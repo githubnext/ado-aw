@@ -13,7 +13,7 @@ The `agentic-pipelines` compiler enables users to write pipeline definitions in 
 - Provides a small, controlled set of tools for agents to complete work
 - Validates outputs for correctness and conformity
 
-Alongside the correctly generated pipeline yaml, an agent file is generated from the remaining markdown and placed in `agents/` at the root of a repository. The pipeline yaml references the agent.
+Alongside the correctly generated pipeline yaml, an agent file is generated from the remaining markdown and placed in `agents/` at the root of a consumer repository. The pipeline yaml references the agent.
 
 ### Architecture
 
@@ -52,10 +52,9 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 │   │   ├── 1es-base.yml      # Base pipeline template for 1ES target
 │   │   └── threat-analysis.md # Threat detection analysis prompt template
 │   ├── mcp-metadata.json     # Bundled MCP tool definitions
-│   ├── examples/
+│   ├── examples/             # Example agent definitions
+│   ├── tests/                # Integration tests and fixtures
 │   └── Cargo.toml            # Rust dependencies
-├── agents/                    # Agent markdown files
-├── es-metadata.yml           # ES metadata configuration
 └── README.md                 # Project documentation
 ```
 
@@ -77,19 +76,6 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 2. Leverage clap's derive macros for CLI argument parsing
 3. Prefer explicit error messages with `anyhow::bail!` or `.context()`
 4. Keep the binary fast—avoid unnecessary allocations and prefer streaming parsers
-
-### Regenerating Pipeline Files
-
-After making changes to the compiler (`agentic-pipelines/src/*.rs`) or the base template (`agentic-pipelines/templates/base.yml`), you **must regenerate the pipeline YAML files**.
-
-**On Windows (PowerShell):**
-```powershell
-.\rebuild-pipelines.ps1
-```
-
-**Note:** Currently only PowerShell script is available. For Linux/macOS, run the equivalent commands manually or use PowerShell Core.
-
-These scripts compile all agent markdown files in `agents/` into their corresponding pipeline YAML files in the repository root.
 
 ### Input Format (Markdown with Front Matter)
 
@@ -834,9 +820,9 @@ Following the gh-aw security model:
 ## Testing
 
 ```bash
-# Run the compiler
+# Build the compiler
 cd agentic-pipelines
-cargo run -- compile <path-to-markdown>
+cargo build
 
 # Run tests
 cargo test
@@ -850,7 +836,7 @@ cargo clippy
 ### Compile a markdown pipeline
 
 ```bash
-cargo run -- compile ./pipelines/my-workflow.md
+cargo run -- compile ./path/to/agent.md
 ```
 
 ### Add a new dependency
