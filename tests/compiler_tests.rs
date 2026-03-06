@@ -107,6 +107,10 @@ fn test_compiled_yaml_structure() {
         template_content.contains("{{ agency_params }}"),
         "Template should contain agency_params marker"
     );
+    assert!(
+        template_content.contains("{{ compiler_version }}"),
+        "Template should contain compiler_version marker"
+    );
 
     // Verify template doesn't accidentally use ${{ }} where {{ }} should be used
     // (The ${{ }} syntax is for Azure DevOps pipeline expressions and should be preserved)
@@ -129,6 +133,20 @@ fn test_compiled_yaml_structure() {
     assert!(
         !template_content.contains("name: AZS-1ES-L-MMS-ubuntu-22.04"),
         "Template should not contain hardcoded pool name 'AZS-1ES-L-MMS-ubuntu-22.04'"
+    );
+
+    // Verify that the ado-aw compiler is downloaded from GitHub Releases, not ADO pipeline artifacts
+    assert!(
+        !template_content.contains("pipeline: 2437"),
+        "Template should not reference ADO pipeline 2437 for the compiler"
+    );
+    assert!(
+        template_content.contains("github.com/githubnext/ado-aw/releases"),
+        "Template should download the compiler from GitHub Releases"
+    );
+    assert!(
+        template_content.contains("sha256sum --check"),
+        "Template should verify checksum of downloaded compiler"
     );
 }
 
@@ -280,4 +298,58 @@ fn test_fixture_complete_agent() {
     // Verify it has both built-in and custom MCPs
     assert!(content.contains("ado: true"), "Should have built-in MCP");
     assert!(content.contains("command:"), "Should have custom MCP");
+}
+
+/// Test that compiled output has no unreplaced template markers
+#[test]
+fn test_compiled_output_no_unreplaced_markers() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("agentic-pipeline-markers-{}", std::process::id()));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("minimal-agent.md");
+
+    let output_path = temp_dir.join("minimal-agent.yml");
+
+    // Run the compiler binary
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args(["compile", fixture_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_path.exists(), "Compiled YAML should exist");
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+
+    // Verify no unreplaced {{ markers }} remain (excluding ${{ }} which are ADO expressions)
+    for line in compiled.lines() {
+        let stripped = line.replace("${{", "");
+        assert!(
+            !stripped.contains("{{ "),
+            "Compiled output should not contain unreplaced marker: {}",
+            line.trim()
+        );
+    }
+
+    // Verify the compiler version was correctly substituted
+    let version = env!("CARGO_PKG_VERSION");
+    assert!(
+        compiled.contains(version),
+        "Compiled output should contain compiler version {version}"
+    );
+    assert!(
+        compiled.contains("github.com/githubnext/ado-aw/releases"),
+        "Compiled output should reference GitHub Releases"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
 }

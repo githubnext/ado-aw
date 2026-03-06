@@ -114,7 +114,9 @@ displayName: "Finalize""#,
         );
 
         // Replace all template markers
+        let compiler_version = env!("CARGO_PKG_VERSION");
         let replacements: Vec<(&str, &str)> = vec![
+            ("{{ compiler_version }}", compiler_version),
             ("{{ pool }}", &pool),
             ("{{ schedule }}", &schedule),
             ("{{ pr_trigger }}", &pr_trigger),

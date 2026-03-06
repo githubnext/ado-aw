@@ -54,16 +54,23 @@ extends:
 
                   {{ prepare_steps }}
 
-                  - task: DownloadPipelineArtifact@2
-                    displayName: "Download agentic pipeline compiler"
-                    inputs:
-                      source: "specific"
-                      project: "4x4"
-                      pipeline: 2437
-                      runVersion: "latestFromBranch"
-                      branchName: "refs/heads/main"
-                      artifact: "agentic-pipeline-compiler-linux-x64"
-                      targetPath: "$(Pipeline.Workspace)/agentic-pipeline-compiler"
+                  - bash: |
+                      COMPILER_VERSION="{{ compiler_version }}"
+                      DOWNLOAD_DIR="$(Pipeline.Workspace)/agentic-pipeline-compiler"
+                      DOWNLOAD_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/ado-aw-linux-x64"
+                      CHECKSUM_URL="${DOWNLOAD_URL}.sha256"
+
+                      mkdir -p "$DOWNLOAD_DIR"
+                      echo "Downloading ado-aw v${COMPILER_VERSION} from GitHub Releases..."
+                      curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64" "$DOWNLOAD_URL"
+                      curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64.sha256" "$CHECKSUM_URL"
+
+                      echo "Verifying checksum..."
+                      cd "$DOWNLOAD_DIR"
+                      sha256sum --check ado-aw-linux-x64.sha256
+                      mv ado-aw-linux-x64 ado-aw
+                      chmod +x ado-aw
+                    displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
 
                   - bash: |
                       AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
@@ -160,16 +167,23 @@ extends:
                   echo "##vso[task.prependpath]$(Agent.TempDirectory)/tools/agency.linux-x64"
                 displayName: Add agency to PATH
 
-              - task: DownloadPipelineArtifact@2
-                displayName: "Download agentic pipeline compiler"
-                inputs:
-                  source: "specific"
-                  project: "4x4"
-                  pipeline: 2437
-                  runVersion: "latestFromBranch"
-                  branchName: "refs/heads/main"
-                  artifact: "agentic-pipeline-compiler-linux-x64"
-                  targetPath: "$(Pipeline.Workspace)/agentic-pipeline-compiler"
+              - bash: |
+                  COMPILER_VERSION="{{ compiler_version }}"
+                  DOWNLOAD_DIR="$(Pipeline.Workspace)/agentic-pipeline-compiler"
+                  DOWNLOAD_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/ado-aw-linux-x64"
+                  CHECKSUM_URL="${DOWNLOAD_URL}.sha256"
+
+                  mkdir -p "$DOWNLOAD_DIR"
+                  echo "Downloading ado-aw v${COMPILER_VERSION} from GitHub Releases..."
+                  curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64" "$DOWNLOAD_URL"
+                  curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64.sha256" "$CHECKSUM_URL"
+
+                  echo "Verifying checksum..."
+                  cd "$DOWNLOAD_DIR"
+                  sha256sum --check ado-aw-linux-x64.sha256
+                  mv ado-aw-linux-x64 ado-aw
+                  chmod +x ado-aw
+                displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
 
               - bash: |
                   mkdir -p {{ working_directory }}/safe_outputs
@@ -297,16 +311,23 @@ extends:
               - download: current
                 artifact: analyzed_outputs
 
-              - task: DownloadPipelineArtifact@2
-                displayName: "Download agentic pipeline compiler"
-                inputs:
-                  source: "specific"
-                  project: "4x4"
-                  pipeline: 2437
-                  runVersion: "latestFromBranch"
-                  branchName: "refs/heads/main"
-                  artifact: "agentic-pipeline-compiler-linux-x64"
-                  targetPath: "$(Pipeline.Workspace)/agentic-pipeline-compiler"
+              - bash: |
+                  COMPILER_VERSION="{{ compiler_version }}"
+                  DOWNLOAD_DIR="$(Pipeline.Workspace)/agentic-pipeline-compiler"
+                  DOWNLOAD_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/ado-aw-linux-x64"
+                  CHECKSUM_URL="${DOWNLOAD_URL}.sha256"
+
+                  mkdir -p "$DOWNLOAD_DIR"
+                  echo "Downloading ado-aw v${COMPILER_VERSION} from GitHub Releases..."
+                  curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64" "$DOWNLOAD_URL"
+                  curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64.sha256" "$CHECKSUM_URL"
+
+                  echo "Verifying checksum..."
+                  cd "$DOWNLOAD_DIR"
+                  sha256sum --check ado-aw-linux-x64.sha256
+                  mv ado-aw-linux-x64 ado-aw
+                  chmod +x ado-aw
+                displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
 
               - bash: |
                   chmod +x $(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw
