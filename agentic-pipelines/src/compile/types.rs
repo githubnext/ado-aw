@@ -313,7 +313,7 @@ pub enum McpConfig {
 }
 
 /// Detailed MCP options
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct McpOptions {
     /// Custom command (if present, it's a custom MCP - standalone only)
     #[serde(default)]

@@ -484,6 +484,145 @@ pub fn generate_pipeline_path(output_path: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compile::types::{McpConfig, McpOptions, Repository};
+
+    /// Helper: create a minimal FrontMatter by parsing YAML
+    fn minimal_front_matter() -> FrontMatter {
+        let (fm, _) = parse_markdown("---\nname: test-agent\ndescription: test\n---\n").unwrap();
+        fm
+    }
+
+    // ─── compute_effective_workspace ─────────────────────────────────────────
+
+    #[test]
+    fn test_workspace_explicit_root() {
+        let ws = compute_effective_workspace(&Some("root".to_string()), &[], "agent");
+        assert_eq!(ws, "root");
+    }
+
+    #[test]
+    fn test_workspace_explicit_repo_with_checkouts() {
+        let checkouts = vec!["other-repo".to_string()];
+        let ws = compute_effective_workspace(&Some("repo".to_string()), &checkouts, "agent");
+        assert_eq!(ws, "repo");
+    }
+
+    #[test]
+    fn test_workspace_implicit_root_no_checkouts() {
+        let ws = compute_effective_workspace(&None, &[], "agent");
+        assert_eq!(ws, "root");
+    }
+
+    #[test]
+    fn test_workspace_implicit_repo_with_checkouts() {
+        let checkouts = vec!["other-repo".to_string()];
+        let ws = compute_effective_workspace(&None, &checkouts, "agent");
+        assert_eq!(ws, "repo");
+    }
+
+    #[test]
+    fn test_workspace_explicit_repo_no_checkouts_still_returns_repo() {
+        // Emits a warning but still returns "repo"
+        let ws = compute_effective_workspace(&Some("repo".to_string()), &[], "agent");
+        assert_eq!(ws, "repo");
+    }
+
+    // ─── validate_checkout_list ───────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_checkout_list_empty_is_ok() {
+        let result = validate_checkout_list(&[], &[]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_checkout_list_valid_alias_passes() {
+        let repos = vec![Repository {
+            repository: "my-repo".to_string(),
+            repo_type: "git".to_string(),
+            name: "org/my-repo".to_string(),
+            repo_ref: "refs/heads/main".to_string(),
+        }];
+        let checkout = vec!["my-repo".to_string()];
+        let result = validate_checkout_list(&repos, &checkout);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_checkout_list_unknown_alias_fails() {
+        let repos = vec![Repository {
+            repository: "my-repo".to_string(),
+            repo_type: "git".to_string(),
+            name: "org/my-repo".to_string(),
+            repo_ref: "refs/heads/main".to_string(),
+        }];
+        let checkout = vec!["unknown-alias".to_string()];
+        let result = validate_checkout_list(&repos, &checkout);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("unknown-alias"));
+    }
+
+    #[test]
+    fn test_validate_checkout_list_empty_checkout_of_nonempty_repos_ok() {
+        let repos = vec![Repository {
+            repository: "my-repo".to_string(),
+            repo_type: "git".to_string(),
+            name: "org/my-repo".to_string(),
+            repo_ref: "refs/heads/main".to_string(),
+        }];
+        let result = validate_checkout_list(&repos, &[]);
+        assert!(result.is_ok());
+    }
+
+    // ─── generate_copilot_params ──────────────────────────────────────────────
+
+    #[test]
+    fn test_copilot_params_bash_wildcard() {
+        let mut fm = minimal_front_matter();
+        fm.tools = Some(crate::compile::types::ToolsConfig {
+            bash: Some(vec![":*".to_string()]),
+            edit: None,
+        });
+        let params = generate_copilot_params(&fm);
+        assert!(params.contains("--allow-tool \"shell(:*)\""));
+    }
+
+    #[test]
+    fn test_copilot_params_bash_disabled() {
+        let mut fm = minimal_front_matter();
+        fm.tools = Some(crate::compile::types::ToolsConfig {
+            bash: Some(vec![]),
+            edit: None,
+        });
+        let params = generate_copilot_params(&fm);
+        assert!(!params.contains("shell("));
+    }
+
+    #[test]
+    fn test_copilot_params_custom_mcp_not_added_with_mcp_flag() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers.insert(
+            "my-tool".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                command: Some("node".to_string()),
+                ..Default::default()
+            }),
+        );
+        let params = generate_copilot_params(&fm);
+        // Custom MCPs (with command) should NOT appear as --mcp flags
+        assert!(!params.contains("--mcp my-tool"));
+    }
+
+    #[test]
+    fn test_copilot_params_builtin_mcp_added_with_mcp_flag() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers
+            .insert("ado".to_string(), McpConfig::Enabled(true));
+        let params = generate_copilot_params(&fm);
+        assert!(params.contains("--mcp ado"));
+    }
+
+    // ─── sanitize_filename ────────────────────────────────────────────────────
 
     #[test]
     fn test_sanitize_filename_basic() {
