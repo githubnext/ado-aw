@@ -52,17 +52,22 @@ jobs:
           copilot -h
         displayName: "Output copilot version"
 
-      - task: DownloadPipelineArtifact@2
-        displayName: "Download agentic pipeline compiler"
-        name: agenticpipelinecompilerdrop
-        inputs:
-          source: "specific"
-          project: "4x4"
-          pipeline: 2437
-          runVersion: "latestFromBranch"
-          branchName: "refs/heads/main"
-          artifact: "agentic-pipeline-compiler-linux-x64"
-          targetPath: "$(Pipeline.Workspace)/agentic-pipeline-compiler"
+      - bash: |
+          COMPILER_VERSION="{{ compiler_version }}"
+          DOWNLOAD_DIR="$(Pipeline.Workspace)/agentic-pipeline-compiler"
+          DOWNLOAD_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/ado-aw-linux-x64"
+          CHECKSUM_URL="${DOWNLOAD_URL}.sha256"
+
+          mkdir -p "$DOWNLOAD_DIR"
+          echo "Downloading ado-aw v${COMPILER_VERSION} from GitHub Releases..."
+          curl -fsSL -o "$DOWNLOAD_DIR/ado-aw" "$DOWNLOAD_URL"
+          curl -fsSL -o "$DOWNLOAD_DIR/ado-aw.sha256" "$CHECKSUM_URL"
+
+          echo "Verifying checksum..."
+          cd "$DOWNLOAD_DIR"
+          sha256sum --check ado-aw.sha256
+          chmod +x ado-aw
+        displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
 
       - bash: |
           AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
@@ -302,17 +307,22 @@ jobs:
           copilot -h
         displayName: "Output copilot version"
 
-      - task: DownloadPipelineArtifact@2
-        displayName: "Download agentic pipeline compiler"
-        name: agenticpipelinecompilerdrop
-        inputs:
-          source: "specific"
-          project: "4x4"
-          pipeline: 2437
-          runVersion: "latestFromBranch"
-          branchName: "refs/heads/main"
-          artifact: "agentic-pipeline-compiler-linux-x64"
-          targetPath: "$(Pipeline.Workspace)/agentic-pipeline-compiler"
+      - bash: |
+          COMPILER_VERSION="{{ compiler_version }}"
+          DOWNLOAD_DIR="$(Pipeline.Workspace)/agentic-pipeline-compiler"
+          DOWNLOAD_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/ado-aw-linux-x64"
+          CHECKSUM_URL="${DOWNLOAD_URL}.sha256"
+
+          mkdir -p "$DOWNLOAD_DIR"
+          echo "Downloading ado-aw v${COMPILER_VERSION} from GitHub Releases..."
+          curl -fsSL -o "$DOWNLOAD_DIR/ado-aw" "$DOWNLOAD_URL"
+          curl -fsSL -o "$DOWNLOAD_DIR/ado-aw.sha256" "$CHECKSUM_URL"
+
+          echo "Verifying checksum..."
+          cd "$DOWNLOAD_DIR"
+          sha256sum --check ado-aw.sha256
+          chmod +x ado-aw
+        displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
 
       - task: DockerInstaller@0
         displayName: "Install Docker"
@@ -488,17 +498,22 @@ jobs:
       - download: current
         artifact: analyzed_outputs_$(Build.BuildId)
 
-      - task: DownloadPipelineArtifact@2
-        displayName: "Download agentic pipeline compiler"
-        name: agenticpipelinecompilerdrop
-        inputs:
-          source: "specific"
-          project: "4x4"
-          pipeline: 2437
-          runVersion: "latestFromBranch"
-          branchName: "refs/heads/main"
-          artifact: "agentic-pipeline-compiler-linux-x64"
-          targetPath: "$(Pipeline.Workspace)/agentic-pipeline-compiler"
+      - bash: |
+          COMPILER_VERSION="{{ compiler_version }}"
+          DOWNLOAD_DIR="$(Pipeline.Workspace)/agentic-pipeline-compiler"
+          DOWNLOAD_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/ado-aw-linux-x64"
+          CHECKSUM_URL="${DOWNLOAD_URL}.sha256"
+
+          mkdir -p "$DOWNLOAD_DIR"
+          echo "Downloading ado-aw v${COMPILER_VERSION} from GitHub Releases..."
+          curl -fsSL -o "$DOWNLOAD_DIR/ado-aw" "$DOWNLOAD_URL"
+          curl -fsSL -o "$DOWNLOAD_DIR/ado-aw.sha256" "$CHECKSUM_URL"
+
+          echo "Verifying checksum..."
+          cd "$DOWNLOAD_DIR"
+          sha256sum --check ado-aw.sha256
+          chmod +x ado-aw
+        displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
 
       - bash: |
           ls -la "$(Pipeline.Workspace)/agentic-pipeline-compiler"

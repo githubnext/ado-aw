@@ -573,6 +573,17 @@ Generates environment variable entries for the copilot AWF step when `read-only-
 
 If no `read-only-service-connection` is configured, this marker is replaced with an empty string, and ADO access tokens are omitted from the copilot invocation.
 
+## {{ compiler_version }}
+
+Should be replaced with the version of the `ado-aw` compiler that generated the pipeline (derived from `CARGO_PKG_VERSION` at compile time). This version is used to construct the GitHub Releases download URL for the `ado-aw` binary.
+
+The generated pipelines download the compiler binary from:
+```
+https://github.com/githubnext/ado-aw/releases/download/v{VERSION}/ado-aw-linux-x64
+```
+
+A SHA256 checksum file (`ado-aw-linux-x64.sha256`) is also downloaded and verified to ensure binary integrity. This replaces the previous approach of downloading from an internal ADO pipeline artifact.
+
 ### 1ES-Specific Template Markers
 
 The following markers are specific to the 1ES target (`target: 1es`) and are not used in standalone pipelines:
@@ -944,7 +955,7 @@ mcp-servers:
 
 Network isolation is provided by AWF (Agentic Workflow Firewall), which provides L7 (HTTP/HTTPS) egress control using Squid proxy and Docker containers. AWF restricts network access to a whitelist of approved domains.
 
-The AWF binary is downloaded from an internal ADO pipeline (pipeline 2450, branch `ms/main`, artifact `gh-aw-firewall-linux-x64`). Docker is sourced via the `DockerInstaller@0` ADO task.
+The `ado-aw` compiler binary is distributed via [GitHub Releases](https://github.com/githubnext/ado-aw/releases) with SHA256 checksum verification. The AWF binary is downloaded from an internal ADO pipeline (pipeline 2450, branch `ms/main`, artifact `gh-aw-firewall-linux-x64`). Docker is sourced via the `DockerInstaller@0` ADO task.
 
 ### Default Allowed Domains
 

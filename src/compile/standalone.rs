@@ -120,7 +120,9 @@ impl Compiler for StandaloneCompiler {
         );
 
         // Replace template markers
+        let compiler_version = env!("CARGO_PKG_VERSION");
         let replacements: Vec<(&str, &str)> = vec![
+            ("{{ compiler_version }}", compiler_version),
             ("{{ pool }}", &pool),
             ("{{ setup_job }}", &setup_job),
             ("{{ teardown_job }}", &teardown_job),

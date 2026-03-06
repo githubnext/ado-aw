@@ -107,6 +107,10 @@ fn test_compiled_yaml_structure() {
         template_content.contains("{{ agency_params }}"),
         "Template should contain agency_params marker"
     );
+    assert!(
+        template_content.contains("{{ compiler_version }}"),
+        "Template should contain compiler_version marker"
+    );
 
     // Verify template doesn't accidentally use ${{ }} where {{ }} should be used
     // (The ${{ }} syntax is for Azure DevOps pipeline expressions and should be preserved)
@@ -129,6 +133,20 @@ fn test_compiled_yaml_structure() {
     assert!(
         !template_content.contains("name: AZS-1ES-L-MMS-ubuntu-22.04"),
         "Template should not contain hardcoded pool name 'AZS-1ES-L-MMS-ubuntu-22.04'"
+    );
+
+    // Verify that the ado-aw compiler is downloaded from GitHub Releases, not ADO pipeline artifacts
+    assert!(
+        !template_content.contains("pipeline: 2437"),
+        "Template should not reference ADO pipeline 2437 for the compiler"
+    );
+    assert!(
+        template_content.contains("github.com/githubnext/ado-aw/releases"),
+        "Template should download the compiler from GitHub Releases"
+    );
+    assert!(
+        template_content.contains("sha256sum --check"),
+        "Template should verify checksum of downloaded compiler"
     );
 }
 
