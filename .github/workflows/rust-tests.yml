@@ -3,7 +3,11 @@ name: Rust Tests
 on:
   pull_request:
     paths:
-      - "agentic-pipelines/**"
+      - "src/**"
+      - "tests/**"
+      - "templates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
 
 env:
   CARGO_TERM_COLOR: always
@@ -12,17 +16,12 @@ jobs:
   test:
     name: Build & Test
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: agentic-pipelines
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: agentic-pipelines
 
       - name: Build
         run: cargo build --verbose

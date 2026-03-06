@@ -21,7 +21,7 @@ impl Drop for ProxyGuard {
 /// Helper to start the proxy as a foreground process and return the port
 /// The proxy runs until the Child is dropped/killed
 fn start_proxy(allowed_hosts: &[&str]) -> ProxyGuard {
-    let binary_path = env!("CARGO_BIN_EXE_agentic-pipelines");
+    let binary_path = env!("CARGO_BIN_EXE_ado-aw");
 
     let mut cmd = Command::new(binary_path);
     cmd.arg("proxy");

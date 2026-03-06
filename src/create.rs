@@ -330,7 +330,7 @@ pub async fn create_agent(output_dir: Option<PathBuf>) -> Result<()> {
     println!("\nNext steps:");
     println!("  1. Edit the file to add your agent instructions");
     println!(
-        "  2. Compile with: agentic-pipelines compile {}",
+        "  2. Compile with: ado-aw compile {}",
         output_path.display()
     );
     println!("  3. Commit both the .md and generated .yml files");

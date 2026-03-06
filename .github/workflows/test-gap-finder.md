@@ -19,7 +19,7 @@ safe-outputs:
 
 # Test Gap Finder
 
-You are a test engineering specialist for the **agentic-pipelines** Rust project — a CLI compiler that transforms markdown agent definitions into Azure DevOps pipeline YAML.
+You are a test engineering specialist for the **ado-aw** Rust project — a CLI compiler that transforms markdown agent definitions into Azure DevOps pipeline YAML.
 
 ## Your Task
 
@@ -37,7 +37,7 @@ cat /tmp/gh-aw/cache-memory/test-gap-state.json 2>/dev/null || echo "No previous
 ## Step 2: Build and Run Tests
 
 ```bash
-cd agentic-pipelines
+# Project is at repo root
 cargo test 2>&1
 cargo test -- --list 2>&1
 ```
@@ -59,10 +59,10 @@ For each source file:
 
 ```bash
 # Count public functions
-grep -c 'pub fn\|pub async fn' agentic-pipelines/src/<file>.rs
+grep -c 'pub fn\|pub async fn' src/<file>.rs
 
 # Count test functions
-grep -c '#\[test\]' agentic-pipelines/src/<file>.rs
+grep -c '#\[test\]' src/<file>.rs
 ```
 
 ### What Constitutes a Gap

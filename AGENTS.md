@@ -6,7 +6,7 @@ This repository contains a compiler for Azure DevOps pipelines that transforms n
 
 ### Purpose
 
-The `agentic-pipelines` compiler enables users to write pipeline definitions in a human-friendly markdown format with YAML front matter, which gets compiled into proper Azure DevOps YAML pipeline definitions. This approach:
+The `ado-aw` compiler enables users to write pipeline definitions in a human-friendly markdown format with YAML front matter, which gets compiled into proper Azure DevOps YAML pipeline definitions. This approach:
 
 - Makes pipeline authoring more accessible through natural language
 - Enables AI agents to work safely in network-isolated sandboxes (via OneBranch)
@@ -18,44 +18,43 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 ### Architecture
 
 ```
-├── agentic-pipelines/        # Rust CLI compiler
-│   ├── src/
-│   │   ├── main.rs           # Entry point with clap CLI
-│   │   ├── allowed_hosts.rs  # Core network allowlist definitions
-│   │   ├── compile/          # Pipeline compilation module
-│   │   │   ├── mod.rs        # Module entry point and Compiler trait
-│   │   │   ├── common.rs     # Shared helpers across targets
-│   │   │   ├── standalone.rs # Standalone pipeline compiler
-│   │   │   ├── onees.rs      # 1ES Pipeline Template compiler
-│   │   │   └── types.rs      # Front matter grammar and types
-│   │   ├── create.rs         # Interactive agent creation wizard
-│   │   ├── execute.rs        # Stage 2 safe output execution
-│   │   ├── fuzzy_schedule.rs # Fuzzy schedule parsing
-│   │   ├── logging.rs        # File-based logging infrastructure
-│   │   ├── mcp.rs            # SafeOutputs MCP server
-│   │   ├── mcp_firewall.rs   # MCP Firewall server
-│   │   ├── mcp_metadata.rs   # Bundled MCP metadata
-│   │   ├── ndjson.rs         # NDJSON parsing utilities
-│   │   ├── proxy.rs          # Network proxy implementation
-│   │   ├── sanitize.rs       # Input sanitization for safe outputs
-│   │   └── tools/            # MCP tool implementations
-│   │       ├── mod.rs
-│   │       ├── create_pr.rs
-│   │       ├── create_work_item.rs
-│   │       ├── memory.rs
-│   │       ├── missing_data.rs
-│   │       ├── missing_tool.rs
-│   │       ├── noop.rs
-│   │       └── result.rs
-│   ├── templates/
-│   │   ├── base.yml          # Base pipeline template for standalone
-│   │   ├── 1es-base.yml      # Base pipeline template for 1ES target
-│   │   └── threat-analysis.md # Threat detection analysis prompt template
-│   ├── mcp-metadata.json     # Bundled MCP tool definitions
-│   ├── examples/             # Example agent definitions
-│   ├── tests/                # Integration tests and fixtures
-│   └── Cargo.toml            # Rust dependencies
-└── README.md                 # Project documentation
+├── src/
+│   ├── main.rs           # Entry point with clap CLI
+│   ├── allowed_hosts.rs  # Core network allowlist definitions
+│   ├── compile/          # Pipeline compilation module
+│   │   ├── mod.rs        # Module entry point and Compiler trait
+│   │   ├── common.rs     # Shared helpers across targets
+│   │   ├── standalone.rs # Standalone pipeline compiler
+│   │   ├── onees.rs      # 1ES Pipeline Template compiler
+│   │   └── types.rs      # Front matter grammar and types
+│   ├── create.rs         # Interactive agent creation wizard
+│   ├── execute.rs        # Stage 2 safe output execution
+│   ├── fuzzy_schedule.rs # Fuzzy schedule parsing
+│   ├── logging.rs        # File-based logging infrastructure
+│   ├── mcp.rs            # SafeOutputs MCP server
+│   ├── mcp_firewall.rs   # MCP Firewall server
+│   ├── mcp_metadata.rs   # Bundled MCP metadata
+│   ├── ndjson.rs         # NDJSON parsing utilities
+│   ├── proxy.rs          # Network proxy implementation
+│   ├── sanitize.rs       # Input sanitization for safe outputs
+│   └── tools/            # MCP tool implementations
+│       ├── mod.rs
+│       ├── create_pr.rs
+│       ├── create_work_item.rs
+│       ├── memory.rs
+│       ├── missing_data.rs
+│       ├── missing_tool.rs
+│       ├── noop.rs
+│       └── result.rs
+├── templates/
+│   ├── base.yml          # Base pipeline template for standalone
+│   ├── 1es-base.yml      # Base pipeline template for 1ES target
+│   └── threat-analysis.md # Threat detection analysis prompt template
+├── mcp-metadata.json     # Bundled MCP tool definitions
+├── examples/             # Example agent definitions
+├── tests/                # Integration tests and fixtures
+├── Cargo.toml            # Rust dependencies
+└── README.md             # Project documentation
 ```
 
 ## Technology Stack
@@ -305,8 +304,8 @@ When using `target: 1es`, the pipeline will extend `1es/1ES.Unofficial.PipelineT
 
 The compiler transforms the input into valid Azure DevOps pipeline YAML based on the target platform:
 
-- **Standalone**: Uses `agentic-pipelines/templates/base.yml`
-- **1ES**: Uses `agentic-pipelines/templates/1es-base.yml`
+- **Standalone**: Uses `templates/base.yml`
+- **1ES**: Uses `templates/1es-base.yml`
 
 Explicit markings are embedded in these templates that the compiler is allowed to replace e.g. `{{ agency_params }}` denotes parameters which are passed to the agency command line tool. The compiler should not replace sections denoted by `${{ some content }}`. What follows is a mapping of markings to responsibilities (primarily for the standalone template).
 
@@ -821,7 +820,6 @@ Following the gh-aw security model:
 
 ```bash
 # Build the compiler
-cd agentic-pipelines
 cargo build
 
 # Run tests
@@ -1121,7 +1119,7 @@ This prevents tool name collisions and makes it clear which upstream handles eac
 
 ```bash
 # Start the MCP firewall server
-agentic-pipelines mcp-firewall --config /path/to/config.json
+ado-aw mcp-firewall --config /path/to/config.json
 ```
 
 ### Pipeline Integration
@@ -1136,7 +1134,7 @@ The firewall config is written to `$(Agent.TempDirectory)/staging/mcp-firewall-c
 
 ### Audit Logging
 
-All tool call attempts are logged to the centralized log file at `$HOME/.agentic-pipelines/logs/YYYY-MM-DD.log`:
+All tool call attempts are logged to the centralized log file at `$HOME/.ado-aw/logs/YYYY-MM-DD.log`:
 
 ```
 [2026-01-29T10:15:32Z] [INFO] [firewall] ALLOWED icm:create_incident (args: {"title": "...", "severity": 3})

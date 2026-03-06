@@ -66,7 +66,7 @@ extends:
                       targetPath: "$(Pipeline.Workspace)/agentic-pipeline-compiler"
 
                   - bash: |
-                      AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/agentic-pipelines"
+                      AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
                       chmod +x "$AGENTIC_PIPELINES_PATH"
                       $AGENTIC_PIPELINES_PATH check "{{ source_path }}" "{{ pipeline_path }}"
                     displayName: "Verify pipeline integrity"
@@ -75,7 +75,7 @@ extends:
                       mkdir -p "$HOME/.copilot"
                       mkdir -p "$(Agent.TempDirectory)/staging"
 
-                      AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/agentic-pipelines"
+                      AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
                       chmod +x "$AGENTIC_PIPELINES_PATH"
 
                       # Generate MCP config for safeoutputs
@@ -190,7 +190,7 @@ extends:
                 displayName: "Prepare threat analysis prompt"
 
               - bash: |
-                  AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/agentic-pipelines"
+                  AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
                   chmod +x "$AGENTIC_PIPELINES_PATH"
 
                   # Start the network proxy in background
@@ -309,11 +309,11 @@ extends:
                   targetPath: "$(Pipeline.Workspace)/agentic-pipeline-compiler"
 
               - bash: |
-                  chmod +x $(Pipeline.Workspace)/agentic-pipeline-compiler/agentic-pipelines
+                  chmod +x $(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw
                   echo "##vso[task.prependpath]$(Pipeline.Workspace)/agentic-pipeline-compiler"
                 displayName: Add agentic compiler to path
 
-              - bash: agentic-pipelines execute --source "{{ source_path }}" --safe-output-dir "$(Pipeline.Workspace)/analyzed_outputs"
+              - bash: ado-aw execute --source "{{ source_path }}" --safe-output-dir "$(Pipeline.Workspace)/analyzed_outputs"
                 displayName: Process safe outputs
                 workingDirectory: {{ working_directory }}
                 env:

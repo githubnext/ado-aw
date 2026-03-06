@@ -1,6 +1,6 @@
 # Test Examples and Patterns
 
-This document provides examples of common testing patterns used in the agentic-pipelines test suite.
+This document provides examples of common testing patterns used in the ado-aw test suite.
 
 ## Basic Unit Test Pattern
 

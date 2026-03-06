@@ -107,10 +107,10 @@ async fn main() -> Result<()> {
         Some(Commands::Execute { .. }) => "execute",
         Some(Commands::Proxy { .. }) => "proxy",
         Some(Commands::McpFirewall { .. }) => "mcp-firewall",
-        None => "agentic-pipelines",
+        None => "ado-aw",
     };
 
-    // Initialize file-based logging to $HOME/.agentic-pipelines/logs/{command}.log
+    // Initialize file-based logging to $HOME/.ado-aw/logs/{command}.log
     let _log_path = logging::init_logging(command_name, args.debug, args.verbose);
 
     if let Some(command) = args.command {

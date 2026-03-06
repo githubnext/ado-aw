@@ -26,7 +26,7 @@ fn create_config_file(config: &str) -> (tempfile::TempDir, std::path::PathBuf) {
 
 /// Helper to start the firewall with a config file
 fn start_firewall(config_path: &std::path::PathBuf) -> FirewallGuard {
-    let binary_path = env!("CARGO_BIN_EXE_agentic-pipelines");
+    let binary_path = env!("CARGO_BIN_EXE_ado-aw");
 
     let mut cmd = Command::new(binary_path);
     cmd.arg("mcp-firewall");

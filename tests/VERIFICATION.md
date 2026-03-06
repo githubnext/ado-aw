@@ -22,13 +22,13 @@ This document demonstrates that all acceptance criteria from issue #160959 have 
 **Status**: COMPLETED
 
 **Implementation**:
-- Unit tests added to `agentic-pipelines/src/main.rs` in a `tests` module (Rust convention)
-- Integration tests added to `agentic-pipelines/tests/compiler_tests.rs` (Rust convention)
+- Unit tests added to `ado-aw/src/main.rs` in a `tests` module (Rust convention)
+- Integration tests added to `ado-aw/tests/compiler_tests.rs` (Rust convention)
 - Note: Issue mentioned `tests/compiler_tests.py`, but this is a Rust project, so we used Rust conventions
 
 **Files**:
-- `agentic-pipelines/src/main.rs` - Line 337-554 (218 lines of unit tests)
-- `agentic-pipelines/tests/compiler_tests.rs` - 197 lines of integration tests
+- `ado-aw/src/main.rs` - Line 337-554 (218 lines of unit tests)
+- `ado-aw/tests/compiler_tests.rs` - 197 lines of integration tests
 
 ### ✅ Define the input and expected output for the test case based on the functionality being tested
 
@@ -121,8 +121,8 @@ fn test_compile_pipeline_basic() {
 **Status**: COMPLETED
 
 **Evidence**:
-- Unit tests: `agentic-pipelines/src/main.rs` (lines 337-554)
-- Integration tests: `agentic-pipelines/tests/compiler_tests.rs`
+- Unit tests: `ado-aw/src/main.rs` (lines 337-554)
+- Integration tests: `ado-aw/tests/compiler_tests.rs`
 - Both files follow Rust project structure conventions
 
 ### ✅ 2. The test case passes when the code is executed with the expected behavior
@@ -142,7 +142,7 @@ fn test_compile_pipeline_basic() {
 
 **Command to run tests**:
 ```bash
-cd agentic-pipelines
+cd ado-aw
 cargo test
 ```
 
@@ -193,7 +193,7 @@ cargo test
 **Verification**:
 ```bash
 # No changes to dependencies
-git diff agentic-pipelines/Cargo.toml
+git diff ado-aw/Cargo.toml
 # (No output - file unchanged)
 ```
 
@@ -302,7 +302,7 @@ To verify all tests pass:
 
 ```bash
 # Navigate to project directory
-cd C:\r\agentic-pipelines
+cd C:\r\ado-aw
 
 # Run all tests
 cargo test
@@ -315,15 +315,15 @@ cargo test
 ## Files Changed
 
 **Modified**: 1 file
-- `agentic-pipelines/src/main.rs` (+219 lines of unit tests)
+- `ado-aw/src/main.rs` (+219 lines of unit tests)
 
 **Created**: 7 files
-- `agentic-pipelines/tests/compiler_tests.rs` (197 lines, 8 integration tests)
-- `agentic-pipelines/tests/README.md` (192 lines, testing guide)
-- `agentic-pipelines/tests/SUMMARY.md` (243 lines, implementation summary)
-- `agentic-pipelines/tests/VERIFICATION.md` (this file)
-- `agentic-pipelines/tests/fixtures/minimal-agent.md` (9 lines)
-- `agentic-pipelines/tests/fixtures/complete-agent.md` (57 lines)
+- `ado-aw/tests/compiler_tests.rs` (197 lines, 8 integration tests)
+- `ado-aw/tests/README.md` (192 lines, testing guide)
+- `ado-aw/tests/SUMMARY.md` (243 lines, implementation summary)
+- `ado-aw/tests/VERIFICATION.md` (this file)
+- `ado-aw/tests/fixtures/minimal-agent.md` (9 lines)
+- `ado-aw/tests/fixtures/complete-agent.md` (57 lines)
 
 **Total**: 917+ lines of test code and documentation added
 
