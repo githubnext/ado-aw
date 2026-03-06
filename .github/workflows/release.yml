@@ -56,4 +56,5 @@ jobs:
         run: |
           gh release upload ${{ needs.release-please.outputs.tag_name }} \
             target/release/ado-aw-linux-x64 \
-            target/release/ado-aw-linux-x64.sha256
+            target/release/ado-aw-linux-x64.sha256 \
+            --clobber

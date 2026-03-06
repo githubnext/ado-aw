@@ -299,3 +299,57 @@ fn test_fixture_complete_agent() {
     assert!(content.contains("ado: true"), "Should have built-in MCP");
     assert!(content.contains("command:"), "Should have custom MCP");
 }
+
+/// Test that compiled output has no unreplaced template markers
+#[test]
+fn test_compiled_output_no_unreplaced_markers() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("agentic-pipeline-markers-{}", std::process::id()));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("minimal-agent.md");
+
+    let output_path = temp_dir.join("minimal-agent.yml");
+
+    // Run the compiler binary
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args(["compile", fixture_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_path.exists(), "Compiled YAML should exist");
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+
+    // Verify no unreplaced {{ markers }} remain (excluding ${{ }} which are ADO expressions)
+    for line in compiled.lines() {
+        let stripped = line.replace("${{", "");
+        assert!(
+            !stripped.contains("{{ "),
+            "Compiled output should not contain unreplaced marker: {}",
+            line.trim()
+        );
+    }
+
+    // Verify the compiler version was correctly substituted
+    let version = env!("CARGO_PKG_VERSION");
+    assert!(
+        compiled.contains(version),
+        "Compiled output should contain compiler version {version}"
+    );
+    assert!(
+        compiled.contains("github.com/githubnext/ado-aw/releases"),
+        "Compiled output should reference GitHub Releases"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
