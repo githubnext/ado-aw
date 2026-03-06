@@ -60,12 +60,13 @@ jobs:
 
           mkdir -p "$DOWNLOAD_DIR"
           echo "Downloading ado-aw v${COMPILER_VERSION} from GitHub Releases..."
-          curl -fsSL -o "$DOWNLOAD_DIR/ado-aw" "$DOWNLOAD_URL"
-          curl -fsSL -o "$DOWNLOAD_DIR/ado-aw.sha256" "$CHECKSUM_URL"
+          curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64" "$DOWNLOAD_URL"
+          curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64.sha256" "$CHECKSUM_URL"
 
           echo "Verifying checksum..."
           cd "$DOWNLOAD_DIR"
-          sha256sum --check ado-aw.sha256
+          sha256sum --check ado-aw-linux-x64.sha256
+          mv ado-aw-linux-x64 ado-aw
           chmod +x ado-aw
         displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
 
@@ -315,12 +316,13 @@ jobs:
 
           mkdir -p "$DOWNLOAD_DIR"
           echo "Downloading ado-aw v${COMPILER_VERSION} from GitHub Releases..."
-          curl -fsSL -o "$DOWNLOAD_DIR/ado-aw" "$DOWNLOAD_URL"
-          curl -fsSL -o "$DOWNLOAD_DIR/ado-aw.sha256" "$CHECKSUM_URL"
+          curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64" "$DOWNLOAD_URL"
+          curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64.sha256" "$CHECKSUM_URL"
 
           echo "Verifying checksum..."
           cd "$DOWNLOAD_DIR"
-          sha256sum --check ado-aw.sha256
+          sha256sum --check ado-aw-linux-x64.sha256
+          mv ado-aw-linux-x64 ado-aw
           chmod +x ado-aw
         displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
 
@@ -506,12 +508,13 @@ jobs:
 
           mkdir -p "$DOWNLOAD_DIR"
           echo "Downloading ado-aw v${COMPILER_VERSION} from GitHub Releases..."
-          curl -fsSL -o "$DOWNLOAD_DIR/ado-aw" "$DOWNLOAD_URL"
-          curl -fsSL -o "$DOWNLOAD_DIR/ado-aw.sha256" "$CHECKSUM_URL"
+          curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64" "$DOWNLOAD_URL"
+          curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64.sha256" "$CHECKSUM_URL"
 
           echo "Verifying checksum..."
           cd "$DOWNLOAD_DIR"
-          sha256sum --check ado-aw.sha256
+          sha256sum --check ado-aw-linux-x64.sha256
+          mv ado-aw-linux-x64 ado-aw
           chmod +x ado-aw
         displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
 
