@@ -228,3 +228,47 @@ macro_rules! tool_result {
         }
     };
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_execution_result_success() {
+        let r = ExecutionResult::success("all good");
+        assert!(r.success);
+        assert_eq!(r.message, "all good");
+        assert!(r.data.is_none());
+    }
+
+    #[test]
+    fn test_execution_result_success_with_data() {
+        let data = serde_json::json!({"id": 42});
+        let r = ExecutionResult::success_with_data("created", data.clone());
+        assert!(r.success);
+        assert_eq!(r.message, "created");
+        assert_eq!(r.data, Some(data));
+    }
+
+    #[test]
+    fn test_execution_result_failure() {
+        let r = ExecutionResult::failure("something broke");
+        assert!(!r.success);
+        assert_eq!(r.message, "something broke");
+        assert!(r.data.is_none());
+    }
+
+    #[test]
+    fn test_anyhow_to_mcp_error_preserves_message() {
+        let err = anyhow::anyhow!("test error message");
+        let mcp_err = anyhow_to_mcp_error(err);
+        assert!(mcp_err.message.contains("test error message"));
+    }
+
+    #[test]
+    fn test_anyhow_to_mcp_error_uses_invalid_params_code() {
+        let err = anyhow::anyhow!("some error");
+        let mcp_err = anyhow_to_mcp_error(err);
+        assert_eq!(mcp_err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    }
+}

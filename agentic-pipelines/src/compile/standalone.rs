@@ -498,4 +498,107 @@ fn generate_memory_prompt() -> String {
         .to_string()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compile::common::parse_markdown;
+    use crate::compile::types::{McpConfig, McpOptions};
 
+    fn minimal_front_matter() -> FrontMatter {
+        let (fm, _) = parse_markdown("---\nname: test-agent\ndescription: test\n---\n").unwrap();
+        fm
+    }
+
+    #[test]
+    fn test_generate_firewall_config_builtin_simple_enabled() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers
+            .insert("ado".to_string(), McpConfig::Enabled(true));
+        let config = generate_firewall_config(&fm);
+        let upstream = config.upstreams.get("ado").unwrap();
+        assert_eq!(upstream.command, "agency");
+        assert_eq!(upstream.args, vec!["mcp", "ado"]);
+        assert_eq!(upstream.allowed, vec!["*"]);
+    }
+
+    #[test]
+    fn test_generate_firewall_config_builtin_with_allowed_list() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers.insert(
+            "icm".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                allowed: vec!["create_incident".to_string(), "get_incident".to_string()],
+                ..Default::default()
+            }),
+        );
+        let config = generate_firewall_config(&fm);
+        let upstream = config.upstreams.get("icm").unwrap();
+        assert_eq!(upstream.command, "agency");
+        assert_eq!(upstream.args, vec!["mcp", "icm"]);
+        assert_eq!(
+            upstream.allowed,
+            vec!["create_incident".to_string(), "get_incident".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_generate_firewall_config_custom_mcp() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers.insert(
+            "my-tool".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                command: Some("node".to_string()),
+                args: vec!["server.js".to_string()],
+                allowed: vec!["do_thing".to_string()],
+                ..Default::default()
+            }),
+        );
+        let config = generate_firewall_config(&fm);
+        let upstream = config.upstreams.get("my-tool").unwrap();
+        assert_eq!(upstream.command, "node");
+        assert_eq!(upstream.args, vec!["server.js"]);
+        assert_eq!(upstream.allowed, vec!["do_thing"]);
+    }
+
+    #[test]
+    fn test_generate_firewall_config_custom_mcp_empty_allowed_defaults_to_wildcard() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers.insert(
+            "my-tool".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                command: Some("python".to_string()),
+                allowed: vec![],
+                ..Default::default()
+            }),
+        );
+        let config = generate_firewall_config(&fm);
+        let upstream = config.upstreams.get("my-tool").unwrap();
+        assert_eq!(upstream.allowed, vec!["*"]);
+    }
+
+    #[test]
+    fn test_generate_firewall_config_unknown_non_builtin_skipped() {
+        // An MCP that is neither built-in nor has a command should be skipped
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers
+            .insert("phantom".to_string(), McpConfig::Enabled(true));
+        let config = generate_firewall_config(&fm);
+        assert!(!config.upstreams.contains_key("phantom"));
+    }
+
+    #[test]
+    fn test_generate_firewall_config_disabled_mcp_skipped() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers
+            .insert("ado".to_string(), McpConfig::Enabled(false));
+        let config = generate_firewall_config(&fm);
+        assert!(!config.upstreams.contains_key("ado"));
+    }
+
+    #[test]
+    fn test_generate_firewall_config_empty_mcp_servers() {
+        let fm = minimal_front_matter();
+        let config = generate_firewall_config(&fm);
+        assert!(config.upstreams.is_empty());
+    }
+}
