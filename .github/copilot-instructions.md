@@ -621,6 +621,8 @@ Reserved for future use. Currently replaced with an empty string.
 
 ### CLI Commands
 
+Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logging), `--debug, -d` (enable debug-level logging, implies verbose)
+
 - `create` - Interactively create a new agent markdown file
   - `--output, -o <path>` - Output directory for the generated file (defaults to current directory)
   - Guides you through: name, description, engine selection, schedule, workspace, repositories, checkout, and MCPs
