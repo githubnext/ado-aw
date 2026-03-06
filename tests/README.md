@@ -1,6 +1,6 @@
 # Testing Guide
 
-This document describes the test suite for the agentic-pipelines compiler.
+This document describes the test suite for the ado-aw compiler.
 
 ## Overview
 

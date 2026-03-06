@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document summarizes the test suite that has been added to the agentic-pipelines compiler project to satisfy the requirements in issue #160959.
+This document summarizes the test suite that has been added to the ado-aw compiler project to satisfy the requirements in issue #160959.
 
 ## What Was Added
 
@@ -181,7 +181,7 @@ To verify the tests work correctly:
 
 2. Run the tests:
    ```bash
-   cd agentic-pipelines
+   cd ado-aw
    cargo test
    ```
 
@@ -190,16 +190,16 @@ To verify the tests work correctly:
 ## Files Modified/Created
 
 ### Modified
-- `agentic-pipelines/src/main.rs` - Added 219 lines of unit tests
+- `ado-aw/src/main.rs` - Added 219 lines of unit tests
 
 ### Created
-- `agentic-pipelines/tests/` - Test directory
-- `agentic-pipelines/tests/compiler_tests.rs` - 8 integration tests
-- `agentic-pipelines/tests/README.md` - Testing guide
-- `agentic-pipelines/tests/fixtures/` - Test fixtures directory
-- `agentic-pipelines/tests/fixtures/minimal-agent.md` - Minimal test fixture
-- `agentic-pipelines/tests/fixtures/complete-agent.md` - Complete test fixture
-- `agentic-pipelines/tests/SUMMARY.md` - This summary document
+- `ado-aw/tests/` - Test directory
+- `ado-aw/tests/compiler_tests.rs` - 8 integration tests
+- `ado-aw/tests/README.md` - Testing guide
+- `ado-aw/tests/fixtures/` - Test fixtures directory
+- `ado-aw/tests/fixtures/minimal-agent.md` - Minimal test fixture
+- `ado-aw/tests/fixtures/complete-agent.md` - Complete test fixture
+- `ado-aw/tests/SUMMARY.md` - This summary document
 
 ## Conclusion
 

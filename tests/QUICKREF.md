@@ -22,7 +22,7 @@ cargo test -- --nocapture
 ## Test Structure
 
 ```
-agentic-pipelines/
+ado-aw/
 ├── src/
 │   └── main.rs              # 18 unit tests (line 337+)
 └── tests/

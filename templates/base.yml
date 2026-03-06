@@ -65,7 +65,7 @@ jobs:
           targetPath: "$(Pipeline.Workspace)/agentic-pipeline-compiler"
 
       - bash: |
-          AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/agentic-pipelines"
+          AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
           chmod +x "$AGENTIC_PIPELINES_PATH"
           $AGENTIC_PIPELINES_PATH check "{{ source_path }}" "{{ pipeline_path }}"
         displayName: "Verify pipeline integrity"
@@ -92,7 +92,7 @@ jobs:
           echo "HOME: $HOME"
 
           # Use absolute path since MCP subprocess may not inherit PATH
-          AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/agentic-pipelines"
+          AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
 
           # Verify the binary exists and is executable
           ls -la "$AGENTIC_PIPELINES_PATH"
@@ -101,8 +101,8 @@ jobs:
           $AGENTIC_PIPELINES_PATH -h
 
           # Copy compiler binary to /tmp so it's accessible inside AWF container
-          cp "$AGENTIC_PIPELINES_PATH" /tmp/awf-tools/agentic-pipelines
-          chmod +x /tmp/awf-tools/agentic-pipelines
+          cp "$AGENTIC_PIPELINES_PATH" /tmp/awf-tools/ado-aw
+          chmod +x /tmp/awf-tools/ado-aw
 
           # Copy MCP firewall config to /tmp
           cp "$(Agent.TempDirectory)/staging/mcp-firewall-config.json" /tmp/awf-tools/staging/mcp-firewall-config.json
@@ -116,7 +116,7 @@ jobs:
                 "tools": [
                   "*"
                 ],
-                "command": "/tmp/awf-tools/agentic-pipelines",
+                "command": "/tmp/awf-tools/ado-aw",
                 "args": ["mcp", "/tmp/awf-tools/staging", "{{ working_directory }}"]
               },
               "mcp-firewall": {
@@ -124,7 +124,7 @@ jobs:
                 "tools": [
                   "*"
                 ],
-                "command": "/tmp/awf-tools/agentic-pipelines",
+                "command": "/tmp/awf-tools/ado-aw",
                 "args": ["mcp-firewall", "--config", "/tmp/awf-tools/staging/mcp-firewall-config.json"]
               }
             }
@@ -254,8 +254,8 @@ jobs:
           if [ -d ~/.agency/logs ]; then
             cp -r ~/.agency/logs/* "$(Agent.TempDirectory)/staging/logs/" 2>/dev/null || true
           fi
-          if [ -d ~/.agentic-pipelines/logs ]; then
-            cp -r ~/.agentic-pipelines/logs/* "$(Agent.TempDirectory)/staging/logs/" 2>/dev/null || true
+          if [ -d ~/.ado-aw/logs ]; then
+            cp -r ~/.ado-aw/logs/* "$(Agent.TempDirectory)/staging/logs/" 2>/dev/null || true
           fi
           echo "Logs copied to $(Agent.TempDirectory)/staging/logs"
           ls -la "$(Agent.TempDirectory)/staging/logs" 2>/dev/null || echo "No logs found"
@@ -356,7 +356,7 @@ jobs:
         displayName: "Prepare threat analysis prompt"
 
       - bash: |
-          AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/agentic-pipelines"
+          AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
           chmod +x "$AGENTIC_PIPELINES_PATH"
         displayName: "Setup agentic pipeline compiler"
 
@@ -460,9 +460,9 @@ jobs:
             mkdir -p "$(Agent.TempDirectory)/analyzed_outputs/logs/agency"
             cp -r ~/.agency/logs/* "$(Agent.TempDirectory)/analyzed_outputs/logs/agency/" 2>/dev/null || true
           fi
-          if [ -d ~/.agentic-pipelines/logs ]; then
-            mkdir -p "$(Agent.TempDirectory)/analyzed_outputs/logs/agentic-pipelines"
-            cp -r ~/.agentic-pipelines/logs/* "$(Agent.TempDirectory)/analyzed_outputs/logs/agentic-pipelines/" 2>/dev/null || true
+          if [ -d ~/.ado-aw/logs ]; then
+            mkdir -p "$(Agent.TempDirectory)/analyzed_outputs/logs/ado-aw"
+            cp -r ~/.ado-aw/logs/* "$(Agent.TempDirectory)/analyzed_outputs/logs/ado-aw/" 2>/dev/null || true
           fi
           echo "Logs copied to $(Agent.TempDirectory)/analyzed_outputs/logs"
           ls -laR "$(Agent.TempDirectory)/analyzed_outputs/logs" 2>/dev/null || echo "No logs found"
@@ -502,7 +502,7 @@ jobs:
 
       - bash: |
           ls -la "$(Pipeline.Workspace)/agentic-pipeline-compiler"
-          chmod +x $(Pipeline.Workspace)/agentic-pipeline-compiler/agentic-pipelines
+          chmod +x $(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw
           echo "##vso[task.prependpath]$(Pipeline.Workspace)/agentic-pipeline-compiler"
         displayName: Add agentic compiler to path
 
@@ -510,7 +510,7 @@ jobs:
           mkdir -p "$(Agent.TempDirectory)/staging"
         displayName: "Prepare output directory"
 
-      - bash: agentic-pipelines execute --source "{{ source_path }}" --safe-output-dir "$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)" --output-dir "$(Agent.TempDirectory)/staging"
+      - bash: ado-aw execute --source "{{ source_path }}" --safe-output-dir "$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)" --output-dir "$(Agent.TempDirectory)/staging"
         displayName: Process safe outputs
         workingDirectory: {{ working_directory }}
         env:
@@ -527,9 +527,9 @@ jobs:
             mkdir -p "$(Agent.TempDirectory)/staging/logs/agency"
             cp -r ~/.agency/logs/* "$(Agent.TempDirectory)/staging/logs/agency/" 2>/dev/null || true
           fi
-          if [ -d ~/.agentic-pipelines/logs ]; then
-            mkdir -p "$(Agent.TempDirectory)/staging/logs/agentic-pipelines"
-            cp -r ~/.agentic-pipelines/logs/* "$(Agent.TempDirectory)/staging/logs/agentic-pipelines/" 2>/dev/null || true
+          if [ -d ~/.ado-aw/logs ]; then
+            mkdir -p "$(Agent.TempDirectory)/staging/logs/ado-aw"
+            cp -r ~/.ado-aw/logs/* "$(Agent.TempDirectory)/staging/logs/ado-aw/" 2>/dev/null || true
           fi
           echo "Logs copied to $(Agent.TempDirectory)/staging/logs"
           ls -laR "$(Agent.TempDirectory)/staging/logs" 2>/dev/null || echo "No logs found"

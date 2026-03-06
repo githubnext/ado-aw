@@ -29,7 +29,7 @@ name: "Rust PR Reviewer"
 "on":
   pull_request:
     paths:
-    - agentic-pipelines/**
+    - "src/**"
     types:
     - opened
     - synchronize

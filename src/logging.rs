@@ -1,6 +1,6 @@
-//! Centralized file-based logging for agentic-pipelines
+//! Centralized file-based logging for ado-aw
 //!
-//! All commands log to `$HOME/.agentic-pipelines/logs/` with daily log files.
+//! All commands log to `$HOME/.ado-aw/logs/` with daily log files.
 //! Each session is marked with timestamp, build ID (if in pipeline), and command name.
 //! In pipeline environments, these logs are copied to the staging directory for artifact upload.
 
@@ -14,11 +14,11 @@ use std::sync::Mutex;
 
 /// Get the standard log directory path
 ///
-/// Returns `$HOME/.agentic-pipelines/logs/` on Unix/macOS
-/// Returns `%USERPROFILE%\.agentic-pipelines\logs\` on Windows
+/// Returns `$HOME/.ado-aw/logs/` on Unix/macOS
+/// Returns `%USERPROFILE%\.ado-aw\logs\` on Windows
 pub fn log_directory() -> Result<PathBuf> {
     let home = dirs::home_dir().context("Could not determine home directory")?;
-    Ok(home.join(".agentic-pipelines").join("logs"))
+    Ok(home.join(".ado-aw").join("logs"))
 }
 
 /// Get the path for today's log file
@@ -105,7 +105,7 @@ impl log::Log for FileLogger {
 
 /// Initialize file-based logging for a command
 ///
-/// Creates/appends to today's log file at `$HOME/.agentic-pipelines/logs/YYYY-MM-DD.log`
+/// Creates/appends to today's log file at `$HOME/.ado-aw/logs/YYYY-MM-DD.log`
 /// and writes a session marker with build context for correlation.
 ///
 /// # Arguments
@@ -201,7 +201,7 @@ mod tests {
     fn test_log_directory() {
         let dir = log_directory().unwrap();
         assert!(
-            dir.ends_with(".agentic-pipelines/logs") || dir.ends_with(".agentic-pipelines\\logs")
+            dir.ends_with(".ado-aw/logs") || dir.ends_with(".ado-aw\\logs")
         );
     }
 

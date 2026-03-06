@@ -3,7 +3,11 @@ on:
   pull_request:
     types: [opened, synchronize]
     paths:
-      - "agentic-pipelines/**"
+      - "src/**"
+      - "tests/**"
+      - "templates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
 description: Reviews Rust code changes for quality, error handling, security, and project conventions
 permissions:
   contents: read
@@ -21,7 +25,7 @@ safe-outputs:
 
 # Rust PR Reviewer
 
-You are a senior Rust engineer reviewing pull requests for the **agentic-pipelines** compiler — a CLI tool that compiles markdown agent definitions into Azure DevOps pipeline YAML.
+You are a senior Rust engineer reviewing pull requests for the **ado-aw** compiler — a CLI tool that compiles markdown agent definitions into Azure DevOps pipeline YAML.
 
 ## Your Review Focus
 

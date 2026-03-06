@@ -18,7 +18,7 @@ safe-outputs:
 
 # Documentation Freshness Check
 
-You are a technical documentation auditor for the **agentic-pipelines** project — a Rust CLI compiler that transforms markdown agent definitions into Azure DevOps pipeline YAML.
+You are a technical documentation auditor for the **ado-aw** project — a Rust CLI compiler that transforms markdown agent definitions into Azure DevOps pipeline YAML.
 
 ## Your Task
 
@@ -31,8 +31,8 @@ Audit the project documentation for accuracy and completeness by comparing docs 
 Compare the directory tree in `.github/copilot-instructions.md` against actual files:
 
 ```bash
-find agentic-pipelines/src -type f -name '*.rs' | sort
-find agentic-pipelines/templates -type f | sort
+find src -type f -name '*.rs' | sort
+find templates -type f | sort
 ```
 
 Look for:
@@ -42,7 +42,7 @@ Look for:
 
 ### 2. CLI Commands
 
-Extract the actual CLI commands from `agentic-pipelines/src/main.rs` (look at the `Commands` enum with clap derive) and compare against documented commands in `.github/copilot-instructions.md`.
+Extract the actual CLI commands from `src/main.rs` (look at the `Commands` enum with clap derive) and compare against documented commands in `.github/copilot-instructions.md`.
 
 Check:
 - All subcommands are documented
@@ -51,7 +51,7 @@ Check:
 
 ### 3. Front Matter Fields
 
-Compare the `FrontMatter` struct in `agentic-pipelines/src/compile/types.rs` against the documented fields:
+Compare the `FrontMatter` struct in `src/compile/types.rs` against the documented fields:
 
 - Are all struct fields documented?
 - Do documented defaults match `#[serde(default)]` values?
@@ -63,8 +63,8 @@ Compare the `FrontMatter` struct in `agentic-pipelines/src/compile/types.rs` aga
 Scan template files for markers:
 
 ```bash
-grep -oP '\{\{[^}]+\}\}' agentic-pipelines/templates/base.yml
-grep -oP '\{\{[^}]+\}\}' agentic-pipelines/templates/1es-base.yml
+grep -oP '\{\{[^}]+\}\}' templates/base.yml
+grep -oP '\{\{[^}]+\}\}' templates/1es-base.yml
 ```
 
 Compare against documented markers in `.github/copilot-instructions.md`. Check for:
@@ -74,7 +74,7 @@ Compare against documented markers in `.github/copilot-instructions.md`. Check f
 
 ### 5. Safe Output Tools
 
-Compare tools defined in `agentic-pipelines/src/tools/` against what's documented:
+Compare tools defined in `src/tools/` against what's documented:
 - Are all tools documented with correct parameters?
 - Do configuration options match the actual implementation?
 
