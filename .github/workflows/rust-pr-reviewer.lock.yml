@@ -23,13 +23,17 @@
 #
 # Reviews Rust code changes for quality, error handling, security, and project conventions
 #
-# gh-aw-metadata: {"schema_version":"v1","frontmatter_hash":"c324a942f4bdaddc1a26cdbfeb1ce8d40b351c155cf916ca738ea6c337f13e41","compiler_version":"v0.53.6"}
+# gh-aw-metadata: {"schema_version":"v1","frontmatter_hash":"3aa25d90e182fc3fb438edf4938ea3ef1ee7ef0057797112375806b7519b1a4c","compiler_version":"v0.53.6"}
 
 name: "Rust PR Reviewer"
 "on":
   pull_request:
     paths:
-    - "src/**"
+    - src/**
+    - tests/**
+    - templates/**
+    - Cargo.toml
+    - Cargo.lock
     types:
     - opened
     - synchronize
