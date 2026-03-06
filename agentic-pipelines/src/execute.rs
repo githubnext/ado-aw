@@ -328,4 +328,47 @@ mod tests {
         assert!(results[0].success);
         assert!(results[1].success);
     }
+
+    #[tokio::test]
+    async fn test_execute_safe_outputs_empty_file_returns_empty() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let safe_output_path = temp_dir.path().join(SAFE_OUTPUT_FILENAME);
+        tokio::fs::write(&safe_output_path, "").await.unwrap();
+
+        let ctx = ExecutionContext::default();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx).await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_execute_missing_data_succeeds() {
+        let entry = serde_json::json!({"name": "missing-data", "data_type": "schema", "reason": "not available"});
+        let ctx = ExecutionContext::default();
+
+        let result = execute_safe_output(&entry, &ctx).await;
+        assert!(result.is_ok());
+        let (tool_name, result) = result.unwrap();
+        assert_eq!(tool_name, "missing-data");
+        assert!(result.success);
+    }
+
+    #[tokio::test]
+    async fn test_execute_safe_output_malformed_work_item_returns_err() {
+        // Missing required fields (title and description)
+        let entry = serde_json::json!({"name": "create-work-item"});
+        let ctx = ExecutionContext::default();
+
+        let result = execute_safe_output(&entry, &ctx).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_execute_unknown_tool_error_contains_tool_name() {
+        let entry = serde_json::json!({"name": "evil-backdoor"});
+        let ctx = ExecutionContext::default();
+
+        let result = execute_safe_output(&entry, &ctx).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("evil-backdoor"));
+    }
 }
