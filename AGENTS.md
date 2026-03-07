@@ -69,6 +69,16 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 
 ## Development Guidelines
 
+### Commit Message Convention
+
+This project uses [Conventional Commits](https://www.conventionalcommits.org/) for automated releases via `release-please`. All commit messages **must** follow the format:
+
+```
+type(optional scope): description
+```
+
+Common types: `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `ci`. Commits that don't follow this format will be ignored by release-please and won't trigger a release.
+
 ### Rust Code Style
 
 1. Use `anyhow::Result` for fallible functions
