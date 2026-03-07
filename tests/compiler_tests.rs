@@ -145,8 +145,26 @@ fn test_compiled_yaml_structure() {
         "Template should download the compiler from GitHub Releases"
     );
     assert!(
-        template_content.contains("sha256sum --check"),
-        "Template should verify checksum of downloaded compiler"
+        template_content.contains("sha256sum -c checksums.txt --ignore-missing"),
+        "Template should verify checksum using checksums.txt"
+    );
+
+    // Verify AWF (Agentic Workflow Firewall) is downloaded from GitHub Releases, not ADO pipeline artifacts
+    assert!(
+        !template_content.contains("pipeline: 2450"),
+        "Template should not reference ADO pipeline 2450 for the firewall"
+    );
+    assert!(
+        !template_content.contains("DownloadPipelineArtifact"),
+        "Template should not use DownloadPipelineArtifact task"
+    );
+    assert!(
+        template_content.contains("github.com/github/gh-aw-firewall/releases"),
+        "Template should download AWF from GitHub Releases"
+    );
+    assert!(
+        template_content.contains("{{ firewall_version }}"),
+        "Template should contain firewall_version marker"
     );
 }
 
