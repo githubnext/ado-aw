@@ -48,7 +48,7 @@ jobs:
           set -euo pipefail
           cd target/release
           cp ado-aw ado-aw-linux-x64
-          sha256sum ado-aw-linux-x64 > ado-aw-linux-x64.sha256
+          sha256sum ado-aw-linux-x64 > checksums.txt
 
       - name: Upload release assets
         env:
@@ -56,5 +56,5 @@ jobs:
         run: |
           gh release upload ${{ needs.release-please.outputs.tag_name }} \
             target/release/ado-aw-linux-x64 \
-            target/release/ado-aw-linux-x64.sha256 \
+            target/release/checksums.txt \
             --clobber

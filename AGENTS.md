@@ -582,7 +582,18 @@ The generated pipelines download the compiler binary from:
 https://github.com/githubnext/ado-aw/releases/download/v{VERSION}/ado-aw-linux-x64
 ```
 
-A SHA256 checksum file (`ado-aw-linux-x64.sha256`) is also downloaded and verified to ensure binary integrity. This replaces the previous approach of downloading from an internal ADO pipeline artifact.
+A `checksums.txt` file is also downloaded and verified via `sha256sum -c checksums.txt --ignore-missing` to ensure binary integrity.
+
+## {{ firewall_version }}
+
+Should be replaced with the pinned version of the AWF (Agentic Workflow Firewall) binary (defined as `AWF_VERSION` constant in `src/compile/common.rs`). This version is used to construct the GitHub Releases download URL for the AWF binary.
+
+The generated pipelines download the AWF binary from:
+```
+https://github.com/github/gh-aw-firewall/releases/download/v{VERSION}/awf-linux-x64
+```
+
+A `checksums.txt` file is also downloaded and verified via `sha256sum -c checksums.txt --ignore-missing` to ensure binary integrity.
 
 ### 1ES-Specific Template Markers
 
@@ -955,7 +966,7 @@ mcp-servers:
 
 Network isolation is provided by AWF (Agentic Workflow Firewall), which provides L7 (HTTP/HTTPS) egress control using Squid proxy and Docker containers. AWF restricts network access to a whitelist of approved domains.
 
-The `ado-aw` compiler binary is distributed via [GitHub Releases](https://github.com/githubnext/ado-aw/releases) with SHA256 checksum verification. The AWF binary is downloaded from an internal ADO pipeline (pipeline 2450, branch `ms/main`, artifact `gh-aw-firewall-linux-x64`). Docker is sourced via the `DockerInstaller@0` ADO task.
+The `ado-aw` compiler binary is distributed via [GitHub Releases](https://github.com/githubnext/ado-aw/releases) with SHA256 checksum verification. The AWF binary is distributed via [GitHub Releases](https://github.com/github/gh-aw-firewall/releases) with SHA256 checksum verification. Docker is sourced via the `DockerInstaller@0` ADO task.
 
 ### Default Allowed Domains
 
