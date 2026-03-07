@@ -145,8 +145,8 @@ fn test_compiled_yaml_structure() {
         "Template should download the compiler from GitHub Releases"
     );
     assert!(
-        template_content.contains("sha256sum -c checksums.txt --ignore-missing"),
-        "Template should verify checksum using checksums.txt"
+        template_content.contains("sha256sum -c checksums.txt --ignore-missing | grep -q \": OK\""),
+        "Template should verify checksum using checksums.txt with grep confirmation"
     );
 
     // Verify AWF (Agentic Workflow Firewall) is downloaded from GitHub Releases, not ADO pipeline artifacts
@@ -366,7 +366,13 @@ fn test_compiled_output_no_unreplaced_markers() {
     );
     assert!(
         compiled.contains("github.com/githubnext/ado-aw/releases"),
-        "Compiled output should reference GitHub Releases"
+        "Compiled output should reference GitHub Releases for the compiler"
+    );
+
+    // Verify the AWF firewall version was correctly substituted
+    assert!(
+        compiled.contains("github.com/github/gh-aw-firewall/releases"),
+        "Compiled output should reference GitHub Releases for AWF"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);

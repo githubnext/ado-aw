@@ -117,6 +117,7 @@ displayName: "Finalize""#,
         let compiler_version = env!("CARGO_PKG_VERSION");
         let replacements: Vec<(&str, &str)> = vec![
             ("{{ compiler_version }}", compiler_version),
+            // No-op for 1ES (template doesn't use AWF), but included for forward-compatibility
             ("{{ firewall_version }}", AWF_VERSION),
             ("{{ pool }}", &pool),
             ("{{ schedule }}", &schedule),
