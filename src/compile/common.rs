@@ -455,6 +455,11 @@ pub fn sanitize_filename(name: &str) -> String {
 /// Default pool name
 pub const DEFAULT_POOL: &str = "AZS-1ES-L-MMS-ubuntu-22.04";
 
+/// Version of the AWF (Agentic Workflow Firewall) binary to download from GitHub Releases.
+/// Update this when upgrading to a new AWF release.
+/// See: https://github.com/github/gh-aw-firewall/releases
+pub const AWF_VERSION: &str = "0.23.1";
+
 /// Generate source path for the execute command.
 ///
 /// Returns a path using `{{ workspace }}` as the base, which gets resolved

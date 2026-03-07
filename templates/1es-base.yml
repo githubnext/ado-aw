@@ -58,16 +58,16 @@ extends:
                       COMPILER_VERSION="{{ compiler_version }}"
                       DOWNLOAD_DIR="$(Pipeline.Workspace)/agentic-pipeline-compiler"
                       DOWNLOAD_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/ado-aw-linux-x64"
-                      CHECKSUM_URL="${DOWNLOAD_URL}.sha256"
+                      CHECKSUM_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/checksums.txt"
 
                       mkdir -p "$DOWNLOAD_DIR"
                       echo "Downloading ado-aw v${COMPILER_VERSION} from GitHub Releases..."
                       curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64" "$DOWNLOAD_URL"
-                      curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64.sha256" "$CHECKSUM_URL"
+                      curl -fsSL -o "$DOWNLOAD_DIR/checksums.txt" "$CHECKSUM_URL"
 
                       echo "Verifying checksum..."
                       cd "$DOWNLOAD_DIR"
-                      sha256sum --check ado-aw-linux-x64.sha256
+                      sha256sum -c checksums.txt --ignore-missing
                       mv ado-aw-linux-x64 ado-aw
                       chmod +x ado-aw
                     displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
@@ -171,16 +171,16 @@ extends:
                   COMPILER_VERSION="{{ compiler_version }}"
                   DOWNLOAD_DIR="$(Pipeline.Workspace)/agentic-pipeline-compiler"
                   DOWNLOAD_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/ado-aw-linux-x64"
-                  CHECKSUM_URL="${DOWNLOAD_URL}.sha256"
+                  CHECKSUM_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/checksums.txt"
 
                   mkdir -p "$DOWNLOAD_DIR"
                   echo "Downloading ado-aw v${COMPILER_VERSION} from GitHub Releases..."
                   curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64" "$DOWNLOAD_URL"
-                  curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64.sha256" "$CHECKSUM_URL"
+                  curl -fsSL -o "$DOWNLOAD_DIR/checksums.txt" "$CHECKSUM_URL"
 
                   echo "Verifying checksum..."
                   cd "$DOWNLOAD_DIR"
-                  sha256sum --check ado-aw-linux-x64.sha256
+                  sha256sum -c checksums.txt --ignore-missing
                   mv ado-aw-linux-x64 ado-aw
                   chmod +x ado-aw
                 displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
@@ -315,16 +315,16 @@ extends:
                   COMPILER_VERSION="{{ compiler_version }}"
                   DOWNLOAD_DIR="$(Pipeline.Workspace)/agentic-pipeline-compiler"
                   DOWNLOAD_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/ado-aw-linux-x64"
-                  CHECKSUM_URL="${DOWNLOAD_URL}.sha256"
+                  CHECKSUM_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/checksums.txt"
 
                   mkdir -p "$DOWNLOAD_DIR"
                   echo "Downloading ado-aw v${COMPILER_VERSION} from GitHub Releases..."
                   curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64" "$DOWNLOAD_URL"
-                  curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64.sha256" "$CHECKSUM_URL"
+                  curl -fsSL -o "$DOWNLOAD_DIR/checksums.txt" "$CHECKSUM_URL"
 
                   echo "Verifying checksum..."
                   cd "$DOWNLOAD_DIR"
-                  sha256sum --check ado-aw-linux-x64.sha256
+                  sha256sum -c checksums.txt --ignore-missing
                   mv ado-aw-linux-x64 ado-aw
                   chmod +x ado-aw
                 displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"

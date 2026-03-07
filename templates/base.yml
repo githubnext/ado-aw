@@ -56,16 +56,16 @@ jobs:
           COMPILER_VERSION="{{ compiler_version }}"
           DOWNLOAD_DIR="$(Pipeline.Workspace)/agentic-pipeline-compiler"
           DOWNLOAD_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/ado-aw-linux-x64"
-          CHECKSUM_URL="${DOWNLOAD_URL}.sha256"
+          CHECKSUM_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/checksums.txt"
 
           mkdir -p "$DOWNLOAD_DIR"
           echo "Downloading ado-aw v${COMPILER_VERSION} from GitHub Releases..."
           curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64" "$DOWNLOAD_URL"
-          curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64.sha256" "$CHECKSUM_URL"
+          curl -fsSL -o "$DOWNLOAD_DIR/checksums.txt" "$CHECKSUM_URL"
 
           echo "Verifying checksum..."
           cd "$DOWNLOAD_DIR"
-          sha256sum --check ado-aw-linux-x64.sha256
+          sha256sum -c checksums.txt --ignore-missing
           mv ado-aw-linux-x64 ado-aw
           chmod +x ado-aw
         displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
@@ -172,23 +172,25 @@ jobs:
       - task: DockerInstaller@0
         displayName: "Install Docker"
 
-      - task: DownloadPipelineArtifact@2
-        displayName: "Download AWF (Agentic Workflow Firewall)"
-        name: awfdrop
-        inputs:
-          source: "specific"
-          project: "4x4"
-          pipeline: 2450
-          runVersion: "latestFromBranch"
-          branchName: "refs/heads/ms/main"
-          artifact: "gh-aw-firewall-linux-x64"
-          targetPath: "$(Pipeline.Workspace)/awf"
-
       - bash: |
-          chmod +x "$(Pipeline.Workspace)/awf/awf"
+          AWF_VERSION="{{ firewall_version }}"
+          DOWNLOAD_DIR="$(Pipeline.Workspace)/awf"
+          DOWNLOAD_URL="https://github.com/github/gh-aw-firewall/releases/download/v${AWF_VERSION}/awf-linux-x64"
+          CHECKSUM_URL="https://github.com/github/gh-aw-firewall/releases/download/v${AWF_VERSION}/checksums.txt"
+
+          mkdir -p "$DOWNLOAD_DIR"
+          echo "Downloading AWF v${AWF_VERSION} from GitHub Releases..."
+          curl -fsSL -o "$DOWNLOAD_DIR/awf-linux-x64" "$DOWNLOAD_URL"
+          curl -fsSL -o "$DOWNLOAD_DIR/checksums.txt" "$CHECKSUM_URL"
+
+          echo "Verifying checksum..."
+          cd "$DOWNLOAD_DIR"
+          sha256sum -c checksums.txt --ignore-missing
+          mv awf-linux-x64 awf
+          chmod +x awf
           echo "##vso[task.prependpath]$(Pipeline.Workspace)/awf"
-          "$(Pipeline.Workspace)/awf/awf" --version || echo "AWF binary ready"
-        displayName: "Setup AWF"
+          ./awf --version || echo "AWF binary ready"
+        displayName: "Download AWF (Agentic Workflow Firewall) v{{ firewall_version }}"
 
       - bash: |
           docker pull ghcr.io/github/gh-aw-firewall/squid:latest
@@ -312,16 +314,16 @@ jobs:
           COMPILER_VERSION="{{ compiler_version }}"
           DOWNLOAD_DIR="$(Pipeline.Workspace)/agentic-pipeline-compiler"
           DOWNLOAD_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/ado-aw-linux-x64"
-          CHECKSUM_URL="${DOWNLOAD_URL}.sha256"
+          CHECKSUM_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/checksums.txt"
 
           mkdir -p "$DOWNLOAD_DIR"
           echo "Downloading ado-aw v${COMPILER_VERSION} from GitHub Releases..."
           curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64" "$DOWNLOAD_URL"
-          curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64.sha256" "$CHECKSUM_URL"
+          curl -fsSL -o "$DOWNLOAD_DIR/checksums.txt" "$CHECKSUM_URL"
 
           echo "Verifying checksum..."
           cd "$DOWNLOAD_DIR"
-          sha256sum --check ado-aw-linux-x64.sha256
+          sha256sum -c checksums.txt --ignore-missing
           mv ado-aw-linux-x64 ado-aw
           chmod +x ado-aw
         displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
@@ -329,23 +331,25 @@ jobs:
       - task: DockerInstaller@0
         displayName: "Install Docker"
 
-      - task: DownloadPipelineArtifact@2
-        displayName: "Download AWF (Agentic Workflow Firewall)"
-        name: awfdrop
-        inputs:
-          source: "specific"
-          project: "4x4"
-          pipeline: 2450
-          runVersion: "latestFromBranch"
-          branchName: "refs/heads/ms/main"
-          artifact: "gh-aw-firewall-linux-x64"
-          targetPath: "$(Pipeline.Workspace)/awf"
-
       - bash: |
-          chmod +x "$(Pipeline.Workspace)/awf/awf"
+          AWF_VERSION="{{ firewall_version }}"
+          DOWNLOAD_DIR="$(Pipeline.Workspace)/awf"
+          DOWNLOAD_URL="https://github.com/github/gh-aw-firewall/releases/download/v${AWF_VERSION}/awf-linux-x64"
+          CHECKSUM_URL="https://github.com/github/gh-aw-firewall/releases/download/v${AWF_VERSION}/checksums.txt"
+
+          mkdir -p "$DOWNLOAD_DIR"
+          echo "Downloading AWF v${AWF_VERSION} from GitHub Releases..."
+          curl -fsSL -o "$DOWNLOAD_DIR/awf-linux-x64" "$DOWNLOAD_URL"
+          curl -fsSL -o "$DOWNLOAD_DIR/checksums.txt" "$CHECKSUM_URL"
+
+          echo "Verifying checksum..."
+          cd "$DOWNLOAD_DIR"
+          sha256sum -c checksums.txt --ignore-missing
+          mv awf-linux-x64 awf
+          chmod +x awf
           echo "##vso[task.prependpath]$(Pipeline.Workspace)/awf"
-          "$(Pipeline.Workspace)/awf/awf" --version || echo "AWF binary ready"
-        displayName: "Setup AWF"
+          ./awf --version || echo "AWF binary ready"
+        displayName: "Download AWF (Agentic Workflow Firewall) v{{ firewall_version }}"
 
       - bash: |
           docker pull ghcr.io/github/gh-aw-firewall/squid:latest
@@ -504,16 +508,16 @@ jobs:
           COMPILER_VERSION="{{ compiler_version }}"
           DOWNLOAD_DIR="$(Pipeline.Workspace)/agentic-pipeline-compiler"
           DOWNLOAD_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/ado-aw-linux-x64"
-          CHECKSUM_URL="${DOWNLOAD_URL}.sha256"
+          CHECKSUM_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/checksums.txt"
 
           mkdir -p "$DOWNLOAD_DIR"
           echo "Downloading ado-aw v${COMPILER_VERSION} from GitHub Releases..."
           curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64" "$DOWNLOAD_URL"
-          curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64.sha256" "$CHECKSUM_URL"
+          curl -fsSL -o "$DOWNLOAD_DIR/checksums.txt" "$CHECKSUM_URL"
 
           echo "Verifying checksum..."
           cd "$DOWNLOAD_DIR"
-          sha256sum --check ado-aw-linux-x64.sha256
+          sha256sum -c checksums.txt --ignore-missing
           mv ado-aw-linux-x64 ado-aw
           chmod +x ado-aw
         displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"

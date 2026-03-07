@@ -14,7 +14,7 @@ use std::path::Path;
 
 use super::Compiler;
 use super::common::{
-    self, DEFAULT_POOL, compute_effective_workspace, generate_copilot_params,
+    self, AWF_VERSION, DEFAULT_POOL, compute_effective_workspace, generate_copilot_params,
     generate_cancel_previous_builds, generate_checkout_self, generate_checkout_steps,
     generate_ci_trigger, generate_pipeline_path, generate_pipeline_resources, generate_pr_trigger,
     generate_repositories, generate_schedule, generate_source_path, generate_working_directory,
@@ -123,6 +123,7 @@ impl Compiler for StandaloneCompiler {
         let compiler_version = env!("CARGO_PKG_VERSION");
         let replacements: Vec<(&str, &str)> = vec![
             ("{{ compiler_version }}", compiler_version),
+            ("{{ firewall_version }}", AWF_VERSION),
             ("{{ pool }}", &pool),
             ("{{ setup_job }}", &setup_job),
             ("{{ teardown_job }}", &teardown_job),
