@@ -454,16 +454,29 @@ pub async fn run_http(
     let bounding = bounding_directory.to_string();
     let output = output_directory.to_string();
 
-    // Generate or use provided API key
+    // Generate or use provided API key.
+    // In production the pipeline always passes --api-key with a cryptographically
+    // random value; this fallback covers dev/test invocations.
     let api_key = api_key
         .map(|k| k.to_string())
         .unwrap_or_else(|| {
-            use std::time::{SystemTime, UNIX_EPOCH};
-            let seed = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            format!("{:x}", seed)
+            let mut buf = [0u8; 32];
+            std::fs::File::open("/dev/urandom")
+                .and_then(|mut f| {
+                    use std::io::Read;
+                    f.read_exact(&mut buf)
+                })
+                .unwrap_or_else(|_| {
+                    // Last-resort fallback if /dev/urandom is unavailable
+                    use std::time::{SystemTime, UNIX_EPOCH};
+                    let seed = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos();
+                    buf[..16].copy_from_slice(&seed.to_le_bytes());
+                    buf[16..].copy_from_slice(&seed.wrapping_mul(0x517cc1b727220a95).to_le_bytes());
+                });
+            buf.iter().map(|b| format!("{:02x}", b)).collect()
         });
 
     info!("Starting SafeOutputs HTTP server on port {}", port);
@@ -524,9 +537,9 @@ pub async fn run_http(
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!("SafeOutputs HTTP server listening on {}", addr);
 
-    // Print connection info for pipeline capture
+    // Print port for pipeline capture (key is already known by the caller)
     println!("SAFE_OUTPUTS_PORT={}", port);
-    println!("SAFE_OUTPUTS_API_KEY={}", api_key);
+    log::debug!("SafeOutputs API key configured (not printed for security)");
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async {

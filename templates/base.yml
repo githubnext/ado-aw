@@ -237,7 +237,10 @@ jobs:
           echo "Starting MCPG with config:"
           echo "$MCPG_CONFIG" | python3 -m json.tool
 
-          # Start MCPG Docker container on host network
+          # Start MCPG Docker container on host network.
+          # The Docker socket mount is required because MCPG spawns stdio-based MCP
+          # servers as sibling containers. This grants significant host access — acceptable
+          # here because the pipeline agent is already trusted and network-isolated by AWF.
           echo "$MCPG_CONFIG" | docker run -i --rm \
             --name mcpg \
             --network host \
