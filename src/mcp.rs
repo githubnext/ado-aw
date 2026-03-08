@@ -475,18 +475,13 @@ pub async fn run_http(
 
     let session_manager = Arc::new(LocalSessionManager::default());
 
-    let bounding_clone = bounding.clone();
-    let output_clone = output.clone();
+    // Pre-initialize SafeOutputs once and share via clone.
+    // The factory closure runs on a Tokio worker thread, so we cannot
+    // use block_on() inside it — that would panic with "Cannot start
+    // a runtime from within a runtime".
+    let safe_outputs_template = SafeOutputs::new(&bounding, &output).await?;
     let mcp_service = StreamableHttpService::new(
-        move || {
-            let bounding = bounding_clone.clone();
-            let output = output_clone.clone();
-            let rt = tokio::runtime::Handle::current();
-            let safe_outputs = rt.block_on(async {
-                SafeOutputs::new(&bounding, &output).await
-            }).map_err(|e| std::io::Error::other(e.to_string()))?;
-            Ok(safe_outputs)
-        },
+        move || Ok(safe_outputs_template.clone()),
         session_manager,
         config,
     );

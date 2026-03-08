@@ -208,13 +208,19 @@ jobs:
           echo "SafeOutputs HTTP server started on port $SAFE_OUTPUTS_PORT (PID: $SAFE_OUTPUTS_PID)"
 
           # Wait for server to be ready
+          READY=false
           for i in $(seq 1 30); do
             if curl -sf "http://localhost:$SAFE_OUTPUTS_PORT/health" > /dev/null 2>&1; then
               echo "SafeOutputs HTTP server is ready"
+              READY=true
               break
             fi
             sleep 1
           done
+          if [ "$READY" != "true" ]; then
+            echo "##vso[task.complete result=Failed]SafeOutputs HTTP server did not become ready within 30s"
+            exit 1
+          fi
         displayName: "Start SafeOutputs HTTP server"
 
       # Start MCP Gateway (MCPG) on host
@@ -243,13 +249,19 @@ jobs:
           echo "MCPG started (PID: $MCPG_PID)"
 
           # Wait for MCPG to be ready
+          READY=false
           for i in $(seq 1 30); do
             if curl -sf "http://localhost:80/health" > /dev/null 2>&1; then
               echo "MCPG is ready"
+              READY=true
               break
             fi
             sleep 1
           done
+          if [ "$READY" != "true" ]; then
+            echo "##vso[task.complete result=Failed]MCPG did not become ready within 30s"
+            exit 1
+          fi
         displayName: "Start MCP Gateway (MCPG)"
 
       # Network isolation via AWF (Agentic Workflow Firewall)

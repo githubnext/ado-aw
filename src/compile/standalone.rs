@@ -160,14 +160,11 @@ impl Compiler for StandaloneCompiler {
                 replace_with_indent(&yaml, placeholder, replacement)
             });
 
-        // Generate MCPG config JSON
-        let mcpg_config_json = if !front_matter.mcp_servers.is_empty() {
-            let config = generate_mcpg_config(front_matter);
-            serde_json::to_string_pretty(&config)
-                .unwrap_or_else(|_| r#"{"mcpServers":{}}"#.to_string())
-        } else {
-            r#"{"mcpServers":{}}"#.to_string()
-        };
+        // Always generate MCPG config — safeoutputs is always required regardless
+        // of whether additional mcp-servers are configured in front matter.
+        let config = generate_mcpg_config(front_matter);
+        let mcpg_config_json = serde_json::to_string_pretty(&config)
+            .unwrap_or_else(|_| r#"{"mcpServers":{}}"#.to_string());
 
         let pipeline_yaml = replace_with_indent(
             &pipeline_yaml,
