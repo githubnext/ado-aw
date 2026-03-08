@@ -79,17 +79,17 @@ jobs:
       - bash: |
           mkdir -p "$(Agent.TempDirectory)/staging"
 
-          # Write MCP firewall configuration to a file
-          cat > "$(Agent.TempDirectory)/staging/mcp-firewall-config.json" << 'MCP_FIREWALL_EOF'
-          {{ firewall_config }}
-          MCP_FIREWALL_EOF
+          # Write MCPG (MCP Gateway) configuration to a file
+          cat > "$(Agent.TempDirectory)/staging/mcpg-config.json" << 'MCPG_CONFIG_EOF'
+          {{ mcpg_config }}
+          MCPG_CONFIG_EOF
 
-          echo "MCP firewall config:"
-          cat "$(Agent.TempDirectory)/staging/mcp-firewall-config.json"
+          echo "MCPG config:"
+          cat "$(Agent.TempDirectory)/staging/mcpg-config.json"
 
           # Validate JSON
-          python3 -m json.tool "$(Agent.TempDirectory)/staging/mcp-firewall-config.json" > /dev/null && echo "JSON is valid"
-        displayName: "Prepare MCP firewall config"
+          python3 -m json.tool "$(Agent.TempDirectory)/staging/mcpg-config.json" > /dev/null && echo "JSON is valid"
+        displayName: "Prepare MCPG config"
 
       - bash: |
           mkdir -p "$HOME/.copilot"
@@ -110,28 +110,17 @@ jobs:
           cp "$AGENTIC_PIPELINES_PATH" /tmp/awf-tools/ado-aw
           chmod +x /tmp/awf-tools/ado-aw
 
-          # Copy MCP firewall config to /tmp
-          cp "$(Agent.TempDirectory)/staging/mcp-firewall-config.json" /tmp/awf-tools/staging/mcp-firewall-config.json
+          # Copy MCPG config to /tmp
+          cp "$(Agent.TempDirectory)/staging/mcpg-config.json" /tmp/awf-tools/staging/mcpg-config.json
 
-          # Generate MCP config pointing to /tmp paths (accessible inside AWF container)
+          # Generate MCP config for copilot CLI pointing to MCPG gateway on host
+          # The agent inside AWF reaches MCPG via host.docker.internal
           cat > /tmp/awf-tools/mcp-config.json << EOF
           {
             "mcpServers": {
-              "safeoutputs": {
-                "type": "stdio",
-                "tools": [
-                  "*"
-                ],
-                "command": "/tmp/awf-tools/ado-aw",
-                "args": ["mcp", "/tmp/awf-tools/staging", "{{ working_directory }}"]
-              },
-              "mcp-firewall": {
-                "type": "stdio",
-                "tools": [
-                  "*"
-                ],
-                "command": "/tmp/awf-tools/ado-aw",
-                "args": ["mcp-firewall", "--config", "/tmp/awf-tools/staging/mcp-firewall-config.json"]
+              "mcpg": {
+                "type": "http",
+                "url": "http://host.docker.internal:80/mcp"
               }
             }
           }
@@ -195,9 +184,73 @@ jobs:
       - bash: |
           docker pull ghcr.io/github/gh-aw-firewall/squid:latest
           docker pull ghcr.io/github/gh-aw-firewall/agent:latest
-        displayName: "Pre-pull AWF container images"
+          docker pull {{ mcpg_image }}:v{{ mcpg_version }}
+        displayName: "Pre-pull AWF and MCPG container images"
 
       {{ prepare_steps }}
+
+      # Start SafeOutputs HTTP server on host (MCPG proxies to it)
+      - bash: |
+          SAFE_OUTPUTS_PORT=8100
+          SAFE_OUTPUTS_API_KEY=$(openssl rand -base64 45 | tr -d '/+=')
+          echo "##vso[task.setvariable variable=SAFE_OUTPUTS_PORT]$SAFE_OUTPUTS_PORT"
+          echo "##vso[task.setvariable variable=SAFE_OUTPUTS_API_KEY;issecret=true]$SAFE_OUTPUTS_API_KEY"
+
+          # Start SafeOutputs as HTTP server in the background
+          nohup /tmp/awf-tools/ado-aw mcp-http \
+            --port "$SAFE_OUTPUTS_PORT" \
+            --api-key "$SAFE_OUTPUTS_API_KEY" \
+            "/tmp/awf-tools/staging" \
+            "{{ working_directory }}" \
+            > "$(Agent.TempDirectory)/staging/logs/safeoutputs.log" 2>&1 &
+          SAFE_OUTPUTS_PID=$!
+          echo "##vso[task.setvariable variable=SAFE_OUTPUTS_PID]$SAFE_OUTPUTS_PID"
+          echo "SafeOutputs HTTP server started on port $SAFE_OUTPUTS_PORT (PID: $SAFE_OUTPUTS_PID)"
+
+          # Wait for server to be ready
+          for i in $(seq 1 30); do
+            if curl -sf "http://localhost:$SAFE_OUTPUTS_PORT/health" > /dev/null 2>&1; then
+              echo "SafeOutputs HTTP server is ready"
+              break
+            fi
+            sleep 1
+          done
+        displayName: "Start SafeOutputs HTTP server"
+
+      # Start MCP Gateway (MCPG) on host
+      - bash: |
+          MCP_GATEWAY_API_KEY=$(openssl rand -base64 45 | tr -d '/+=')
+          echo "##vso[task.setvariable variable=MCP_GATEWAY_API_KEY;issecret=true]$MCP_GATEWAY_API_KEY"
+
+          # Substitute runtime values into MCPG config
+          MCPG_CONFIG=$(cat /tmp/awf-tools/staging/mcpg-config.json \
+            | sed "s|\${SAFE_OUTPUTS_PORT}|$(SAFE_OUTPUTS_PORT)|g" \
+            | sed "s|\${SAFE_OUTPUTS_API_KEY}|$(SAFE_OUTPUTS_API_KEY)|g" \
+            | sed "s|\${MCP_GATEWAY_API_KEY}|$MCP_GATEWAY_API_KEY|g")
+
+          echo "Starting MCPG with config:"
+          echo "$MCPG_CONFIG" | python3 -m json.tool
+
+          # Start MCPG Docker container on host network
+          echo "$MCPG_CONFIG" | docker run -i --rm \
+            --name mcpg \
+            --network host \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -e MCP_GATEWAY_API_KEY="$MCP_GATEWAY_API_KEY" \
+            {{ mcpg_image }}:v{{ mcpg_version }} &
+          MCPG_PID=$!
+          echo "##vso[task.setvariable variable=MCPG_PID]$MCPG_PID"
+          echo "MCPG started (PID: $MCPG_PID)"
+
+          # Wait for MCPG to be ready
+          for i in $(seq 1 30); do
+            if curl -sf "http://localhost:80/health" > /dev/null 2>&1; then
+              echo "MCPG is ready"
+              break
+            fi
+            sleep 1
+          done
+        displayName: "Start MCP Gateway (MCPG)"
 
       # Network isolation via AWF (Agentic Workflow Firewall)
       - bash: |
@@ -210,12 +263,15 @@ jobs:
           echo "Allowed domains: {{ allowed_domains }}"
 
           # AWF provides L7 domain whitelisting via Squid proxy + Docker containers.
+          # --enable-host-access allows the AWF container to reach host services
+          # (MCPG and SafeOutputs) via host.docker.internal.
           # AWF auto-mounts /tmp:/tmp:rw into the container, so copilot binary,
           # agent prompt, and MCP config are placed under /tmp/awf-tools/.
           sudo -E "$(Pipeline.Workspace)/awf/awf" \
             --allow-domains {{ allowed_domains }} \
             --skip-pull \
             --env-all \
+            --enable-host-access \
             --container-workdir "{{ working_directory }}" \
             --log-level info \
             --proxy-logs-dir "$(Agent.TempDirectory)/staging/logs/firewall" \
@@ -249,6 +305,21 @@ jobs:
           echo "Safe outputs copied to $(Agent.TempDirectory)/staging"
           ls -la "$(Agent.TempDirectory)/staging" 2>/dev/null || echo "No safe outputs found"
         displayName: "Collect safe outputs from AWF container"
+        condition: always()
+
+      - bash: |
+          # Stop MCPG container
+          echo "Stopping MCPG..."
+          docker stop mcpg 2>/dev/null || true
+          echo "MCPG stopped"
+
+          # Stop SafeOutputs HTTP server
+          if [ -n "$(SAFE_OUTPUTS_PID)" ]; then
+            echo "Stopping SafeOutputs (PID: $(SAFE_OUTPUTS_PID))..."
+            kill "$(SAFE_OUTPUTS_PID)" 2>/dev/null || true
+            echo "SafeOutputs stopped"
+          fi
+        displayName: "Stop MCPG and SafeOutputs"
         condition: always()
 
       {{ finalize_steps }}
