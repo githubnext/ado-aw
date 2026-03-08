@@ -21,7 +21,7 @@ use super::common::{
     generate_checkout_self, generate_checkout_steps, generate_ci_trigger,
     generate_pipeline_path, generate_pipeline_resources, generate_pr_trigger,
     generate_repositories, generate_schedule, generate_source_path,
-    generate_working_directory, replace_with_indent,
+    generate_working_directory, is_custom_mcp, replace_with_indent,
 };
 use super::types::{FrontMatter, McpConfig};
 
@@ -177,17 +177,29 @@ fn generate_agent_context_root(effective_workspace: &str) -> String {
     }
 }
 
-/// Generate MCP configuration for 1ES templates
+/// Generate MCP configuration for 1ES templates.
+///
+/// In 1ES, MCPs require service connections. Only MCPs with explicit
+/// `service_connection` configuration or custom commands are included.
 fn generate_mcp_configuration(mcps: &HashMap<String, McpConfig>) -> String {
     let mut mcp_entries: Vec<_> = mcps
         .iter()
         .filter_map(|(name, config)| {
             let (is_enabled, opts) = match config {
                 McpConfig::Enabled(enabled) => (*enabled, None),
-                McpConfig::WithOptions(o) => (o.command.is_none(), Some(o)), // Custom MCPs not supported
+                McpConfig::WithOptions(o) => (true, Some(o)),
             };
 
-            if !is_enabled || !common::is_builtin_mcp(name) {
+            if !is_enabled {
+                return None;
+            }
+
+            // Custom MCPs with command: not supported in 1ES (needs service connection)
+            if is_custom_mcp(config) {
+                log::warn!(
+                    "MCP '{}' uses custom command — not supported in 1ES target (requires service connection)",
+                    name
+                );
                 return None;
             }
 
