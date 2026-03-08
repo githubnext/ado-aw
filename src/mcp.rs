@@ -434,6 +434,115 @@ pub async fn run(output_directory: &str, bounding_directory: &str) -> Result<()>
     Ok(())
 }
 
+/// Run SafeOutputs MCP server over HTTP using the Streamable HTTP protocol.
+///
+/// This is used for MCPG integration: the gateway connects to this server as an
+/// HTTP backend and proxies tool calls from the agent.
+pub async fn run_http(
+    output_directory: &str,
+    bounding_directory: &str,
+    port: u16,
+    api_key: Option<&str>,
+) -> Result<()> {
+    use axum::Router;
+    use rmcp::transport::streamable_http_server::{
+        StreamableHttpServerConfig, StreamableHttpService,
+        session::local::LocalSessionManager,
+    };
+    use std::sync::Arc;
+
+    let bounding = bounding_directory.to_string();
+    let output = output_directory.to_string();
+
+    // Generate or use provided API key
+    let api_key = api_key
+        .map(|k| k.to_string())
+        .unwrap_or_else(|| {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let seed = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            format!("{:x}", seed)
+        });
+
+    info!("Starting SafeOutputs HTTP server on port {}", port);
+
+    let config = StreamableHttpServerConfig {
+        sse_keep_alive: Some(std::time::Duration::from_secs(15)),
+        stateful_mode: true,
+    };
+
+    let session_manager = Arc::new(LocalSessionManager::default());
+
+    let bounding_clone = bounding.clone();
+    let output_clone = output.clone();
+    let mcp_service = StreamableHttpService::new(
+        move || {
+            let bounding = bounding_clone.clone();
+            let output = output_clone.clone();
+            let rt = tokio::runtime::Handle::current();
+            let safe_outputs = rt.block_on(async {
+                SafeOutputs::new(&bounding, &output).await
+            }).map_err(|e| std::io::Error::other(e.to_string()))?;
+            Ok(safe_outputs)
+        },
+        session_manager,
+        config,
+    );
+
+    // Wrap with API key auth middleware
+    let expected_key = api_key.clone();
+    let app = Router::new()
+        .route("/health", axum::routing::get(|| async { "ok" }))
+        .route(
+            "/mcp",
+            axum::routing::post(axum::routing::any_service(mcp_service.clone()))
+                .get(axum::routing::any_service(mcp_service.clone()))
+                .delete(axum::routing::any_service(mcp_service)),
+        )
+        .layer(axum::middleware::from_fn(move |req: axum::extract::Request, next: axum::middleware::Next| {
+            let expected = expected_key.clone();
+            async move {
+                // Skip auth for health endpoint
+                if req.uri().path() == "/health" {
+                    return next.run(req).await;
+                }
+
+                // Check Bearer token
+                if let Some(auth) = req.headers().get("authorization") {
+                    if let Ok(auth_str) = auth.to_str() {
+                        if auth_str == format!("Bearer {}", expected) {
+                            return next.run(req).await;
+                        }
+                    }
+                }
+
+                axum::response::Response::builder()
+                    .status(401)
+                    .body(axum::body::Body::from("Unauthorized"))
+                    .unwrap()
+            }
+        }));
+
+    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    info!("SafeOutputs HTTP server listening on {}", addr);
+
+    // Print connection info for pipeline capture
+    println!("SAFE_OUTPUTS_PORT={}", port);
+    println!("SAFE_OUTPUTS_API_KEY={}", api_key);
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            tokio::signal::ctrl_c().await.ok();
+            info!("SafeOutputs HTTP server shutting down");
+        })
+        .await?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -53,6 +53,8 @@ pub static CORE_ALLOWED_HOSTS: &[&str] = &[
     "rt.services.visualstudio.com",
     // ===== Agency / Copilot configuration =====
     "config.edge.skype.com",
+    // ===== MCP Gateway (host-side MCPG accessible from AWF container) =====
+    "host.docker.internal",
     // Note: 168.63.129.16 (Azure DNS) is handled separately as it's an IP
 ];
 
