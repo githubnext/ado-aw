@@ -407,6 +407,14 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
     );
 
     for (name, config) in &front_matter.mcp_servers {
+        // Prevent user-defined MCPs from overwriting the reserved safeoutputs backend
+        if name == "safeoutputs" {
+            log::warn!(
+                "MCP name 'safeoutputs' is reserved for the safe outputs HTTP backend — skipping"
+            );
+            continue;
+        }
+
         let (is_enabled, options) = match config {
             McpConfig::Enabled(enabled) => (*enabled, None),
             McpConfig::WithOptions(opts) => (true, Some(opts)),
