@@ -14,9 +14,9 @@ use std::path::Path;
 
 use super::Compiler;
 use super::common::{
-    self, AWF_VERSION, DEFAULT_POOL, MCPG_IMAGE, MCPG_VERSION, compute_effective_workspace,
-    generate_copilot_params, generate_cancel_previous_builds, generate_checkout_self,
-    generate_checkout_steps, generate_ci_trigger, generate_pipeline_path,
+    self, AWF_VERSION, DEFAULT_POOL, MCPG_IMAGE, MCPG_PORT, MCPG_VERSION,
+    compute_effective_workspace, generate_copilot_params, generate_cancel_previous_builds,
+    generate_checkout_self, generate_checkout_steps, generate_ci_trigger, generate_pipeline_path,
     generate_pipeline_resources, generate_pr_trigger, generate_repositories, generate_schedule,
     generate_source_path, generate_working_directory, replace_with_indent, sanitize_filename,
 };
@@ -164,7 +164,7 @@ impl Compiler for StandaloneCompiler {
         // of whether additional mcp-servers are configured in front matter.
         let config = generate_mcpg_config(front_matter);
         let mcpg_config_json = serde_json::to_string_pretty(&config)
-            .unwrap_or_else(|_| r#"{"mcpServers":{}}"#.to_string());
+            .context("Failed to serialize MCPG config")?;
 
         let pipeline_yaml = replace_with_indent(
             &pipeline_yaml,
@@ -213,6 +213,11 @@ fn generate_allowed_domains(front_matter: &FrontMatter) -> String {
     for host in CORE_ALLOWED_HOSTS {
         hosts.insert((*host).to_string());
     }
+
+    // Add host.docker.internal — required for the AWF container to reach
+    // MCPG and SafeOutputs on the host. Only added for standalone pipelines
+    // that always use MCPG.
+    hosts.insert("host.docker.internal".to_string());
 
     // Add MCP-specific hosts
     for mcp in &enabled_mcps {
@@ -414,6 +419,11 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
         if let Some(opts) = options {
             if let Some(command) = &opts.command {
                 // Custom MCP with explicit command → stdio server
+                let args = if opts.args.is_empty() {
+                    None
+                } else {
+                    Some(opts.args.clone())
+                };
                 let env = if opts.env.is_empty() {
                     None
                 } else {
@@ -429,7 +439,7 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
                     McpgServerConfig {
                         server_type: "stdio".to_string(),
                         command: Some(command.clone()),
-                        args: Some(opts.args.clone()),
+                        args,
                         url: None,
                         headers: None,
                         env,
@@ -453,7 +463,7 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
     McpgConfig {
         mcp_servers,
         gateway: McpgGatewayConfig {
-            port: 80,
+            port: MCPG_PORT,
             domain: "host.docker.internal".to_string(),
             api_key: "${MCP_GATEWAY_API_KEY}".to_string(),
             payload_dir: "/tmp/gh-aw/mcp-payloads".to_string(),

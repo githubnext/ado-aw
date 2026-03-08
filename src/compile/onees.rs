@@ -203,10 +203,21 @@ fn generate_mcp_configuration(mcps: &HashMap<String, McpConfig>) -> String {
                 return None;
             }
 
-            // Use explicit service connection or generate default
+            // Use explicit service connection or generate default.
+            // Warn when falling back to the naming convention — the generated
+            // service connection reference may not exist in the ADO project.
             let service_connection = opts
                 .and_then(|o| o.service_connection.clone())
-                .unwrap_or_else(|| format!("mcp-{}-service-connection", name));
+                .unwrap_or_else(|| {
+                    let default = format!("mcp-{}-service-connection", name);
+                    log::warn!(
+                        "MCP '{}' has no explicit service connection in 1ES target — \
+                        assuming '{}' exists",
+                        name,
+                        default,
+                    );
+                    default
+                });
 
             Some((name.clone(), service_connection))
         })

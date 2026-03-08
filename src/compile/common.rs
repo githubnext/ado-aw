@@ -441,6 +441,9 @@ pub const AWF_VERSION: &str = "0.23.1";
 pub const MCPG_VERSION: &str = "0.1.9";
 pub const MCPG_IMAGE: &str = "ghcr.io/github/gh-aw-mcpg";
 
+/// Default port MCPG listens on inside the container (host network mode).
+pub const MCPG_PORT: u16 = 80;
+
 /// Generate source path for the execute command.
 ///
 /// Returns a path using `{{ workspace }}` as the base, which gets resolved
