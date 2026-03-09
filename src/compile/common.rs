@@ -656,4 +656,183 @@ mod tests {
         assert_eq!(sanitize_filename("agent@v1.0"), "agent-v1-0");
         assert_eq!(sanitize_filename("test_case"), "test-case");
     }
+
+    // ─── generate_pr_trigger ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_generate_pr_trigger_no_triggers_no_schedule() {
+        let result = generate_pr_trigger(&None, false);
+        assert!(result.is_empty(), "Should be empty when no triggers configured");
+    }
+
+    #[test]
+    fn test_generate_pr_trigger_schedule_only() {
+        let result = generate_pr_trigger(&None, true);
+        assert!(result.contains("pr: none"));
+        assert!(result.contains("only run on schedule"));
+    }
+
+    #[test]
+    fn test_generate_pr_trigger_pipeline_only() {
+        let triggers = Some(crate::compile::types::TriggerConfig {
+            pipeline: Some(crate::compile::types::PipelineTrigger {
+                name: "Build".into(),
+                project: None,
+                branches: vec![],
+            }),
+        });
+        let result = generate_pr_trigger(&triggers, false);
+        assert!(result.contains("pr: none"));
+        assert!(result.contains("upstream pipeline"));
+    }
+
+    #[test]
+    fn test_generate_pr_trigger_both_pipeline_and_schedule() {
+        let triggers = Some(crate::compile::types::TriggerConfig {
+            pipeline: Some(crate::compile::types::PipelineTrigger {
+                name: "Build".into(),
+                project: None,
+                branches: vec![],
+            }),
+        });
+        let result = generate_pr_trigger(&triggers, true);
+        assert!(result.contains("pr: none"));
+        // Contains text indicating both reasons
+        assert!(result.contains("schedule") || result.contains("upstream pipeline"));
+    }
+
+    // ─── generate_ci_trigger ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_generate_ci_trigger_no_triggers_no_schedule() {
+        let result = generate_ci_trigger(&None, false);
+        assert!(result.is_empty(), "Should be empty when no triggers configured");
+    }
+
+    #[test]
+    fn test_generate_ci_trigger_schedule_only() {
+        let result = generate_ci_trigger(&None, true);
+        assert_eq!(result, "trigger: none");
+    }
+
+    #[test]
+    fn test_generate_ci_trigger_pipeline_only() {
+        let triggers = Some(crate::compile::types::TriggerConfig {
+            pipeline: Some(crate::compile::types::PipelineTrigger {
+                name: "Build".into(),
+                project: None,
+                branches: vec![],
+            }),
+        });
+        let result = generate_ci_trigger(&triggers, false);
+        assert_eq!(result, "trigger: none");
+    }
+
+    #[test]
+    fn test_generate_ci_trigger_both_pipeline_and_schedule() {
+        let triggers = Some(crate::compile::types::TriggerConfig {
+            pipeline: Some(crate::compile::types::PipelineTrigger {
+                name: "Build".into(),
+                project: None,
+                branches: vec![],
+            }),
+        });
+        let result = generate_ci_trigger(&triggers, true);
+        assert_eq!(result, "trigger: none");
+    }
+
+    // ─── generate_pipeline_resources ─────────────────────────────────────────
+
+    #[test]
+    fn test_generate_pipeline_resources_no_triggers() {
+        let result = generate_pipeline_resources(&None).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_generate_pipeline_resources_empty_trigger_config() {
+        let triggers = Some(crate::compile::types::TriggerConfig { pipeline: None });
+        let result = generate_pipeline_resources(&triggers).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_generate_pipeline_resources_with_branches() {
+        let triggers = Some(crate::compile::types::TriggerConfig {
+            pipeline: Some(crate::compile::types::PipelineTrigger {
+                name: "Build Pipeline".into(),
+                project: Some("OtherProject".into()),
+                branches: vec!["main".into(), "release/*".into()],
+            }),
+        });
+        let result = generate_pipeline_resources(&triggers).unwrap();
+        assert!(result.contains("source: 'Build Pipeline'"));
+        assert!(result.contains("OtherProject"));
+        assert!(result.contains("main"));
+        assert!(result.contains("release/*"));
+        // Should use branch include list, not `trigger: true`
+        assert!(result.contains("branches:"));
+        assert!(!result.contains("trigger: true"));
+    }
+
+    #[test]
+    fn test_generate_pipeline_resources_without_branches_triggers_on_any() {
+        let triggers = Some(crate::compile::types::TriggerConfig {
+            pipeline: Some(crate::compile::types::PipelineTrigger {
+                name: "My Pipeline".into(),
+                project: None,
+                branches: vec![],
+            }),
+        });
+        let result = generate_pipeline_resources(&triggers).unwrap();
+        assert!(result.contains("source: 'My Pipeline'"));
+        assert!(result.contains("trigger: true"));
+        // No project when not specified
+        assert!(!result.contains("project:"));
+    }
+
+    #[test]
+    fn test_generate_pipeline_resources_resource_id_is_snake_case() {
+        let triggers = Some(crate::compile::types::TriggerConfig {
+            pipeline: Some(crate::compile::types::PipelineTrigger {
+                name: "My Build Pipeline".into(),
+                project: None,
+                branches: vec![],
+            }),
+        });
+        let result = generate_pipeline_resources(&triggers).unwrap();
+        // The pipeline resource ID should be snake_case derived from the name
+        assert!(result.contains("pipeline: my_build_pipeline"));
+    }
+
+    // ─── generate_cancel_previous_builds ─────────────────────────────────────
+
+    #[test]
+    fn test_generate_cancel_previous_builds_no_triggers() {
+        let result = generate_cancel_previous_builds(&None);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_generate_cancel_previous_builds_no_pipeline_trigger() {
+        let triggers = Some(crate::compile::types::TriggerConfig { pipeline: None });
+        let result = generate_cancel_previous_builds(&triggers);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_generate_cancel_previous_builds_with_pipeline_trigger() {
+        let triggers = Some(crate::compile::types::TriggerConfig {
+            pipeline: Some(crate::compile::types::PipelineTrigger {
+                name: "Build".into(),
+                project: None,
+                branches: vec![],
+            }),
+        });
+        let result = generate_cancel_previous_builds(&triggers);
+        assert!(!result.is_empty());
+        assert!(result.contains("Cancel previous queued builds"));
+        assert!(result.contains("SYSTEM_ACCESSTOKEN"));
+        assert!(result.contains("cancelling"));
+    }
 }
