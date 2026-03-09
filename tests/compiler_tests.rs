@@ -377,3 +377,103 @@ fn test_compiled_output_no_unreplaced_markers() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+/// Test that the pipeline-trigger-agent fixture compiles correctly
+///
+/// Verifies that the `triggers.pipeline` front matter field generates:
+/// - `resources.pipelines` block with the correct source pipeline name
+/// - `trigger: none` and `pr: none` to suppress CI/PR triggers
+/// - A cancel-previous-builds bash step
+/// - No `schedules:` block (since only a pipeline trigger is configured)
+#[test]
+fn test_fixture_pipeline_trigger_agent_compiled_output() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-trigger-test-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("pipeline-trigger-agent.md");
+
+    assert!(
+        fixture_path.exists(),
+        "Pipeline trigger agent fixture should exist"
+    );
+
+    let output_path = temp_dir.join("pipeline-trigger-agent.yml");
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            fixture_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_path.exists(), "Compiled YAML should exist");
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+
+    // Should contain pipeline resource pointing to the upstream pipeline
+    assert!(
+        compiled.contains("Build Pipeline"),
+        "Compiled output should contain source pipeline name 'Build Pipeline'"
+    );
+    assert!(
+        compiled.contains("OtherProject"),
+        "Compiled output should contain the project name 'OtherProject'"
+    );
+    assert!(
+        compiled.contains("resources:"),
+        "Compiled output should contain a resources block"
+    );
+    assert!(
+        compiled.contains("pipelines:"),
+        "Compiled output should contain a pipelines resource block"
+    );
+
+    // CI and PR triggers should be suppressed
+    assert!(
+        compiled.contains("trigger: none"),
+        "Compiled output should disable CI trigger with 'trigger: none'"
+    );
+    assert!(
+        compiled.contains("pr: none"),
+        "Compiled output should disable PR trigger with 'pr: none'"
+    );
+
+    // Should include the cancel-previous-builds step
+    assert!(
+        compiled.contains("Cancel previous queued builds"),
+        "Compiled output should include cancel-previous-builds step"
+    );
+
+    // Should NOT contain a schedules block (no schedule configured)
+    assert!(
+        !compiled.contains("schedules:"),
+        "Compiled output should not contain a schedules block"
+    );
+
+    // Verify no unreplaced markers remain
+    for line in compiled.lines() {
+        let stripped = line.replace("${{", "");
+        assert!(
+            !stripped.contains("{{ "),
+            "Compiled output should not contain unreplaced marker: {}",
+            line.trim()
+        );
+    }
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
