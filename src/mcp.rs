@@ -52,6 +52,9 @@ fn generate_short_id() -> String {
 // SafeOutputs MCP Server
 // ============================================================================
 
+/// SafeOutputs is safe to clone for concurrent use: it only contains immutable
+/// `PathBuf` fields and a `ToolRouter`. File I/O (NDJSON append) opens files
+/// fresh on each call, so no shared mutable state exists between clones.
 #[derive(Clone, Debug)]
 pub struct SafeOutputs {
     bounding_directory: PathBuf,
@@ -461,22 +464,21 @@ pub async fn run_http(
         .map(|k| k.to_string())
         .unwrap_or_else(|| {
             let mut buf = [0u8; 32];
-            std::fs::File::open("/dev/urandom")
+            match std::fs::File::open("/dev/urandom")
                 .and_then(|mut f| {
                     use std::io::Read;
                     f.read_exact(&mut buf)
-                })
-                .unwrap_or_else(|_| {
-                    // Last-resort fallback if /dev/urandom is unavailable
-                    use std::time::{SystemTime, UNIX_EPOCH};
-                    let seed = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_nanos();
-                    buf[..16].copy_from_slice(&seed.to_le_bytes());
-                    buf[16..].copy_from_slice(&seed.wrapping_mul(0x517cc1b727220a95).to_le_bytes());
-                });
-            buf.iter().map(|b| format!("{:02x}", b)).collect()
+                }) {
+                Ok(()) => buf.iter().map(|b| format!("{:02x}", b)).collect(),
+                Err(e) => {
+                    // Fail loudly rather than generating a weak key
+                    panic!(
+                        "Cannot generate secure API key: /dev/urandom unavailable ({}). \
+                        Pass --api-key explicitly.",
+                        e
+                    );
+                }
+            }
         });
 
     info!("Starting SafeOutputs HTTP server on port {}", port);
@@ -499,7 +501,8 @@ pub async fn run_http(
         config,
     );
 
-    // Wrap with API key auth middleware
+    // Wrap with API key auth middleware (constant-time comparison to
+    // prevent timing side-channels from a compromised AWF container).
     let expected_key = api_key.clone();
     let app = Router::new()
         .route("/health", axum::routing::get(|| async { "ok" }))
@@ -517,10 +520,12 @@ pub async fn run_http(
                     return next.run(req).await;
                 }
 
-                // Check Bearer token
+                // Check Bearer token with constant-time comparison
                 if let Some(auth) = req.headers().get("authorization") {
                     if let Ok(auth_str) = auth.to_str() {
-                        if auth_str == format!("Bearer {}", expected) {
+                        let expected_header = format!("Bearer {}", expected);
+                        use subtle::ConstantTimeEq;
+                        if auth_str.as_bytes().ct_eq(expected_header.as_bytes()).into() {
                             return next.run(req).await;
                         }
                     }
