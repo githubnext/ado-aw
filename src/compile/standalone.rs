@@ -389,14 +389,16 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
     let mut mcp_servers = HashMap::new();
 
     // SafeOutputs is always included as an HTTP backend.
-    // The actual URL/key are replaced at runtime by the pipeline template.
+    // MCPG runs with --network host, so it reaches SafeOutputs via localhost
+    // (not host.docker.internal, which requires Docker DNS and isn't available
+    // in host network mode on Linux).
     mcp_servers.insert(
         "safeoutputs".to_string(),
         McpgServerConfig {
             server_type: "http".to_string(),
             command: None,
             args: None,
-            url: Some("http://host.docker.internal:${SAFE_OUTPUTS_PORT}/mcp".to_string()),
+            url: Some("http://localhost:${SAFE_OUTPUTS_PORT}/mcp".to_string()),
             headers: Some(HashMap::from([(
                 "Authorization".to_string(),
                 "Bearer ${SAFE_OUTPUTS_API_KEY}".to_string(),
@@ -592,7 +594,7 @@ mod tests {
         let config = generate_mcpg_config(&fm);
         let so = config.mcp_servers.get("safeoutputs").unwrap();
         assert_eq!(so.server_type, "http");
-        assert!(so.url.as_ref().unwrap().contains("host.docker.internal"));
+        assert!(so.url.as_ref().unwrap().contains("localhost"));
     }
 
     #[test]
