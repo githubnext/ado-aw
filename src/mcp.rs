@@ -527,10 +527,8 @@ pub async fn run_http(
                     }
                 }
 
-                axum::response::Response::builder()
-                    .status(401)
-                    .body(axum::body::Body::from("Unauthorized"))
-                    .unwrap()
+                use axum::response::IntoResponse;
+                (axum::http::StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
             }
         }));
 

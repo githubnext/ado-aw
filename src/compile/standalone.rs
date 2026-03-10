@@ -410,7 +410,7 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
 
     for (name, config) in &front_matter.mcp_servers {
         // Prevent user-defined MCPs from overwriting the reserved safeoutputs backend
-        if name == "safeoutputs" {
+        if name.eq_ignore_ascii_case("safeoutputs") {
             log::warn!(
                 "MCP name 'safeoutputs' is reserved for the safe outputs HTTP backend — skipping"
             );
@@ -466,7 +466,7 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
         } else {
             log::warn!(
                 "MCP '{}' specified as boolean true — skipping. \
-                Boolean-enabled MCPs required built-in MCPs which no longer exist. \
+                Boolean-enabled MCPs require built-in MCPs which no longer exist. \
                 Use the object form with a command: field instead.",
                 name
             );
