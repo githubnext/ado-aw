@@ -5,8 +5,6 @@ mod execute;
 mod fuzzy_schedule;
 mod logging;
 mod mcp;
-mod mcp_firewall;
-mod mcp_metadata;
 mod ndjson;
 mod proxy;
 pub mod sanitize;
@@ -73,11 +71,18 @@ enum Commands {
         #[arg(long = "allow")]
         allowed_hosts: Vec<String>,
     },
-    /// Start an MCP firewall server that proxies and filters tool calls to upstream MCPs
-    McpFirewall {
-        /// Path to the firewall configuration JSON file
-        #[arg(short, long)]
-        config: PathBuf,
+    /// Run SafeOutputs MCP server over HTTP (for MCPG integration)
+    McpHttp {
+        /// Port to listen on
+        #[arg(long, default_value = "8100")]
+        port: u16,
+        /// API key for authentication (if not provided, one is generated)
+        #[arg(long)]
+        api_key: Option<String>,
+        /// Directory for safe output files
+        output_directory: String,
+        /// Guard against directory traversal attacks
+        bounding_directory: String,
     },
 }
 
@@ -106,7 +111,7 @@ async fn main() -> Result<()> {
         Some(Commands::Mcp { .. }) => "mcp",
         Some(Commands::Execute { .. }) => "execute",
         Some(Commands::Proxy { .. }) => "proxy",
-        Some(Commands::McpFirewall { .. }) => "mcp-firewall",
+        Some(Commands::McpHttp { .. }) => "mcp-http",
         None => "ado-aw",
     };
 
@@ -228,8 +233,14 @@ async fn main() -> Result<()> {
                 #[cfg(windows)]
                 std::future::pending::<()>().await;
             }
-            Commands::McpFirewall { config } => {
-                mcp_firewall::run(&config).await?;
+            Commands::McpHttp {
+                port,
+                api_key,
+                output_directory,
+                bounding_directory,
+            } => {
+                mcp::run_http(&output_directory, &bounding_directory, port, api_key.as_deref())
+                    .await?;
             }
         }
     } else {

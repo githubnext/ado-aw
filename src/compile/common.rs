@@ -4,12 +4,12 @@ use anyhow::{Context, Result};
 
 use super::types::{FrontMatter, McpConfig, Repository, TriggerConfig};
 use crate::fuzzy_schedule;
-use crate::mcp_metadata::McpMetadataFile;
 
-/// Check if an MCP name is a built-in (launched via agency mcp)
-pub fn is_builtin_mcp(name: &str) -> bool {
-    let metadata = McpMetadataFile::bundled();
-    metadata.get(name).map(|m| m.builtin).unwrap_or(false)
+/// Check if an MCP has a custom command (i.e., is not just a name-based reference).
+/// All MCPs now require explicit command configuration — there are no built-in MCPs
+/// in the copilot CLI.
+pub fn is_custom_mcp(config: &McpConfig) -> bool {
+    matches!(config, McpConfig::WithOptions(opts) if opts.command.is_some())
 }
 
 /// Parse the markdown file and extract front matter and body
@@ -306,14 +306,9 @@ pub fn generate_copilot_params(front_matter: &FrontMatter) -> String {
         allowed_tools.push(format!("shell({})", cmd));
     }
 
-    let metadata = McpMetadataFile::bundled();
-    let mut disallowed_mcps: Vec<&str> = metadata.mcp_names();
-    disallowed_mcps.sort();
-
     let mut params = Vec::new();
 
     params.push(format!("--model {}", front_matter.engine.model()));
-    params.push("--disable-builtin-mcps".to_string());
     params.push("--no-ask-user".to_string());
 
     for tool in allowed_tools {
@@ -323,26 +318,6 @@ pub fn generate_copilot_params(front_matter: &FrontMatter) -> String {
             params.push(format!("--allow-tool \"{}\"", tool));
         } else {
             params.push(format!("--allow-tool {}", tool));
-        }
-    }
-
-    for mcp in disallowed_mcps {
-        params.push(format!("--disable-mcp-server {}", mcp));
-    }
-
-    for (name, config) in &front_matter.mcp_servers {
-        let is_custom = matches!(config, McpConfig::WithOptions(opts) if opts.command.is_some());
-        if is_custom {
-            continue;
-        }
-
-        let is_enabled = match config {
-            McpConfig::Enabled(enabled) => *enabled,
-            McpConfig::WithOptions(_) => true,
-        };
-
-        if is_enabled {
-            params.push(format!("--mcp {}", name));
         }
     }
 
@@ -459,6 +434,15 @@ pub const DEFAULT_POOL: &str = "AZS-1ES-L-MMS-ubuntu-22.04";
 /// Update this when upgrading to a new AWF release.
 /// See: https://github.com/github/gh-aw-firewall/releases
 pub const AWF_VERSION: &str = "0.23.1";
+
+/// Docker image and version for the MCP Gateway (gh-aw-mcpg).
+/// Update this when upgrading to a new MCPG release.
+/// See: https://github.com/github/gh-aw-mcpg/releases
+pub const MCPG_VERSION: &str = "0.1.9";
+pub const MCPG_IMAGE: &str = "ghcr.io/github/gh-aw-mcpg";
+
+/// Default port MCPG listens on inside the container (host network mode).
+pub const MCPG_PORT: u16 = 80;
 
 /// Generate source path for the execute command.
 ///
@@ -604,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_params_custom_mcp_not_added_with_mcp_flag() {
+    fn test_copilot_params_custom_mcp_not_in_params() {
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "my-tool".to_string(),
@@ -614,17 +598,20 @@ mod tests {
             }),
         );
         let params = generate_copilot_params(&fm);
-        // Custom MCPs (with command) should NOT appear as --mcp flags
-        assert!(!params.contains("--mcp my-tool"));
+        // MCPs are handled by MCPG, not copilot CLI params
+        assert!(!params.contains("my-tool"));
     }
 
     #[test]
-    fn test_copilot_params_builtin_mcp_added_with_mcp_flag() {
+    fn test_copilot_params_no_mcp_flags() {
         let mut fm = minimal_front_matter();
         fm.mcp_servers
             .insert("ado".to_string(), McpConfig::Enabled(true));
         let params = generate_copilot_params(&fm);
-        assert!(params.contains("--mcp ado"));
+        // No --mcp or --disable-mcp-server flags — MCPs are handled by MCPG
+        assert!(!params.contains("--mcp"));
+        assert!(!params.contains("--disable-mcp-server"));
+        assert!(!params.contains("--disable-builtin-mcps"));
     }
 
     // ─── sanitize_filename ────────────────────────────────────────────────────

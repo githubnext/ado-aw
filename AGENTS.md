@@ -31,9 +31,7 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 │   ├── execute.rs        # Stage 2 safe output execution
 │   ├── fuzzy_schedule.rs # Fuzzy schedule parsing
 │   ├── logging.rs        # File-based logging infrastructure
-│   ├── mcp.rs            # SafeOutputs MCP server
-│   ├── mcp_firewall.rs   # MCP Firewall server
-│   ├── mcp_metadata.rs   # Bundled MCP metadata
+│   ├── mcp.rs            # SafeOutputs MCP server (stdio + HTTP)
 │   ├── ndjson.rs         # NDJSON parsing utilities
 │   ├── proxy.rs          # Network proxy implementation
 │   ├── sanitize.rs       # Input sanitization for safe outputs
@@ -50,7 +48,6 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 │   ├── base.yml          # Base pipeline template for standalone
 │   ├── 1es-base.yml      # Base pipeline template for 1ES target
 │   └── threat-analysis.md # Threat detection analysis prompt template
-├── mcp-metadata.json     # Bundled MCP tool definitions
 ├── examples/             # Example agent definitions
 ├── tests/                # Integration tests and fixtures
 ├── Cargo.toml            # Rust dependencies
@@ -126,18 +123,7 @@ checkout: # optional list of repository aliases for the agent to checkout and wo
 # env:                          # RESERVED: workflow-level environment variables (not yet implemented)
 #   CUSTOM_VAR: "value"
 mcp-servers:
-  ado: true                    # built-in, enabled with defaults
-  bluebird: true
-  es-chat: true
-  msft-learn: true
-  icm:
-    allowed:                   # built-in with restricted functions
-      - create_incident
-      - get_incident
-  kusto:
-    allowed:
-      - query
-  my-custom-tool:              # custom MCP server (has command field)
+  my-custom-tool:              # custom MCP server (requires command field)
     command: "node"
     args: ["path/to/mcp-server.js"]
     allowed:
@@ -286,7 +272,7 @@ The `target` field in the front matter determines the output format and executio
 Generates a self-contained Azure DevOps pipeline with:
 - Full 3-job pipeline: `PerformAgenticTask` → `AnalyzeSafeOutputs` → `ProcessSafeOutputs`
 - AWF (Agentic Workflow Firewall) L7 domain whitelisting via Squid proxy + Docker
-- MCP firewall with tool-level filtering and custom MCP server support
+- MCP Gateway (MCPG) for MCP routing with SafeOutputs HTTP backend
 - Setup/teardown job support
 - All safe output features (create-pull-request, create-work-item, etc.)
 
@@ -390,13 +376,10 @@ Should be replaced with the human-readable name from the front matter (e.g., "Da
 
 Additional params provided to agency CLI. The compiler generates:
 - `--model <model>` - AI model from `engine` front matter field (default: claude-opus-4.5)
-- `--disable-builtin-mcps` - Disables all built-in MCPs initially
 - `--no-ask-user` - Prevents interactive prompts
 - `--allow-tool <tool>` - Explicitly allows specific tools (github, safeoutputs, write, shell commands like cat, date, echo, grep, head, ls, pwd, sort, tail, uniq, wc, yq)
-- `--disable-mcp-server <name>` - Disables specific MCPs (all built-in MCPs are disabled by default and must be explicitly enabled via mcp-servers config)
-- `--mcp <name>` - Enables MCPs specified in front matter
 
-Only built-in MCPs are passed via params. Custom MCPs (with command field) are handled separately.
+MCP servers are handled entirely by the MCP Gateway (MCPG) and are not passed as copilot CLI params.
 
 ## {{ pool }}
 
@@ -513,9 +496,17 @@ resources:
 
 Should be replaced with the markdown body (agent instructions) extracted from the source markdown file, excluding the YAML front matter. This content provides the agent with its task description and guidelines.
 
-## {{ firewall_config }}
+## {{ mcpg_config }}
 
-Should be replaced with the MCP firewall configuration JSON generated from the `mcp-servers:` front matter. This configuration defines which MCP servers to spawn and which tools are allowed for each upstream.
+Should be replaced with the MCP Gateway (MCPG) configuration JSON generated from the `mcp-servers:` front matter. This configuration defines the MCPG server entries and gateway settings.
+
+The generated JSON has two top-level sections:
+- `mcpServers`: Maps server names to their configuration (type, command/url, tools, etc.)
+- `gateway`: Gateway settings (port, domain, apiKey, payloadDir)
+
+SafeOutputs is always included as an HTTP backend (`type: "http"`) pointing to `host.docker.internal`. Custom MCPs with explicit `command:` are included as stdio servers (`type: "stdio"`). MCPs without a command are skipped (there are no built-in MCPs in the copilot CLI).
+
+Runtime placeholders (`${SAFE_OUTPUTS_PORT}`, `${SAFE_OUTPUTS_API_KEY}`, `${MCP_GATEWAY_API_KEY}`) are substituted by the pipeline at runtime before passing the config to MCPG.
 
 ## {{ allowed_domains }}
 
@@ -605,6 +596,14 @@ https://github.com/github/gh-aw-firewall/releases/download/v{VERSION}/awf-linux-
 
 A `checksums.txt` file is also downloaded and verified via `sha256sum -c checksums.txt --ignore-missing` to ensure binary integrity.
 
+## {{ mcpg_version }}
+
+Should be replaced with the pinned version of the MCP Gateway (defined as `MCPG_VERSION` constant in `src/compile/common.rs`). Used to tag the MCPG Docker image in the pipeline.
+
+## {{ mcpg_image }}
+
+Should be replaced with the MCPG Docker image name (defined as `MCPG_IMAGE` constant in `src/compile/common.rs`). Currently `ghcr.io/github/gh-aw-mcpg`.
+
 ### 1ES-Specific Template Markers
 
 The following markers are specific to the 1ES target (`target: 1es`) and are not used in standalone pipelines:
@@ -617,7 +616,7 @@ Should be replaced with the agent context root for 1ES Agency jobs. This determi
 
 ## {{ mcp_configuration }}
 
-Should be replaced with the MCP server configuration for 1ES templates. For each enabled built-in MCP, generates service connection references:
+Should be replaced with the MCP server configuration for 1ES templates. For each enabled MCP with a service connection, generates service connection references:
 
 ```yaml
 ado:
@@ -626,7 +625,7 @@ kusto:
   serviceConnection: mcp-kusto-service-connection
 ```
 
-Custom MCP servers (with `command:` field) are not supported in 1ES target. Only built-in MCPs with corresponding service connections are supported.
+Custom MCP servers (with `command:` field) are not supported in 1ES target. MCPs must have service connection configuration.
 
 ## {{ global_options }}
 
@@ -650,7 +649,10 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - `<source>` - Path to the source markdown file
   - `<pipeline>` - Path to the pipeline YAML file to verify
   - Useful for CI checks to ensure pipelines are regenerated after source changes
-- `mcp <output_directory> <bounding_directory>` - Run as an MCP server for safe outputs
+- `mcp <output_directory> <bounding_directory>` - Run SafeOutputs as a stdio MCP server
+- `mcp-http <output_directory> <bounding_directory>` - Run SafeOutputs as an HTTP MCP server (for MCPG integration)
+  - `--port <port>` - Port to listen on (default: 8100)
+  - `--api-key <key>` - API key for authentication (auto-generated if not provided)
 - `execute` - Execute safe outputs from Stage 1 (Stage 2 of pipeline)
   - `--source, -s <path>` - Path to source markdown file
   - `--safe-output-dir <path>` - Directory containing safe output NDJSON (default: current directory)
@@ -659,8 +661,6 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - `--ado-project <name>` - Azure DevOps project name override
 - `proxy` - Start an HTTP proxy for network filtering
   - `--allow <host>` - Allowed hosts (supports wildcards, can be repeated)
-- `mcp-firewall` - Start an MCP firewall server that proxies tool calls
-  - `--config, -c <path>` - Path to firewall configuration JSON file
 
 ## Safe Outputs Configuration
 
@@ -883,34 +883,11 @@ cargo add <crate-name>
 
 ## MCP Configuration
 
-The `mcp-servers:` field provides a unified way to configure both built-in and custom MCP (Model Context Protocol) servers. The compiler distinguishes between them by checking for the `command:` field—if present, it's a custom server; otherwise, it's a built-in.
-
-### Built-in MCP Servers
-
-Enable built-in servers with `true` or configure them with options:
-
-```yaml
-mcp-servers:
-  ado: true                    # enabled with all default functions
-  ado-ext: true                # Extended ADO functionality
-  asa: true                    # Azure Stream Analytics MCP
-  bluebird: true               # Bluebird MCP
-  calculator: true             # Calculator MCP
-  es-chat: true
-  icm:                         # enabled with restricted functions
-    allowed:
-      - create_incident
-      - get_incident
-  kusto:
-    allowed:
-      - query
-  msft-learn: true
-  stack: true                  # Stack MCP
-```
+The `mcp-servers:` field configures MCP (Model Context Protocol) servers that are made available to the agent via the MCP Gateway (MCPG). All MCPs require explicit `command:` configuration — there are no built-in MCPs in the copilot CLI.
 
 ### Custom MCP Servers
 
-Define custom servers by including a `command:` field:
+Define MCP servers by including a `command:` field:
 
 ```yaml
 mcp-servers:
@@ -924,27 +901,15 @@ mcp-servers:
 
 ### Configuration Properties
 
-**For built-in MCPs:**
-- `true` - Enable with all default functions
-- `allowed:` - Array of function names to restrict available tools
-
-**For custom MCPs (requires `command:`):**
 - `command:` - The executable to run (e.g., `"node"`, `"python"`, `"dotnet"`)
 - `args:` - Array of command-line arguments passed to the command
 - `allowed:` - Array of function names agents are permitted to call (required for security)
 - `env:` - Optional environment variables for the MCP server process
 
-### Example: Mixed Configuration
+### Example Configuration
 
 ```yaml
 mcp-servers:
-  # Built-in servers
-  ado: true
-  ado-ext: true
-  es-chat: true
-  icm:
-    allowed: [create_incident, get_incident]
-
   # Custom Python MCP server
   data-processor:
     command: "python"
@@ -970,7 +935,7 @@ mcp-servers:
 2. **Command Validation**: The compiler validates that commands are from a trusted set
 3. **Argument Sanitization**: Arguments are validated to prevent injection attacks
 4. **Environment Isolation**: MCP servers run in the same isolated sandbox as the pipeline
-5. **Built-in Trust**: Built-in MCPs are pre-vetted; custom MCPs require explicit `allowed:` list
+5. **MCPG Gateway**: All MCP traffic flows through the MCP Gateway which enforces tool-level filtering
 
 ## Network Isolation (AWF)
 
@@ -1016,6 +981,7 @@ The following domains are always allowed (defined in `allowed_hosts.rs`):
 | `dc.services.visualstudio.com` | Visual Studio telemetry |
 | `rt.services.visualstudio.com` | Visual Studio runtime telemetry |
 | `config.edge.skype.com` | Agency configuration |
+| `host.docker.internal` | MCP Gateway (MCPG) on host |
 
 ### Adding Additional Hosts
 
@@ -1047,145 +1013,104 @@ When not configured:
 - ADO access tokens are omitted from the copilot invocation
 - The agent cannot authenticate to ADO APIs
 
-## MCP Firewall
+## MCP Gateway (MCPG)
 
-The MCP Firewall is a security layer that acts as a filtering proxy between agents and their configured MCP servers. It provides policy-based access control and audit logging for all tool calls.
-
-### Purpose
-
-When agents are configured with multiple MCPs (e.g., `ado`, `kusto`, `icm`), the firewall:
-
-1. **Loads tool definitions** from pre-generated metadata (`mcp-metadata.json`)
-2. **Enforces allow-lists** - only exposes tools explicitly permitted in the config
-3. **Namespaces tools** - tools appear as `upstream:tool_name` (e.g., `icm:create_incident`)
-4. **Spawns upstream MCPs lazily** as child processes when tools are actually called
-5. **Routes tool calls** to the appropriate upstream server
-6. **Logs all attempts** for security auditing
+The MCP Gateway ([gh-aw-mcpg](https://github.com/github/gh-aw-mcpg)) is the upstream MCP routing layer that connects agents to their configured MCP servers. It replaces the previous custom MCP firewall with the standard gh-aw gateway implementation.
 
 ### Architecture
 
 ```
-┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│             │     │                  │     │  ado MCP        │
-│   Agent     │────▶│   MCP Firewall   │────▶│  (agency mcp ado)│
-│  (Agency)   │     │                  │     └─────────────────┘
-│             │     │  - Policy check  │     ┌─────────────────┐
-└─────────────┘     │  - Tool routing  │────▶│  icm MCP        │
-                    │  - Audit logging │     │  (agency mcp icm)│
-                    └──────────────────┘     └─────────────────┘
-                                             ┌─────────────────┐
-                                        ────▶│  custom MCP     │
-                                             │  (node server.js)│
-                                             └─────────────────┘
+                          Host
+┌─────────────────────────────────────────────────┐
+│                                                 │
+│  ┌──────────────┐     ┌──────────────────────┐  │
+│  │ SafeOutputs  │     │  MCPG Gateway        │  │
+│  │ HTTP Server  │◀────│  (Docker, --network   │  │
+│  │ (ado-aw      │     │   host, port 80)     │  │
+│  │  mcp-http)   │     │                      │  │
+│  │ port 8100    │     │  Routes tool calls   │  │
+│  └──────────────┘     │  to upstreams        │  │
+│                       └──────────┬───────────┘  │
+│                                  │              │
+│          ┌─────────────────┐     │              │
+│          │  Custom MCP     │◀────┘              │
+│          │  (stdio server) │                    │
+│          └─────────────────┘                    │
+└─────────────────────────────────────────────────┘
+                       │
+          host.docker.internal:80
+                       │
+┌─────────────────────────────────────────────────┐
+│                  AWF Container                   │
+│                                                 │
+│  ┌──────────┐                                   │
+│  │  Copilot │──── HTTP ──── MCPG (via host)     │
+│  │  Agent   │                                   │
+│  └──────────┘                                   │
+└─────────────────────────────────────────────────┘
 ```
 
-### Configuration File Format
+### How It Works
 
-The firewall reads a JSON configuration file at runtime:
+1. **SafeOutputs HTTP server** starts on the host (port 8100) via `ado-aw mcp-http`
+2. **MCPG container** starts on the host network (`docker run --network host`)
+3. **MCPG config** (generated by the compiler) defines:
+   - SafeOutputs as an HTTP backend (`type: "http"`, URL points to localhost:8100)
+   - Custom MCPs as stdio servers (`type: "stdio"`, spawned by MCPG)
+   - Gateway settings (port 80, API key, payload directory)
+4. **Agent inside AWF** connects to MCPG via `http://host.docker.internal:80/mcp`
+5. MCPG routes tool calls to the appropriate upstream (SafeOutputs or custom MCPs)
+6. After the agent completes, MCPG and SafeOutputs are stopped
+
+### MCPG Configuration Format
+
+The compiler generates MCPG configuration JSON from the `mcp-servers:` front matter:
 
 ```json
 {
-  "upstreams": {
-    "ado": {
-      "command": "agency",
-      "args": ["mcp", "ado"],
-      "env": {},
-      "allowed": ["*"]
-    },
-    "icm": {
-      "command": "agency",
-      "args": ["mcp", "icm"],
-      "env": {},
-      "allowed": ["create_incident", "get_incident"]
-    },
-    "kusto": {
-      "command": "agency",
-      "args": ["mcp", "kusto"],
-      "env": {},
-      "allowed": ["query"]
+  "mcpServers": {
+    "safeoutputs": {
+      "type": "http",
+      "url": "http://host.docker.internal:8100/mcp",
+      "headers": {
+        "Authorization": "Bearer <api-key>"
+      }
     },
     "custom-tool": {
+      "type": "stdio",
       "command": "node",
       "args": ["server.js"],
-      "env": { "NODE_ENV": "production" },
-      "allowed": ["process_data", "get_status"],
-      "spawn_timeout_secs": 60
+      "tools": ["process_data", "get_status"]
     }
+  },
+  "gateway": {
+    "port": 80,
+    "domain": "host.docker.internal",
+    "apiKey": "<gateway-api-key>",
+    "payloadDir": "/tmp/gh-aw/mcp-payloads"
   }
 }
 ```
 
-### Configuration Properties (Firewall)
-
-Each upstream configuration supports:
-
-| Property | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `command` | Yes | - | The executable to spawn |
-| `args` | No | `[]` | Arguments passed to the command |
-| `env` | No | `{}` | Environment variables for the process |
-| `allowed` | Yes | - | Tool names allowed (supports `"*"` and prefix wildcards) |
-| `spawn_timeout_secs` | No | `30` | Timeout in seconds for spawning and initializing the MCP server |
-
-### Allow-list Patterns
-
-The `allowed` field supports several patterns:
-
-| Pattern | Description | Example |
-|---------|-------------|---------|
-| `"*"` | Allow all tools from this upstream | `["*"]` |
-| `"exact_name"` | Allow only this specific tool | `["query", "execute"]` |
-| `"prefix_*"` | Allow tools starting with prefix | `["get_*", "list_*"]` |
-
-### Tool Namespacing
-
-All tools exposed by the firewall are namespaced with their upstream name:
-
-- `ado:create-work-item` - from the `ado` upstream
-- `icm:create_incident` - from the `icm` upstream
-- `kusto:query` - from the `kusto` upstream
-
-This prevents tool name collisions and makes it clear which upstream handles each call.
-
-### CLI Usage
-
-```bash
-# Start the MCP firewall server
-ado-aw mcp-firewall --config /path/to/config.json
-```
+Runtime placeholders (`${SAFE_OUTPUTS_PORT}`, `${SAFE_OUTPUTS_API_KEY}`, `${MCP_GATEWAY_API_KEY}`) are substituted by the pipeline before passing the config to MCPG.
 
 ### Pipeline Integration
 
-The firewall is automatically configured in generated pipelines:
+The MCPG is automatically configured in generated standalone pipelines:
 
-1. **Config Generation**: The compiler generates `mcp-firewall-config.json` from the agent's `mcp-servers:` front matter
-2. **MCP Registration**: The firewall is registered in the agency MCP config as `mcp-firewall`
-3. **Runtime Launch**: When agency starts, it launches the firewall which spawns upstream MCPs
+1. **Config Generation**: The compiler generates `mcpg-config.json` from the agent's `mcp-servers:` front matter
+2. **SafeOutputs Start**: `ado-aw mcp-http` starts as a background process on the host
+3. **MCPG Start**: The MCPG Docker container starts on the host network with config via stdin
+4. **Agent Execution**: AWF runs the agent with `--enable-host-access`, copilot connects to MCPG via HTTP
+5. **Cleanup**: Both MCPG and SafeOutputs are stopped after the agent completes (condition: always)
 
-The firewall config is written to `$(Agent.TempDirectory)/staging/mcp-firewall-config.json` in its own pipeline step, making it easy to inspect and debug.
-
-### Audit Logging
-
-All tool call attempts are logged to the centralized log file at `$HOME/.ado-aw/logs/YYYY-MM-DD.log`:
-
-```
-[2026-01-29T10:15:32Z] [INFO] [firewall] ALLOWED icm:create_incident (args: {"title": "...", "severity": 3})
-[2026-01-29T10:15:45Z] [INFO] [firewall] BLOCKED icm:delete_incident (not in allowlist)
-[2026-01-29T10:16:01Z] [INFO] [firewall] ALLOWED kusto:query (args: {"cluster": "...", "query": "..."})
-```
-
-This provides a complete audit trail of agent actions for security review.
-
-### Error Handling
-
-- **Upstream spawn failure**: If an upstream fails to start, the firewall continues with remaining upstreams (partial functionality)
-- **Tool not found**: Returns an MCP error if the requested tool doesn't exist
-- **Policy violation**: Returns an MCP error if the tool exists but isn't in the allow-list
-- **Upstream error**: Propagates errors from upstream MCPs back to the agent
+The MCPG config is written to `$(Agent.TempDirectory)/staging/mcpg-config.json` in its own pipeline step, making it easy to inspect and debug.
 
 ## References
 
 - [GitHub Agentic Workflows](https://github.com/githubnext/gh-aw) - Inspiration for this project
+- [MCP Gateway (gh-aw-mcpg)](https://github.com/github/gh-aw-mcpg) - MCP routing gateway
+- [AWF (gh-aw-firewall)](https://github.com/github/gh-aw-firewall) - Network isolation firewall
 - [Azure DevOps YAML Schema](https://docs.microsoft.com/en-us/azure/devops/pipelines/yaml-schema)
 - [OneBranch Documentation](https://aka.ms/onebranchdocs)
 - [Clap Documentation](https://docs.rs/clap/latest/clap/)
