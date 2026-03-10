@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use log::{debug, error, info, warn};
 use rmcp::{
     ErrorData as McpError, ServerHandler, ServiceExt, handler::server::tool::ToolRouter,
@@ -460,26 +460,22 @@ pub async fn run_http(
     // Generate or use provided API key.
     // In production the pipeline always passes --api-key with a cryptographically
     // random value; this fallback covers dev/test invocations.
-    let api_key = api_key
-        .map(|k| k.to_string())
-        .unwrap_or_else(|| {
+    let api_key = match api_key {
+        Some(k) => k.to_string(),
+        None => {
             let mut buf = [0u8; 32];
-            match std::fs::File::open("/dev/urandom")
+            std::fs::File::open("/dev/urandom")
                 .and_then(|mut f| {
                     use std::io::Read;
                     f.read_exact(&mut buf)
-                }) {
-                Ok(()) => buf.iter().map(|b| format!("{:02x}", b)).collect(),
-                Err(e) => {
-                    // Fail loudly rather than generating a weak key
-                    panic!(
-                        "Cannot generate secure API key: /dev/urandom unavailable ({}). \
-                        Pass --api-key explicitly.",
-                        e
-                    );
-                }
-            }
-        });
+                })
+                .context(
+                    "Cannot generate secure API key: /dev/urandom unavailable. \
+                    Pass --api-key explicitly.",
+                )?;
+            buf.iter().map(|b| format!("{:02x}", b)).collect()
+        }
+    };
 
     info!("Starting SafeOutputs HTTP server on port {}", port);
 
@@ -538,7 +534,7 @@ pub async fn run_http(
             }
         }));
 
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!("SafeOutputs HTTP server listening on {}", addr);
 
