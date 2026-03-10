@@ -456,13 +456,16 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
                 );
             } else {
                 log::warn!(
-                    "MCP '{}' has no command — skipping (no built-in MCPs available)",
+                    "MCP '{}' has options but no command — skipping. \
+                    All MCPs now require an explicit command: field.",
                     name
                 );
             }
         } else {
             log::warn!(
-                "MCP '{}' has no command — skipping (no built-in MCPs available)",
+                "MCP '{}' specified as boolean true — skipping. \
+                Boolean-enabled MCPs required built-in MCPs which no longer exist. \
+                Use the object form with a command: field instead.",
                 name
             );
         }
