@@ -4,6 +4,12 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag to upload assets to (e.g., v0.1.1)"
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,6 +21,7 @@ permissions:
 jobs:
   release-please:
     name: Release Please
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
@@ -28,7 +35,9 @@ jobs:
   build:
     name: Build (Linux)
     needs: release-please
-    if: ${{ needs.release-please.outputs.release_created }}
+    if: >-
+      always() &&
+      (needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -54,7 +63,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload ${{ needs.release-please.outputs.tag_name }} \
+          TAG="${{ needs.release-please.outputs.tag_name || github.event.inputs.tag_name }}"
+          gh release upload "$TAG" \
             target/release/ado-aw-linux-x64 \
             target/release/checksums.txt \
             --clobber
