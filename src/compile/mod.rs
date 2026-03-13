@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 pub use common::parse_markdown;
 pub use common::sanitize_filename;
-pub use types::{CompileTarget, FrontMatter};
+pub use types::{CompileTarget, FrontMatter, PermissionsConfig};
 
 /// Trait for pipeline compilers.
 ///

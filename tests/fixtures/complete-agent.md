@@ -32,6 +32,14 @@ mcp-servers:
       - custom_function_2
     env:
       NODE_ENV: "test"
+permissions:
+  read: my-read-arm-connection
+  write: my-write-arm-connection
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+  create-work-item:
+    work-item-type: Task
 steps:
   - bash: echo "Preparing context"
     displayName: "Prepare context"

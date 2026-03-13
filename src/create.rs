@@ -28,6 +28,10 @@ struct AgentConfig {
     /// Repository aliases to checkout (if empty, all repos are checked out)
     checkout: Vec<String>,
     mcps: Vec<McpSelection>,
+    /// ARM service connection for read-only ADO access (Stage 1 agent)
+    read_service_connection: Option<String>,
+    /// ARM service connection for write ADO access (Stage 2 executor)
+    write_service_connection: Option<String>,
     prompt_body: String,
 }
 
@@ -59,6 +63,7 @@ enum WizardStep {
     Repositories,
     Checkout,
     Mcps,
+    Permissions,
     Done,
 }
 
@@ -73,7 +78,8 @@ impl WizardStep {
             Self::Workspace => Self::Repositories,
             Self::Repositories => Self::Checkout,
             Self::Checkout => Self::Mcps,
-            Self::Mcps => Self::Done,
+            Self::Mcps => Self::Permissions,
+            Self::Permissions => Self::Done,
             Self::Done => Self::Done,
         }
     }
@@ -89,7 +95,8 @@ impl WizardStep {
             Self::Repositories => Self::Workspace,
             Self::Checkout => Self::Repositories,
             Self::Mcps => Self::Checkout,
-            Self::Done => Self::Mcps,
+            Self::Permissions => Self::Mcps,
+            Self::Done => Self::Permissions,
         }
     }
 }
@@ -273,6 +280,56 @@ pub async fn create_agent(output_dir: Option<PathBuf>) -> Result<()> {
                     None => {
                         // User pressed Esc, step already updated
                     }
+                }
+            }
+
+            WizardStep::Permissions => {
+                let read_prompt = Text::new("Read service connection (optional):")
+                    .with_help_message(
+                        "ARM service connection for read-only ADO access. Leave empty to skip. (Esc to go back)",
+                    )
+                    .with_default(
+                        config.read_service_connection.as_deref().unwrap_or(""),
+                    )
+                    .prompt();
+
+                match read_prompt {
+                    Ok(val) => {
+                        config.read_service_connection = if val.trim().is_empty() {
+                            None
+                        } else {
+                            Some(val.trim().to_string())
+                        };
+                    }
+                    Err(InquireError::OperationCanceled) => {
+                        step = step.prev();
+                        continue;
+                    }
+                    Err(e) => return Err(e).context("Failed to get read service connection"),
+                }
+
+                let write_prompt = Text::new("Write service connection (optional):")
+                    .with_help_message(
+                        "ARM service connection for write ADO access (used by safe-outputs executor only). Leave empty to skip. (Esc to go back)",
+                    )
+                    .with_default(
+                        config.write_service_connection.as_deref().unwrap_or(""),
+                    )
+                    .prompt();
+
+                match write_prompt {
+                    Ok(val) => {
+                        config.write_service_connection = if val.trim().is_empty() {
+                            None
+                        } else {
+                            Some(val.trim().to_string())
+                        };
+                        step = step.next();
+                    }
+                    Err(InquireError::OperationCanceled) => {
+                        step = step.prev();
+                    }
+                    Err(e) => return Err(e).context("Failed to get write service connection"),
                 }
             }
 
@@ -1022,6 +1079,17 @@ fn generate_markdown(config: &AgentConfig) -> String {
                     }
                 }
             }
+        }
+    }
+
+    // Permissions
+    if config.read_service_connection.is_some() || config.write_service_connection.is_some() {
+        yaml_parts.push("permissions:".to_string());
+        if let Some(ref sc) = config.read_service_connection {
+            yaml_parts.push(format!("  read: {}", sc));
+        }
+        if let Some(ref sc) = config.write_service_connection {
+            yaml_parts.push(format!("  write: {}", sc));
         }
     }
 

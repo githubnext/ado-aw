@@ -177,7 +177,9 @@ network:                       # optional network policy (standalone target only
     - "*.mycompany.com"
   blocked:                     # blocked host patterns (takes precedence over allow)
     - "evil.example.com"
-read-only-service-connection: my-arm-connection  # optional: ARM service connection for read-only ADO token
+permissions:                   # optional ADO access token configuration
+  read: my-read-arm-connection   # ARM service connection for read-only ADO access (Stage 1 agent)
+  write: my-write-arm-connection # ARM service connection for write ADO access (Stage 2 executor only)
 ---
 
 
@@ -568,20 +570,37 @@ Should be replaced with the description field from the front matter. This is use
 
 ## {{ acquire_ado_token }}
 
-Generates an `AzureCLI@2` step that acquires an Azure DevOps-scoped access token from an ARM service connection. This is only generated when `read-only-service-connection` is configured in the front matter.
+Generates an `AzureCLI@2` step that acquires a read-only ADO-scoped access token from the ARM service connection specified in `permissions.read`. This token is used by the agent in Stage 1 (inside the AWF sandbox).
 
 The step:
-- Uses the specified ARM service connection
+- Uses the ARM service connection from `permissions.read`
 - Calls `az account get-access-token` with the ADO resource ID
-- Stores the token in a secret pipeline variable `SC_ACCESS_TOKEN`
+- Stores the token in a secret pipeline variable `SC_READ_TOKEN`
 
-If no `read-only-service-connection` is configured, this marker is replaced with an empty string.
+If `permissions.read` is not configured, this marker is replaced with an empty string.
 
 ## {{ copilot_ado_env }}
 
-Generates environment variable entries for the copilot AWF step when `read-only-service-connection` is configured. Sets both `AZURE_DEVOPS_EXT_PAT` and `SYSTEM_ACCESSTOKEN` to the service connection token.
+Generates environment variable entries for the copilot AWF step when `permissions.read` is configured. Sets both `AZURE_DEVOPS_EXT_PAT` and `SYSTEM_ACCESSTOKEN` to the read service connection token (`SC_READ_TOKEN`).
 
-If no `read-only-service-connection` is configured, this marker is replaced with an empty string, and ADO access tokens are omitted from the copilot invocation.
+If `permissions.read` is not configured, this marker is replaced with an empty string, and ADO access tokens are omitted from the copilot invocation.
+
+## {{ acquire_write_token }}
+
+Generates an `AzureCLI@2` step that acquires a write-capable ADO-scoped access token from the ARM service connection specified in `permissions.write`. This token is used only by the executor in Stage 2 (`ProcessSafeOutputs` job) and is never exposed to the agent.
+
+The step:
+- Uses the ARM service connection from `permissions.write`
+- Calls `az account get-access-token` with the ADO resource ID
+- Stores the token in a secret pipeline variable `SC_WRITE_TOKEN`
+
+If `permissions.write` is not configured, this marker is replaced with an empty string.
+
+## {{ executor_ado_env }}
+
+Generates environment variable entries for the Stage 2 executor step when `permissions.write` is configured. Sets `SYSTEM_ACCESSTOKEN` to the write service connection token (`SC_WRITE_TOKEN`).
+
+If `permissions.write` is not configured, this marker is replaced with an empty string. Note: `System.AccessToken` is never used directly — all ADO tokens come from explicitly configured service connections.
 
 ## {{ compiler_version }}
 
@@ -1030,22 +1049,42 @@ network:
 
 All hosts (core + MCP-specific + user-specified) are combined into a comma-separated domain list passed to AWF's `--allow-domains` flag.
 
-### Read-Only Service Connection
+### Permissions (ADO Access Tokens)
 
-For agents that need read-only access to Azure DevOps resources (e.g., reading repository information), you can configure an ARM service connection to provide a scoped access token:
+ADO does not support fine-grained permissions — there are two access levels: blanket read and blanket write. Tokens are minted from ARM service connections; `System.AccessToken` is never used for agent or executor operations.
 
 ```yaml
-read-only-service-connection: my-arm-connection
+permissions:
+  read: my-read-arm-connection    # Stage 1 agent — read-only ADO access
+  write: my-write-arm-connection  # Stage 2 executor — write access for safe-outputs
 ```
 
-When configured:
-- The pipeline mints an ADO-scoped token from the ARM service connection
-- The token is passed to the copilot via `AZURE_DEVOPS_EXT_PAT` and `SYSTEM_ACCESSTOKEN`
-- This allows the agent to authenticate to ADO APIs without using the pipeline's default System.AccessToken
+#### Security Model
 
-When not configured:
-- ADO access tokens are omitted from the copilot invocation
-- The agent cannot authenticate to ADO APIs
+- **`permissions.read`**: Mints a read-only ADO-scoped token given to the agent inside the AWF sandbox (Stage 1). The agent can query ADO APIs but cannot write.
+- **`permissions.write`**: Mints a write-capable ADO-scoped token used **only** by the executor in Stage 2 (`ProcessSafeOutputs` job). This token is never exposed to the agent.
+- **Both omitted**: No ADO tokens are passed anywhere. The agent has no ADO API access.
+
+#### Compile-Time Validation
+
+If write-requiring safe-outputs (`create-pull-request`, `create-work-item`) are configured but `permissions.write` is missing, compilation fails with a clear error message.
+
+#### Examples
+
+```yaml
+# Agent can read ADO, safe-outputs can write
+permissions:
+  read: my-read-sc
+  write: my-write-sc
+
+# Agent can read ADO, no write safe-outputs needed
+permissions:
+  read: my-read-sc
+
+# Agent has no ADO access, but safe-outputs can create PRs/work items
+permissions:
+  write: my-write-sc
+```
 
 ## MCP Firewall
 

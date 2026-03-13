@@ -486,6 +486,99 @@ pub fn generate_pipeline_path(output_path: &std::path::Path) -> String {
     format!("{{{{ workspace }}}}/{}", filename)
 }
 
+// ==================== Permission helpers ====================
+
+/// ADO resource ID for minting ADO-scoped tokens via Azure CLI.
+const ADO_RESOURCE_ID: &str = "499b84ac-1321-427f-aa17-267ca6975798";
+
+/// Generate an AzureCLI@2 step to acquire an ADO-scoped token from an ARM service connection.
+/// The `variable_name` parameter controls which pipeline variable the token is stored in
+/// (e.g. "SC_READ_TOKEN" for the agent, "SC_WRITE_TOKEN" for the executor).
+/// Returns empty string if no service connection is provided.
+pub fn generate_acquire_ado_token(service_connection: Option<&str>, variable_name: &str) -> String {
+    match service_connection {
+        Some(sc) => {
+            let mut lines = Vec::new();
+            lines.push("- task: AzureCLI@2".to_string());
+            lines.push(format!(
+                r#"  displayName: "Acquire ADO token ({variable_name})""#
+            ));
+            lines.push("  inputs:".to_string());
+            lines.push(format!("    azureSubscription: '{}'", sc));
+            lines.push("    scriptType: 'bash'".to_string());
+            lines.push("    scriptLocation: 'inlineScript'".to_string());
+            lines.push("    addSpnToEnvironment: true".to_string());
+            lines.push("    inlineScript: |".to_string());
+            lines.push("      ADO_TOKEN=$(az account get-access-token \\".to_string());
+            lines.push(format!(
+                "        --resource {} \\",
+                ADO_RESOURCE_ID
+            ));
+            lines.push("        --query accessToken -o tsv)".to_string());
+            lines.push(format!(
+                "      echo \"##vso[task.setvariable variable={variable_name};issecret=true]$ADO_TOKEN\""
+            ));
+            lines.join("\n")
+        }
+        None => String::new(),
+    }
+}
+
+/// Generate the env block entries for the copilot AWF step (Stage 1 agent).
+/// Uses the read-only token from the read service connection.
+/// When not configured, omits ADO access tokens entirely.
+pub fn generate_copilot_ado_env(read_service_connection: Option<&str>) -> String {
+    match read_service_connection {
+        Some(_) => {
+            "AZURE_DEVOPS_EXT_PAT: $(SC_READ_TOKEN)\nSYSTEM_ACCESSTOKEN: $(SC_READ_TOKEN)"
+                .to_string()
+        }
+        None => String::new(),
+    }
+}
+
+/// Generate the env block entries for the executor step (Stage 2 ProcessSafeOutputs).
+/// Uses the write token from the write service connection.
+/// When not configured, omits ADO access tokens entirely.
+pub fn generate_executor_ado_env(write_service_connection: Option<&str>) -> String {
+    match write_service_connection {
+        Some(_) => "SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)".to_string(),
+        None => String::new(),
+    }
+}
+
+/// Safe-output names that require write access to ADO.
+const WRITE_REQUIRING_SAFE_OUTPUTS: &[&str] = &["create-pull-request", "create-work-item"];
+
+/// Validate that write-requiring safe-outputs have a write service connection configured.
+pub fn validate_write_permissions(front_matter: &FrontMatter) -> Result<()> {
+    let has_write_sc = front_matter
+        .permissions
+        .as_ref()
+        .is_some_and(|p| p.write.is_some());
+
+    if has_write_sc {
+        return Ok(());
+    }
+
+    let missing: Vec<&str> = WRITE_REQUIRING_SAFE_OUTPUTS
+        .iter()
+        .filter(|name| front_matter.safe_outputs.contains_key(**name))
+        .copied()
+        .collect();
+
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "Safe outputs [{}] require write access to ADO, but no write service connection \
+             is configured. Add a 'permissions.write' field to the front matter:\n\n  \
+             permissions:\n    write: <your-write-arm-service-connection>\n",
+            missing.join(", ")
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
