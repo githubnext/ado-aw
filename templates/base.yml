@@ -501,6 +501,8 @@ jobs:
       {{ checkout_self }}
       {{ checkout_repositories }}
 
+      {{ acquire_write_token }}
+
       - download: current
         artifact: analyzed_outputs_$(Build.BuildId)
 
@@ -536,7 +538,7 @@ jobs:
         displayName: Process safe outputs
         workingDirectory: {{ working_directory }}
         env:
-          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          {{ executor_ado_env }}
 
       - bash: |
           # Copy all logs to output directory for artifact upload

@@ -150,6 +150,8 @@ extends:
               {{ checkout_self }}
               {{ checkout_repositories }}
 
+              {{ acquire_ado_token }}
+
               - download: current
                 artifact: AgencyArtifact
 
@@ -239,8 +241,7 @@ extends:
                 displayName: "Run threat analysis"
                 workingDirectory: {{ working_directory }}
                 env:
-                  AZURE_DEVOPS_EXT_PAT: $(System.AccessToken)
-                  SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+                  {{ copilot_ado_env }}
                   GITHUB_TOKEN: $(GITHUB_TOKEN)
                   GITHUB_READ_ONLY: 1
                   HTTP_PROXY: "http://127.0.0.1:$(PROXY_PORT)"
@@ -308,6 +309,8 @@ extends:
               {{ checkout_self }}
               {{ checkout_repositories }}
 
+              {{ acquire_write_token }}
+
               - download: current
                 artifact: analyzed_outputs
 
@@ -338,6 +341,6 @@ extends:
                 displayName: Process safe outputs
                 workingDirectory: {{ working_directory }}
                 env:
-                  SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+                  {{ executor_ado_env }}
 
           {{ teardown_job }}
