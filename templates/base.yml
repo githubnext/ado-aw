@@ -193,10 +193,10 @@ jobs:
         displayName: "Download AWF (Agentic Workflow Firewall) v{{ firewall_version }}"
 
       - bash: |
-          docker pull ghcr.io/github/gh-aw-firewall/squid:v{{ firewall_version }}
-          docker pull ghcr.io/github/gh-aw-firewall/agent:v{{ firewall_version }}
-          docker tag ghcr.io/github/gh-aw-firewall/squid:v{{ firewall_version }} ghcr.io/github/gh-aw-firewall/squid:latest
-          docker tag ghcr.io/github/gh-aw-firewall/agent:v{{ firewall_version }} ghcr.io/github/gh-aw-firewall/agent:latest
+          docker pull ghcr.io/github/gh-aw-firewall/squid:{{ firewall_version }}
+          docker pull ghcr.io/github/gh-aw-firewall/agent:{{ firewall_version }}
+          docker tag ghcr.io/github/gh-aw-firewall/squid:{{ firewall_version }} ghcr.io/github/gh-aw-firewall/squid:latest
+          docker tag ghcr.io/github/gh-aw-firewall/agent:{{ firewall_version }} ghcr.io/github/gh-aw-firewall/agent:latest
         displayName: "Pre-pull AWF container images (v{{ firewall_version }})"
 
       {{ prepare_steps }}
@@ -354,10 +354,10 @@ jobs:
         displayName: "Download AWF (Agentic Workflow Firewall) v{{ firewall_version }}"
 
       - bash: |
-          docker pull ghcr.io/github/gh-aw-firewall/squid:v{{ firewall_version }}
-          docker pull ghcr.io/github/gh-aw-firewall/agent:v{{ firewall_version }}
-          docker tag ghcr.io/github/gh-aw-firewall/squid:v{{ firewall_version }} ghcr.io/github/gh-aw-firewall/squid:latest
-          docker tag ghcr.io/github/gh-aw-firewall/agent:v{{ firewall_version }} ghcr.io/github/gh-aw-firewall/agent:latest
+          docker pull ghcr.io/github/gh-aw-firewall/squid:{{ firewall_version }}
+          docker pull ghcr.io/github/gh-aw-firewall/agent:{{ firewall_version }}
+          docker tag ghcr.io/github/gh-aw-firewall/squid:{{ firewall_version }} ghcr.io/github/gh-aw-firewall/squid:latest
+          docker tag ghcr.io/github/gh-aw-firewall/agent:{{ firewall_version }} ghcr.io/github/gh-aw-firewall/agent:latest
         displayName: "Pre-pull AWF container images (v{{ firewall_version }})"
 
       - bash: |
