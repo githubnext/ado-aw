@@ -2,16 +2,15 @@
 on:
   issues:
     types: [labeled]
-    label: "doc-update"
   workflow_dispatch:
     inputs:
       topic:
         description: "Topic or section of the documentation to update"
-        required: true
+        required: false
 description: Writes and updates project documentation to keep README and docs accurate and complete
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
+  pull-requests: read
   issues: read
 tools:
   github:
@@ -20,9 +19,8 @@ network:
   allowed: [defaults, rust]
 safe-outputs:
   create-pull-request:
-    target-branch: main
-    auto-complete: false
-    delete-source-branch: true
+    base-branch: main
+    auto-merge: false
 ---
 
 # Technical Documentation Writer
