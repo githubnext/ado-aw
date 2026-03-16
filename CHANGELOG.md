@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/githubnext/ado-aw/compare/v0.1.2...v0.1.3) (2026-03-16)
+
+
+### Bug Fixes
+
+* pin AWF container images to specific firewall version ([#32](https://github.com/githubnext/ado-aw/issues/32)) ([9c3b85c](https://github.com/githubnext/ado-aw/commit/9c3b85c3029a513f75dc354be3b6052098cd43db))
+
 ## [0.1.2](https://github.com/githubnext/ado-aw/compare/v0.1.1...v0.1.2) (2026-03-16)
 
 
