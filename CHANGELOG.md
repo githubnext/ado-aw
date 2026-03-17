@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/githubnext/ado-aw/compare/v0.3.0...v0.3.1) (2026-03-17)
+
+
+### Bug Fixes
+
+* add --repo flag to gh release upload in checksums job ([#40](https://github.com/githubnext/ado-aw/issues/40)) ([fd437da](https://github.com/githubnext/ado-aw/commit/fd437daf148e63f2c768fd9c6365c5c8ac4ef871))
+
 ## [0.3.0](https://github.com/githubnext/ado-aw/compare/v0.2.0...v0.3.0) (2026-03-17)
 
 
