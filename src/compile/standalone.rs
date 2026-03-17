@@ -14,7 +14,7 @@ use std::path::Path;
 
 use super::Compiler;
 use super::common::{
-    self, AWF_VERSION, DEFAULT_POOL, compute_effective_workspace, generate_copilot_params,
+    self, AWF_VERSION, COPILOT_CLI_VERSION, DEFAULT_POOL, compute_effective_workspace, generate_copilot_params,
     generate_acquire_ado_token, generate_cancel_previous_builds, generate_checkout_self,
     generate_checkout_steps, generate_ci_trigger, generate_copilot_ado_env,
     generate_executor_ado_env, generate_pipeline_path, generate_pipeline_resources,
@@ -140,6 +140,7 @@ impl Compiler for StandaloneCompiler {
         let replacements: Vec<(&str, &str)> = vec![
             ("{{ compiler_version }}", compiler_version),
             ("{{ firewall_version }}", AWF_VERSION),
+            ("{{ copilot_version }}", COPILOT_CLI_VERSION),
             ("{{ pool }}", &pool),
             ("{{ setup_job }}", &setup_job),
             ("{{ teardown_job }}", &teardown_job),
