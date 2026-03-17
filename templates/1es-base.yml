@@ -67,7 +67,7 @@ extends:
 
                       echo "Verifying checksum..."
                       cd "$DOWNLOAD_DIR"
-                      sha256sum -c checksums.txt --ignore-missing
+                      grep "ado-aw-linux-x64" checksums.txt | sha256sum -c -
                       mv ado-aw-linux-x64 ado-aw
                       chmod +x ado-aw
                     displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
@@ -182,7 +182,7 @@ extends:
 
                   echo "Verifying checksum..."
                   cd "$DOWNLOAD_DIR"
-                  sha256sum -c checksums.txt --ignore-missing
+                  grep "ado-aw-linux-x64" checksums.txt | sha256sum -c -
                   mv ado-aw-linux-x64 ado-aw
                   chmod +x ado-aw
                 displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
@@ -327,7 +327,7 @@ extends:
 
                   echo "Verifying checksum..."
                   cd "$DOWNLOAD_DIR"
-                  sha256sum -c checksums.txt --ignore-missing
+                  grep "ado-aw-linux-x64" checksums.txt | sha256sum -c -
                   mv ado-aw-linux-x64 ado-aw
                   chmod +x ado-aw
                 displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
