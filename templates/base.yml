@@ -65,7 +65,7 @@ jobs:
 
           echo "Verifying checksum..."
           cd "$DOWNLOAD_DIR"
-          sha256sum -c checksums.txt --ignore-missing | grep -q ": OK"
+          sha256sum -c checksums.txt --ignore-missing
           mv ado-aw-linux-x64 ado-aw
           chmod +x ado-aw
         displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
@@ -185,7 +185,7 @@ jobs:
 
           echo "Verifying checksum..."
           cd "$DOWNLOAD_DIR"
-          sha256sum -c checksums.txt --ignore-missing | grep -q ": OK"
+          sha256sum -c checksums.txt --ignore-missing
           mv awf-linux-x64 awf
           chmod +x awf
           echo "##vso[task.prependpath]$(Pipeline.Workspace)/awf"
@@ -325,7 +325,7 @@ jobs:
 
           echo "Verifying checksum..."
           cd "$DOWNLOAD_DIR"
-          sha256sum -c checksums.txt --ignore-missing | grep -q ": OK"
+          sha256sum -c checksums.txt --ignore-missing
           mv ado-aw-linux-x64 ado-aw
           chmod +x ado-aw
         displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
@@ -346,7 +346,7 @@ jobs:
 
           echo "Verifying checksum..."
           cd "$DOWNLOAD_DIR"
-          sha256sum -c checksums.txt --ignore-missing | grep -q ": OK"
+          sha256sum -c checksums.txt --ignore-missing
           mv awf-linux-x64 awf
           chmod +x awf
           echo "##vso[task.prependpath]$(Pipeline.Workspace)/awf"
@@ -523,14 +523,14 @@ jobs:
 
           echo "Verifying checksum..."
           cd "$DOWNLOAD_DIR"
-          sha256sum -c checksums.txt --ignore-missing | grep -q ": OK"
+          sha256sum -c checksums.txt --ignore-missing
           mv ado-aw-linux-x64 ado-aw
           chmod +x ado-aw
         displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
 
       - bash: |
           ls -la "$(Pipeline.Workspace)/agentic-pipeline-compiler"
-          chmod +x $(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw
+          chmod +x "$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
           echo "##vso[task.prependpath]$(Pipeline.Workspace)/agentic-pipeline-compiler"
         displayName: Add agentic compiler to path
 

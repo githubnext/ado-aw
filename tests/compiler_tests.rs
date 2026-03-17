@@ -145,8 +145,8 @@ fn test_compiled_yaml_structure() {
         "Template should download the compiler from GitHub Releases"
     );
     assert!(
-        template_content.contains("sha256sum -c checksums.txt --ignore-missing | grep -q \": OK\""),
-        "Template should verify checksum using checksums.txt with grep confirmation"
+        template_content.contains("sha256sum -c checksums.txt --ignore-missing"),
+        "Template should verify checksum using checksums.txt"
     );
 
     // Verify AWF (Agentic Workflow Firewall) is downloaded from GitHub Releases, not ADO pipeline artifacts

@@ -67,7 +67,7 @@ extends:
 
                       echo "Verifying checksum..."
                       cd "$DOWNLOAD_DIR"
-                      sha256sum -c checksums.txt --ignore-missing | grep -q ": OK"
+                      sha256sum -c checksums.txt --ignore-missing
                       mv ado-aw-linux-x64 ado-aw
                       chmod +x ado-aw
                     displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
@@ -182,7 +182,7 @@ extends:
 
                   echo "Verifying checksum..."
                   cd "$DOWNLOAD_DIR"
-                  sha256sum -c checksums.txt --ignore-missing | grep -q ": OK"
+                  sha256sum -c checksums.txt --ignore-missing
                   mv ado-aw-linux-x64 ado-aw
                   chmod +x ado-aw
                 displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
@@ -327,13 +327,13 @@ extends:
 
                   echo "Verifying checksum..."
                   cd "$DOWNLOAD_DIR"
-                  sha256sum -c checksums.txt --ignore-missing | grep -q ": OK"
+                  sha256sum -c checksums.txt --ignore-missing
                   mv ado-aw-linux-x64 ado-aw
                   chmod +x ado-aw
                 displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
 
               - bash: |
-                  chmod +x $(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw
+                  chmod +x "$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
                   echo "##vso[task.prependpath]$(Pipeline.Workspace)/agentic-pipeline-compiler"
                 displayName: Add agentic compiler to path
 
