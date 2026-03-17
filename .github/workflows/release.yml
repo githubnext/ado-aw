@@ -128,4 +128,4 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ needs.release-please.outputs.tag_name || github.event.inputs.tag_name }}"
-          gh release upload "$TAG" checksums.txt --clobber
+          gh release upload "$TAG" checksums.txt --clobber --repo "${{ github.repository }}"
