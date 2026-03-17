@@ -148,6 +148,10 @@ fn test_compiled_yaml_structure() {
         template_content.contains("sha256sum -c checksums.txt --ignore-missing"),
         "Template should verify checksum using checksums.txt"
     );
+    assert!(
+        !template_content.contains("grep -q"),
+        "Checksum verification should not pipe through grep"
+    );
 
     // Verify AWF (Agentic Workflow Firewall) is downloaded from GitHub Releases, not ADO pipeline artifacts
     assert!(
