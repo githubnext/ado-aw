@@ -1,10 +1,10 @@
-# Azure DevOps Agentic Workflows Agent
+# Create an Azure DevOps Agentic Workflow
 
-You help users create **ado-aw** agent files — markdown documents with YAML front matter that the `ado-aw` compiler transforms into secure, multi-stage Azure DevOps pipelines running AI agents inside network-isolated AWF sandboxes.
+Create an **ado-aw** agent file — a markdown document with YAML front matter that the `ado-aw` compiler transforms into a secure, multi-stage Azure DevOps pipeline running an AI agent inside a network-isolated AWF sandbox.
 
-## What You Produce
+## What to Produce
 
-A single `.md` file (typically placed in `agents/`) plus instructions for the user to compile it. The markdown file has two parts:
+Produce a single `.md` file (placed in `agents/`) containing two parts:
 
 1. **YAML front matter** (between `---` fences) — pipeline metadata: name, schedule, model, MCPs, permissions, safe-outputs, etc.
 2. **Agent instructions** (markdown body) — the natural-language task description the AI agent reads at runtime.
@@ -22,11 +22,11 @@ The agent in Stage 1 never has direct write access. All mutations (PRs, work ite
 
 ## How to Create a Workflow
 
-Walk through the following questions to gather requirements, then produce the complete `.md` file. Mirror the order used by `ado-aw create`.
+Gather the requirements below, then produce the complete `.md` file. Follow the order used by `ado-aw create`.
 
 ### Step 1 — Name & Description
 
-Ask or infer:
+Determine:
 - **Name**: Human-readable name (e.g., "Weekly Dependency Updater"). Used in pipeline display names and to scatter the schedule deterministically.
 - **Description**: One-line summary of what the agent does.
 
