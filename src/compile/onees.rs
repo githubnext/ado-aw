@@ -17,7 +17,7 @@ use std::path::Path;
 
 use super::Compiler;
 use super::common::{
-    self, AGENCY_CLI_VERSION, AWF_VERSION, DEFAULT_POOL, compute_effective_workspace, generate_copilot_params,
+    self, AWF_VERSION, COPILOT_CLI_VERSION, DEFAULT_POOL, compute_effective_workspace, generate_copilot_params,
     generate_acquire_ado_token, generate_checkout_self, generate_checkout_steps,
     generate_ci_trigger, generate_copilot_ado_env, generate_executor_ado_env,
     generate_pipeline_path, generate_pipeline_resources, generate_pr_trigger,
@@ -139,7 +139,7 @@ displayName: "Finalize""#,
             ("{{ compiler_version }}", compiler_version),
             // No-op for 1ES (template doesn't use AWF), but included for forward-compatibility
             ("{{ firewall_version }}", AWF_VERSION),
-            ("{{ agency_version }}", AGENCY_CLI_VERSION),
+            ("{{ copilot_version }}", COPILOT_CLI_VERSION),
             ("{{ pool }}", &pool),
             ("{{ schedule }}", &schedule),
             ("{{ pr_trigger }}", &pr_trigger),
@@ -163,6 +163,7 @@ displayName: "Finalize""#,
             ("{{ source_path }}", &source_path),
             ("{{ pipeline_path }}", &pipeline_path),
             ("{{ working_directory }}", &working_directory),
+            ("{{ workspace }}", &working_directory),
             ("{{ agency_params }}", &agency_params),
             ("{{ acquire_ado_token }}", &acquire_read_token),
             ("{{ copilot_ado_env }}", &copilot_ado_env),

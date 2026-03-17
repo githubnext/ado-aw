@@ -465,11 +465,6 @@ pub const AWF_VERSION: &str = "0.23.1";
 /// See: https://pkgs.dev.azure.com/msazuresphere/_packaging/Guardian1ESPTUpstreamOrgFeed/nuget/v3/index.json
 pub const COPILOT_CLI_VERSION: &str = "1.0.6";
 
-/// Version of the Agency CLI (agency.linux-x64) NuGet package to install in 1ES pipelines.
-/// Update this when upgrading to a new Agency CLI release.
-/// See: https://pkgs.dev.azure.com/msazuresphere/_packaging/Guardian1ESPTUpstreamOrgFeed/nuget/v3/index.json
-pub const AGENCY_CLI_VERSION: &str = "2026.1.22.4";
-
 /// Generate source path for the execute command.
 ///
 /// Returns a path using `{{ workspace }}` as the base, which gets resolved

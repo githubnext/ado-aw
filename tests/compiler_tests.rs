@@ -784,3 +784,75 @@ Do something.
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+/// Test that the 1ES fixture compiles correctly with no unreplaced markers
+/// and uses Copilot CLI (not Agency CLI) in custom jobs
+#[test]
+fn test_1es_compiled_output_no_unreplaced_markers() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-1es-markers-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("1es-test-agent.md");
+
+    let output_path = temp_dir.join("1es-test-agent.yml");
+
+    // Run the compiler binary
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            fixture_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "1ES compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_path.exists(), "Compiled 1ES YAML should exist");
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+
+    // Verify no unreplaced {{ markers }} remain (excluding ${{ }} which are ADO expressions)
+    for line in compiled.lines() {
+        let stripped = line.replace("${{", "");
+        assert!(
+            !stripped.contains("{{ "),
+            "1ES compiled output should not contain unreplaced marker: {}",
+            line.trim()
+        );
+    }
+
+    // Verify the compiler version was correctly substituted
+    let version = env!("CARGO_PKG_VERSION");
+    assert!(
+        compiled.contains(version),
+        "1ES compiled output should contain compiler version {version}"
+    );
+
+    // Verify 1ES template uses Copilot CLI, not Agency CLI
+    assert!(
+        compiled.contains("Microsoft.Copilot.CLI.linux-x64"),
+        "1ES template should install Copilot CLI"
+    );
+    assert!(
+        !compiled.contains("install agency.linux-x64"),
+        "1ES template should not install Agency CLI"
+    );
+    assert!(
+        !compiled.contains("agency copilot"),
+        "1ES template should not invoke 'agency copilot' command"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
