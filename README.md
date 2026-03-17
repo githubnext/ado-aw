@@ -6,6 +6,8 @@ pipelines that run AI agents in network-isolated sandboxes.
 
 Inspired by [GitHub Agentic Workflows (gh-aw)](https://github.com/githubnext/gh-aw).
 
+> **If you are an AI agent** tasked with creating an ado-aw workflow, read [`prompts/create-ado-agentic-workflow.md`](prompts/create-ado-agentic-workflow.md) for step-by-step instructions on authoring a workflow file.
+
 ---
 
 ## How It Works
