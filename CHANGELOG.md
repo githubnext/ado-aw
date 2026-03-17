@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/githubnext/ado-aw/compare/v0.1.3...v0.2.0) (2026-03-17)
+
+
+### Features
+
+* Add Windows x64 binary to release artifacts ([#37](https://github.com/githubnext/ado-aw/issues/37)) ([d463006](https://github.com/githubnext/ado-aw/commit/d4630063c6f6fb8418fe0e37c3ef56abed1fa299))
+
 ## [0.1.3](https://github.com/githubnext/ado-aw/compare/v0.1.2...v0.1.3) (2026-03-16)
 
 
