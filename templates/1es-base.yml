@@ -189,7 +189,7 @@ extends:
 
               - bash: |
                   mkdir -p {{ working_directory }}/safe_outputs
-                  # Copy safe outputs from artifact if they exist
+                  # Copy safe outputs from AgencyArtifact if they exist
                   if [ -f "$(Pipeline.Workspace)/AgencyArtifact/safe_outputs.ndjson" ]; then
                     cp "$(Pipeline.Workspace)/AgencyArtifact/safe_outputs.ndjson" {{ working_directory }}/safe_outputs/
                   fi
