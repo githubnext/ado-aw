@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/githubnext/ado-aw/compare/v0.3.1...v0.3.2) (2026-03-17)
+
+
+### Bug Fixes
+
+* quote chmod paths and remove fragile sha256sum pipe in templates ([#43](https://github.com/githubnext/ado-aw/issues/43)) ([b246fb1](https://github.com/githubnext/ado-aw/commit/b246fb157177994224eb4c4a8930f11148a653c3))
+
 ## [0.3.1](https://github.com/githubnext/ado-aw/compare/v0.3.0...v0.3.1) (2026-03-17)
 
 
