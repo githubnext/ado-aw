@@ -57,7 +57,6 @@ jobs:
           set -euo pipefail
           cd target/release
           cp ado-aw ado-aw-linux-x64
-          sha256sum ado-aw-linux-x64 > checksums.txt
 
       - name: Upload release assets
         env:
@@ -66,5 +65,67 @@ jobs:
           TAG="${{ needs.release-please.outputs.tag_name || github.event.inputs.tag_name }}"
           gh release upload "$TAG" \
             target/release/ado-aw-linux-x64 \
-            target/release/checksums.txt \
             --clobber
+
+  build-windows:
+    name: Build (Windows)
+    needs: release-please
+    if: >-
+      always() &&
+      (needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch')
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+
+      - name: Build
+        run: cargo build --release --verbose
+
+      - name: Run tests
+        run: cargo test --verbose
+
+      - name: Prepare release assets
+        run: |
+          Copy-Item target/release/ado-aw.exe target/release/ado-aw-windows-x64.exe
+
+      - name: Upload release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $TAG = "${{ needs.release-please.outputs.tag_name || github.event.inputs.tag_name }}"
+          gh release upload "$TAG" `
+            target/release/ado-aw-windows-x64.exe `
+            --clobber
+
+  checksums:
+    name: Generate Checksums
+    needs: [release-please, build, build-windows]
+    if: >-
+      always() &&
+      (needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch') &&
+      needs.build.result == 'success' &&
+      needs.build-windows.result == 'success'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download release binaries and generate checksums
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.release-please.outputs.tag_name || github.event.inputs.tag_name }}"
+          gh release download "$TAG" \
+            --pattern "ado-aw-*" \
+            --repo "${{ github.repository }}"
+          test -f ado-aw-linux-x64 || { echo "Missing ado-aw-linux-x64"; exit 1; }
+          test -f ado-aw-windows-x64.exe || { echo "Missing ado-aw-windows-x64.exe"; exit 1; }
+          sha256sum ado-aw-linux-x64 ado-aw-windows-x64.exe > checksums.txt
+
+      - name: Upload checksums
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ needs.release-please.outputs.tag_name || github.event.inputs.tag_name }}"
+          gh release upload "$TAG" checksums.txt --clobber
