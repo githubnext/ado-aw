@@ -479,7 +479,7 @@ Used by the execute command's --source parameter.
 
 ## {{ pipeline_path }}
 
-Should be replaced with the path to the compiled pipeline YAML file for runtime integrity checking. The path is derived from the output path's filename and uses `{{ workspace }}` as the base (which gets resolved before this placeholder):
+Should be replaced with the path to the compiled pipeline YAML file for runtime integrity checking. The path is derived from the output path's filename and uses `{{ working_directory }}` as the base (which gets resolved before this placeholder):
 - `root`: `$(Build.SourcesDirectory)/<filename>.yml`
 - `repo`: `$(Build.SourcesDirectory)/$(Build.Repository.Name)/<filename>.yml`
 
@@ -560,10 +560,6 @@ The threat analysis prompt instructs the security analysis agent to check for:
 - Secret leaks
 - Malicious patches (suspicious web calls, backdoors, encoded strings, suspicious dependencies)
 
-## {{ workspace }}
-
-An alias for `{{ working_directory }}`. Both markers are replaced with the same value based on the effective workspace setting.
-
 ## {{ agent_description }}
 
 Should be replaced with the description field from the front matter. This is used in display contexts and the threat analysis prompt template.
@@ -623,6 +619,15 @@ https://github.com/github/gh-aw-firewall/releases/download/v{VERSION}/awf-linux-
 ```
 
 A `checksums.txt` file is also downloaded and verified via `sha256sum -c checksums.txt --ignore-missing` to ensure binary integrity.
+
+## {{ copilot_version }}
+
+Should be replaced with the pinned version of the `Microsoft.Copilot.CLI.linux-x64` NuGet package (defined as `COPILOT_CLI_VERSION` constant in `src/compile/common.rs`). This version is used in the pipeline step that installs the Copilot CLI tool from Azure Artifacts.
+
+The generated pipelines install the package from:
+```
+https://pkgs.dev.azure.com/msazuresphere/_packaging/Guardian1ESPTUpstreamOrgFeed/nuget/v3/index.json
+```
 
 ### 1ES-Specific Template Markers
 
@@ -946,6 +951,7 @@ mcp-servers:
 **For built-in MCPs:**
 - `true` - Enable with all default functions
 - `allowed:` - Array of function names to restrict available tools
+- `service-connection:` - (1ES target only) Override the service connection name used for this MCP. If not specified, defaults to `mcp-<name>-service-connection` (e.g., `mcp-ado-service-connection` for the `ado` MCP)
 
 **For custom MCPs (requires `command:`):**
 - `command:` - The executable to run (e.g., `"node"`, `"python"`, `"dotnet"`)
