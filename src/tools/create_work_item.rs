@@ -1,6 +1,7 @@
 //! Create work item reporting schemas
 
 use log::{debug, info};
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -8,6 +9,13 @@ use crate::tool_result;
 use crate::tools::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{Sanitize, sanitize as sanitize_text};
 use anyhow::{Context, ensure};
+
+/// Characters to percent-encode in a URL path segment.
+/// Encodes the structural delimiters that would break URL parsing if left raw:
+/// `#` (fragment), `?` (query), `/` (path separator), and space.
+/// This hardens operator-controlled values (wiki names, project names, work item
+/// types) against accidental corruption of the URL structure.
+const PATH_SEGMENT: &AsciiSet = &CONTROLS.add(b'#').add(b'?').add(b'/').add(b' ');
 
 /// Parameters for creating a work item
 #[derive(Deserialize, JsonSchema)]
@@ -257,8 +265,8 @@ impl Executor for CreateWorkItemResult {
         let url = format!(
             "{}/{}/_apis/wit/workitems/${}?api-version=7.0",
             org_url.trim_end_matches('/'),
-            project,
-            config.work_item_type,
+            utf8_percent_encode(project, PATH_SEGMENT),
+            utf8_percent_encode(&config.work_item_type, PATH_SEGMENT),
         );
         debug!("API URL: {}", url);
 

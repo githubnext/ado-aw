@@ -14,6 +14,7 @@ dependencies = [
  "env_logger",
  "inquire",
  "log",
+ "percent-encoding",
  "regex-lite",
  "reqwest",
  "rmcp",

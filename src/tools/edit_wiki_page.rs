@@ -2,12 +2,20 @@
 
 use anyhow::{Context, ensure};
 use log::{debug, info};
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::sanitize::{Sanitize, sanitize as sanitize_text};
 use crate::tool_result;
 use crate::tools::{ExecutionContext, ExecutionResult, Executor, Validate};
+
+/// Characters to percent-encode in a URL path segment.
+/// Encodes the structural delimiters that would break URL parsing if left raw:
+/// `#` (fragment), `?` (query), `/` (path separator), and space.
+/// This hardens operator-controlled values (wiki names, project names, work item
+/// types) against accidental corruption of the URL structure.
+const PATH_SEGMENT: &AsciiSet = &CONTROLS.add(b'#').add(b'?').add(b'/').add(b' ');
 
 /// Parameters for editing a wiki page (agent-provided)
 #[derive(Deserialize, JsonSchema)]
@@ -239,8 +247,8 @@ impl Executor for EditWikiPageResult {
         let base_url = format!(
             "{}/{}/_apis/wiki/wikis/{}/pages",
             org_url.trim_end_matches('/'),
-            project,
-            wiki_name,
+            utf8_percent_encode(project, PATH_SEGMENT),
+            utf8_percent_encode(wiki_name, PATH_SEGMENT),
         );
 
         let client = reqwest::Client::new();
@@ -742,5 +750,31 @@ wiki-name: "MyProject.wiki"
 
         assert!(!config.create_if_missing);
         assert_eq!(config.wiki_name.as_deref(), Some("Proj.wiki"));
+    }
+
+    // ── URL encoding ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_path_segment_encodes_fragment_delimiter() {
+        let encoded = utf8_percent_encode("wiki#name", PATH_SEGMENT).to_string();
+        assert_eq!(encoded, "wiki%23name");
+    }
+
+    #[test]
+    fn test_path_segment_encodes_query_delimiter() {
+        let encoded = utf8_percent_encode("wiki?name", PATH_SEGMENT).to_string();
+        assert_eq!(encoded, "wiki%3Fname");
+    }
+
+    #[test]
+    fn test_path_segment_encodes_space() {
+        let encoded = utf8_percent_encode("My Project", PATH_SEGMENT).to_string();
+        assert_eq!(encoded, "My%20Project");
+    }
+
+    #[test]
+    fn test_path_segment_does_not_encode_safe_chars() {
+        let encoded = utf8_percent_encode("MyProject.wiki", PATH_SEGMENT).to_string();
+        assert_eq!(encoded, "MyProject.wiki");
     }
 }
