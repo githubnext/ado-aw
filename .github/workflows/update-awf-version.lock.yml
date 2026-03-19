@@ -23,13 +23,13 @@
 #
 # Checks for new releases of gh-aw-firewall and opens a PR to update the AWF_VERSION constant
 #
-# gh-aw-metadata: {"schema_version":"v1","frontmatter_hash":"e19e8ee8162cb2edd32a0b95ed57aae217f077fdb5b356587439253f0943c10d","compiler_version":"v0.53.6"}
+# gh-aw-metadata: {"schema_version":"v1","frontmatter_hash":"b991f6b4afcb78c714c46ba2984d6e655428d74b54b3a0c69db5b59f869562fc","compiler_version":"v0.53.6"}
 
 name: "AWF Version Updater"
 "on":
   schedule:
-  - cron: "43 10 * * 1"
-    # Friendly format: weekly on monday (scattered)
+  - cron: "43 10 * * *"
+    # Friendly format: daily (scattered)
   workflow_dispatch:
 
 permissions: {}

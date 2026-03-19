@@ -1,6 +1,6 @@
 ---
 on:
-  schedule: weekly on monday
+  schedule: daily
 description: Checks for new releases of gh-aw-firewall and opens a PR to update the AWF_VERSION constant
 permissions:
   contents: read
