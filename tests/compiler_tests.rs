@@ -958,3 +958,104 @@ Update the wiki.
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+/// Test that create-wiki-page requires a write service connection
+#[test]
+fn test_create_wiki_page_requires_write_sc() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-create-wiki-fail-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("create-wiki-agent.md");
+    let test_content = r#"---
+name: "Create Wiki Agent"
+description: "Agent that creates wiki pages but has no write SC"
+safe-outputs:
+  create-wiki-page:
+    wiki-name: "MyProject.wiki"
+    path-prefix: "/agent-output"
+---
+
+## Create Wiki Agent
+
+Create new wiki pages.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("create-wiki-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should fail when create-wiki-page lacks a write SC"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("permissions.write"),
+        "Error message should mention permissions.write: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that create-wiki-page compiles successfully when a write SC is present
+#[test]
+fn test_create_wiki_page_compiles_with_write_sc() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-create-wiki-pass-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("create-wiki-agent.md");
+    let test_content = r#"---
+name: "Create Wiki Agent"
+description: "Agent that creates wiki pages with write SC"
+permissions:
+  write: my-write-sc
+safe-outputs:
+  create-wiki-page:
+    wiki-name: "MyProject.wiki"
+    path-prefix: "/agent-output"
+    title-prefix: "[Agent] "
+    comment: "Created by agent"
+---
+
+## Create Wiki Agent
+
+Create new wiki pages.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("create-wiki-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed when write SC is provided: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
