@@ -1,7 +1,17 @@
 //! Tool parameter and result structs for MCP tools
 
+use percent_encoding::{AsciiSet, CONTROLS};
+
+/// Characters to percent-encode in a URL path segment.
+/// Encodes the structural delimiters that would break URL parsing if left raw:
+/// `#` (fragment), `?` (query), `/` (path separator), and space.
+/// This hardens operator-controlled values (project names, wiki names, work item
+/// types) against accidental corruption of the URL structure.
+pub(crate) const PATH_SEGMENT: &AsciiSet = &CONTROLS.add(b'#').add(b'?').add(b'/').add(b' ');
+
 mod create_pr;
 mod create_work_item;
+mod edit_wiki_page;
 pub mod memory;
 mod missing_data;
 mod missing_tool;
@@ -10,6 +20,7 @@ mod result;
 
 pub use create_pr::*;
 pub use create_work_item::*;
+pub use edit_wiki_page::*;
 pub use missing_data::*;
 pub use missing_tool::*;
 pub use noop::*;
