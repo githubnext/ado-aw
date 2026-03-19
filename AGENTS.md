@@ -120,9 +120,9 @@ repositories: # a list of repository resources available to the pipeline (for pr
     name: my-org/another-repo
 checkout: # optional list of repository aliases for the agent to checkout and work with (must be subset of repositories)
   - reponame # only checkout reponame, not another-repo
-# tools:                       # RESERVED: tool configuration (not yet implemented)
-#   bash: ["cat", "ls", "grep"]  # bash command allow-list
-#   edit: true                   # enable file editing tool
+tools:                         # optional tool configuration
+  bash: ["cat", "ls", "grep"]  # bash command allow-list (defaults to safe built-in list)
+  edit: true                   # enable file editing tool (default: true)
 # env:                          # RESERVED: workflow-level environment variables (not yet implemented)
 #   CUSTOM_VAR: "value"
 mcp-servers:
@@ -277,6 +277,47 @@ schedule:
   branches:
     - main
     - release/*
+```
+
+### Tools Configuration
+
+The `tools` field controls which tools are available to the agent. Both sub-fields are optional and have sensible defaults.
+
+#### Default Bash Command Allow-list
+
+When `tools.bash` is omitted, the agent can invoke the following shell commands:
+
+```
+cat, date, echo, grep, head, ls, pwd, sort, tail, uniq, wc, yq
+```
+
+#### Configuring Bash Access
+
+```yaml
+# Default: safe built-in command list (bash field omitted)
+tools:
+  edit: true
+
+# Unrestricted bash access (use with caution)
+tools:
+  bash: [":*"]
+
+# Explicit command allow-list
+tools:
+  bash: ["cat", "ls", "grep", "find"]
+
+# Disable bash entirely (empty list)
+tools:
+  bash: []
+```
+
+#### Disabling File Writes
+
+By default, the `edit` tool (file writing) is enabled. To disable it:
+
+```yaml
+tools:
+  edit: false
 ```
 
 ### Target Platforms
