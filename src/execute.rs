@@ -10,7 +10,8 @@ use std::path::Path;
 
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
 use crate::tools::{
-    CreatePrResult, CreateWorkItemResult, ExecutionContext, ExecutionResult, Executor,
+    CreatePrResult, CreateWorkItemResult, EditWikiPageResult, ExecutionContext, ExecutionResult,
+    Executor,
 };
 
 // Re-export memory types for use by main.rs
@@ -178,6 +179,17 @@ pub async fn execute_safe_output(
             debug!(
                 "create-pull-request: title='{}', repo='{}', branch='{}', patch='{}'",
                 output.title, output.repository, output.source_branch, output.patch_file
+            );
+            output.execute_sanitized(ctx).await?
+        }
+        "edit-wiki-page" => {
+            debug!("Parsing edit-wiki-page payload");
+            let mut output: EditWikiPageResult = serde_json::from_value(entry.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to parse edit-wiki-page: {}", e))?;
+            debug!(
+                "edit-wiki-page: path='{}', content length={}",
+                output.path,
+                output.content.len()
             );
             output.execute_sanitized(ctx).await?
         }
@@ -370,5 +382,47 @@ mod tests {
         let result = execute_safe_output(&entry, &ctx).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("evil-backdoor"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_malformed_edit_wiki_page_returns_err() {
+        // Missing required fields (path and content)
+        let entry = serde_json::json!({"name": "edit-wiki-page"});
+        let ctx = ExecutionContext::default();
+
+        let result = execute_safe_output(&entry, &ctx).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_execute_edit_wiki_page_missing_context() {
+        let entry = serde_json::json!({
+            "name": "edit-wiki-page",
+            "path": "/Overview",
+            "content": "This is some valid wiki content."
+        });
+
+        // Context without required fields (ado_org_url, etc.)
+        let ctx = ExecutionContext {
+            ado_org_url: None,
+            ado_organization: None,
+            ado_project: None,
+            access_token: None,
+            working_directory: PathBuf::from("."),
+            source_directory: PathBuf::from("."),
+            tool_configs: HashMap::new(),
+            repository_id: None,
+            repository_name: None,
+            allowed_repositories: HashMap::new(),
+        };
+
+        let result = execute_safe_output(&entry, &ctx).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("AZURE_DEVOPS_ORG_URL")
+        );
     }
 }

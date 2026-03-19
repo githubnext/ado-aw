@@ -2,6 +2,7 @@
 
 mod create_pr;
 mod create_work_item;
+mod edit_wiki_page;
 pub mod memory;
 mod missing_data;
 mod missing_tool;
@@ -10,6 +11,7 @@ mod result;
 
 pub use create_pr::*;
 pub use create_work_item::*;
+pub use edit_wiki_page::*;
 pub use missing_data::*;
 pub use missing_tool::*;
 pub use noop::*;
