@@ -1,21 +1,15 @@
 //! Create work item reporting schemas
 
 use log::{debug, info};
-use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::PATH_SEGMENT;
 use crate::tool_result;
 use crate::tools::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{Sanitize, sanitize as sanitize_text};
 use anyhow::{Context, ensure};
-
-/// Characters to percent-encode in a URL path segment.
-/// Encodes the structural delimiters that would break URL parsing if left raw:
-/// `#` (fragment), `?` (query), `/` (path separator), and space.
-/// This hardens operator-controlled values (wiki names, project names, work item
-/// types) against accidental corruption of the URL structure.
-const PATH_SEGMENT: &AsciiSet = &CONTROLS.add(b'#').add(b'?').add(b'/').add(b' ');
 
 /// Parameters for creating a work item
 #[derive(Deserialize, JsonSchema)]

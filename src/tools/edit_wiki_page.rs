@@ -2,20 +2,14 @@
 
 use anyhow::{Context, ensure};
 use log::{debug, info};
-use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::PATH_SEGMENT;
 use crate::sanitize::{Sanitize, sanitize as sanitize_text};
 use crate::tool_result;
 use crate::tools::{ExecutionContext, ExecutionResult, Executor, Validate};
-
-/// Characters to percent-encode in a URL path segment.
-/// Encodes the structural delimiters that would break URL parsing if left raw:
-/// `#` (fragment), `?` (query), `/` (path separator), and space.
-/// This hardens operator-controlled values (wiki names, project names, work item
-/// types) against accidental corruption of the URL structure.
-const PATH_SEGMENT: &AsciiSet = &CONTROLS.add(b'#').add(b'?').add(b'/').add(b' ');
 
 /// Parameters for editing a wiki page (agent-provided)
 #[derive(Deserialize, JsonSchema)]
@@ -35,6 +29,10 @@ pub struct EditWikiPageParams {
 impl Validate for EditWikiPageParams {
     fn validate(&self) -> anyhow::Result<()> {
         ensure!(!self.path.trim().is_empty(), "path must not be empty");
+        ensure!(
+            !self.path.contains('\0'),
+            "path must not contain null bytes"
+        );
         ensure!(
             !self.path.contains(".."),
             "path must not contain '..': {}",
@@ -181,6 +179,24 @@ fn apply_title_prefix(path: &str, prefix: &str) -> String {
 // Stage-2 executor
 // ============================================================================
 
+/// Guard that enforces the `create-if-missing` configuration.
+///
+/// Returns `Some(failure)` when the page does not exist and creation is
+/// disabled; returns `None` when the call should proceed normally.
+fn check_create_if_missing_guard(
+    page_exists: bool,
+    config: &EditWikiPageConfig,
+    path: &str,
+) -> Option<ExecutionResult> {
+    if !page_exists && !config.create_if_missing {
+        Some(ExecutionResult::failure(format!(
+            "Wiki page '{path}' does not exist and create-if-missing is disabled"
+        )))
+    } else {
+        None
+    }
+}
+
 #[async_trait::async_trait]
 impl Executor for EditWikiPageResult {
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
@@ -285,10 +301,8 @@ impl Executor for EditWikiPageResult {
             None
         };
 
-        if !page_exists && !config.create_if_missing {
-            return Ok(ExecutionResult::failure(format!(
-                "Wiki page '{effective_path}' does not exist and create-if-missing is disabled"
-            )));
+        if let Some(err) = check_create_if_missing_guard(page_exists, &config, &effective_path) {
+            return Ok(err);
         }
 
         let comment = self
@@ -449,6 +463,17 @@ mod tests {
     }
 
     #[test]
+    fn test_validation_rejects_null_bytes_in_path() {
+        let params = EditWikiPageParams {
+            path: "/Page\x00Name".to_string(),
+            content: "Some valid content here.".to_string(),
+            comment: None,
+        };
+        let result: Result<EditWikiPageResult, _> = params.try_into();
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_validation_rejects_short_content() {
         let params = EditWikiPageParams {
             path: "/Page".to_string(),
@@ -569,14 +594,17 @@ wiki-name: "MyProject.wiki"
 
     #[test]
     fn test_sanitize_removes_control_chars_from_path() {
+        // Use \x01 (SOH) — passes validate() but must be stripped by sanitize_fields().
+        // Null bytes are rejected earlier at the validate() stage (see
+        // test_validation_rejects_null_bytes_in_path).
         let params = EditWikiPageParams {
-            path: "/Page\x00Name".to_string(),
+            path: "/Page\x01Name".to_string(),
             content: "Some valid content here.".to_string(),
             comment: None,
         };
         let mut result: EditWikiPageResult = params.try_into().unwrap();
         result.sanitize_fields();
-        assert!(!result.path.contains('\x00'));
+        assert!(!result.path.contains('\x01'));
     }
 
     #[test]
@@ -723,33 +751,38 @@ wiki-name: "MyProject.wiki"
     }
 
     #[tokio::test]
-    async fn test_execute_create_if_missing_false_rejected() {
-        use std::collections::HashMap;
+    async fn test_execute_create_if_missing_guard_blocks_nonexistent_page() {
+        let config = EditWikiPageConfig {
+            wiki_name: Some("Proj.wiki".to_string()),
+            create_if_missing: false,
+            ..Default::default()
+        };
+        let result = check_create_if_missing_guard(false, &config, "/Agent/Page");
+        assert!(result.is_some());
+        assert!(!result.unwrap().success);
+    }
 
-        let mut tool_configs = HashMap::new();
-        tool_configs.insert(
-            "edit-wiki-page".to_string(),
-            serde_json::json!({
-                "wiki-name": "Proj.wiki",
-                "create-if-missing": false
-            }),
-        );
+    #[tokio::test]
+    async fn test_execute_create_if_missing_guard_allows_when_enabled() {
+        let config = EditWikiPageConfig {
+            wiki_name: Some("Proj.wiki".to_string()),
+            create_if_missing: true,
+            ..Default::default()
+        };
+        let result = check_create_if_missing_guard(false, &config, "/Agent/Page");
+        assert!(result.is_none());
+    }
 
-        // Simulate a page-not-found scenario by using a non-existent host.
-        // We inject the context and let reqwest fail — or we can check the
-        // create-if-missing guard by mocking. Here we test via an HTTP that
-        // returns 404, but since we cannot spin up a real ADO instance,
-        // we verify the behavior by testing the path validation logic directly
-        // using a mock org URL that will be refused by reqwest (no real call).
-        //
-        // Instead, test the config parsing and default behavior.
-        let config: EditWikiPageConfig = serde_json::from_value(
-            tool_configs["edit-wiki-page"].clone(),
-        )
-        .unwrap();
-
-        assert!(!config.create_if_missing);
-        assert_eq!(config.wiki_name.as_deref(), Some("Proj.wiki"));
+    #[tokio::test]
+    async fn test_execute_create_if_missing_guard_allows_existing_page() {
+        // Even when create-if-missing is false, an existing page should be allowed.
+        let config = EditWikiPageConfig {
+            wiki_name: Some("Proj.wiki".to_string()),
+            create_if_missing: false,
+            ..Default::default()
+        };
+        let result = check_create_if_missing_guard(true, &config, "/Agent/Page");
+        assert!(result.is_none());
     }
 
     // ── URL encoding ──────────────────────────────────────────────────────────
