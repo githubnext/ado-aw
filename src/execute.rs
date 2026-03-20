@@ -11,7 +11,7 @@ use std::path::Path;
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
 use crate::tools::{
     CreatePrResult, CreateWikiPageResult, CreateWorkItemResult, EditWikiPageResult,
-    ExecutionContext, ExecutionResult, Executor,
+    ExecutionContext, ExecutionResult, Executor, UpdateWorkItemConfig, UpdateWorkItemResult,
 };
 
 // Re-export memory types for use by main.rs
@@ -79,6 +79,24 @@ pub async fn execute_safe_outputs(
 
     info!("Found {} safe output(s) to execute", entries.len());
     println!("Found {} safe output(s) to execute", entries.len());
+
+    // Pre-validate the update-work-item max constraint before executing anything
+    let update_wi_count = entries
+        .iter()
+        .filter(|e| e.get("name").and_then(|n| n.as_str()) == Some("update-work-item"))
+        .count();
+    if update_wi_count > 0 {
+        let update_config: UpdateWorkItemConfig = ctx.get_tool_config("update-work-item");
+        if update_wi_count > update_config.max as usize {
+            return Err(anyhow::anyhow!(
+                "Too many update-work-item safe outputs: {} found, but max is {}. \
+                 Reduce the number of work item updates or increase 'max' in the \
+                 safe-outputs.update-work-item configuration.",
+                update_wi_count,
+                update_config.max
+            ));
+        }
+    }
 
     // Log summary of what we're about to execute
     for (i, entry) in entries.iter().enumerate() {
@@ -170,6 +188,13 @@ pub async fn execute_safe_output(
                 output.title,
                 output.description.len()
             );
+            output.execute_sanitized(ctx).await?
+        }
+        "update-work-item" => {
+            debug!("Parsing update-work-item payload");
+            let mut output: UpdateWorkItemResult = serde_json::from_value(entry.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to parse update-work-item: {}", e))?;
+            debug!("update-work-item: id={}", output.id);
             output.execute_sanitized(ctx).await?
         }
         "create-pull-request" => {
