@@ -127,6 +127,7 @@ fn default_max() -> u32 {
 ///     title: true               # enable title updates
 ///     body: true                # enable body/description updates
 ///     title-prefix: "[bot] "    # only update work items whose title starts with this prefix
+///     tag-prefix: "agent-"      # only update work items that have at least one tag starting with this prefix
 ///     max: 3                    # max updates per run (default: 1)
 ///     target: "*"               # "*" (default) or a specific work item ID number
 ///     work-item-type: true      # enable work item type updates (ADO-specific)
@@ -154,6 +155,12 @@ pub struct UpdateWorkItemConfig {
     /// Requires an extra GET request to fetch the current title before patching.
     #[serde(default, rename = "title-prefix")]
     pub title_prefix: Option<String>,
+
+    /// Only update work items that have at least one tag starting with this prefix.
+    /// ADO stores tags as a semicolon-separated string; each tag is trimmed before comparison.
+    /// Requires an extra GET request to fetch the current tags before patching.
+    #[serde(default, rename = "tag-prefix")]
+    pub tag_prefix: Option<String>,
 
     /// Maximum number of update-work-item outputs allowed per pipeline run (default: 1)
     #[serde(default = "default_max")]
@@ -193,6 +200,7 @@ impl Default for UpdateWorkItemConfig {
             title: false,
             body: false,
             title_prefix: None,
+            tag_prefix: None,
             max: default_max(),
             target: TargetConfig::default(),
             work_item_type: false,
@@ -286,13 +294,14 @@ impl Executor for UpdateWorkItemResult {
 
         let config: UpdateWorkItemConfig = ctx.get_tool_config("update-work-item");
         debug!(
-            "Config: status={}, title={}, body={}, target={:?}, max={}, title_prefix={:?}",
+            "Config: status={}, title={}, body={}, target={:?}, max={}, title_prefix={:?}, tag_prefix={:?}",
             config.status,
             config.title,
             config.body,
             config.target,
             config.max,
-            config.title_prefix
+            config.title_prefix,
+            config.tag_prefix,
         );
 
         // Validate the target constraint
@@ -352,27 +361,53 @@ impl Executor for UpdateWorkItemResult {
 
         let client = reqwest::Client::new();
 
-        // If title-prefix is configured, fetch the current work item to verify the title
-        if let Some(prefix) = &config.title_prefix {
-            debug!("Checking title-prefix constraint: '{}'", prefix);
+        // If either prefix guard is configured, fetch the current work item once and check both
+        if config.title_prefix.is_some() || config.tag_prefix.is_some() {
+            debug!(
+                "Fetching work item #{} to check prefix guards (title_prefix={:?}, tag_prefix={:?})",
+                self.id, config.title_prefix, config.tag_prefix
+            );
             match fetch_work_item(&client, org_url, project, token, self.id).await {
                 Ok(wi) => {
-                    let current_title = wi
-                        .get("fields")
-                        .and_then(|f| f.get("System.Title"))
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("");
-                    if !current_title.starts_with(prefix.as_str()) {
-                        return Ok(ExecutionResult::failure(format!(
-                            "Work item #{} title '{}' does not start with the required prefix '{}' (configured in title-prefix)",
-                            self.id, current_title, prefix
-                        )));
+                    // title-prefix check
+                    if let Some(prefix) = &config.title_prefix {
+                        let current_title = wi
+                            .get("fields")
+                            .and_then(|f| f.get("System.Title"))
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("");
+                        if !current_title.starts_with(prefix.as_str()) {
+                            return Ok(ExecutionResult::failure(format!(
+                                "Work item #{} title '{}' does not start with the required prefix '{}' (configured in title-prefix)",
+                                self.id, current_title, prefix
+                            )));
+                        }
+                        debug!("Title-prefix check passed: '{}'", current_title);
                     }
-                    debug!("Title-prefix check passed: '{}'", current_title);
+
+                    // tag-prefix check: ADO stores tags as a semicolon-separated string
+                    if let Some(prefix) = &config.tag_prefix {
+                        let raw_tags = wi
+                            .get("fields")
+                            .and_then(|f| f.get("System.Tags"))
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("");
+                        let has_matching_tag = raw_tags
+                            .split(';')
+                            .map(str::trim)
+                            .any(|tag| tag.starts_with(prefix.as_str()));
+                        if !has_matching_tag {
+                            return Ok(ExecutionResult::failure(format!(
+                                "Work item #{} has no tag starting with '{}' (configured in tag-prefix). Current tags: '{}'",
+                                self.id, prefix, raw_tags
+                            )));
+                        }
+                        debug!("Tag-prefix check passed; matched in tags: '{}'", raw_tags);
+                    }
                 }
                 Err(e) => {
                     return Ok(ExecutionResult::failure(format!(
-                        "Failed to fetch work item #{} for title-prefix validation: {}",
+                        "Failed to fetch work item #{} for prefix validation: {}",
                         self.id, e
                     )));
                 }
@@ -620,6 +655,7 @@ mod tests {
         assert_eq!(config.max, 1);
         assert_eq!(config.target, TargetConfig::Pattern("*".to_string()));
         assert!(config.title_prefix.is_none());
+        assert!(config.tag_prefix.is_none());
     }
 
     #[test]
@@ -629,6 +665,7 @@ status: true
 title: true
 body: true
 title-prefix: "[bot] "
+tag-prefix: "agent-"
 max: 3
 target: "*"
 work-item-type: true
@@ -642,6 +679,7 @@ tags: true
         assert!(config.title);
         assert!(config.body);
         assert_eq!(config.title_prefix, Some("[bot] ".to_string()));
+        assert_eq!(config.tag_prefix, Some("agent-".to_string()));
         assert_eq!(config.max, 3);
         assert_eq!(config.target, TargetConfig::Pattern("*".to_string()));
         assert!(config.work_item_type);
@@ -870,5 +908,67 @@ target: 42
         // tags should be sanitized
         let tags = result.tags.as_ref().unwrap();
         assert!(tags[1].contains("`@two`"));
+    }
+
+    // -------------------------------------------------------------------------
+    // tag-prefix parsing / logic tests (no network calls needed)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_config_tag_prefix_deserializes() {
+        let yaml = r#"
+title: true
+tag-prefix: "agent-"
+"#;
+        let config: UpdateWorkItemConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.tag_prefix, Some("agent-".to_string()));
+    }
+
+    #[test]
+    fn test_config_tag_prefix_absent_is_none() {
+        let yaml = "title: true";
+        let config: UpdateWorkItemConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.tag_prefix.is_none());
+    }
+
+    /// Helper: simulate the tag-prefix logic in isolation so it can be unit-tested
+    /// without spinning up an HTTP server.
+    fn tag_prefix_matches(raw_tags: &str, prefix: &str) -> bool {
+        raw_tags
+            .split(';')
+            .map(str::trim)
+            .any(|tag| tag.starts_with(prefix))
+    }
+
+    #[test]
+    fn test_tag_prefix_matches_single_tag() {
+        assert!(tag_prefix_matches("agent-run", "agent-"));
+    }
+
+    #[test]
+    fn test_tag_prefix_matches_one_of_several_tags() {
+        assert!(tag_prefix_matches("bug; agent-2026; automated", "agent-"));
+    }
+
+    #[test]
+    fn test_tag_prefix_matches_with_extra_spaces() {
+        // ADO can emit tags with surrounding spaces
+        assert!(tag_prefix_matches("  agent-run  ; other  ", "agent-"));
+    }
+
+    #[test]
+    fn test_tag_prefix_no_match() {
+        assert!(!tag_prefix_matches("bug; automated", "agent-"));
+    }
+
+    #[test]
+    fn test_tag_prefix_empty_tags() {
+        assert!(!tag_prefix_matches("", "agent-"));
+    }
+
+    #[test]
+    fn test_tag_prefix_exact_match_still_passes() {
+        // A tag that exactly equals the prefix (no trailing chars) should match
+        assert!(tag_prefix_matches("agent-", "agent-"));
     }
 }
