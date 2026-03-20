@@ -18,6 +18,7 @@ mod missing_data;
 mod missing_tool;
 mod noop;
 mod result;
+mod update_work_item;
 
 pub use create_pr::*;
 pub use create_wiki_page::*;
@@ -29,3 +30,4 @@ pub use noop::*;
 pub use result::{
     ExecutionContext, ExecutionResult, Executor, ToolResult, Validate, anyhow_to_mcp_error,
 };
+pub use update_work_item::*;
