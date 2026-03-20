@@ -857,9 +857,9 @@ fn test_1es_compiled_output_no_unreplaced_markers() {
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
-/// Test that edit-wiki-page requires a write service connection
+/// Test that update-wiki-page requires a write service connection
 #[test]
-fn test_edit_wiki_page_requires_write_sc() {
+fn test_update_wiki_page_requires_write_sc() {
     let temp_dir = std::env::temp_dir().join(format!(
         "agentic-pipeline-wiki-fail-{}",
         std::process::id()
@@ -871,7 +871,7 @@ fn test_edit_wiki_page_requires_write_sc() {
 name: "Wiki Agent"
 description: "Agent that edits wiki pages but has no write SC"
 safe-outputs:
-  edit-wiki-page:
+  update-wiki-page:
     wiki-name: "MyProject.wiki"
     path-prefix: "/agent-output"
 ---
@@ -896,7 +896,7 @@ Update the wiki.
 
     assert!(
         !output.status.success(),
-        "Compiler should fail when edit-wiki-page lacks a write SC"
+        "Compiler should fail when update-wiki-page lacks a write SC"
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -908,9 +908,9 @@ Update the wiki.
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
-/// Test that edit-wiki-page compiles successfully when a write SC is present
+/// Test that update-wiki-page compiles successfully when a write SC is present
 #[test]
-fn test_edit_wiki_page_compiles_with_write_sc() {
+fn test_update_wiki_page_compiles_with_write_sc() {
     let temp_dir = std::env::temp_dir().join(format!(
         "agentic-pipeline-wiki-pass-{}",
         std::process::id()
@@ -924,7 +924,7 @@ description: "Agent that edits wiki pages with write SC"
 permissions:
   write: my-write-sc
 safe-outputs:
-  edit-wiki-page:
+  update-wiki-page:
     wiki-name: "MyProject.wiki"
     path-prefix: "/agent-output"
     title-prefix: "[Agent] "
