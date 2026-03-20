@@ -39,6 +39,10 @@ impl Validate for CreateWikiPageParams {
             self.path
         );
         ensure!(
+            self.path.trim_matches('/') != "",
+            "path must contain at least one non-slash segment"
+        );
+        ensure!(
             !self.content.is_empty(),
             "content must not be empty"
         );
@@ -277,7 +281,13 @@ impl Executor for CreateWikiPageResult {
 
         debug!("Creating new wiki page: {effective_path}");
 
-        // ── PUT: create the new page (no If-Match since it doesn't exist) ─────
+        // ── PUT: create the new page using If-Match: "" for atomic create-only ──
+        //
+        // The ADO Wiki Pages API treats a PUT without If-Match as an upsert.
+        // Sending `If-Match: ""` (empty ETag) tells the API "create only — fail
+        // with 412 if this resource already exists", closing the TOCTOU race
+        // between our GET (404) and the PUT where a concurrent request could
+        // create the page first.
         let put_resp = client
             .put(&base_url)
             .query(&[
@@ -286,13 +296,25 @@ impl Executor for CreateWikiPageResult {
                 ("api-version", "7.0"),
             ])
             .header("Content-Type", "application/json")
+            .header("If-Match", "")
             .basic_auth("", Some(token))
             .json(&serde_json::json!({ "content": self.content }))
             .send()
             .await
             .context("Failed to create wiki page")?;
 
-        if put_resp.status().is_success() {
+        let put_status = put_resp.status();
+
+        // 412 Precondition Failed means the page was created between our GET
+        // and our PUT (TOCTOU). Surface this as a clean, actionable message.
+        if put_status.as_u16() == 412 {
+            return Ok(ExecutionResult::failure(format!(
+                "Wiki page '{effective_path}' already exists (conflict detected during creation). \
+                 Use the edit-wiki-page safe output to update existing pages."
+            )));
+        }
+
+        if put_status.is_success() {
             let body: serde_json::Value = put_resp.json().await.unwrap_or_default();
             let page_id = body
                 .get("id")
@@ -318,7 +340,6 @@ impl Executor for CreateWikiPageResult {
                 }),
             ))
         } else {
-            let put_status = put_resp.status();
             let error_body = put_resp.text().await.unwrap_or_default();
             Ok(ExecutionResult::failure(format!(
                 "Failed to create wiki page '{}' (HTTP {}): {}",
@@ -455,6 +476,28 @@ mod tests {
         };
         let result: Result<CreateWikiPageResult, _> = params.try_into();
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validation_rejects_bare_slash_path() {
+        let params = CreateWikiPageParams {
+            path: "/".to_string(),
+            content: "This is sufficient content.".to_string(),
+            comment: None,
+        };
+        let result: Result<CreateWikiPageResult, _> = params.try_into();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validation_rejects_multiple_slash_only_path() {
+        let params = CreateWikiPageParams {
+            path: "///".to_string(),
+            content: "This is sufficient content.".to_string(),
+            comment: None,
+        };
+        let result: Result<CreateWikiPageResult, _> = params.try_into();
+        assert!(result.is_err());
     }
 
     // ── Config ────────────────────────────────────────────────────────────────
@@ -739,7 +782,14 @@ wiki-name: "MyProject.wiki"
         //  the guard itself is exercised by test_page_already_exists_guard_returns_failure)
     }
 
-    /// Unit test for the page-already-exists guard (no HTTP call needed).
+    /// Unit test for the page-already-exists guard logic.
+    ///
+    /// NOTE: This test verifies the conditional logic prototype in isolation —
+    /// it does *not* call `execute_impl` directly. If the guard were accidentally
+    /// removed from `execute_impl`, this test would still pass. The integration
+    /// tests in `tests/compiler_tests.rs` and the network-level test
+    /// `test_execute_page_already_exists_is_rejected` (which calls `execute_impl`
+    /// against a fake host) together catch regressions in the live code path.
     #[test]
     fn test_page_already_exists_guard_returns_failure() {
         // Simulate the logic: if page_exists → failure.
@@ -758,6 +808,9 @@ wiki-name: "MyProject.wiki"
     }
 
     /// Confirm that a non-existent page (page_exists = false) proceeds past the guard.
+    ///
+    /// NOTE: Same caveat as `test_page_already_exists_guard_returns_failure` above —
+    /// this tests the logic prototype, not the live `execute_impl` code path.
     #[test]
     fn test_new_page_passes_guard() {
         let page_exists = false;
