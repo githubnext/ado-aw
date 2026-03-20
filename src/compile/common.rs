@@ -553,7 +553,7 @@ pub fn generate_executor_ado_env(write_service_connection: Option<&str>) -> Stri
 }
 
 /// Safe-output names that require write access to ADO.
-const WRITE_REQUIRING_SAFE_OUTPUTS: &[&str] = &["create-pull-request", "create-work-item", "edit-wiki-page"];
+const WRITE_REQUIRING_SAFE_OUTPUTS: &[&str] = &["create-pull-request", "create-work-item", "create-wiki-page", "edit-wiki-page"];
 
 /// Validate that write-requiring safe-outputs have a write service connection configured.
 pub fn validate_write_permissions(front_matter: &FrontMatter) -> Result<()> {

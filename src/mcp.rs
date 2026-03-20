@@ -11,7 +11,8 @@ use std::path::PathBuf;
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
 use crate::sanitize::sanitize as sanitize_text;
 use crate::tools::{
-    CreatePrParams, CreatePrResult, CreateWorkItemParams, CreateWorkItemResult,
+    CreatePrParams, CreatePrResult, CreateWikiPageParams, CreateWikiPageResult,
+    CreateWorkItemParams, CreateWorkItemResult,
     EditWikiPageParams, EditWikiPageResult, MissingDataParams, MissingDataResult,
     MissingToolParams, MissingToolResult, NoopParams, NoopResult, ToolResult,
     anyhow_to_mcp_error,
@@ -436,6 +437,43 @@ structured output that should be visible in the project wiki."
         info!("Wiki page edit queued: '{}'", result.path);
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Wiki page edit queued for '{}'. The page will be created or updated during safe output processing.",
+            result.path
+        ))]))
+    }
+
+    #[tool(
+        name = "create-wiki-page",
+        description = "Create a new Azure DevOps wiki page with the provided markdown content. \
+The page path (e.g. '/Overview/NewPage') and the wiki to write to are determined by the \
+pipeline configuration. The page must not already exist — use edit-wiki-page to update \
+existing pages. Use this to publish findings, summaries, documentation, or any other \
+structured output that should be visible in the project wiki."
+    )]
+    async fn create_wiki_page(
+        &self,
+        params: Parameters<CreateWikiPageParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!("Tool called: create-wiki-page - '{}'", params.0.path);
+        debug!("Content length: {} chars", params.0.content.len());
+
+        // Sanitize untrusted agent-provided text fields (IS-01).
+        // Path: strip control characters to prevent injection into the NDJSON record.
+        // Content and comment: apply the full sanitization pipeline.
+        let mut sanitized = params.0;
+        sanitized.path = sanitized
+            .path
+            .chars()
+            .filter(|c| !c.is_control() || *c == '\t')
+            .collect();
+        sanitized.content = sanitize_text(&sanitized.content);
+        sanitized.comment = sanitized.comment.map(|c| sanitize_text(&c));
+
+        let result: CreateWikiPageResult = sanitized.try_into()?;
+        let _ = self.write_safe_output_file(&result).await;
+
+        info!("Wiki page creation queued: '{}'", result.path);
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Wiki page creation queued for '{}'. The page will be created during safe output processing.",
             result.path
         ))]))
     }

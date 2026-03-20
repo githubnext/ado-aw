@@ -10,6 +10,7 @@ use percent_encoding::{AsciiSet, CONTROLS};
 pub(crate) const PATH_SEGMENT: &AsciiSet = &CONTROLS.add(b'#').add(b'?').add(b'/').add(b' ');
 
 mod create_pr;
+mod create_wiki_page;
 mod create_work_item;
 mod edit_wiki_page;
 pub mod memory;
@@ -19,6 +20,7 @@ mod noop;
 mod result;
 
 pub use create_pr::*;
+pub use create_wiki_page::*;
 pub use create_work_item::*;
 pub use edit_wiki_page::*;
 pub use missing_data::*;
