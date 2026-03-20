@@ -13,7 +13,7 @@ use crate::sanitize::sanitize as sanitize_text;
 use crate::tools::{
     CreatePrParams, CreatePrResult, CreateWikiPageParams, CreateWikiPageResult,
     CreateWorkItemParams, CreateWorkItemResult,
-    EditWikiPageParams, EditWikiPageResult, MissingDataParams, MissingDataResult,
+    UpdateWikiPageParams, UpdateWikiPageResult, MissingDataParams, MissingDataResult,
     MissingToolParams, MissingToolResult, NoopParams, NoopResult, ToolResult,
     anyhow_to_mcp_error,
 };
@@ -406,17 +406,17 @@ impl SafeOutputs {
     }
 
     #[tool(
-        name = "edit-wiki-page",
+        name = "update-wiki-page",
         description = "Create or update an Azure DevOps wiki page with the provided markdown content. \
 The page path (e.g. '/Overview/Architecture') and the wiki to write to are determined by the \
 pipeline configuration. Use this to publish findings, summaries, documentation, or any other \
 structured output that should be visible in the project wiki."
     )]
-    async fn edit_wiki_page(
+    async fn update_wiki_page(
         &self,
-        params: Parameters<EditWikiPageParams>,
+        params: Parameters<UpdateWikiPageParams>,
     ) -> Result<CallToolResult, McpError> {
-        info!("Tool called: edit-wiki-page - '{}'", params.0.path);
+        info!("Tool called: update-wiki-page - '{}'", params.0.path);
         debug!("Content length: {} chars", params.0.content.len());
 
         // Sanitize untrusted agent-provided text fields (IS-01).
@@ -431,7 +431,7 @@ structured output that should be visible in the project wiki."
         sanitized.content = sanitize_text(&sanitized.content);
         sanitized.comment = sanitized.comment.map(|c| sanitize_text(&c));
 
-        let result: EditWikiPageResult = sanitized.try_into()?;
+        let result: UpdateWikiPageResult = sanitized.try_into()?;
         let _ = self.write_safe_output_file(&result).await;
 
         info!("Wiki page edit queued: '{}'", result.path);
@@ -445,7 +445,7 @@ structured output that should be visible in the project wiki."
         name = "create-wiki-page",
         description = "Create a new Azure DevOps wiki page with the provided markdown content. \
 The page path (e.g. '/Overview/NewPage') and the wiki to write to are determined by the \
-pipeline configuration. The page must not already exist — use edit-wiki-page to update \
+pipeline configuration. The page must not already exist — use update-wiki-page to update \
 existing pages. Use this to publish findings, summaries, documentation, or any other \
 structured output that should be visible in the project wiki."
     )]

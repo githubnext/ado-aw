@@ -269,7 +269,7 @@ impl Executor for CreateWikiPageResult {
         if page_exists {
             return Ok(ExecutionResult::failure(format!(
                 "Wiki page '{effective_path}' already exists. \
-                 Use the edit-wiki-page safe output to update existing pages."
+                 Use the update-wiki-page safe output to update existing pages."
             )));
         }
 
@@ -310,7 +310,7 @@ impl Executor for CreateWikiPageResult {
         if put_status.as_u16() == 412 {
             return Ok(ExecutionResult::failure(format!(
                 "Wiki page '{effective_path}' already exists (conflict detected during creation). \
-                 Use the edit-wiki-page safe output to update existing pages."
+                 Use the update-wiki-page safe output to update existing pages."
             )));
         }
 
@@ -798,7 +798,7 @@ wiki-name: "MyProject.wiki"
         let result = if page_exists {
             Some(ExecutionResult::failure(format!(
                 "Wiki page '{effective_path}' already exists. \
-                 Use the edit-wiki-page safe output to update existing pages."
+                 Use the update-wiki-page safe output to update existing pages."
             )))
         } else {
             None
@@ -818,7 +818,7 @@ wiki-name: "MyProject.wiki"
         let result: Option<ExecutionResult> = if page_exists {
             Some(ExecutionResult::failure(format!(
                 "Wiki page '{effective_path}' already exists. \
-                 Use the edit-wiki-page safe output to update existing pages."
+                 Use the update-wiki-page safe output to update existing pages."
             )))
         } else {
             None

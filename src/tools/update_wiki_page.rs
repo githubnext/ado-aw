@@ -1,4 +1,4 @@
-//! Edit wiki page safe output tool
+//! Update wiki page safe output tool
 
 use anyhow::{Context, ensure};
 use log::{debug, info};
@@ -13,7 +13,7 @@ use crate::tools::{ExecutionContext, ExecutionResult, Executor, Validate};
 
 /// Parameters for editing a wiki page (agent-provided)
 #[derive(Deserialize, JsonSchema)]
-pub struct EditWikiPageParams {
+pub struct UpdateWikiPageParams {
     /// Path of the wiki page to update, e.g. "/Overview/Architecture".
     /// The page must already exist. The path must not contain "..".
     pub path: String,
@@ -26,7 +26,7 @@ pub struct EditWikiPageParams {
     pub comment: Option<String>,
 }
 
-impl Validate for EditWikiPageParams {
+impl Validate for UpdateWikiPageParams {
     fn validate(&self) -> anyhow::Result<()> {
         ensure!(!self.path.trim().is_empty(), "path must not be empty");
         ensure!(
@@ -51,17 +51,17 @@ impl Validate for EditWikiPageParams {
 }
 
 tool_result! {
-    name = "edit-wiki-page",
-    params = EditWikiPageParams,
+    name = "update-wiki-page",
+    params = UpdateWikiPageParams,
     /// Result of editing a wiki page
-    pub struct EditWikiPageResult {
+    pub struct UpdateWikiPageResult {
         path: String,
         content: String,
         comment: Option<String>,
     }
 }
 
-impl Sanitize for EditWikiPageResult {
+impl Sanitize for UpdateWikiPageResult {
     fn sanitize_fields(&mut self) {
         // Path is a structural identifier — sanitize lightly (remove control chars)
         // but do not escape HTML or neutralize patterns that are valid in wiki paths.
@@ -79,11 +79,11 @@ impl Sanitize for EditWikiPageResult {
 // Front-matter configuration
 // ============================================================================
 
-/// Configuration for the `edit-wiki-page` tool (specified in front matter).
+/// Configuration for the `update-wiki-page` tool (specified in front matter).
 ///
 /// ```yaml
 /// safe-outputs:
-///   edit-wiki-page:
+///   update-wiki-page:
 ///     wiki-name: "MyProject.wiki"
 ///     wiki-project: "OtherProject"  # optional, defaults to current project
 ///     path-prefix: "/agent-output"
@@ -91,7 +91,7 @@ impl Sanitize for EditWikiPageResult {
 ///     comment: "Updated by agent"
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EditWikiPageConfig {
+pub struct UpdateWikiPageConfig {
     /// Wiki identifier (name or ID). Required — execution fails without this.
     ///
     /// For a project wiki, the identifier is typically `<ProjectName>.wiki`.
@@ -121,7 +121,7 @@ pub struct EditWikiPageConfig {
     pub comment: Option<String>,
 }
 
-impl Default for EditWikiPageConfig {
+impl Default for UpdateWikiPageConfig {
     fn default() -> Self {
         Self {
             wiki_name: None,
@@ -168,7 +168,7 @@ fn apply_title_prefix(path: &str, prefix: &str) -> String {
 // ============================================================================
 
 #[async_trait::async_trait]
-impl Executor for EditWikiPageResult {
+impl Executor for UpdateWikiPageResult {
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!("Editing wiki page: '{}'", self.path);
         debug!("Content length: {} chars", self.content.len());
@@ -186,12 +186,12 @@ impl Executor for EditWikiPageResult {
             .as_ref()
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
 
-        let config: EditWikiPageConfig = ctx.get_tool_config("edit-wiki-page");
+        let config: UpdateWikiPageConfig = ctx.get_tool_config("update-wiki-page");
 
         let wiki_name = config
             .wiki_name
             .as_deref()
-            .context("wiki-name must be configured in safe-outputs.edit-wiki-page.wiki-name")?;
+            .context("wiki-name must be configured in safe-outputs.update-wiki-page.wiki-name")?;
 
         // Use the wiki-project override if present, otherwise use the pipeline project.
         let project = config
@@ -356,13 +356,13 @@ mod tests {
 
     #[test]
     fn test_result_has_correct_name() {
-        assert_eq!(EditWikiPageResult::NAME, "edit-wiki-page");
+        assert_eq!(UpdateWikiPageResult::NAME, "update-wiki-page");
     }
 
     #[test]
     fn test_params_deserializes() {
         let json = r#"{"path": "/Overview", "content": "Hello, wiki!"}"#;
-        let params: EditWikiPageParams = serde_json::from_str(json).unwrap();
+        let params: UpdateWikiPageParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.path, "/Overview");
         assert_eq!(params.content, "Hello, wiki!");
         assert!(params.comment.is_none());
@@ -371,19 +371,19 @@ mod tests {
     #[test]
     fn test_params_with_comment_deserializes() {
         let json = r#"{"path": "/Overview", "content": "Hello, wiki!", "comment": "initial"}"#;
-        let params: EditWikiPageParams = serde_json::from_str(json).unwrap();
+        let params: UpdateWikiPageParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.comment, Some("initial".to_string()));
     }
 
     #[test]
     fn test_params_converts_to_result() {
-        let params = EditWikiPageParams {
+        let params = UpdateWikiPageParams {
             path: "/My Page".to_string(),
             content: "Some wiki content here".to_string(),
             comment: None,
         };
-        let result: EditWikiPageResult = params.try_into().unwrap();
-        assert_eq!(result.name, "edit-wiki-page");
+        let result: UpdateWikiPageResult = params.try_into().unwrap();
+        assert_eq!(result.name, "update-wiki-page");
         assert_eq!(result.path, "/My Page");
         assert_eq!(result.content, "Some wiki content here");
         assert!(result.comment.is_none());
@@ -391,14 +391,14 @@ mod tests {
 
     #[test]
     fn test_result_serializes_correctly() {
-        let params = EditWikiPageParams {
+        let params = UpdateWikiPageParams {
             path: "/Folder/Page".to_string(),
             content: "Sufficient content here".to_string(),
             comment: Some("initial commit".to_string()),
         };
-        let result: EditWikiPageResult = params.try_into().unwrap();
+        let result: UpdateWikiPageResult = params.try_into().unwrap();
         let json = serde_json::to_string(&result).unwrap();
-        assert!(json.contains(r#""name":"edit-wiki-page""#));
+        assert!(json.contains(r#""name":"update-wiki-page""#));
         assert!(json.contains(r#""path":"/Folder/Page""#));
     }
 
@@ -406,67 +406,67 @@ mod tests {
 
     #[test]
     fn test_validation_rejects_empty_path() {
-        let params = EditWikiPageParams {
+        let params = UpdateWikiPageParams {
             path: "".to_string(),
             content: "Some content here".to_string(),
             comment: None,
         };
-        let result: Result<EditWikiPageResult, _> = params.try_into();
+        let result: Result<UpdateWikiPageResult, _> = params.try_into();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_validation_rejects_path_traversal() {
-        let params = EditWikiPageParams {
+        let params = UpdateWikiPageParams {
             path: "/valid/../../../etc/passwd".to_string(),
             content: "Some content here".to_string(),
             comment: None,
         };
-        let result: Result<EditWikiPageResult, _> = params.try_into();
+        let result: Result<UpdateWikiPageResult, _> = params.try_into();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_validation_rejects_null_bytes_in_path() {
-        let params = EditWikiPageParams {
+        let params = UpdateWikiPageParams {
             path: "/Page\x00Name".to_string(),
             content: "Some valid content here.".to_string(),
             comment: None,
         };
-        let result: Result<EditWikiPageResult, _> = params.try_into();
+        let result: Result<UpdateWikiPageResult, _> = params.try_into();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_validation_rejects_short_content() {
-        let params = EditWikiPageParams {
+        let params = UpdateWikiPageParams {
             path: "/Page".to_string(),
             content: "short".to_string(),
             comment: None,
         };
-        let result: Result<EditWikiPageResult, _> = params.try_into();
+        let result: Result<UpdateWikiPageResult, _> = params.try_into();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_validation_rejects_empty_content() {
-        let params = EditWikiPageParams {
+        let params = UpdateWikiPageParams {
             path: "/Page".to_string(),
             content: "".to_string(),
             comment: None,
         };
-        let result: Result<EditWikiPageResult, _> = params.try_into();
+        let result: Result<UpdateWikiPageResult, _> = params.try_into();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_validation_accepts_valid_params() {
-        let params = EditWikiPageParams {
+        let params = UpdateWikiPageParams {
             path: "/Folder/My Page".to_string(),
             content: "This is sufficient content.".to_string(),
             comment: None,
         };
-        let result: Result<EditWikiPageResult, _> = params.try_into();
+        let result: Result<UpdateWikiPageResult, _> = params.try_into();
         assert!(result.is_ok());
     }
 
@@ -474,7 +474,7 @@ mod tests {
 
     #[test]
     fn test_config_defaults() {
-        let config = EditWikiPageConfig::default();
+        let config = UpdateWikiPageConfig::default();
         assert!(config.wiki_name.is_none());
         assert!(config.wiki_project.is_none());
         assert!(config.path_prefix.is_none());
@@ -491,7 +491,7 @@ path-prefix: "/agent-output"
 title-prefix: "[Agent] "
 comment: "Updated by agent"
 "#;
-        let config: EditWikiPageConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: UpdateWikiPageConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.wiki_name.as_deref(), Some("MyProject.wiki"));
         assert_eq!(config.wiki_project.as_deref(), Some("OtherProject"));
         assert_eq!(config.path_prefix.as_deref(), Some("/agent-output"));
@@ -504,7 +504,7 @@ comment: "Updated by agent"
         let yaml = r#"
 wiki-name: "MyProject.wiki"
 "#;
-        let config: EditWikiPageConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: UpdateWikiPageConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.wiki_name.as_deref(), Some("MyProject.wiki"));
         assert!(config.path_prefix.is_none());
     }
@@ -557,24 +557,24 @@ wiki-name: "MyProject.wiki"
         // Use \x01 (SOH) — passes validate() but must be stripped by sanitize_fields().
         // Null bytes are rejected earlier at the validate() stage (see
         // test_validation_rejects_null_bytes_in_path).
-        let params = EditWikiPageParams {
+        let params = UpdateWikiPageParams {
             path: "/Page\x01Name".to_string(),
             content: "Some valid content here.".to_string(),
             comment: None,
         };
-        let mut result: EditWikiPageResult = params.try_into().unwrap();
+        let mut result: UpdateWikiPageResult = params.try_into().unwrap();
         result.sanitize_fields();
         assert!(!result.path.contains('\x01'));
     }
 
     #[test]
     fn test_sanitize_preserves_path_structure() {
-        let params = EditWikiPageParams {
+        let params = UpdateWikiPageParams {
             path: "/Folder/My Page".to_string(),
             content: "Some valid content here.".to_string(),
             comment: None,
         };
-        let mut result: EditWikiPageResult = params.try_into().unwrap();
+        let mut result: UpdateWikiPageResult = params.try_into().unwrap();
         result.sanitize_fields();
         assert_eq!(result.path, "/Folder/My Page");
     }
@@ -583,12 +583,12 @@ wiki-name: "MyProject.wiki"
 
     #[tokio::test]
     async fn test_execute_missing_wiki_name_returns_err() {
-        let params = EditWikiPageParams {
+        let params = UpdateWikiPageParams {
             path: "/Page".to_string(),
             content: "Some valid content here.".to_string(),
             comment: None,
         };
-        let mut result: EditWikiPageResult = params.try_into().unwrap();
+        let mut result: UpdateWikiPageResult = params.try_into().unwrap();
         result.sanitize_fields();
 
         let ctx = crate::tools::ExecutionContext {
@@ -612,12 +612,12 @@ wiki-name: "MyProject.wiki"
 
     #[tokio::test]
     async fn test_execute_missing_org_url_returns_err() {
-        let params = EditWikiPageParams {
+        let params = UpdateWikiPageParams {
             path: "/Page".to_string(),
             content: "Some valid content here.".to_string(),
             comment: None,
         };
-        let mut result: EditWikiPageResult = params.try_into().unwrap();
+        let mut result: UpdateWikiPageResult = params.try_into().unwrap();
         result.sanitize_fields();
 
         let ctx = crate::tools::ExecutionContext {
@@ -641,14 +641,14 @@ wiki-name: "MyProject.wiki"
 
         let mut tool_configs = HashMap::new();
         tool_configs.insert(
-            "edit-wiki-page".to_string(),
+            "update-wiki-page".to_string(),
             serde_json::json!({ "wiki-name": "Proj.wiki" }),
         );
 
         // Bypass validation by building the result directly (simulates a
         // tampered safe-output file that somehow smuggled ".." through).
-        let result = EditWikiPageResult {
-            name: "edit-wiki-page".to_string(),
+        let result = UpdateWikiPageResult {
+            name: "update-wiki-page".to_string(),
             path: "/valid/../etc/passwd".to_string(),
             content: "pwned".to_string(),
             comment: None,
@@ -678,15 +678,15 @@ wiki-name: "MyProject.wiki"
 
         let mut tool_configs = HashMap::new();
         tool_configs.insert(
-            "edit-wiki-page".to_string(),
+            "update-wiki-page".to_string(),
             serde_json::json!({
                 "wiki-name": "Proj.wiki",
                 "path-prefix": "/agent-output"
             }),
         );
 
-        let result = EditWikiPageResult {
-            name: "edit-wiki-page".to_string(),
+        let result = UpdateWikiPageResult {
+            name: "update-wiki-page".to_string(),
             path: "/root-level-page".to_string(),
             content: "Some content here".to_string(),
             comment: None,
@@ -718,13 +718,13 @@ wiki-name: "MyProject.wiki"
 
         let mut tool_configs = HashMap::new();
         tool_configs.insert(
-            "edit-wiki-page".to_string(),
+            "update-wiki-page".to_string(),
             serde_json::json!({ "wiki-name": "Proj.wiki" }),
         );
 
         // Build result directly to bypass Stage-1 validation
-        let result = EditWikiPageResult {
-            name: "edit-wiki-page".to_string(),
+        let result = UpdateWikiPageResult {
+            name: "update-wiki-page".to_string(),
             path: "/Agent/Page".to_string(),
             content: "some content here".to_string(),
             comment: None,

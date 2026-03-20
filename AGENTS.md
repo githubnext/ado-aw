@@ -41,7 +41,7 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 │       ├── mod.rs
 │       ├── create_pr.rs
 │       ├── create_work_item.rs
-│       ├── edit_wiki_page.rs
+│       ├── update_wiki_page.rs
 │       ├── memory.rs
 │       ├── missing_data.rs
 │       ├── missing_tool.rs
@@ -894,7 +894,7 @@ safe-outputs:
 - Content validation: text files are scanned for `##vso[` commands
 - Extension filtering: can restrict to specific file types
 
-#### edit-wiki-page
+#### update-wiki-page
 Updates the content of an existing Azure DevOps wiki page. The wiki page must already exist; this tool edits its content but does not create new pages.
 
 **Agent parameters:**
@@ -905,7 +905,7 @@ Updates the content of an existing Azure DevOps wiki page. The wiki page must al
 **Configuration options (front matter):**
 ```yaml
 safe-outputs:
-  edit-wiki-page:
+  update-wiki-page:
     wiki-name: "MyProject.wiki"     # Required — wiki identifier (name or GUID)
     wiki-project: "OtherProject"    # Optional — ADO project that owns the wiki; defaults to current pipeline project
     path-prefix: "/agent-output"    # Optional — prepended to the agent-supplied path (restricts write scope)

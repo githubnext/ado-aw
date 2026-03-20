@@ -10,7 +10,7 @@ use std::path::Path;
 
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
 use crate::tools::{
-    CreatePrResult, CreateWikiPageResult, CreateWorkItemResult, EditWikiPageResult,
+    CreatePrResult, CreateWikiPageResult, CreateWorkItemResult, UpdateWikiPageResult,
     ExecutionContext, ExecutionResult, Executor,
 };
 
@@ -182,12 +182,12 @@ pub async fn execute_safe_output(
             );
             output.execute_sanitized(ctx).await?
         }
-        "edit-wiki-page" => {
-            debug!("Parsing edit-wiki-page payload");
-            let mut output: EditWikiPageResult = serde_json::from_value(entry.clone())
-                .map_err(|e| anyhow::anyhow!("Failed to parse edit-wiki-page: {}", e))?;
+        "update-wiki-page" => {
+            debug!("Parsing update-wiki-page payload");
+            let mut output: UpdateWikiPageResult = serde_json::from_value(entry.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to parse update-wiki-page: {}", e))?;
             debug!(
-                "edit-wiki-page: path='{}', content length={}",
+                "update-wiki-page: path='{}', content length={}",
                 output.path,
                 output.content.len()
             );
@@ -396,9 +396,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_execute_malformed_edit_wiki_page_returns_err() {
+    async fn test_execute_malformed_update_wiki_page_returns_err() {
         // Missing required fields (path and content)
-        let entry = serde_json::json!({"name": "edit-wiki-page"});
+        let entry = serde_json::json!({"name": "update-wiki-page"});
         let ctx = ExecutionContext::default();
 
         let result = execute_safe_output(&entry, &ctx).await;
@@ -406,9 +406,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_execute_edit_wiki_page_missing_context() {
+    async fn test_execute_update_wiki_page_missing_context() {
         let entry = serde_json::json!({
-            "name": "edit-wiki-page",
+            "name": "update-wiki-page",
             "path": "/Overview",
             "content": "This is some valid wiki content."
         });
