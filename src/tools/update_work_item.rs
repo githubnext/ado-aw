@@ -26,9 +26,6 @@ pub struct UpdateWorkItemParams {
     /// New state/status (e.g., "Active", "Resolved", "Closed"); only if enabled in the safe-outputs configuration
     pub state: Option<String>,
 
-    /// New work item type (e.g., "Bug", "Task"); only if enabled in the safe-outputs configuration
-    pub work_item_type: Option<String>,
-
     /// New area path (only if enabled in the safe-outputs configuration)
     pub area_path: Option<String>,
 
@@ -49,12 +46,11 @@ impl Validate for UpdateWorkItemParams {
             self.title.is_some()
                 || self.body.is_some()
                 || self.state.is_some()
-                || self.work_item_type.is_some()
                 || self.area_path.is_some()
                 || self.iteration_path.is_some()
                 || self.assignee.is_some()
                 || self.tags.is_some(),
-            "At least one field must be provided for update (title, body, state, work_item_type, area_path, iteration_path, assignee, or tags)"
+            "At least one field must be provided for update (title, body, state, area_path, iteration_path, assignee, or tags)"
         );
         if let Some(title) = &self.title {
             ensure!(!title.is_empty(), "Title cannot be empty");
@@ -73,7 +69,6 @@ tool_result! {
         title: Option<String>,
         body: Option<String>,
         state: Option<String>,
-        work_item_type: Option<String>,
         area_path: Option<String>,
         iteration_path: Option<String>,
         assignee: Option<String>,
@@ -86,7 +81,6 @@ impl Sanitize for UpdateWorkItemResult {
         self.title = self.title.as_deref().map(sanitize_text);
         self.body = self.body.as_deref().map(sanitize_text);
         self.state = self.state.as_deref().map(sanitize_text);
-        self.work_item_type = self.work_item_type.as_deref().map(sanitize_text);
         self.area_path = self.area_path.as_deref().map(sanitize_text);
         self.iteration_path = self.iteration_path.as_deref().map(sanitize_text);
         self.assignee = self.assignee.as_deref().map(sanitize_text);
@@ -126,11 +120,11 @@ fn default_max() -> u32 {
 ///     status: true              # enable state/status updates
 ///     title: true               # enable title updates
 ///     body: true                # enable body/description updates
+///     markdown-body: true       # store body as markdown (requires ADO Services or Server 2022+)
 ///     title-prefix: "[bot] "    # only update work items whose title starts with this prefix
 ///     tag-prefix: "agent-"      # only update work items that have at least one tag starting with this prefix
 ///     max: 3                    # max updates per run (default: 1)
 ///     target: "*"               # "*" (default) or a specific work item ID number
-///     work-item-type: true      # enable work item type updates (ADO-specific)
 ///     area-path: true           # enable area path updates
 ///     iteration-path: true      # enable iteration path updates
 ///     assignee: true            # enable assignee updates
@@ -150,6 +144,15 @@ pub struct UpdateWorkItemConfig {
     /// Enable body/description updates (default: false)
     #[serde(default)]
     pub body: bool,
+
+    /// When true, adds a `/multilineFieldsFormat/System.Description: "Markdown"` patch
+    /// operation alongside the body update so that ADO renders the content as markdown.
+    ///
+    /// Only supported on Azure DevOps Services and Server 2022+. On older on-premises
+    /// deployments this extra operation causes the entire PATCH to fail with HTTP 400,
+    /// so the flag defaults to `false` for broad compatibility.
+    #[serde(default, rename = "markdown-body")]
+    pub markdown_body: bool,
 
     /// Only update work items whose current title starts with this prefix.
     /// Requires an extra GET request to fetch the current title before patching.
@@ -171,10 +174,6 @@ pub struct UpdateWorkItemConfig {
     /// - An integer: only that specific work item ID
     #[serde(default)]
     pub target: TargetConfig,
-
-    /// Enable work item type updates (ADO-specific, default: false)
-    #[serde(default, rename = "work-item-type")]
-    pub work_item_type: bool,
 
     /// Enable area path updates (default: false)
     #[serde(default, rename = "area-path")]
@@ -199,11 +198,11 @@ impl Default for UpdateWorkItemConfig {
             status: false,
             title: false,
             body: false,
+            markdown_body: false,
             title_prefix: None,
             tag_prefix: None,
             max: default_max(),
             target: TargetConfig::default(),
-            work_item_type: false,
             area_path: false,
             iteration_path: false,
             assignee: false,
@@ -268,11 +267,10 @@ impl Executor for UpdateWorkItemResult {
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!("Updating work item #{}", self.id);
         debug!(
-            "Fields: title={:?}, body_len={:?}, state={:?}, type={:?}, area={:?}, iter={:?}, assignee={:?}, tags={:?}",
+            "Fields: title={:?}, body_len={:?}, state={:?}, area={:?}, iter={:?}, assignee={:?}, tags={:?}",
             self.title,
             self.body.as_ref().map(|b| b.len()),
             self.state,
-            self.work_item_type,
             self.area_path,
             self.iteration_path,
             self.assignee,
@@ -294,10 +292,11 @@ impl Executor for UpdateWorkItemResult {
 
         let config: UpdateWorkItemConfig = ctx.get_tool_config("update-work-item");
         debug!(
-            "Config: status={}, title={}, body={}, target={:?}, max={}, title_prefix={:?}, tag_prefix={:?}",
+            "Config: status={}, title={}, body={}, markdown_body={}, target={:?}, max={}, title_prefix={:?}, tag_prefix={:?}",
             config.status,
             config.title,
             config.body,
+            config.markdown_body,
             config.target,
             config.max,
             config.title_prefix,
@@ -308,7 +307,14 @@ impl Executor for UpdateWorkItemResult {
         let target_allowed = match &config.target {
             TargetConfig::Pattern(p) if p == "*" => true,
             TargetConfig::Id(allowed_id) => *allowed_id == self.id,
-            _ => false,
+            TargetConfig::Pattern(p) => {
+                log::warn!(
+                    "update-work-item: unrecognised target pattern '{}'; \
+                     only \"*\" or an integer ID are valid — all updates are blocked",
+                    p
+                );
+                false
+            }
         };
         if !target_allowed {
             return Ok(ExecutionResult::failure(format!(
@@ -331,11 +337,6 @@ impl Executor for UpdateWorkItemResult {
         if self.state.is_some() && !config.status {
             return Ok(ExecutionResult::failure(
                 "State/status updates are not enabled in the update-work-item configuration; set 'status: true' in safe-outputs",
-            ));
-        }
-        if self.work_item_type.is_some() && !config.work_item_type {
-            return Ok(ExecutionResult::failure(
-                "Work item type updates are not enabled in the update-work-item configuration; set 'work-item-type: true' in safe-outputs",
             ));
         }
         if self.area_path.is_some() && !config.area_path {
@@ -422,18 +423,19 @@ impl Executor for UpdateWorkItemResult {
         }
         if let Some(body) = &self.body {
             patch_doc.push(replace_field_op("System.Description", body));
-            // Tell Azure DevOps the description is in markdown format
-            patch_doc.push(serde_json::json!({
-                "op": "replace",
-                "path": "/multilineFieldsFormat/System.Description",
-                "value": "Markdown"
-            }));
+            // Only add the markdown format hint when explicitly opted in.
+            // This op is only supported on ADO Services and Server 2022+; omitting it
+            // keeps the body update working on older on-premises deployments.
+            if config.markdown_body {
+                patch_doc.push(serde_json::json!({
+                    "op": "replace",
+                    "path": "/multilineFieldsFormat/System.Description",
+                    "value": "Markdown"
+                }));
+            }
         }
         if let Some(state) = &self.state {
             patch_doc.push(replace_field_op("System.State", state));
-        }
-        if let Some(work_item_type) = &self.work_item_type {
-            patch_doc.push(replace_field_op("System.WorkItemType", work_item_type));
         }
         if let Some(area_path) = &self.area_path {
             patch_doc.push(replace_field_op("System.AreaPath", area_path));
@@ -517,7 +519,6 @@ mod tests {
             title: Some("New title".to_string()),
             body: None,
             state: None,
-            work_item_type: None,
             area_path: None,
             iteration_path: None,
             assignee: None,
@@ -534,7 +535,6 @@ mod tests {
             title: None,
             body: None,
             state: None,
-            work_item_type: None,
             area_path: None,
             iteration_path: None,
             assignee: None,
@@ -551,7 +551,6 @@ mod tests {
             title: Some("x".repeat(256)),
             body: None,
             state: None,
-            work_item_type: None,
             area_path: None,
             iteration_path: None,
             assignee: None,
@@ -568,7 +567,6 @@ mod tests {
             title: Some("Valid new title".to_string()),
             body: None,
             state: None,
-            work_item_type: None,
             area_path: None,
             iteration_path: None,
             assignee: None,
@@ -588,7 +586,6 @@ mod tests {
             title: None,
             body: None,
             state: Some("Resolved".to_string()),
-            work_item_type: None,
             area_path: None,
             iteration_path: None,
             assignee: None,
@@ -605,7 +602,6 @@ mod tests {
             title: None,
             body: None,
             state: None,
-            work_item_type: None,
             area_path: None,
             iteration_path: None,
             assignee: None,
@@ -627,7 +623,6 @@ mod tests {
             title: Some("Test title".to_string()),
             body: None,
             state: Some("Active".to_string()),
-            work_item_type: None,
             area_path: None,
             iteration_path: None,
             assignee: None,
@@ -647,7 +642,7 @@ mod tests {
         assert!(!config.status);
         assert!(!config.title);
         assert!(!config.body);
-        assert!(!config.work_item_type);
+        assert!(!config.markdown_body);
         assert!(!config.area_path);
         assert!(!config.iteration_path);
         assert!(!config.assignee);
@@ -664,11 +659,11 @@ mod tests {
 status: true
 title: true
 body: true
+markdown-body: true
 title-prefix: "[bot] "
 tag-prefix: "agent-"
 max: 3
 target: "*"
-work-item-type: true
 area-path: true
 iteration-path: true
 assignee: true
@@ -678,11 +673,11 @@ tags: true
         assert!(config.status);
         assert!(config.title);
         assert!(config.body);
+        assert!(config.markdown_body);
         assert_eq!(config.title_prefix, Some("[bot] ".to_string()));
         assert_eq!(config.tag_prefix, Some("agent-".to_string()));
         assert_eq!(config.max, 3);
         assert_eq!(config.target, TargetConfig::Pattern("*".to_string()));
-        assert!(config.work_item_type);
         assert!(config.area_path);
         assert!(config.iteration_path);
         assert!(config.assignee);
@@ -720,7 +715,6 @@ target: 42
             title: Some("New title".to_string()),
             body: None,
             state: None,
-            work_item_type: None,
             area_path: None,
             iteration_path: None,
             assignee: None,
@@ -760,7 +754,6 @@ target: 42
             title: Some("New title".to_string()),
             body: None,
             state: None,
-            work_item_type: None,
             area_path: None,
             iteration_path: None,
             assignee: None,
@@ -802,7 +795,6 @@ target: 42
             title: Some("New title".to_string()),
             body: None,
             state: None,
-            work_item_type: None,
             area_path: None,
             iteration_path: None,
             assignee: None,
@@ -852,7 +844,6 @@ target: 42
             title: None,
             body: None,
             state: Some("Resolved".to_string()),
-            work_item_type: None,
             area_path: None,
             iteration_path: None,
             assignee: None,
@@ -894,7 +885,6 @@ target: 42
             title: Some("Hello @user".to_string()),
             body: Some("Description with <script>alert(1)</script>".to_string()),
             state: None,
-            work_item_type: None,
             area_path: None,
             iteration_path: None,
             assignee: None,

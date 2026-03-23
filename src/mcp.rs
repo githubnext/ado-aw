@@ -354,7 +354,6 @@ fields you want to update."
         sanitized.title = sanitized.title.map(|t| sanitize_text(&t));
         sanitized.body = sanitized.body.map(|b| sanitize_text(&b));
         sanitized.state = sanitized.state.map(|s| sanitize_text(&s));
-        sanitized.work_item_type = sanitized.work_item_type.map(|t| sanitize_text(&t));
         sanitized.area_path = sanitized.area_path.map(|p| sanitize_text(&p));
         sanitized.iteration_path = sanitized.iteration_path.map(|p| sanitize_text(&p));
         sanitized.assignee = sanitized.assignee.map(|a| sanitize_text(&a));
