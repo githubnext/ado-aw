@@ -1059,3 +1059,112 @@ Create new wiki pages.
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+/// Test that update-work-item requires a write service connection
+#[test]
+fn test_update_work_item_requires_write_sc() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-uwi-fail-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("uwi-agent.md");
+    let test_content = r#"---
+name: "Update Work Item Agent"
+description: "Agent that updates work items but has no write SC"
+safe-outputs:
+  update-work-item:
+    title: true
+    status: true
+---
+
+## Update Work Item Agent
+
+Update existing work items.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("uwi-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should fail when update-work-item lacks a write SC"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("permissions.write"),
+        "Error message should mention permissions.write: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that update-work-item compiles successfully when a write SC is present
+#[test]
+fn test_update_work_item_compiles_with_write_sc() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-uwi-pass-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("uwi-agent.md");
+    let test_content = r#"---
+name: "Update Work Item Agent"
+description: "Agent that updates work items with write SC"
+permissions:
+  write: my-write-sc
+safe-outputs:
+  update-work-item:
+    title: true
+    status: true
+    body: true
+    markdown-body: true
+    title-prefix: "[bot] "
+    tag-prefix: "agent-"
+    max: 2
+    target: "*"
+    area-path: true
+    iteration-path: true
+    assignee: true
+    tags: true
+---
+
+## Update Work Item Agent
+
+Update existing work items.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("uwi-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed when write SC is provided: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}

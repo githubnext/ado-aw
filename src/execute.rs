@@ -10,8 +10,8 @@ use std::path::Path;
 
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
 use crate::tools::{
-    CreatePrResult, CreateWikiPageResult, CreateWorkItemResult, UpdateWikiPageResult,
-    ExecutionContext, ExecutionResult, Executor,
+    CreatePrResult, CreateWikiPageResult, CreateWorkItemResult, ExecutionContext, ExecutionResult,
+    Executor, UpdateWikiPageResult, UpdateWorkItemConfig, UpdateWorkItemResult,
 };
 
 // Re-export memory types for use by main.rs
@@ -87,6 +87,11 @@ pub async fn execute_safe_outputs(
         }
     }
 
+    // Fetch the update-work-item max once; used to skip excess entries without aborting the batch
+    let update_wi_config: UpdateWorkItemConfig = ctx.get_tool_config("update-work-item");
+    let max_update_wi = update_wi_config.max as usize;
+    let mut update_wi_executed: usize = 0;
+
     let mut results = Vec::new();
     for (i, entry) in entries.iter().enumerate() {
         let entry_json = serde_json::to_string(entry).unwrap_or_else(|_| "<invalid>".to_string());
@@ -96,6 +101,38 @@ pub async fn execute_safe_outputs(
             entries.len(),
             entry_json
         );
+
+        // Enforce update-work-item max: skip excess entries rather than aborting the whole batch
+        if entry.get("name").and_then(|n| n.as_str()) == Some("update-work-item") {
+            if update_wi_executed >= max_update_wi {
+                let wi_id = entry
+                    .get("id")
+                    .and_then(|v| v.as_u64())
+                    .map(|id| format!(" (work item #{})", id))
+                    .unwrap_or_default();
+                warn!(
+                    "[{}/{}] Skipping update-work-item{} entry: max ({}) already reached for this run",
+                    i + 1,
+                    entries.len(),
+                    wi_id,
+                    max_update_wi
+                );
+                let result = ExecutionResult::failure(format!(
+                    "Skipped{}: maximum update-work-item count ({}) already reached. \
+                     Increase 'max' in safe-outputs.update-work-item to allow more updates.",
+                    wi_id, max_update_wi
+                ));
+                println!(
+                    "[{}/{}] update-work-item - ✗ - {}",
+                    i + 1,
+                    entries.len(),
+                    result.message
+                );
+                results.push(result);
+                continue;
+            }
+            update_wi_executed += 1;
+        }
 
         match execute_safe_output(entry, ctx).await {
             Ok((tool_name, result)) => {
@@ -170,6 +207,13 @@ pub async fn execute_safe_output(
                 output.title,
                 output.description.len()
             );
+            output.execute_sanitized(ctx).await?
+        }
+        "update-work-item" => {
+            debug!("Parsing update-work-item payload");
+            let mut output: UpdateWorkItemResult = serde_json::from_value(entry.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to parse update-work-item: {}", e))?;
+            debug!("update-work-item: id={}", output.id);
             output.execute_sanitized(ctx).await?
         }
         "create-pull-request" => {
@@ -476,6 +520,69 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("AZURE_DEVOPS_ORG_URL")
+        );
+    }
+
+    /// Excess update-work-item entries beyond `max` are skipped (failure result added) rather than
+    /// aborting the entire batch. Other tool entries must still execute.
+    #[tokio::test]
+    async fn test_execute_update_work_item_max_skips_excess_not_abort() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let safe_output_path = temp_dir.path().join(SAFE_OUTPUT_FILENAME);
+
+        // Write 3 update-work-item entries + 1 noop; max defaults to 1
+        let ndjson = r#"{"name":"update-work-item","id":1,"title":"First update"}
+{"name":"update-work-item","id":2,"title":"Second update"}
+{"name":"update-work-item","id":3,"title":"Third update"}
+{"name":"noop","context":"still runs"}
+"#;
+        tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
+
+        // Config: update-work-item with max=1 (default), title=true so the field check passes
+        let update_cfg = serde_json::json!({
+            "title": true,
+            "max": 1
+        });
+        let mut tool_configs = HashMap::new();
+        tool_configs.insert("update-work-item".to_string(), update_cfg);
+
+        let ctx = ExecutionContext {
+            ado_org_url: Some("https://dev.azure.com/org".to_string()),
+            ado_organization: Some("org".to_string()),
+            ado_project: Some("Proj".to_string()),
+            access_token: Some("token".to_string()),
+            working_directory: PathBuf::from("."),
+            source_directory: PathBuf::from("."),
+            tool_configs,
+            repository_id: None,
+            repository_name: None,
+            allowed_repositories: HashMap::new(),
+        };
+
+        let results = execute_safe_outputs(temp_dir.path(), &ctx).await;
+        // The batch must NOT abort — execute_safe_outputs should return Ok
+        assert!(
+            results.is_ok(),
+            "Batch should not abort when max is exceeded; got: {:?}",
+            results
+        );
+        let results = results.unwrap();
+        // 4 entries total: 3 update-work-item + 1 noop
+        assert_eq!(results.len(), 4, "Expected 4 results (3 uwi + 1 noop)");
+
+        // The first update-work-item fails with HTTP error (no real ADO) but was attempted
+        // The 2nd and 3rd are skipped due to max
+        let skipped: Vec<_> = results
+            .iter()
+            .filter(|r| r.message.contains("maximum update-work-item count"))
+            .collect();
+        assert_eq!(skipped.len(), 2, "Expected 2 skipped entries, got: {:?}", skipped);
+
+        // The noop still executes successfully
+        let noop_result = &results[3];
+        assert!(
+            noop_result.success,
+            "noop should still succeed even when prior entries are skipped"
         );
     }
 }
