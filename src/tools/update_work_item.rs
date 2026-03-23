@@ -56,6 +56,16 @@ impl Validate for UpdateWorkItemParams {
             ensure!(!title.is_empty(), "Title cannot be empty");
             ensure!(title.len() <= 255, "Title must be 255 characters or fewer");
         }
+        if let Some(tags) = &self.tags {
+            for tag in tags {
+                ensure!(
+                    !tag.contains(';'),
+                    "Tag '{}' contains a semicolon, which is not allowed \
+                     (ADO uses semicolons as tag separators)",
+                    tag
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -960,5 +970,40 @@ tag-prefix: "agent-"
     fn test_tag_prefix_exact_match_still_passes() {
         // A tag that exactly equals the prefix (no trailing chars) should match
         assert!(tag_prefix_matches("agent-", "agent-"));
+    }
+
+    #[test]
+    fn test_params_rejects_tag_with_semicolon() {
+        // A tag containing a semicolon would inject additional ADO tags — reject it
+        let params = UpdateWorkItemParams {
+            id: 42,
+            title: None,
+            body: None,
+            state: None,
+            area_path: None,
+            iteration_path: None,
+            assignee: None,
+            tags: Some(vec!["valid".to_string(), "injected; extra-tag".to_string()]),
+        };
+        let result: Result<UpdateWorkItemResult, _> = params.try_into();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("semicolon"), "Expected semicolon error, got: {err}");
+    }
+
+    #[test]
+    fn test_params_accepts_tags_without_semicolons() {
+        let params = UpdateWorkItemParams {
+            id: 42,
+            title: None,
+            body: None,
+            state: None,
+            area_path: None,
+            iteration_path: None,
+            assignee: None,
+            tags: Some(vec!["agent-run".to_string(), "automated".to_string()]),
+        };
+        let result: Result<UpdateWorkItemResult, _> = params.try_into();
+        assert!(result.is_ok());
     }
 }
