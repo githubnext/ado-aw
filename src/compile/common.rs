@@ -553,7 +553,7 @@ pub fn generate_executor_ado_env(write_service_connection: Option<&str>) -> Stri
 }
 
 /// Safe-output names that require write access to ADO.
-const WRITE_REQUIRING_SAFE_OUTPUTS: &[&str] = &["create-pull-request", "create-work-item", "create-wiki-page", "update-wiki-page"];
+const WRITE_REQUIRING_SAFE_OUTPUTS: &[&str] = &["comment-on-work-item", "create-pull-request", "create-work-item", "create-wiki-page", "update-wiki-page"];
 
 /// Validate that write-requiring safe-outputs have a write service connection configured.
 pub fn validate_write_permissions(front_matter: &FrontMatter) -> Result<()> {
@@ -581,6 +581,33 @@ pub fn validate_write_permissions(front_matter: &FrontMatter) -> Result<()> {
         );
     }
 
+    Ok(())
+}
+
+/// Validate that comment-on-work-item has a required `target` field when configured.
+pub fn validate_comment_target(front_matter: &FrontMatter) -> Result<()> {
+    if let Some(config_value) = front_matter.safe_outputs.get("comment-on-work-item") {
+        // Check that "target" key is present in the config
+        if let Some(obj) = config_value.as_object() {
+            if !obj.contains_key("target") {
+                anyhow::bail!(
+                    "safe-outputs.comment-on-work-item requires a 'target' field to scope \
+                     which work items the agent can comment on. Options:\n\n  \
+                     target: \"*\"           # any work item (unrestricted)\n  \
+                     target: 12345          # specific work item ID\n  \
+                     target: [12345, 67890] # list of work item IDs\n  \
+                     target: \"area:Path\"   # work items under area path prefix\n"
+                );
+            }
+        } else {
+            // If the value is not an object (e.g., `comment-on-work-item: true`), that's invalid
+            anyhow::bail!(
+                "safe-outputs.comment-on-work-item must be a configuration object with at \
+                 least a 'target' field. Example:\n\n  \
+                 safe-outputs:\n    comment-on-work-item:\n      target: \"*\"\n"
+            );
+        }
+    }
     Ok(())
 }
 

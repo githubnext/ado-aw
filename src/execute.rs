@@ -10,8 +10,8 @@ use std::path::Path;
 
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
 use crate::tools::{
-    CreatePrResult, CreateWikiPageResult, CreateWorkItemResult, UpdateWikiPageResult,
-    ExecutionContext, ExecutionResult, Executor,
+    CommentOnWorkItemResult, CreatePrResult, CreateWikiPageResult, CreateWorkItemResult,
+    UpdateWikiPageResult, ExecutionContext, ExecutionResult, Executor,
 };
 
 // Re-export memory types for use by main.rs
@@ -169,6 +169,17 @@ pub async fn execute_safe_output(
                 "create-work-item: title='{}', description length={}",
                 output.title,
                 output.description.len()
+            );
+            output.execute_sanitized(ctx).await?
+        }
+        "comment-on-work-item" => {
+            debug!("Parsing comment-on-work-item payload");
+            let mut output: CommentOnWorkItemResult = serde_json::from_value(entry.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to parse comment-on-work-item: {}", e))?;
+            debug!(
+                "comment-on-work-item: work_item_id={}, body length={}",
+                output.work_item_id,
+                output.body.len()
             );
             output.execute_sanitized(ctx).await?
         }
@@ -453,6 +464,48 @@ mod tests {
             "name": "create-wiki-page",
             "path": "/NewPage",
             "content": "This is some valid wiki content."
+        });
+
+        // Context without required fields (ado_org_url, etc.)
+        let ctx = ExecutionContext {
+            ado_org_url: None,
+            ado_organization: None,
+            ado_project: None,
+            access_token: None,
+            working_directory: PathBuf::from("."),
+            source_directory: PathBuf::from("."),
+            tool_configs: HashMap::new(),
+            repository_id: None,
+            repository_name: None,
+            allowed_repositories: HashMap::new(),
+        };
+
+        let result = execute_safe_output(&entry, &ctx).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("AZURE_DEVOPS_ORG_URL")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_malformed_comment_on_work_item_returns_err() {
+        // Missing required fields (work_item_id and body)
+        let entry = serde_json::json!({"name": "comment-on-work-item"});
+        let ctx = ExecutionContext::default();
+
+        let result = execute_safe_output(&entry, &ctx).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_execute_comment_on_work_item_missing_context() {
+        let entry = serde_json::json!({
+            "name": "comment-on-work-item",
+            "work_item_id": 12345,
+            "body": "This is a comment on the work item."
         });
 
         // Context without required fields (ado_org_url, etc.)

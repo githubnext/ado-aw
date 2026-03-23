@@ -9,6 +9,7 @@ use percent_encoding::{AsciiSet, CONTROLS};
 /// types) against accidental corruption of the URL structure.
 pub(crate) const PATH_SEGMENT: &AsciiSet = &CONTROLS.add(b'#').add(b'?').add(b'/').add(b' ');
 
+mod comment_on_work_item;
 mod create_pr;
 mod create_wiki_page;
 mod create_work_item;
@@ -19,6 +20,7 @@ mod missing_tool;
 mod noop;
 mod result;
 
+pub use comment_on_work_item::*;
 pub use create_pr::*;
 pub use create_wiki_page::*;
 pub use create_work_item::*;

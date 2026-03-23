@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
 use crate::sanitize::sanitize as sanitize_text;
 use crate::tools::{
+    CommentOnWorkItemParams, CommentOnWorkItemResult,
     CreatePrParams, CreatePrResult, CreateWikiPageParams, CreateWikiPageResult,
     CreateWorkItemParams, CreateWorkItemResult,
     UpdateWikiPageParams, UpdateWikiPageResult, MissingDataParams, MissingDataResult,
@@ -333,6 +334,41 @@ impl SafeOutputs {
         let _ = self.write_safe_output_file(&result).await;
         info!("Work item queued for creation");
         Ok(CallToolResult::success(vec![]))
+    }
+
+    #[tool(
+        name = "comment-on-work-item",
+        description = "Add a comment to an existing Azure DevOps work item. \
+Provide the work item ID and the comment body in markdown. The comment will be \
+posted during safe output processing. Target restrictions may apply based on \
+pipeline configuration."
+    )]
+    async fn comment_on_work_item(
+        &self,
+        params: Parameters<CommentOnWorkItemParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!(
+            "Tool called: comment-on-work-item - work item #{}",
+            params.0.work_item_id
+        );
+        debug!("Body length: {} chars", params.0.body.len());
+        // Sanitize untrusted agent-provided text fields (IS-01)
+        let mut sanitized = params.0;
+        sanitized.body = sanitize_text(&sanitized.body);
+        let result: CommentOnWorkItemResult = sanitized.try_into()?;
+        let written = self.write_safe_output_file_with_maximum(&result, 1).await
+            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        if !written {
+            warn!("comment-on-work-item limit reached, ignoring");
+            return Ok(CallToolResult::success(vec![Content::text(
+                "Maximum number of comments reached for this run. This comment was not recorded.",
+            )]));
+        }
+        info!("Comment queued for work item #{}", result.work_item_id);
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Comment queued for work item #{}. The comment will be posted during safe output processing.",
+            result.work_item_id
+        ))]))
     }
 
     #[tool(
