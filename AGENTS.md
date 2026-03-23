@@ -40,6 +40,7 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 │   └── tools/            # MCP tool implementations
 │       ├── mod.rs
 │       ├── create_pr.rs
+│       ├── create_wiki_page.rs
 │       ├── create_work_item.rs
 │       ├── update_wiki_page.rs
 │       ├── memory.rs
@@ -893,6 +894,27 @@ safe-outputs:
 - Path validation: no `..`, `.git`, absolute paths, or null bytes
 - Content validation: text files are scanned for `##vso[` commands
 - Extension filtering: can restrict to specific file types
+
+#### create-wiki-page
+Creates a new Azure DevOps wiki page. The page must **not** already exist; the tool enforces an atomic create-only operation (via `If-Match: ""`). Attempting to create a page that already exists results in an explicit failure.
+
+**Agent parameters:**
+- `path` - Wiki page path to create (e.g. `/Overview/NewPage`). Must not be empty and must not contain `..`.
+- `content` - Markdown content for the wiki page (at least 10 characters).
+- `comment` *(optional)* - Commit comment describing the change. Defaults to the value configured in the front matter, or `"Created by agent"` if not set.
+
+**Configuration options (front matter):**
+```yaml
+safe-outputs:
+  create-wiki-page:
+    wiki-name: "MyProject.wiki"     # Required — wiki identifier (name or GUID)
+    wiki-project: "OtherProject"    # Optional — ADO project that owns the wiki; defaults to current pipeline project
+    path-prefix: "/agent-output"    # Optional — prepended to the agent-supplied path (restricts write scope)
+    title-prefix: "[Agent] "        # Optional — prepended to the last path segment (the page title)
+    comment: "Created by agent"     # Optional — default commit comment when agent omits one
+```
+
+Note: `wiki-name` is required. If it is not set, execution fails with an explicit error message.
 
 #### update-wiki-page
 Updates the content of an existing Azure DevOps wiki page. The wiki page must already exist; this tool edits its content but does not create new pages.
