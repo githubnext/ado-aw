@@ -42,6 +42,7 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 │       ├── create_pr.rs
 │       ├── create_wiki_page.rs
 │       ├── create_work_item.rs
+│       ├── update_work_item.rs
 │       ├── update_wiki_page.rs
 │       ├── memory.rs
 │       ├── missing_data.rs
@@ -777,6 +778,41 @@ Creates an Azure DevOps work item.
   - `enabled` - Whether to add an artifact link (default: false)
   - `repository` - Repository name override (defaults to BUILD_REPOSITORY_NAME)
   - `branch` - Branch name to link to (default: "main")
+
+#### update-work-item
+Updates an existing Azure DevOps work item. Each field that can be modified requires explicit opt-in via configuration to prevent unintended updates.
+
+**Agent parameters:**
+- `id` - Work item ID to update (required, must be a positive integer)
+- `title` - New title for the work item (optional, requires `title: true` in config)
+- `body` - New description in markdown format (optional, requires `body: true` in config)
+- `state` - New state (e.g., `"Active"`, `"Resolved"`, `"Closed"`; optional, requires `status: true` in config)
+- `area_path` - New area path (optional, requires `area-path: true` in config)
+- `iteration_path` - New iteration path (optional, requires `iteration-path: true` in config)
+- `assignee` - New assignee email or display name (optional, requires `assignee: true` in config)
+- `tags` - New tags, replaces all existing tags (optional, requires `tags: true` in config)
+
+At least one field must be provided for update.
+
+**Configuration options (front matter):**
+```yaml
+safe-outputs:
+  update-work-item:
+    status: true              # enable state/status updates via `state` parameter (default: false)
+    title: true               # enable title updates (default: false)
+    body: true                # enable body/description updates (default: false)
+    markdown-body: true       # store body as markdown in ADO (default: false; requires ADO Services or Server 2022+)
+    title-prefix: "[bot] "    # only update work items whose title starts with this prefix
+    tag-prefix: "agent-"      # only update work items that have at least one tag starting with this prefix
+    max: 3                    # maximum number of update-work-item outputs allowed per run (default: 1)
+    target: "*"               # "*" (default) allows any work item ID, or set to a specific work item ID number
+    area-path: true           # enable area path updates (default: false)
+    iteration-path: true      # enable iteration path updates (default: false)
+    assignee: true            # enable assignee updates (default: false)
+    tags: true                # enable tag updates (default: false)
+```
+
+**Security note:** Every field that can be modified requires explicit opt-in (`true`) in the front matter configuration. If the `max` limit is exceeded, additional entries are skipped rather than aborting the entire batch.
 
 #### create-pull-request
 Creates a pull request with code changes made by the agent. When invoked:
