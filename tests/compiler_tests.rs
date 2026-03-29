@@ -1318,3 +1318,75 @@ Comment on work items.
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+/// Test that comment-on-work-item fixture compiles and generates correct pipeline output
+#[test]
+fn test_fixture_comment_on_work_item_compiled_output() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-cwi-fixture-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("comment-on-work-item-agent.md");
+
+    assert!(
+        fixture_path.exists(),
+        "comment-on-work-item fixture should exist"
+    );
+
+    let output_path = temp_dir.join("comment-on-work-item-agent.yml");
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            fixture_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_path.exists(), "Compiled YAML should exist");
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+
+    // Should contain comment-on-work-item in the safe outputs tool config
+    assert!(
+        compiled.contains("comment-on-work-item"),
+        "Compiled output should reference comment-on-work-item tool"
+    );
+
+    // Should have safeoutputs in the allowed tools (agent can call comment-on-work-item via MCP)
+    assert!(
+        compiled.contains("safeoutputs"),
+        "Compiled output should allow the safeoutputs MCP tool"
+    );
+
+    // Should contain the write service connection for Stage 2
+    assert!(
+        compiled.contains("my-write-sc"),
+        "Compiled output should contain the write service connection"
+    );
+
+    // Verify no unreplaced markers
+    for line in compiled.lines() {
+        let stripped = line.replace("${{", "");
+        assert!(
+            !stripped.contains("{{ "),
+            "Compiled output should not contain unreplaced marker: {}",
+            line.trim()
+        );
+    }
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}

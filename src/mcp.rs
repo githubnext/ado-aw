@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
-use crate::sanitize::sanitize as sanitize_text;
+use crate::sanitize::{Sanitize, sanitize as sanitize_text};
 use crate::tools::{
     CommentOnWorkItemParams, CommentOnWorkItemResult,
     CreatePrParams, CreatePrResult, CreateWikiPageParams, CreateWikiPageResult,
@@ -379,7 +379,9 @@ fields you want to update."
         params: Parameters<UpdateWorkItemParams>,
     ) -> Result<CallToolResult, McpError> {
         info!("Tool called: update-work-item - id={}", params.0.id);
-        let result: UpdateWorkItemResult = params.0.try_into()?;
+        let mut result: UpdateWorkItemResult = params.0.try_into()?;
+        // Sanitize before persisting to NDJSON (defense-in-depth; Stage 2 sanitizes again)
+        result.sanitize_fields();
         self.write_safe_output_file(&result).await
             .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
         info!("Work item update queued for #{}", result.id);
