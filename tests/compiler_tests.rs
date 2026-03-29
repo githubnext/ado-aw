@@ -1077,6 +1077,7 @@ safe-outputs:
   update-work-item:
     title: true
     status: true
+    target: "*"
 ---
 
 ## Update Work Item Agent
@@ -1164,6 +1165,281 @@ Update existing work items.
         output.status.success(),
         "Compiler should succeed when write SC is provided: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that comment-on-work-item requires a target field
+#[test]
+fn test_comment_on_work_item_requires_target_field() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-cwi-target-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("cwi-agent.md");
+    let test_content = r#"---
+name: "Comment Agent"
+description: "Agent that comments on work items but has no target"
+permissions:
+  write: my-write-sc
+safe-outputs:
+  comment-on-work-item:
+    max: 3
+---
+
+## Comment Agent
+
+Comment on work items.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("cwi-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should fail when comment-on-work-item lacks a target field"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("target"),
+        "Error message should mention target: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that comment-on-work-item requires a write service connection
+#[test]
+fn test_comment_on_work_item_requires_write_sc() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-cwi-sc-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("cwi-agent.md");
+    let test_content = r#"---
+name: "Comment Agent"
+description: "Agent that comments on work items but has no write SC"
+safe-outputs:
+  comment-on-work-item:
+    target: "*"
+---
+
+## Comment Agent
+
+Comment on work items.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("cwi-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should fail when comment-on-work-item lacks a write SC"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("permissions.write"),
+        "Error message should mention permissions.write: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that comment-on-work-item compiles successfully with proper config
+#[test]
+fn test_comment_on_work_item_compiles_with_target_and_write_sc() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-cwi-pass-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("cwi-agent.md");
+    let test_content = r#"---
+name: "Comment Agent"
+description: "Agent that comments on work items"
+permissions:
+  write: my-write-sc
+safe-outputs:
+  comment-on-work-item:
+    target: "*"
+    max: 5
+---
+
+## Comment Agent
+
+Comment on work items.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("cwi-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed when target and write SC are provided: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that comment-on-work-item fixture compiles and generates correct pipeline output
+#[test]
+fn test_fixture_comment_on_work_item_compiled_output() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-cwi-fixture-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("comment-on-work-item-agent.md");
+
+    assert!(
+        fixture_path.exists(),
+        "comment-on-work-item fixture should exist"
+    );
+
+    let output_path = temp_dir.join("comment-on-work-item-agent.yml");
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            fixture_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_path.exists(), "Compiled YAML should exist");
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+
+    // Should contain comment-on-work-item in the safe outputs tool config
+    assert!(
+        compiled.contains("comment-on-work-item"),
+        "Compiled output should reference comment-on-work-item tool"
+    );
+
+    // Should have safeoutputs in the allowed tools (agent can call comment-on-work-item via MCP)
+    assert!(
+        compiled.contains("safeoutputs"),
+        "Compiled output should allow the safeoutputs MCP tool"
+    );
+
+    // Should contain the write service connection for Stage 2
+    assert!(
+        compiled.contains("my-write-sc"),
+        "Compiled output should contain the write service connection"
+    );
+
+    // Verify no unreplaced markers
+    for line in compiled.lines() {
+        let stripped = line.replace("${{", "");
+        assert!(
+            !stripped.contains("{{ "),
+            "Compiled output should not contain unreplaced marker: {}",
+            line.trim()
+        );
+    }
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that update-work-item requires a target field
+#[test]
+fn test_update_work_item_requires_target_field() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-uwi-target-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("uwi-agent.md");
+    let test_content = r#"---
+name: "Update Work Item Agent"
+description: "Agent that updates work items but has no target"
+permissions:
+  write: my-write-sc
+safe-outputs:
+  update-work-item:
+    title: true
+    status: true
+---
+
+## Update Work Item Agent
+
+Update existing work items.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("uwi-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should fail when update-work-item lacks a target field"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("target"),
+        "Error message should mention target: {stderr}"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);

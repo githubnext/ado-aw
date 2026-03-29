@@ -21,6 +21,8 @@ use super::common::{
     generate_pr_trigger, generate_repositories, generate_schedule, generate_source_path,
     generate_working_directory, replace_with_indent, sanitize_filename,
     validate_write_permissions,
+    validate_comment_target,
+    validate_update_work_item_target,
 };
 use super::types::{FrontMatter, McpConfig};
 use crate::allowed_hosts::{CORE_ALLOWED_HOSTS, mcp_required_hosts};
@@ -124,6 +126,10 @@ impl Compiler for StandaloneCompiler {
 
         // Validate that write-requiring safe-outputs have a write service connection
         validate_write_permissions(front_matter)?;
+        // Validate comment-on-work-item has required target field
+        validate_comment_target(front_matter)?;
+        // Validate update-work-item has required target field
+        validate_update_work_item_target(front_matter)?;
 
         // Load threat analysis prompt template
         let threat_analysis_prompt = include_str!("../../templates/threat-analysis.md");

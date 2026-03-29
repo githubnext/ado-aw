@@ -10,7 +10,7 @@ use std::path::Path;
 
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
 use crate::tools::{
-    CreatePrResult, CreateWikiPageResult, CreateWorkItemResult, ExecutionContext, ExecutionResult,
+    CommentOnWorkItemConfig, CommentOnWorkItemResult, CreatePrResult, CreateWikiPageResult, CreateWorkItemResult, ExecutionContext, ExecutionResult,
     Executor, UpdateWikiPageResult, UpdateWorkItemConfig, UpdateWorkItemResult,
 };
 
@@ -92,6 +92,11 @@ pub async fn execute_safe_outputs(
     let max_update_wi = update_wi_config.max as usize;
     let mut update_wi_executed: usize = 0;
 
+    // Fetch the comment-on-work-item max once; same skip-and-continue pattern
+    let comment_wi_config: CommentOnWorkItemConfig = ctx.get_tool_config("comment-on-work-item");
+    let max_comment_wi = comment_wi_config.max as usize;
+    let mut comment_wi_executed: usize = 0;
+
     let mut results = Vec::new();
     for (i, entry) in entries.iter().enumerate() {
         let entry_json = serde_json::to_string(entry).unwrap_or_else(|_| "<invalid>".to_string());
@@ -102,7 +107,9 @@ pub async fn execute_safe_outputs(
             entry_json
         );
 
-        // Enforce update-work-item max: skip excess entries rather than aborting the whole batch
+        // Enforce update-work-item max: skip excess entries rather than aborting the whole batch.
+        // Budget is consumed before execution so that failed attempts (target policy rejection,
+        // network errors) still count — this prevents unbounded retries against a failing endpoint.
         if entry.get("name").and_then(|n| n.as_str()) == Some("update-work-item") {
             if update_wi_executed >= max_update_wi {
                 let wi_id = entry
@@ -132,6 +139,39 @@ pub async fn execute_safe_outputs(
                 continue;
             }
             update_wi_executed += 1;
+        }
+
+        // Enforce comment-on-work-item max: same skip-and-continue pattern as update-work-item.
+        // Budget is consumed before execution so that failed attempts still count.
+        if entry.get("name").and_then(|n| n.as_str()) == Some("comment-on-work-item") {
+            if comment_wi_executed >= max_comment_wi {
+                let wi_id = entry
+                    .get("work_item_id")
+                    .and_then(|v| v.as_i64())
+                    .map(|id| format!(" (work item #{})", id))
+                    .unwrap_or_default();
+                warn!(
+                    "[{}/{}] Skipping comment-on-work-item{} entry: max ({}) already reached for this run",
+                    i + 1,
+                    entries.len(),
+                    wi_id,
+                    max_comment_wi
+                );
+                let result = ExecutionResult::failure(format!(
+                    "Skipped{}: maximum comment-on-work-item count ({}) already reached. \
+                     Increase 'max' in safe-outputs.comment-on-work-item to allow more comments.",
+                    wi_id, max_comment_wi
+                ));
+                println!(
+                    "[{}/{}] comment-on-work-item - ✗ - {}",
+                    i + 1,
+                    entries.len(),
+                    result.message
+                );
+                results.push(result);
+                continue;
+            }
+            comment_wi_executed += 1;
         }
 
         match execute_safe_output(entry, ctx).await {
@@ -206,6 +246,17 @@ pub async fn execute_safe_output(
                 "create-work-item: title='{}', description length={}",
                 output.title,
                 output.description.len()
+            );
+            output.execute_sanitized(ctx).await?
+        }
+        "comment-on-work-item" => {
+            debug!("Parsing comment-on-work-item payload");
+            let mut output: CommentOnWorkItemResult = serde_json::from_value(entry.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to parse comment-on-work-item: {}", e))?;
+            debug!(
+                "comment-on-work-item: work_item_id={}, body length={}",
+                output.work_item_id,
+                output.body.len()
             );
             output.execute_sanitized(ctx).await?
         }
@@ -523,6 +574,48 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_execute_malformed_comment_on_work_item_returns_err() {
+        // Missing required fields (work_item_id and body)
+        let entry = serde_json::json!({"name": "comment-on-work-item"});
+        let ctx = ExecutionContext::default();
+
+        let result = execute_safe_output(&entry, &ctx).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_execute_comment_on_work_item_missing_context() {
+        let entry = serde_json::json!({
+            "name": "comment-on-work-item",
+            "work_item_id": 12345,
+            "body": "This is a comment on the work item."
+        });
+
+        // Context without required fields (ado_org_url, etc.)
+        let ctx = ExecutionContext {
+            ado_org_url: None,
+            ado_organization: None,
+            ado_project: None,
+            access_token: None,
+            working_directory: PathBuf::from("."),
+            source_directory: PathBuf::from("."),
+            tool_configs: HashMap::new(),
+            repository_id: None,
+            repository_name: None,
+            allowed_repositories: HashMap::new(),
+        };
+
+        let result = execute_safe_output(&entry, &ctx).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("AZURE_DEVOPS_ORG_URL")
+        );
+    }
+
     /// Excess update-work-item entries beyond `max` are skipped (failure result added) rather than
     /// aborting the entire batch. Other tool entries must still execute.
     #[tokio::test]
@@ -541,7 +634,8 @@ mod tests {
         // Config: update-work-item with max=1 (default), title=true so the field check passes
         let update_cfg = serde_json::json!({
             "title": true,
-            "max": 1
+            "max": 1,
+            "target": "*"
         });
         let mut tool_configs = HashMap::new();
         tool_configs.insert("update-work-item".to_string(), update_cfg);

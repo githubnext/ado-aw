@@ -9,8 +9,9 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
-use crate::sanitize::sanitize as sanitize_text;
+use crate::sanitize::{Sanitize, sanitize as sanitize_text};
 use crate::tools::{
+    CommentOnWorkItemParams, CommentOnWorkItemResult,
     CreatePrParams, CreatePrResult, CreateWikiPageParams, CreateWikiPageResult,
     CreateWorkItemParams, CreateWorkItemResult,
     UpdateWikiPageParams, UpdateWikiPageResult, MissingDataParams, MissingDataResult,
@@ -337,6 +338,35 @@ impl SafeOutputs {
     }
 
     #[tool(
+        name = "comment-on-work-item",
+        description = "Add a comment to an existing Azure DevOps work item. \
+Provide the work item ID and the comment body in markdown. The comment will be \
+posted during safe output processing. Target restrictions may apply based on \
+pipeline configuration."
+    )]
+    async fn comment_on_work_item(
+        &self,
+        params: Parameters<CommentOnWorkItemParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!(
+            "Tool called: comment-on-work-item - work item #{}",
+            params.0.work_item_id
+        );
+        debug!("Body length: {} chars", params.0.body.len());
+        // Sanitize untrusted agent-provided text fields (IS-01)
+        let mut sanitized = params.0;
+        sanitized.body = sanitize_text(&sanitized.body);
+        let result: CommentOnWorkItemResult = sanitized.try_into()?;
+        self.write_safe_output_file(&result).await
+            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        info!("Comment queued for work item #{}", result.work_item_id);
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Comment queued for work item #{}. The comment will be posted during safe output processing.",
+            result.work_item_id
+        ))]))
+    }
+
+    #[tool(
         name = "update-work-item",
         description = "Update an existing Azure DevOps work item. Only fields explicitly enabled \
 in the pipeline configuration (safe-outputs.update-work-item) may be changed. Updates may be \
@@ -349,19 +379,11 @@ fields you want to update."
         params: Parameters<UpdateWorkItemParams>,
     ) -> Result<CallToolResult, McpError> {
         info!("Tool called: update-work-item - id={}", params.0.id);
-        // Sanitize untrusted agent-provided text fields (IS-01)
-        let mut sanitized = params.0;
-        sanitized.title = sanitized.title.map(|t| sanitize_text(&t));
-        sanitized.body = sanitized.body.map(|b| sanitize_text(&b));
-        sanitized.state = sanitized.state.map(|s| sanitize_text(&s));
-        sanitized.area_path = sanitized.area_path.map(|p| sanitize_text(&p));
-        sanitized.iteration_path = sanitized.iteration_path.map(|p| sanitize_text(&p));
-        sanitized.assignee = sanitized.assignee.map(|a| sanitize_text(&a));
-        sanitized.tags = sanitized
-            .tags
-            .map(|ts| ts.into_iter().map(|t| sanitize_text(&t)).collect());
-        let result: UpdateWorkItemResult = sanitized.try_into()?;
-        let _ = self.write_safe_output_file(&result).await;
+        let mut result: UpdateWorkItemResult = params.0.try_into()?;
+        // Sanitize before persisting to NDJSON (defense-in-depth; Stage 2 sanitizes again)
+        result.sanitize_fields();
+        self.write_safe_output_file(&result).await
+            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
         info!("Work item update queued for #{}", result.id);
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Work item #{} update queued. Changes will be applied during safe output processing.",

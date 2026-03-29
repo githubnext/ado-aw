@@ -111,12 +111,6 @@ pub enum TargetConfig {
     Pattern(String),
 }
 
-impl Default for TargetConfig {
-    fn default() -> Self {
-        TargetConfig::Pattern("*".to_string())
-    }
-}
-
 fn default_max() -> u32 {
     1
 }
@@ -134,7 +128,7 @@ fn default_max() -> u32 {
 ///     title-prefix: "[bot] "    # only update work items whose title starts with this prefix
 ///     tag-prefix: "agent-"      # only update work items that have at least one tag starting with this prefix
 ///     max: 3                    # max updates per run (default: 1)
-///     target: "*"               # "*" (default) or a specific work item ID number
+///     target: "*"               # "*" or a specific work item ID number (required)
 ///     area-path: true           # enable area path updates
 ///     iteration-path: true      # enable iteration path updates
 ///     assignee: true            # enable assignee updates
@@ -179,11 +173,10 @@ pub struct UpdateWorkItemConfig {
     #[serde(default = "default_max")]
     pub max: u32,
 
-    /// Which work items can be updated:
-    /// - `"*"` (default): any work item ID the agent specifies
+    /// Which work items can be updated (required):
+    /// - `"*"`: any work item ID the agent specifies
     /// - An integer: only that specific work item ID
-    #[serde(default)]
-    pub target: TargetConfig,
+    pub target: Option<TargetConfig>,
 
     /// Enable area path updates (default: false)
     #[serde(default, rename = "area-path")]
@@ -212,7 +205,7 @@ impl Default for UpdateWorkItemConfig {
             title_prefix: None,
             tag_prefix: None,
             max: default_max(),
-            target: TargetConfig::default(),
+            target: None,
             area_path: false,
             iteration_path: false,
             assignee: false,
@@ -314,7 +307,17 @@ impl Executor for UpdateWorkItemResult {
         );
 
         // Validate the target constraint
-        let target_allowed = match &config.target {
+        let target = match &config.target {
+            Some(t) => t,
+            None => {
+                return Ok(ExecutionResult::failure(
+                    "update-work-item target is not configured. \
+                     This is required to scope which work items the agent can update."
+                        .to_string(),
+                ));
+            }
+        };
+        let target_allowed = match target {
             TargetConfig::Pattern(p) if p == "*" => true,
             TargetConfig::Id(allowed_id) => *allowed_id == self.id,
             TargetConfig::Pattern(p) => {
@@ -658,7 +661,7 @@ mod tests {
         assert!(!config.assignee);
         assert!(!config.tags);
         assert_eq!(config.max, 1);
-        assert_eq!(config.target, TargetConfig::Pattern("*".to_string()));
+        assert!(config.target.is_none());
         assert!(config.title_prefix.is_none());
         assert!(config.tag_prefix.is_none());
     }
@@ -687,7 +690,7 @@ tags: true
         assert_eq!(config.title_prefix, Some("[bot] ".to_string()));
         assert_eq!(config.tag_prefix, Some("agent-".to_string()));
         assert_eq!(config.max, 3);
-        assert_eq!(config.target, TargetConfig::Pattern("*".to_string()));
+        assert_eq!(config.target, Some(TargetConfig::Pattern("*".to_string())));
         assert!(config.area_path);
         assert!(config.iteration_path);
         assert!(config.assignee);
@@ -701,7 +704,7 @@ title: true
 target: 42
 "#;
         let config: UpdateWorkItemConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.target, TargetConfig::Id(42));
+        assert_eq!(config.target, Some(TargetConfig::Id(42)));
     }
 
     #[test]
@@ -711,7 +714,7 @@ target: 42
         assert!(config.status);
         assert!(!config.title);
         assert_eq!(config.max, 1);
-        assert_eq!(config.target, TargetConfig::Pattern("*".to_string()));
+        assert!(config.target.is_none());
     }
 
     #[tokio::test]
@@ -771,8 +774,11 @@ target: 42
         };
         let mut result: UpdateWorkItemResult = params.try_into().unwrap();
 
-        // Config with title updates disabled (default)
-        let config = UpdateWorkItemConfig::default();
+        // Config with title updates disabled (default), but target set so target check passes
+        let config = UpdateWorkItemConfig {
+            target: Some(TargetConfig::Pattern("*".to_string())),
+            ..UpdateWorkItemConfig::default()
+        };
         let config_value = serde_json::to_value(config).unwrap();
         let mut tool_configs = HashMap::new();
         tool_configs.insert("update-work-item".to_string(), config_value);
@@ -815,7 +821,7 @@ target: 42
         // Config that only allows work item ID 99, not 42
         let config = UpdateWorkItemConfig {
             title: true,
-            target: TargetConfig::Id(99),
+            target: Some(TargetConfig::Id(99)),
             ..UpdateWorkItemConfig::default()
         };
         let config_value = serde_json::to_value(config).unwrap();
@@ -861,7 +867,10 @@ target: 42
         };
         let mut result: UpdateWorkItemResult = params.try_into().unwrap();
 
-        let config = UpdateWorkItemConfig::default(); // status: false
+        let config = UpdateWorkItemConfig {
+            target: Some(TargetConfig::Pattern("*".to_string())),
+            ..UpdateWorkItemConfig::default()
+        }; // status: false
         let config_value = serde_json::to_value(config).unwrap();
         let mut tool_configs = HashMap::new();
         tool_configs.insert("update-work-item".to_string(), config_value);
