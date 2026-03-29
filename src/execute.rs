@@ -107,7 +107,9 @@ pub async fn execute_safe_outputs(
             entry_json
         );
 
-        // Enforce update-work-item max: skip excess entries rather than aborting the whole batch
+        // Enforce update-work-item max: skip excess entries rather than aborting the whole batch.
+        // Budget is consumed before execution so that failed attempts (target policy rejection,
+        // network errors) still count — this prevents unbounded retries against a failing endpoint.
         if entry.get("name").and_then(|n| n.as_str()) == Some("update-work-item") {
             if update_wi_executed >= max_update_wi {
                 let wi_id = entry
@@ -139,7 +141,8 @@ pub async fn execute_safe_outputs(
             update_wi_executed += 1;
         }
 
-        // Enforce comment-on-work-item max: skip excess entries rather than aborting the whole batch
+        // Enforce comment-on-work-item max: same skip-and-continue pattern as update-work-item.
+        // Budget is consumed before execution so that failed attempts still count.
         if entry.get("name").and_then(|n| n.as_str()) == Some("comment-on-work-item") {
             if comment_wi_executed >= max_comment_wi {
                 let wi_id = entry

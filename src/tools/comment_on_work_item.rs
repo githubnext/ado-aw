@@ -220,10 +220,15 @@ impl Executor for CommentOnWorkItemResult {
                 )));
             }
             None => {
-                // Area path validation — need to fetch the work item
-                let prefix = target.area_path_prefix().expect(
-                    "allows_id returned None but area_path_prefix is also None; this is a bug",
-                );
+                // Area path validation — need to fetch the work item.
+                // Invariant: allows_id returns None only for StringTarget(s != "*"),
+                // and area_path_prefix returns Some for exactly that case.
+                let prefix = match target.area_path_prefix() {
+                    Some(p) => p,
+                    None => unreachable!(
+                        "allows_id returned None but area_path_prefix is also None"
+                    ),
+                };
                 debug!(
                     "Validating area path for work item #{} against prefix '{}'",
                     self.work_item_id, prefix
@@ -232,8 +237,15 @@ impl Executor for CommentOnWorkItemResult {
                     .await
                 {
                     Ok(area_path) => {
-                        // ADO area paths are case-insensitive
-                        if !area_path.to_lowercase().starts_with(&prefix.to_lowercase()) {
+                        // ADO area paths are case-insensitive and use backslash separators.
+                        // Require the match to land on a path boundary so that prefix "4x4"
+                        // doesn't accidentally match "4x4Production".
+                        let ap = area_path.to_lowercase();
+                        let pf = prefix.to_lowercase();
+                        let is_match = ap == pf
+                            || (ap.starts_with(&pf)
+                                && ap.as_bytes().get(pf.len()) == Some(&b'\\'));
+                        if !is_match {
                             return Ok(ExecutionResult::failure(format!(
                                 "Work item #{} has area path '{}' which is not under allowed prefix '{}'",
                                 self.work_item_id, area_path, prefix
