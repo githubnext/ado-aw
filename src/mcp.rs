@@ -357,7 +357,7 @@ pipeline configuration."
         let mut sanitized = params.0;
         sanitized.body = sanitize_text(&sanitized.body);
         let result: CommentOnWorkItemResult = sanitized.try_into()?;
-        let _ = self.write_safe_output_file(&result).await
+        self.write_safe_output_file(&result).await
             .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
         info!("Comment queued for work item #{}", result.work_item_id);
         Ok(CallToolResult::success(vec![Content::text(format!(
@@ -379,19 +379,9 @@ fields you want to update."
         params: Parameters<UpdateWorkItemParams>,
     ) -> Result<CallToolResult, McpError> {
         info!("Tool called: update-work-item - id={}", params.0.id);
-        // Sanitize untrusted agent-provided text fields (IS-01)
-        let mut sanitized = params.0;
-        sanitized.title = sanitized.title.map(|t| sanitize_text(&t));
-        sanitized.body = sanitized.body.map(|b| sanitize_text(&b));
-        sanitized.state = sanitized.state.map(|s| sanitize_text(&s));
-        sanitized.area_path = sanitized.area_path.map(|p| sanitize_text(&p));
-        sanitized.iteration_path = sanitized.iteration_path.map(|p| sanitize_text(&p));
-        sanitized.assignee = sanitized.assignee.map(|a| sanitize_text(&a));
-        sanitized.tags = sanitized
-            .tags
-            .map(|ts| ts.into_iter().map(|t| sanitize_text(&t)).collect());
-        let result: UpdateWorkItemResult = sanitized.try_into()?;
-        let _ = self.write_safe_output_file(&result).await;
+        let result: UpdateWorkItemResult = params.0.try_into()?;
+        self.write_safe_output_file(&result).await
+            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
         info!("Work item update queued for #{}", result.id);
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Work item #{} update queued. Changes will be applied during safe output processing.",

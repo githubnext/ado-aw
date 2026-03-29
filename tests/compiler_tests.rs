@@ -1168,3 +1168,153 @@ Update existing work items.
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+/// Test that comment-on-work-item requires a target field
+#[test]
+fn test_comment_on_work_item_requires_target_field() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-cwi-target-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("cwi-agent.md");
+    let test_content = r#"---
+name: "Comment Agent"
+description: "Agent that comments on work items but has no target"
+permissions:
+  write: my-write-sc
+safe-outputs:
+  comment-on-work-item:
+    max: 3
+---
+
+## Comment Agent
+
+Comment on work items.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("cwi-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should fail when comment-on-work-item lacks a target field"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("target"),
+        "Error message should mention target: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that comment-on-work-item requires a write service connection
+#[test]
+fn test_comment_on_work_item_requires_write_sc() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-cwi-sc-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("cwi-agent.md");
+    let test_content = r#"---
+name: "Comment Agent"
+description: "Agent that comments on work items but has no write SC"
+safe-outputs:
+  comment-on-work-item:
+    target: "*"
+---
+
+## Comment Agent
+
+Comment on work items.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("cwi-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should fail when comment-on-work-item lacks a write SC"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("permissions.write"),
+        "Error message should mention permissions.write: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that comment-on-work-item compiles successfully with proper config
+#[test]
+fn test_comment_on_work_item_compiles_with_target_and_write_sc() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-cwi-pass-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("cwi-agent.md");
+    let test_content = r#"---
+name: "Comment Agent"
+description: "Agent that comments on work items"
+permissions:
+  write: my-write-sc
+safe-outputs:
+  comment-on-work-item:
+    target: "*"
+    max: 5
+---
+
+## Comment Agent
+
+Comment on work items.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("cwi-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed when target and write SC are provided: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}

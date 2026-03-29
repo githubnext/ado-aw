@@ -232,7 +232,8 @@ impl Executor for CommentOnWorkItemResult {
                     .await
                 {
                     Ok(area_path) => {
-                        if !area_path.starts_with(prefix) {
+                        // ADO area paths are case-insensitive
+                        if !area_path.to_lowercase().starts_with(&prefix.to_lowercase()) {
                             return Ok(ExecutionResult::failure(format!(
                                 "Work item #{} has area path '{}' which is not under allowed prefix '{}'",
                                 self.work_item_id, area_path, prefix
