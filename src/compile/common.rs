@@ -267,10 +267,7 @@ const DEFAULT_BASH_COMMANDS: &[&str] = &[
 
 /// Generate copilot CLI params from front matter configuration
 pub fn generate_copilot_params(front_matter: &FrontMatter) -> String {
-    let mut allowed_tools: Vec<String> = vec![
-        "github".to_string(),
-        "safeoutputs".to_string(),
-    ];
+    let mut allowed_tools: Vec<String> = vec!["github".to_string(), "safeoutputs".to_string()];
 
     // Edit tool: enabled by default, can be disabled with `edit: false`
     let edit_enabled = front_matter
@@ -458,7 +455,7 @@ pub const DEFAULT_POOL: &str = "AZS-1ES-L-MMS-ubuntu-22.04";
 /// Version of the AWF (Agentic Workflow Firewall) binary to download from GitHub Releases.
 /// Update this when upgrading to a new AWF release.
 /// See: https://github.com/github/gh-aw-firewall/releases
-pub const AWF_VERSION: &str = "0.24.5";
+pub const AWF_VERSION: &str = "0.25.3";
 
 /// Version of the GitHub Copilot CLI (Microsoft.Copilot.CLI.linux-x64) NuGet package to install.
 /// Update this when upgrading to a new Copilot CLI release.
@@ -515,10 +512,7 @@ pub fn generate_acquire_ado_token(service_connection: Option<&str>, variable_nam
             lines.push("    addSpnToEnvironment: true".to_string());
             lines.push("    inlineScript: |".to_string());
             lines.push("      ADO_TOKEN=$(az account get-access-token \\".to_string());
-            lines.push(format!(
-                "        --resource {} \\",
-                ADO_RESOURCE_ID
-            ));
+            lines.push(format!("        --resource {} \\", ADO_RESOURCE_ID));
             lines.push("        --query accessToken -o tsv)".to_string());
             lines.push(format!(
                 "      echo \"##vso[task.setvariable variable={variable_name};issecret=true]$ADO_TOKEN\""
@@ -534,10 +528,8 @@ pub fn generate_acquire_ado_token(service_connection: Option<&str>, variable_nam
 /// When not configured, omits ADO access tokens entirely.
 pub fn generate_copilot_ado_env(read_service_connection: Option<&str>) -> String {
     match read_service_connection {
-        Some(_) => {
-            "AZURE_DEVOPS_EXT_PAT: $(SC_READ_TOKEN)\nSYSTEM_ACCESSTOKEN: $(SC_READ_TOKEN)"
-                .to_string()
-        }
+        Some(_) => "AZURE_DEVOPS_EXT_PAT: $(SC_READ_TOKEN)\nSYSTEM_ACCESSTOKEN: $(SC_READ_TOKEN)"
+            .to_string(),
         None => String::new(),
     }
 }
@@ -553,7 +545,14 @@ pub fn generate_executor_ado_env(write_service_connection: Option<&str>) -> Stri
 }
 
 /// Safe-output names that require write access to ADO.
-const WRITE_REQUIRING_SAFE_OUTPUTS: &[&str] = &["comment-on-work-item", "create-pull-request", "create-work-item", "create-wiki-page", "update-wiki-page"];
+const WRITE_REQUIRING_SAFE_OUTPUTS: &[&str] = &[
+    "create-pull-request",
+    "create-work-item",
+    "comment-on-work-item",
+    "update-work-item",
+    "create-wiki-page",
+    "update-wiki-page",
+];
 
 /// Validate that write-requiring safe-outputs have a write service connection configured.
 pub fn validate_write_permissions(front_matter: &FrontMatter) -> Result<()> {
@@ -787,7 +786,10 @@ mod tests {
     #[test]
     fn test_generate_pr_trigger_no_triggers_no_schedule() {
         let result = generate_pr_trigger(&None, false);
-        assert!(result.is_empty(), "Should be empty when no triggers configured");
+        assert!(
+            result.is_empty(),
+            "Should be empty when no triggers configured"
+        );
     }
 
     #[test]
@@ -831,7 +833,10 @@ mod tests {
     #[test]
     fn test_generate_ci_trigger_no_triggers_no_schedule() {
         let result = generate_ci_trigger(&None, false);
-        assert!(result.is_empty(), "Should be empty when no triggers configured");
+        assert!(
+            result.is_empty(),
+            "Should be empty when no triggers configured"
+        );
     }
 
     #[test]

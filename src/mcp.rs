@@ -16,6 +16,7 @@ use crate::tools::{
     CreateWorkItemParams, CreateWorkItemResult,
     UpdateWikiPageParams, UpdateWikiPageResult, MissingDataParams, MissingDataResult,
     MissingToolParams, MissingToolResult, NoopParams, NoopResult, ToolResult,
+    UpdateWorkItemParams, UpdateWorkItemResult,
     anyhow_to_mcp_error,
 };
 
@@ -368,6 +369,39 @@ pipeline configuration."
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Comment queued for work item #{}. The comment will be posted during safe output processing.",
             result.work_item_id
+        ))]))
+    }
+
+    #[tool(
+        name = "update-work-item",
+        description = "Update an existing Azure DevOps work item. Only fields explicitly enabled \
+in the pipeline configuration (safe-outputs.update-work-item) may be changed. Updates may be \
+further restricted by target (only a specific work item ID) or title-prefix (only work items \
+whose current title starts with a configured prefix). Provide the work item ID and only the \
+fields you want to update."
+    )]
+    async fn update_work_item(
+        &self,
+        params: Parameters<UpdateWorkItemParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!("Tool called: update-work-item - id={}", params.0.id);
+        // Sanitize untrusted agent-provided text fields (IS-01)
+        let mut sanitized = params.0;
+        sanitized.title = sanitized.title.map(|t| sanitize_text(&t));
+        sanitized.body = sanitized.body.map(|b| sanitize_text(&b));
+        sanitized.state = sanitized.state.map(|s| sanitize_text(&s));
+        sanitized.area_path = sanitized.area_path.map(|p| sanitize_text(&p));
+        sanitized.iteration_path = sanitized.iteration_path.map(|p| sanitize_text(&p));
+        sanitized.assignee = sanitized.assignee.map(|a| sanitize_text(&a));
+        sanitized.tags = sanitized
+            .tags
+            .map(|ts| ts.into_iter().map(|t| sanitize_text(&t)).collect());
+        let result: UpdateWorkItemResult = sanitized.try_into()?;
+        let _ = self.write_safe_output_file(&result).await;
+        info!("Work item update queued for #{}", result.id);
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Work item #{} update queued. Changes will be applied during safe output processing.",
+            result.id
         ))]))
     }
 
