@@ -595,7 +595,7 @@ pub fn validate_comment_target(front_matter: &FrontMatter) -> Result<()> {
                      target: \"*\"           # any work item (unrestricted)\n  \
                      target: 12345          # specific work item ID\n  \
                      target: [12345, 67890] # list of work item IDs\n  \
-                     target: \"area:Path\"   # work items under area path prefix\n"
+                     target: \"Path\\\\Sub\"   # work items under area path prefix\n"
                 );
             }
         } else {

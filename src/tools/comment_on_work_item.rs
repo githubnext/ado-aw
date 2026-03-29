@@ -48,10 +48,10 @@ impl Sanitize for CommentOnWorkItemResult {
 /// Target scope for which work items can be commented on.
 ///
 /// Deserialized from the `target` field in front matter:
-/// - `"*"` → `Wildcard` (any work item)
-/// - `12345` → `Id(12345)` (single work item)
-/// - `[12345, 67890]` → `Ids(vec![12345, 67890])` (set of work items)
-/// - `"area:Some\\Path"` → `AreaPath("Some\\Path")` (work items under area path prefix)
+/// - `"*"` → wildcard (any work item)
+/// - `12345` → single work item ID
+/// - `[12345, 67890]` → set of work item IDs
+/// - `"Some\\Path"` → area path prefix (any string that isn't `"*"`)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum CommentTarget {
@@ -59,7 +59,7 @@ pub enum CommentTarget {
     SingleId(i64),
     /// A list of work item IDs
     IdList(Vec<i64>),
-    /// A string target: "*" for wildcard, "area:..." for area path
+    /// A string target: "*" for wildcard, anything else is an area path
     StringTarget(String),
 }
 
@@ -78,7 +78,7 @@ impl CommentTarget {
     /// Get the area path prefix if this is an area-path target.
     pub fn area_path_prefix(&self) -> Option<&str> {
         match self {
-            CommentTarget::StringTarget(s) if s.starts_with("area:") => Some(&s[5..]),
+            CommentTarget::StringTarget(s) if s != "*" => Some(s.as_str()),
             _ => None,
         }
     }
@@ -433,7 +433,7 @@ target: "*"
     #[test]
     fn test_config_area_path_target() {
         let yaml = r#"
-target: "area:4x4\\QED"
+target: "4x4\\QED"
 "#;
         let config: CommentOnWorkItemConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.target.allows_id(1).is_none());

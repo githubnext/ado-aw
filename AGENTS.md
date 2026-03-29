@@ -774,14 +774,14 @@ Adds a comment to an existing Azure DevOps work item. This is the ADO equivalent
   - `"*"` - Any work item in the project (unrestricted, must be explicit)
   - `12345` - A specific work item ID
   - `[12345, 67890]` - A list of allowed work item IDs
-  - `"area:Some\\Path"` - Work items under the specified area path prefix (validated via ADO API at Stage 2)
+  - `"Some\\Path"` - Work items under the specified area path prefix (any string that isn't `"*"`, validated via ADO API at Stage 2)
 
 **Example configuration:**
 ```yaml
 safe-outputs:
   comment-on-work-item:
     max: 3
-    target: "area:4x4\\QED"
+    target: "4x4\\QED"
 ```
 
 **Note:** The `target` field is required. If omitted, compilation fails with an error. This ensures operators are intentional about which work items agents can comment on.
