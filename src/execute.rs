@@ -111,30 +111,12 @@ pub async fn execute_safe_outputs(
         // Budget is consumed before execution so that failed attempts (target policy rejection,
         // network errors) still count — this prevents unbounded retries against a failing endpoint.
         if entry.get("name").and_then(|n| n.as_str()) == Some("update-work-item") {
-            if update_wi_executed >= max_update_wi {
-                let wi_id = entry
-                    .get("id")
-                    .and_then(|v| v.as_u64())
-                    .map(|id| format!(" (work item #{})", id))
-                    .unwrap_or_default();
-                warn!(
-                    "[{}/{}] Skipping update-work-item{} entry: max ({}) already reached for this run",
-                    i + 1,
-                    entries.len(),
-                    wi_id,
-                    max_update_wi
-                );
-                let result = ExecutionResult::failure(format!(
-                    "Skipped{}: maximum update-work-item count ({}) already reached. \
-                     Increase 'max' in safe-outputs.update-work-item to allow more updates.",
-                    wi_id, max_update_wi
-                ));
-                println!(
-                    "[{}/{}] update-work-item - ✗ - {}",
-                    i + 1,
-                    entries.len(),
-                    result.message
-                );
+            let wi_id = entry
+                .get("id")
+                .and_then(|v| v.as_u64())
+                .map(|id| format!(" (work item #{})", id))
+                .unwrap_or_default();
+            if let Some(result) = check_budget(entries.len(), i, "update-work-item", &wi_id, update_wi_executed, max_update_wi) {
                 results.push(result);
                 continue;
             }
@@ -144,30 +126,12 @@ pub async fn execute_safe_outputs(
         // Enforce comment-on-work-item max: same skip-and-continue pattern as update-work-item.
         // Budget is consumed before execution so that failed attempts still count.
         if entry.get("name").and_then(|n| n.as_str()) == Some("comment-on-work-item") {
-            if comment_wi_executed >= max_comment_wi {
-                let wi_id = entry
-                    .get("work_item_id")
-                    .and_then(|v| v.as_i64())
-                    .map(|id| format!(" (work item #{})", id))
-                    .unwrap_or_default();
-                warn!(
-                    "[{}/{}] Skipping comment-on-work-item{} entry: max ({}) already reached for this run",
-                    i + 1,
-                    entries.len(),
-                    wi_id,
-                    max_comment_wi
-                );
-                let result = ExecutionResult::failure(format!(
-                    "Skipped{}: maximum comment-on-work-item count ({}) already reached. \
-                     Increase 'max' in safe-outputs.comment-on-work-item to allow more comments.",
-                    wi_id, max_comment_wi
-                ));
-                println!(
-                    "[{}/{}] comment-on-work-item - ✗ - {}",
-                    i + 1,
-                    entries.len(),
-                    result.message
-                );
+            let wi_id = entry
+                .get("work_item_id")
+                .and_then(|v| v.as_i64())
+                .map(|id| format!(" (work item #{})", id))
+                .unwrap_or_default();
+            if let Some(result) = check_budget(entries.len(), i, "comment-on-work-item", &wi_id, comment_wi_executed, max_comment_wi) {
                 results.push(result);
                 continue;
             }
@@ -318,6 +282,47 @@ pub async fn execute_safe_output(
     };
 
     Ok((tool_name.to_string(), result))
+}
+
+/// Returns `Some(result)` when the budget for `tool_name` is exhausted so the caller can push the
+/// result and `continue` to the next entry. Returns `None` when a budget slot is still available
+/// and the caller should proceed with execution.
+///
+/// `total` is the total number of entries (for the `[i/total]` log prefix), `i` is the
+/// zero-based index of the current entry, `wi_id` is a pre-formatted context string like
+/// `" (work item #42)"` or `""`.
+fn check_budget(
+    total: usize,
+    i: usize,
+    tool_name: &str,
+    wi_id: &str,
+    executed: usize,
+    max: usize,
+) -> Option<ExecutionResult> {
+    if executed < max {
+        return None;
+    }
+    warn!(
+        "[{}/{}] Skipping {}{} entry: max ({}) already reached for this run",
+        i + 1,
+        total,
+        tool_name,
+        wi_id,
+        max
+    );
+    let result = ExecutionResult::failure(format!(
+        "Skipped{}: maximum {} count ({}) already reached. \
+         Increase 'max' in safe-outputs.{} to allow more.",
+        wi_id, tool_name, max, tool_name
+    ));
+    println!(
+        "[{}/{}] {} - ✗ - {}",
+        i + 1,
+        total,
+        tool_name,
+        result.message
+    );
+    Some(result)
 }
 
 #[cfg(test)]
@@ -678,5 +683,56 @@ mod tests {
             noop_result.success,
             "noop should still succeed even when prior entries are skipped"
         );
+    }
+
+    // --- check_budget unit tests ---
+
+    #[test]
+    fn test_check_budget_returns_none_when_under_limit() {
+        let result = check_budget(5, 0, "update-work-item", "", 0, 3);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_check_budget_returns_none_at_exactly_one_below_limit() {
+        let result = check_budget(5, 1, "update-work-item", "", 2, 3);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_check_budget_returns_failure_when_at_limit() {
+        let result = check_budget(5, 2, "update-work-item", "", 3, 3);
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(!r.success);
+        assert!(r.message.contains("maximum update-work-item count (3)"));
+        assert!(r.message.contains("safe-outputs.update-work-item"));
+    }
+
+    #[test]
+    fn test_check_budget_returns_failure_when_over_limit() {
+        let result = check_budget(5, 3, "comment-on-work-item", " (work item #99)", 5, 2);
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(!r.success);
+        assert!(r.message.contains("(work item #99)"));
+        assert!(r.message.contains("maximum comment-on-work-item count (2)"));
+    }
+
+    #[test]
+    fn test_check_budget_zero_max_always_skips() {
+        let result = check_budget(3, 0, "update-work-item", "", 0, 0);
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(!r.success);
+        assert!(r.message.contains("maximum update-work-item count (0)"));
+    }
+
+    #[test]
+    fn test_check_budget_wi_id_included_in_message() {
+        let result = check_budget(4, 1, "update-work-item", " (work item #42)", 1, 1);
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(r.message.contains("(work item #42)"));
     }
 }
