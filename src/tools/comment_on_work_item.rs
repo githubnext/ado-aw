@@ -99,8 +99,9 @@ pub struct CommentOnWorkItemConfig {
     #[serde(default = "default_max")]
     pub max: u32,
 
-    /// Target scope — which work items can be commented on (required)
-    pub target: CommentTarget,
+    /// Target scope — which work items can be commented on.
+    /// `None` means no target was configured; execution must reject this.
+    pub target: Option<CommentTarget>,
 }
 
 fn default_max() -> u32 {
@@ -111,7 +112,7 @@ impl Default for CommentOnWorkItemConfig {
     fn default() -> Self {
         Self {
             max: default_max(),
-            target: CommentTarget::StringTarget("*".to_string()),
+            target: None,
         }
     }
 }
@@ -191,10 +192,21 @@ impl Executor for CommentOnWorkItemResult {
         let config: CommentOnWorkItemConfig = ctx.get_tool_config("comment-on-work-item");
         debug!("Target: {:?}, max: {}", config.target, config.max);
 
+        let target = match &config.target {
+            Some(t) => t,
+            None => {
+                return Ok(ExecutionResult::failure(
+                    "comment-on-work-item target is not configured. \
+                     This is required to scope which work items the agent can comment on."
+                        .to_string(),
+                ));
+            }
+        };
+
         let client = reqwest::Client::new();
 
         // Validate work item ID against target policy
-        match config.target.allows_id(self.work_item_id) {
+        match target.allows_id(self.work_item_id) {
             Some(true) => {
                 debug!(
                     "Work item #{} allowed by target policy",
@@ -209,29 +221,30 @@ impl Executor for CommentOnWorkItemResult {
             }
             None => {
                 // Area path validation — need to fetch the work item
-                if let Some(prefix) = config.target.area_path_prefix() {
-                    debug!(
-                        "Validating area path for work item #{} against prefix '{}'",
-                        self.work_item_id, prefix
-                    );
-                    match get_work_item_area_path(&client, org_url, project, token, self.work_item_id)
-                        .await
-                    {
-                        Ok(area_path) => {
-                            if !area_path.starts_with(prefix) {
-                                return Ok(ExecutionResult::failure(format!(
-                                    "Work item #{} has area path '{}' which is not under allowed prefix '{}'",
-                                    self.work_item_id, area_path, prefix
-                                )));
-                            }
-                            debug!("Area path '{}' validated against '{}'", area_path, prefix);
-                        }
-                        Err(e) => {
+                let prefix = target.area_path_prefix().expect(
+                    "allows_id returned None but area_path_prefix is also None; this is a bug",
+                );
+                debug!(
+                    "Validating area path for work item #{} against prefix '{}'",
+                    self.work_item_id, prefix
+                );
+                match get_work_item_area_path(&client, org_url, project, token, self.work_item_id)
+                    .await
+                {
+                    Ok(area_path) => {
+                        if !area_path.starts_with(prefix) {
                             return Ok(ExecutionResult::failure(format!(
-                                "Failed to validate area path for work item #{}: {}",
-                                self.work_item_id, e
+                                "Work item #{} has area path '{}' which is not under allowed prefix '{}'",
+                                self.work_item_id, area_path, prefix
                             )));
                         }
+                        debug!("Area path '{}' validated against '{}'", area_path, prefix);
+                    }
+                    Err(e) => {
+                        return Ok(ExecutionResult::failure(format!(
+                            "Failed to validate area path for work item #{}: {}",
+                            self.work_item_id, e
+                        )));
                     }
                 }
             }
@@ -382,6 +395,7 @@ mod tests {
     fn test_config_defaults() {
         let config = CommentOnWorkItemConfig::default();
         assert_eq!(config.max, 1);
+        assert!(config.target.is_none());
     }
 
     #[test]
@@ -392,6 +406,7 @@ target: "*"
 "#;
         let config: CommentOnWorkItemConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.max, 5);
+        assert!(config.target.is_some());
     }
 
     #[test]
@@ -401,8 +416,9 @@ max: 1
 target: 12345
 "#;
         let config: CommentOnWorkItemConfig = serde_yaml::from_str(yaml).unwrap();
-        assert!(config.target.allows_id(12345) == Some(true));
-        assert!(config.target.allows_id(99999) == Some(false));
+        let target = config.target.unwrap();
+        assert!(target.allows_id(12345) == Some(true));
+        assert!(target.allows_id(99999) == Some(false));
     }
 
     #[test]
@@ -415,9 +431,10 @@ target:
   - 300
 "#;
         let config: CommentOnWorkItemConfig = serde_yaml::from_str(yaml).unwrap();
-        assert!(config.target.allows_id(100) == Some(true));
-        assert!(config.target.allows_id(200) == Some(true));
-        assert!(config.target.allows_id(999) == Some(false));
+        let target = config.target.unwrap();
+        assert!(target.allows_id(100) == Some(true));
+        assert!(target.allows_id(200) == Some(true));
+        assert!(target.allows_id(999) == Some(false));
     }
 
     #[test]
@@ -426,8 +443,9 @@ target:
 target: "*"
 "#;
         let config: CommentOnWorkItemConfig = serde_yaml::from_str(yaml).unwrap();
-        assert!(config.target.allows_id(1) == Some(true));
-        assert!(config.target.allows_id(99999) == Some(true));
+        let target = config.target.unwrap();
+        assert!(target.allows_id(1) == Some(true));
+        assert!(target.allows_id(99999) == Some(true));
     }
 
     #[test]
@@ -436,8 +454,18 @@ target: "*"
 target: "4x4\\QED"
 "#;
         let config: CommentOnWorkItemConfig = serde_yaml::from_str(yaml).unwrap();
-        assert!(config.target.allows_id(1).is_none());
-        assert_eq!(config.target.area_path_prefix(), Some("4x4\\QED"));
+        let target = config.target.unwrap();
+        assert!(target.allows_id(1).is_none());
+        assert_eq!(target.area_path_prefix(), Some("4x4\\QED"));
+    }
+
+    #[test]
+    fn test_config_missing_target_defaults_to_none() {
+        let yaml = r#"
+max: 3
+"#;
+        let config: CommentOnWorkItemConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.target.is_none());
     }
 
     #[test]

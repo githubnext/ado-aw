@@ -10,7 +10,7 @@ use std::path::Path;
 
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
 use crate::tools::{
-    CommentOnWorkItemResult, CreatePrResult, CreateWikiPageResult, CreateWorkItemResult, ExecutionContext, ExecutionResult,
+    CommentOnWorkItemConfig, CommentOnWorkItemResult, CreatePrResult, CreateWikiPageResult, CreateWorkItemResult, ExecutionContext, ExecutionResult,
     Executor, UpdateWikiPageResult, UpdateWorkItemConfig, UpdateWorkItemResult,
 };
 
@@ -92,6 +92,11 @@ pub async fn execute_safe_outputs(
     let max_update_wi = update_wi_config.max as usize;
     let mut update_wi_executed: usize = 0;
 
+    // Fetch the comment-on-work-item max once; same skip-and-continue pattern
+    let comment_wi_config: CommentOnWorkItemConfig = ctx.get_tool_config("comment-on-work-item");
+    let max_comment_wi = comment_wi_config.max as usize;
+    let mut comment_wi_executed: usize = 0;
+
     let mut results = Vec::new();
     for (i, entry) in entries.iter().enumerate() {
         let entry_json = serde_json::to_string(entry).unwrap_or_else(|_| "<invalid>".to_string());
@@ -132,6 +137,38 @@ pub async fn execute_safe_outputs(
                 continue;
             }
             update_wi_executed += 1;
+        }
+
+        // Enforce comment-on-work-item max: skip excess entries rather than aborting the whole batch
+        if entry.get("name").and_then(|n| n.as_str()) == Some("comment-on-work-item") {
+            if comment_wi_executed >= max_comment_wi {
+                let wi_id = entry
+                    .get("work_item_id")
+                    .and_then(|v| v.as_i64())
+                    .map(|id| format!(" (work item #{})", id))
+                    .unwrap_or_default();
+                warn!(
+                    "[{}/{}] Skipping comment-on-work-item{} entry: max ({}) already reached for this run",
+                    i + 1,
+                    entries.len(),
+                    wi_id,
+                    max_comment_wi
+                );
+                let result = ExecutionResult::failure(format!(
+                    "Skipped{}: maximum comment-on-work-item count ({}) already reached. \
+                     Increase 'max' in safe-outputs.comment-on-work-item to allow more comments.",
+                    wi_id, max_comment_wi
+                ));
+                println!(
+                    "[{}/{}] comment-on-work-item - ✗ - {}",
+                    i + 1,
+                    entries.len(),
+                    result.message
+                );
+                results.push(result);
+                continue;
+            }
+            comment_wi_executed += 1;
         }
 
         match execute_safe_output(entry, ctx).await {

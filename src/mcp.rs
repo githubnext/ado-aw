@@ -357,14 +357,8 @@ pipeline configuration."
         let mut sanitized = params.0;
         sanitized.body = sanitize_text(&sanitized.body);
         let result: CommentOnWorkItemResult = sanitized.try_into()?;
-        let written = self.write_safe_output_file_with_maximum(&result, 1).await
+        let _ = self.write_safe_output_file(&result).await
             .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
-        if !written {
-            warn!("comment-on-work-item limit reached, ignoring");
-            return Ok(CallToolResult::success(vec![Content::text(
-                "Maximum number of comments reached for this run. This comment was not recorded.",
-            )]));
-        }
         info!("Comment queued for work item #{}", result.work_item_id);
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Comment queued for work item #{}. The comment will be posted during safe output processing.",
