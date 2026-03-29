@@ -610,6 +610,29 @@ pub fn validate_comment_target(front_matter: &FrontMatter) -> Result<()> {
     Ok(())
 }
 
+/// Validate that update-work-item has a required `target` field when configured.
+pub fn validate_update_work_item_target(front_matter: &FrontMatter) -> Result<()> {
+    if let Some(config_value) = front_matter.safe_outputs.get("update-work-item") {
+        if let Some(obj) = config_value.as_object() {
+            if !obj.contains_key("target") {
+                anyhow::bail!(
+                    "safe-outputs.update-work-item requires a 'target' field to scope \
+                     which work items the agent can update. Options:\n\n  \
+                     target: \"*\"   # any work item (unrestricted)\n  \
+                     target: 42    # specific work item ID\n"
+                );
+            }
+        } else {
+            anyhow::bail!(
+                "safe-outputs.update-work-item must be a configuration object with at \
+                 least a 'target' field. Example:\n\n  \
+                 safe-outputs:\n    update-work-item:\n      target: \"*\"\n      title: true\n"
+            );
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

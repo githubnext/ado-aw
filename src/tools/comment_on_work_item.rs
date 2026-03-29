@@ -243,8 +243,8 @@ impl Executor for CommentOnWorkItemResult {
                         let ap = area_path.to_lowercase();
                         let pf = prefix.to_lowercase();
                         let is_match = ap == pf
-                            || (ap.starts_with(&pf)
-                                && ap.as_bytes().get(pf.len()) == Some(&b'\\'));
+                            || (ap.starts_with(&*pf)
+                                && ap[pf.len()..].starts_with('\\'));
                         if !is_match {
                             return Ok(ExecutionResult::failure(format!(
                                 "Work item #{} has area path '{}' which is not under allowed prefix '{}'",

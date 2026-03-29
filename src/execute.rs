@@ -634,7 +634,8 @@ mod tests {
         // Config: update-work-item with max=1 (default), title=true so the field check passes
         let update_cfg = serde_json::json!({
             "title": true,
-            "max": 1
+            "max": 1,
+            "target": "*"
         });
         let mut tool_configs = HashMap::new();
         tool_configs.insert("update-work-item".to_string(), update_cfg);

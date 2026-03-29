@@ -1077,6 +1077,7 @@ safe-outputs:
   update-work-item:
     title: true
     status: true
+    target: "*"
 ---
 
 ## Update Work Item Agent
@@ -1387,6 +1388,59 @@ fn test_fixture_comment_on_work_item_compiled_output() {
             line.trim()
         );
     }
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that update-work-item requires a target field
+#[test]
+fn test_update_work_item_requires_target_field() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-uwi-target-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("uwi-agent.md");
+    let test_content = r#"---
+name: "Update Work Item Agent"
+description: "Agent that updates work items but has no target"
+permissions:
+  write: my-write-sc
+safe-outputs:
+  update-work-item:
+    title: true
+    status: true
+---
+
+## Update Work Item Agent
+
+Update existing work items.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("uwi-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should fail when update-work-item lacks a target field"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("target"),
+        "Error message should mention target: {stderr}"
+    );
 
     let _ = fs::remove_dir_all(&temp_dir);
 }

@@ -23,7 +23,7 @@ use super::common::{
     generate_pipeline_path, generate_pipeline_resources, generate_pr_trigger,
     generate_repositories, generate_schedule, generate_source_path,
     generate_working_directory, replace_with_indent, validate_comment_target,
-    validate_write_permissions,
+    validate_update_work_item_target, validate_write_permissions,
 };
 use super::types::{FrontMatter, McpConfig};
 
@@ -135,6 +135,8 @@ displayName: "Finalize""#,
         validate_write_permissions(front_matter)?;
         // Validate comment-on-work-item has required target field
         validate_comment_target(front_matter)?;
+        // Validate update-work-item has required target field
+        validate_update_work_item_target(front_matter)?;
 
         // Replace all template markers
         let compiler_version = env!("CARGO_PKG_VERSION");
