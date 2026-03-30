@@ -83,9 +83,9 @@ enum Commands {
     },
     /// Detect agentic pipelines and update GITHUB_TOKEN on their ADO definitions
     Configure {
-        /// The new GITHUB_TOKEN value (defaults to GITHUB_TOKEN env var)
+        /// The new GITHUB_TOKEN value (defaults to GITHUB_TOKEN env var; prompted if omitted)
         #[arg(long, env = "GITHUB_TOKEN")]
-        token: String,
+        token: Option<String>,
         /// Override: Azure DevOps organization URL (inferred from git remote by default)
         #[arg(long)]
         org: Option<String>,
@@ -264,7 +264,7 @@ async fn main() -> Result<()> {
                 dry_run,
             } => {
                 configure::run(
-                    &token,
+                    token.as_deref(),
                     org.as_deref(),
                     project.as_deref(),
                     pat.as_deref(),

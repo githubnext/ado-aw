@@ -423,7 +423,7 @@ async fn update_pipeline_variable(
 
 /// Run the configure command.
 pub async fn run(
-    token: &str,
+    token: Option<&str>,
     org: Option<&str>,
     project: Option<&str>,
     pat: Option<&str>,
@@ -433,6 +433,15 @@ pub async fn run(
     let repo_path = path
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
+
+    // Resolve token: CLI flag > env var (handled by clap) > interactive prompt
+    let token = match token {
+        Some(t) => t.to_string(),
+        None => inquire::Password::new("Enter the new GITHUB_TOKEN:")
+            .without_confirmation()
+            .prompt()
+            .context("Failed to read token from interactive prompt")?,
+    };
 
     // Step 1: Detect agentic pipelines
     println!("Scanning for agentic pipelines...");
@@ -528,7 +537,7 @@ pub async fn run(
             &resolved_pat,
             m.id,
             "GITHUB_TOKEN",
-            token,
+            &token,
         )
         .await
         {
