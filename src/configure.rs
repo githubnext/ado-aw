@@ -160,43 +160,67 @@ struct MatchedDefinition {
     yaml_path: String,
 }
 
-/// List all build definitions in the project.
+/// List all build definitions in the project, handling pagination.
 async fn list_definitions(
     client: &reqwest::Client,
     ctx: &AdoContext,
     pat: &str,
 ) -> Result<Vec<DefinitionSummary>> {
-    let url = format!(
-        "{}/{}/_apis/build/definitions?api-version=7.1",
-        ctx.org_url.trim_end_matches('/'),
-        ctx.project
-    );
+    let mut all_definitions = Vec::new();
+    let mut continuation_token: Option<String> = None;
 
-    debug!("Listing definitions: {}", url);
-
-    let resp = client
-        .get(&url)
-        .basic_auth("", Some(pat))
-        .send()
-        .await
-        .context("Failed to list pipeline definitions")?;
-
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!(
-            "ADO API returned {} when listing definitions: {}",
-            status,
-            body
+    loop {
+        let mut url = format!(
+            "{}/{}/_apis/build/definitions?api-version=7.1",
+            ctx.org_url.trim_end_matches('/'),
+            ctx.project
         );
+        if let Some(ref token) = continuation_token {
+            url.push_str(&format!("&continuationToken={}", token));
+        }
+
+        debug!("Listing definitions: {}", url);
+
+        let resp = client
+            .get(&url)
+            .basic_auth("", Some(pat))
+            .send()
+            .await
+            .context("Failed to list pipeline definitions")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "ADO API returned {} when listing definitions: {}",
+                status,
+                body
+            );
+        }
+
+        // Check for continuation token in response headers
+        let next_token = resp
+            .headers()
+            .get("x-ms-continuationtoken")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        let response: DefinitionListResponse = resp
+            .json()
+            .await
+            .context("Failed to parse definitions response")?;
+
+        all_definitions.extend(response.value);
+
+        match next_token {
+            Some(token) if !token.is_empty() => {
+                continuation_token = Some(token);
+            }
+            _ => break,
+        }
     }
 
-    let response: DefinitionListResponse = resp
-        .json()
-        .await
-        .context("Failed to parse definitions response")?;
-
-    Ok(response.value)
+    Ok(all_definitions)
 }
 
 /// Match detected pipeline YAML files to ADO pipeline definitions.
@@ -246,32 +270,51 @@ async fn match_definitions(
             continue;
         }
 
-        // Strategy 2: Match by pipeline name containing the agent name
+        // Strategy 2: Fall back to matching by pipeline name.
+        // Only accept unambiguous matches — if multiple definitions match, skip.
         let agent_name = Path::new(&pipeline.source)
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("");
 
         if !agent_name.is_empty() {
-            let name_match = definitions.iter().find(|d| {
-                let def_name_lower = d.name.to_lowercase();
-                let agent_lower = agent_name.to_lowercase().replace('-', " ");
-                def_name_lower.contains(&agent_lower)
-                    || def_name_lower.contains(&agent_name.to_lowercase())
-            });
+            let agent_lower = agent_name.to_lowercase();
+            let agent_spaced = agent_lower.replace('-', " ");
+            let candidates: Vec<_> = definitions
+                .iter()
+                .filter(|d| {
+                    let def_name_lower = d.name.to_lowercase();
+                    def_name_lower.contains(&agent_spaced)
+                        || def_name_lower.contains(&agent_lower)
+                })
+                .collect();
 
-            if let Some(def) = name_match {
-                debug!(
-                    "Matched '{}' to definition '{}' (id={}) by pipeline name",
-                    yaml_path_normalized, def.name, def.id
-                );
-                matched.push(MatchedDefinition {
-                    id: def.id,
-                    name: def.name.clone(),
-                    match_method: MatchMethod::PipelineName,
-                    yaml_path: yaml_path_normalized.to_string(),
-                });
-                continue;
+            match candidates.len() {
+                1 => {
+                    let def = candidates[0];
+                    eprintln!(
+                        "  Warning: '{}' matched to '{}' (id={}) by pipeline name (fuzzy match)",
+                        yaml_path_normalized, def.name, def.id
+                    );
+                    matched.push(MatchedDefinition {
+                        id: def.id,
+                        name: def.name.clone(),
+                        match_method: MatchMethod::PipelineName,
+                        yaml_path: yaml_path_normalized.to_string(),
+                    });
+                    continue;
+                }
+                n if n > 1 => {
+                    let names: Vec<_> = candidates.iter().map(|d| d.name.as_str()).collect();
+                    eprintln!(
+                        "  Warning: '{}' has {} ambiguous name matches ({}), skipping",
+                        yaml_path_normalized,
+                        n,
+                        names.join(", ")
+                    );
+                    continue;
+                }
+                _ => {}
             }
         }
 
@@ -288,6 +331,10 @@ async fn match_definitions(
 ///
 /// Uses the same `.basic_auth("", Some(token))` pattern as the existing
 /// tools in `src/tools/` (e.g., create_work_item, create_pr).
+///
+/// Note: The GET→PUT cycle is not atomic. Concurrent `configure` runs against
+/// the same definition could overwrite each other's variables. This is acceptable
+/// for a CLI tool typically run by a single operator.
 async fn update_pipeline_variable(
     client: &reqwest::Client,
     ctx: &AdoContext,
@@ -392,7 +439,9 @@ pub async fn run(
     let detected = detect::detect_pipelines(&repo_path).await?;
 
     if detected.is_empty() {
-        println!("No agentic pipelines found. Make sure your pipelines were compiled with ado-aw >= 0.4.0.");
+        println!(
+            "No agentic pipelines found. Make sure your pipelines were compiled with the latest ado-aw."
+        );
         return Ok(());
     }
 
@@ -434,13 +483,9 @@ pub async fn run(
     );
     println!();
 
-    // Step 3: Resolve PAT (same env var the existing tools check)
-    let resolved_pat = match pat {
-        Some(p) => p.to_string(),
-        None => std::env::var("AZURE_DEVOPS_EXT_PAT").context(
-            "No PAT provided. Set AZURE_DEVOPS_EXT_PAT environment variable or use --pat flag.",
-        )?,
-    };
+    // Step 3: Resolve PAT
+    let resolved_pat = pat
+        .context("No PAT provided. Set AZURE_DEVOPS_EXT_PAT environment variable or use --pat flag.")?;
 
     // Step 4: Match to ADO definitions
     println!("Matching to Azure DevOps pipeline definitions...");
@@ -502,7 +547,7 @@ pub async fn run(
     println!("Done: {} updated, {} failed.", success_count, failure_count);
 
     if failure_count > 0 {
-        std::process::exit(1);
+        anyhow::bail!("{} definition(s) failed to update", failure_count);
     }
 
     Ok(())

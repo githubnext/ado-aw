@@ -6,6 +6,7 @@
 use anyhow::{Context, Result};
 use log::{debug, info};
 use std::path::{Path, PathBuf};
+use tokio::io::AsyncBufReadExt;
 
 use crate::compile::HEADER_MARKER;
 
@@ -78,16 +79,17 @@ fn scan_directory<'a>(
 
 /// Check if a YAML file is an agentic pipeline and extract its metadata.
 ///
-/// Reads up to the first 5 lines of the file looking for the `# @ado-aw` marker.
+/// Reads only the first 5 lines of the file for performance — the `@ado-aw`
+/// marker is always in the first two lines of compiled output.
 async fn try_detect_pipeline(
     file_path: &Path,
     root: &Path,
 ) -> Result<Option<DetectedPipeline>> {
-    let content = match tokio::fs::read_to_string(file_path).await {
-        Ok(c) => c,
+    let file = match tokio::fs::File::open(file_path).await {
+        Ok(f) => f,
         Err(e) => {
             debug!(
-                "Skipping {} (read error: {})",
+                "Skipping {} (open error: {})",
                 file_path.display(),
                 e
             );
@@ -95,9 +97,17 @@ async fn try_detect_pipeline(
         }
     };
 
-    // Only inspect the first 5 lines for performance
-    for line in content.lines().take(5) {
-        if let Some(metadata) = parse_header_line(line) {
+    let reader = tokio::io::BufReader::new(file);
+    let mut lines = reader.lines();
+    let mut line_count = 0;
+
+    while let Ok(Some(line)) = lines.next_line().await {
+        line_count += 1;
+        if line_count > 5 {
+            break;
+        }
+
+        if let Some(metadata) = parse_header_line(&line) {
             let relative_path = file_path
                 .strip_prefix(root)
                 .unwrap_or(file_path)

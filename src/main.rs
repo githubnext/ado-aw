@@ -83,8 +83,8 @@ enum Commands {
     },
     /// Detect agentic pipelines and update GITHUB_TOKEN on their ADO definitions
     Configure {
-        /// The new GITHUB_TOKEN value to set on matched pipeline definitions
-        #[arg(long)]
+        /// The new GITHUB_TOKEN value (defaults to GITHUB_TOKEN env var)
+        #[arg(long, env = "GITHUB_TOKEN")]
         token: String,
         /// Override: Azure DevOps organization URL (inferred from git remote by default)
         #[arg(long)]
@@ -93,7 +93,7 @@ enum Commands {
         #[arg(long)]
         project: Option<String>,
         /// PAT for ADO API authentication (defaults to AZURE_DEVOPS_EXT_PAT env var)
-        #[arg(long)]
+        #[arg(long, env = "AZURE_DEVOPS_EXT_PAT")]
         pat: Option<String>,
         /// Path to the repository root (defaults to current directory)
         #[arg(long)]
