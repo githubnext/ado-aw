@@ -94,7 +94,7 @@ impl Sanitize for CreateWikiPageResult {
 ///     title-prefix: "[Agent] "
 ///     comment: "Created by agent"
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CreateWikiPageConfig {
     /// Wiki identifier (name or ID). Required — execution fails without this.
     ///
@@ -123,18 +123,6 @@ pub struct CreateWikiPageConfig {
     /// Default commit comment used when the agent does not supply one.
     #[serde(default)]
     pub comment: Option<String>,
-}
-
-impl Default for CreateWikiPageConfig {
-    fn default() -> Self {
-        Self {
-            wiki_name: None,
-            wiki_project: None,
-            path_prefix: None,
-            title_prefix: None,
-            comment: None,
-        }
-    }
 }
 
 // ============================================================================

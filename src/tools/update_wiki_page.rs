@@ -90,7 +90,7 @@ impl Sanitize for UpdateWikiPageResult {
 ///     title-prefix: "[Agent] "
 ///     comment: "Updated by agent"
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UpdateWikiPageConfig {
     /// Wiki identifier (name or ID). Required — execution fails without this.
     ///
@@ -119,18 +119,6 @@ pub struct UpdateWikiPageConfig {
     /// Default commit comment used when the agent does not supply one.
     #[serde(default)]
     pub comment: Option<String>,
-}
-
-impl Default for UpdateWikiPageConfig {
-    fn default() -> Self {
-        Self {
-            wiki_name: None,
-            wiki_project: None,
-            path_prefix: None,
-            title_prefix: None,
-            comment: None,
-        }
-    }
 }
 
 // ============================================================================

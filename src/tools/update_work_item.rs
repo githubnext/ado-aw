@@ -111,10 +111,6 @@ pub enum TargetConfig {
     Pattern(String),
 }
 
-fn default_max() -> u32 {
-    1
-}
-
 /// Configuration for the update-work-item tool (specified in front matter).
 ///
 /// Example front matter:
@@ -134,7 +130,7 @@ fn default_max() -> u32 {
 ///     assignee: true            # enable assignee updates
 ///     tags: true                # enable tag updates
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UpdateWorkItemConfig {
     /// Enable state/status updates via the `state` agent parameter (default: false).
     /// The YAML key for this option is `status`.
@@ -169,10 +165,6 @@ pub struct UpdateWorkItemConfig {
     #[serde(default, rename = "tag-prefix")]
     pub tag_prefix: Option<String>,
 
-    /// Maximum number of update-work-item outputs allowed per pipeline run (default: 1)
-    #[serde(default = "default_max")]
-    pub max: u32,
-
     /// Which work items can be updated (required):
     /// - `"*"`: any work item ID the agent specifies
     /// - An integer: only that specific work item ID
@@ -193,25 +185,6 @@ pub struct UpdateWorkItemConfig {
     /// Enable tag updates (default: false)
     #[serde(default)]
     pub tags: bool,
-}
-
-impl Default for UpdateWorkItemConfig {
-    fn default() -> Self {
-        Self {
-            status: false,
-            title: false,
-            body: false,
-            markdown_body: false,
-            title_prefix: None,
-            tag_prefix: None,
-            max: default_max(),
-            target: None,
-            area_path: false,
-            iteration_path: false,
-            assignee: false,
-            tags: false,
-        }
-    }
 }
 
 /// Build a replace-field patch operation for work item updates
@@ -295,13 +268,12 @@ impl Executor for UpdateWorkItemResult {
 
         let config: UpdateWorkItemConfig = ctx.get_tool_config("update-work-item");
         debug!(
-            "Config: status={}, title={}, body={}, markdown_body={}, target={:?}, max={}, title_prefix={:?}, tag_prefix={:?}",
+            "Config: status={}, title={}, body={}, markdown_body={}, target={:?}, title_prefix={:?}, tag_prefix={:?}",
             config.status,
             config.title,
             config.body,
             config.markdown_body,
             config.target,
-            config.max,
             config.title_prefix,
             config.tag_prefix,
         );
@@ -660,7 +632,6 @@ mod tests {
         assert!(!config.iteration_path);
         assert!(!config.assignee);
         assert!(!config.tags);
-        assert_eq!(config.max, 1);
         assert!(config.target.is_none());
         assert!(config.title_prefix.is_none());
         assert!(config.tag_prefix.is_none());
@@ -689,7 +660,6 @@ tags: true
         assert!(config.markdown_body);
         assert_eq!(config.title_prefix, Some("[bot] ".to_string()));
         assert_eq!(config.tag_prefix, Some("agent-".to_string()));
-        assert_eq!(config.max, 3);
         assert_eq!(config.target, Some(TargetConfig::Pattern("*".to_string())));
         assert!(config.area_path);
         assert!(config.iteration_path);
@@ -713,7 +683,6 @@ target: 42
         let config: UpdateWorkItemConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.status);
         assert!(!config.title);
-        assert_eq!(config.max, 1);
         assert!(config.target.is_none());
     }
 

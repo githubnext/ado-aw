@@ -800,6 +800,7 @@ Creates an Azure DevOps work item.
 - `assignee` - User to assign (email or display name)
 - `tags` - List of tags to apply
 - `custom-fields` - Map of custom field reference names to values (e.g., `Custom.MyField: "value"`)
+- `max` - Maximum number of create-work-item outputs allowed per run (default: 1)
 - `artifact-link` - Configuration for GitHub Copilot artifact linking:
   - `enabled` - Whether to add an artifact link (default: false)
   - `repository` - Repository name override (defaults to BUILD_REPOSITORY_NAME)
@@ -897,6 +898,7 @@ Note: The source branch name is auto-generated from a sanitized version of the P
 - `reviewers` - List of reviewer emails to add
 - `labels` - List of labels to apply
 - `work-items` - List of work item IDs to link
+- `max` - Maximum number of create-pull-request outputs allowed per run (default: 1)
 
 **Multi-repository support:**
 When `workspace: root` and multiple repositories are checked out, agents can create PRs for any allowed repository:
@@ -974,6 +976,7 @@ safe-outputs:
     path-prefix: "/agent-output"    # Optional — prepended to the agent-supplied path (restricts write scope)
     title-prefix: "[Agent] "        # Optional — prepended to the last path segment (the page title)
     comment: "Created by agent"     # Optional — default commit comment when agent omits one
+    max: 1                          # Maximum number of create-wiki-page outputs allowed per run (default: 1)
 ```
 
 Note: `wiki-name` is required. If it is not set, execution fails with an explicit error message.
@@ -995,6 +998,7 @@ safe-outputs:
     path-prefix: "/agent-output"    # Optional — prepended to the agent-supplied path (restricts write scope)
     title-prefix: "[Agent] "        # Optional — prepended to the last path segment (the page title)
     comment: "Updated by agent"     # Optional — default commit comment when agent omits one
+    max: 1                          # Maximum number of update-wiki-page outputs allowed per run (default: 1)
 ```
 
 Note: `wiki-name` is required. If it is not set, execution fails with an explicit error message.
