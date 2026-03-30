@@ -11,6 +11,10 @@ use crate::sanitize::Sanitize;
 pub trait ToolResult: Serialize {
     /// The constant name identifier for this tool
     const NAME: &'static str;
+
+    /// Default maximum number of outputs allowed per pipeline run.
+    /// Each tool can override this; the operator can further override via `max` in front matter.
+    const DEFAULT_MAX: u32 = 1;
 }
 
 /// Trait for validating tool parameters before conversion to results.
@@ -188,6 +192,47 @@ pub fn anyhow_to_mcp_error(err: anyhow::Error) -> McpError {
 /// ```
 #[macro_export]
 macro_rules! tool_result {
+    (
+        name = $tool_name:literal,
+        params = $params:ty,
+        default_max = $default_max:literal,
+        $(#[$meta:meta])*
+        $vis:vis struct $name:ident {
+            $(
+                $(#[$field_meta:meta])*
+                $field_vis:vis $field:ident : $ty:ty
+            ),* $(,)?
+        }
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+        $vis struct $name {
+            /// Tool identifier
+            pub name: String,
+            $(
+                $(#[$field_meta])*
+                pub $field: $ty,
+            )*
+        }
+
+        impl $crate::tools::ToolResult for $name {
+            const NAME: &'static str = $tool_name;
+            const DEFAULT_MAX: u32 = $default_max;
+        }
+
+        impl TryFrom<$params> for $name {
+            type Error = rmcp::ErrorData;
+
+            fn try_from(params: $params) -> Result<Self, Self::Error> {
+                <$params as $crate::tools::Validate>::validate(&params)
+                    .map_err($crate::tools::anyhow_to_mcp_error)?;
+                Ok(Self {
+                    name: <Self as $crate::tools::ToolResult>::NAME.to_string(),
+                    $($field: params.$field,)*
+                })
+            }
+        }
+    };
     (
         name = $tool_name:literal,
         params = $params:ty,

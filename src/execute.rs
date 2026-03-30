@@ -6,12 +6,14 @@
 use anyhow::{Result, bail};
 use log::{debug, error, info, warn};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
 use crate::tools::{
-    CommentOnWorkItemConfig, CommentOnWorkItemResult, CreatePrResult, CreateWikiPageResult, CreateWorkItemResult, ExecutionContext, ExecutionResult,
-    Executor, UpdateWikiPageResult, UpdateWorkItemConfig, UpdateWorkItemResult,
+    CreatePrResult, CreateWikiPageResult, CreateWorkItemResult, CommentOnWorkItemResult,
+    ExecutionContext, ExecutionResult, Executor, ToolResult,
+    UpdateWikiPageResult, UpdateWorkItemResult,
 };
 
 // Re-export memory types for use by main.rs
@@ -87,15 +89,28 @@ pub async fn execute_safe_outputs(
         }
     }
 
-    // Fetch the update-work-item max once; used to skip excess entries without aborting the batch
-    let update_wi_config: UpdateWorkItemConfig = ctx.get_tool_config("update-work-item");
-    let max_update_wi = update_wi_config.max as usize;
-    let mut update_wi_executed: usize = 0;
-
-    // Fetch the comment-on-work-item max once; same skip-and-continue pattern
-    let comment_wi_config: CommentOnWorkItemConfig = ctx.get_tool_config("comment-on-work-item");
-    let max_comment_wi = comment_wi_config.max as usize;
-    let mut comment_wi_executed: usize = 0;
+    // Build budget map: tool_name → (executed_count, max_allowed).
+    // Each tool declares its DEFAULT_MAX via the ToolResult trait; the operator can
+    // override it with `max` in the front-matter config JSON.
+    let mut budgets: HashMap<&str, (usize, usize)> = HashMap::new();
+    macro_rules! register_budgets {
+        ($($tool:ty),+ $(,)?) => {
+            $({
+                let name = <$tool>::NAME;
+                let default = <$tool>::DEFAULT_MAX;
+                let max = resolve_max(ctx, name, default);
+                budgets.insert(name, (0, max));
+            })+
+        };
+    }
+    register_budgets!(
+        CreateWorkItemResult,
+        CreatePrResult,
+        UpdateWorkItemResult,
+        CommentOnWorkItemResult,
+        CreateWikiPageResult,
+        UpdateWikiPageResult,
+    );
 
     let mut results = Vec::new();
     for (i, entry) in entries.iter().enumerate() {
@@ -107,35 +122,18 @@ pub async fn execute_safe_outputs(
             entry_json
         );
 
-        // Enforce update-work-item max: skip excess entries rather than aborting the whole batch.
+        // Generic budget enforcement: skip excess entries rather than aborting the whole batch.
         // Budget is consumed before execution so that failed attempts (target policy rejection,
         // network errors) still count — this prevents unbounded retries against a failing endpoint.
-        if entry.get("name").and_then(|n| n.as_str()) == Some("update-work-item") {
-            let wi_id = entry
-                .get("id")
-                .and_then(|v| v.as_u64())
-                .map(|id| format!(" (work item #{})", id))
-                .unwrap_or_default();
-            if let Some(result) = check_budget(entries.len(), i, "update-work-item", &wi_id, update_wi_executed, max_update_wi) {
-                results.push(result);
-                continue;
+        if let Some(tool_name) = entry.get("name").and_then(|n| n.as_str()) {
+            if let Some((executed, max)) = budgets.get_mut(tool_name) {
+                let context_id = extract_entry_context(entry);
+                if let Some(result) = check_budget(entries.len(), i, tool_name, &context_id, *executed, *max) {
+                    results.push(result);
+                    continue;
+                }
+                *executed += 1;
             }
-            update_wi_executed += 1;
-        }
-
-        // Enforce comment-on-work-item max: same skip-and-continue pattern as update-work-item.
-        // Budget is consumed before execution so that failed attempts still count.
-        if entry.get("name").and_then(|n| n.as_str()) == Some("comment-on-work-item") {
-            let wi_id = entry
-                .get("work_item_id")
-                .and_then(|v| v.as_i64())
-                .map(|id| format!(" (work item #{})", id))
-                .unwrap_or_default();
-            if let Some(result) = check_budget(entries.len(), i, "comment-on-work-item", &wi_id, comment_wi_executed, max_comment_wi) {
-                results.push(result);
-                continue;
-            }
-            comment_wi_executed += 1;
         }
 
         match execute_safe_output(entry, ctx).await {
@@ -282,6 +280,35 @@ pub async fn execute_safe_output(
     };
 
     Ok((tool_name.to_string(), result))
+}
+
+/// Read the operator's `max` override from the tool's config JSON, falling back to the
+/// tool's `DEFAULT_MAX` (declared on the `ToolResult` trait) when not configured.
+fn resolve_max(ctx: &ExecutionContext, tool_name: &str, default_max: u32) -> usize {
+    ctx.tool_configs
+        .get(tool_name)
+        .and_then(|v| v.get("max"))
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .unwrap_or(default_max as usize)
+}
+
+/// Extract a human-readable context identifier from a safe-output entry for log messages.
+fn extract_entry_context(entry: &Value) -> String {
+    if let Some(id) = entry.get("id").and_then(|v| v.as_u64()) {
+        return format!(" (work item #{})", id);
+    }
+    if let Some(id) = entry.get("work_item_id").and_then(|v| v.as_i64()) {
+        return format!(" (work item #{})", id);
+    }
+    if let Some(title) = entry.get("title").and_then(|v| v.as_str()) {
+        let truncated = if title.len() > 40 { &title[..40] } else { title };
+        return format!(" (\"{}\")", truncated);
+    }
+    if let Some(path) = entry.get("path").and_then(|v| v.as_str()) {
+        return format!(" (path: {})", path);
+    }
+    String::new()
 }
 
 /// Returns `Some(result)` when the budget for `tool_name` is exhausted so the caller can push the
@@ -734,5 +761,172 @@ mod tests {
         assert!(result.is_some());
         let r = result.unwrap();
         assert!(r.message.contains("(work item #42)"));
+    }
+
+    // --- extract_entry_context unit tests ---
+
+    #[test]
+    fn test_extract_entry_context_with_id() {
+        let entry = serde_json::json!({"name": "update-work-item", "id": 42});
+        assert_eq!(extract_entry_context(&entry), " (work item #42)");
+    }
+
+    #[test]
+    fn test_extract_entry_context_with_work_item_id() {
+        let entry = serde_json::json!({"name": "comment-on-work-item", "work_item_id": 99});
+        assert_eq!(extract_entry_context(&entry), " (work item #99)");
+    }
+
+    #[test]
+    fn test_extract_entry_context_with_title() {
+        let entry = serde_json::json!({"name": "create-work-item", "title": "Fix the bug"});
+        assert_eq!(extract_entry_context(&entry), " (\"Fix the bug\")");
+    }
+
+    #[test]
+    fn test_extract_entry_context_with_path() {
+        let entry = serde_json::json!({"name": "create-wiki-page", "path": "/Overview/NewPage"});
+        assert_eq!(extract_entry_context(&entry), " (path: /Overview/NewPage)");
+    }
+
+    #[test]
+    fn test_extract_entry_context_empty() {
+        let entry = serde_json::json!({"name": "noop"});
+        assert_eq!(extract_entry_context(&entry), "");
+    }
+
+    // --- resolve_max and DEFAULT_MAX unit tests ---
+
+    #[test]
+    fn test_default_max_trait_constant() {
+        assert_eq!(CreateWorkItemResult::DEFAULT_MAX, 1);
+        assert_eq!(CreatePrResult::DEFAULT_MAX, 1);
+        assert_eq!(UpdateWorkItemResult::DEFAULT_MAX, 1);
+        assert_eq!(CommentOnWorkItemResult::DEFAULT_MAX, 1);
+        assert_eq!(CreateWikiPageResult::DEFAULT_MAX, 1);
+        assert_eq!(UpdateWikiPageResult::DEFAULT_MAX, 1);
+    }
+
+    #[test]
+    fn test_resolve_max_uses_config_override() {
+        let mut tool_configs = HashMap::new();
+        tool_configs.insert("test-tool".to_string(), serde_json::json!({"max": 5}));
+        let ctx = ExecutionContext {
+            tool_configs,
+            ..ExecutionContext::default()
+        };
+        assert_eq!(resolve_max(&ctx, "test-tool", 1), 5);
+    }
+
+    #[test]
+    fn test_resolve_max_falls_back_to_default() {
+        let ctx = ExecutionContext::default();
+        assert_eq!(resolve_max(&ctx, "nonexistent-tool", 3), 3);
+    }
+
+    #[test]
+    fn test_resolve_max_uses_default_when_no_max_in_config() {
+        let mut tool_configs = HashMap::new();
+        tool_configs.insert("test-tool".to_string(), serde_json::json!({"other": true}));
+        let ctx = ExecutionContext {
+            tool_configs,
+            ..ExecutionContext::default()
+        };
+        assert_eq!(resolve_max(&ctx, "test-tool", 7), 7);
+    }
+
+    // --- Generic budget enforcement for all tool types ---
+
+    #[tokio::test]
+    async fn test_budget_enforcement_create_work_item_max() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let safe_output_path = temp_dir.path().join(SAFE_OUTPUT_FILENAME);
+
+        // Write 3 create-work-item entries + 1 noop; max set to 2
+        let ndjson = r#"{"name":"create-work-item","title":"First item","description":"A description that is definitely longer than thirty characters."}
+{"name":"create-work-item","title":"Second item","description":"A description that is definitely longer than thirty characters."}
+{"name":"create-work-item","title":"Third item","description":"A description that is definitely longer than thirty characters."}
+{"name":"noop","context":"still runs"}
+"#;
+        tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
+
+        let mut tool_configs = HashMap::new();
+        tool_configs.insert("create-work-item".to_string(), serde_json::json!({"max": 2}));
+
+        let ctx = ExecutionContext {
+            ado_org_url: Some("https://dev.azure.com/org".to_string()),
+            ado_organization: Some("org".to_string()),
+            ado_project: Some("Proj".to_string()),
+            access_token: Some("token".to_string()),
+            working_directory: PathBuf::from("."),
+            source_directory: PathBuf::from("."),
+            tool_configs,
+            repository_id: None,
+            repository_name: None,
+            allowed_repositories: HashMap::new(),
+        };
+
+        let results = execute_safe_outputs(temp_dir.path(), &ctx).await;
+        assert!(results.is_ok(), "Batch should not abort when max is exceeded");
+        let results = results.unwrap();
+        assert_eq!(results.len(), 4, "Expected 4 results");
+
+        // Only 1 should be skipped (max=2 allows first 2, third is skipped)
+        let skipped: Vec<_> = results
+            .iter()
+            .filter(|r| r.message.contains("maximum create-work-item count"))
+            .collect();
+        assert_eq!(skipped.len(), 1, "Expected 1 skipped entry, got: {:?}", skipped);
+
+        // noop still runs
+        assert!(results[3].success, "noop should still succeed");
+    }
+
+    #[tokio::test]
+    async fn test_budget_enforcement_mixed_tools_independent_budgets() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let safe_output_path = temp_dir.path().join(SAFE_OUTPUT_FILENAME);
+
+        // Mix of tools: each has max=1 (default), so only the first of each type should pass budget
+        let ndjson = r#"{"name":"create-work-item","title":"WI 1","description":"A description that is definitely longer than thirty characters."}
+{"name":"create-work-item","title":"WI 2","description":"A description that is definitely longer than thirty characters."}
+{"name":"create-wiki-page","path":"/Page1","content":"Some valid wiki content here."}
+{"name":"create-wiki-page","path":"/Page2","content":"Some valid wiki content here."}
+{"name":"noop","context":"always runs"}
+"#;
+        tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
+
+        let ctx = ExecutionContext {
+            ado_org_url: Some("https://dev.azure.com/org".to_string()),
+            ado_organization: Some("org".to_string()),
+            ado_project: Some("Proj".to_string()),
+            access_token: Some("token".to_string()),
+            working_directory: PathBuf::from("."),
+            source_directory: PathBuf::from("."),
+            tool_configs: HashMap::new(), // defaults: max=1 for all
+            repository_id: None,
+            repository_name: None,
+            allowed_repositories: HashMap::new(),
+        };
+
+        let results = execute_safe_outputs(temp_dir.path(), &ctx).await.unwrap();
+        assert_eq!(results.len(), 5);
+
+        // Second create-work-item should be skipped
+        let cwi_skipped: Vec<_> = results
+            .iter()
+            .filter(|r| r.message.contains("maximum create-work-item count"))
+            .collect();
+        assert_eq!(cwi_skipped.len(), 1, "Expected 1 skipped create-work-item");
+
+        // Second create-wiki-page should be skipped
+        let cwp_skipped: Vec<_> = results
+            .iter()
+            .filter(|r| r.message.contains("maximum create-wiki-page count"))
+            .collect();
+        assert_eq!(cwp_skipped.len(), 1, "Expected 1 skipped create-wiki-page");
+
+        // noop always runs
+        assert!(results[4].success, "noop should still succeed");
     }
 }

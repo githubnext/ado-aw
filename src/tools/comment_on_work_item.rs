@@ -93,28 +93,11 @@ impl CommentTarget {
 ///     max: 5
 ///     target: "*"
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CommentOnWorkItemConfig {
-    /// Maximum number of comments per run (default: 1)
-    #[serde(default = "default_max")]
-    pub max: u32,
-
     /// Target scope — which work items can be commented on.
     /// `None` means no target was configured; execution must reject this.
     pub target: Option<CommentTarget>,
-}
-
-fn default_max() -> u32 {
-    1
-}
-
-impl Default for CommentOnWorkItemConfig {
-    fn default() -> Self {
-        Self {
-            max: default_max(),
-            target: None,
-        }
-    }
 }
 
 /// Fetch a work item's area path from the ADO API
@@ -190,7 +173,7 @@ impl Executor for CommentOnWorkItemResult {
         debug!("ADO org: {}, project: {}", org_url, project);
 
         let config: CommentOnWorkItemConfig = ctx.get_tool_config("comment-on-work-item");
-        debug!("Target: {:?}, max: {}", config.target, config.max);
+        debug!("Target: {:?}", config.target);
 
         let target = match &config.target {
             Some(t) => t,
@@ -407,18 +390,15 @@ mod tests {
     #[test]
     fn test_config_defaults() {
         let config = CommentOnWorkItemConfig::default();
-        assert_eq!(config.max, 1);
         assert!(config.target.is_none());
     }
 
     #[test]
     fn test_config_deserializes_from_yaml() {
         let yaml = r#"
-max: 5
 target: "*"
 "#;
         let config: CommentOnWorkItemConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.max, 5);
         assert!(config.target.is_some());
     }
 
@@ -487,6 +467,6 @@ max: 3
 target: "*"
 "#;
         let config: CommentOnWorkItemConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.max, 1); // default
+        assert!(config.target.is_some());
     }
 }
