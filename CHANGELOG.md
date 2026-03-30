@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.4.0](https://github.com/githubnext/ado-aw/compare/v0.3.2...v0.4.0) (2026-03-30)
+
+
+### Features
+
+* add /rust-review slash command for on-demand PR reviews ([#60](https://github.com/githubnext/ado-aw/issues/60)) ([8eaf972](https://github.com/githubnext/ado-aw/commit/8eaf972baed99bcd03f9d3bcae013bdb922e390a))
+* add comment-on-work-item safe output tool ([#80](https://github.com/githubnext/ado-aw/issues/80)) ([513f7fe](https://github.com/githubnext/ado-aw/commit/513f7feca82e4d6c2ae02906ea6231fa2ebf4530))
+* add create-wiki-page safe output ([#61](https://github.com/githubnext/ado-aw/issues/61)) ([87d6527](https://github.com/githubnext/ado-aw/commit/87d65276a084b5ab944f33083089cb2a7fe93434))
+* add edit-wiki-page safe output ([#58](https://github.com/githubnext/ado-aw/issues/58)) ([7b4536f](https://github.com/githubnext/ado-aw/commit/7b4536f1953c9d09bb3deee5a06779c06e4ac53e))
+* add update-work-item safe output ([#65](https://github.com/githubnext/ado-aw/issues/65)) ([cf5e6b5](https://github.com/githubnext/ado-aw/commit/cf5e6b5a0778dda1cfcbfeb0d5a19d89649ce43a))
+* allow copilot bot to trigger rust PR reviewer ([#59](https://github.com/githubnext/ado-aw/issues/59)) ([0bcef57](https://github.com/githubnext/ado-aw/commit/0bcef5799295157f6d1f3cda06de4c7fcd020730))
+* apply max budget enforcement to all safe-output tools ([#91](https://github.com/githubnext/ado-aw/issues/91)) ([e88d8da](https://github.com/githubnext/ado-aw/commit/e88d8da4e8370547b5a22b623c850287402abab6))
+* rename edit-wiki-page to update-wiki-page ([#66](https://github.com/githubnext/ado-aw/issues/66)) ([2b6c5ed](https://github.com/githubnext/ado-aw/commit/2b6c5ed5bbfd5874231adaac3d27f45ac0c1d3f1))
+
+
+### Bug Fixes
+
+* sha256sum --ignore-missing silently passes when binary is absent from checksums.txt ([#47](https://github.com/githubnext/ado-aw/issues/47)) ([26c03c4](https://github.com/githubnext/ado-aw/commit/26c03c4e1c9c0ffde1e1570a70fbe90744c9383f))
+* **tests:** strengthen checksum verification assertion against regression ([#48](https://github.com/githubnext/ado-aw/issues/48)) ([7fcabe2](https://github.com/githubnext/ado-aw/commit/7fcabe2b4494dd694127d4f11ed7aad98b6b21e9))
+* update Copilot CLI version to 1.0.6 via compiler constants ([#51](https://github.com/githubnext/ado-aw/issues/51)) ([b8d8ece](https://github.com/githubnext/ado-aw/commit/b8d8ece8777b1517a6d8ced9c0c89f85ac088932))
+
 ## [0.3.2](https://github.com/githubnext/ado-aw/compare/v0.3.1...v0.3.2) (2026-03-17)
 
 
