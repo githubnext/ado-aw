@@ -297,6 +297,8 @@ fn resolve_max(ctx: &ExecutionContext, tool_name: &str, default_max: u32) -> usi
 }
 
 /// Extract a human-readable context identifier from a safe-output entry for log messages.
+/// Called before sanitization, so all string values are stripped of control characters
+/// to prevent log injection.
 fn extract_entry_context(entry: &Value) -> String {
     if let Some(id) = entry.get("id").and_then(|v| v.as_u64()) {
         return format!(" (work item #{})", id);
@@ -305,15 +307,17 @@ fn extract_entry_context(entry: &Value) -> String {
         return format!(" (work item #{})", id);
     }
     if let Some(title) = entry.get("title").and_then(|v| v.as_str()) {
-        let truncated: &str = if title.chars().count() > 40 {
-            &title[..title.char_indices().nth(40).map(|(i, _)| i).unwrap_or(title.len())]
+        let clean: String = title.chars().filter(|c| !c.is_control()).collect();
+        let truncated: &str = if clean.chars().count() > 40 {
+            &clean[..clean.char_indices().nth(40).map(|(i, _)| i).unwrap_or(clean.len())]
         } else {
-            title
+            &clean
         };
         return format!(" (\"{}\")", truncated);
     }
     if let Some(path) = entry.get("path").and_then(|v| v.as_str()) {
-        return format!(" (path: {})", path);
+        let clean: String = path.chars().filter(|c| !c.is_control()).collect();
+        return format!(" (path: {})", clean);
     }
     String::new()
 }
@@ -813,6 +817,18 @@ mod tests {
     fn test_extract_entry_context_empty() {
         let entry = serde_json::json!({"name": "noop"});
         assert_eq!(extract_entry_context(&entry), "");
+    }
+
+    #[test]
+    fn test_extract_entry_context_strips_control_chars() {
+        let entry = serde_json::json!({"name": "create-work-item", "title": "Good\ntitle\r\nhere"});
+        assert_eq!(extract_entry_context(&entry), " (\"Goodtitlehere\")");
+    }
+
+    #[test]
+    fn test_extract_entry_context_strips_control_chars_from_path() {
+        let entry = serde_json::json!({"name": "create-wiki-page", "path": "/Page\n/Injected"});
+        assert_eq!(extract_entry_context(&entry), " (path: /Page/Injected)");
     }
 
     // --- resolve_max and DEFAULT_MAX unit tests ---
