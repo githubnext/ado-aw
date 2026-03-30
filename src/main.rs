@@ -1,6 +1,8 @@
 mod allowed_hosts;
 mod compile;
+mod configure;
 mod create;
+mod detect;
 mod execute;
 mod fuzzy_schedule;
 mod logging;
@@ -79,6 +81,27 @@ enum Commands {
         #[arg(short, long)]
         config: PathBuf,
     },
+    /// Detect agentic pipelines and update GITHUB_TOKEN on their ADO definitions
+    Configure {
+        /// The new GITHUB_TOKEN value to set on matched pipeline definitions
+        #[arg(long)]
+        token: String,
+        /// Override: Azure DevOps organization URL (inferred from git remote by default)
+        #[arg(long)]
+        org: Option<String>,
+        /// Override: Azure DevOps project name (inferred from git remote by default)
+        #[arg(long)]
+        project: Option<String>,
+        /// PAT for ADO API authentication (defaults to AZURE_DEVOPS_EXT_PAT env var)
+        #[arg(long)]
+        pat: Option<String>,
+        /// Path to the repository root (defaults to current directory)
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Preview changes without applying them
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -107,6 +130,7 @@ async fn main() -> Result<()> {
         Some(Commands::Execute { .. }) => "execute",
         Some(Commands::Proxy { .. }) => "proxy",
         Some(Commands::McpFirewall { .. }) => "mcp-firewall",
+        Some(Commands::Configure { .. }) => "configure",
         None => "ado-aw",
     };
 
@@ -230,6 +254,24 @@ async fn main() -> Result<()> {
             }
             Commands::McpFirewall { config } => {
                 mcp_firewall::run(&config).await?;
+            }
+            Commands::Configure {
+                token,
+                org,
+                project,
+                pat,
+                path,
+                dry_run,
+            } => {
+                configure::run(
+                    &token,
+                    org.as_deref(),
+                    project.as_deref(),
+                    pat.as_deref(),
+                    path.as_deref(),
+                    dry_run,
+                )
+                .await?;
             }
         }
     } else {

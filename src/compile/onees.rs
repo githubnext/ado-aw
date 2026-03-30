@@ -20,8 +20,8 @@ use super::common::{
     self, AWF_VERSION, COPILOT_CLI_VERSION, DEFAULT_POOL, compute_effective_workspace, generate_copilot_params,
     generate_acquire_ado_token, generate_checkout_self, generate_checkout_steps,
     generate_ci_trigger, generate_copilot_ado_env, generate_executor_ado_env,
-    generate_pipeline_path, generate_pipeline_resources, generate_pr_trigger,
-    generate_repositories, generate_schedule, generate_source_path,
+    generate_header_comment, generate_pipeline_path, generate_pipeline_resources,
+    generate_pr_trigger, generate_repositories, generate_schedule, generate_source_path,
     generate_working_directory, replace_with_indent, validate_comment_target,
     validate_update_work_item_target, validate_write_permissions,
 };
@@ -193,6 +193,10 @@ displayName: "Finalize""#,
                 They will be ignored. Use standalone target for full MCP support."
             );
         }
+
+        // Prepend header comment for pipeline detection
+        let header = generate_header_comment(input_path);
+        let pipeline_yaml = format!("{}{}", header, pipeline_yaml);
 
         Ok(pipeline_yaml)
     }

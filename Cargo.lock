@@ -25,6 +25,7 @@ dependencies = [
  "tempfile",
  "terminal_size",
  "tokio",
+ "url",
 ]
 
 [[package]]
