@@ -92,6 +92,9 @@ pub async fn execute_safe_outputs(
     // Build budget map: tool_name → (executed_count, max_allowed).
     // Each tool declares its DEFAULT_MAX via the ToolResult trait; the operator can
     // override it with `max` in the front-matter config JSON.
+    //
+    // IMPORTANT: When adding a new ToolResult implementor, also register it here
+    // so its budget is enforced. There is no compile-time guard for this.
     let mut budgets: HashMap<&str, (usize, usize)> = HashMap::new();
     macro_rules! register_budgets {
         ($($tool:ty),+ $(,)?) => {
@@ -302,7 +305,11 @@ fn extract_entry_context(entry: &Value) -> String {
         return format!(" (work item #{})", id);
     }
     if let Some(title) = entry.get("title").and_then(|v| v.as_str()) {
-        let truncated = if title.len() > 40 { &title[..40] } else { title };
+        let truncated: &str = if title.chars().count() > 40 {
+            &title[..title.char_indices().nth(40).map(|(i, _)| i).unwrap_or(title.len())]
+        } else {
+            title
+        };
         return format!(" (\"{}\")", truncated);
     }
     if let Some(path) = entry.get("path").and_then(|v| v.as_str()) {
@@ -787,6 +794,19 @@ mod tests {
     fn test_extract_entry_context_with_path() {
         let entry = serde_json::json!({"name": "create-wiki-page", "path": "/Overview/NewPage"});
         assert_eq!(extract_entry_context(&entry), " (path: /Overview/NewPage)");
+    }
+
+    #[test]
+    fn test_extract_entry_context_truncates_long_title_utf8_safe() {
+        // 41 emoji characters — each is 4 bytes, so naive &title[..40] would panic
+        let title = "🔥".repeat(41);
+        let entry = serde_json::json!({"name": "create-work-item", "title": title});
+        let ctx = extract_entry_context(&entry);
+        assert!(ctx.starts_with(" (\""));
+        assert!(ctx.ends_with("\")"));
+        // Should contain exactly 40 emoji chars (not panic)
+        let inner = &ctx[3..ctx.len() - 2];
+        assert_eq!(inner.chars().count(), 40);
     }
 
     #[test]

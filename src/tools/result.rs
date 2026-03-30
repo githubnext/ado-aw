@@ -179,14 +179,27 @@ pub fn anyhow_to_mcp_error(err: anyhow::Error) -> McpError {
 /// for both Stage 1 (serialization to safe outputs) and Stage 2 (deserialization for execution).
 ///
 /// # Usage
+///
+/// Basic (uses trait default of `DEFAULT_MAX = 1`):
 /// ```ignore
 /// tool_result! {
 ///     name = "my_tool",
 ///     params = MyToolParams,
-///     /// Documentation for the result struct
 ///     pub struct MyToolResult {
 ///         field1: String,
 ///         field2: i32,
+///     }
+/// }
+/// ```
+///
+/// With custom default max (overrides `DEFAULT_MAX` for this tool):
+/// ```ignore
+/// tool_result! {
+///     name = "my_tool",
+///     params = MyToolParams,
+///     default_max = 5,
+///     pub struct MyToolResult {
+///         field1: String,
 ///     }
 /// }
 /// ```
