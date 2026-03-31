@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/githubnext/ado-aw/compare/v0.6.0...v0.6.1) (2026-03-31)
+
+
+### Bug Fixes
+
+* **configure:** support Azure CLI auth and fix YAML path matching ([#98](https://github.com/githubnext/ado-aw/issues/98)) ([a771036](https://github.com/githubnext/ado-aw/commit/a771036b21849f5769bc3d44cb72346a93d73bac))
+
 ## [0.6.0](https://github.com/githubnext/ado-aw/compare/v0.5.0...v0.6.0) (2026-03-31)
 
 
