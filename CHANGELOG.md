@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/githubnext/ado-aw/compare/v0.4.0...v0.5.0) (2026-03-31)
+
+
+### Features
+
+* add \configure\ command to detect pipelines and update GITHUB_TOKEN ([#92](https://github.com/githubnext/ado-aw/issues/92)) ([a032b4e](https://github.com/githubnext/ado-aw/commit/a032b4e837df89fe5127100664f44415274f1030))
+
 ## [0.4.0](https://github.com/githubnext/ado-aw/compare/v0.3.2...v0.4.0) (2026-03-30)
 
 
