@@ -106,6 +106,80 @@ pub async fn compile_pipeline(input_path: &str, output_path: Option<&str>) -> Re
     Ok(())
 }
 
+/// Auto-discover and recompile all agentic pipelines in the current directory.
+///
+/// Scans for compiled YAML files containing the `# @ado-aw source=...` header,
+/// resolves each source markdown path, and recompiles. Pipelines whose source
+/// files are missing are reported but don't abort the batch.
+pub async fn compile_all_pipelines() -> Result<()> {
+    let root = Path::new(".");
+    info!("Auto-discovering agentic pipelines for recompilation");
+
+    let detected = crate::detect::detect_pipelines(root).await?;
+
+    if detected.is_empty() {
+        println!("No agentic pipelines found in the current directory.");
+        println!("To compile a single file, run: ado-aw compile <path>");
+        return Ok(());
+    }
+
+    println!("Found {} agentic pipeline(s):", detected.len());
+    for p in &detected {
+        println!(
+            "  {} (source: {}, version: {})",
+            p.yaml_path.display(),
+            p.source,
+            p.version
+        );
+    }
+    println!();
+
+    let mut success_count = 0;
+    let mut skip_count = 0;
+    let mut fail_count = 0;
+
+    for pipeline in &detected {
+        let source_path = root.join(&pipeline.source);
+        let yaml_output_path = root.join(&pipeline.yaml_path);
+
+        if !source_path.exists() {
+            eprintln!(
+                "  Warning: source '{}' not found for {}, skipping",
+                pipeline.source,
+                pipeline.yaml_path.display()
+            );
+            skip_count += 1;
+            continue;
+        }
+
+        let source_str = source_path.to_string_lossy();
+        let output_str = yaml_output_path.to_string_lossy();
+
+        match compile_pipeline(&source_str, Some(&output_str)).await {
+            Ok(()) => success_count += 1,
+            Err(e) => {
+                eprintln!(
+                    "  Error compiling '{}': {}",
+                    pipeline.source, e
+                );
+                fail_count += 1;
+            }
+        }
+    }
+
+    println!();
+    println!(
+        "Done: {} compiled, {} skipped, {} failed.",
+        success_count, skip_count, fail_count
+    );
+
+    if fail_count > 0 {
+        anyhow::bail!("{} pipeline(s) failed to compile", fail_count);
+    }
+
+    Ok(())
+}
+
 /// Check that a compiled pipeline YAML matches its source markdown.
 ///
 /// Compiles the source markdown fresh and compares (whitespace-normalized)

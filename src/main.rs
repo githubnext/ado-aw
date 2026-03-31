@@ -29,10 +29,11 @@ enum Commands {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
-    /// Compile markdown to pipeline definition
+    /// Compile markdown to pipeline definition (or recompile all detected pipelines)
     Compile {
-        /// Path to the input markdown file
-        path: String,
+        /// Path to the input markdown file. If omitted, auto-discovers and
+        /// recompiles all existing agentic pipelines in the current directory.
+        path: Option<String>,
         /// Optional output path for the generated YAML file
         #[arg(short, long)]
         output: Option<String>,
@@ -142,9 +143,18 @@ async fn main() -> Result<()> {
             Commands::Create { output } => {
                 create::create_agent(output).await?;
             }
-            Commands::Compile { path, output } => {
-                compile::compile_pipeline(&path, output.as_deref()).await?;
-            }
+            Commands::Compile { path, output } => match path {
+                Some(p) => compile::compile_pipeline(&p, output.as_deref()).await?,
+                None => {
+                    if output.is_some() {
+                        anyhow::bail!(
+                            "--output cannot be used with auto-discovery mode. \
+                             Specify a path to compile a single file with a custom output."
+                        );
+                    }
+                    compile::compile_all_pipelines().await?
+                }
+            },
             Commands::Check { source, pipeline } => {
                 compile::check_pipeline(&source, &pipeline).await?;
             }
