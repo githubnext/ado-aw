@@ -36,7 +36,11 @@ pub fn parse_ado_remote(remote_url: &str) -> Result<AdoContext> {
     let url = remote_url.trim();
 
     // SSH format: git@ssh.dev.azure.com:v3/{org}/{project}/{repo}
-    if let Some(rest) = url.strip_prefix("git@ssh.dev.azure.com:v3/") {
+    // Also handles legacy: git@vs-ssh.visualstudio.com:v3/{org}/{project}/{repo}
+    if let Some(rest) = url
+        .strip_prefix("git@ssh.dev.azure.com:v3/")
+        .or_else(|| url.strip_prefix("git@vs-ssh.visualstudio.com:v3/"))
+    {
         let parts: Vec<&str> = rest.splitn(3, '/').collect();
         if parts.len() >= 3 {
             let repo_name = parts[2].trim_end_matches(".git");
@@ -290,12 +294,17 @@ async fn match_definitions(
         let yaml_path_str = pipeline.yaml_path.to_string_lossy();
         let yaml_path_normalized = yaml_path_str.replace('\\', "/");
 
-        // Strategy 1: Match by YAML filename in the definition
+        // Strategy 1: Match by YAML filename in the definition.
+        // ADO stores yamlFilename with a leading '/' (e.g., "/.azdo/pipelines/agent.yml"),
+        // so we strip it before comparing to the locally-detected relative path.
         let path_match = definitions.iter().find(|d| {
             d.process
                 .as_ref()
                 .and_then(|p| p.yaml_filename.as_ref())
-                .is_some_and(|f| f.replace('\\', "/") == yaml_path_normalized)
+                .is_some_and(|f| {
+                    let f_normalized = f.trim_start_matches('/').replace('\\', "/");
+                    f_normalized == yaml_path_normalized
+                })
         });
 
         if let Some(def) = path_match {
@@ -566,7 +575,7 @@ pub async fn run(
     }
     println!();
 
-    // Step 5: Update GITHUB_TOKEN
+    // Step 4: Update GITHUB_TOKEN
     if dry_run {
         println!("Dry run \u{2014} no changes applied.");
         println!(
@@ -651,6 +660,15 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_ado_remote_legacy_ssh() {
+        let url = "git@vs-ssh.visualstudio.com:v3/myorg/myproject/myrepo";
+        let ctx = parse_ado_remote(url).unwrap();
+        assert_eq!(ctx.org_url, "https://dev.azure.com/myorg");
+        assert_eq!(ctx.project, "myproject");
+        assert_eq!(ctx.repo_name, "myrepo");
+    }
+
+    #[test]
     fn test_parse_ado_remote_invalid() {
         assert!(parse_ado_remote("https://github.com/user/repo").is_err());
         assert!(parse_ado_remote("not-a-url").is_err());
@@ -664,6 +682,52 @@ mod tests {
             name: name.to_string(),
             process: None,
         }
+    }
+
+    fn make_def_with_yaml(id: u64, name: &str, yaml_filename: &str) -> DefinitionSummary {
+        DefinitionSummary {
+            id,
+            name: name.to_string(),
+            process: Some(ProcessInfo {
+                yaml_filename: Some(yaml_filename.to_string()),
+            }),
+        }
+    }
+
+    // ==================== YAML path matching ====================
+
+    #[test]
+    fn test_yaml_path_match_strips_leading_slash() {
+        // ADO stores yamlFilename with a leading '/'
+        let def = make_def_with_yaml(1, "My Pipeline", "/.azdo/pipelines/agent.yml");
+        let local_path = ".azdo/pipelines/agent.yml";
+        let f_normalized = def
+            .process
+            .as_ref()
+            .unwrap()
+            .yaml_filename
+            .as_ref()
+            .unwrap()
+            .trim_start_matches('/')
+            .replace('\\', "/");
+        assert_eq!(f_normalized, local_path);
+    }
+
+    #[test]
+    fn test_yaml_path_match_without_leading_slash() {
+        // Some ADO instances may store without leading '/'
+        let def = make_def_with_yaml(1, "My Pipeline", ".azdo/pipelines/agent.yml");
+        let local_path = ".azdo/pipelines/agent.yml";
+        let f_normalized = def
+            .process
+            .as_ref()
+            .unwrap()
+            .yaml_filename
+            .as_ref()
+            .unwrap()
+            .trim_start_matches('/')
+            .replace('\\', "/");
+        assert_eq!(f_normalized, local_path);
     }
 
     #[test]
