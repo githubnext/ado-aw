@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/githubnext/ado-aw/compare/v0.6.1...v0.7.0) (2026-03-31)
+
+
+### Features
+
+* **configure:** accept explicit definition IDs via --definition-ids ([#100](https://github.com/githubnext/ado-aw/issues/100)) ([b12c5ff](https://github.com/githubnext/ado-aw/commit/b12c5ffb493479976b555b115f805eca63e0c967))
+
 ## [0.6.1](https://github.com/githubnext/ado-aw/compare/v0.6.0...v0.6.1) (2026-03-31)
 
 
