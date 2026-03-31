@@ -132,22 +132,46 @@ struct HeaderMetadata {
 
 /// Parse a single line for the `# @ado-aw` marker and extract key=value pairs.
 ///
-/// Expected format: `# @ado-aw source=agents/foo.md version=1.2.3`
+/// Expected format: `# @ado-aw source="path/to/agent.md" version=1.2.3`
+///
+/// The source value is quoted to support paths with spaces. Unquoted values
+/// are also accepted for backward compatibility.
 fn parse_header_line(line: &str) -> Option<HeaderMetadata> {
     let line = line.trim();
-    if !line.starts_with(HEADER_MARKER) {
-        return None;
-    }
+    // Require exact marker followed by a space to avoid matching e.g. "# @ado-aw-v2"
+    let rest = line.strip_prefix(HEADER_MARKER)?.strip_prefix(' ')?;
 
-    let rest = &line[HEADER_MARKER.len()..];
     let mut source = String::new();
     let mut version = String::new();
 
-    for part in rest.split_whitespace() {
-        if let Some(val) = part.strip_prefix("source=") {
-            source = val.to_string();
-        } else if let Some(val) = part.strip_prefix("version=") {
-            version = val.to_string();
+    let mut remaining = rest;
+    while !remaining.is_empty() {
+        remaining = remaining.trim_start();
+        if let Some(after) = remaining.strip_prefix("source=") {
+            // Handle quoted value: source="path with spaces"
+            if let Some(after_quote) = after.strip_prefix('"') {
+                if let Some(end) = after_quote.find('"') {
+                    source = after_quote[..end].to_string();
+                    remaining = &after_quote[end + 1..];
+                } else {
+                    // No closing quote — take rest of line
+                    source = after_quote.to_string();
+                    break;
+                }
+            } else {
+                // Unquoted: take until next whitespace
+                let end = after.find(' ').unwrap_or(after.len());
+                source = after[..end].to_string();
+                remaining = &after[end..];
+            }
+        } else if let Some(after) = remaining.strip_prefix("version=") {
+            let end = after.find(' ').unwrap_or(after.len());
+            version = after[..end].to_string();
+            remaining = &after[end..];
+        } else {
+            // Skip unknown token
+            let end = remaining.find(' ').unwrap_or(remaining.len());
+            remaining = &remaining[end..];
         }
     }
 
@@ -171,6 +195,22 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_header_line_quoted_source() {
+        let line = r#"# @ado-aw source="agents/my-agent.md" version=0.3.2"#;
+        let meta = parse_header_line(line).unwrap();
+        assert_eq!(meta.source, "agents/my-agent.md");
+        assert_eq!(meta.version, "0.3.2");
+    }
+
+    #[test]
+    fn test_parse_header_line_quoted_source_with_spaces() {
+        let line = r#"# @ado-aw source="my agents/my agent.md" version=0.5.0"#;
+        let meta = parse_header_line(line).unwrap();
+        assert_eq!(meta.source, "my agents/my agent.md");
+        assert_eq!(meta.version, "0.5.0");
+    }
+
+    #[test]
     fn test_parse_header_line_reordered() {
         let line = "# @ado-aw version=1.0.0 source=agents/foo.md";
         let meta = parse_header_line(line).unwrap();
@@ -187,8 +227,14 @@ mod tests {
 
     #[test]
     fn test_parse_header_line_marker_only() {
-        // Just the marker with no key=value pairs
+        // Just the marker with no space after it — should not match
         assert!(parse_header_line("# @ado-aw").is_none());
+    }
+
+    #[test]
+    fn test_parse_header_line_marker_prefix_mismatch() {
+        // "# @ado-aw-v2" should NOT match — must be exact marker + space
+        assert!(parse_header_line("# @ado-aw-v2 source=foo.md version=1.0").is_none());
     }
 
     #[test]
