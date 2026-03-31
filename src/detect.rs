@@ -125,9 +125,9 @@ async fn try_detect_pipeline(
 }
 
 /// Parsed metadata from a `# @ado-aw` header line.
-struct HeaderMetadata {
-    source: String,
-    version: String,
+pub struct HeaderMetadata {
+    pub source: String,
+    pub version: String,
 }
 
 /// Parse a single line for the `# @ado-aw` marker and extract key=value pairs.
@@ -136,7 +136,7 @@ struct HeaderMetadata {
 ///
 /// The source value is quoted to support paths with spaces. Unquoted values
 /// are also accepted for backward compatibility.
-fn parse_header_line(line: &str) -> Option<HeaderMetadata> {
+pub fn parse_header_line(line: &str) -> Option<HeaderMetadata> {
     let line = line.trim();
     // Require exact marker followed by a space to avoid matching e.g. "# @ado-aw-v2"
     let rest = line.strip_prefix(HEADER_MARKER)?.strip_prefix(' ')?;
@@ -150,14 +150,29 @@ fn parse_header_line(line: &str) -> Option<HeaderMetadata> {
         if let Some(after) = remaining.strip_prefix("source=") {
             // Handle quoted value: source="path with spaces"
             if let Some(after_quote) = after.strip_prefix('"') {
-                if let Some(end) = after_quote.find('"') {
-                    source = after_quote[..end].to_string();
-                    remaining = &after_quote[end + 1..];
-                } else {
-                    // No closing quote — take rest of line
-                    source = after_quote.to_string();
-                    break;
+                // Find closing quote, skipping escaped quotes (\")
+                let mut value = String::new();
+                let mut chars = after_quote.char_indices();
+                let mut end_pos = after_quote.len();
+                while let Some((i, c)) = chars.next() {
+                    if c == '\\' {
+                        // Consume the escaped character
+                        if let Some((_, escaped)) = chars.next() {
+                            value.push(escaped);
+                        }
+                    } else if c == '"' {
+                        end_pos = i;
+                        break;
+                    } else {
+                        value.push(c);
+                    }
                 }
+                source = value;
+                remaining = if end_pos < after_quote.len() {
+                    &after_quote[end_pos + 1..]
+                } else {
+                    ""
+                };
             } else {
                 // Unquoted: take until next whitespace
                 let end = after.find(' ').unwrap_or(after.len());
@@ -243,6 +258,14 @@ mod tests {
         let meta = parse_header_line(line).unwrap();
         assert_eq!(meta.source, "agents/test.md");
         assert_eq!(meta.version, "");
+    }
+
+    #[test]
+    fn test_parse_header_line_quoted_source_with_escaped_quotes() {
+        let line = r#"# @ado-aw source="agents/my \"agent\".md" version=0.4.0"#;
+        let meta = parse_header_line(line).unwrap();
+        assert_eq!(meta.source, r#"agents/my "agent".md"#);
+        assert_eq!(meta.version, "0.4.0");
     }
 
     #[test]

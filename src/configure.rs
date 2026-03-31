@@ -170,20 +170,20 @@ async fn list_definitions(
     let mut continuation_token: Option<String> = None;
 
     loop {
-        let mut url = format!(
+        let url = format!(
             "{}/{}/_apis/build/definitions?api-version=7.1",
             ctx.org_url.trim_end_matches('/'),
             ctx.project
         );
-        if let Some(ref token) = continuation_token {
-            url.push_str(&format!("&continuationToken={}", token));
-        }
 
         debug!("Listing definitions: {}", url);
 
-        let resp = client
-            .get(&url)
-            .basic_auth("", Some(pat))
+        let mut request = client.get(&url).basic_auth("", Some(pat));
+        if let Some(ref token) = continuation_token {
+            request = request.query(&[("continuationToken", token)]);
+        }
+
+        let resp = request
             .send()
             .await
             .context("Failed to list pipeline definitions")?;
@@ -221,6 +221,48 @@ async fn list_definitions(
     }
 
     Ok(all_definitions)
+}
+
+/// Result of a fuzzy name match attempt.
+#[derive(Debug, PartialEq)]
+enum FuzzyMatchResult {
+    /// Exactly one definition matched.
+    Single(usize),
+    /// Multiple definitions matched (ambiguous).
+    Ambiguous(Vec<String>),
+    /// No definitions matched.
+    None,
+}
+
+/// Fuzzy-match an agent filename against pipeline definition names.
+///
+/// Checks if any definition name contains the agent name (with hyphens also
+/// tried as spaces). Returns `Single(index)` for an unambiguous match,
+/// `Ambiguous` when multiple definitions match, or `None` when nothing matches.
+fn fuzzy_match_by_name(agent_name: &str, definitions: &[DefinitionSummary]) -> FuzzyMatchResult {
+    if agent_name.is_empty() {
+        return FuzzyMatchResult::None;
+    }
+
+    let agent_lower = agent_name.to_lowercase();
+    let agent_spaced = agent_lower.replace('-', " ");
+    let candidates: Vec<(usize, &DefinitionSummary)> = definitions
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| {
+            let def_name_lower = d.name.to_lowercase();
+            def_name_lower.contains(&agent_spaced) || def_name_lower.contains(&agent_lower)
+        })
+        .collect();
+
+    match candidates.len() {
+        1 => FuzzyMatchResult::Single(candidates[0].0),
+        n if n > 1 => {
+            let names = candidates.iter().map(|(_, d)| d.name.clone()).collect();
+            FuzzyMatchResult::Ambiguous(names)
+        }
+        _ => FuzzyMatchResult::None,
+    }
 }
 
 /// Match detected pipeline YAML files to ADO pipeline definitions.
@@ -277,45 +319,31 @@ async fn match_definitions(
             .and_then(|s| s.to_str())
             .unwrap_or("");
 
-        if !agent_name.is_empty() {
-            let agent_lower = agent_name.to_lowercase();
-            let agent_spaced = agent_lower.replace('-', " ");
-            let candidates: Vec<_> = definitions
-                .iter()
-                .filter(|d| {
-                    let def_name_lower = d.name.to_lowercase();
-                    def_name_lower.contains(&agent_spaced)
-                        || def_name_lower.contains(&agent_lower)
-                })
-                .collect();
-
-            match candidates.len() {
-                1 => {
-                    let def = candidates[0];
-                    eprintln!(
-                        "  Warning: '{}' matched to '{}' (id={}) by pipeline name (fuzzy match)",
-                        yaml_path_normalized, def.name, def.id
-                    );
-                    matched.push(MatchedDefinition {
-                        id: def.id,
-                        name: def.name.clone(),
-                        match_method: MatchMethod::PipelineName,
-                        yaml_path: yaml_path_normalized.to_string(),
-                    });
-                    continue;
-                }
-                n if n > 1 => {
-                    let names: Vec<_> = candidates.iter().map(|d| d.name.as_str()).collect();
-                    eprintln!(
-                        "  Warning: '{}' has {} ambiguous name matches ({}), skipping",
-                        yaml_path_normalized,
-                        n,
-                        names.join(", ")
-                    );
-                    continue;
-                }
-                _ => {}
+        match fuzzy_match_by_name(agent_name, &definitions) {
+            FuzzyMatchResult::Single(idx) => {
+                let def = &definitions[idx];
+                eprintln!(
+                    "  Warning: '{}' matched to '{}' (id={}) by pipeline name (fuzzy match)",
+                    yaml_path_normalized, def.name, def.id
+                );
+                matched.push(MatchedDefinition {
+                    id: def.id,
+                    name: def.name.clone(),
+                    match_method: MatchMethod::PipelineName,
+                    yaml_path: yaml_path_normalized.to_string(),
+                });
+                continue;
             }
+            FuzzyMatchResult::Ambiguous(names) => {
+                eprintln!(
+                    "  Warning: '{}' has {} ambiguous name matches ({}), skipping",
+                    yaml_path_normalized,
+                    names.len(),
+                    names.join(", ")
+                );
+                continue;
+            }
+            FuzzyMatchResult::None => {}
         }
 
         info!(
@@ -604,5 +632,70 @@ mod tests {
     fn test_parse_ado_remote_invalid() {
         assert!(parse_ado_remote("https://github.com/user/repo").is_err());
         assert!(parse_ado_remote("not-a-url").is_err());
+    }
+
+    // ==================== Fuzzy name matching ====================
+
+    fn make_def(id: u64, name: &str) -> DefinitionSummary {
+        DefinitionSummary {
+            id,
+            name: name.to_string(),
+            process: None,
+        }
+    }
+
+    #[test]
+    fn test_fuzzy_match_single_unambiguous() {
+        let defs = vec![
+            make_def(1, "Daily Code Review"),
+            make_def(2, "Build Pipeline"),
+            make_def(3, "Release Pipeline"),
+        ];
+        // "daily-code-review" → hyphens become spaces → "daily code review" matches def 1
+        let result = fuzzy_match_by_name("daily-code-review", &defs);
+        assert_eq!(result, FuzzyMatchResult::Single(0));
+    }
+
+    #[test]
+    fn test_fuzzy_match_ambiguous_multiple() {
+        let defs = vec![
+            make_def(1, "Build and Test"),
+            make_def(2, "Build Validation"),
+            make_def(3, "Release Pipeline"),
+        ];
+        // "build" matches both def 1 ("Build and Test") and def 2 ("Build Validation")
+        let result = fuzzy_match_by_name("build", &defs);
+        assert!(
+            matches!(result, FuzzyMatchResult::Ambiguous(ref names) if names.len() == 2),
+            "Expected Ambiguous with 2 candidates, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_fuzzy_match_no_match() {
+        let defs = vec![
+            make_def(1, "Build Pipeline"),
+            make_def(2, "Release Pipeline"),
+        ];
+        let result = fuzzy_match_by_name("security-scanner", &defs);
+        assert_eq!(result, FuzzyMatchResult::None);
+    }
+
+    #[test]
+    fn test_fuzzy_match_empty_agent_name() {
+        let defs = vec![make_def(1, "Build Pipeline")];
+        let result = fuzzy_match_by_name("", &defs);
+        assert_eq!(result, FuzzyMatchResult::None);
+    }
+
+    #[test]
+    fn test_fuzzy_match_case_insensitive() {
+        let defs = vec![
+            make_def(1, "CODE REVIEW Agent"),
+            make_def(2, "Deploy Pipeline"),
+        ];
+        let result = fuzzy_match_by_name("code-review", &defs);
+        assert_eq!(result, FuzzyMatchResult::Single(0));
     }
 }
