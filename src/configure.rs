@@ -32,6 +32,7 @@ pub struct AdoContext {
 /// - HTTPS: `https://dev.azure.com/{org}/{project}/_git/{repo}`
 /// - HTTPS (legacy): `https://{org}.visualstudio.com/{project}/_git/{repo}`
 /// - SSH: `git@ssh.dev.azure.com:v3/{org}/{project}/{repo}`
+/// - SSH (legacy): `git@vs-ssh.visualstudio.com:v3/{org}/{project}/{repo}`
 pub fn parse_ado_remote(remote_url: &str) -> Result<AdoContext> {
     let url = remote_url.trim();
 
@@ -269,6 +270,15 @@ fn fuzzy_match_by_name(agent_name: &str, definitions: &[DefinitionSummary]) -> F
     }
 }
 
+/// Normalize an ADO YAML filename for comparison with local paths.
+///
+/// ADO's Build Definitions API stores `yamlFilename` with a leading `/`
+/// (e.g., `/.azdo/pipelines/agent.yml`) and may use backslashes on Windows.
+/// This strips the leading `/` and normalizes separators to forward slashes.
+fn normalize_ado_yaml_path(path: &str) -> String {
+    path.replace('\\', "/").trim_start_matches('/').to_string()
+}
+
 /// Match detected pipeline YAML files to ADO pipeline definitions.
 ///
 /// Strategy:
@@ -301,10 +311,7 @@ async fn match_definitions(
             d.process
                 .as_ref()
                 .and_then(|p| p.yaml_filename.as_ref())
-                .is_some_and(|f| {
-                    let f_normalized = f.trim_start_matches('/').replace('\\', "/");
-                    f_normalized == yaml_path_normalized
-                })
+                .is_some_and(|f| normalize_ado_yaml_path(f) == yaml_path_normalized)
         });
 
         if let Some(def) = path_match {
@@ -699,35 +706,27 @@ mod tests {
     #[test]
     fn test_yaml_path_match_strips_leading_slash() {
         // ADO stores yamlFilename with a leading '/'
-        let def = make_def_with_yaml(1, "My Pipeline", "/.azdo/pipelines/agent.yml");
-        let local_path = ".azdo/pipelines/agent.yml";
-        let f_normalized = def
-            .process
-            .as_ref()
-            .unwrap()
-            .yaml_filename
-            .as_ref()
-            .unwrap()
-            .trim_start_matches('/')
-            .replace('\\', "/");
-        assert_eq!(f_normalized, local_path);
+        assert_eq!(
+            normalize_ado_yaml_path("/.azdo/pipelines/agent.yml"),
+            ".azdo/pipelines/agent.yml"
+        );
     }
 
     #[test]
     fn test_yaml_path_match_without_leading_slash() {
         // Some ADO instances may store without leading '/'
-        let def = make_def_with_yaml(1, "My Pipeline", ".azdo/pipelines/agent.yml");
-        let local_path = ".azdo/pipelines/agent.yml";
-        let f_normalized = def
-            .process
-            .as_ref()
-            .unwrap()
-            .yaml_filename
-            .as_ref()
-            .unwrap()
-            .trim_start_matches('/')
-            .replace('\\', "/");
-        assert_eq!(f_normalized, local_path);
+        assert_eq!(
+            normalize_ado_yaml_path(".azdo/pipelines/agent.yml"),
+            ".azdo/pipelines/agent.yml"
+        );
+    }
+
+    #[test]
+    fn test_yaml_path_match_backslash_normalization() {
+        assert_eq!(
+            normalize_ado_yaml_path("\\.azdo\\pipelines\\agent.yml"),
+            ".azdo/pipelines/agent.yml"
+        );
     }
 
     #[test]
