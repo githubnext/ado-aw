@@ -14,11 +14,14 @@ use std::path::Path;
 
 use super::Compiler;
 use super::common::{
-    self, AWF_VERSION, DEFAULT_POOL, MCPG_IMAGE, MCPG_PORT, MCPG_VERSION,
-    compute_effective_workspace, generate_copilot_params, generate_cancel_previous_builds,
-    generate_checkout_self, generate_checkout_steps, generate_ci_trigger, generate_pipeline_path,
-    generate_pipeline_resources, generate_pr_trigger, generate_repositories, generate_schedule,
-    generate_source_path, generate_working_directory, replace_with_indent, sanitize_filename,
+    self, AWF_VERSION, COPILOT_CLI_VERSION, DEFAULT_POOL, MCPG_IMAGE, MCPG_PORT, MCPG_VERSION,
+    compute_effective_workspace, generate_copilot_params, generate_acquire_ado_token,
+    generate_cancel_previous_builds, generate_checkout_self, generate_checkout_steps,
+    generate_ci_trigger, generate_copilot_ado_env, generate_executor_ado_env,
+    generate_header_comment, generate_pipeline_path, generate_pipeline_resources,
+    generate_pr_trigger, generate_repositories, generate_schedule, generate_source_path,
+    generate_working_directory, replace_with_indent, sanitize_filename,
+    validate_write_permissions, validate_comment_target, validate_update_work_item_target,
 };
 use super::types::{FrontMatter, McpConfig};
 use crate::allowed_hosts::{CORE_ALLOWED_HOSTS, mcp_required_hosts};
@@ -104,10 +107,28 @@ impl Compiler for StandaloneCompiler {
         let finalize_steps = generate_finalize_steps(&front_matter.post_steps);
         let agentic_depends_on = generate_agentic_depends_on(&front_matter.setup);
 
-        // Generate service connection token acquisition step and env vars
-        let acquire_ado_token =
-            generate_acquire_ado_token(&front_matter.read_only_service_connection);
-        let copilot_ado_env = generate_copilot_ado_env(&front_matter.read_only_service_connection);
+        // Generate service connection token acquisition steps and env vars
+        let acquire_read_token = generate_acquire_ado_token(
+            front_matter.permissions.as_ref().and_then(|p| p.read.as_deref()),
+            "SC_READ_TOKEN",
+        );
+        let copilot_ado_env = generate_copilot_ado_env(
+            front_matter.permissions.as_ref().and_then(|p| p.read.as_deref()),
+        );
+        let acquire_write_token = generate_acquire_ado_token(
+            front_matter.permissions.as_ref().and_then(|p| p.write.as_deref()),
+            "SC_WRITE_TOKEN",
+        );
+        let executor_ado_env = generate_executor_ado_env(
+            front_matter.permissions.as_ref().and_then(|p| p.write.as_deref()),
+        );
+
+        // Validate that write-requiring safe-outputs have a write service connection
+        validate_write_permissions(front_matter)?;
+        // Validate comment-on-work-item has required target field
+        validate_comment_target(front_matter)?;
+        // Validate update-work-item has required target field
+        validate_update_work_item_target(front_matter)?;
 
         // Load threat analysis prompt template
         let threat_analysis_prompt = include_str!("../../templates/threat-analysis.md");
@@ -126,6 +147,7 @@ impl Compiler for StandaloneCompiler {
             ("{{ firewall_version }}", AWF_VERSION),
             ("{{ mcpg_version }}", MCPG_VERSION),
             ("{{ mcpg_image }}", MCPG_IMAGE),
+            ("{{ copilot_version }}", COPILOT_CLI_VERSION),
             ("{{ pool }}", &pool),
             ("{{ setup_job }}", &setup_job),
             ("{{ teardown_job }}", &teardown_job),
@@ -150,8 +172,10 @@ impl Compiler for StandaloneCompiler {
             ("{{ workspace }}", &working_directory),
             ("{{ allowed_domains }}", &allowed_domains),
             ("{{ agent_content }}", markdown_body),
-            ("{{ acquire_ado_token }}", &acquire_ado_token),
+            ("{{ acquire_ado_token }}", &acquire_read_token),
             ("{{ copilot_ado_env }}", &copilot_ado_env),
+            ("{{ acquire_write_token }}", &acquire_write_token),
+            ("{{ executor_ado_env }}", &executor_ado_env),
         ];
 
         let pipeline_yaml = replacements
@@ -171,6 +195,10 @@ impl Compiler for StandaloneCompiler {
             "{{ mcpg_config }}",
             &mcpg_config_json,
         );
+
+        // Prepend header comment for pipeline detection
+        let header = generate_header_comment(input_path);
+        let pipeline_yaml = format!("{}{}", header, pipeline_yaml);
 
         Ok(pipeline_yaml)
     }
@@ -481,46 +509,6 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
             api_key: "${MCP_GATEWAY_API_KEY}".to_string(),
             payload_dir: "/tmp/gh-aw/mcp-payloads".to_string(),
         },
-    }
-}
-
-/// Generate the AzureCLI@2 step to acquire an ADO-scoped token from an ARM service connection.
-/// Returns empty string if no service connection is configured.
-fn generate_acquire_ado_token(service_connection: &Option<String>) -> String {
-    match service_connection {
-        Some(sc) => {
-            let mut lines = Vec::new();
-            lines.push("- task: AzureCLI@2".to_string());
-            lines.push(r#"  displayName: "Get ADO token from service connection""#.to_string());
-            lines.push("  inputs:".to_string());
-            lines.push(format!("    azureSubscription: '{}'", sc));
-            lines.push("    scriptType: 'bash'".to_string());
-            lines.push("    scriptLocation: 'inlineScript'".to_string());
-            lines.push("    addSpnToEnvironment: true".to_string());
-            lines.push("    inlineScript: |".to_string());
-            lines.push("      ADO_TOKEN=$(az account get-access-token \\".to_string());
-            lines.push("        --resource 499b84ac-1321-427f-aa17-267ca6975798 \\".to_string());
-            lines.push("        --query accessToken -o tsv)".to_string());
-            lines.push(
-                "      echo \"##vso[task.setvariable variable=SC_ACCESS_TOKEN;issecret=true]$ADO_TOKEN\""
-                    .to_string(),
-            );
-            lines.join("\n")
-        }
-        None => String::new(),
-    }
-}
-
-/// Generate the env block entries for the copilot AWF step.
-/// When a service connection is configured, uses the SC token.
-/// When not configured, omits ADO access tokens entirely.
-fn generate_copilot_ado_env(service_connection: &Option<String>) -> String {
-    match service_connection {
-        Some(_) => {
-            "AZURE_DEVOPS_EXT_PAT: $(SC_ACCESS_TOKEN)\nSYSTEM_ACCESSTOKEN: $(SC_ACCESS_TOKEN)"
-                .to_string()
-        }
-        None => String::new(),
     }
 }
 

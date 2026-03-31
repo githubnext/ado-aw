@@ -9,10 +9,14 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
-use crate::sanitize::sanitize as sanitize_text;
+use crate::sanitize::{Sanitize, sanitize as sanitize_text};
 use crate::tools::{
-    CreatePrParams, CreatePrResult, CreateWorkItemParams, CreateWorkItemResult, MissingDataParams,
-    MissingDataResult, MissingToolParams, MissingToolResult, NoopParams, NoopResult, ToolResult,
+    CommentOnWorkItemParams, CommentOnWorkItemResult,
+    CreatePrParams, CreatePrResult, CreateWikiPageParams, CreateWikiPageResult,
+    CreateWorkItemParams, CreateWorkItemResult,
+    UpdateWikiPageParams, UpdateWikiPageResult, MissingDataParams, MissingDataResult,
+    MissingToolParams, MissingToolResult, NoopParams, NoopResult, ToolResult,
+    UpdateWorkItemParams, UpdateWorkItemResult,
     anyhow_to_mcp_error,
 };
 
@@ -337,6 +341,60 @@ impl SafeOutputs {
     }
 
     #[tool(
+        name = "comment-on-work-item",
+        description = "Add a comment to an existing Azure DevOps work item. \
+Provide the work item ID and the comment body in markdown. The comment will be \
+posted during safe output processing. Target restrictions may apply based on \
+pipeline configuration."
+    )]
+    async fn comment_on_work_item(
+        &self,
+        params: Parameters<CommentOnWorkItemParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!(
+            "Tool called: comment-on-work-item - work item #{}",
+            params.0.work_item_id
+        );
+        debug!("Body length: {} chars", params.0.body.len());
+        // Sanitize untrusted agent-provided text fields (IS-01)
+        let mut sanitized = params.0;
+        sanitized.body = sanitize_text(&sanitized.body);
+        let result: CommentOnWorkItemResult = sanitized.try_into()?;
+        self.write_safe_output_file(&result).await
+            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        info!("Comment queued for work item #{}", result.work_item_id);
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Comment queued for work item #{}. The comment will be posted during safe output processing.",
+            result.work_item_id
+        ))]))
+    }
+
+    #[tool(
+        name = "update-work-item",
+        description = "Update an existing Azure DevOps work item. Only fields explicitly enabled \
+in the pipeline configuration (safe-outputs.update-work-item) may be changed. Updates may be \
+further restricted by target (only a specific work item ID) or title-prefix (only work items \
+whose current title starts with a configured prefix). Provide the work item ID and only the \
+fields you want to update."
+    )]
+    async fn update_work_item(
+        &self,
+        params: Parameters<UpdateWorkItemParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!("Tool called: update-work-item - id={}", params.0.id);
+        let mut result: UpdateWorkItemResult = params.0.try_into()?;
+        // Sanitize before persisting to NDJSON (defense-in-depth; Stage 2 sanitizes again)
+        result.sanitize_fields();
+        self.write_safe_output_file(&result).await
+            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        info!("Work item update queued for #{}", result.id);
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Work item #{} update queued. Changes will be applied during safe output processing.",
+            result.id
+        ))]))
+    }
+
+    #[tool(
         name = "create-pull-request",
         description = "Create a new pull request to propose code changes. Use this after making file edits to submit them for review and merging. The PR will be created from the current branch with your committed changes. Use 'self' for the pipeline's own repository, or a repository alias from the checkout list."
     )]
@@ -403,6 +461,79 @@ impl SafeOutputs {
         Ok(CallToolResult::success(vec![Content::text(format!(
             "PR request saved for repository '{}'. Patch file: {}. Changes will be pushed and PR created during safe output processing.",
             repository, result.patch_file
+        ))]))
+    }
+
+    #[tool(
+        name = "update-wiki-page",
+        description = "Create or update an Azure DevOps wiki page with the provided markdown content. \
+The page path (e.g. '/Overview/Architecture') and the wiki to write to are determined by the \
+pipeline configuration. Use this to publish findings, summaries, documentation, or any other \
+structured output that should be visible in the project wiki."
+    )]
+    async fn update_wiki_page(
+        &self,
+        params: Parameters<UpdateWikiPageParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!("Tool called: update-wiki-page - '{}'", params.0.path);
+        debug!("Content length: {} chars", params.0.content.len());
+
+        // Sanitize untrusted agent-provided text fields (IS-01).
+        // Path: strip control characters to prevent injection into the NDJSON record.
+        // Content and comment: apply the full sanitization pipeline.
+        let mut sanitized = params.0;
+        sanitized.path = sanitized
+            .path
+            .chars()
+            .filter(|c| !c.is_control() || *c == '\t')
+            .collect();
+        sanitized.content = sanitize_text(&sanitized.content);
+        sanitized.comment = sanitized.comment.map(|c| sanitize_text(&c));
+
+        let result: UpdateWikiPageResult = sanitized.try_into()?;
+        let _ = self.write_safe_output_file(&result).await;
+
+        info!("Wiki page edit queued: '{}'", result.path);
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Wiki page edit queued for '{}'. The page will be created or updated during safe output processing.",
+            result.path
+        ))]))
+    }
+
+    #[tool(
+        name = "create-wiki-page",
+        description = "Create a new Azure DevOps wiki page with the provided markdown content. \
+The page path (e.g. '/Overview/NewPage') and the wiki to write to are determined by the \
+pipeline configuration. The page must not already exist — use update-wiki-page to update \
+existing pages. Use this to publish findings, summaries, documentation, or any other \
+structured output that should be visible in the project wiki."
+    )]
+    async fn create_wiki_page(
+        &self,
+        params: Parameters<CreateWikiPageParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!("Tool called: create-wiki-page - '{}'", params.0.path);
+        debug!("Content length: {} chars", params.0.content.len());
+
+        // Sanitize untrusted agent-provided text fields (IS-01).
+        // Path: strip control characters to prevent injection into the NDJSON record.
+        // Content and comment: apply the full sanitization pipeline.
+        let mut sanitized = params.0;
+        sanitized.path = sanitized
+            .path
+            .chars()
+            .filter(|c| !c.is_control() || *c == '\t')
+            .collect();
+        sanitized.content = sanitize_text(&sanitized.content);
+        sanitized.comment = sanitized.comment.map(|c| sanitize_text(&c));
+
+        let result: CreateWikiPageResult = sanitized.try_into()?;
+        let _ = self.write_safe_output_file(&result).await;
+
+        info!("Wiki page creation queued: '{}'", result.path);
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Wiki page creation queued for '{}'. The page will be created during safe output processing.",
+            result.path
         ))]))
     }
 }

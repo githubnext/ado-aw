@@ -34,7 +34,7 @@ jobs:
         displayName: "Install Copilot CLI"
         inputs:
           command: 'custom'
-          arguments: 'install Microsoft.Copilot.CLI.linux-x64 -Source "https://pkgs.dev.azure.com/msazuresphere/_packaging/Guardian1ESPTUpstreamOrgFeed/nuget/v3/index.json" -Version 0.0.407 -OutputDirectory $(Agent.TempDirectory)/tools -ExcludeVersion -NonInteractive'
+          arguments: 'install Microsoft.Copilot.CLI.linux-x64 -Source "https://pkgs.dev.azure.com/msazuresphere/_packaging/Guardian1ESPTUpstreamOrgFeed/nuget/v3/index.json" -Version {{ copilot_version }} -OutputDirectory $(Agent.TempDirectory)/tools -ExcludeVersion -NonInteractive'
 
       - bash: |
           ls -la "$(Agent.TempDirectory)/tools"
@@ -65,7 +65,7 @@ jobs:
 
           echo "Verifying checksum..."
           cd "$DOWNLOAD_DIR"
-          sha256sum -c checksums.txt --ignore-missing | grep -q ": OK"
+          grep "ado-aw-linux-x64" checksums.txt | sha256sum -c -
           mv ado-aw-linux-x64 ado-aw
           chmod +x ado-aw
         displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
@@ -183,7 +183,7 @@ jobs:
 
           echo "Verifying checksum..."
           cd "$DOWNLOAD_DIR"
-          sha256sum -c checksums.txt --ignore-missing | grep -q ": OK"
+          grep "awf-linux-x64" checksums.txt | sha256sum -c -
           mv awf-linux-x64 awf
           chmod +x awf
           echo "##vso[task.prependpath]$(Pipeline.Workspace)/awf"
@@ -191,10 +191,12 @@ jobs:
         displayName: "Download AWF (Agentic Workflow Firewall) v{{ firewall_version }}"
 
       - bash: |
-          docker pull ghcr.io/github/gh-aw-firewall/squid:latest
-          docker pull ghcr.io/github/gh-aw-firewall/agent:latest
+          docker pull ghcr.io/github/gh-aw-firewall/squid:{{ firewall_version }}
+          docker pull ghcr.io/github/gh-aw-firewall/agent:{{ firewall_version }}
+          docker tag ghcr.io/github/gh-aw-firewall/squid:{{ firewall_version }} ghcr.io/github/gh-aw-firewall/squid:latest
+          docker tag ghcr.io/github/gh-aw-firewall/agent:{{ firewall_version }} ghcr.io/github/gh-aw-firewall/agent:latest
           docker pull {{ mcpg_image }}:v{{ mcpg_version }}
-        displayName: "Pre-pull AWF and MCPG container images"
+        displayName: "Pre-pull AWF and MCPG container images (v{{ firewall_version }})"
 
       {{ prepare_steps }}
 
@@ -390,7 +392,7 @@ jobs:
         displayName: "Install Copilot CLI"
         inputs:
           command: 'custom'
-          arguments: 'install Microsoft.Copilot.CLI.linux-x64 -Source "https://pkgs.dev.azure.com/msazuresphere/_packaging/Guardian1ESPTUpstreamOrgFeed/nuget/v3/index.json" -Version 0.0.407 -OutputDirectory $(Agent.TempDirectory)/tools -ExcludeVersion -NonInteractive'
+          arguments: 'install Microsoft.Copilot.CLI.linux-x64 -Source "https://pkgs.dev.azure.com/msazuresphere/_packaging/Guardian1ESPTUpstreamOrgFeed/nuget/v3/index.json" -Version {{ copilot_version }} -OutputDirectory $(Agent.TempDirectory)/tools -ExcludeVersion -NonInteractive'
 
       - bash: |
           ls -la "$(Agent.TempDirectory)/tools"
@@ -420,7 +422,7 @@ jobs:
 
           echo "Verifying checksum..."
           cd "$DOWNLOAD_DIR"
-          sha256sum -c checksums.txt --ignore-missing | grep -q ": OK"
+          grep "ado-aw-linux-x64" checksums.txt | sha256sum -c -
           mv ado-aw-linux-x64 ado-aw
           chmod +x ado-aw
         displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
@@ -441,7 +443,7 @@ jobs:
 
           echo "Verifying checksum..."
           cd "$DOWNLOAD_DIR"
-          sha256sum -c checksums.txt --ignore-missing | grep -q ": OK"
+          grep "awf-linux-x64" checksums.txt | sha256sum -c -
           mv awf-linux-x64 awf
           chmod +x awf
           echo "##vso[task.prependpath]$(Pipeline.Workspace)/awf"
@@ -449,9 +451,11 @@ jobs:
         displayName: "Download AWF (Agentic Workflow Firewall) v{{ firewall_version }}"
 
       - bash: |
-          docker pull ghcr.io/github/gh-aw-firewall/squid:latest
-          docker pull ghcr.io/github/gh-aw-firewall/agent:latest
-        displayName: "Pre-pull AWF container images"
+          docker pull ghcr.io/github/gh-aw-firewall/squid:{{ firewall_version }}
+          docker pull ghcr.io/github/gh-aw-firewall/agent:{{ firewall_version }}
+          docker tag ghcr.io/github/gh-aw-firewall/squid:{{ firewall_version }} ghcr.io/github/gh-aw-firewall/squid:latest
+          docker tag ghcr.io/github/gh-aw-firewall/agent:{{ firewall_version }} ghcr.io/github/gh-aw-firewall/agent:latest
+        displayName: "Pre-pull AWF container images (v{{ firewall_version }})"
 
       - bash: |
           mkdir -p {{ working_directory }}/safe_outputs
@@ -598,6 +602,8 @@ jobs:
       {{ checkout_self }}
       {{ checkout_repositories }}
 
+      {{ acquire_write_token }}
+
       - download: current
         artifact: analyzed_outputs_$(Build.BuildId)
 
@@ -614,14 +620,14 @@ jobs:
 
           echo "Verifying checksum..."
           cd "$DOWNLOAD_DIR"
-          sha256sum -c checksums.txt --ignore-missing | grep -q ": OK"
+          grep "ado-aw-linux-x64" checksums.txt | sha256sum -c -
           mv ado-aw-linux-x64 ado-aw
           chmod +x ado-aw
         displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
 
       - bash: |
           ls -la "$(Pipeline.Workspace)/agentic-pipeline-compiler"
-          chmod +x $(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw
+          chmod +x "$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
           echo "##vso[task.prependpath]$(Pipeline.Workspace)/agentic-pipeline-compiler"
         displayName: Add agentic compiler to path
 
@@ -633,7 +639,7 @@ jobs:
         displayName: Process safe outputs
         workingDirectory: {{ working_directory }}
         env:
-          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          {{ executor_ado_env }}
 
       - bash: |
           # Copy all logs to output directory for artifact upload

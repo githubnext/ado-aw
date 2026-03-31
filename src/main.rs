@@ -1,6 +1,8 @@
 mod allowed_hosts;
 mod compile;
+mod configure;
 mod create;
+mod detect;
 mod execute;
 mod fuzzy_schedule;
 mod logging;
@@ -25,10 +27,11 @@ enum Commands {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
-    /// Compile markdown to pipeline definition
+    /// Compile markdown to pipeline definition (or recompile all detected pipelines)
     Compile {
-        /// Path to the input markdown file
-        path: String,
+        /// Path to the input markdown file. If omitted, auto-discovers and
+        /// recompiles all existing agentic pipelines in the current directory.
+        path: Option<String>,
         /// Optional output path for the generated YAML file
         #[arg(short, long)]
         output: Option<String>,
@@ -84,6 +87,30 @@ enum Commands {
         /// Guard against directory traversal attacks
         bounding_directory: String,
     },
+    /// Detect agentic pipelines and update GITHUB_TOKEN on their ADO definitions
+    Configure {
+        /// The new GITHUB_TOKEN value (defaults to GITHUB_TOKEN env var; prompted if omitted)
+        #[arg(long, env = "GITHUB_TOKEN")]
+        token: Option<String>,
+        /// Override: Azure DevOps organization URL (inferred from git remote by default)
+        #[arg(long)]
+        org: Option<String>,
+        /// Override: Azure DevOps project name (inferred from git remote by default)
+        #[arg(long)]
+        project: Option<String>,
+        /// PAT for ADO API authentication (prefer setting AZURE_DEVOPS_EXT_PAT env var; prompted if omitted)
+        #[arg(long, env = "AZURE_DEVOPS_EXT_PAT")]
+        pat: Option<String>,
+        /// Path to the repository root (defaults to current directory)
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Preview changes without applying them
+        #[arg(long)]
+        dry_run: bool,
+        /// Explicit pipeline definition IDs to update (skips auto-detection)
+        #[arg(long, value_delimiter = ',')]
+        definition_ids: Option<Vec<u64>>,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -112,6 +139,7 @@ async fn main() -> Result<()> {
         Some(Commands::Execute { .. }) => "execute",
         Some(Commands::Proxy { .. }) => "proxy",
         Some(Commands::McpHttp { .. }) => "mcp-http",
+        Some(Commands::Configure { .. }) => "configure",
         None => "ado-aw",
     };
 
@@ -123,9 +151,18 @@ async fn main() -> Result<()> {
             Commands::Create { output } => {
                 create::create_agent(output).await?;
             }
-            Commands::Compile { path, output } => {
-                compile::compile_pipeline(&path, output.as_deref()).await?;
-            }
+            Commands::Compile { path, output } => match path {
+                Some(p) => compile::compile_pipeline(&p, output.as_deref()).await?,
+                None => {
+                    if output.is_some() {
+                        anyhow::bail!(
+                            "--output cannot be used with auto-discovery mode. \
+                             Specify a path to compile a single file with a custom output."
+                        );
+                    }
+                    compile::compile_all_pipelines().await?
+                }
+            },
             Commands::Check { source, pipeline } => {
                 compile::check_pipeline(&source, &pipeline).await?;
             }
@@ -241,6 +278,26 @@ async fn main() -> Result<()> {
             } => {
                 mcp::run_http(&output_directory, &bounding_directory, port, api_key.as_deref())
                     .await?;
+            }
+            Commands::Configure {
+                token,
+                org,
+                project,
+                pat,
+                path,
+                dry_run,
+                definition_ids,
+            } => {
+                configure::run(
+                    token.as_deref(),
+                    org.as_deref(),
+                    project.as_deref(),
+                    pat.as_deref(),
+                    path.as_deref(),
+                    dry_run,
+                    definition_ids.as_deref(),
+                )
+                .await?;
             }
         }
     } else {

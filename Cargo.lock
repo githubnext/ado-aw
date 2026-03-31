@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "ado-aw"
-version = "0.1.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15,6 +15,7 @@ dependencies = [
  "env_logger",
  "inquire",
  "log",
+ "percent-encoding",
  "regex-lite",
  "reqwest",
  "rmcp",
@@ -25,6 +26,7 @@ dependencies = [
  "subtle",
  "tempfile",
  "tokio",
+ "url",
 ]
 
 [[package]]
@@ -1601,9 +1603,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.9"
+version = "0.103.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7df23109aa6c1567d1c575b9952556388da57401e4ace1d15f79eedad0d8f53"
+checksum = "df33b2b81ac578cabaf06b89b0631153a3f416b0a886e8a7a1707fb51abbd1ef"
 dependencies = [
  "ring",
  "rustls-pki-types",

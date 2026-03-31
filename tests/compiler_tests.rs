@@ -145,8 +145,16 @@ fn test_compiled_yaml_structure() {
         "Template should download the compiler from GitHub Releases"
     );
     assert!(
-        template_content.contains("sha256sum -c checksums.txt --ignore-missing | grep -q \": OK\""),
-        "Template should verify checksum using checksums.txt with grep confirmation"
+        !template_content.contains("sha256sum -c checksums.txt --ignore-missing"),
+        "Template should not use --ignore-missing which silently passes when binary is missing from checksums"
+    );
+    assert!(
+        template_content.contains(r#"grep "ado-aw-linux-x64" checksums.txt | sha256sum -c -"#),
+        "Template should verify ado-aw checksum using targeted grep to ensure binary entry exists"
+    );
+    assert!(
+        !template_content.contains("grep -q"),
+        "Checksum verification should not pipe through grep"
     );
 
     // Verify AWF (Agentic Workflow Firewall) is downloaded from GitHub Releases, not ADO pipeline artifacts
@@ -343,6 +351,20 @@ fn test_fixture_complete_agent() {
 
     // Verify it has MCP configuration and custom MCPs
     assert!(content.contains("command:"), "Should have custom MCP");
+
+    // Verify permissions
+    assert!(
+        content.contains("permissions:"),
+        "Should have permissions"
+    );
+    assert!(
+        content.contains("read: my-read-arm-connection"),
+        "Should have read service connection"
+    );
+    assert!(
+        content.contains("write: my-write-arm-connection"),
+        "Should have write service connection"
+    );
 }
 
 /// Test that compiled output has no unreplaced template markers
@@ -424,6 +446,1267 @@ fn test_compiled_output_no_unreplaced_markers() {
     assert!(
         !compiled.contains("mcp_firewall"),
         "Compiled output should not reference legacy mcp_firewall"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that the pipeline-trigger-agent fixture compiles correctly
+///
+/// Verifies that the `triggers.pipeline` front matter field generates:
+/// - `resources.pipelines` block with the correct source pipeline name
+/// - `trigger: none` and `pr: none` to suppress CI/PR triggers
+/// - A cancel-previous-builds bash step
+/// - No `schedules:` block (since only a pipeline trigger is configured)
+#[test]
+fn test_fixture_pipeline_trigger_agent_compiled_output() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-trigger-test-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("pipeline-trigger-agent.md");
+
+    assert!(
+        fixture_path.exists(),
+        "Pipeline trigger agent fixture should exist"
+    );
+
+    let output_path = temp_dir.join("pipeline-trigger-agent.yml");
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            fixture_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_path.exists(), "Compiled YAML should exist");
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+
+    // Should contain pipeline resource pointing to the upstream pipeline
+    assert!(
+        compiled.contains("Build Pipeline"),
+        "Compiled output should contain source pipeline name 'Build Pipeline'"
+    );
+    assert!(
+        compiled.contains("OtherProject"),
+        "Compiled output should contain the project name 'OtherProject'"
+    );
+    assert!(
+        compiled.contains("resources:"),
+        "Compiled output should contain a resources block"
+    );
+    assert!(
+        compiled.contains("pipelines:"),
+        "Compiled output should contain a pipelines resource block"
+    );
+
+    // CI and PR triggers should be suppressed
+    assert!(
+        compiled.contains("trigger: none"),
+        "Compiled output should disable CI trigger with 'trigger: none'"
+    );
+    assert!(
+        compiled.contains("pr: none"),
+        "Compiled output should disable PR trigger with 'pr: none'"
+    );
+
+    // Should include the cancel-previous-builds step
+    assert!(
+        compiled.contains("Cancel previous queued builds"),
+        "Compiled output should include cancel-previous-builds step"
+    );
+
+    // Should NOT contain a schedules block (no schedule configured)
+    assert!(
+        !compiled.contains("schedules:"),
+        "Compiled output should not contain a schedules block"
+    );
+
+    // Verify no unreplaced markers remain
+    for line in compiled.lines() {
+        let stripped = line.replace("${{", "");
+        assert!(
+            !stripped.contains("{{ "),
+            "Compiled output should not contain unreplaced marker: {}",
+            line.trim()
+        );
+    }
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that permissions with read+write service connections generates correct token steps
+#[test]
+fn test_permissions_read_write_compiled_output() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-permissions-rw-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("perms-agent.md");
+    let test_content = r#"---
+name: "Permissions Test Agent"
+description: "Agent with read and write permissions"
+permissions:
+  read: my-read-sc
+  write: my-write-sc
+safe-outputs:
+  create-work-item:
+    work-item-type: Task
+---
+
+## Test Agent
+
+Do something.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("perms-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args(["compile", test_input.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+
+    // Should contain read token acquisition (SC_READ_TOKEN)
+    assert!(
+        compiled.contains("SC_READ_TOKEN"),
+        "Compiled output should contain SC_READ_TOKEN for read service connection"
+    );
+    assert!(
+        compiled.contains("my-read-sc"),
+        "Compiled output should contain the read service connection name"
+    );
+
+    // Should contain write token acquisition (SC_WRITE_TOKEN)
+    assert!(
+        compiled.contains("SC_WRITE_TOKEN"),
+        "Compiled output should contain SC_WRITE_TOKEN for write service connection"
+    );
+    assert!(
+        compiled.contains("my-write-sc"),
+        "Compiled output should contain the write service connection name"
+    );
+
+    // Should NOT contain System.AccessToken in executor env
+    assert!(
+        !compiled.contains("SYSTEM_ACCESSTOKEN: $(System.AccessToken)"),
+        "Compiled output should not pass System.AccessToken to executor"
+    );
+
+    // Verify no unreplaced markers remain
+    for line in compiled.lines() {
+        let stripped = line.replace("${{", "");
+        assert!(
+            !stripped.contains("{{ "),
+            "Compiled output should not contain unreplaced marker: {}",
+            line.trim()
+        );
+    }
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that permissions omitted results in no token steps
+#[test]
+fn test_permissions_omitted_compiled_output() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-permissions-none-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("no-perms-agent.md");
+    let test_content = r#"---
+name: "No Permissions Agent"
+description: "Agent with no permissions configured"
+---
+
+## Test Agent
+
+Do something.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("no-perms-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args(["compile", test_input.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+
+    // Should NOT contain any SC token variables
+    assert!(
+        !compiled.contains("SC_READ_TOKEN"),
+        "Compiled output should not contain SC_READ_TOKEN when permissions are omitted"
+    );
+    assert!(
+        !compiled.contains("SC_WRITE_TOKEN"),
+        "Compiled output should not contain SC_WRITE_TOKEN when permissions are omitted"
+    );
+    assert!(
+        !compiled.contains("AzureCLI@2"),
+        "Compiled output should not contain AzureCLI task when permissions are omitted"
+    );
+
+    // Verify no unreplaced markers remain
+    for line in compiled.lines() {
+        let stripped = line.replace("${{", "");
+        assert!(
+            !stripped.contains("{{ "),
+            "Compiled output should not contain unreplaced marker: {}",
+            line.trim()
+        );
+    }
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that write-requiring safe-outputs fail without write service connection
+#[test]
+fn test_permissions_validation_fails_without_write_sc() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-permissions-fail-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("bad-perms-agent.md");
+    let test_content = r#"---
+name: "Bad Permissions Agent"
+description: "Agent with create-work-item but no write SC"
+safe-outputs:
+  create-work-item:
+    work-item-type: Task
+---
+
+## Test Agent
+
+Do something.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("bad-perms-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args(["compile", test_input.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should fail when write-requiring safe-outputs lack write SC"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("permissions.write"),
+        "Error message should mention permissions.write: {}",
+        stderr
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that write-requiring safe-outputs succeed with write service connection
+#[test]
+fn test_permissions_validation_passes_with_write_sc() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-permissions-pass-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("good-perms-agent.md");
+    let test_content = r#"---
+name: "Good Permissions Agent"
+description: "Agent with create-work-item and write SC"
+permissions:
+  write: my-write-sc
+safe-outputs:
+  create-work-item:
+    work-item-type: Task
+  create-pull-request:
+    target-branch: main
+---
+
+## Test Agent
+
+Do something.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("good-perms-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args(["compile", test_input.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed when write SC is provided: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that read-only permissions work (agent gets token, executor does not)
+#[test]
+fn test_permissions_read_only_compiled_output() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-permissions-ro-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("read-only-agent.md");
+    let test_content = r#"---
+name: "Read Only Agent"
+description: "Agent with read-only permissions"
+permissions:
+  read: my-read-sc
+---
+
+## Test Agent
+
+Do something.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("read-only-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args(["compile", test_input.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+
+    // Should contain read token but not write token
+    assert!(
+        compiled.contains("SC_READ_TOKEN"),
+        "Compiled output should contain SC_READ_TOKEN"
+    );
+    assert!(
+        !compiled.contains("SC_WRITE_TOKEN"),
+        "Compiled output should not contain SC_WRITE_TOKEN when only read is configured"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that the 1ES fixture compiles correctly with no unreplaced markers
+/// and uses Copilot CLI (not Agency CLI) in custom jobs
+#[test]
+fn test_1es_compiled_output_no_unreplaced_markers() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-1es-markers-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("1es-test-agent.md");
+
+    let output_path = temp_dir.join("1es-test-agent.yml");
+
+    // Run the compiler binary
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            fixture_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "1ES compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_path.exists(), "Compiled 1ES YAML should exist");
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+
+    // Verify no unreplaced {{ markers }} remain (excluding ${{ }} which are ADO expressions)
+    for line in compiled.lines() {
+        let stripped = line.replace("${{", "");
+        assert!(
+            !stripped.contains("{{ "),
+            "1ES compiled output should not contain unreplaced marker: {}",
+            line.trim()
+        );
+    }
+
+    // Verify the compiler version was correctly substituted
+    let version = env!("CARGO_PKG_VERSION");
+    assert!(
+        compiled.contains(version),
+        "1ES compiled output should contain compiler version {version}"
+    );
+
+    // Verify 1ES template uses Copilot CLI, not Agency CLI
+    assert!(
+        compiled.contains("Microsoft.Copilot.CLI.linux-x64"),
+        "1ES template should install Copilot CLI"
+    );
+    assert!(
+        !compiled.contains("install agency.linux-x64"),
+        "1ES template should not install Agency CLI"
+    );
+    assert!(
+        !compiled.contains("agency copilot"),
+        "1ES template should not invoke 'agency copilot' command"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that update-wiki-page requires a write service connection
+#[test]
+fn test_update_wiki_page_requires_write_sc() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-wiki-fail-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("wiki-agent.md");
+    let test_content = r#"---
+name: "Wiki Agent"
+description: "Agent that edits wiki pages but has no write SC"
+safe-outputs:
+  update-wiki-page:
+    wiki-name: "MyProject.wiki"
+    path-prefix: "/agent-output"
+---
+
+## Wiki Agent
+
+Update the wiki.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("wiki-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should fail when update-wiki-page lacks a write SC"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("permissions.write"),
+        "Error message should mention permissions.write: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that update-wiki-page compiles successfully when a write SC is present
+#[test]
+fn test_update_wiki_page_compiles_with_write_sc() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-wiki-pass-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("wiki-agent.md");
+    let test_content = r#"---
+name: "Wiki Agent"
+description: "Agent that edits wiki pages with write SC"
+permissions:
+  write: my-write-sc
+safe-outputs:
+  update-wiki-page:
+    wiki-name: "MyProject.wiki"
+    path-prefix: "/agent-output"
+    title-prefix: "[Agent] "
+    comment: "Updated by agent"
+    create-if-missing: true
+---
+
+## Wiki Agent
+
+Update the wiki.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("wiki-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed when write SC is provided: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that create-wiki-page requires a write service connection
+#[test]
+fn test_create_wiki_page_requires_write_sc() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-create-wiki-fail-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("create-wiki-agent.md");
+    let test_content = r#"---
+name: "Create Wiki Agent"
+description: "Agent that creates wiki pages but has no write SC"
+safe-outputs:
+  create-wiki-page:
+    wiki-name: "MyProject.wiki"
+    path-prefix: "/agent-output"
+---
+
+## Create Wiki Agent
+
+Create new wiki pages.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("create-wiki-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should fail when create-wiki-page lacks a write SC"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("permissions.write"),
+        "Error message should mention permissions.write: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that create-wiki-page compiles successfully when a write SC is present
+#[test]
+fn test_create_wiki_page_compiles_with_write_sc() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-create-wiki-pass-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("create-wiki-agent.md");
+    let test_content = r#"---
+name: "Create Wiki Agent"
+description: "Agent that creates wiki pages with write SC"
+permissions:
+  write: my-write-sc
+safe-outputs:
+  create-wiki-page:
+    wiki-name: "MyProject.wiki"
+    path-prefix: "/agent-output"
+    title-prefix: "[Agent] "
+    comment: "Created by agent"
+---
+
+## Create Wiki Agent
+
+Create new wiki pages.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("create-wiki-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed when write SC is provided: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that update-work-item requires a write service connection
+#[test]
+fn test_update_work_item_requires_write_sc() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-uwi-fail-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("uwi-agent.md");
+    let test_content = r#"---
+name: "Update Work Item Agent"
+description: "Agent that updates work items but has no write SC"
+safe-outputs:
+  update-work-item:
+    title: true
+    status: true
+    target: "*"
+---
+
+## Update Work Item Agent
+
+Update existing work items.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("uwi-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should fail when update-work-item lacks a write SC"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("permissions.write"),
+        "Error message should mention permissions.write: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that update-work-item compiles successfully when a write SC is present
+#[test]
+fn test_update_work_item_compiles_with_write_sc() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-uwi-pass-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("uwi-agent.md");
+    let test_content = r#"---
+name: "Update Work Item Agent"
+description: "Agent that updates work items with write SC"
+permissions:
+  write: my-write-sc
+safe-outputs:
+  update-work-item:
+    title: true
+    status: true
+    body: true
+    markdown-body: true
+    title-prefix: "[bot] "
+    tag-prefix: "agent-"
+    max: 2
+    target: "*"
+    area-path: true
+    iteration-path: true
+    assignee: true
+    tags: true
+---
+
+## Update Work Item Agent
+
+Update existing work items.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("uwi-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed when write SC is provided: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that comment-on-work-item requires a target field
+#[test]
+fn test_comment_on_work_item_requires_target_field() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-cwi-target-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("cwi-agent.md");
+    let test_content = r#"---
+name: "Comment Agent"
+description: "Agent that comments on work items but has no target"
+permissions:
+  write: my-write-sc
+safe-outputs:
+  comment-on-work-item:
+    max: 3
+---
+
+## Comment Agent
+
+Comment on work items.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("cwi-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should fail when comment-on-work-item lacks a target field"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("target"),
+        "Error message should mention target: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that comment-on-work-item requires a write service connection
+#[test]
+fn test_comment_on_work_item_requires_write_sc() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-cwi-sc-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("cwi-agent.md");
+    let test_content = r#"---
+name: "Comment Agent"
+description: "Agent that comments on work items but has no write SC"
+safe-outputs:
+  comment-on-work-item:
+    target: "*"
+---
+
+## Comment Agent
+
+Comment on work items.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("cwi-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should fail when comment-on-work-item lacks a write SC"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("permissions.write"),
+        "Error message should mention permissions.write: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that comment-on-work-item compiles successfully with proper config
+#[test]
+fn test_comment_on_work_item_compiles_with_target_and_write_sc() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-cwi-pass-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("cwi-agent.md");
+    let test_content = r#"---
+name: "Comment Agent"
+description: "Agent that comments on work items"
+permissions:
+  write: my-write-sc
+safe-outputs:
+  comment-on-work-item:
+    target: "*"
+    max: 5
+---
+
+## Comment Agent
+
+Comment on work items.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("cwi-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed when target and write SC are provided: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that comment-on-work-item fixture compiles and generates correct pipeline output
+#[test]
+fn test_fixture_comment_on_work_item_compiled_output() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-cwi-fixture-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("comment-on-work-item-agent.md");
+
+    assert!(
+        fixture_path.exists(),
+        "comment-on-work-item fixture should exist"
+    );
+
+    let output_path = temp_dir.join("comment-on-work-item-agent.yml");
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            fixture_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_path.exists(), "Compiled YAML should exist");
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+
+    // Should contain comment-on-work-item in the safe outputs tool config
+    assert!(
+        compiled.contains("comment-on-work-item"),
+        "Compiled output should reference comment-on-work-item tool"
+    );
+
+    // Should have safeoutputs in the allowed tools (agent can call comment-on-work-item via MCP)
+    assert!(
+        compiled.contains("safeoutputs"),
+        "Compiled output should allow the safeoutputs MCP tool"
+    );
+
+    // Should contain the write service connection for Stage 2
+    assert!(
+        compiled.contains("my-write-sc"),
+        "Compiled output should contain the write service connection"
+    );
+
+    // Verify no unreplaced markers
+    for line in compiled.lines() {
+        let stripped = line.replace("${{", "");
+        assert!(
+            !stripped.contains("{{ "),
+            "Compiled output should not contain unreplaced marker: {}",
+            line.trim()
+        );
+    }
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that update-work-item requires a target field
+#[test]
+fn test_update_work_item_requires_target_field() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-uwi-target-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("uwi-agent.md");
+    let test_content = r#"---
+name: "Update Work Item Agent"
+description: "Agent that updates work items but has no target"
+permissions:
+  write: my-write-sc
+safe-outputs:
+  update-work-item:
+    title: true
+    status: true
+---
+
+## Update Work Item Agent
+
+Update existing work items.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("uwi-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should fail when update-work-item lacks a target field"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("target"),
+        "Error message should mention target: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that compiled output starts with the `@ado-aw` header comment for pipeline detection
+#[test]
+fn test_compiled_output_has_header_comment() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-header-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("minimal-agent.md");
+
+    let output_path = temp_dir.join("minimal-agent.yml");
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            fixture_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+    let lines: Vec<&str> = compiled.lines().collect();
+
+    assert!(
+        lines.len() >= 2,
+        "Compiled output should have at least 2 lines for the header, got {}",
+        lines.len()
+    );
+
+    // First line should be the "do not edit" warning
+    assert!(
+        lines[0].contains("auto-generated by ado-aw"),
+        "First line should be auto-generated warning, got: {}",
+        lines[0]
+    );
+
+    // Second line should be the @ado-aw marker with source and version
+    assert!(
+        lines[1].starts_with("# @ado-aw"),
+        "Second line should start with '# @ado-aw', got: {}",
+        lines[1]
+    );
+    // Source path should contain the fixture filename (quoted, path as passed to compiler)
+    assert!(
+        lines[1].contains("minimal-agent.md"),
+        "Header should contain source filename, got: {}",
+        lines[1]
+    );
+    assert!(
+        lines[1].contains("source=\""),
+        "Header should contain quoted source= key, got: {}",
+        lines[1]
+    );
+    let version = env!("CARGO_PKG_VERSION");
+    assert!(
+        lines[1].contains(&format!("version={}", version)),
+        "Header should contain compiler version, got: {}",
+        lines[1]
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that `compile` with no path argument auto-discovers and recompiles all pipelines
+#[test]
+fn test_compile_auto_discover_recompiles_detected_pipelines() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-autodiscover-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&temp_dir);
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    // Create a source markdown file at agents/my-agent.md
+    let agents_dir = temp_dir.join("agents");
+    fs::create_dir_all(&agents_dir).expect("Failed to create agents directory");
+
+    let source_content = r#"---
+name: "Auto Discover Agent"
+description: "An agent for testing auto-discovery"
+---
+
+## Auto Discover Agent
+
+This agent tests the auto-discovery feature.
+"#;
+    fs::write(agents_dir.join("my-agent.md"), source_content)
+        .expect("Failed to write source markdown");
+
+    // Step 1: Compile the source file to create the initial YAML with header
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            "agents/my-agent.md",
+        ])
+        .current_dir(&temp_dir)
+        .output()
+        .expect("Failed to run initial compile");
+
+    assert!(
+        output.status.success(),
+        "Initial compile should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify the YAML was created with the header
+    let yaml_path = agents_dir.join("my-agent.yml");
+    assert!(yaml_path.exists(), "Compiled YAML should exist");
+    let initial_yaml = fs::read_to_string(&yaml_path).expect("Should read initial YAML");
+    assert!(
+        initial_yaml.contains("# @ado-aw"),
+        "Initial YAML should contain @ado-aw header"
+    );
+
+    // Step 2: Run compile with no arguments (auto-discover mode)
+    let output = std::process::Command::new(&binary_path)
+        .args(["compile"])
+        .current_dir(&temp_dir)
+        .output()
+        .expect("Failed to run auto-discover compile");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "Auto-discover compile should succeed.\nstdout: {}\nstderr: {}",
+        stdout, stderr
+    );
+
+    assert!(
+        stdout.contains("Found 1 agentic pipeline"),
+        "Should report finding 1 pipeline, got stdout: {}",
+        stdout
+    );
+
+    assert!(
+        stdout.contains("1 compiled"),
+        "Should report 1 compiled, got stdout: {}",
+        stdout
+    );
+
+    // The YAML should still exist and be valid
+    let recompiled_yaml = fs::read_to_string(&yaml_path).expect("Should read recompiled YAML");
+    assert!(
+        recompiled_yaml.contains("# @ado-aw"),
+        "Recompiled YAML should still contain @ado-aw header"
+    );
+    assert!(
+        recompiled_yaml.contains("Auto Discover Agent"),
+        "Recompiled YAML should contain agent name"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that auto-discover mode gracefully skips missing source files
+#[test]
+fn test_compile_auto_discover_skips_missing_source() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-autodiscover-missing-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&temp_dir);
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    // Create a YAML file with a @ado-aw header pointing to a source that doesn't exist
+    let version = env!("CARGO_PKG_VERSION");
+    let fake_yaml = format!(
+        "# This file is auto-generated by ado-aw. Do not edit manually.\n\
+         # @ado-aw source=\"agents/nonexistent.md\" version={}\n\
+         name: fake-pipeline\n",
+        version
+    );
+    fs::write(temp_dir.join("orphaned.yml"), fake_yaml).expect("Failed to write fake YAML");
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args(["compile"])
+        .current_dir(&temp_dir)
+        .output()
+        .expect("Failed to run auto-discover compile");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Should succeed (skips, doesn't fail)
+    assert!(
+        output.status.success(),
+        "Should succeed even with missing source.\nstdout: {}\nstderr: {}",
+        stdout, stderr
+    );
+
+    assert!(
+        stderr.contains("not found") || stdout.contains("skipped"),
+        "Should warn about missing source.\nstdout: {}\nstderr: {}",
+        stdout, stderr
     );
 
     let _ = fs::remove_dir_all(&temp_dir);

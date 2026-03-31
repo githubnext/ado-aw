@@ -37,8 +37,12 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 │   ├── sanitize.rs       # Input sanitization for safe outputs
 │   └── tools/            # MCP tool implementations
 │       ├── mod.rs
+│       ├── comment_on_work_item.rs
 │       ├── create_pr.rs
+│       ├── create_wiki_page.rs
 │       ├── create_work_item.rs
+│       ├── update_work_item.rs
+│       ├── update_wiki_page.rs
 │       ├── memory.rs
 │       ├── missing_data.rs
 │       ├── missing_tool.rs
@@ -117,9 +121,9 @@ repositories: # a list of repository resources available to the pipeline (for pr
     name: my-org/another-repo
 checkout: # optional list of repository aliases for the agent to checkout and work with (must be subset of repositories)
   - reponame # only checkout reponame, not another-repo
-# tools:                       # RESERVED: tool configuration (not yet implemented)
-#   bash: ["cat", "ls", "grep"]  # bash command allow-list
-#   edit: true                   # enable file editing tool
+tools:                         # optional tool configuration
+  bash: ["cat", "ls", "grep"]  # bash command allow-list (defaults to safe built-in list)
+  edit: true                   # enable file editing tool (default: true)
 # env:                          # RESERVED: workflow-level environment variables (not yet implemented)
 #   CUSTOM_VAR: "value"
 mcp-servers:
@@ -163,7 +167,9 @@ network:                       # optional network policy (standalone target only
     - "*.mycompany.com"
   blocked:                     # blocked host patterns (takes precedence over allow)
     - "evil.example.com"
-read-only-service-connection: my-arm-connection  # optional: ARM service connection for read-only ADO token
+permissions:                   # optional ADO access token configuration
+  read: my-read-arm-connection   # ARM service connection for read-only ADO access (Stage 1 agent)
+  write: my-write-arm-connection # ARM service connection for write ADO access (Stage 2 executor only)
 ---
 
 
@@ -261,6 +267,47 @@ schedule:
   branches:
     - main
     - release/*
+```
+
+### Tools Configuration
+
+The `tools` field controls which tools are available to the agent. Both sub-fields are optional and have sensible defaults.
+
+#### Default Bash Command Allow-list
+
+When `tools.bash` is omitted, the agent can invoke the following shell commands:
+
+```
+cat, date, echo, grep, head, ls, pwd, sort, tail, uniq, wc, yq
+```
+
+#### Configuring Bash Access
+
+```yaml
+# Default: safe built-in command list (bash field omitted)
+tools:
+  edit: true
+
+# Unrestricted bash access (use with caution)
+tools:
+  bash: [":*"]
+
+# Explicit command allow-list
+tools:
+  bash: ["cat", "ls", "grep", "find"]
+
+# Disable bash entirely (empty list)
+tools:
+  bash: []
+```
+
+#### Disabling File Writes
+
+By default, the `edit` tool (file writing) is enabled. To disable it:
+
+```yaml
+tools:
+  edit: false
 ```
 
 ### Target Platforms
@@ -460,7 +507,7 @@ Used by the execute command's --source parameter.
 
 ## {{ pipeline_path }}
 
-Should be replaced with the path to the compiled pipeline YAML file for runtime integrity checking. The path is derived from the output path's filename and uses `{{ workspace }}` as the base (which gets resolved before this placeholder):
+Should be replaced with the path to the compiled pipeline YAML file for runtime integrity checking. The path is derived from the output path's filename and uses `{{ working_directory }}` as the base (which gets resolved before this placeholder):
 - `root`: `$(Build.SourcesDirectory)/<filename>.yml`
 - `repo`: `$(Build.SourcesDirectory)/$(Build.Repository.Name)/<filename>.yml`
 
@@ -549,30 +596,43 @@ The threat analysis prompt instructs the security analysis agent to check for:
 - Secret leaks
 - Malicious patches (suspicious web calls, backdoors, encoded strings, suspicious dependencies)
 
-## {{ workspace }}
-
-An alias for `{{ working_directory }}`. Both markers are replaced with the same value based on the effective workspace setting.
-
 ## {{ agent_description }}
 
 Should be replaced with the description field from the front matter. This is used in display contexts and the threat analysis prompt template.
 
 ## {{ acquire_ado_token }}
 
-Generates an `AzureCLI@2` step that acquires an Azure DevOps-scoped access token from an ARM service connection. This is only generated when `read-only-service-connection` is configured in the front matter.
+Generates an `AzureCLI@2` step that acquires a read-only ADO-scoped access token from the ARM service connection specified in `permissions.read`. This token is used by the agent in Stage 1 (inside the AWF sandbox).
 
 The step:
-- Uses the specified ARM service connection
+- Uses the ARM service connection from `permissions.read`
 - Calls `az account get-access-token` with the ADO resource ID
-- Stores the token in a secret pipeline variable `SC_ACCESS_TOKEN`
+- Stores the token in a secret pipeline variable `SC_READ_TOKEN`
 
-If no `read-only-service-connection` is configured, this marker is replaced with an empty string.
+If `permissions.read` is not configured, this marker is replaced with an empty string.
 
 ## {{ copilot_ado_env }}
 
-Generates environment variable entries for the copilot AWF step when `read-only-service-connection` is configured. Sets both `AZURE_DEVOPS_EXT_PAT` and `SYSTEM_ACCESSTOKEN` to the service connection token.
+Generates environment variable entries for the copilot AWF step when `permissions.read` is configured. Sets both `AZURE_DEVOPS_EXT_PAT` and `SYSTEM_ACCESSTOKEN` to the read service connection token (`SC_READ_TOKEN`).
 
-If no `read-only-service-connection` is configured, this marker is replaced with an empty string, and ADO access tokens are omitted from the copilot invocation.
+If `permissions.read` is not configured, this marker is replaced with an empty string, and ADO access tokens are omitted from the copilot invocation.
+
+## {{ acquire_write_token }}
+
+Generates an `AzureCLI@2` step that acquires a write-capable ADO-scoped access token from the ARM service connection specified in `permissions.write`. This token is used only by the executor in Stage 2 (`ProcessSafeOutputs` job) and is never exposed to the agent.
+
+The step:
+- Uses the ARM service connection from `permissions.write`
+- Calls `az account get-access-token` with the ADO resource ID
+- Stores the token in a secret pipeline variable `SC_WRITE_TOKEN`
+
+If `permissions.write` is not configured, this marker is replaced with an empty string.
+
+## {{ executor_ado_env }}
+
+Generates environment variable entries for the Stage 2 executor step when `permissions.write` is configured. Sets `SYSTEM_ACCESSTOKEN` to the write service connection token (`SC_WRITE_TOKEN`).
+
+If `permissions.write` is not configured, this marker is replaced with an empty string. Note: `System.AccessToken` is never used directly — all ADO tokens come from explicitly configured service connections.
 
 ## {{ compiler_version }}
 
@@ -603,6 +663,15 @@ Should be replaced with the pinned version of the MCP Gateway (defined as `MCPG_
 ## {{ mcpg_image }}
 
 Should be replaced with the MCPG Docker image name (defined as `MCPG_IMAGE` constant in `src/compile/common.rs`). Currently `ghcr.io/github/gh-aw-mcpg`.
+
+## {{ copilot_version }}
+
+Should be replaced with the pinned version of the `Microsoft.Copilot.CLI.linux-x64` NuGet package (defined as `COPILOT_CLI_VERSION` constant in `src/compile/common.rs`). This version is used in the pipeline step that installs the Copilot CLI tool from Azure Artifacts.
+
+The generated pipelines install the package from:
+```
+https://pkgs.dev.azure.com/msazuresphere/_packaging/Guardian1ESPTUpstreamOrgFeed/nuget/v3/index.json
+```
 
 ### 1ES-Specific Template Markers
 
@@ -692,6 +761,31 @@ Safe output configurations are passed to Stage 2 execution and used when process
 
 ### Available Safe Output Tools
 
+#### comment-on-work-item
+Adds a comment to an existing Azure DevOps work item. This is the ADO equivalent of gh-aw's `add-comment` tool.
+
+**Agent parameters:**
+- `work_item_id` - The work item ID to comment on (required, must be positive)
+- `body` - Comment text in markdown format (required, must be at least 10 characters)
+
+**Configuration options (front matter):**
+- `max` - Maximum number of comments per run (default: 1)
+- `target` - **Required** — scoping policy for which work items can be commented on:
+  - `"*"` - Any work item in the project (unrestricted, must be explicit)
+  - `12345` - A specific work item ID
+  - `[12345, 67890]` - A list of allowed work item IDs
+  - `"Some\\Path"` - Work items under the specified area path prefix (any string that isn't `"*"`, validated via ADO API at Stage 2)
+
+**Example configuration:**
+```yaml
+safe-outputs:
+  comment-on-work-item:
+    max: 3
+    target: "4x4\\QED"
+```
+
+**Note:** The `target` field is required. If omitted, compilation fails with an error. This ensures operators are intentional about which work items agents can comment on.
+
 #### create-work-item
 Creates an Azure DevOps work item.
 
@@ -706,10 +800,46 @@ Creates an Azure DevOps work item.
 - `assignee` - User to assign (email or display name)
 - `tags` - List of tags to apply
 - `custom-fields` - Map of custom field reference names to values (e.g., `Custom.MyField: "value"`)
+- `max` - Maximum number of create-work-item outputs allowed per run (default: 1)
 - `artifact-link` - Configuration for GitHub Copilot artifact linking:
   - `enabled` - Whether to add an artifact link (default: false)
   - `repository` - Repository name override (defaults to BUILD_REPOSITORY_NAME)
   - `branch` - Branch name to link to (default: "main")
+
+#### update-work-item
+Updates an existing Azure DevOps work item. Each field that can be modified requires explicit opt-in via configuration to prevent unintended updates.
+
+**Agent parameters:**
+- `id` - Work item ID to update (required, must be a positive integer)
+- `title` - New title for the work item (optional, requires `title: true` in config)
+- `body` - New description in markdown format (optional, requires `body: true` in config)
+- `state` - New state (e.g., `"Active"`, `"Resolved"`, `"Closed"`; optional, requires `status: true` in config)
+- `area_path` - New area path (optional, requires `area-path: true` in config)
+- `iteration_path` - New iteration path (optional, requires `iteration-path: true` in config)
+- `assignee` - New assignee email or display name (optional, requires `assignee: true` in config)
+- `tags` - New tags, replaces all existing tags (optional, requires `tags: true` in config)
+
+At least one field must be provided for update.
+
+**Configuration options (front matter):**
+```yaml
+safe-outputs:
+  update-work-item:
+    status: true              # enable state/status updates via `state` parameter (default: false)
+    title: true               # enable title updates (default: false)
+    body: true                # enable body/description updates (default: false)
+    markdown-body: true       # store body as markdown in ADO (default: false; requires ADO Services or Server 2022+)
+    title-prefix: "[bot] "    # only update work items whose title starts with this prefix
+    tag-prefix: "agent-"      # only update work items that have at least one tag starting with this prefix
+    max: 3                    # maximum number of update-work-item outputs allowed per run (default: 1)
+    target: "*"               # "*" (default) allows any work item ID, or set to a specific work item ID number
+    area-path: true           # enable area path updates (default: false)
+    iteration-path: true      # enable iteration path updates (default: false)
+    assignee: true            # enable assignee updates (default: false)
+    tags: true                # enable tag updates (default: false)
+```
+
+**Security note:** Every field that can be modified requires explicit opt-in (`true`) in the front matter configuration. If the `max` limit is exceeded, additional entries are skipped rather than aborting the entire batch.
 
 #### create-pull-request
 Creates a pull request with code changes made by the agent. When invoked:
@@ -768,6 +898,7 @@ Note: The source branch name is auto-generated from a sanitized version of the P
 - `reviewers` - List of reviewer emails to add
 - `labels` - List of labels to apply
 - `work-items` - List of work item IDs to link
+- `max` - Maximum number of create-pull-request outputs allowed per run (default: 1)
 
 **Multi-repository support:**
 When `workspace: root` and multiple repositories are checked out, agents can create PRs for any allowed repository:
@@ -827,6 +958,50 @@ safe-outputs:
 - Path validation: no `..`, `.git`, absolute paths, or null bytes
 - Content validation: text files are scanned for `##vso[` commands
 - Extension filtering: can restrict to specific file types
+
+#### create-wiki-page
+Creates a new Azure DevOps wiki page. The page must **not** already exist; the tool enforces an atomic create-only operation (via `If-Match: ""`). Attempting to create a page that already exists results in an explicit failure.
+
+**Agent parameters:**
+- `path` - Wiki page path to create (e.g. `/Overview/NewPage`). Must not be empty and must not contain `..`.
+- `content` - Markdown content for the wiki page (at least 10 characters).
+- `comment` *(optional)* - Commit comment describing the change. Defaults to the value configured in the front matter, or `"Created by agent"` if not set.
+
+**Configuration options (front matter):**
+```yaml
+safe-outputs:
+  create-wiki-page:
+    wiki-name: "MyProject.wiki"     # Required — wiki identifier (name or GUID)
+    wiki-project: "OtherProject"    # Optional — ADO project that owns the wiki; defaults to current pipeline project
+    path-prefix: "/agent-output"    # Optional — prepended to the agent-supplied path (restricts write scope)
+    title-prefix: "[Agent] "        # Optional — prepended to the last path segment (the page title)
+    comment: "Created by agent"     # Optional — default commit comment when agent omits one
+    max: 1                          # Maximum number of create-wiki-page outputs allowed per run (default: 1)
+```
+
+Note: `wiki-name` is required. If it is not set, execution fails with an explicit error message.
+
+#### update-wiki-page
+Updates the content of an existing Azure DevOps wiki page. The wiki page must already exist; this tool edits its content but does not create new pages.
+
+**Agent parameters:**
+- `path` - Wiki page path to update (e.g. `/Overview/Architecture`). Must not be empty and must not contain `..`.
+- `content` - Markdown content for the wiki page (at least 10 characters).
+- `comment` *(optional)* - Commit comment describing the change. Defaults to the value configured in the front matter, or `"Updated by agent"` if not set.
+
+**Configuration options (front matter):**
+```yaml
+safe-outputs:
+  update-wiki-page:
+    wiki-name: "MyProject.wiki"     # Required — wiki identifier (name or GUID)
+    wiki-project: "OtherProject"    # Optional — ADO project that owns the wiki; defaults to current pipeline project
+    path-prefix: "/agent-output"    # Optional — prepended to the agent-supplied path (restricts write scope)
+    title-prefix: "[Agent] "        # Optional — prepended to the last path segment (the page title)
+    comment: "Updated by agent"     # Optional — default commit comment when agent omits one
+    max: 1                          # Maximum number of update-wiki-page outputs allowed per run (default: 1)
+```
+
+Note: `wiki-name` is required. If it is not set, execution fails with an explicit error message.
 
 ### Adding New Features
 
@@ -900,6 +1075,7 @@ mcp-servers:
 ```
 
 ### Configuration Properties
+
 
 - `command:` - The executable to run (e.g., `"node"`, `"python"`, `"dotnet"`)
 - `args:` - Array of command-line arguments passed to the command
@@ -996,22 +1172,42 @@ network:
 
 All hosts (core + MCP-specific + user-specified) are combined into a comma-separated domain list passed to AWF's `--allow-domains` flag.
 
-### Read-Only Service Connection
+### Permissions (ADO Access Tokens)
 
-For agents that need read-only access to Azure DevOps resources (e.g., reading repository information), you can configure an ARM service connection to provide a scoped access token:
+ADO does not support fine-grained permissions — there are two access levels: blanket read and blanket write. Tokens are minted from ARM service connections; `System.AccessToken` is never used for agent or executor operations.
 
 ```yaml
-read-only-service-connection: my-arm-connection
+permissions:
+  read: my-read-arm-connection    # Stage 1 agent — read-only ADO access
+  write: my-write-arm-connection  # Stage 2 executor — write access for safe-outputs
 ```
 
-When configured:
-- The pipeline mints an ADO-scoped token from the ARM service connection
-- The token is passed to the copilot via `AZURE_DEVOPS_EXT_PAT` and `SYSTEM_ACCESSTOKEN`
-- This allows the agent to authenticate to ADO APIs without using the pipeline's default System.AccessToken
+#### Security Model
 
-When not configured:
-- ADO access tokens are omitted from the copilot invocation
-- The agent cannot authenticate to ADO APIs
+- **`permissions.read`**: Mints a read-only ADO-scoped token given to the agent inside the AWF sandbox (Stage 1). The agent can query ADO APIs but cannot write.
+- **`permissions.write`**: Mints a write-capable ADO-scoped token used **only** by the executor in Stage 2 (`ProcessSafeOutputs` job). This token is never exposed to the agent.
+- **Both omitted**: No ADO tokens are passed anywhere. The agent has no ADO API access.
+
+#### Compile-Time Validation
+
+If write-requiring safe-outputs (`create-pull-request`, `create-work-item`) are configured but `permissions.write` is missing, compilation fails with a clear error message.
+
+#### Examples
+
+```yaml
+# Agent can read ADO, safe-outputs can write
+permissions:
+  read: my-read-sc
+  write: my-write-sc
+
+# Agent can read ADO, no write safe-outputs needed
+permissions:
+  read: my-read-sc
+
+# Agent has no ADO access, but safe-outputs can create PRs/work items
+permissions:
+  write: my-write-sc
+```
 
 ## MCP Gateway (MCPG)
 

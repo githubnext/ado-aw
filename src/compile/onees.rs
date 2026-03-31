@@ -17,11 +17,13 @@ use std::path::Path;
 
 use super::Compiler;
 use super::common::{
-    self, AWF_VERSION, DEFAULT_POOL, compute_effective_workspace, generate_copilot_params,
-    generate_checkout_self, generate_checkout_steps, generate_ci_trigger,
-    generate_pipeline_path, generate_pipeline_resources, generate_pr_trigger,
-    generate_repositories, generate_schedule, generate_source_path,
-    generate_working_directory, is_custom_mcp, replace_with_indent,
+    self, AWF_VERSION, COPILOT_CLI_VERSION, DEFAULT_POOL, compute_effective_workspace, generate_copilot_params,
+    generate_acquire_ado_token, generate_checkout_self, generate_checkout_steps,
+    generate_ci_trigger, generate_copilot_ado_env, generate_executor_ado_env,
+    generate_header_comment, generate_pipeline_path, generate_pipeline_resources,
+    generate_pr_trigger, generate_repositories, generate_schedule, generate_source_path,
+    generate_working_directory, is_custom_mcp, replace_with_indent, validate_comment_target,
+    validate_update_work_item_target, validate_write_permissions,
 };
 use super::types::{FrontMatter, McpConfig};
 
@@ -113,12 +115,36 @@ displayName: "Finalize""#,
             threat_analysis_prompt,
         );
 
+        // Generate service connection token acquisition steps and env vars
+        let acquire_read_token = generate_acquire_ado_token(
+            front_matter.permissions.as_ref().and_then(|p| p.read.as_deref()),
+            "SC_READ_TOKEN",
+        );
+        let copilot_ado_env = generate_copilot_ado_env(
+            front_matter.permissions.as_ref().and_then(|p| p.read.as_deref()),
+        );
+        let acquire_write_token = generate_acquire_ado_token(
+            front_matter.permissions.as_ref().and_then(|p| p.write.as_deref()),
+            "SC_WRITE_TOKEN",
+        );
+        let executor_ado_env = generate_executor_ado_env(
+            front_matter.permissions.as_ref().and_then(|p| p.write.as_deref()),
+        );
+
+        // Validate that write-requiring safe-outputs have a write service connection
+        validate_write_permissions(front_matter)?;
+        // Validate comment-on-work-item has required target field
+        validate_comment_target(front_matter)?;
+        // Validate update-work-item has required target field
+        validate_update_work_item_target(front_matter)?;
+
         // Replace all template markers
         let compiler_version = env!("CARGO_PKG_VERSION");
         let replacements: Vec<(&str, &str)> = vec![
             ("{{ compiler_version }}", compiler_version),
             // No-op for 1ES (template doesn't use AWF), but included for forward-compatibility
             ("{{ firewall_version }}", AWF_VERSION),
+            ("{{ copilot_version }}", COPILOT_CLI_VERSION),
             ("{{ pool }}", &pool),
             ("{{ schedule }}", &schedule),
             ("{{ pr_trigger }}", &pr_trigger),
@@ -142,7 +168,12 @@ displayName: "Finalize""#,
             ("{{ source_path }}", &source_path),
             ("{{ pipeline_path }}", &pipeline_path),
             ("{{ working_directory }}", &working_directory),
+            ("{{ workspace }}", &working_directory),
             ("{{ agency_params }}", &agency_params),
+            ("{{ acquire_ado_token }}", &acquire_read_token),
+            ("{{ copilot_ado_env }}", &copilot_ado_env),
+            ("{{ acquire_write_token }}", &acquire_write_token),
+            ("{{ executor_ado_env }}", &executor_ado_env),
         ];
 
         let pipeline_yaml = replacements
@@ -162,6 +193,10 @@ displayName: "Finalize""#,
                 They will be ignored. Use standalone target for full MCP support."
             );
         }
+
+        // Prepend header comment for pipeline detection
+        let header = generate_header_comment(input_path);
+        let pipeline_yaml = format!("{}{}", header, pipeline_yaml);
 
         Ok(pipeline_yaml)
     }

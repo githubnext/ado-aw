@@ -67,7 +67,7 @@ extends:
 
                       echo "Verifying checksum..."
                       cd "$DOWNLOAD_DIR"
-                      sha256sum -c checksums.txt --ignore-missing | grep -q ": OK"
+                      grep "ado-aw-linux-x64" checksums.txt | sha256sum -c -
                       mv ado-aw-linux-x64 ado-aw
                       chmod +x ado-aw
                     displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
@@ -150,6 +150,8 @@ extends:
               {{ checkout_self }}
               {{ checkout_repositories }}
 
+              {{ acquire_ado_token }}
+
               - download: current
                 artifact: AgencyArtifact
 
@@ -157,15 +159,15 @@ extends:
                 displayName: "Authenticate NuGet Feed"
 
               - task: NuGetCommand@2
-                displayName: "Install Agency CLI"
+                displayName: "Install Copilot CLI"
                 inputs:
                   command: 'custom'
-                  arguments: 'install agency.linux-x64 -Source "https://pkgs.dev.azure.com/msazuresphere/_packaging/Guardian1ESPTUpstreamOrgFeed/nuget/v3/index.json" -Version 2026.1.22.4 -OutputDirectory $(Agent.TempDirectory)/tools -ExcludeVersion -NonInteractive'
+                  arguments: 'install Microsoft.Copilot.CLI.linux-x64 -Source "https://pkgs.dev.azure.com/msazuresphere/_packaging/Guardian1ESPTUpstreamOrgFeed/nuget/v3/index.json" -Version {{ copilot_version }} -OutputDirectory $(Agent.TempDirectory)/tools -ExcludeVersion -NonInteractive'
 
               - bash: |
                   ls -la "$(Agent.TempDirectory)/tools"
-                  echo "##vso[task.prependpath]$(Agent.TempDirectory)/tools/agency.linux-x64"
-                displayName: Add agency to PATH
+                  echo "##vso[task.prependpath]$(Agent.TempDirectory)/tools/Microsoft.Copilot.CLI.linux-x64"
+                displayName: Add copilot to PATH
 
               - bash: |
                   COMPILER_VERSION="{{ compiler_version }}"
@@ -180,7 +182,7 @@ extends:
 
                   echo "Verifying checksum..."
                   cd "$DOWNLOAD_DIR"
-                  sha256sum -c checksums.txt --ignore-missing | grep -q ": OK"
+                  grep "ado-aw-linux-x64" checksums.txt | sha256sum -c -
                   mv ado-aw-linux-x64 ado-aw
                   chmod +x ado-aw
                 displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
@@ -228,7 +230,7 @@ extends:
                   THREAT_OUTPUT_FILE="$(Agent.TempDirectory)/threat-analysis-output.txt"
 
                   # Use $(cat file) like gh-aw does - the command is executed directly, not via a variable
-                  agency copilot --prompt "$(cat $(Agent.TempDirectory)/threat-analysis-prompt.md)" {{ agency_params }} > "$THREAT_OUTPUT_FILE" 2>&1
+                  copilot --prompt "$(cat $(Agent.TempDirectory)/threat-analysis-prompt.md)" {{ agency_params }} > "$THREAT_OUTPUT_FILE" 2>&1
                   AGENT_EXIT_CODE=$?
 
                   echo "=== Threat Analysis Output (sanitized) ==="
@@ -239,8 +241,7 @@ extends:
                 displayName: "Run threat analysis"
                 workingDirectory: {{ working_directory }}
                 env:
-                  AZURE_DEVOPS_EXT_PAT: $(System.AccessToken)
-                  SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+                  {{ copilot_ado_env }}
                   GITHUB_TOKEN: $(GITHUB_TOKEN)
                   GITHUB_READ_ONLY: 1
                   HTTP_PROXY: "http://127.0.0.1:$(PROXY_PORT)"
@@ -308,6 +309,8 @@ extends:
               {{ checkout_self }}
               {{ checkout_repositories }}
 
+              {{ acquire_write_token }}
+
               - download: current
                 artifact: analyzed_outputs
 
@@ -324,13 +327,13 @@ extends:
 
                   echo "Verifying checksum..."
                   cd "$DOWNLOAD_DIR"
-                  sha256sum -c checksums.txt --ignore-missing | grep -q ": OK"
+                  grep "ado-aw-linux-x64" checksums.txt | sha256sum -c -
                   mv ado-aw-linux-x64 ado-aw
                   chmod +x ado-aw
                 displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
 
               - bash: |
-                  chmod +x $(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw
+                  chmod +x "$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
                   echo "##vso[task.prependpath]$(Pipeline.Workspace)/agentic-pipeline-compiler"
                 displayName: Add agentic compiler to path
 
@@ -338,6 +341,6 @@ extends:
                 displayName: Process safe outputs
                 workingDirectory: {{ working_directory }}
                 env:
-                  SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+                  {{ executor_ado_env }}
 
           {{ teardown_job }}
