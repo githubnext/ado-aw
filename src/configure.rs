@@ -479,17 +479,31 @@ async fn get_definition_name(
         definition_id
     );
 
-    let resp = auth
-        .apply(client.get(&url))
-        .send()
-        .await
-        .ok()?;
+    let resp = match auth.apply(client.get(&url)).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            debug!("Failed to fetch name for definition {}: {:?}", definition_id, e);
+            return None;
+        }
+    };
 
     if !resp.status().is_success() {
+        debug!(
+            "Failed to fetch name for definition {}: HTTP {}",
+            definition_id,
+            resp.status()
+        );
         return None;
     }
 
-    let body: serde_json::Value = resp.json().await.ok()?;
+    let body: serde_json::Value = match resp.json().await {
+        Ok(b) => b,
+        Err(e) => {
+            debug!("Failed to parse response for definition {}: {:?}", definition_id, e);
+            return None;
+        }
+    };
+
     body.get("name")
         .and_then(|n| n.as_str())
         .map(|s| s.to_string())
@@ -653,39 +667,49 @@ pub async fn run(
         }
     };
 
-    // Resolve ADO context from git remote (best-effort), with CLI overrides
-    let ado_ctx = match (get_git_remote_url(&repo_path).await.ok(), org, project) {
-        // Git remote available — parse and apply overrides
-        (Some(remote_url), org, project) => {
-            info!("Git remote: {}", remote_url);
-            let mut ctx = parse_ado_remote(&remote_url).with_context(|| {
-                format!(
-                    "Could not parse ADO context from remote '{}'. Use --org and --project to specify manually.",
-                    remote_url
-                )
-            })?;
-            if let Some(org) = org {
-                ctx.org_url = org.to_string();
+    // Resolve ADO context from git remote (best-effort), with CLI overrides.
+    // If a git remote exists but isn't an ADO URL (e.g. GitHub), fall back to --org/--project.
+    let ado_ctx = {
+        let remote_ctx = get_git_remote_url(&repo_path)
+            .await
+            .ok()
+            .and_then(|url| {
+                info!("Git remote: {}", url);
+                match parse_ado_remote(&url) {
+                    Ok(ctx) => Some(ctx),
+                    Err(e) => {
+                        debug!("Git remote is not an ADO URL: {:#}", e);
+                        None
+                    }
+                }
+            });
+
+        match (remote_ctx, org, project) {
+            // Git remote parsed — apply overrides
+            (Some(mut ctx), org, project) => {
+                if let Some(org) = org {
+                    ctx.org_url = org.to_string();
+                }
+                if let Some(project) = project {
+                    ctx.project = project.to_string();
+                }
+                ctx
             }
-            if let Some(project) = project {
-                ctx.project = project.to_string();
+            // No usable remote — require explicit --org and --project
+            (None, Some(org), Some(project)) => {
+                info!("No ADO git remote; using --org and --project");
+                AdoContext {
+                    org_url: org.to_string(),
+                    project: project.to_string(),
+                    repo_name: String::new(),
+                }
             }
-            ctx
-        }
-        // No git remote — require explicit --org and --project
-        (None, Some(org), Some(project)) => {
-            info!("No git remote; using --org and --project");
-            AdoContext {
-                org_url: org.to_string(),
-                project: project.to_string(),
-                repo_name: String::new(),
+            (None, _, _) => {
+                anyhow::bail!(
+                    "Could not determine ADO context: no ADO git remote found and --org/--project not both provided.\n\
+                     When using --definition-ids outside an ADO repo, both --org and --project are required."
+                );
             }
-        }
-        (None, _, _) => {
-            anyhow::bail!(
-                "Could not determine ADO context: no git remote found and --org/--project not both provided.\n\
-                 Use --org <org-url> --project <project> to specify manually."
-            );
         }
     };
 
