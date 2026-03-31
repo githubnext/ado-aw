@@ -240,15 +240,16 @@ async fn list_definitions(
     let mut continuation_token: Option<String> = None;
 
     loop {
-        let url = format!(
-            "{}/{}/_apis/build/definitions?includeAllProperties=true&api-version=7.1",
+        let base_url = format!(
+            "{}/{}/_apis/build/definitions",
             ctx.org_url.trim_end_matches('/'),
             ctx.project
         );
 
-        debug!("Listing definitions: {}", url);
+        debug!("Listing definitions: {}", base_url);
 
-        let mut request = auth.apply(client.get(&url));
+        let mut request = auth.apply(client.get(&base_url))
+            .query(&[("includeAllProperties", "true"), ("api-version", "7.1")]);
         if let Some(ref token) = continuation_token {
             request = request.query(&[("continuationToken", token)]);
         }
@@ -835,6 +836,40 @@ mod tests {
             normalize_ado_yaml_path("\\.azdo\\pipelines\\agent.yml"),
             ".azdo/pipelines/agent.yml"
         );
+    }
+
+    #[test]
+    fn test_yaml_path_match_finds_definition_by_yaml_filename() {
+        let defs = vec![
+            make_def(1, "Unrelated Pipeline"),
+            make_def_with_yaml(2, "My Agent", "/.azdo/pipelines/agent.yml"),
+            make_def(3, "Another Pipeline"),
+        ];
+        let local_path = ".azdo/pipelines/agent.yml";
+        let path_match = defs.iter().find(|d| {
+            d.process
+                .as_ref()
+                .and_then(|p| p.yaml_filename.as_ref())
+                .is_some_and(|f| normalize_ado_yaml_path(f) == local_path)
+        });
+        assert!(path_match.is_some());
+        assert_eq!(path_match.unwrap().id, 2);
+    }
+
+    #[test]
+    fn test_yaml_path_match_no_match_when_process_is_none() {
+        let defs = vec![
+            make_def(1, "Classic Pipeline"),
+            make_def(2, "Another Classic"),
+        ];
+        let local_path = ".azdo/pipelines/agent.yml";
+        let path_match = defs.iter().find(|d| {
+            d.process
+                .as_ref()
+                .and_then(|p| p.yaml_filename.as_ref())
+                .is_some_and(|f| normalize_ado_yaml_path(f) == local_path)
+        });
+        assert!(path_match.is_none());
     }
 
     #[test]
