@@ -7,11 +7,59 @@
 //! (reqwest + `.basic_auth("", Some(token))` for authentication).
 
 use anyhow::{Context, Result};
-use log::{debug, info};
+use log::{debug, info, warn};
 use serde::Deserialize;
 use std::path::Path;
 
 use crate::detect;
+
+/// ADO resource ID for minting ADO-scoped tokens via Azure CLI.
+const ADO_RESOURCE_ID: &str = "499b84ac-1321-427f-aa17-267ca6975798";
+
+/// Attempt to acquire an ADO-scoped access token via `az account get-access-token`.
+/// Returns `Ok(token)` if the Azure CLI is installed and the user is logged in,
+/// or an error if the CLI is missing or the command fails.
+async fn try_azure_cli_token() -> Result<String> {
+    // On Windows, `az` is a .cmd batch script that must be invoked via cmd.exe.
+    let output = if cfg!(windows) {
+        tokio::process::Command::new("cmd")
+            .args([
+                "/C", "az", "account", "get-access-token",
+                "--resource", ADO_RESOURCE_ID,
+                "--query", "accessToken",
+                "-o", "tsv",
+            ])
+            .output()
+            .await
+    } else {
+        tokio::process::Command::new("az")
+            .args([
+                "account", "get-access-token",
+                "--resource", ADO_RESOURCE_ID,
+                "--query", "accessToken",
+                "-o", "tsv",
+            ])
+            .output()
+            .await
+    }
+    .context("Failed to run 'az account get-access-token'. Is the Azure CLI installed?")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Azure CLI token acquisition failed: {}", stderr.trim());
+    }
+
+    let token = String::from_utf8(output.stdout)
+        .context("Azure CLI returned non-UTF-8 token")?
+        .trim()
+        .to_string();
+
+    if token.is_empty() {
+        anyhow::bail!("Azure CLI returned an empty token");
+    }
+
+    Ok(token)
+}
 
 // ==================== ADO context from git remote ====================
 
@@ -121,6 +169,23 @@ async fn get_git_remote_url(repo_path: &Path) -> Result<String> {
 
 // ==================== ADO Build Definitions API ====================
 
+/// Authentication method for ADO API calls.
+/// PATs use HTTP Basic auth; Azure CLI tokens use Bearer auth.
+#[derive(Clone)]
+enum AdoAuth {
+    Pat(String),
+    Bearer(String),
+}
+
+impl AdoAuth {
+    fn apply(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self {
+            AdoAuth::Pat(pat) => request.basic_auth("", Some(pat)),
+            AdoAuth::Bearer(token) => request.bearer_auth(token),
+        }
+    }
+}
+
 /// Minimal subset of an ADO Build Definition for listing.
 #[derive(Debug, Deserialize)]
 struct DefinitionListResponse {
@@ -169,21 +234,21 @@ struct MatchedDefinition {
 async fn list_definitions(
     client: &reqwest::Client,
     ctx: &AdoContext,
-    pat: &str,
+    auth: &AdoAuth,
 ) -> Result<Vec<DefinitionSummary>> {
     let mut all_definitions = Vec::new();
     let mut continuation_token: Option<String> = None;
 
     loop {
         let url = format!(
-            "{}/{}/_apis/build/definitions?api-version=7.1",
+            "{}/{}/_apis/build/definitions?includeAllProperties=true&api-version=7.1",
             ctx.org_url.trim_end_matches('/'),
             ctx.project
         );
 
         debug!("Listing definitions: {}", url);
 
-        let mut request = client.get(&url).basic_auth("", Some(pat));
+        let mut request = auth.apply(client.get(&url));
         if let Some(ref token) = continuation_token {
             request = request.query(&[("continuationToken", token)]);
         }
@@ -210,10 +275,16 @@ async fn list_definitions(
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
-        let response: DefinitionListResponse = resp
-            .json()
-            .await
-            .context("Failed to parse definitions response")?;
+        let body = resp.text().await.context("Failed to read definitions response body")?;
+        let response: DefinitionListResponse = serde_json::from_str(&body)
+            .with_context(|| {
+                let snippet: String = body.chars().take(500).collect();
+                format!(
+                    "Failed to parse definitions response as JSON. \
+                     This usually means the PAT is invalid or expired. \
+                     Response body (first 500 chars):\n{snippet}"
+                )
+            })?;
 
         all_definitions.extend(response.value);
 
@@ -287,10 +358,10 @@ fn normalize_ado_yaml_path(path: &str) -> String {
 async fn match_definitions(
     client: &reqwest::Client,
     ctx: &AdoContext,
-    pat: &str,
+    auth: &AdoAuth,
     detected: &[detect::DetectedPipeline],
 ) -> Result<Vec<MatchedDefinition>> {
-    let definitions = list_definitions(client, ctx, pat).await?;
+    let definitions = list_definitions(client, ctx, auth).await?;
     info!(
         "Found {} pipeline definitions in {}/{}",
         definitions.len(),
@@ -300,9 +371,28 @@ async fn match_definitions(
 
     let mut matched = Vec::new();
 
+    // Log all definition yaml paths for debugging
+    for def in &definitions {
+        let yaml_path = def
+            .process
+            .as_ref()
+            .and_then(|p| p.yaml_filename.as_ref())
+            .map(|f| normalize_ado_yaml_path(f));
+        debug!(
+            "ADO definition: '{}' (id={}) yamlFilename={:?} normalized={:?}",
+            def.name, def.id,
+            def.process.as_ref().and_then(|p| p.yaml_filename.as_ref()),
+            yaml_path
+        );
+    }
+
     for pipeline in detected {
         let yaml_path_str = pipeline.yaml_path.to_string_lossy();
         let yaml_path_normalized = yaml_path_str.replace('\\', "/");
+        debug!(
+            "Matching local pipeline: raw={:?} normalized={:?} source={:?}",
+            yaml_path_str, yaml_path_normalized, pipeline.source
+        );
 
         // Strategy 1: Match by YAML filename in the definition.
         // ADO stores yamlFilename with a leading '/' (e.g., "/.azdo/pipelines/agent.yml"),
@@ -373,16 +463,13 @@ async fn match_definitions(
 
 /// Update the GITHUB_TOKEN pipeline variable on a definition.
 ///
-/// Uses the same `.basic_auth("", Some(token))` pattern as the existing
-/// tools in `src/tools/` (e.g., create_work_item, create_pr).
-///
 /// Note: The GET→PUT cycle is not atomic. Concurrent `configure` runs against
 /// the same definition could overwrite each other's variables. This is acceptable
 /// for a CLI tool typically run by a single operator.
 async fn update_pipeline_variable(
     client: &reqwest::Client,
     ctx: &AdoContext,
-    pat: &str,
+    auth: &AdoAuth,
     definition_id: u64,
     variable_name: &str,
     variable_value: &str,
@@ -396,9 +483,8 @@ async fn update_pipeline_variable(
 
     debug!("Fetching definition {}: {}", definition_id, get_url);
 
-    let resp = client
-        .get(&get_url)
-        .basic_auth("", Some(pat))
+    let resp = auth
+        .apply(client.get(&get_url))
         .send()
         .await
         .context("Failed to get pipeline definition")?;
@@ -414,10 +500,17 @@ async fn update_pipeline_variable(
         );
     }
 
-    let mut definition: serde_json::Value = resp
-        .json()
-        .await
-        .context("Failed to parse definition JSON")?;
+    let body = resp.text().await.context("Failed to read definition response body")?;
+    let mut definition: serde_json::Value = serde_json::from_str(&body)
+        .with_context(|| {
+            let snippet: String = body.chars().take(500).collect();
+            format!(
+                "Failed to parse definition {} as JSON. \
+                 This usually means the PAT is invalid or expired. \
+                 Response body (first 500 chars):\n{snippet}",
+                definition_id
+            )
+        })?;
 
     // Ensure variables object exists
     if definition.get("variables").is_none() {
@@ -449,9 +542,8 @@ async fn update_pipeline_variable(
 
     debug!("Updating definition {}: {}", definition_id, put_url);
 
-    let resp = client
-        .put(&put_url)
-        .basic_auth("", Some(pat))
+    let resp = auth
+        .apply(client.put(&put_url))
         .header("Content-Type", "application/json")
         .json(&definition)
         .send()
@@ -501,13 +593,29 @@ pub async fn run(
             .context("Failed to read token from interactive prompt")?,
     };
 
-    // Resolve PAT: CLI flag > env var (handled by clap) > interactive prompt
-    let resolved_pat = match pat {
-        Some(p) => p.to_string(),
-        None => inquire::Password::new("Enter your Azure DevOps PAT:")
-            .without_confirmation()
-            .prompt()
-            .context("Failed to read PAT from interactive prompt. Set AZURE_DEVOPS_EXT_PAT env var or use --pat flag.")?,
+    // Resolve auth: CLI flag > env var (handled by clap) > Azure CLI > interactive prompt
+    let auth = match pat {
+        Some(p) => {
+            info!("Using PAT from --pat flag or AZURE_DEVOPS_EXT_PAT env var");
+            AdoAuth::Pat(p.to_string())
+        }
+        None => {
+            info!("No PAT provided, trying Azure CLI authentication...");
+            match try_azure_cli_token().await {
+                Ok(token) => {
+                    println!("Using Azure CLI authentication (az account get-access-token)");
+                    AdoAuth::Bearer(token)
+                }
+                Err(e) => {
+                    warn!("Azure CLI auth failed: {:#}. Falling back to interactive prompt.", e);
+                    let pat = inquire::Password::new("Enter your Azure DevOps PAT:")
+                        .without_confirmation()
+                        .prompt()
+                        .context("Failed to read PAT from interactive prompt. Set AZURE_DEVOPS_EXT_PAT env var, log in with 'az login', or use --pat flag.")?;
+                    AdoAuth::Pat(pat)
+                }
+            }
+        }
     };
 
     // Step 1: Detect agentic pipelines
@@ -565,7 +673,7 @@ pub async fn run(
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .context("Failed to create HTTP client")?;
-    let matched = match_definitions(&client, &ado_ctx, &resolved_pat, &detected).await?;
+    let matched = match_definitions(&client, &ado_ctx, &auth, &detected).await?;
 
     if matched.is_empty() {
         println!("No matching ADO pipeline definitions found.");
@@ -600,7 +708,7 @@ pub async fn run(
         match update_pipeline_variable(
             &client,
             &ado_ctx,
-            &resolved_pat,
+            &auth,
             m.id,
             "GITHUB_TOKEN",
             &token,
