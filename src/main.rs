@@ -92,7 +92,7 @@ enum Commands {
         /// Override: Azure DevOps project name (inferred from git remote by default)
         #[arg(long)]
         project: Option<String>,
-        /// PAT for ADO API authentication (defaults to AZURE_DEVOPS_EXT_PAT env var)
+        /// PAT for ADO API authentication (prefer setting AZURE_DEVOPS_EXT_PAT env var; prompted if omitted)
         #[arg(long, env = "AZURE_DEVOPS_EXT_PAT")]
         pat: Option<String>,
         /// Path to the repository root (defaults to current directory)

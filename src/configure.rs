@@ -9,7 +9,7 @@
 use anyhow::{Context, Result};
 use log::{debug, info};
 use serde::Deserialize;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::detect;
 
@@ -408,11 +408,20 @@ async fn update_pipeline_variable(
         definition["variables"] = serde_json::json!({});
     }
 
-    // Set the variable (mark as secret since it's a token)
+    // Set the variable (mark as secret since it's a token).
+    // Preserve existing allowOverride if the variable already exists,
+    // otherwise default to false (stricter security posture).
+    let allow_override = definition
+        .get("variables")
+        .and_then(|vars| vars.get(variable_name))
+        .and_then(|var| var.get("allowOverride"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     definition["variables"][variable_name] = serde_json::json!({
         "value": variable_value,
         "isSecret": true,
-        "allowOverride": true
+        "allowOverride": allow_override
     });
 
     let put_url = format!(
@@ -458,9 +467,14 @@ pub async fn run(
     path: Option<&Path>,
     dry_run: bool,
 ) -> Result<()> {
-    let repo_path = path
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+    let repo_path = match path {
+        Some(p) => tokio::fs::canonicalize(p)
+            .await
+            .with_context(|| format!("Could not resolve path: {}", p.display()))?,
+        None => tokio::fs::canonicalize(".")
+            .await
+            .context("Could not resolve current directory")?,
+    };
 
     // Resolve token: CLI flag > env var (handled by clap) > interactive prompt
     let token = match token {
@@ -469,6 +483,15 @@ pub async fn run(
             .without_confirmation()
             .prompt()
             .context("Failed to read token from interactive prompt")?,
+    };
+
+    // Resolve PAT: CLI flag > env var (handled by clap) > interactive prompt
+    let resolved_pat = match pat {
+        Some(p) => p.to_string(),
+        None => inquire::Password::new("Enter your Azure DevOps PAT:")
+            .without_confirmation()
+            .prompt()
+            .context("Failed to read PAT from interactive prompt. Set AZURE_DEVOPS_EXT_PAT env var or use --pat flag.")?,
     };
 
     // Step 1: Detect agentic pipelines
@@ -520,13 +543,12 @@ pub async fn run(
     );
     println!();
 
-    // Step 3: Resolve PAT
-    let resolved_pat = pat
-        .context("No PAT provided. Set AZURE_DEVOPS_EXT_PAT environment variable or use --pat flag.")?;
-
-    // Step 4: Match to ADO definitions
+    // Step 3: Match to ADO definitions
     println!("Matching to Azure DevOps pipeline definitions...");
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("Failed to create HTTP client")?;
     let matched = match_definitions(&client, &ado_ctx, &resolved_pat, &detected).await?;
 
     if matched.is_empty() {
