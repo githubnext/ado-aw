@@ -210,6 +210,7 @@ struct ProcessInfo {
 pub enum MatchMethod {
     YamlPath,
     PipelineName,
+    Explicit,
 }
 
 impl std::fmt::Display for MatchMethod {
@@ -217,6 +218,7 @@ impl std::fmt::Display for MatchMethod {
         match self {
             MatchMethod::YamlPath => write!(f, "yaml-path"),
             MatchMethod::PipelineName => write!(f, "pipeline-name"),
+            MatchMethod::Explicit => write!(f, "explicit"),
         }
     }
 }
@@ -462,6 +464,51 @@ async fn match_definitions(
     Ok(matched)
 }
 
+/// Fetch the human-readable name of a pipeline definition by ID.
+/// Returns `None` if the definition doesn't exist or the request fails.
+async fn get_definition_name(
+    client: &reqwest::Client,
+    ctx: &AdoContext,
+    auth: &AdoAuth,
+    definition_id: u64,
+) -> Option<String> {
+    let url = format!(
+        "{}/{}/_apis/build/definitions/{}?api-version=7.1",
+        ctx.org_url.trim_end_matches('/'),
+        ctx.project,
+        definition_id
+    );
+
+    let resp = match auth.apply(client.get(&url)).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            debug!("Failed to fetch name for definition {}: {:?}", definition_id, e);
+            return None;
+        }
+    };
+
+    if !resp.status().is_success() {
+        debug!(
+            "Failed to fetch name for definition {}: HTTP {}",
+            definition_id,
+            resp.status()
+        );
+        return None;
+    }
+
+    let body: serde_json::Value = match resp.json().await {
+        Ok(b) => b,
+        Err(e) => {
+            debug!("Failed to parse response for definition {}: {:?}", definition_id, e);
+            return None;
+        }
+    };
+
+    body.get("name")
+        .and_then(|n| n.as_str())
+        .map(|s| s.to_string())
+}
+
 /// Update the GITHUB_TOKEN pipeline variable on a definition.
 ///
 /// Note: The GET→PUT cycle is not atomic. Concurrent `configure` runs against
@@ -575,6 +622,7 @@ pub async fn run(
     pat: Option<&str>,
     path: Option<&Path>,
     dry_run: bool,
+    definition_ids: Option<&[u64]>,
 ) -> Result<()> {
     let repo_path = match path {
         Some(p) => tokio::fs::canonicalize(p)
@@ -619,62 +667,112 @@ pub async fn run(
         }
     };
 
-    // Step 1: Detect agentic pipelines
-    println!("Scanning for agentic pipelines...");
-    let detected = detect::detect_pipelines(&repo_path).await?;
+    // Resolve ADO context from git remote (best-effort), with CLI overrides.
+    // If a git remote exists but isn't an ADO URL (e.g. GitHub), fall back to --org/--project.
+    let ado_ctx = {
+        let remote_ctx = get_git_remote_url(&repo_path)
+            .await
+            .ok()
+            .and_then(|url| {
+                info!("Git remote: {}", url);
+                match parse_ado_remote(&url) {
+                    Ok(ctx) => Some(ctx),
+                    Err(e) => {
+                        debug!("Git remote is not an ADO URL: {:#}", e);
+                        None
+                    }
+                }
+            });
 
-    if detected.is_empty() {
-        println!(
-            "No agentic pipelines found. Make sure your pipelines were compiled with the latest ado-aw."
-        );
-        return Ok(());
-    }
-
-    println!("Found {} agentic pipeline(s):", detected.len());
-    for p in &detected {
-        println!(
-            "  {} (source: {}, version: {})",
-            p.yaml_path.display(),
-            p.source,
-            p.version
-        );
-    }
-    println!();
-
-    // Step 2: Resolve ADO context from git remote, with CLI overrides
-    let remote_url = get_git_remote_url(&repo_path)
-        .await
-        .context("Could not get git remote URL. Use --org and --project to specify manually.")?;
-
-    info!("Git remote: {}", remote_url);
-
-    let mut ado_ctx = parse_ado_remote(&remote_url).with_context(|| {
-        format!(
-            "Could not parse ADO context from remote '{}'. Use --org and --project to specify manually.",
-            remote_url
-        )
-    })?;
-
-    if let Some(org) = org {
-        ado_ctx.org_url = org.to_string();
-    }
-    if let Some(project) = project {
-        ado_ctx.project = project.to_string();
-    }
+        match (remote_ctx, org, project) {
+            // Git remote parsed — apply overrides
+            (Some(mut ctx), org, project) => {
+                if let Some(org) = org {
+                    ctx.org_url = org.to_string();
+                }
+                if let Some(project) = project {
+                    ctx.project = project.to_string();
+                }
+                ctx
+            }
+            // No usable remote — require explicit --org and --project
+            (None, Some(org), Some(project)) => {
+                info!("No ADO git remote; using --org and --project");
+                AdoContext {
+                    org_url: org.to_string(),
+                    project: project.to_string(),
+                    repo_name: String::new(),
+                }
+            }
+            (None, _, _) => {
+                anyhow::bail!(
+                    "Could not determine ADO context: no ADO git remote found and --org/--project not both provided.\n\
+                     When using --definition-ids outside an ADO repo, both --org and --project are required."
+                );
+            }
+        }
+    };
 
     println!(
-        "ADO context: org={}, project={}, repo={}",
-        ado_ctx.org_url, ado_ctx.project, ado_ctx.repo_name
+        "ADO context: org={}, project={}{}",
+        ado_ctx.org_url,
+        ado_ctx.project,
+        if ado_ctx.repo_name.is_empty() {
+            String::new()
+        } else {
+            format!(", repo={}", ado_ctx.repo_name)
+        }
     );
     println!();
 
-    // Step 3: Match to ADO definitions
-    println!("Matching to Azure DevOps pipeline definitions...");
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .context("Failed to create HTTP client")?;
-    let matched = match_definitions(&client, &ado_ctx, &auth, &detected).await?;
+
+    // Build the list of definitions to update — either from explicit IDs or auto-detection
+    let matched = if let Some(ids) = definition_ids {
+        println!("Using explicit definition IDs: {:?}", ids);
+
+        let mut matched = Vec::new();
+        for &id in ids {
+            let name = get_definition_name(&client, &ado_ctx, &auth, id)
+                .await
+                .unwrap_or_else(|| format!("definition {}", id));
+            matched.push(MatchedDefinition {
+                id,
+                name,
+                match_method: MatchMethod::Explicit,
+                yaml_path: String::new(),
+            });
+        }
+        matched
+    } else {
+        // Auto-detect: scan local repo and match to ADO definitions
+        println!("Scanning for agentic pipelines...");
+        let detected = detect::detect_pipelines(&repo_path).await?;
+
+        if detected.is_empty() {
+            println!(
+                "No agentic pipelines found. Make sure your pipelines were compiled with the latest ado-aw."
+            );
+            return Ok(());
+        }
+
+        println!("Found {} agentic pipeline(s):", detected.len());
+        for p in &detected {
+            println!(
+                "  {} (source: {}, version: {})",
+                p.yaml_path.display(),
+                p.source,
+                p.version
+            );
+        }
+        println!();
+
+        println!("Matching to Azure DevOps pipeline definitions...");
+        match_definitions(&client, &ado_ctx, &auth, &detected).await?
+    };
 
     if matched.is_empty() {
         println!("No matching ADO pipeline definitions found.");
@@ -682,12 +780,19 @@ pub async fn run(
         return Ok(());
     }
 
-    println!("Matched {} definition(s):", matched.len());
+    println!("{} definition(s) to update:", matched.len());
     for m in &matched {
-        println!(
-            "  [{}] '{}' (id={}) \u{2190} {}",
-            m.match_method, m.name, m.id, m.yaml_path
-        );
+        if m.yaml_path.is_empty() {
+            println!(
+                "  [{}] '{}' (id={})",
+                m.match_method, m.name, m.id
+            );
+        } else {
+            println!(
+                "  [{}] '{}' (id={}) \u{2190} {}",
+                m.match_method, m.name, m.id, m.yaml_path
+            );
+        }
     }
     println!();
 
@@ -925,5 +1030,19 @@ mod tests {
         ];
         let result = fuzzy_match_by_name("code-review", &defs);
         assert_eq!(result, FuzzyMatchResult::Single(0));
+    }
+
+    // ==================== MatchMethod display ====================
+
+    #[test]
+    fn test_match_method_explicit_display() {
+        assert_eq!(format!("{}", MatchMethod::Explicit), "explicit");
+    }
+
+    #[test]
+    fn test_match_method_all_variants_display() {
+        assert_eq!(format!("{}", MatchMethod::YamlPath), "yaml-path");
+        assert_eq!(format!("{}", MatchMethod::PipelineName), "pipeline-name");
+        assert_eq!(format!("{}", MatchMethod::Explicit), "explicit");
     }
 }

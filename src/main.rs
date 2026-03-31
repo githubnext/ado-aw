@@ -102,6 +102,9 @@ enum Commands {
         /// Preview changes without applying them
         #[arg(long)]
         dry_run: bool,
+        /// Explicit pipeline definition IDs to update (skips auto-detection)
+        #[arg(long, value_delimiter = ',')]
+        definition_ids: Option<Vec<u64>>,
     },
 }
 
@@ -272,6 +275,7 @@ async fn main() -> Result<()> {
                 pat,
                 path,
                 dry_run,
+                definition_ids,
             } => {
                 configure::run(
                     token.as_deref(),
@@ -280,6 +284,7 @@ async fn main() -> Result<()> {
                     pat.as_deref(),
                     path.as_deref(),
                     dry_run,
+                    definition_ids.as_deref(),
                 )
                 .await?;
             }
