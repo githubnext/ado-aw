@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.0](https://github.com/githubnext/ado-aw/compare/v0.5.0...v0.6.0) (2026-03-31)
+
+
+### Features
+
+* auto-discover and recompile all agentic pipelines ([#96](https://github.com/githubnext/ado-aw/issues/96)) ([fb1de50](https://github.com/githubnext/ado-aw/commit/fb1de50f6ac89d13a1876f8c5374c933139345ee))
+
+
+### Bug Fixes
+
+* YAML path matching and legacy SSH URL support ([#95](https://github.com/githubnext/ado-aw/issues/95)) ([f85dd39](https://github.com/githubnext/ado-aw/commit/f85dd39b5038be49ce6ed0f67d34d170090999e4))
+
 ## [0.5.0](https://github.com/githubnext/ado-aw/compare/v0.4.0...v0.5.0) (2026-03-31)
 
 
