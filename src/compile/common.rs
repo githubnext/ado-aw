@@ -500,26 +500,67 @@ pub fn generate_header_comment(input_path: &std::path::Path) -> String {
 ///
 /// Returns a path using `{{ workspace }}` as the base, which gets resolved
 /// to the correct ADO working directory before this placeholder is replaced.
+///
+/// The full relative path of the input file is preserved so that agents compiled
+/// from subdirectories (e.g. `ado-aw compile agents/ctf.md`) produce a correct
+/// runtime path (`$(Build.SourcesDirectory)/agents/ctf.md`) rather than a path
+/// that drops the directory component.
+///
+/// Absolute paths fall back to using only the filename to avoid embedding
+/// machine-specific paths in the generated pipeline.
 pub fn generate_source_path(input_path: &std::path::Path) -> String {
-    let filename = input_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("agent.md");
+    let relative = normalize_relative_path(input_path).unwrap_or_else(|| {
+        input_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("agent.md")
+            .to_string()
+    });
 
-    format!("{{{{ workspace }}}}/agents/{}", filename)
+    format!("{{{{ workspace }}}}/{}", relative)
 }
 
 /// Generate the pipeline YAML path for integrity checking at ADO runtime.
 ///
 /// Returns a path using `{{ workspace }}` as the base, derived from the
-/// output path's filename so it matches whatever `-o` was specified during compilation.
+/// output path so it matches whatever `-o` was specified during compilation.
+///
+/// The full relative path is preserved so that pipelines compiled into
+/// subdirectories (e.g. `agents/ctf.yml`) produce a correct runtime path
+/// (`$(Build.SourcesDirectory)/agents/ctf.yml`) rather than a path that
+/// drops the directory component.
+///
+/// Absolute paths fall back to using only the filename to avoid embedding
+/// machine-specific paths in the generated pipeline.
 pub fn generate_pipeline_path(output_path: &std::path::Path) -> String {
-    let filename = output_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("pipeline.yml");
+    let relative = normalize_relative_path(output_path).unwrap_or_else(|| {
+        output_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("pipeline.yml")
+            .to_string()
+    });
 
-    format!("{{{{ workspace }}}}/{}", filename)
+    format!("{{{{ workspace }}}}/{}", relative)
+}
+
+/// Normalize a path for embedding in a generated pipeline.
+///
+/// Returns `Some(String)` when `path` is relative, with:
+/// - Backslashes converted to forward slashes
+/// - Redundant leading `./` prefixes stripped
+///
+/// Returns `None` for absolute paths so callers can fall back to a safe default.
+fn normalize_relative_path(path: &std::path::Path) -> Option<String> {
+    if path.is_absolute() {
+        return None;
+    }
+
+    let mut s = path.to_string_lossy().replace('\\', "/");
+    while s.starts_with("./") {
+        s = s[2..].to_string();
+    }
+    Some(s)
 }
 
 // ==================== Permission helpers ====================
@@ -1066,5 +1107,69 @@ mod tests {
             "Single ./ prefix should be stripped: {}",
             header
         );
+    }
+
+    // ─── generate_source_path ────────────────────────────────────────────────
+
+    #[test]
+    fn test_generate_source_path_preserves_directory() {
+        // Compiling agents/ctf.md should produce {{ workspace }}/agents/ctf.md,
+        // not {{ workspace }}/agents/ctf.md with a hardcoded agents/ prefix.
+        let path = std::path::Path::new("agents/ctf.md");
+        let result = generate_source_path(path);
+        assert_eq!(result, "{{ workspace }}/agents/ctf.md");
+    }
+
+    #[test]
+    fn test_generate_source_path_nested_directory() {
+        let path = std::path::Path::new("pipelines/production/review.md");
+        let result = generate_source_path(path);
+        assert_eq!(result, "{{ workspace }}/pipelines/production/review.md");
+    }
+
+    #[test]
+    fn test_generate_source_path_strips_dot_slash() {
+        let path = std::path::Path::new("./agents/my-agent.md");
+        let result = generate_source_path(path);
+        assert_eq!(result, "{{ workspace }}/agents/my-agent.md");
+    }
+
+    #[test]
+    fn test_generate_source_path_filename_only() {
+        let path = std::path::Path::new("my-agent.md");
+        let result = generate_source_path(path);
+        assert_eq!(result, "{{ workspace }}/my-agent.md");
+    }
+
+    // ─── generate_pipeline_path ──────────────────────────────────────────────
+
+    #[test]
+    fn test_generate_pipeline_path_preserves_directory() {
+        // The original bug: compiling agents/ctf.md produced agents/ctf.yml as
+        // output, but the embedded path was only ctf.yml (missing agents/).
+        let path = std::path::Path::new("agents/ctf.yml");
+        let result = generate_pipeline_path(path);
+        assert_eq!(result, "{{ workspace }}/agents/ctf.yml");
+    }
+
+    #[test]
+    fn test_generate_pipeline_path_nested_directory() {
+        let path = std::path::Path::new("pipelines/production/review.yml");
+        let result = generate_pipeline_path(path);
+        assert_eq!(result, "{{ workspace }}/pipelines/production/review.yml");
+    }
+
+    #[test]
+    fn test_generate_pipeline_path_strips_dot_slash() {
+        let path = std::path::Path::new("./agents/my-agent.yml");
+        let result = generate_pipeline_path(path);
+        assert_eq!(result, "{{ workspace }}/agents/my-agent.yml");
+    }
+
+    #[test]
+    fn test_generate_pipeline_path_filename_only() {
+        let path = std::path::Path::new("pipeline.yml");
+        let result = generate_pipeline_path(path);
+        assert_eq!(result, "{{ workspace }}/pipeline.yml");
     }
 }
