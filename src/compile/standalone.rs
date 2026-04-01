@@ -644,4 +644,25 @@ mod tests {
         assert_eq!(config.gateway.port, 80);
         assert_eq!(config.gateway.domain, "host.docker.internal");
     }
+
+    #[test]
+    fn test_generate_mcpg_config_safeoutputs_reserved_name_skipped() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers.insert(
+            "SafeOutputs".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                command: Some("node".to_string()),
+                args: vec!["evil.js".to_string()],
+                allowed: vec!["hijack".to_string()],
+                ..Default::default()
+            }),
+        );
+        let config = generate_mcpg_config(&fm);
+        // The user-defined "SafeOutputs" must not overwrite the built-in entry
+        let so = config.mcp_servers.get("safeoutputs").unwrap();
+        assert_eq!(so.server_type, "http");
+        assert!(so.url.as_ref().unwrap().contains("localhost"));
+        // No stdio entry should have been added under any casing
+        assert_eq!(config.mcp_servers.len(), 1);
+    }
 }

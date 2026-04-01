@@ -551,7 +551,7 @@ The generated JSON has two top-level sections:
 - `mcpServers`: Maps server names to their configuration (type, command/url, tools, etc.)
 - `gateway`: Gateway settings (port, domain, apiKey, payloadDir)
 
-SafeOutputs is always included as an HTTP backend (`type: "http"`) pointing to `host.docker.internal`. Custom MCPs with explicit `command:` are included as stdio servers (`type: "stdio"`). MCPs without a command are skipped (there are no built-in MCPs in the copilot CLI).
+SafeOutputs is always included as an HTTP backend (`type: "http"`) pointing to `localhost` (MCPG runs with `--network host`, so `localhost` is the host loopback). Custom MCPs with explicit `command:` are included as stdio servers (`type: "stdio"`). MCPs without a command are skipped (there are no built-in MCPs in the copilot CLI).
 
 Runtime placeholders (`${SAFE_OUTPUTS_PORT}`, `${SAFE_OUTPUTS_API_KEY}`, `${MCP_GATEWAY_API_KEY}`) are substituted by the pipeline at runtime before passing the config to MCPG.
 
@@ -1267,7 +1267,7 @@ The compiler generates MCPG configuration JSON from the `mcp-servers:` front mat
   "mcpServers": {
     "safeoutputs": {
       "type": "http",
-      "url": "http://host.docker.internal:8100/mcp",
+      "url": "http://localhost:8100/mcp",
       "headers": {
         "Authorization": "Bearer <api-key>"
       }

@@ -207,6 +207,8 @@ jobs:
           echo "##vso[task.setvariable variable=SAFE_OUTPUTS_PORT]$SAFE_OUTPUTS_PORT"
           echo "##vso[task.setvariable variable=SAFE_OUTPUTS_API_KEY;issecret=true]$SAFE_OUTPUTS_API_KEY"
 
+          mkdir -p "$(Agent.TempDirectory)/staging/logs"
+
           # Start SafeOutputs as HTTP server in the background
           nohup /tmp/awf-tools/ado-aw mcp-http \
             --port "$SAFE_OUTPUTS_PORT" \
@@ -261,7 +263,6 @@ jobs:
             -e MCP_GATEWAY_API_KEY="$(MCP_GATEWAY_API_KEY)" \
             ghcr.io/github/gh-aw-mcpg:v{{ mcpg_version }} &
           MCPG_PID=$!
-          echo "##vso[task.setvariable variable=MCPG_PID]$MCPG_PID"
           echo "MCPG started (PID: $MCPG_PID)"
 
           # Wait for MCPG to be ready
