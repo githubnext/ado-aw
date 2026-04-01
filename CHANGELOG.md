@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.1](https://github.com/githubnext/ado-aw/compare/v0.7.0...v0.7.1) (2026-04-01)
+
+
+### Bug Fixes
+
+* pin DockerInstaller to v26.1.4 for API compatibility ([#105](https://github.com/githubnext/ado-aw/issues/105)) ([2c6baf2](https://github.com/githubnext/ado-aw/commit/2c6baf28766981ec92d2129def1060f821b0393d))
+* strip redundant ./ prefixes from source path in header comment ([#106](https://github.com/githubnext/ado-aw/issues/106)) ([689825c](https://github.com/githubnext/ado-aw/commit/689825c6ab073864e8b380e3ee86ec3c2d120f45))
+
 ## [0.7.0](https://github.com/githubnext/ado-aw/compare/v0.6.1...v0.7.0) (2026-03-31)
 
 
