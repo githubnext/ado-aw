@@ -171,6 +171,8 @@ jobs:
 
       - task: DockerInstaller@0
         displayName: "Install Docker"
+        inputs:
+          dockerVersion: 26.1.4
 
       - bash: |
           AWF_VERSION="{{ firewall_version }}"
@@ -332,6 +334,8 @@ jobs:
 
       - task: DockerInstaller@0
         displayName: "Install Docker"
+        inputs:
+          dockerVersion: 26.1.4
 
       - bash: |
           AWF_VERSION="{{ firewall_version }}"
