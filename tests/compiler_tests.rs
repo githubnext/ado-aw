@@ -181,10 +181,6 @@ fn test_compiled_yaml_structure() {
         "Template should contain mcpg_config marker"
     );
     assert!(
-        template_content.contains("{{ mcpg_image }}"),
-        "Template should contain mcpg_image marker"
-    );
-    assert!(
         template_content.contains("{{ mcpg_version }}"),
         "Template should contain mcpg_version marker"
     );

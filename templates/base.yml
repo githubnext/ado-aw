@@ -195,7 +195,7 @@ jobs:
           docker pull ghcr.io/github/gh-aw-firewall/agent:{{ firewall_version }}
           docker tag ghcr.io/github/gh-aw-firewall/squid:{{ firewall_version }} ghcr.io/github/gh-aw-firewall/squid:latest
           docker tag ghcr.io/github/gh-aw-firewall/agent:{{ firewall_version }} ghcr.io/github/gh-aw-firewall/agent:latest
-          docker pull {{ mcpg_image }}:v{{ mcpg_version }}
+          docker pull ghcr.io/github/gh-aw-mcpg:v{{ mcpg_version }}
         displayName: "Pre-pull AWF and MCPG container images (v{{ firewall_version }})"
 
       {{ prepare_steps }}
@@ -259,7 +259,7 @@ jobs:
             --network host \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -e MCP_GATEWAY_API_KEY="$(MCP_GATEWAY_API_KEY)" \
-            {{ mcpg_image }}:v{{ mcpg_version }} &
+            ghcr.io/github/gh-aw-mcpg:v{{ mcpg_version }} &
           MCPG_PID=$!
           echo "##vso[task.setvariable variable=MCPG_PID]$MCPG_PID"
           echo "MCPG started (PID: $MCPG_PID)"

@@ -469,7 +469,6 @@ pub fn generate_header_comment(input_path: &std::path::Path) -> String {
 /// Update this when upgrading to a new MCPG release.
 /// See: https://github.com/github/gh-aw-mcpg/releases
 pub const MCPG_VERSION: &str = "0.1.9";
-pub const MCPG_IMAGE: &str = "ghcr.io/github/gh-aw-mcpg";
 
 /// Default port MCPG listens on inside the container (host network mode).
 pub const MCPG_PORT: u16 = 80;
