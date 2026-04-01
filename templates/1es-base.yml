@@ -75,7 +75,7 @@ extends:
                   - bash: |
                       AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
                       chmod +x "$AGENTIC_PIPELINES_PATH"
-                      $AGENTIC_PIPELINES_PATH check "{{ source_path }}" "{{ pipeline_path }}"
+                      $AGENTIC_PIPELINES_PATH check "{{ pipeline_path }}"
                     displayName: "Verify pipeline integrity"
 
                   - bash: |

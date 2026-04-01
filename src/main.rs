@@ -40,9 +40,7 @@ enum Commands {
     },
     /// Check that a compiled pipeline matches its source markdown
     Check {
-        /// Path to the source markdown file
-        source: String,
-        /// Path to the pipeline YAML file to verify
+        /// Path to the pipeline YAML file to verify (source auto-detected from header)
         pipeline: String,
     },
     /// Run as an MCP server
@@ -158,8 +156,8 @@ async fn main() -> Result<()> {
                     compile::compile_all_pipelines().await?
                 }
             },
-            Commands::Check { source, pipeline } => {
-                compile::check_pipeline(&source, &pipeline).await?;
+            Commands::Check { pipeline } => {
+                compile::check_pipeline(&pipeline).await?;
             }
             Commands::Mcp {
                 output_directory,

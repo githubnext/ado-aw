@@ -715,9 +715,9 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - The generated file includes a placeholder for agent instructions that you edit directly
 - `compile <path>` - Compile a markdown file to Azure DevOps pipeline YAML
   - `--output, -o <path>` - Optional output path for generated YAML
-- `check <source> <pipeline>` - Verify that a compiled pipeline matches its source markdown
-  - `<source>` - Path to the source markdown file
+- `check <pipeline>` - Verify that a compiled pipeline matches its source markdown
   - `<pipeline>` - Path to the pipeline YAML file to verify
+  - The source markdown path is auto-detected from the `@ado-aw` header in the pipeline file
   - Useful for CI checks to ensure pipelines are regenerated after source changes
 - `mcp <output_directory> <bounding_directory>` - Run as an MCP server for safe outputs
 - `execute` - Execute safe outputs from Stage 1 (Stage 2 of pipeline)
