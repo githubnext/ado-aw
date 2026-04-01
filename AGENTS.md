@@ -973,6 +973,7 @@ safe-outputs:
   create-wiki-page:
     wiki-name: "MyProject.wiki"     # Required — wiki identifier (name or GUID)
     wiki-project: "OtherProject"    # Optional — ADO project that owns the wiki; defaults to current pipeline project
+    branch: "main"                  # Optional — git branch override; auto-detected for code wikis (see note below)
     path-prefix: "/agent-output"    # Optional — prepended to the agent-supplied path (restricts write scope)
     title-prefix: "[Agent] "        # Optional — prepended to the last path segment (the page title)
     comment: "Created by agent"     # Optional — default commit comment when agent omits one
@@ -980,6 +981,8 @@ safe-outputs:
 ```
 
 Note: `wiki-name` is required. If it is not set, execution fails with an explicit error message.
+
+**Code wikis vs project wikis:** The executor automatically detects code wikis (type 1) and resolves the published branch from the wiki metadata. You only need to set `branch` explicitly to override the auto-detected value (e.g. targeting a non-default branch). Project wikis (type 0) need no branch configuration.
 
 #### update-wiki-page
 Updates the content of an existing Azure DevOps wiki page. The wiki page must already exist; this tool edits its content but does not create new pages.
@@ -995,6 +998,7 @@ safe-outputs:
   update-wiki-page:
     wiki-name: "MyProject.wiki"     # Required — wiki identifier (name or GUID)
     wiki-project: "OtherProject"    # Optional — ADO project that owns the wiki; defaults to current pipeline project
+    branch: "main"                  # Optional — git branch override; auto-detected for code wikis (see note below)
     path-prefix: "/agent-output"    # Optional — prepended to the agent-supplied path (restricts write scope)
     title-prefix: "[Agent] "        # Optional — prepended to the last path segment (the page title)
     comment: "Updated by agent"     # Optional — default commit comment when agent omits one
@@ -1002,6 +1006,8 @@ safe-outputs:
 ```
 
 Note: `wiki-name` is required. If it is not set, execution fails with an explicit error message.
+
+**Code wikis vs project wikis:** The executor automatically detects code wikis (type 1) and resolves the published branch from the wiki metadata. You only need to set `branch` explicitly to override the auto-detected value (e.g. targeting a non-default branch). Project wikis (type 0) need no branch configuration.
 
 ### Adding New Features
 
