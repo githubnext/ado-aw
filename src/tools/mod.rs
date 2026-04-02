@@ -1,6 +1,7 @@
 //! Tool parameter and result structs for MCP tools
 
-use percent_encoding::{AsciiSet, CONTROLS};
+use log::{debug, warn};
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 
 /// Characters to percent-encode in a URL path segment.
 /// Encodes the structural delimiters that would break URL parsing if left raw:
@@ -8,6 +9,94 @@ use percent_encoding::{AsciiSet, CONTROLS};
 /// This hardens operator-controlled values (project names, wiki names, work item
 /// types) against accidental corruption of the URL structure.
 pub(crate) const PATH_SEGMENT: &AsciiSet = &CONTROLS.add(b'#').add(b'?').add(b'/').add(b' ');
+
+/// Resolve the effective branch for a wiki.
+///
+/// If `configured_branch` is `Some`, that value is returned directly.
+/// Otherwise the wiki metadata API is queried: code wikis (type&nbsp;1) return
+/// the published branch from the `versions` array; project wikis (type&nbsp;0)
+/// return `Ok(None)` because the server handles branching internally.
+///
+/// Returns `Err` when a code wiki is detected but the branch cannot be
+/// resolved — callers should surface this as a user-facing failure rather
+/// than proceeding to a confusing ADO PUT error.
+pub(crate) async fn resolve_wiki_branch(
+    client: &reqwest::Client,
+    org_url: &str,
+    project: &str,
+    wiki_name: &str,
+    token: &str,
+    configured_branch: Option<&str>,
+) -> Result<Option<String>, String> {
+    // Explicit configuration always wins.
+    if let Some(b) = configured_branch {
+        return Ok(Some(b.to_owned()));
+    }
+
+    let url = format!(
+        "{}/{}/_apis/wiki/wikis/{}",
+        org_url.trim_end_matches('/'),
+        utf8_percent_encode(project, PATH_SEGMENT),
+        utf8_percent_encode(wiki_name, PATH_SEGMENT),
+    );
+
+    let resp = match client
+        .get(&url)
+        .query(&[("api-version", "7.0")])
+        .basic_auth("", Some(token))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("Wiki metadata request failed: {e} — skipping branch auto-detection");
+            return Ok(None);
+        }
+    };
+
+    if !resp.status().is_success() {
+        warn!(
+            "Wiki metadata request returned HTTP {} — skipping branch auto-detection",
+            resp.status()
+        );
+        return Ok(None);
+    }
+
+    let body: serde_json::Value = match resp.json().await {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("Failed to parse wiki metadata response: {e}");
+            return Ok(None);
+        }
+    };
+
+    // type 0 = project wiki, type 1 = code wiki
+    let wiki_type = body.get("type").and_then(|v| v.as_u64()).unwrap_or(0);
+    if wiki_type != 1 {
+        debug!("Wiki is a project wiki (type {wiki_type}) — no branch needed");
+        return Ok(None);
+    }
+
+    // Code wiki: extract the published branch from versions[0].version
+    let branch = body
+        .get("versions")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.get("version"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned());
+
+    match &branch {
+        Some(b) => {
+            debug!("Detected code wiki — resolved branch: {b}");
+            Ok(branch)
+        }
+        None => Err(format!(
+            "Wiki '{wiki_name}' is a code wiki but its published branch could not be \
+             determined. Set 'branch' explicitly in the safe-outputs config."
+        )),
+    }
+}
 
 mod comment_on_work_item;
 mod create_pr;
