@@ -70,10 +70,16 @@ pub(crate) async fn resolve_wiki_branch(
         }
     };
 
-    // type 0 = project wiki, type 1 = code wiki
-    let wiki_type = body.get("type").and_then(|v| v.as_u64()).unwrap_or(0);
-    if wiki_type != 1 {
-        debug!("Wiki is a project wiki (type {wiki_type}) — no branch needed");
+    // Detect code wikis. ADO returns the type as a string enum ("codeWiki" /
+    // "projectWiki") rather than a numeric value, so we check both forms.
+    let is_code_wiki = match body.get("type") {
+        Some(serde_json::Value::String(s)) => s.eq_ignore_ascii_case("codewiki"),
+        Some(serde_json::Value::Number(n)) => n.as_u64() == Some(1),
+        _ => false,
+    };
+    if !is_code_wiki {
+        let type_val = body.get("type").cloned().unwrap_or(serde_json::Value::Null);
+        debug!("Wiki is a project wiki (type {type_val}) — no branch needed");
         return Ok(None);
     }
 
