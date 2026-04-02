@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.1](https://github.com/githubnext/ado-aw/compare/v0.8.0...v0.8.1) (2026-04-02)
+
+
+### Bug Fixes
+
+* auto-detect code wiki branch for wiki page safe outputs ([#115](https://github.com/githubnext/ado-aw/issues/115)) ([f8ea1e9](https://github.com/githubnext/ado-aw/commit/f8ea1e9b2c44ca7cce02398fa6a7fd2d20edf252))
+* preserve subdirectory in generated pipeline_path and source_path ([#114](https://github.com/githubnext/ado-aw/issues/114)) ([32137fe](https://github.com/githubnext/ado-aw/commit/32137fe1c3169ee7209fa71368abcbf9165ddc36))
+
 ## [0.8.0](https://github.com/githubnext/ado-aw/compare/ado-aw-v0.7.1...ado-aw-v0.8.0) (2026-04-01)
 
 
