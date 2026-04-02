@@ -1220,17 +1220,22 @@ mod tests {
 
     #[test]
     fn test_generate_source_path_absolute_falls_back_to_filename() {
-        // /home/user/agents/ctf.md is not inside a git repo, so we fall back
+        // An absolute path that is NOT inside a git repo should fall back
         // to filename-only to avoid embedding a machine-specific absolute path.
-        let path = std::path::Path::new("/home/user/agents/ctf.md");
-        let result = generate_source_path(path);
+        // Use a real temp dir so the path is genuinely absolute on any OS.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let abs_path = tmp.path().join("agents").join("ctf.md");
+        // No .git marker — find_git_root will walk up and find nothing
+        // (temp dirs are outside any repo).
+        let result = generate_source_path(&abs_path);
         assert_eq!(result, "{{ workspace }}/ctf.md");
     }
 
     #[test]
     fn test_generate_pipeline_path_absolute_falls_back_to_filename() {
-        let path = std::path::Path::new("/home/user/agents/ctf.yml");
-        let result = generate_pipeline_path(path);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let abs_path = tmp.path().join("agents").join("ctf.yml");
+        let result = generate_pipeline_path(&abs_path);
         assert_eq!(result, "{{ workspace }}/ctf.yml");
     }
 
