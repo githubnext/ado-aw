@@ -209,11 +209,23 @@ pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
             )
         })?;
 
-    // Resolve source path relative to the pipeline file's parent directory
-    let source_path = pipeline_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(&header_meta.source);
+    // The header stores the source path relative to the repository root.
+    // Walk up from the pipeline file to find the .git directory, then resolve
+    // the source path relative to that root.
+    let pipeline_abs = if pipeline_path.is_absolute() {
+        pipeline_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(pipeline_path)
+    };
+    let repo_root = find_repo_root(&pipeline_abs).with_context(|| {
+        format!(
+            "Could not find repository root (no .git directory) from {}",
+            pipeline_path.display()
+        )
+    })?;
+    let source_path = repo_root.join(&header_meta.source);
 
     info!(
         "Checking pipeline integrity: {} -> {} (source from header)",
@@ -264,6 +276,19 @@ pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
 
     println!("OK: {} is up to date", pipeline_path.display());
     Ok(())
+}
+
+/// Walk up from `start` to find the nearest directory containing `.git`.
+fn find_repo_root(start: &Path) -> Option<PathBuf> {
+    let mut current = start.to_path_buf();
+    loop {
+        if current.join(".git").exists() {
+            return Some(current);
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
 }
 
 /// Normalize a string by removing all whitespace characters.
