@@ -1,6 +1,6 @@
 //! Tool parameter and result structs for MCP tools
 
-use log::debug;
+use log::{debug, warn};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 
 /// Characters to percent-encode in a URL path segment.
@@ -45,7 +45,7 @@ pub(crate) async fn resolve_wiki_branch(
         .ok()?;
 
     if !resp.status().is_success() {
-        debug!(
+        warn!(
             "Wiki metadata request returned HTTP {} — skipping branch auto-detection",
             resp.status()
         );
@@ -70,7 +70,11 @@ pub(crate) async fn resolve_wiki_branch(
         .and_then(|v| v.as_str())
         .map(|s| s.to_owned());
 
-    debug!("Detected code wiki — resolved branch: {branch:?}");
+    if branch.is_none() {
+        warn!("Code wiki detected but versions array is empty — branch auto-detection failed");
+    } else {
+        debug!("Detected code wiki — resolved branch: {branch:?}");
+    }
     branch
 }
 
