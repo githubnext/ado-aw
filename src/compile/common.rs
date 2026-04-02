@@ -550,14 +550,30 @@ pub fn generate_pipeline_path(output_path: &std::path::Path) -> String {
 /// - Backslashes converted to forward slashes
 /// - Redundant leading `./` prefixes stripped
 ///
-/// Returns `None` for absolute paths so callers can fall back to a safe default
-/// (typically the filename-only component) to avoid embedding machine-specific
-/// paths in the generated pipeline YAML.
+/// For absolute paths the function first tries to compute a relative path from
+/// the nearest git repository root (found by walking up the directory tree
+/// looking for a `.git` entry).  This preserves the directory structure when
+/// the user passes an absolute path — e.g.
+/// `/home/user/repo/agents/ctf.md` → `agents/ctf.md`.
 ///
-/// Note: `..` components are passed through unchanged. Callers are responsible
-/// for ensuring the path does not traverse outside the repository checkout.
+/// Falls back to `None` (callers use filename-only) only when no git root is
+/// found, to avoid embedding machine-specific absolute paths in the generated
+/// pipeline YAML.
+///
+/// Note: `..` components in relative paths are passed through unchanged.
+/// Callers are responsible for ensuring the path does not traverse outside the
+/// repository checkout.
 fn normalize_relative_path(path: &std::path::Path) -> Option<String> {
     if path.is_absolute() {
+        // Try to make the path relative to the nearest git repo root so that
+        // directory structure (e.g. `agents/ctf.md`) is preserved even when
+        // the user invokes the compiler with an absolute path.
+        if let Some(git_root) = find_git_root(path) {
+            if let Ok(rel) = path.strip_prefix(&git_root) {
+                let s = rel.to_string_lossy().replace('\\', "/");
+                return Some(s);
+            }
+        }
         return None;
     }
 
@@ -566,6 +582,30 @@ fn normalize_relative_path(path: &std::path::Path) -> Option<String> {
         s = stripped.to_string();
     }
     Some(s)
+}
+
+/// Walk up the directory tree from `path` looking for a `.git` entry.
+///
+/// Returns the first ancestor directory that contains `.git`, or `None` if the
+/// traversal reaches the filesystem root without finding one.
+fn find_git_root(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    // Start from the file's parent directory (or the path itself if it is a dir).
+    let start: &std::path::Path = if path.is_dir() {
+        path
+    } else {
+        path.parent()?
+    };
+
+    let mut current = start.to_path_buf();
+    loop {
+        if current.join(".git").exists() {
+            return Some(current);
+        }
+        match current.parent() {
+            Some(parent) => current = parent.to_path_buf(),
+            None => return None,
+        }
+    }
 }
 
 // ==================== Permission helpers ====================
@@ -1180,7 +1220,8 @@ mod tests {
 
     #[test]
     fn test_generate_source_path_absolute_falls_back_to_filename() {
-        // Absolute paths must not embed machine-specific directory structure.
+        // /home/user/agents/ctf.md is not inside a git repo, so we fall back
+        // to filename-only to avoid embedding a machine-specific absolute path.
         let path = std::path::Path::new("/home/user/agents/ctf.md");
         let result = generate_source_path(path);
         assert_eq!(result, "{{ workspace }}/ctf.md");
@@ -1191,5 +1232,33 @@ mod tests {
         let path = std::path::Path::new("/home/user/agents/ctf.yml");
         let result = generate_pipeline_path(path);
         assert_eq!(result, "{{ workspace }}/ctf.yml");
+    }
+
+    #[test]
+    fn test_generate_source_path_absolute_with_git_root_preserves_directory() {
+        // When the absolute path is inside a git repo, the directory structure
+        // relative to the repo root must be preserved.
+        use std::fs;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let agents_dir = tmp.path().join("agents");
+        fs::create_dir_all(&agents_dir).unwrap();
+        // A `.git` file (as used in worktrees) satisfies `.exists()` just like
+        // a `.git` directory, so either form is a valid marker.
+        fs::write(tmp.path().join(".git"), "gitdir: fake").unwrap();
+        let abs_path = agents_dir.join("ctf.md");
+        let result = generate_source_path(&abs_path);
+        assert_eq!(result, "{{ workspace }}/agents/ctf.md");
+    }
+
+    #[test]
+    fn test_generate_pipeline_path_absolute_with_git_root_preserves_directory() {
+        use std::fs;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let agents_dir = tmp.path().join("agents");
+        fs::create_dir_all(&agents_dir).unwrap();
+        fs::write(tmp.path().join(".git"), "gitdir: fake").unwrap();
+        let abs_path = agents_dir.join("ctf.yml");
+        let result = generate_pipeline_path(&abs_path);
+        assert_eq!(result, "{{ workspace }}/agents/ctf.yml");
     }
 }
