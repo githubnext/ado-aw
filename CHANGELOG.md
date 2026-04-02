@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.3](https://github.com/githubnext/ado-aw/compare/v0.8.2...v0.8.3) (2026-04-02)
+
+
+### Bug Fixes
+
+* handle string WikiType enum from ADO API in branch resolution ([#122](https://github.com/githubnext/ado-aw/issues/122)) ([7914169](https://github.com/githubnext/ado-aw/commit/791416976e805e440fe60a5829f79ebca2143cdb))
+* resolve check command source path from repo root ([#120](https://github.com/githubnext/ado-aw/issues/120)) ([a057598](https://github.com/githubnext/ado-aw/commit/a05759895352aa6504fa62ab74bde3ee62a9e25e))
+
 ## [0.8.2](https://github.com/githubnext/ado-aw/compare/v0.8.1...v0.8.2) (2026-04-02)
 
 
