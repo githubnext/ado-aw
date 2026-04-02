@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.2](https://github.com/githubnext/ado-aw/compare/v0.8.1...v0.8.2) (2026-04-02)
+
+
+### Bug Fixes
+
+* use platform-appropriate absolute paths in path fallback tests ([#118](https://github.com/githubnext/ado-aw/issues/118)) ([434cf19](https://github.com/githubnext/ado-aw/commit/434cf19562563199e3114fbaaa04b3d3c33aad98))
+
 ## [0.8.1](https://github.com/githubnext/ado-aw/compare/v0.8.0...v0.8.1) (2026-04-02)
 
 
