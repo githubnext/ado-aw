@@ -240,7 +240,7 @@ impl Executor for CreateWikiPageResult {
 
         // Resolve the effective branch: explicit config → auto-detect from wiki
         // metadata (code wikis need an explicit versionDescriptor).
-        let resolved_branch = resolve_wiki_branch(
+        let resolved_branch = match resolve_wiki_branch(
             &client,
             org_url,
             project,
@@ -248,7 +248,11 @@ impl Executor for CreateWikiPageResult {
             token,
             config.branch.as_deref(),
         )
-        .await;
+        .await
+        {
+            Ok(b) => b,
+            Err(msg) => return Ok(ExecutionResult::failure(msg)),
+        };
 
         // ── GET: check whether the page already exists ────────────────────────
         let mut get_query: Vec<(&str, &str)> = vec![
