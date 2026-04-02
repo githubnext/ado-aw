@@ -550,15 +550,20 @@ pub fn generate_pipeline_path(output_path: &std::path::Path) -> String {
 /// - Backslashes converted to forward slashes
 /// - Redundant leading `./` prefixes stripped
 ///
-/// Returns `None` for absolute paths so callers can fall back to a safe default.
+/// Returns `None` for absolute paths so callers can fall back to a safe default
+/// (typically the filename-only component) to avoid embedding machine-specific
+/// paths in the generated pipeline YAML.
+///
+/// Note: `..` components are passed through unchanged. Callers are responsible
+/// for ensuring the path does not traverse outside the repository checkout.
 fn normalize_relative_path(path: &std::path::Path) -> Option<String> {
     if path.is_absolute() {
         return None;
     }
 
     let mut s = path.to_string_lossy().replace('\\', "/");
-    while s.starts_with("./") {
-        s = s[2..].to_string();
+    while let Some(stripped) = s.strip_prefix("./") {
+        s = stripped.to_string();
     }
     Some(s)
 }
@@ -1171,5 +1176,20 @@ mod tests {
         let path = std::path::Path::new("pipeline.yml");
         let result = generate_pipeline_path(path);
         assert_eq!(result, "{{ workspace }}/pipeline.yml");
+    }
+
+    #[test]
+    fn test_generate_source_path_absolute_falls_back_to_filename() {
+        // Absolute paths must not embed machine-specific directory structure.
+        let path = std::path::Path::new("/home/user/agents/ctf.md");
+        let result = generate_source_path(path);
+        assert_eq!(result, "{{ workspace }}/ctf.md");
+    }
+
+    #[test]
+    fn test_generate_pipeline_path_absolute_falls_back_to_filename() {
+        let path = std::path::Path::new("/home/user/agents/ctf.yml");
+        let result = generate_pipeline_path(path);
+        assert_eq!(result, "{{ workspace }}/ctf.yml");
     }
 }
