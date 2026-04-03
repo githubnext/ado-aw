@@ -34,6 +34,8 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 │   ├── mcp.rs            # SafeOutputs MCP server
 │   ├── mcp_firewall.rs   # MCP Firewall server
 │   ├── mcp_metadata.rs   # Bundled MCP metadata
+│   ├── configure.rs      # `configure` CLI command — detects and updates pipeline variables
+│   ├── detect.rs         # Agentic pipeline detection (helper for `configure`)
 │   ├── ndjson.rs         # NDJSON parsing utilities
 │   ├── proxy.rs          # Network proxy implementation
 │   ├── sanitize.rs       # Input sanitization for safe outputs
@@ -730,6 +732,14 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - `--allow <host>` - Allowed hosts (supports wildcards, can be repeated)
 - `mcp-firewall` - Start an MCP firewall server that proxies tool calls
   - `--config, -c <path>` - Path to firewall configuration JSON file
+- `configure` - Detect agentic pipelines in a local repository and update the `GITHUB_TOKEN` pipeline variable on their Azure DevOps build definitions
+  - `--token <token>` / `GITHUB_TOKEN` env var - The new GITHUB_TOKEN value (prompted if omitted)
+  - `--org <url>` - Override: Azure DevOps organization URL (inferred from git remote by default)
+  - `--project <name>` - Override: Azure DevOps project name (inferred from git remote by default)
+  - `--pat <pat>` / `AZURE_DEVOPS_EXT_PAT` env var - PAT for ADO API authentication (prompted if omitted)
+  - `--path <path>` - Path to the repository root (defaults to current directory)
+  - `--dry-run` - Preview changes without applying them
+  - `--definition-ids <ids>` - Explicit pipeline definition IDs to update (comma-separated, skips auto-detection)
 
 ## Safe Outputs Configuration
 
