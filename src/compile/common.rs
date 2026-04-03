@@ -455,7 +455,7 @@ pub const DEFAULT_POOL: &str = "AZS-1ES-L-MMS-ubuntu-22.04";
 /// Version of the AWF (Agentic Workflow Firewall) binary to download from GitHub Releases.
 /// Update this when upgrading to a new AWF release.
 /// See: https://github.com/github/gh-aw-firewall/releases
-pub const AWF_VERSION: &str = "0.25.6";
+pub const AWF_VERSION: &str = "0.25.13";
 
 /// Version of the GitHub Copilot CLI (Microsoft.Copilot.CLI.linux-x64) NuGet package to install.
 /// Update this when upgrading to a new Copilot CLI release.
