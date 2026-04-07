@@ -316,7 +316,7 @@ Each "turn" is one iteration of the model calling a tool and receiving its outpu
 - **Safety** — preventing infinite loops where the agent repeatedly calls tools without converging on a result.
 - **Predictability** — ensuring the pipeline completes within a reasonable time frame.
 
-When omitted, the Copilot CLI uses its built-in default. When set, the compiler emits `--max-turns <value>` in the generated pipeline's agency params.
+When omitted, the Copilot CLI uses its built-in default. When set, the compiler emits `--max-turns <value>` in the generated pipeline's copilot params.
 
 #### `timeout-minutes`
 
@@ -326,7 +326,7 @@ The `timeout-minutes` field sets a wall-clock limit (in minutes) for the entire 
 - **Pipeline hygiene** — preventing agents from occupying a runner indefinitely if they stall or enter long retry loops.
 - **SLA compliance** — ensuring scheduled agents complete within a known window.
 
-When omitted, the Copilot CLI uses its built-in default. When set, the compiler emits `--max-timeout <value>` in the generated pipeline's agency params.
+When omitted, the Copilot CLI uses its built-in default. When set, the compiler emits `--max-timeout <value>` in the generated pipeline's copilot params.
 
 ### Tools Configuration
 
