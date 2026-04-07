@@ -310,6 +310,12 @@ pub fn generate_copilot_params(front_matter: &FrontMatter) -> String {
     let mut params = Vec::new();
 
     params.push(format!("--model {}", front_matter.engine.model()));
+    if let Some(max_turns) = front_matter.engine.max_turns() {
+        params.push(format!("--max-turns {}", max_turns));
+    }
+    if let Some(timeout_minutes) = front_matter.engine.timeout_minutes() {
+        params.push(format!("--timeout-minutes {}", timeout_minutes));
+    }
     params.push("--disable-builtin-mcps".to_string());
     params.push("--no-ask-user".to_string());
 
@@ -892,6 +898,67 @@ mod tests {
             .insert("ado".to_string(), McpConfig::Enabled(true));
         let params = generate_copilot_params(&fm);
         assert!(params.contains("--mcp ado"));
+    }
+
+    #[test]
+    fn test_copilot_params_max_turns_included() {
+        let mut fm = minimal_front_matter();
+        fm.engine = crate::compile::types::EngineConfig::Full(
+            crate::compile::types::EngineOptions {
+                model: Some("claude-opus-4.5".to_string()),
+                max_turns: Some(50),
+                timeout_minutes: None,
+            },
+        );
+        let params = generate_copilot_params(&fm);
+        assert!(params.contains("--max-turns 50"));
+    }
+
+    #[test]
+    fn test_copilot_params_timeout_minutes_included() {
+        let mut fm = minimal_front_matter();
+        fm.engine = crate::compile::types::EngineConfig::Full(
+            crate::compile::types::EngineOptions {
+                model: Some("claude-opus-4.5".to_string()),
+                max_turns: None,
+                timeout_minutes: Some(30),
+            },
+        );
+        let params = generate_copilot_params(&fm);
+        assert!(params.contains("--timeout-minutes 30"));
+    }
+
+    #[test]
+    fn test_copilot_params_max_turns_and_timeout_both_included() {
+        let mut fm = minimal_front_matter();
+        fm.engine = crate::compile::types::EngineConfig::Full(
+            crate::compile::types::EngineOptions {
+                model: Some("claude-sonnet-4.5".to_string()),
+                max_turns: Some(25),
+                timeout_minutes: Some(60),
+            },
+        );
+        let params = generate_copilot_params(&fm);
+        assert!(params.contains("--max-turns 25"));
+        assert!(params.contains("--timeout-minutes 60"));
+    }
+
+    #[test]
+    fn test_copilot_params_no_max_turns_or_timeout_by_default() {
+        let fm = minimal_front_matter();
+        let params = generate_copilot_params(&fm);
+        assert!(!params.contains("--max-turns"));
+        assert!(!params.contains("--timeout-minutes"));
+    }
+
+    #[test]
+    fn test_copilot_params_simple_engine_string_no_max_turns_or_timeout() {
+        let mut fm = minimal_front_matter();
+        fm.engine = crate::compile::types::EngineConfig::Simple("gpt-5.4".to_string());
+        let params = generate_copilot_params(&fm);
+        assert!(params.contains("--model gpt-5.4"));
+        assert!(!params.contains("--max-turns"));
+        assert!(!params.contains("--timeout-minutes"));
     }
 
     // ─── sanitize_filename ────────────────────────────────────────────────────
