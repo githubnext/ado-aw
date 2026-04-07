@@ -1,4 +1,4 @@
-//! MCP Metadata - Bundled tool definitions for agency MCPs
+//! MCP Metadata - Bundled tool definitions for copilot MCPs
 //!
 //! This module provides access to pre-discovered MCP tool metadata that is
 //! embedded at compile time. The metadata is refreshed by running:
@@ -11,7 +11,7 @@
 //! ./refresh-mcp-metadata.sh
 //! ```
 //!
-//! The scripts query each built-in agency MCP and save the tool definitions
+//! The scripts query each built-in copilot MCP and save the tool definitions
 //! to `mcp-metadata.json`, which is then embedded into the binary.
 
 use serde::{Deserialize, Serialize};
@@ -38,7 +38,7 @@ pub struct ToolMetadata {
 pub struct McpMetadata {
     /// Server name/identifier
     pub name: String,
-    /// Whether this is a built-in agency MCP
+    /// Whether this is a built-in copilot MCP
     #[serde(default)]
     pub builtin: bool,
     /// Available tools

@@ -58,7 +58,7 @@ impl Compiler for OneESCompiler {
         let repositories = generate_repositories(&front_matter.repositories);
         let checkout_steps = generate_checkout_steps(&front_matter.checkout);
         let checkout_self = generate_checkout_self();
-        let agency_params = generate_copilot_params(front_matter);
+        let copilot_params = generate_copilot_params(front_matter);
 
         let effective_workspace = compute_effective_workspace(
             &front_matter.workspace,
@@ -169,7 +169,7 @@ displayName: "Finalize""#,
             ("{{ pipeline_path }}", &pipeline_path),
             ("{{ working_directory }}", &working_directory),
             ("{{ workspace }}", &working_directory),
-            ("{{ agency_params }}", &agency_params),
+            ("{{ copilot_params }}", &copilot_params),
             ("{{ acquire_ado_token }}", &acquire_read_token),
             ("{{ copilot_ado_env }}", &copilot_ado_env),
             ("{{ acquire_write_token }}", &acquire_write_token),

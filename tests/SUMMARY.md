@@ -28,9 +28,9 @@ Added 18 comprehensive unit tests in the `tests` module at the end of `main.rs`:
 - `test_generate_checkout_steps_multiple` - Tests multiple checkout steps
 
 #### Agency Parameters (3 tests)
-- `test_generate_agency_params_builtin_enabled` - Tests enabled built-in MCPs
-- `test_generate_agency_params_builtin_disabled` - Tests disabled MCPs
-- `test_generate_agency_params_custom_mcp_skipped` - Verifies custom MCPs are skipped
+- `test_generate_copilot_params_builtin_enabled` - Tests enabled built-in MCPs
+- `test_generate_copilot_params_builtin_disabled` - Tests disabled MCPs
+- `test_generate_copilot_params_custom_mcp_skipped` - Verifies custom MCPs are skipped
 
 #### Markdown Parsing (4 tests)
 - `test_parse_markdown_valid` - Tests valid markdown with front matter

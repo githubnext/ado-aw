@@ -6,7 +6,7 @@ use super::types::{FrontMatter, McpConfig, Repository, TriggerConfig};
 use crate::fuzzy_schedule;
 use crate::mcp_metadata::McpMetadataFile;
 
-/// Check if an MCP name is a built-in (launched via agency mcp)
+/// Check if an MCP name is a built-in (launched via copilot mcp)
 pub fn is_builtin_mcp(name: &str) -> bool {
     let metadata = McpMetadataFile::bundled();
     metadata.get(name).map(|m| m.builtin).unwrap_or(false)
@@ -315,7 +315,7 @@ pub fn generate_copilot_params(front_matter: &FrontMatter) -> String {
 
     for tool in allowed_tools {
         if tool.contains('(') || tool.contains(')') || tool.contains(' ') {
-            // Use double quotes - the agency_params are embedded inside a single-quoted
+            // Use double quotes - the copilot_params are embedded inside a single-quoted
             // bash string in the AWF command, so single quotes would break quoting.
             params.push(format!("--allow-tool \"{}\"", tool));
         } else {

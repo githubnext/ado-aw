@@ -366,7 +366,7 @@ The compiler transforms the input into valid Azure DevOps pipeline YAML based on
 - **Standalone**: Uses `templates/base.yml`
 - **1ES**: Uses `templates/1es-base.yml`
 
-Explicit markings are embedded in these templates that the compiler is allowed to replace e.g. `{{ agency_params }}` denotes parameters which are passed to the agency command line tool. The compiler should not replace sections denoted by `${{ some content }}`. What follows is a mapping of markings to responsibilities (primarily for the standalone template).
+Explicit markings are embedded in these templates that the compiler is allowed to replace e.g. `{{ copilot_params }}` denotes parameters which are passed to the copilot command line tool. The compiler should not replace sections denoted by `${{ some content }}`. What follows is a mapping of markings to responsibilities (primarily for the standalone template).
 
 ## {{ repositories }}
 For each additional repository specified in the front matter append:
@@ -435,9 +435,9 @@ This distinction allows resources (like templates) to be available as pipeline r
 
 Should be replaced with the human-readable name from the front matter (e.g., "Daily Code Review"). This is used for display purposes like stage names.
 
-## {{ agency_params }}
+## {{ copilot_params }}
 
-Additional params provided to agency CLI. The compiler generates:
+Additional params provided to copilot CLI. The compiler generates:
 - `--model <model>` - AI model from `engine` front matter field (default: claude-opus-4.5)
 - `--disable-builtin-mcps` - Disables all built-in MCPs initially
 - `--no-ask-user` - Prevents interactive prompts
@@ -514,7 +514,7 @@ Should be replaced with the appropriate working directory based on the effective
 - `root`: `$(Build.SourcesDirectory)` - the checkout root directory
 - `repo`: `$(Build.SourcesDirectory)/$(Build.Repository.Name)` - the repository's subfolder
 
-This is used for the `workingDirectory` property of the agency copilot task.
+This is used for the `workingDirectory` property of the copilot task.
 
 ## {{ source_path }}
 
@@ -1286,11 +1286,11 @@ When agents are configured with multiple MCPs (e.g., `ado`, `kusto`, `icm`), the
 ```
 ┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
 │             │     │                  │     │  ado MCP        │
-│   Agent     │────▶│   MCP Firewall   │────▶│  (agency mcp ado)│
+│   Agent     │────▶│   MCP Firewall   │────▶│  (copilot mcp ado)│
 │  (Agency)   │     │                  │     └─────────────────┘
 │             │     │  - Policy check  │     ┌─────────────────┐
 └─────────────┘     │  - Tool routing  │────▶│  icm MCP        │
-                    │  - Audit logging │     │  (agency mcp icm)│
+                    │  - Audit logging │     │  (copilot mcp icm)│
                     └──────────────────┘     └─────────────────┘
                                              ┌─────────────────┐
                                         ────▶│  custom MCP     │
@@ -1306,19 +1306,19 @@ The firewall reads a JSON configuration file at runtime:
 {
   "upstreams": {
     "ado": {
-      "command": "agency",
+      "command": "copilot",
       "args": ["mcp", "ado"],
       "env": {},
       "allowed": ["*"]
     },
     "icm": {
-      "command": "agency",
+      "command": "copilot",
       "args": ["mcp", "icm"],
       "env": {},
       "allowed": ["create_incident", "get_incident"]
     },
     "kusto": {
-      "command": "agency",
+      "command": "copilot",
       "args": ["mcp", "kusto"],
       "env": {},
       "allowed": ["query"]
@@ -1378,8 +1378,8 @@ ado-aw mcp-firewall --config /path/to/config.json
 The firewall is automatically configured in generated pipelines:
 
 1. **Config Generation**: The compiler generates `mcp-firewall-config.json` from the agent's `mcp-servers:` front matter
-2. **MCP Registration**: The firewall is registered in the agency MCP config as `mcp-firewall`
-3. **Runtime Launch**: When agency starts, it launches the firewall which spawns upstream MCPs
+2. **MCP Registration**: The firewall is registered in the copilot MCP config as `mcp-firewall`
+3. **Runtime Launch**: When copilot starts, it launches the firewall which spawns upstream MCPs
 
 The firewall config is written to `$(Agent.TempDirectory)/staging/mcp-firewall-config.json` in its own pipeline step, making it easy to inspect and debug.
 

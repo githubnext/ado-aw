@@ -59,7 +59,7 @@ impl Compiler for StandaloneCompiler {
         let repositories = generate_repositories(&front_matter.repositories);
         let checkout_steps = generate_checkout_steps(&front_matter.checkout);
         let checkout_self = generate_checkout_self();
-        let agency_params = generate_copilot_params(front_matter);
+        let copilot_params = generate_copilot_params(front_matter);
         let agent_name = sanitize_filename(&front_matter.name);
 
         // Compute effective workspace
@@ -163,7 +163,7 @@ impl Compiler for StandaloneCompiler {
             ("{{ agent }}", &agent_name),
             ("{{ agent_name }}", &front_matter.name),
             ("{{ agent_description }}", &front_matter.description),
-            ("{{ agency_params }}", &agency_params),
+            ("{{ copilot_params }}", &copilot_params),
             ("{{ source_path }}", &source_path),
             ("{{ pipeline_path }}", &pipeline_path),
             ("{{ working_directory }}", &working_directory),
@@ -393,7 +393,7 @@ pub fn generate_firewall_config(front_matter: &FrontMatter) -> FirewallConfig {
                 args.extend(opts.args.clone());
 
                 UpstreamConfig {
-                    command: "agency".to_string(),
+                    command: "copilot".to_string(),
                     args,
                     env: opts.env.clone(),
                     allowed: if opts.allowed.is_empty() {
@@ -413,7 +413,7 @@ pub fn generate_firewall_config(front_matter: &FrontMatter) -> FirewallConfig {
         } else if common::is_builtin_mcp(name) {
             // Built-in MCP with simple enablement
             UpstreamConfig {
-                command: "agency".to_string(),
+                command: "copilot".to_string(),
                 args: vec!["mcp".to_string(), name.clone()],
                 env: HashMap::new(),
                 allowed: vec!["*".to_string()],
@@ -507,7 +507,7 @@ mod tests {
             .insert("ado".to_string(), McpConfig::Enabled(true));
         let config = generate_firewall_config(&fm);
         let upstream = config.upstreams.get("ado").unwrap();
-        assert_eq!(upstream.command, "agency");
+        assert_eq!(upstream.command, "copilot");
         assert_eq!(upstream.args, vec!["mcp", "ado"]);
         assert_eq!(upstream.allowed, vec!["*"]);
     }
@@ -524,7 +524,7 @@ mod tests {
         );
         let config = generate_firewall_config(&fm);
         let upstream = config.upstreams.get("icm").unwrap();
-        assert_eq!(upstream.command, "agency");
+        assert_eq!(upstream.command, "copilot");
         assert_eq!(upstream.args, vec!["mcp", "icm"]);
         assert_eq!(
             upstream.allowed,
