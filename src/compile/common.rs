@@ -310,6 +310,9 @@ pub fn generate_copilot_params(front_matter: &FrontMatter) -> String {
     let mut params = Vec::new();
 
     params.push(format!("--model {}", front_matter.engine.model()));
+    if let Some(max_turns) = front_matter.engine.max_turns() {
+        params.push(format!("--max-turns {}", max_turns));
+    }
     params.push("--disable-builtin-mcps".to_string());
     params.push("--no-ask-user".to_string());
 
@@ -892,6 +895,23 @@ mod tests {
             .insert("ado".to_string(), McpConfig::Enabled(true));
         let params = generate_copilot_params(&fm);
         assert!(params.contains("--mcp ado"));
+    }
+
+    #[test]
+    fn test_copilot_params_max_turns() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  max-turns: 50\n---\n",
+        )
+        .unwrap();
+        let params = generate_copilot_params(&fm);
+        assert!(params.contains("--max-turns 50"));
+    }
+
+    #[test]
+    fn test_copilot_params_no_max_turns_when_simple_engine() {
+        let fm = minimal_front_matter();
+        let params = generate_copilot_params(&fm);
+        assert!(!params.contains("--max-turns"));
     }
 
     // ─── sanitize_filename ────────────────────────────────────────────────────
