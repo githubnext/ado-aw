@@ -285,6 +285,39 @@ schedule:
     - release/*
 ```
 
+### Engine Configuration
+
+The `engine` field specifies which AI model to use and optional execution parameters. It accepts both a simple string format (model name only) and an object format with additional options.
+
+```yaml
+# Simple string format (just a model name)
+engine: claude-opus-4.5
+
+# Object format with additional options
+engine:
+  model: claude-opus-4.5
+  max-turns: 50
+  timeout-minutes: 30
+```
+
+#### Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `model` | string | `claude-opus-4.5` | AI model to use. Options include `claude-sonnet-4.5`, `gpt-5.2-codex`, `gemini-3-pro-preview`, etc. |
+| `max-turns` | integer | *(none)* | Maximum number of agentic turns (tool-use iterations) the model is allowed per run. Maps to the `--max-turns` Copilot CLI argument. Use this to cap compute and prevent runaway loops. |
+| `timeout-minutes` | integer | *(none)* | Workflow timeout in minutes. |
+
+#### `max-turns`
+
+Each "turn" is one iteration of the model calling a tool and receiving its output. Setting `max-turns` places an upper bound on how many such iterations the agent can perform in a single pipeline run. This is useful for:
+
+- **Cost control** — limiting expensive model invocations.
+- **Safety** — preventing infinite loops where the agent repeatedly calls tools without converging on a result.
+- **Predictability** — ensuring the pipeline completes within a reasonable time frame.
+
+When omitted, the Copilot CLI uses its built-in default. When set, the compiler emits `--max-turns <value>` in the generated pipeline's agency params.
+
 ### Tools Configuration
 
 The `tools` field controls which tools are available to the agent. Both sub-fields are optional and have sensible defaults.
@@ -439,6 +472,7 @@ Should be replaced with the human-readable name from the front matter (e.g., "Da
 
 Additional params provided to agency CLI. The compiler generates:
 - `--model <model>` - AI model from `engine` front matter field (default: claude-opus-4.5)
+- `--max-turns <n>` - Maximum agentic turns from `engine.max-turns` (omitted when not set)
 - `--disable-builtin-mcps` - Disables all built-in MCPs initially
 - `--no-ask-user` - Prevents interactive prompts
 - `--allow-tool <tool>` - Explicitly allows specific tools (github, safeoutputs, write, shell commands like cat, date, echo, grep, head, ls, pwd, sort, tail, uniq, wc, yq)
