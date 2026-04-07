@@ -306,7 +306,7 @@ engine:
 |-------|------|---------|-------------|
 | `model` | string | `claude-opus-4.5` | AI model to use. Options include `claude-sonnet-4.5`, `gpt-5.2-codex`, `gemini-3-pro-preview`, etc. |
 | `max-turns` | integer | *(none)* | Maximum number of agentic turns (tool-use iterations) the model is allowed per run. Maps to the `--max-turns` Copilot CLI argument. Use this to cap compute and prevent runaway loops. |
-| `timeout-minutes` | integer | *(none)* | Workflow timeout in minutes. |
+| `timeout-minutes` | integer | *(none)* | Maximum time in minutes the agent workflow is allowed to run. Maps to the `--max-timeout` Copilot CLI argument. Use this to cap long-running agent sessions. |
 
 #### `max-turns`
 
@@ -317,6 +317,16 @@ Each "turn" is one iteration of the model calling a tool and receiving its outpu
 - **Predictability** — ensuring the pipeline completes within a reasonable time frame.
 
 When omitted, the Copilot CLI uses its built-in default. When set, the compiler emits `--max-turns <value>` in the generated pipeline's agency params.
+
+#### `timeout-minutes`
+
+The `timeout-minutes` field sets a wall-clock limit (in minutes) for the entire agent session. It maps to the `--max-timeout` Copilot CLI argument. This is useful for:
+
+- **Budget enforcement** — hard-capping the total runtime of an agent to control compute costs.
+- **Pipeline hygiene** — preventing agents from occupying a runner indefinitely if they stall or enter long retry loops.
+- **SLA compliance** — ensuring scheduled agents complete within a known window.
+
+When omitted, the Copilot CLI uses its built-in default. When set, the compiler emits `--max-timeout <value>` in the generated pipeline's agency params.
 
 ### Tools Configuration
 
@@ -473,6 +483,7 @@ Should be replaced with the human-readable name from the front matter (e.g., "Da
 Additional params provided to agency CLI. The compiler generates:
 - `--model <model>` - AI model from `engine` front matter field (default: claude-opus-4.5)
 - `--max-turns <n>` - Maximum agentic turns from `engine.max-turns` (omitted when not set)
+- `--max-timeout <n>` - Workflow timeout in minutes from `engine.timeout-minutes` (omitted when not set)
 - `--disable-builtin-mcps` - Disables all built-in MCPs initially
 - `--no-ask-user` - Prevents interactive prompts
 - `--allow-tool <tool>` - Explicitly allows specific tools (github, safeoutputs, write, shell commands like cat, date, echo, grep, head, ls, pwd, sort, tail, uniq, wc, yq)

@@ -313,6 +313,9 @@ pub fn generate_copilot_params(front_matter: &FrontMatter) -> String {
     if let Some(max_turns) = front_matter.engine.max_turns() {
         params.push(format!("--max-turns {}", max_turns));
     }
+    if let Some(timeout_minutes) = front_matter.engine.timeout_minutes() {
+        params.push(format!("--max-timeout {}", timeout_minutes));
+    }
     params.push("--disable-builtin-mcps".to_string());
     params.push("--no-ask-user".to_string());
 
@@ -912,6 +915,23 @@ mod tests {
         let fm = minimal_front_matter();
         let params = generate_copilot_params(&fm);
         assert!(!params.contains("--max-turns"));
+    }
+
+    #[test]
+    fn test_copilot_params_max_timeout() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  timeout-minutes: 30\n---\n",
+        )
+        .unwrap();
+        let params = generate_copilot_params(&fm);
+        assert!(params.contains("--max-timeout 30"));
+    }
+
+    #[test]
+    fn test_copilot_params_no_max_timeout_when_simple_engine() {
+        let fm = minimal_front_matter();
+        let params = generate_copilot_params(&fm);
+        assert!(!params.contains("--max-timeout"));
     }
 
     // ─── sanitize_filename ────────────────────────────────────────────────────
