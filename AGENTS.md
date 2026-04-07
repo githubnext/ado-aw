@@ -715,8 +715,8 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - `--output, -o <path>` - Output directory for the generated file (defaults to current directory)
   - Guides you through: name, description, engine selection, schedule, workspace, repositories, checkout, and MCPs
   - The generated file includes a placeholder for agent instructions that you edit directly
-- `compile <path>` - Compile a markdown file to Azure DevOps pipeline YAML
-  - `--output, -o <path>` - Optional output path for generated YAML
+- `compile [<path>]` - Compile a markdown file to Azure DevOps pipeline YAML. If no path is given, auto-discovers and recompiles all detected agentic pipelines in the current directory.
+  - `--output, -o <path>` - Optional output path for generated YAML (only valid when a path is provided)
 - `check <pipeline>` - Verify that a compiled pipeline matches its source markdown
   - `<pipeline>` - Path to the pipeline YAML file to verify
   - The source markdown path is auto-detected from the `@ado-aw` header in the pipeline file
@@ -1058,6 +1058,13 @@ cargo clippy
 
 ```bash
 cargo run -- compile ./path/to/agent.md
+```
+
+### Recompile all agentic pipelines in the current directory
+
+```bash
+# Auto-discovers and recompiles all detected agentic pipelines
+cargo run -- compile
 ```
 
 ### Add a new dependency
