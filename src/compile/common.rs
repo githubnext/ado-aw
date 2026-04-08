@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 
-use super::types::{FrontMatter, Repository, TriggerConfig};
+use super::types::{FrontMatter, McpConfig, Repository, TriggerConfig};
 use crate::fuzzy_schedule;
 use crate::mcp_metadata::McpMetadataFile;
 
@@ -347,6 +347,23 @@ pub fn generate_copilot_params(front_matter: &FrontMatter) -> String {
 
     for mcp in disallowed_mcps {
         params.push(format!("--disable-mcp-server {}", mcp));
+    }
+
+    // Enable built-in MCPs that are configured in front matter
+    for (name, config) in &front_matter.mcp_servers {
+        let is_custom = matches!(config, McpConfig::WithOptions(opts) if opts.command.is_some());
+        if is_custom {
+            continue;
+        }
+
+        let is_enabled = match config {
+            McpConfig::Enabled(enabled) => *enabled,
+            McpConfig::WithOptions(_) => true,
+        };
+
+        if is_enabled {
+            params.push(format!("--mcp {}", name));
+        }
     }
 
     params.join(" ")
