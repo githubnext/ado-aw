@@ -118,7 +118,11 @@ mod missing_data;
 mod missing_tool;
 mod noop;
 mod queue_build;
+mod reply_to_pr_comment;
+mod report_incomplete;
+mod resolve_pr_thread;
 mod result;
+mod submit_pr_review;
 mod update_pr;
 mod update_wiki_page;
 mod update_work_item;
@@ -137,9 +141,13 @@ pub use missing_data::*;
 pub use missing_tool::*;
 pub use noop::*;
 pub use queue_build::*;
+pub use reply_to_pr_comment::*;
+pub use report_incomplete::*;
+pub use resolve_pr_thread::*;
 pub use result::{
     ExecutionContext, ExecutionResult, Executor, ToolResult, Validate, anyhow_to_mcp_error,
 };
+pub use submit_pr_review::*;
 pub use update_pr::*;
 pub use update_wiki_page::*;
 pub use update_work_item::*;

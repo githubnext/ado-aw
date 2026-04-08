@@ -702,6 +702,9 @@ const WRITE_REQUIRING_SAFE_OUTPUTS: &[&str] = &[
     "create-branch",
     "update-pr",
     "upload-attachment",
+    "submit-pr-review",
+    "reply-to-pr-review-comment",
+    "resolve-pr-review-thread",
 ];
 
 /// Validate that write-requiring safe-outputs have a write service connection configured.

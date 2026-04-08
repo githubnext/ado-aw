@@ -29,6 +29,11 @@ pub struct AddPrCommentParams {
     #[serde(default)]
     pub file_path: Option<String>,
 
+    /// Starting line number for a multi-line inline comment. Requires `file_path` and `line`.
+    /// When set, the comment spans from `start_line` to `line`.
+    #[serde(default)]
+    pub start_line: Option<i32>,
+
     /// Line number for an inline comment. Requires `file_path` to be set.
     #[serde(default)]
     pub line: Option<i32>,
@@ -59,6 +64,20 @@ impl Validate for AddPrCommentParams {
                 "line requires file_path to be set"
             );
         }
+        if self.start_line.is_some() {
+            ensure!(
+                self.line.is_some(),
+                "start_line requires line to be set"
+            );
+            if let (Some(start), Some(end)) = (self.start_line, self.line) {
+                ensure!(
+                    start < end,
+                    "start_line ({}) must be less than line ({})",
+                    start,
+                    end
+                );
+            }
+        }
         if let Some(fp) = &self.file_path {
             validate_file_path(fp)?;
         }
@@ -75,6 +94,7 @@ tool_result! {
         content: String,
         repository: String,
         file_path: Option<String>,
+        start_line: Option<i32>,
         line: Option<i32>,
         status: String,
     }
@@ -271,11 +291,12 @@ impl Executor for AddPrCommentResult {
 
         // Add thread context for inline comments
         if let Some(ref fp) = self.file_path {
-            let line_num = self.line.unwrap_or(1);
+            let end_line = self.line.unwrap_or(1);
+            let start_line = self.start_line.unwrap_or(end_line);
             thread_body["threadContext"] = serde_json::json!({
                 "filePath": format!("/{}", fp),
-                "rightFileStart": { "line": line_num, "offset": 1 },
-                "rightFileEnd": { "line": line_num, "offset": 1 }
+                "rightFileStart": { "line": start_line, "offset": 1 },
+                "rightFileEnd": { "line": end_line, "offset": 1 }
             });
         }
 
@@ -361,6 +382,7 @@ mod tests {
             content: "This is a test comment with enough characters.".to_string(),
             repository: "self".to_string(),
             file_path: None,
+            start_line: None,
             line: None,
             status: "Active".to_string(),
         };
@@ -377,6 +399,7 @@ mod tests {
             content: "This is a valid comment body text.".to_string(),
             repository: "self".to_string(),
             file_path: None,
+            start_line: None,
             line: None,
             status: "Active".to_string(),
         };
@@ -391,6 +414,7 @@ mod tests {
             content: "Too short".to_string(),
             repository: "self".to_string(),
             file_path: None,
+            start_line: None,
             line: None,
             status: "Active".to_string(),
         };
@@ -405,6 +429,7 @@ mod tests {
             content: "This is a valid comment body text.".to_string(),
             repository: "self".to_string(),
             file_path: None,
+            start_line: None,
             line: Some(10),
             status: "Active".to_string(),
         };
@@ -419,6 +444,7 @@ mod tests {
             content: "A comment body that is definitely longer than ten characters.".to_string(),
             repository: "self".to_string(),
             file_path: Some("src/main.rs".to_string()),
+            start_line: None,
             line: Some(10),
             status: "Active".to_string(),
         };

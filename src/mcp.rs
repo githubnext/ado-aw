@@ -19,9 +19,12 @@ use crate::tools::{
     CreatePrParams, CreatePrResult, CreateWikiPageParams, CreateWikiPageResult,
     CreateWorkItemParams, CreateWorkItemResult,
     LinkWorkItemsParams, LinkWorkItemsResult,
+    ReplyToPrCommentParams, ReplyToPrCommentResult,
+    ReportIncompleteParams, ReportIncompleteResult,
+    ResolvePrThreadParams, ResolvePrThreadResult,
     UpdateWikiPageParams, UpdateWikiPageResult, MissingDataParams, MissingDataResult,
     MissingToolParams, MissingToolResult, NoopParams, NoopResult, QueueBuildParams,
-    QueueBuildResult, ToolResult,
+    QueueBuildResult, SubmitPrReviewParams, SubmitPrReviewResult, ToolResult,
     UpdatePrParams, UpdatePrResult,
     UpdateWorkItemParams, UpdateWorkItemResult,
     UploadAttachmentParams, UploadAttachmentResult,
@@ -731,6 +734,97 @@ uploaded and linked during safe output processing. File size and type restrictio
             "Attachment '{}' queued for work item #{}. The file will be uploaded during safe output processing.",
             result.file_path, result.work_item_id
         ))]))
+    }
+
+    #[tool(
+        name = "submit-pr-review",
+        description = "Submit a pull request review with a decision (approve, request-changes, \
+or comment-only) and an optional body explaining the rationale. The review will be \
+submitted during safe output processing. Requires 'allowed-events' to be configured."
+    )]
+    async fn submit_pr_review(
+        &self,
+        params: Parameters<SubmitPrReviewParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!(
+            "Tool called: submit-pr-review - PR #{} event '{}'",
+            params.0.pull_request_id, params.0.event
+        );
+        let mut sanitized = params.0;
+        sanitized.body = sanitized.body.map(|b| sanitize_text(&b));
+        let result: SubmitPrReviewResult = sanitized.try_into()?;
+        self.write_safe_output_file(&result).await
+            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "PR review '{}' queued for PR #{}. The review will be submitted during safe output processing.",
+            result.event, result.pull_request_id
+        ))]))
+    }
+
+    #[tool(
+        name = "reply-to-pr-review-comment",
+        description = "Reply to an existing review comment thread on an Azure DevOps pull request. \
+Provide the PR ID, thread ID, and reply content. The reply will be posted during safe output processing."
+    )]
+    async fn reply_to_pr_review_comment(
+        &self,
+        params: Parameters<ReplyToPrCommentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!(
+            "Tool called: reply-to-pr-review-comment - PR #{} thread #{}",
+            params.0.pull_request_id, params.0.thread_id
+        );
+        let mut sanitized = params.0;
+        sanitized.content = sanitize_text(&sanitized.content);
+        let result: ReplyToPrCommentResult = sanitized.try_into()?;
+        self.write_safe_output_file(&result).await
+            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Reply queued for thread #{} on PR #{}. The reply will be posted during safe output processing.",
+            result.thread_id, result.pull_request_id
+        ))]))
+    }
+
+    #[tool(
+        name = "resolve-pr-review-thread",
+        description = "Resolve or change the status of a review thread on an Azure DevOps pull request. \
+Valid statuses: fixed, wont-fix, closed, by-design, active. \
+The status change will be applied during safe output processing."
+    )]
+    async fn resolve_pr_review_thread(
+        &self,
+        params: Parameters<ResolvePrThreadParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!(
+            "Tool called: resolve-pr-review-thread - PR #{} thread #{} → '{}'",
+            params.0.pull_request_id, params.0.thread_id, params.0.status
+        );
+        let result: ResolvePrThreadResult = params.0.try_into()?;
+        self.write_safe_output_file(&result).await
+            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Thread #{} status change to '{}' queued for PR #{}. The change will be applied during safe output processing.",
+            result.thread_id, result.status, result.pull_request_id
+        ))]))
+    }
+
+    #[tool(
+        name = "report-incomplete",
+        description = "Signal that the task could not be completed due to infrastructure failure, \
+tool errors, or other environmental issues beyond the agent's control. Use this when the \
+agent attempted work but couldn't finish (e.g., API timeouts, build failures, resource limits)."
+    )]
+    async fn report_incomplete(
+        &self,
+        params: Parameters<ReportIncompleteParams>,
+    ) -> Result<CallToolResult, McpError> {
+        warn!("Tool called: report-incomplete - '{}'", params.0.reason);
+        let mut sanitized = params.0;
+        sanitized.reason = sanitize_text(&sanitized.reason);
+        sanitized.context = sanitized.context.map(|c| sanitize_text(&c));
+        let result: ReportIncompleteResult = sanitized.try_into()?;
+        let _ = self.write_safe_output_file(&result).await;
+        Ok(CallToolResult::success(vec![]))
     }
 }
 

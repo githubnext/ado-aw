@@ -14,6 +14,7 @@ use crate::tools::{
     AddBuildTagResult, AddPrCommentResult, CreateBranchResult, CreateGitTagResult,
     CreatePrResult, CreateWikiPageResult, CreateWorkItemResult, CommentOnWorkItemResult,
     ExecutionContext, ExecutionResult, Executor, LinkWorkItemsResult, QueueBuildResult,
+    ReplyToPrCommentResult, ResolvePrThreadResult, SubmitPrReviewResult,
     ToolResult, UpdatePrResult, UpdateWikiPageResult, UpdateWorkItemResult,
     UploadAttachmentResult,
 };
@@ -123,6 +124,9 @@ pub async fn execute_safe_outputs(
         CreateBranchResult,
         UpdatePrResult,
         UploadAttachmentResult,
+        SubmitPrReviewResult,
+        ReplyToPrCommentResult,
+        ResolvePrThreadResult,
     );
 
     let mut results = Vec::new();
@@ -343,9 +347,43 @@ pub async fn execute_safe_output(
             );
             output.execute_sanitized(ctx).await?
         }
+        "submit-pr-review" => {
+            debug!("Parsing submit-pr-review payload");
+            let mut output: SubmitPrReviewResult = serde_json::from_value(entry.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to parse submit-pr-review: {}", e))?;
+            debug!(
+                "submit-pr-review: pr_id={}, event='{}'",
+                output.pull_request_id, output.event
+            );
+            output.execute_sanitized(ctx).await?
+        }
+        "reply-to-pr-review-comment" => {
+            debug!("Parsing reply-to-pr-review-comment payload");
+            let mut output: ReplyToPrCommentResult = serde_json::from_value(entry.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to parse reply-to-pr-review-comment: {}", e))?;
+            debug!(
+                "reply-to-pr-review-comment: pr_id={}, thread_id={}",
+                output.pull_request_id, output.thread_id
+            );
+            output.execute_sanitized(ctx).await?
+        }
+        "resolve-pr-review-thread" => {
+            debug!("Parsing resolve-pr-review-thread payload");
+            let mut output: ResolvePrThreadResult = serde_json::from_value(entry.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to parse resolve-pr-review-thread: {}", e))?;
+            debug!(
+                "resolve-pr-review-thread: pr_id={}, thread_id={}, status='{}'",
+                output.pull_request_id, output.thread_id, output.status
+            );
+            output.execute_sanitized(ctx).await?
+        }
         "noop" => {
             debug!("Skipping noop entry");
             ExecutionResult::success("Skipped informational output: noop")
+        }
+        "report-incomplete" => {
+            debug!("Skipping report-incomplete entry");
+            ExecutionResult::success("Skipped informational output: report-incomplete")
         }
         "missing-tool" => {
             debug!("Skipping missing-tool entry");

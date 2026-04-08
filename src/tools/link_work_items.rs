@@ -79,6 +79,7 @@ impl Validate for LinkWorkItemsParams {
 tool_result! {
     name = "link-work-items",
     params = LinkWorkItemsParams,
+    default_max = 5,
     /// Result of linking two work items
     pub struct LinkWorkItemsResult {
         source_id: i64,
