@@ -185,9 +185,26 @@ pub struct UpdatePrConfig {
     #[serde(default, rename = "allowed-repositories")]
     pub allowed_repositories: Vec<String>,
 
-    /// Which vote values are permitted. Empty list means all votes are allowed.
+    /// Which vote values are permitted. REQUIRED for vote operation —
+    /// empty list rejects all votes to prevent accidental auto-approve.
     #[serde(default, rename = "allowed-votes")]
     pub allowed_votes: Vec<String>,
+
+    /// Whether to delete the source branch after merge (for set-auto-complete, default: true)
+    #[serde(default = "default_true", rename = "delete-source-branch")]
+    pub delete_source_branch: bool,
+
+    /// Merge strategy for auto-complete: "squash", "noFastForward", "rebase", "rebaseMerge" (default: "squash")
+    #[serde(default = "default_merge_strategy", rename = "merge-strategy")]
+    pub merge_strategy: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_merge_strategy() -> String {
+    "squash".to_string()
 }
 
 impl Default for UpdatePrConfig {
@@ -196,6 +213,8 @@ impl Default for UpdatePrConfig {
             allowed_operations: Vec::new(),
             allowed_repositories: Vec::new(),
             allowed_votes: Vec::new(),
+            delete_source_branch: true,
+            merge_strategy: "squash".to_string(),
         }
     }
 }
@@ -294,7 +313,7 @@ impl Executor for UpdatePrResult {
 
         match self.operation.as_str() {
             "set-auto-complete" => {
-                self.execute_set_auto_complete(&client, &base_url, &repo_name, token)
+                self.execute_set_auto_complete(&client, &base_url, &repo_name, token, &config)
                     .await
             }
             "vote" => {
@@ -345,6 +364,7 @@ impl UpdatePrResult {
         base_url: &str,
         repo_name: &str,
         token: &str,
+        config: &UpdatePrConfig,
     ) -> anyhow::Result<ExecutionResult> {
         let encoded_repo = utf8_percent_encode(repo_name, PATH_SEGMENT).to_string();
 
@@ -396,8 +416,8 @@ impl UpdatePrResult {
                 "id": created_by_id
             },
             "completionOptions": {
-                "deleteSourceBranch": true,
-                "mergeStrategy": "squash"
+                "deleteSourceBranch": config.delete_source_branch,
+                "mergeStrategy": config.merge_strategy
             }
         });
 
@@ -454,8 +474,17 @@ impl UpdatePrResult {
             .as_deref()
             .context("vote value is required for vote operation")?;
 
-        // Validate against allowed-votes if configured
-        if !config.allowed_votes.is_empty() && !config.allowed_votes.contains(&vote_str.to_string())
+        // Validate against allowed-votes — REQUIRED for vote operation.
+        // An empty allowed-votes list means the operator hasn't opted in, so reject.
+        if config.allowed_votes.is_empty() {
+            return Ok(ExecutionResult::failure(
+                "vote operation requires 'allowed-votes' to be configured in safe-outputs.update-pr. \
+                 This prevents agents from casting unrestricted votes (including approve). \
+                 Example:\n  safe-outputs:\n    update-pr:\n      allowed-votes:\n        - approve-with-suggestions\n        - wait-for-author"
+                    .to_string(),
+            ));
+        }
+        if !config.allowed_votes.contains(&vote_str.to_string())
         {
             return Ok(ExecutionResult::failure(format!(
                 "Vote '{}' is not in the allowed-votes list: [{}]",
@@ -563,14 +592,15 @@ impl UpdatePrResult {
 
     /// Add reviewers to a pull request.
     ///
-    /// For each reviewer email, PUTs to the reviewers endpoint with vote 0.
+    /// For each reviewer email, resolves the identity via VSSPS, then PUTs to
+    /// the reviewers endpoint with vote 0.
     async fn execute_add_reviewers(
         &self,
         client: &reqwest::Client,
         base_url: &str,
         repo_name: &str,
         token: &str,
-        _organization: &str,
+        organization: &str,
     ) -> anyhow::Result<ExecutionResult> {
         let reviewers = self
             .reviewers
@@ -582,12 +612,62 @@ impl UpdatePrResult {
         let mut failed = Vec::new();
 
         for reviewer in reviewers {
+            // Resolve reviewer email to GUID via VSSPS identity API
+            let identity_url = format!(
+                "https://vssps.dev.azure.com/{}/_apis/identities?searchFilter=General&filterValue={}&api-version=7.1",
+                utf8_percent_encode(organization, PATH_SEGMENT),
+                utf8_percent_encode(reviewer, PATH_SEGMENT),
+            );
+            debug!("Resolving identity for '{}': {}", reviewer, identity_url);
+
+            let identity_response = client
+                .get(&identity_url)
+                .basic_auth("", Some(token))
+                .send()
+                .await;
+
+            let reviewer_id = match identity_response {
+                Ok(resp) if resp.status().is_success() => {
+                    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+                    body.get("value")
+                        .and_then(|v| v.as_array())
+                        .and_then(|arr| arr.first())
+                        .and_then(|entry| entry.get("id"))
+                        .and_then(|id| id.as_str())
+                        .map(|s| s.to_string())
+                }
+                Ok(resp) => {
+                    warn!(
+                        "Identity lookup for '{}' returned HTTP {}",
+                        reviewer,
+                        resp.status()
+                    );
+                    None
+                }
+                Err(e) => {
+                    warn!("Identity lookup for '{}' failed: {}", reviewer, e);
+                    None
+                }
+            };
+
+            let reviewer_id = match reviewer_id {
+                Some(id) => id,
+                None => {
+                    warn!(
+                        "Could not resolve identity for '{}', skipping",
+                        reviewer
+                    );
+                    failed.push(format!("{} (identity not found)", reviewer));
+                    continue;
+                }
+            };
+
             let reviewer_url = format!(
                 "{}/{}/pullRequests/{}/reviewers/{}?api-version=7.1",
                 base_url,
                 encoded_repo,
                 self.pull_request_id,
-                utf8_percent_encode(reviewer, PATH_SEGMENT),
+                reviewer_id,
             );
             let reviewer_body = serde_json::json!({
                 "vote": 0,

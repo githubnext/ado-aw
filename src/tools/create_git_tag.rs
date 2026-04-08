@@ -146,7 +146,7 @@ impl Default for CreateGitTagConfig {
     }
 }
 
-/// Resolve HEAD of the default branch for a repository via the ADO refs API.
+/// Resolve HEAD commit for a repository by querying the repository's default branch.
 async fn resolve_head_commit(
     client: &reqwest::Client,
     org_url: &str,
@@ -154,11 +154,51 @@ async fn resolve_head_commit(
     token: &str,
     repo_name: &str,
 ) -> anyhow::Result<String> {
-    let url = format!(
-        "{}/{}/_apis/git/repositories/{}/refs?filter=heads/main&api-version=7.1",
+    // First, discover the default branch from the repository metadata
+    let repo_url = format!(
+        "{}/{}/_apis/git/repositories/{}?api-version=7.1",
         org_url.trim_end_matches('/'),
         utf8_percent_encode(project, PATH_SEGMENT),
         utf8_percent_encode(repo_name, PATH_SEGMENT),
+    );
+    debug!("Fetching repository metadata: {}", repo_url);
+
+    let repo_response = client
+        .get(&repo_url)
+        .basic_auth("", Some(token))
+        .send()
+        .await
+        .context("Failed to query repository metadata")?;
+
+    ensure!(
+        repo_response.status().is_success(),
+        "Failed to fetch repository metadata (HTTP {})",
+        repo_response.status()
+    );
+
+    let repo_body: serde_json::Value = repo_response
+        .json()
+        .await
+        .context("Failed to parse repository metadata")?;
+
+    let default_branch = repo_body
+        .get("defaultBranch")
+        .and_then(|v| v.as_str())
+        .unwrap_or("refs/heads/main");
+
+    // Strip "refs/heads/" prefix for the filter parameter
+    let branch_filter = default_branch
+        .strip_prefix("refs/")
+        .unwrap_or(default_branch);
+    debug!("Default branch: {} (filter: {})", default_branch, branch_filter);
+
+    // Now resolve the HEAD commit of the default branch
+    let url = format!(
+        "{}/{}/_apis/git/repositories/{}/refs?filter={}&api-version=7.1",
+        org_url.trim_end_matches('/'),
+        utf8_percent_encode(project, PATH_SEGMENT),
+        utf8_percent_encode(repo_name, PATH_SEGMENT),
+        branch_filter,
     );
 
     debug!("Resolving HEAD commit via: {}", url);
@@ -187,7 +227,10 @@ async fn resolve_head_commit(
         .and_then(|r| r.get("objectId"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
-        .context("No refs found for heads/main — cannot resolve HEAD commit")
+        .context(format!(
+            "No refs found for {} — cannot resolve HEAD commit",
+            default_branch
+        ))
 }
 
 #[async_trait::async_trait]

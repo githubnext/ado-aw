@@ -59,6 +59,9 @@ impl Validate for AddPrCommentParams {
                 "line requires file_path to be set"
             );
         }
+        if let Some(fp) = &self.file_path {
+            validate_file_path(fp)?;
+        }
         Ok(())
     }
 }

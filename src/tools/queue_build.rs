@@ -67,6 +67,14 @@ impl Sanitize for QueueBuildResult {
         if let Some(reason) = &self.reason {
             self.reason = Some(sanitize_text(reason));
         }
+        if let Some(params) = &self.parameters {
+            self.parameters = Some(
+                params
+                    .iter()
+                    .map(|(k, v)| (sanitize_text(k), sanitize_text(v)))
+                    .collect(),
+            );
+        }
     }
 }
 
