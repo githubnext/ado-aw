@@ -11,12 +11,20 @@ use std::path::PathBuf;
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
 use crate::sanitize::{Sanitize, sanitize as sanitize_text};
 use crate::tools::{
+    AddBuildTagParams, AddBuildTagResult,
+    AddPrCommentParams, AddPrCommentResult,
     CommentOnWorkItemParams, CommentOnWorkItemResult,
+    CreateBranchParams, CreateBranchResult,
+    CreateGitTagParams, CreateGitTagResult,
     CreatePrParams, CreatePrResult, CreateWikiPageParams, CreateWikiPageResult,
     CreateWorkItemParams, CreateWorkItemResult,
+    LinkWorkItemsParams, LinkWorkItemsResult,
     UpdateWikiPageParams, UpdateWikiPageResult, MissingDataParams, MissingDataResult,
-    MissingToolParams, MissingToolResult, NoopParams, NoopResult, ToolResult,
+    MissingToolParams, MissingToolResult, NoopParams, NoopResult, QueueBuildParams,
+    QueueBuildResult, ToolResult,
+    UpdatePrParams, UpdatePrResult,
     UpdateWorkItemParams, UpdateWorkItemResult,
+    UploadAttachmentParams, UploadAttachmentResult,
     anyhow_to_mcp_error,
 };
 
@@ -531,6 +539,197 @@ structured output that should be visible in the project wiki."
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Wiki page creation queued for '{}'. The page will be created during safe output processing.",
             result.path
+        ))]))
+    }
+
+    #[tool(
+        name = "add-pr-comment",
+        description = "Add a comment thread to an Azure DevOps pull request. Supports both \
+general comments and file-specific inline comments with optional line positioning. \
+The comment will be posted during safe output processing."
+    )]
+    async fn add_pr_comment(
+        &self,
+        params: Parameters<AddPrCommentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!(
+            "Tool called: add-pr-comment - PR #{}",
+            params.0.pull_request_id
+        );
+        debug!("Content length: {} chars", params.0.content.len());
+        let mut sanitized = params.0;
+        sanitized.content = sanitize_text(&sanitized.content);
+        let result: AddPrCommentResult = sanitized.try_into()?;
+        self.write_safe_output_file(&result).await
+            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        info!("PR comment queued for PR #{}", result.pull_request_id);
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Comment queued for PR #{}. The comment will be posted during safe output processing.",
+            result.pull_request_id
+        ))]))
+    }
+
+    #[tool(
+        name = "link-work-items",
+        description = "Create a relationship link between two Azure DevOps work items. \
+Supported link types: parent, child, related, predecessor, successor, duplicate, duplicate-of. \
+The link will be created during safe output processing."
+    )]
+    async fn link_work_items(
+        &self,
+        params: Parameters<LinkWorkItemsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!(
+            "Tool called: link-work-items - {} -> {} ({})",
+            params.0.source_id, params.0.target_id, params.0.link_type
+        );
+        let mut sanitized = params.0;
+        sanitized.comment = sanitized.comment.map(|c| sanitize_text(&c));
+        let result: LinkWorkItemsResult = sanitized.try_into()?;
+        self.write_safe_output_file(&result).await
+            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Link queued: work item #{} → #{} ({}). The link will be created during safe output processing.",
+            result.source_id, result.target_id, result.link_type
+        ))]))
+    }
+
+    #[tool(
+        name = "queue-build",
+        description = "Trigger an Azure DevOps pipeline/build run. The pipeline must be in the \
+allowed-pipelines list configured in the pipeline definition. Optionally specify a branch \
+and template parameters."
+    )]
+    async fn queue_build(
+        &self,
+        params: Parameters<QueueBuildParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!(
+            "Tool called: queue-build - pipeline {}",
+            params.0.pipeline_id
+        );
+        let mut sanitized = params.0;
+        sanitized.reason = sanitized.reason.map(|r| sanitize_text(&r));
+        let result: QueueBuildResult = sanitized.try_into()?;
+        self.write_safe_output_file(&result).await
+            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Build queued for pipeline {}. The build will be triggered during safe output processing.",
+            result.pipeline_id
+        ))]))
+    }
+
+    #[tool(
+        name = "create-git-tag",
+        description = "Create an annotated git tag on a commit in an Azure DevOps repository. \
+The tag will be created during safe output processing."
+    )]
+    async fn create_git_tag(
+        &self,
+        params: Parameters<CreateGitTagParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!("Tool called: create-git-tag - '{}'", params.0.tag_name);
+        let mut sanitized = params.0;
+        sanitized.message = sanitized.message.map(|m| sanitize_text(&m));
+        let result: CreateGitTagResult = sanitized.try_into()?;
+        self.write_safe_output_file(&result).await
+            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Git tag '{}' queued. The tag will be created during safe output processing.",
+            result.tag_name
+        ))]))
+    }
+
+    #[tool(
+        name = "add-build-tag",
+        description = "Add a tag to an Azure DevOps build for classification and filtering. \
+The tag will be added during safe output processing."
+    )]
+    async fn add_build_tag(
+        &self,
+        params: Parameters<AddBuildTagParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!(
+            "Tool called: add-build-tag - build {} tag '{}'",
+            params.0.build_id, params.0.tag
+        );
+        let result: AddBuildTagResult = params.0.try_into()?;
+        self.write_safe_output_file(&result).await
+            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Build tag '{}' queued for build #{}. The tag will be added during safe output processing.",
+            result.tag, result.build_id
+        ))]))
+    }
+
+    #[tool(
+        name = "create-branch",
+        description = "Create a new branch in an Azure DevOps repository without creating a \
+pull request. The branch will be created during safe output processing."
+    )]
+    async fn create_branch(
+        &self,
+        params: Parameters<CreateBranchParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!(
+            "Tool called: create-branch - '{}'",
+            params.0.branch_name
+        );
+        let result: CreateBranchResult = params.0.try_into()?;
+        self.write_safe_output_file(&result).await
+            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Branch '{}' queued for creation. The branch will be created during safe output processing.",
+            result.branch_name
+        ))]))
+    }
+
+    #[tool(
+        name = "update-pr",
+        description = "Update pull request metadata in Azure DevOps. Supports operations: \
+add-reviewers, add-labels, set-auto-complete, vote, update-description. \
+Changes will be applied during safe output processing."
+    )]
+    async fn update_pr(
+        &self,
+        params: Parameters<UpdatePrParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!(
+            "Tool called: update-pr - PR #{} operation '{}'",
+            params.0.pull_request_id, params.0.operation
+        );
+        let mut sanitized = params.0;
+        sanitized.description = sanitized.description.map(|d| sanitize_text(&d));
+        let result: UpdatePrResult = sanitized.try_into()?;
+        self.write_safe_output_file(&result).await
+            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "PR #{} '{}' operation queued. Changes will be applied during safe output processing.",
+            result.pull_request_id, result.operation
+        ))]))
+    }
+
+    #[tool(
+        name = "upload-attachment",
+        description = "Upload a file attachment to an Azure DevOps work item. The file will be \
+uploaded and linked during safe output processing. File size and type restrictions may apply."
+    )]
+    async fn upload_attachment(
+        &self,
+        params: Parameters<UploadAttachmentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!(
+            "Tool called: upload-attachment - work item #{} file '{}'",
+            params.0.work_item_id, params.0.file_path
+        );
+        let mut sanitized = params.0;
+        sanitized.comment = sanitized.comment.map(|c| sanitize_text(&c));
+        let result: UploadAttachmentResult = sanitized.try_into()?;
+        self.write_safe_output_file(&result).await
+            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Attachment '{}' queued for work item #{}. The file will be uploaded during safe output processing.",
+            result.file_path, result.work_item_id
         ))]))
     }
 }

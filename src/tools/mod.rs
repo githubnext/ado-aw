@@ -104,27 +104,43 @@ pub(crate) async fn resolve_wiki_branch(
     }
 }
 
+mod add_build_tag;
+mod add_pr_comment;
 mod comment_on_work_item;
+mod create_branch;
+mod create_git_tag;
 mod create_pr;
 mod create_wiki_page;
 mod create_work_item;
-mod update_wiki_page;
+mod link_work_items;
 pub mod memory;
 mod missing_data;
 mod missing_tool;
 mod noop;
+mod queue_build;
 mod result;
+mod update_pr;
+mod update_wiki_page;
 mod update_work_item;
+mod upload_attachment;
 
+pub use add_build_tag::*;
+pub use add_pr_comment::*;
 pub use comment_on_work_item::*;
+pub use create_branch::*;
+pub use create_git_tag::*;
 pub use create_pr::*;
 pub use create_wiki_page::*;
 pub use create_work_item::*;
-pub use update_wiki_page::*;
+pub use link_work_items::*;
 pub use missing_data::*;
 pub use missing_tool::*;
 pub use noop::*;
+pub use queue_build::*;
 pub use result::{
     ExecutionContext, ExecutionResult, Executor, ToolResult, Validate, anyhow_to_mcp_error,
 };
+pub use update_pr::*;
+pub use update_wiki_page::*;
 pub use update_work_item::*;
+pub use upload_attachment::*;

@@ -694,6 +694,14 @@ const WRITE_REQUIRING_SAFE_OUTPUTS: &[&str] = &[
     "update-work-item",
     "create-wiki-page",
     "update-wiki-page",
+    "add-pr-comment",
+    "link-work-items",
+    "queue-build",
+    "create-git-tag",
+    "add-build-tag",
+    "create-branch",
+    "update-pr",
+    "upload-attachment",
 ];
 
 /// Validate that write-requiring safe-outputs have a write service connection configured.
