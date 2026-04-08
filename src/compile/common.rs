@@ -2,11 +2,11 @@
 
 use anyhow::{Context, Result};
 
-use super::types::{FrontMatter, McpConfig, Repository, TriggerConfig};
+use super::types::{FrontMatter, Repository, TriggerConfig};
 use crate::fuzzy_schedule;
 use crate::mcp_metadata::McpMetadataFile;
 
-/// Check if an MCP name is a built-in (launched via copilot mcp)
+/// Check if an MCP name is a built-in (known to the Copilot CLI via mcp-metadata.json)
 pub fn is_builtin_mcp(name: &str) -> bool {
     let metadata = McpMetadataFile::bundled();
     metadata.get(name).map(|m| m.builtin).unwrap_or(false)
@@ -325,22 +325,6 @@ pub fn generate_copilot_params(front_matter: &FrontMatter) -> String {
 
     for mcp in disallowed_mcps {
         params.push(format!("--disable-mcp-server {}", mcp));
-    }
-
-    for (name, config) in &front_matter.mcp_servers {
-        let is_custom = matches!(config, McpConfig::WithOptions(opts) if opts.command.is_some());
-        if is_custom {
-            continue;
-        }
-
-        let is_enabled = match config {
-            McpConfig::Enabled(enabled) => *enabled,
-            McpConfig::WithOptions(_) => true,
-        };
-
-        if is_enabled {
-            params.push(format!("--mcp {}", name));
-        }
     }
 
     params.join(" ")
@@ -871,7 +855,7 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_params_custom_mcp_not_added_with_mcp_flag() {
+    fn test_copilot_params_custom_mcp_no_mcp_flag() {
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "my-tool".to_string(),
@@ -883,15 +867,6 @@ mod tests {
         let params = generate_copilot_params(&fm);
         // Custom MCPs (with command) should NOT appear as --mcp flags
         assert!(!params.contains("--mcp my-tool"));
-    }
-
-    #[test]
-    fn test_copilot_params_builtin_mcp_added_with_mcp_flag() {
-        let mut fm = minimal_front_matter();
-        fm.mcp_servers
-            .insert("ado".to_string(), McpConfig::Enabled(true));
-        let params = generate_copilot_params(&fm);
-        assert!(params.contains("--mcp ado"));
     }
 
     // ─── sanitize_filename ────────────────────────────────────────────────────

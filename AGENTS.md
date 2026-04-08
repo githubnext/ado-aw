@@ -443,7 +443,6 @@ Additional params provided to copilot CLI. The compiler generates:
 - `--no-ask-user` - Prevents interactive prompts
 - `--allow-tool <tool>` - Explicitly allows specific tools (github, safeoutputs, write, shell commands like cat, date, echo, grep, head, ls, pwd, sort, tail, uniq, wc, yq)
 - `--disable-mcp-server <name>` - Disables specific Copilot CLI MCPs
-- `--mcp <name>` - Re-enables specific Copilot CLI MCPs listed in `mcp-servers:` (without a `command:` field)
 
 Custom MCPs (with `command:` field) are handled separately via the MCP firewall config.
 
