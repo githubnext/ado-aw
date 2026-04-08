@@ -104,7 +104,6 @@ target: standalone # Optional: "standalone" (default) or "1es". See Target Platf
 engine: claude-opus-4.5 # AI engine to use. Defaults to claude-opus-4.5. Other options include claude-sonnet-4.5, gpt-5.2-codex, gemini-3-pro-preview, etc.
 # engine:                        # Alternative object format (with additional options)
 #   model: claude-opus-4.5
-#   max-turns: 50
 #   timeout-minutes: 30
 schedule: daily around 14:00 # Fuzzy schedule syntax - see Schedule Syntax section below
 # schedule:                       # Alternative object format (with branch filtering)
@@ -296,7 +295,6 @@ engine: claude-opus-4.5
 # Object format with additional options
 engine:
   model: claude-opus-4.5
-  max-turns: 50
   timeout-minutes: 30
 ```
 
@@ -305,28 +303,19 @@ engine:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `model` | string | `claude-opus-4.5` | AI model to use. Options include `claude-sonnet-4.5`, `gpt-5.2-codex`, `gemini-3-pro-preview`, etc. |
-| `max-turns` | integer | *(none)* | Maximum number of agentic turns (tool-use iterations) the model is allowed per run. Maps to the `--max-turns` Copilot CLI argument. Use this to cap compute and prevent runaway loops. |
-| `timeout-minutes` | integer | *(none)* | Maximum time in minutes the agent workflow is allowed to run. Maps to the `--max-timeout` Copilot CLI argument. Use this to cap long-running agent sessions. |
+| `timeout-minutes` | integer | *(none)* | Maximum time in minutes the agent job is allowed to run. Sets `timeoutInMinutes` on the `PerformAgenticTask` job in the generated pipeline. |
 
-#### `max-turns`
-
-Each "turn" is one iteration of the model calling a tool and receiving its output. Setting `max-turns` places an upper bound on how many such iterations the agent can perform in a single pipeline run. This is useful for:
-
-- **Cost control** — limiting expensive model invocations.
-- **Safety** — preventing infinite loops where the agent repeatedly calls tools without converging on a result.
-- **Predictability** — ensuring the pipeline completes within a reasonable time frame.
-
-When omitted, the Copilot CLI uses its built-in default. When set, the compiler emits `--max-turns <value>` in the generated pipeline's copilot params.
+> **Deprecated:** `max-turns` is still accepted in front matter for backwards compatibility but is ignored at compile time (a warning is emitted). It was specific to Claude Code and is not supported by Copilot CLI.
 
 #### `timeout-minutes`
 
-The `timeout-minutes` field sets a wall-clock limit (in minutes) for the entire agent session. It maps to the `--max-timeout` Copilot CLI argument. This is useful for:
+The `timeout-minutes` field sets a wall-clock limit (in minutes) for the entire agent job. It maps to the Azure DevOps `timeoutInMinutes` job property on `PerformAgenticTask`. This is useful for:
 
 - **Budget enforcement** — hard-capping the total runtime of an agent to control compute costs.
 - **Pipeline hygiene** — preventing agents from occupying a runner indefinitely if they stall or enter long retry loops.
 - **SLA compliance** — ensuring scheduled agents complete within a known window.
 
-When omitted, the Copilot CLI uses its built-in default. When set, the compiler emits `--max-timeout <value>` in the generated pipeline's copilot params.
+When omitted, Azure DevOps uses its default job timeout (60 minutes). When set, the compiler emits `timeoutInMinutes: <value>` on the agentic job.
 
 ### Tools Configuration
 
@@ -482,8 +471,6 @@ Should be replaced with the human-readable name from the front matter (e.g., "Da
 
 Additional params provided to agency CLI. The compiler generates:
 - `--model <model>` - AI model from `engine` front matter field (default: claude-opus-4.5)
-- `--max-turns <n>` - Maximum agentic turns from `engine.max-turns` (omitted when not set)
-- `--max-timeout <n>` - Workflow timeout in minutes from `engine.timeout-minutes` (omitted when not set)
 - `--disable-builtin-mcps` - Disables all built-in MCPs initially
 - `--no-ask-user` - Prevents interactive prompts
 - `--allow-tool <tool>` - Explicitly allows specific tools (github, safeoutputs, write, shell commands like cat, date, echo, grep, head, ls, pwd, sort, tail, uniq, wc, yq)
@@ -543,6 +530,12 @@ If `post-steps` is empty, this is replaced with an empty string.
 Generates a `dependsOn: SetupJob` clause for `PerformAgenticTask` if a setup job is configured. The setup job is identified by the job name `SetupJob`, ensuring the agentic task waits for the setup job to complete.
 
 If no setup job is configured, this is replaced with an empty string.
+
+## {{ job_timeout }}
+
+Generates a `timeoutInMinutes: <value>` job property for `PerformAgenticTask` when `engine.timeout-minutes` is configured. This sets the Azure DevOps job-level timeout for the agentic task.
+
+If `timeout-minutes` is not configured, this is replaced with an empty string.
 
 ## {{ working_directory }}
 

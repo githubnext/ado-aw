@@ -43,6 +43,7 @@ extends:
           - job: PerformAgenticTask
             displayName: "{{ agent_name }} (Agent)"
             {{ agentic_depends_on }}
+            {{ job_timeout }}
             templateContext:
               type: agencyJob
               arguments:

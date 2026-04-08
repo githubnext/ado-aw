@@ -20,10 +20,11 @@ use super::common::{
     self, AWF_VERSION, COPILOT_CLI_VERSION, DEFAULT_POOL, compute_effective_workspace, generate_copilot_params,
     generate_acquire_ado_token, generate_checkout_self, generate_checkout_steps,
     generate_ci_trigger, generate_copilot_ado_env, generate_executor_ado_env,
-    generate_header_comment, generate_pipeline_path, generate_pipeline_resources,
-    generate_pr_trigger, generate_repositories, generate_schedule, generate_source_path,
-    generate_working_directory, replace_with_indent, validate_comment_target,
-    validate_update_work_item_target, validate_write_permissions,
+    generate_header_comment, generate_job_timeout, generate_pipeline_path,
+    generate_pipeline_resources, generate_pr_trigger, generate_repositories,
+    generate_schedule, generate_source_path, generate_working_directory,
+    replace_with_indent, validate_comment_target, validate_update_work_item_target,
+    validate_write_permissions,
 };
 use super::types::{FrontMatter, McpConfig};
 
@@ -104,6 +105,7 @@ displayName: "Finalize""#,
         } else {
             String::new()
         };
+        let job_timeout = generate_job_timeout(front_matter);
 
         // Load threat analysis prompt template
         let threat_analysis_prompt = include_str!("../../templates/threat-analysis.md");
@@ -163,6 +165,7 @@ displayName: "Finalize""#,
             ("{{ log_level }}", ""),
             ("{{ mcp_configuration }}", &mcp_configuration),
             ("{{ agentic_depends_on }}", &agentic_depends_on),
+            ("{{ job_timeout }}", &job_timeout),
             ("{{ setup_job }}", &setup_job),
             ("{{ teardown_job }}", &teardown_job),
             ("{{ source_path }}", &source_path),

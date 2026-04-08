@@ -310,27 +310,22 @@ pub fn generate_copilot_params(front_matter: &FrontMatter) -> String {
     let mut params = Vec::new();
 
     params.push(format!("--model {}", front_matter.engine.model()));
-    if let Some(max_turns) = front_matter.engine.max_turns() {
-        if max_turns == 0 {
-            eprintln!(
-                "Warning: Agent '{}' has max-turns: 0, which means zero turns allowed. \
-                The agent will not be able to perform any tool calls. \
-                Consider setting max-turns to at least 1.",
-                front_matter.name
-            );
-        }
-        params.push(format!("--max-turns {}", max_turns));
+    if front_matter.engine.max_turns().is_some() {
+        eprintln!(
+            "Warning: Agent '{}' has max-turns set, but max-turns is not supported by Copilot CLI \
+            and will be ignored. Consider removing it from the engine configuration.",
+            front_matter.name
+        );
     }
     if let Some(timeout_minutes) = front_matter.engine.timeout_minutes() {
         if timeout_minutes == 0 {
             eprintln!(
                 "Warning: Agent '{}' has timeout-minutes: 0, which means no time is allowed. \
-                The agent session will time out immediately. \
+                The agent job will time out immediately. \
                 Consider setting timeout-minutes to at least 1.",
                 front_matter.name
             );
         }
-        params.push(format!("--max-timeout {}", timeout_minutes));
     }
     params.push("--disable-builtin-mcps".to_string());
     params.push("--no-ask-user".to_string());
@@ -397,6 +392,15 @@ pub fn generate_working_directory(effective_workspace: &str) -> String {
     match effective_workspace {
         "repo" => "$(Build.SourcesDirectory)/$(Build.Repository.Name)".to_string(),
         "root" | _ => "$(Build.SourcesDirectory)".to_string(),
+    }
+}
+
+/// Generate `timeoutInMinutes` job property from `engine.timeout-minutes`.
+/// Returns an empty string when timeout is not configured.
+pub fn generate_job_timeout(front_matter: &FrontMatter) -> String {
+    match front_matter.engine.timeout_minutes() {
+        Some(minutes) => format!("timeoutInMinutes: {}", minutes),
+        None => String::new(),
     }
 }
 
@@ -917,13 +921,13 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_params_max_turns() {
+    fn test_copilot_params_max_turns_ignored() {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  max-turns: 50\n---\n",
         )
         .unwrap();
         let params = generate_copilot_params(&fm);
-        assert!(params.contains("--max-turns 50"));
+        assert!(!params.contains("--max-turns"), "max-turns should not be emitted as a CLI arg");
     }
 
     #[test]
@@ -934,13 +938,13 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_params_max_timeout() {
+    fn test_copilot_params_no_max_timeout() {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  timeout-minutes: 30\n---\n",
         )
         .unwrap();
         let params = generate_copilot_params(&fm);
-        assert!(params.contains("--max-timeout 30"));
+        assert!(!params.contains("--max-timeout"), "timeout-minutes should not be emitted as a CLI arg");
     }
 
     #[test]
@@ -951,23 +955,47 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_params_max_turns_zero_still_emitted() {
+    fn test_copilot_params_max_turns_zero_not_emitted() {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  max-turns: 0\n---\n",
         )
         .unwrap();
         let params = generate_copilot_params(&fm);
-        assert!(params.contains("--max-turns 0"));
+        assert!(!params.contains("--max-turns"), "max-turns should not be emitted as a CLI arg");
     }
 
     #[test]
-    fn test_copilot_params_max_timeout_zero_still_emitted() {
+    fn test_copilot_params_max_timeout_zero_not_emitted() {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  timeout-minutes: 0\n---\n",
         )
         .unwrap();
         let params = generate_copilot_params(&fm);
-        assert!(params.contains("--max-timeout 0"));
+        assert!(!params.contains("--max-timeout"), "timeout-minutes should not be emitted as a CLI arg");
+    }
+
+    #[test]
+    fn test_job_timeout_with_value() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  timeout-minutes: 30\n---\n",
+        )
+        .unwrap();
+        assert_eq!(generate_job_timeout(&fm), "timeoutInMinutes: 30");
+    }
+
+    #[test]
+    fn test_job_timeout_without_value() {
+        let fm = minimal_front_matter();
+        assert_eq!(generate_job_timeout(&fm), "");
+    }
+
+    #[test]
+    fn test_job_timeout_zero() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  timeout-minutes: 0\n---\n",
+        )
+        .unwrap();
+        assert_eq!(generate_job_timeout(&fm), "timeoutInMinutes: 0");
     }
 
     // ─── sanitize_filename ────────────────────────────────────────────────────

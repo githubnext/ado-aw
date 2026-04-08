@@ -17,11 +17,11 @@ use super::common::{
     self, AWF_VERSION, COPILOT_CLI_VERSION, DEFAULT_POOL, compute_effective_workspace, generate_copilot_params,
     generate_acquire_ado_token, generate_cancel_previous_builds, generate_checkout_self,
     generate_checkout_steps, generate_ci_trigger, generate_copilot_ado_env,
-    generate_executor_ado_env, generate_header_comment, generate_pipeline_path,
-    generate_pipeline_resources, generate_pr_trigger, generate_repositories,
-    generate_schedule, generate_source_path, generate_working_directory,
-    replace_with_indent, sanitize_filename, validate_write_permissions,
-    validate_comment_target, validate_update_work_item_target,
+    generate_executor_ado_env, generate_header_comment, generate_job_timeout,
+    generate_pipeline_path, generate_pipeline_resources, generate_pr_trigger,
+    generate_repositories, generate_schedule, generate_source_path,
+    generate_working_directory, replace_with_indent, sanitize_filename,
+    validate_write_permissions, validate_comment_target, validate_update_work_item_target,
 };
 use super::types::{FrontMatter, McpConfig};
 use crate::allowed_hosts::{CORE_ALLOWED_HOSTS, mcp_required_hosts};
@@ -106,6 +106,7 @@ impl Compiler for StandaloneCompiler {
         let prepare_steps = generate_prepare_steps(&front_matter.steps, has_memory);
         let finalize_steps = generate_finalize_steps(&front_matter.post_steps);
         let agentic_depends_on = generate_agentic_depends_on(&front_matter.setup);
+        let job_timeout = generate_job_timeout(front_matter);
 
         // Generate service connection token acquisition steps and env vars
         let acquire_read_token = generate_acquire_ado_token(
@@ -152,6 +153,7 @@ impl Compiler for StandaloneCompiler {
             ("{{ prepare_steps }}", &prepare_steps),
             ("{{ finalize_steps }}", &finalize_steps),
             ("{{ agentic_depends_on }}", &agentic_depends_on),
+            ("{{ job_timeout }}", &job_timeout),
             ("{{ repositories }}", &repositories),
             ("{{ schedule }}", &schedule),
             ("{{ pipeline_resources }}", &pipeline_resources),
