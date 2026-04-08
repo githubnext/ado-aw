@@ -823,7 +823,9 @@ agent attempted work but couldn't finish (e.g., API timeouts, build failures, re
         sanitized.reason = sanitize_text(&sanitized.reason);
         sanitized.context = sanitized.context.map(|c| sanitize_text(&c));
         let result: ReportIncompleteResult = sanitized.try_into()?;
-        let _ = self.write_safe_output_file(&result).await;
+        if let Err(e) = self.write_safe_output_file(&result).await {
+            warn!("Failed to write report-incomplete safe output: {}", e);
+        }
         Ok(CallToolResult::success(vec![]))
     }
 }

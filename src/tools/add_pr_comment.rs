@@ -30,7 +30,8 @@ pub struct AddPrCommentParams {
     pub file_path: Option<String>,
 
     /// Starting line number for a multi-line inline comment. Requires `file_path` and `line`.
-    /// When set, the comment spans from `start_line` to `line`.
+    /// When set, the comment spans from `start_line` to `line`. Must be strictly less than
+    /// `line` (use `line` alone for single-line comments — do not pass `start_line == line`).
     #[serde(default)]
     pub start_line: Option<i32>,
 

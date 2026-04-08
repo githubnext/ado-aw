@@ -5,7 +5,7 @@ use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::PATH_SEGMENT;
+use super::{PATH_SEGMENT, resolve_repo_name};
 use crate::sanitize::{Sanitize, sanitize as sanitize_text};
 use crate::tool_result;
 use crate::tools::{ExecutionContext, ExecutionResult, Executor, Validate};
@@ -130,31 +130,6 @@ impl Default for SubmitPrReviewConfig {
             allowed_events: Vec::new(),
             allowed_repositories: Vec::new(),
         }
-    }
-}
-
-/// Resolve the repository name for use in ADO API URLs.
-///
-/// "self" (or None) → `ctx.repository_name`, otherwise look up in `ctx.allowed_repositories`.
-fn resolve_repo_name(
-    repo_alias: Option<&str>,
-    ctx: &ExecutionContext,
-) -> Result<String, ExecutionResult> {
-    let alias = repo_alias.unwrap_or("self");
-    if alias == "self" {
-        ctx.repository_name
-            .clone()
-            .ok_or_else(|| ExecutionResult::failure("BUILD_REPOSITORY_NAME not set"))
-    } else {
-        ctx.allowed_repositories
-            .get(alias)
-            .cloned()
-            .ok_or_else(|| {
-                ExecutionResult::failure(format!(
-                    "Repository '{}' is not in the allowed repository list",
-                    alias
-                ))
-            })
     }
 }
 

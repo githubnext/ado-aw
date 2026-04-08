@@ -172,6 +172,8 @@ impl Executor for ReplyToPrCommentResult {
         );
         debug!("API URL: {}", url);
 
+        // parentCommentId=1 targets the root comment in the thread. In ADO,
+        // the first comment in a thread is always ID 1 (IDs are thread-scoped).
         let request_body = serde_json::json!({
             "parentCommentId": 1,
             "content": comment_body,

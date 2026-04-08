@@ -104,6 +104,31 @@ pub(crate) async fn resolve_wiki_branch(
     }
 }
 
+/// Resolve a repository alias to its ADO repo name.
+///
+/// "self" (or None) → `ctx.repository_name`, otherwise look up in `ctx.allowed_repositories`.
+pub(crate) fn resolve_repo_name(
+    repo_alias: Option<&str>,
+    ctx: &ExecutionContext,
+) -> Result<String, ExecutionResult> {
+    let alias = repo_alias.unwrap_or("self");
+    if alias == "self" {
+        ctx.repository_name
+            .clone()
+            .ok_or_else(|| ExecutionResult::failure("BUILD_REPOSITORY_NAME not set"))
+    } else {
+        ctx.allowed_repositories
+            .get(alias)
+            .cloned()
+            .ok_or_else(|| {
+                ExecutionResult::failure(format!(
+                    "Repository '{}' is not in the allowed repository list",
+                    alias
+                ))
+            })
+    }
+}
+
 mod add_build_tag;
 mod add_pr_comment;
 mod comment_on_work_item;

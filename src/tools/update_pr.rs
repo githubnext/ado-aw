@@ -5,7 +5,7 @@ use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::PATH_SEGMENT;
+use super::{PATH_SEGMENT, resolve_repo_name};
 use crate::sanitize::{Sanitize, sanitize as sanitize_text};
 use crate::tool_result;
 use crate::tools::{ExecutionContext, ExecutionResult, Executor, Validate};
@@ -221,31 +221,6 @@ impl Default for UpdatePrConfig {
             delete_source_branch: true,
             merge_strategy: "squash".to_string(),
         }
-    }
-}
-
-/// Resolve the repository name for use in ADO API URLs.
-///
-/// "self" (or None) → `ctx.repository_name`, otherwise look up in `ctx.allowed_repositories`.
-fn resolve_repo_name(
-    repo_alias: Option<&str>,
-    ctx: &ExecutionContext,
-) -> Result<String, ExecutionResult> {
-    let alias = repo_alias.unwrap_or("self");
-    if alias == "self" {
-        ctx.repository_name
-            .clone()
-            .ok_or_else(|| ExecutionResult::failure("BUILD_REPOSITORY_NAME not set"))
-    } else {
-        ctx.allowed_repositories
-            .get(alias)
-            .cloned()
-            .ok_or_else(|| {
-                ExecutionResult::failure(format!(
-                    "Repository '{}' is not in the allowed repository list",
-                    alias
-                ))
-            })
     }
 }
 
@@ -613,21 +588,21 @@ impl UpdatePrResult {
         let mut added = Vec::new();
         let mut failed = Vec::new();
 
+        // Derive VSSPS base URL once, before the loop.
+        let trimmed_org = org_url.trim_end_matches('/');
+        let vssps_base = trimmed_org
+            .replace("://dev.azure.com/", "://vssps.dev.azure.com/");
+        if vssps_base == trimmed_org {
+            return Ok(ExecutionResult::failure(format!(
+                "Cannot derive VSSPS identity endpoint from org URL '{}'. \
+                 The add-reviewers operation requires dev.azure.com-style URLs \
+                 to resolve reviewer identities. Legacy *.visualstudio.com \
+                 organizations are not currently supported for this operation.",
+                trimmed_org
+            )));
+        }
+
         for reviewer in reviewers {
-            // Resolve reviewer email to GUID via VSSPS identity API.
-            // Derive the VSSPS URL from org_url to support non-standard environments.
-            let trimmed_org = org_url.trim_end_matches('/');
-            let vssps_base = trimmed_org
-                .replace("://dev.azure.com/", "://vssps.dev.azure.com/");
-            if vssps_base == trimmed_org {
-                return Ok(ExecutionResult::failure(format!(
-                    "Cannot derive VSSPS identity endpoint from org URL '{}'. \
-                     The add-reviewers operation requires dev.azure.com-style URLs \
-                     to resolve reviewer identities. Legacy *.visualstudio.com \
-                     organizations are not currently supported for this operation.",
-                    trimmed_org
-                )));
-            }
             let identity_url = format!(
                 "{}/_apis/identities?searchFilter=General&filterValue={}&api-version=7.1",
                 vssps_base,

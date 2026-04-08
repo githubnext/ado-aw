@@ -270,8 +270,21 @@ impl Executor for CreateGitTagResult {
             }
         }
 
-        // Resolve repository name
+        // Resolve repository
         let repo_alias = self.repository.as_deref().unwrap_or("self");
+
+        // Validate repository against config policy BEFORE resolving the name,
+        // so operators see a policy error rather than a confusing resolution error.
+        if !config.allowed_repositories.is_empty()
+            && !config.allowed_repositories.contains(&repo_alias.to_string())
+        {
+            return Ok(ExecutionResult::failure(format!(
+                "Repository '{}' is not in the allowed-repositories list: [{}]",
+                repo_alias,
+                config.allowed_repositories.join(", ")
+            )));
+        }
+
         let repo_name = if repo_alias == "self" {
             ctx.repository_name
                 .as_deref()
@@ -286,16 +299,6 @@ impl Executor for CreateGitTagResult {
                     repo_alias
                 ))?
         };
-
-        // Validate repository against allowed-repositories config
-        if !config.allowed_repositories.is_empty()
-            && !config.allowed_repositories.contains(&repo_alias.to_string())
-        {
-            return Ok(ExecutionResult::failure(format!(
-                "Repository '{}' is not in the allowed-repositories list",
-                repo_alias
-            )));
-        }
 
         let client = reqwest::Client::new();
 

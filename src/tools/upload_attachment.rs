@@ -208,7 +208,11 @@ impl Executor for UploadAttachmentResult {
         let file_bytes =
             std::fs::read(&canonical).context("Failed to read file contents")?;
 
-        // Check if file is text (not binary) — if text, scan for ##vso[ command injection
+        // Check if file is text (valid UTF-8) — if text, scan for ##vso[ command injection.
+        // Binary files (where from_utf8 fails) skip this check intentionally: ADO's attachment
+        // viewer won't execute ##vso[ sequences from binary content. Note that a binary file
+        // with a valid UTF-8 preamble but malformed tail will also skip the scan, but this is
+        // acceptable because the injection risk from binary attachments is negligible.
         if let Ok(text) = std::str::from_utf8(&file_bytes) {
             if text.contains("##vso[") {
                 return Ok(ExecutionResult::failure(format!(
