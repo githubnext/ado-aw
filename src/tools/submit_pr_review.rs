@@ -178,10 +178,6 @@ impl Executor for SubmitPrReviewResult {
             .access_token
             .as_ref()
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
-        let organization = ctx
-            .ado_organization
-            .as_ref()
-            .context("Could not determine ADO organization name from URL")?;
         debug!("ADO org: {}, project: {}", org_url, project);
 
         let config: SubmitPrReviewConfig = ctx.get_tool_config("submit-pr-review");
@@ -241,10 +237,11 @@ impl Executor for SubmitPrReviewResult {
             encoded_project,
         );
 
-        // Resolve the current user identity via connection data
+        // Resolve the current user identity via connection data.
+        // Use the org URL — supports vanity domains and national clouds.
         let connection_url = format!(
-            "https://dev.azure.com/{}/_apis/connectiondata",
-            utf8_percent_encode(organization, PATH_SEGMENT)
+            "{}/_apis/connectiondata",
+            org_url.trim_end_matches('/')
         );
         debug!("Connection data URL: {}", connection_url);
 

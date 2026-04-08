@@ -169,8 +169,23 @@ impl Executor for UploadAttachmentResult {
         let resolved_path = ctx.source_directory.join(&self.file_path);
         debug!("Resolved file path: {}", resolved_path.display());
 
-        // Check file exists
-        if !resolved_path.exists() {
+        // Canonicalize to resolve symlinks, then verify the path stays within source_directory.
+        let canonical = resolved_path
+            .canonicalize()
+            .context("Failed to canonicalize file path — file may not exist or contains broken symlinks")?;
+        let canonical_base = ctx
+            .source_directory
+            .canonicalize()
+            .context("Failed to canonicalize source directory")?;
+        if !canonical.starts_with(&canonical_base) {
+            return Ok(ExecutionResult::failure(format!(
+                "File path '{}' resolves outside the workspace (symlink escape)",
+                self.file_path
+            )));
+        }
+
+        // Check file exists (already confirmed by canonicalize, but kept for clarity)
+        if !canonical.exists() {
             return Ok(ExecutionResult::failure(format!(
                 "File not found: {}",
                 resolved_path.display()
@@ -178,7 +193,7 @@ impl Executor for UploadAttachmentResult {
         }
 
         // Check file size
-        let metadata = std::fs::metadata(&resolved_path)
+        let metadata = std::fs::metadata(&canonical)
             .context("Failed to read file metadata")?;
         let file_size = metadata.len();
         debug!("File size: {} bytes", file_size);
@@ -191,7 +206,7 @@ impl Executor for UploadAttachmentResult {
 
         // Read file bytes
         let file_bytes =
-            std::fs::read(&resolved_path).context("Failed to read file contents")?;
+            std::fs::read(&canonical).context("Failed to read file contents")?;
 
         // Check if file is text (not binary) — if text, scan for ##vso[ command injection
         if let Ok(text) = std::str::from_utf8(&file_bytes) {

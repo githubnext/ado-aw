@@ -264,10 +264,6 @@ impl Executor for UpdatePrResult {
             .access_token
             .as_ref()
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
-        let organization = ctx
-            .ado_organization
-            .as_ref()
-            .context("Could not determine ADO organization name from URL")?;
         debug!("ADO org: {}, project: {}", org_url, project);
 
         let config: UpdatePrConfig = ctx.get_tool_config("update-pr");
@@ -322,7 +318,7 @@ impl Executor for UpdatePrResult {
                     &base_url,
                     &repo_name,
                     token,
-                    organization,
+                    org_url,
                     &config,
                 )
                 .await
@@ -333,7 +329,7 @@ impl Executor for UpdatePrResult {
                     &base_url,
                     &repo_name,
                     token,
-                    organization,
+                    org_url,
                 )
                 .await
             }
@@ -466,7 +462,7 @@ impl UpdatePrResult {
         base_url: &str,
         repo_name: &str,
         token: &str,
-        organization: &str,
+        org_url: &str,
         config: &UpdatePrConfig,
     ) -> anyhow::Result<ExecutionResult> {
         let vote_str = self
@@ -499,10 +495,11 @@ impl UpdatePrResult {
             VALID_VOTES.join(", ")
         ))?;
 
-        // Resolve the current user identity
+        // Resolve the current user identity.
+        // Use the org URL for connection data — supports vanity domains and national clouds.
         let connection_url = format!(
-            "https://dev.azure.com/{}/_apis/connectiondata",
-            utf8_percent_encode(organization, PATH_SEGMENT)
+            "{}/_apis/connectiondata",
+            org_url.trim_end_matches('/')
         );
         debug!("Connection data URL: {}", connection_url);
 
@@ -600,7 +597,7 @@ impl UpdatePrResult {
         base_url: &str,
         repo_name: &str,
         token: &str,
-        organization: &str,
+        org_url: &str,
     ) -> anyhow::Result<ExecutionResult> {
         let reviewers = self
             .reviewers
@@ -612,10 +609,14 @@ impl UpdatePrResult {
         let mut failed = Vec::new();
 
         for reviewer in reviewers {
-            // Resolve reviewer email to GUID via VSSPS identity API
+            // Resolve reviewer email to GUID via VSSPS identity API.
+            // Derive the VSSPS URL from org_url to support non-standard environments.
+            let vssps_base = org_url
+                .trim_end_matches('/')
+                .replace("://dev.azure.com/", "://vssps.dev.azure.com/");
             let identity_url = format!(
-                "https://vssps.dev.azure.com/{}/_apis/identities?searchFilter=General&filterValue={}&api-version=7.1",
-                utf8_percent_encode(organization, PATH_SEGMENT),
+                "{}/_apis/identities?searchFilter=General&filterValue={}&api-version=7.1",
+                vssps_base,
                 utf8_percent_encode(reviewer, PATH_SEGMENT),
             );
             debug!("Resolving identity for '{}': {}", reviewer, identity_url);

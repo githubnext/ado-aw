@@ -103,6 +103,12 @@ tool_result! {
 impl Sanitize for AddPrCommentResult {
     fn sanitize_fields(&mut self) {
         self.content = sanitize_text(&self.content);
+        // Strip control characters from structural fields for defense-in-depth
+        self.repository = self.repository.chars().filter(|c| !c.is_control()).collect();
+        self.status = self.status.chars().filter(|c| !c.is_control()).collect();
+        self.file_path = self.file_path.as_ref().map(|fp| {
+            fp.chars().filter(|c| !c.is_control()).collect()
+        });
     }
 }
 
