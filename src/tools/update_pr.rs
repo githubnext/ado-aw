@@ -162,6 +162,11 @@ impl Sanitize for UpdatePrResult {
 
 /// Configuration for the update-pr tool (specified in front matter)
 ///
+/// **Allow-list semantics note:** `allowed-operations` and `allowed-repositories` use
+/// permissive defaults (empty = all allowed), while `allowed-votes` uses a secure default
+/// (empty = all rejected). This asymmetry is intentional — vote operations can auto-approve
+/// PRs, so they require explicit opt-in to prevent accidental privilege escalation.
+///
 /// Example front matter:
 /// ```yaml
 /// safe-outputs:
@@ -615,11 +620,13 @@ impl UpdatePrResult {
             let vssps_base = trimmed_org
                 .replace("://dev.azure.com/", "://vssps.dev.azure.com/");
             if vssps_base == trimmed_org {
-                warn!(
-                    "Could not derive VSSPS endpoint from org URL '{}' — identity lookup \
-                     may fail for non-dev.azure.com hosts (e.g., *.visualstudio.com)",
+                return Ok(ExecutionResult::failure(format!(
+                    "Cannot derive VSSPS identity endpoint from org URL '{}'. \
+                     The add-reviewers operation requires dev.azure.com-style URLs \
+                     to resolve reviewer identities. Legacy *.visualstudio.com \
+                     organizations are not currently supported for this operation.",
                     trimmed_org
-                );
+                )));
             }
             let identity_url = format!(
                 "{}/_apis/identities?searchFilter=General&filterValue={}&api-version=7.1",

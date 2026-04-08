@@ -231,11 +231,25 @@ impl Executor for CreateBranchResult {
             debug!("Branch name matches pattern '{}'", pattern);
         }
 
-        // Determine repository name
+        // Determine repository alias
         let repo_alias = self
             .repository
             .as_deref()
             .unwrap_or("self");
+
+        // Validate repository against config policy BEFORE resolving the name,
+        // so operators see a policy error rather than a confusing "not in checkout list" error.
+        if !config.allowed_repositories.is_empty()
+            && !config.allowed_repositories.contains(&repo_alias.to_string())
+        {
+            return Ok(ExecutionResult::failure(format!(
+                "Repository '{}' is not in the allowed-repositories list: [{}]",
+                repo_alias,
+                config.allowed_repositories.join(", ")
+            )));
+        }
+
+        // Resolve the alias to the actual ADO repo name
         let repo_name = if repo_alias == "self" {
             ctx.repository_name
                 .as_deref()
@@ -251,16 +265,6 @@ impl Executor for CreateBranchResult {
                 ))?
         };
         debug!("Resolved repository: {}", repo_name);
-
-        // Validate repository against allowed-repositories (if configured)
-        if !config.allowed_repositories.is_empty()
-            && !config.allowed_repositories.contains(&repo_alias.to_string())
-        {
-            return Ok(ExecutionResult::failure(format!(
-                "Repository '{}' is not in the allowed-repositories list",
-                repo_alias
-            )));
-        }
 
         // Validate source_branch against allowed-source-branches (if configured)
         let source_branch = self.source_branch.as_deref().unwrap_or("main");

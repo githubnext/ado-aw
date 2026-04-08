@@ -68,6 +68,9 @@ impl Sanitize for QueueBuildResult {
         if let Some(reason) = &self.reason {
             self.reason = Some(sanitize_text(reason));
         }
+        if let Some(branch) = &self.branch {
+            self.branch = Some(sanitize_text(branch));
+        }
         if let Some(params) = &self.parameters {
             self.parameters = Some(
                 params

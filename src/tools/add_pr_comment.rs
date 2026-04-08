@@ -38,7 +38,8 @@ pub struct AddPrCommentParams {
     #[serde(default)]
     pub line: Option<i32>,
 
-    /// Thread status: "Active" (default), "Closed", "ByDesign", or "WontFix".
+    /// Thread status: "active" (default), "fixed", "wont-fix", "closed", or "by-design".
+    /// CamelCase forms ("Active", "WontFix", etc.) are also accepted for backwards compatibility.
     #[serde(default = "default_status")]
     pub status: String,
 }
@@ -48,7 +49,7 @@ fn default_repository() -> String {
 }
 
 fn default_status() -> String {
-    "Active".to_string()
+    "active".to_string()
 }
 
 impl Validate for AddPrCommentParams {
@@ -153,19 +154,21 @@ impl Default for AddPrCommentConfig {
     }
 }
 
-/// Map a thread status string to the ADO API integer value
+/// Map a thread status string to the ADO API integer value.
+/// Accepts both kebab-case (preferred) and CamelCase for backwards compatibility.
 fn status_to_int(status: &str) -> Option<i32> {
     match status {
-        "Active" => Some(1),
-        "Closed" => Some(4),
-        "ByDesign" => Some(5),
-        "WontFix" => Some(6),
+        "active" | "Active" => Some(1),
+        "fixed" | "Fixed" => Some(2),
+        "wont-fix" | "WontFix" => Some(3),
+        "closed" | "Closed" => Some(4),
+        "by-design" | "ByDesign" => Some(5),
         _ => None,
     }
 }
 
-/// All valid thread status strings
-const VALID_STATUSES: &[&str] = &["Active", "Closed", "ByDesign", "WontFix"];
+/// All valid thread status strings (kebab-case canonical form)
+const VALID_STATUSES: &[&str] = &["active", "fixed", "wont-fix", "closed", "by-design"];
 
 /// Validate a file path for inline comments: no `..`, not absolute
 fn validate_file_path(path: &str) -> anyhow::Result<()> {
@@ -378,7 +381,7 @@ mod tests {
         assert_eq!(params.repository, "self");
         assert!(params.file_path.is_none());
         assert!(params.line.is_none());
-        assert_eq!(params.status, "Active");
+        assert_eq!(params.status, "active");
     }
 
     #[test]
@@ -390,7 +393,7 @@ mod tests {
             file_path: None,
             start_line: None,
             line: None,
-            status: "Active".to_string(),
+            status: "active".to_string(),
         };
         let result: AddPrCommentResult = params.try_into().unwrap();
         assert_eq!(result.name, "add-pr-comment");
@@ -407,7 +410,7 @@ mod tests {
             file_path: None,
             start_line: None,
             line: None,
-            status: "Active".to_string(),
+            status: "active".to_string(),
         };
         let result: Result<AddPrCommentResult, _> = params.try_into();
         assert!(result.is_err());
@@ -422,7 +425,7 @@ mod tests {
             file_path: None,
             start_line: None,
             line: None,
-            status: "Active".to_string(),
+            status: "active".to_string(),
         };
         let result: Result<AddPrCommentResult, _> = params.try_into();
         assert!(result.is_err());
@@ -437,7 +440,7 @@ mod tests {
             file_path: None,
             start_line: None,
             line: Some(10),
-            status: "Active".to_string(),
+            status: "active".to_string(),
         };
         let result: Result<AddPrCommentResult, _> = params.try_into();
         assert!(result.is_err());
@@ -452,7 +455,7 @@ mod tests {
             file_path: Some("src/main.rs".to_string()),
             start_line: None,
             line: Some(10),
-            status: "Active".to_string(),
+            status: "active".to_string(),
         };
         let result: AddPrCommentResult = params.try_into().unwrap();
         let json = serde_json::to_string(&result).unwrap();
@@ -488,10 +491,17 @@ allowed-statuses:
 
     #[test]
     fn test_status_to_int_mapping() {
+        // Kebab-case (canonical)
+        assert_eq!(status_to_int("active"), Some(1));
+        assert_eq!(status_to_int("fixed"), Some(2));
+        assert_eq!(status_to_int("wont-fix"), Some(3));
+        assert_eq!(status_to_int("closed"), Some(4));
+        assert_eq!(status_to_int("by-design"), Some(5));
+        // CamelCase (backwards compat)
         assert_eq!(status_to_int("Active"), Some(1));
-        assert_eq!(status_to_int("Closed"), Some(4));
+        assert_eq!(status_to_int("WontFix"), Some(3));
         assert_eq!(status_to_int("ByDesign"), Some(5));
-        assert_eq!(status_to_int("WontFix"), Some(6));
+        // Invalid
         assert_eq!(status_to_int("Invalid"), None);
     }
 
