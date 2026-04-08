@@ -81,7 +81,9 @@ fn test_with_hashmap() {
     let result = generate_copilot_params(&mcps);
     
     assert!(result.contains("--prompt"));
-    assert!(result.contains("--mcp ado") || result.contains("--mcp es-chat"));
+    // MCPs are handled via the MCP firewall, not --mcp flags
+    assert!(!result.contains("--mcp ado"));
+    assert!(!result.contains("--mcp es-chat"));
 }
 ```
 

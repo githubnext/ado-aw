@@ -126,7 +126,7 @@ The current test suite provides coverage for:
 - ✅ Schedule generation
 - ✅ Repository configuration generation
 - ✅ Checkout step generation
-- ✅ Agency parameter generation
+- ✅ Copilot parameter generation
 - ✅ Markdown parsing
 - ✅ Template structure validation
 - ✅ Example file validation

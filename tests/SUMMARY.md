@@ -27,9 +27,9 @@ Added 18 comprehensive unit tests in the `tests` module at the end of `main.rs`:
 - `test_generate_checkout_steps_empty` - Tests empty checkout list
 - `test_generate_checkout_steps_multiple` - Tests multiple checkout steps
 
-#### Agency Parameters (3 tests)
-- `test_generate_copilot_params_builtin_enabled` - Tests enabled built-in MCPs
-- `test_generate_copilot_params_builtin_disabled` - Tests disabled MCPs
+#### Copilot Parameters (3 tests)
+- `test_copilot_params_custom_mcp_no_mcp_flag` - Verifies custom MCPs don't generate --mcp flags
+- `test_copilot_params_builtin_mcp_no_mcp_flag` - Verifies built-in MCPs don't generate --mcp flags (all MCPs handled via firewall)
 - `test_generate_copilot_params_custom_mcp_skipped` - Verifies custom MCPs are skipped
 
 #### Markdown Parsing (4 tests)
@@ -78,7 +78,7 @@ The test suite provides comprehensive coverage for:
 - Schedule generation (hourly/daily, deterministic)
 - Repository configuration generation
 - Checkout step generation
-- Agency parameter generation
+- Copilot parameter generation
 
 ✅ **Error Handling**
 - Missing front matter

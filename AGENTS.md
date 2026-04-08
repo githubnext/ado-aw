@@ -482,14 +482,12 @@ Should be replaced with the human-readable name from the front matter (e.g., "Da
 
 Additional params provided to copilot CLI. The compiler generates:
 - `--model <model>` - AI model from `engine` front matter field (default: claude-opus-4.5)
-- `--max-turns <n>` - Maximum agentic turns from `engine.max-turns` (omitted when not set)
-- `--max-timeout <n>` - Workflow timeout in minutes from `engine.timeout-minutes` (omitted when not set)
 - `--disable-builtin-mcps` - Disables all built-in MCPs initially
 - `--no-ask-user` - Prevents interactive prompts
 - `--allow-tool <tool>` - Explicitly allows specific tools (github, safeoutputs, write, shell commands like cat, date, echo, grep, head, ls, pwd, sort, tail, uniq, wc, yq)
 - `--disable-mcp-server <name>` - Disables specific Copilot CLI MCPs
 
-Custom MCPs (with `command:` field) are handled separately via the MCP firewall config.
+All MCPs (both built-in and custom) are handled via the MCP firewall config, not via `--mcp` flags.
 
 ## {{ pool }}
 
