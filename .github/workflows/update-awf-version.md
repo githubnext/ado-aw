@@ -1,7 +1,7 @@
 ---
 on:
   schedule: daily
-description: Checks for new releases of gh-aw-firewall and opens a PR to update the AWF_VERSION constant
+description: Checks for new releases of gh-aw-firewall and copilot-cli, and opens PRs to update pinned version constants
 permissions:
   contents: read
   issues: read
@@ -13,56 +13,87 @@ network:
   allowed: [defaults]
 safe-outputs:
   create-pull-request:
-    max: 1
+    max: 2
 ---
 
-# AWF Version Updater
+# Dependency Version Updater
 
 You are a dependency maintenance bot for the **ado-aw** project — a Rust CLI compiler that transforms markdown agent definitions into Azure DevOps pipeline YAML.
 
 ## Your Task
 
-Check whether the `AWF_VERSION` constant in `src/compile/common.rs` is up to date with the latest release of [gh-aw-firewall](https://github.com/github/gh-aw-firewall). If a newer version is available, open a PR to update it.
+Check whether pinned version constants in `src/compile/common.rs` are up to date with the latest releases of their upstream dependencies. For each outdated constant, open a PR to update it.
 
-## Step 1: Get the Latest gh-aw-firewall Release
+There are two dependencies to check:
 
-Fetch the latest release of the `github/gh-aw-firewall` repository. Record the tag name, stripping any leading `v` prefix to get the bare version number (e.g. `v0.24.0` → `0.24.0`).
+| Constant | Upstream Repository | Example value |
+|----------|-------------------|---------------|
+| `AWF_VERSION` | [github/gh-aw-firewall](https://github.com/github/gh-aw-firewall) | `0.25.14` |
+| `COPILOT_CLI_VERSION` | [github/copilot-cli](https://github.com/github/copilot-cli) | `1.0.6` |
 
-## Step 2: Read the Current AWF_VERSION
+Run the following steps **independently for each dependency**. One may be up to date while the other is not.
 
-Read the file `src/compile/common.rs` in this repository and find the line:
+---
 
-```rust
-pub const AWF_VERSION: &str = "...";
-```
+## For each dependency:
 
-Extract the version string from that line.
+### Step 1: Get the Latest Release
 
-## Step 3: Compare Versions
+Fetch the latest release of the upstream repository. Record the tag name, stripping any leading `v` prefix to get the bare version number (e.g. `v0.24.0` → `0.24.0`).
 
-If the current `AWF_VERSION` already matches the latest release, **do nothing and stop**. The dependency is up to date.
+### Step 2: Read the Current Version
 
-Before proceeding, also check whether a PR already exists with a title matching `chore: update AWF_VERSION to <latest-version>`. If one is already open, **do nothing and stop** to avoid duplicates.
+Read the file `src/compile/common.rs` in this repository and find the corresponding constant:
 
-## Step 4: Create an Update PR
+- `pub const AWF_VERSION: &str = "...";`
+- `pub const COPILOT_CLI_VERSION: &str = "...";`
 
-If the latest version is newer than `AWF_VERSION`:
+Extract the version string.
 
-1. Edit `src/compile/common.rs` — update the `AWF_VERSION` string literal to the new version. Change only that single string value; do not modify anything else in the file.
+### Step 3: Compare Versions
 
-2. Create a pull request with:
-   - **Title**: `chore: update AWF_VERSION to <latest-version>`
-   - **Body**:
-     ```markdown
-     ## Dependency Update
+If the current constant already matches the latest release, **skip this dependency** — it is up to date.
 
-     Updates the pinned `AWF_VERSION` constant in `src/compile/common.rs` from `<old-version>` to `<latest-version>`.
+Before proceeding, also check whether a PR already exists with a title matching the expected PR title (see Step 4). If one is already open, **skip this dependency** to avoid duplicates.
 
-     ### Release
+### Step 4: Create an Update PR
 
-     See the [gh-aw-firewall release notes](https://github.com/github/gh-aw-firewall/releases/tag/v<latest-version>) for details.
+If the latest version is newer than the current constant:
 
-     ---
-     *This PR was opened automatically by the AWF version updater workflow.*
-     ```
-   - **Base branch**: `main`
+1. Edit `src/compile/common.rs` — update **only** the relevant version string literal. Do not modify anything else in the file.
+
+2. Create a pull request:
+
+**For AWF_VERSION:**
+- **Title**: `chore: update AWF_VERSION to <latest-version>`
+- **Body**:
+  ```markdown
+  ## Dependency Update
+
+  Updates the pinned `AWF_VERSION` constant in `src/compile/common.rs` from `<old-version>` to `<latest-version>`.
+
+  ### Release
+
+  See the [gh-aw-firewall release notes](https://github.com/github/gh-aw-firewall/releases/tag/v<latest-version>) for details.
+
+  ---
+  *This PR was opened automatically by the dependency version updater workflow.*
+  ```
+
+**For COPILOT_CLI_VERSION:**
+- **Title**: `chore: update COPILOT_CLI_VERSION to <latest-version>`
+- **Body**:
+  ```markdown
+  ## Dependency Update
+
+  Updates the pinned `COPILOT_CLI_VERSION` constant in `src/compile/common.rs` from `<old-version>` to `<latest-version>`.
+
+  ### Release
+
+  See the [copilot-cli release notes](https://github.com/github/copilot-cli/releases/tag/v<latest-version>) for details.
+
+  ---
+  *This PR was opened automatically by the dependency version updater workflow.*
+  ```
+
+- **Base branch**: `main`
