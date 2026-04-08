@@ -180,8 +180,7 @@ impl Executor for QueueBuildResult {
                 if pattern.ends_with("/*") {
                     let prefix = &pattern[..pattern.len() - 2];
                     effective_branch.starts_with(prefix)
-                        && (effective_branch.len() == prefix.len()
-                            || effective_branch[prefix.len()..].starts_with('/'))
+                        && effective_branch[prefix.len()..].starts_with('/')
                 } else {
                     pattern == effective_branch
                 }

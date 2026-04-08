@@ -611,9 +611,16 @@ impl UpdatePrResult {
         for reviewer in reviewers {
             // Resolve reviewer email to GUID via VSSPS identity API.
             // Derive the VSSPS URL from org_url to support non-standard environments.
-            let vssps_base = org_url
-                .trim_end_matches('/')
+            let trimmed_org = org_url.trim_end_matches('/');
+            let vssps_base = trimmed_org
                 .replace("://dev.azure.com/", "://vssps.dev.azure.com/");
+            if vssps_base == trimmed_org {
+                warn!(
+                    "Could not derive VSSPS endpoint from org URL '{}' — identity lookup \
+                     may fail for non-dev.azure.com hosts (e.g., *.visualstudio.com)",
+                    trimmed_org
+                );
+            }
             let identity_url = format!(
                 "{}/_apis/identities?searchFilter=General&filterValue={}&api-version=7.1",
                 vssps_base,
