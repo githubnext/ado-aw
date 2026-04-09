@@ -14,7 +14,7 @@ use crate::tools::{
     AddBuildTagResult, AddPrCommentResult, CreateBranchResult, CreateGitTagResult,
     CreatePrResult, CreateWikiPageResult, CreateWorkItemResult, CommentOnWorkItemResult,
     ExecutionContext, ExecutionResult, Executor, LinkWorkItemsResult, QueueBuildResult,
-    ReplyToPrCommentResult, ResolvePrThreadResult, SubmitPrReviewResult,
+    ReplyToPrCommentResult, ReportIncompleteResult, ResolvePrThreadResult, SubmitPrReviewResult,
     ToolResult, UpdatePrResult, UpdateWikiPageResult, UpdateWorkItemResult,
     UploadAttachmentResult,
 };
@@ -382,8 +382,10 @@ pub async fn execute_safe_output(
             ExecutionResult::success("Skipped informational output: noop")
         }
         "report-incomplete" => {
-            debug!("Skipping report-incomplete entry");
-            ExecutionResult::success("Skipped informational output: report-incomplete")
+            let output: ReportIncompleteResult = serde_json::from_value(entry.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to parse report-incomplete: {}", e))?;
+            debug!("report-incomplete: {}", output.reason);
+            ExecutionResult::failure(format!("Agent reported task incomplete: {}", output.reason))
         }
         "missing-tool" => {
             debug!("Skipping missing-tool entry");

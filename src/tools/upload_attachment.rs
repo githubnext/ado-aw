@@ -184,14 +184,6 @@ impl Executor for UploadAttachmentResult {
             )));
         }
 
-        // Check file exists (already confirmed by canonicalize, but kept for clarity)
-        if !canonical.exists() {
-            return Ok(ExecutionResult::failure(format!(
-                "File not found: {}",
-                resolved_path.display()
-            )));
-        }
-
         // Check file size
         let metadata = std::fs::metadata(&canonical)
             .context("Failed to read file metadata")?;

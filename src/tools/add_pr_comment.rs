@@ -60,6 +60,11 @@ impl Validate for AddPrCommentParams {
             self.content.len() >= 10,
             "content must be at least 10 characters"
         );
+        ensure!(
+            status_to_int(&self.status).is_some(),
+            "status must be one of: {}",
+            VALID_STATUSES.join(", ")
+        );
         if self.line.is_some() {
             ensure!(
                 self.file_path.is_some(),
@@ -522,5 +527,39 @@ allowed-statuses:
     fn test_validate_file_path_accepts_valid() {
         assert!(validate_file_path("src/main.rs").is_ok());
         assert!(validate_file_path("path/to/file.txt").is_ok());
+    }
+
+    #[test]
+    fn test_validation_rejects_invalid_status() {
+        let params = AddPrCommentParams {
+            pull_request_id: 42,
+            content: "This is a valid comment body text.".to_string(),
+            repository: "self".to_string(),
+            file_path: None,
+            start_line: None,
+            line: None,
+            status: "unknown".to_string(),
+        };
+        let result: Result<AddPrCommentResult, _> = params.try_into();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("status must be one of"));
+    }
+
+    #[test]
+    fn test_validation_accepts_valid_statuses() {
+        for s in &["active", "fixed", "wont-fix", "closed", "by-design", "Active", "WontFix"] {
+            let params = AddPrCommentParams {
+                pull_request_id: 42,
+                content: "This is a valid comment body text.".to_string(),
+                repository: "self".to_string(),
+                file_path: None,
+                start_line: None,
+                line: None,
+                status: s.to_string(),
+            };
+            let result: Result<AddPrCommentResult, _> = params.try_into();
+            assert!(result.is_ok(), "Expected status '{}' to be valid", s);
+        }
     }
 }

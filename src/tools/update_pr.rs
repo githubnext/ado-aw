@@ -29,6 +29,9 @@ const VALID_VOTES: &[&str] = &[
     "reset",
 ];
 
+/// Valid merge strategy values accepted by ADO's completionOptions.mergeStrategy
+const VALID_MERGE_STRATEGIES: &[&str] = &["squash", "noFastForward", "rebase", "rebaseMerge"];
+
 /// Map a vote string to its ADO numeric value
 fn vote_to_ado_value(vote: &str) -> Option<i32> {
     match vote {
@@ -383,6 +386,13 @@ impl UpdatePrResult {
         debug!("PR created by: {}", created_by_id);
 
         // PATCH to set auto-complete
+        if !VALID_MERGE_STRATEGIES.contains(&config.merge_strategy.as_str()) {
+            return Ok(ExecutionResult::failure(format!(
+                "Invalid merge-strategy '{}'. Must be one of: {}",
+                config.merge_strategy,
+                VALID_MERGE_STRATEGIES.join(", ")
+            )));
+        }
         let patch_url = format!(
             "{}/{}/pullRequests/{}?api-version=7.1",
             base_url, encoded_repo, self.pull_request_id
@@ -516,9 +526,10 @@ impl UpdatePrResult {
 
         // PUT vote to reviewers endpoint
         let encoded_repo = utf8_percent_encode(repo_name, PATH_SEGMENT).to_string();
+        let encoded_user_id = utf8_percent_encode(user_id, PATH_SEGMENT).to_string();
         let vote_url = format!(
             "{}/{}/pullRequests/{}/reviewers/{}?api-version=7.1",
-            base_url, encoded_repo, self.pull_request_id, user_id
+            base_url, encoded_repo, self.pull_request_id, encoded_user_id
         );
         let vote_body = serde_json::json!({
             "vote": vote_value
@@ -1016,6 +1027,7 @@ mod tests {
         assert!(config.allowed_operations.is_empty());
         assert!(config.allowed_repositories.is_empty());
         assert!(config.allowed_votes.is_empty());
+        assert_eq!(config.merge_strategy, "squash");
     }
 
     #[test]
@@ -1036,5 +1048,23 @@ allowed-votes:
         assert!(config.allowed_operations.contains(&"set-auto-complete".to_string()));
         assert_eq!(config.allowed_repositories.len(), 1);
         assert_eq!(config.allowed_votes.len(), 2);
+    }
+
+    #[test]
+    fn test_valid_merge_strategies() {
+        for strategy in VALID_MERGE_STRATEGIES {
+            assert!(
+                VALID_MERGE_STRATEGIES.contains(strategy),
+                "'{}' should be a valid merge strategy",
+                strategy
+            );
+        }
+    }
+
+    #[test]
+    fn test_config_deserializes_merge_strategy() {
+        let yaml = r#"merge-strategy: rebase"#;
+        let config: UpdatePrConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.merge_strategy, "rebase");
     }
 }

@@ -252,9 +252,10 @@ impl Executor for SubmitPrReviewResult {
         debug!("Authenticated user ID: {}", user_id);
 
         // PUT vote to reviewers endpoint
+        let encoded_user_id = utf8_percent_encode(user_id, PATH_SEGMENT).to_string();
         let vote_url = format!(
             "{}/{}/pullRequests/{}/reviewers/{}?api-version=7.1",
-            base_url, encoded_repo, self.pull_request_id, user_id
+            base_url, encoded_repo, self.pull_request_id, encoded_user_id
         );
         let vote_body = serde_json::json!({
             "vote": vote_value
