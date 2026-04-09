@@ -21,7 +21,7 @@ use super::common::{
     generate_pipeline_resources, generate_pr_trigger, generate_repositories,
     generate_schedule, generate_source_path, generate_working_directory,
     replace_with_indent, sanitize_filename, validate_write_permissions,
-    validate_comment_target, validate_update_work_item_target,
+    validate_comment_target, validate_update_work_item_target, validate_submit_pr_review_events,
 };
 use super::types::{FrontMatter, McpConfig};
 use crate::allowed_hosts::{CORE_ALLOWED_HOSTS, mcp_required_hosts};
@@ -129,6 +129,8 @@ impl Compiler for StandaloneCompiler {
         validate_comment_target(front_matter)?;
         // Validate update-work-item has required target field
         validate_update_work_item_target(front_matter)?;
+        // Validate submit-pr-review has required allowed-events field
+        validate_submit_pr_review_events(front_matter)?;
 
         // Load threat analysis prompt template
         let threat_analysis_prompt = include_str!("../../templates/threat-analysis.md");

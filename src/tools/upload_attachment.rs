@@ -29,8 +29,8 @@ impl Validate for UploadAttachmentParams {
         ensure!(self.work_item_id > 0, "work_item_id must be positive");
         ensure!(!self.file_path.is_empty(), "file_path must not be empty");
         ensure!(
-            !self.file_path.contains(".."),
-            "file_path must not contain '..'"
+            !self.file_path.split('/').any(|component| component == ".."),
+            "file_path must not contain '..' path components"
         );
         ensure!(
             !self.file_path.starts_with('/'),
@@ -413,6 +413,42 @@ mod tests {
         };
         let result: Result<UploadAttachmentResult, _> = params.try_into();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validation_rejects_embedded_traversal() {
+        // "src/../secret" has ".." as a standalone component
+        let params = UploadAttachmentParams {
+            work_item_id: 42,
+            file_path: "src/../secret".to_string(),
+            comment: None,
+        };
+        let result: Result<UploadAttachmentResult, _> = params.try_into();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validation_accepts_filename_with_dots_in_name() {
+        // "report..v2.pdf" has ".." inside a filename, not as a standalone component
+        let params = UploadAttachmentParams {
+            work_item_id: 42,
+            file_path: "report..v2.pdf".to_string(),
+            comment: None,
+        };
+        let result: Result<UploadAttachmentResult, _> = params.try_into();
+        assert!(result.is_ok(), "report..v2.pdf should be a valid filename");
+    }
+
+    #[test]
+    fn test_validation_accepts_directory_with_dots_in_name() {
+        // "v2..3/notes.md" — ".." inside a directory name, not a standalone component
+        let params = UploadAttachmentParams {
+            work_item_id: 42,
+            file_path: "v2..3/notes.md".to_string(),
+            comment: None,
+        };
+        let result: Result<UploadAttachmentResult, _> = params.try_into();
+        assert!(result.is_ok(), "v2..3/notes.md should be valid");
     }
 
     #[test]

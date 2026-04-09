@@ -786,6 +786,38 @@ pub fn validate_update_work_item_target(front_matter: &FrontMatter) -> Result<()
     Ok(())
 }
 
+/// Validate that submit-pr-review has a required `allowed-events` field when configured.
+///
+/// An empty or missing `allowed-events` list would allow agents to cast any review vote,
+/// including auto-approvals. Operators must explicitly opt in to each allowed event.
+pub fn validate_submit_pr_review_events(front_matter: &FrontMatter) -> Result<()> {
+    if let Some(config_value) = front_matter.safe_outputs.get("submit-pr-review") {
+        if let Some(obj) = config_value.as_object() {
+            let allowed_events = obj.get("allowed-events");
+            let is_empty = match allowed_events {
+                None => true,
+                Some(v) => v.as_array().map_or(true, |a| a.is_empty()),
+            };
+            if is_empty {
+                anyhow::bail!(
+                    "safe-outputs.submit-pr-review requires a non-empty 'allowed-events' list \
+                     to prevent agents from casting unrestricted review votes. Example:\n\n  \
+                     safe-outputs:\n    submit-pr-review:\n      allowed-events:\n        \
+                     - comment\n        - approve-with-suggestions\n\n\
+                     Valid events: approve, approve-with-suggestions, request-changes, comment\n"
+                );
+            }
+        } else {
+            anyhow::bail!(
+                "safe-outputs.submit-pr-review must be a configuration object with an \
+                 'allowed-events' list. Example:\n\n  \
+                 safe-outputs:\n    submit-pr-review:\n      allowed-events:\n        - comment\n"
+            );
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1352,5 +1384,52 @@ mod tests {
         let abs_path = agents_dir.join("ctf.yml");
         let result = generate_pipeline_path(&abs_path);
         assert_eq!(result, "{{ workspace }}/agents/ctf.yml");
+    }
+
+    // ─── validate_submit_pr_review_events ────────────────────────────────────
+
+    #[test]
+    fn test_submit_pr_review_events_passes_when_not_configured() {
+        let fm = minimal_front_matter();
+        assert!(validate_submit_pr_review_events(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_submit_pr_review_events_fails_when_allowed_events_missing() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  submit-pr-review:\n    allowed-repositories:\n      - self\n---\n"
+        ).unwrap();
+        let result = validate_submit_pr_review_events(&fm);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("allowed-events"), "message: {msg}");
+    }
+
+    #[test]
+    fn test_submit_pr_review_events_fails_when_allowed_events_empty() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  submit-pr-review:\n    allowed-events: []\n---\n"
+        ).unwrap();
+        let result = validate_submit_pr_review_events(&fm);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("allowed-events"), "message: {msg}");
+    }
+
+    #[test]
+    fn test_submit_pr_review_events_fails_when_value_is_scalar() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  submit-pr-review: true\n---\n"
+        ).unwrap();
+        let result = validate_submit_pr_review_events(&fm);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_submit_pr_review_events_passes_when_events_provided() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  submit-pr-review:\n    allowed-events:\n      - comment\n      - approve\n---\n"
+        ).unwrap();
+        assert!(validate_submit_pr_review_events(&fm).is_ok());
     }
 }

@@ -1660,3 +1660,157 @@ fn test_compile_auto_discover_skips_missing_source() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+/// Test that submit-pr-review fails compilation when allowed-events is missing
+#[test]
+fn test_submit_pr_review_requires_allowed_events() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-spr-events-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("spr-agent.md");
+    let test_content = r#"---
+name: "PR Review Agent"
+description: "Agent that submits PR reviews but has no allowed-events"
+permissions:
+  write: my-write-sc
+safe-outputs:
+  submit-pr-review:
+    allowed-repositories:
+      - self
+---
+
+## PR Review Agent
+
+Submit PR reviews.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("spr-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should fail when submit-pr-review lacks allowed-events"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("allowed-events"),
+        "Error message should mention allowed-events: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that submit-pr-review fails compilation when allowed-events is an empty list
+#[test]
+fn test_submit_pr_review_requires_nonempty_allowed_events() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-spr-empty-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("spr-agent.md");
+    let test_content = r#"---
+name: "PR Review Agent"
+description: "Agent that submits PR reviews but has empty allowed-events"
+permissions:
+  write: my-write-sc
+safe-outputs:
+  submit-pr-review:
+    allowed-events: []
+---
+
+## PR Review Agent
+
+Submit PR reviews.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("spr-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should fail when submit-pr-review has empty allowed-events"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("allowed-events"),
+        "Error message should mention allowed-events: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that submit-pr-review compiles successfully with proper config
+#[test]
+fn test_submit_pr_review_compiles_with_allowed_events() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-spr-pass-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("spr-agent.md");
+    let test_content = r#"---
+name: "PR Review Agent"
+description: "Agent that submits PR reviews with proper config"
+permissions:
+  write: my-write-sc
+safe-outputs:
+  submit-pr-review:
+    allowed-events:
+      - comment
+      - approve-with-suggestions
+---
+
+## PR Review Agent
+
+Submit PR reviews.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("spr-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed with proper submit-pr-review config: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}

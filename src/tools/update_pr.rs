@@ -345,6 +345,15 @@ impl UpdatePrResult {
         token: &str,
         config: &UpdatePrConfig,
     ) -> anyhow::Result<ExecutionResult> {
+        // Validate merge_strategy before any network I/O
+        if !VALID_MERGE_STRATEGIES.contains(&config.merge_strategy.as_str()) {
+            return Ok(ExecutionResult::failure(format!(
+                "Invalid merge-strategy '{}'. Must be one of: {}",
+                config.merge_strategy,
+                VALID_MERGE_STRATEGIES.join(", ")
+            )));
+        }
+
         let encoded_repo = utf8_percent_encode(repo_name, PATH_SEGMENT).to_string();
 
         // Fetch the PR to get createdBy.id
@@ -386,13 +395,6 @@ impl UpdatePrResult {
         debug!("PR created by: {}", created_by_id);
 
         // PATCH to set auto-complete
-        if !VALID_MERGE_STRATEGIES.contains(&config.merge_strategy.as_str()) {
-            return Ok(ExecutionResult::failure(format!(
-                "Invalid merge-strategy '{}'. Must be one of: {}",
-                config.merge_strategy,
-                VALID_MERGE_STRATEGIES.join(", ")
-            )));
-        }
         let patch_url = format!(
             "{}/{}/pullRequests/{}?api-version=7.1",
             base_url, encoded_repo, self.pull_request_id
