@@ -1051,14 +1051,11 @@ allowed-votes:
     }
 
     #[test]
-    fn test_valid_merge_strategies() {
-        for strategy in VALID_MERGE_STRATEGIES {
-            assert!(
-                VALID_MERGE_STRATEGIES.contains(strategy),
-                "'{}' should be a valid merge strategy",
-                strategy
-            );
-        }
+    fn test_valid_merge_strategies_are_expected_values() {
+        assert_eq!(
+            VALID_MERGE_STRATEGIES,
+            &["squash", "noFastForward", "rebase", "rebaseMerge"]
+        );
     }
 
     #[test]
@@ -1066,5 +1063,19 @@ allowed-votes:
         let yaml = r#"merge-strategy: rebase"#;
         let config: UpdatePrConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.merge_strategy, "rebase");
+    }
+
+    #[test]
+    fn test_valid_merge_strategies_are_recognized() {
+        for strategy in VALID_MERGE_STRATEGIES {
+            assert!(
+                VALID_MERGE_STRATEGIES.contains(strategy),
+                "'{}' should be a valid merge strategy",
+                strategy
+            );
+        }
+        // Ensure invalid strategy is NOT in the list
+        assert!(!VALID_MERGE_STRATEGIES.contains(&"invalid"));
+        assert!(!VALID_MERGE_STRATEGIES.contains(&"Squash"));
     }
 }
