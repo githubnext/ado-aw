@@ -818,6 +818,51 @@ pub fn validate_submit_pr_review_events(front_matter: &FrontMatter) -> Result<()
     Ok(())
 }
 
+/// Validate that update-pr has a required `allowed-votes` field when the `vote` operation
+/// is enabled (i.e., `allowed-operations` is empty — meaning all ops — or explicitly contains
+/// "vote").
+///
+/// An empty `allowed-votes` list when vote is enabled would always fail at Stage 2 with a
+/// runtime error. Catching this at compile time is consistent with how
+/// `validate_submit_pr_review_events` handles the analogous case.
+pub fn validate_update_pr_votes(front_matter: &FrontMatter) -> Result<()> {
+    if let Some(config_value) = front_matter.safe_outputs.get("update-pr") {
+        if let Some(obj) = config_value.as_object() {
+            // Determine whether the vote operation is reachable:
+            // - allowed-operations absent or empty → all operations allowed (includes vote)
+            // - allowed-operations non-empty → vote is allowed only if explicitly listed
+            let vote_reachable = match obj.get("allowed-operations") {
+                None => true,
+                Some(v) => v
+                    .as_array()
+                    .map_or(true, |a| a.is_empty() || a.iter().any(|x| x == "vote")),
+            };
+
+            if vote_reachable {
+                let allowed_votes_empty = match obj.get("allowed-votes") {
+                    None => true,
+                    Some(v) => v.as_array().map_or(true, |a| a.is_empty()),
+                };
+                if allowed_votes_empty {
+                    anyhow::bail!(
+                        "safe-outputs.update-pr enables the 'vote' operation but has no \
+                         'allowed-votes' list. This would reject all votes at Stage 2. \
+                         Either restrict 'allowed-operations' to exclude 'vote', or add an \
+                         explicit 'allowed-votes' list:\n\n  \
+                         safe-outputs:\n    update-pr:\n      allowed-votes:\n        \
+                         - approve-with-suggestions\n        - wait-for-author\n\n\
+                         Valid votes: approve, approve-with-suggestions, reject, \
+                         wait-for-author, reset\n"
+                    );
+                }
+            }
+        }
+        // If the value is a scalar (e.g. `update-pr: true`) we don't error here —
+        // the config will default to empty allowed-votes, which is safe (vote always rejected).
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1431,5 +1476,74 @@ mod tests {
             "---\nname: test\ndescription: test\nsafe-outputs:\n  submit-pr-review:\n    allowed-events:\n      - comment\n      - approve\n---\n"
         ).unwrap();
         assert!(validate_submit_pr_review_events(&fm).is_ok());
+    }
+
+    // ─── validate_update_pr_votes ─────────────────────────────────────────────
+
+    #[test]
+    fn test_update_pr_votes_passes_when_not_configured() {
+        let fm = minimal_front_matter();
+        assert!(validate_update_pr_votes(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_update_pr_votes_fails_when_vote_reachable_and_no_allowed_votes() {
+        // allowed-operations absent → vote is reachable; no allowed-votes → should fail
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  update-pr:\n    allowed-repositories:\n      - self\n---\n"
+        ).unwrap();
+        let result = validate_update_pr_votes(&fm);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("allowed-votes"), "message: {msg}");
+    }
+
+    #[test]
+    fn test_update_pr_votes_fails_when_vote_explicit_and_no_allowed_votes() {
+        // allowed-operations contains "vote"; no allowed-votes → should fail
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  update-pr:\n    allowed-operations:\n      - vote\n---\n"
+        ).unwrap();
+        let result = validate_update_pr_votes(&fm);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("allowed-votes"), "message: {msg}");
+    }
+
+    #[test]
+    fn test_update_pr_votes_fails_when_allowed_votes_empty() {
+        // allowed-operations absent; allowed-votes is empty list → should fail
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  update-pr:\n    allowed-votes: []\n---\n"
+        ).unwrap();
+        let result = validate_update_pr_votes(&fm);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_update_pr_votes_passes_when_vote_excluded_from_allowed_operations() {
+        // allowed-operations is non-empty and does not contain "vote" → safe, no error
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  update-pr:\n    allowed-operations:\n      - add-reviewers\n      - set-auto-complete\n---\n"
+        ).unwrap();
+        assert!(validate_update_pr_votes(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_update_pr_votes_passes_when_vote_reachable_and_allowed_votes_set() {
+        // allowed-operations absent; allowed-votes non-empty → OK
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  update-pr:\n    allowed-votes:\n      - approve-with-suggestions\n---\n"
+        ).unwrap();
+        assert!(validate_update_pr_votes(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_update_pr_votes_passes_when_vote_explicit_and_allowed_votes_set() {
+        // allowed-operations contains "vote"; allowed-votes non-empty → OK
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  update-pr:\n    allowed-operations:\n      - vote\n    allowed-votes:\n      - wait-for-author\n---\n"
+        ).unwrap();
+        assert!(validate_update_pr_votes(&fm).is_ok());
     }
 }

@@ -24,6 +24,7 @@ use super::common::{
     generate_pr_trigger, generate_repositories, generate_schedule, generate_source_path,
     generate_working_directory, replace_with_indent, validate_comment_target,
     validate_update_work_item_target, validate_write_permissions, validate_submit_pr_review_events,
+    validate_update_pr_votes,
 };
 use super::types::{FrontMatter, McpConfig};
 
@@ -139,6 +140,8 @@ displayName: "Finalize""#,
         validate_update_work_item_target(front_matter)?;
         // Validate submit-pr-review has required allowed-events field
         validate_submit_pr_review_events(front_matter)?;
+        // Validate update-pr vote operation has required allowed-votes field
+        validate_update_pr_votes(front_matter)?;
 
         // Replace all template markers
         let compiler_version = env!("CARGO_PKG_VERSION");

@@ -303,7 +303,7 @@ impl Executor for SubmitPrReviewResult {
                     "content": body,
                     "commentType": 1
                 }],
-                "status": 4
+                "status": 1
             });
 
             info!(

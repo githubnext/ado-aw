@@ -226,9 +226,12 @@ impl Executor for AddPrCommentResult {
             )));
         }
 
-        // Validate status against allowed-statuses config
+        // Validate status against allowed-statuses config (case-insensitive)
         if !config.allowed_statuses.is_empty()
-            && !config.allowed_statuses.contains(&self.status)
+            && !config
+                .allowed_statuses
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case(&self.status))
         {
             return Ok(ExecutionResult::failure(format!(
                 "Status '{}' is not in the allowed-statuses list",
@@ -561,5 +564,44 @@ allowed-statuses:
             let result: Result<AddPrCommentResult, _> = params.try_into();
             assert!(result.is_ok(), "Expected status '{}' to be valid", s);
         }
+    }
+
+    #[test]
+    fn test_allowed_statuses_case_insensitive_match() {
+        // Config has "Active" but agent sends "active" (canonical lowercase) — should be allowed
+        let config = AddPrCommentConfig {
+            comment_prefix: None,
+            allowed_repositories: Vec::new(),
+            allowed_statuses: vec!["Active".to_string(), "Closed".to_string()],
+        };
+        // Test the exact comparison logic extracted from execute_impl
+        let status = "active";
+        let matched = config
+            .allowed_statuses
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case(status));
+        assert!(
+            matched,
+            "lowercase 'active' should match config value 'Active'"
+        );
+    }
+
+    #[test]
+    fn test_allowed_statuses_case_insensitive_reverse() {
+        // Config has "active" but agent sends "Active" — should be allowed
+        let config = AddPrCommentConfig {
+            comment_prefix: None,
+            allowed_repositories: Vec::new(),
+            allowed_statuses: vec!["active".to_string()],
+        };
+        let status = "Active";
+        let matched = config
+            .allowed_statuses
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case(status));
+        assert!(
+            matched,
+            "uppercase 'Active' should match config value 'active'"
+        );
     }
 }
