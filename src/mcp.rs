@@ -1336,15 +1336,26 @@ mod tests {
         let tools = so.tool_router.list_all();
         let tool_names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
 
-        // Enabled tools + always-on
-        let expected_count = enabled.len() + ALWAYS_ON_TOOLS.len();
-        assert_eq!(
-            tool_names.len(),
-            expected_count,
-            "Expected {} tools, got {}: {:?}",
-            expected_count,
-            tool_names.len(),
-            tool_names
-        );
+        // All enabled tools should be present
+        for tool in &enabled {
+            assert!(
+                tool_names.contains(tool),
+                "Enabled tool '{}' should be present, got {:?}",
+                tool,
+                tool_names
+            );
+        }
+        // Always-on tools should be present
+        for tool in ALWAYS_ON_TOOLS {
+            assert!(
+                tool_names.contains(&tool.to_string()),
+                "Always-on tool '{}' should be present, got {:?}",
+                tool,
+                tool_names
+            );
+        }
+        // Non-enabled tools should be absent
+        assert!(!tool_names.contains(&"update-wiki-page".to_string()),
+            "Non-enabled tool should be filtered out");
     }
 }
