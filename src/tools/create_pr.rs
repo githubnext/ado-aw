@@ -12,6 +12,63 @@ use anyhow::{Context, ensure};
 /// Maximum allowed patch file size (5 MB)
 const MAX_PATCH_SIZE_BYTES: u64 = 5 * 1024 * 1024;
 
+/// Default maximum files allowed in a single PR
+const DEFAULT_MAX_FILES: usize = 100;
+
+/// Runtime manifest files that are protected by default.
+/// These are dependency/build files that could be modified to introduce supply chain attacks.
+const PROTECTED_MANIFEST_BASENAMES: &[&str] = &[
+    // npm / Node.js
+    "package.json",
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "npm-shrinkwrap.json",
+    // Go
+    "go.mod",
+    "go.sum",
+    // Python
+    "requirements.txt",
+    "Pipfile",
+    "Pipfile.lock",
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "poetry.lock",
+    // Ruby
+    "Gemfile",
+    "Gemfile.lock",
+    // Java / Kotlin / Gradle
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "settings.gradle",
+    "settings.gradle.kts",
+    "gradle.properties",
+    // .NET / C#
+    "Directory.Build.props",
+    "Directory.Build.targets",
+    "global.json",
+    // Rust
+    "Cargo.toml",
+    "Cargo.lock",
+];
+
+/// Path prefixes that are protected by default.
+/// Files under these paths are blocked unless protected-files is set to "allowed".
+const PROTECTED_PATH_PREFIXES: &[&str] = &[
+    ".github/",
+    ".pipelines/",
+    ".azure-pipelines/",
+    ".agents/",
+    ".claude/",
+    ".codex/",
+    ".copilot/",
+];
+
+/// Exact filenames (at repo root) that are protected by default.
+const PROTECTED_EXACT_PATHS: &[&str] = &["CODEOWNERS"];
+
 /// Resolve a reviewer identifier (email, display name, or ID) to an Azure DevOps identity ID.
 ///
 /// If the input is already a GUID, returns it directly. Otherwise, uses the Azure DevOps
@@ -149,6 +206,11 @@ pub struct CreatePrParams {
     /// Required when multiple repositories are checked out.
     #[serde(default)]
     pub repository: Option<String>,
+
+    /// Labels to add to the PR for categorization.
+    /// These may be subject to an operator-configured allowlist.
+    #[serde(default)]
+    pub labels: Vec<String>,
 }
 
 impl Validate for CreatePrParams {
@@ -184,6 +246,9 @@ pub struct CreatePrResult {
     pub patch_file: String,
     /// Repository alias ("self" or alias from checkout list)
     pub repository: String,
+    /// Agent-provided labels (validated against allowed-labels at execution time)
+    #[serde(default)]
+    pub agent_labels: Vec<String>,
 }
 
 impl crate::tools::ToolResult for CreatePrResult {
@@ -205,6 +270,7 @@ impl CreatePrResult {
         source_branch: String,
         patch_file: String,
         repository: String,
+        agent_labels: Vec<String>,
     ) -> Self {
         Self {
             name: Self::NAME.to_string(),
@@ -213,6 +279,7 @@ impl CreatePrResult {
             source_branch,
             patch_file,
             repository,
+            agent_labels,
         }
     }
 }
@@ -222,10 +289,20 @@ impl CreatePrResult {
 /// Example front matter:
 /// ```yaml
 /// safe-outputs:
-///   create_pr:
-///     auto_complete: true
-///     delete_source_branch: true
-///     squash_merge: true
+///   create-pull-request:
+///     target-branch: main
+///     draft: true
+///     auto-complete: true
+///     delete-source-branch: true
+///     squash-merge: true
+///     title-prefix: "[Bot] "
+///     if-no-changes: warn
+///     max-files: 100
+///     protected-files: blocked
+///     excluded-files:
+///       - "*.lock"
+///     allowed-labels:
+///       - "automated"
 ///     reviewers:
 ///       - "user@example.com"
 ///     labels:
@@ -237,6 +314,10 @@ pub struct CreatePrConfig {
     /// Target branch to merge into (default: "main")
     #[serde(default = "default_target_branch", rename = "target-branch")]
     pub target_branch: String,
+
+    /// Whether to create the PR as a draft (default: true)
+    #[serde(default = "default_true")]
+    pub draft: bool,
 
     /// Whether to set auto-complete on the PR (default: false)
     #[serde(default, rename = "auto-complete")]
@@ -250,6 +331,32 @@ pub struct CreatePrConfig {
     #[serde(default = "default_true", rename = "squash-merge")]
     pub squash_merge: bool,
 
+    /// Prefix to prepend to all PR titles
+    #[serde(default, rename = "title-prefix")]
+    pub title_prefix: Option<String>,
+
+    /// Behavior when the patch is empty: "warn" (default), "error", "ignore"
+    #[serde(default = "default_if_no_changes", rename = "if-no-changes")]
+    pub if_no_changes: String,
+
+    /// Maximum number of files allowed in a single PR (default: 100)
+    #[serde(default = "default_max_files", rename = "max-files")]
+    pub max_files: usize,
+
+    /// File protection policy: "blocked" (default) or "allowed"
+    /// Controls whether manifest/CI files can be modified
+    #[serde(default = "default_protected_files", rename = "protected-files")]
+    pub protected_files: String,
+
+    /// Glob patterns for files to exclude from the patch
+    #[serde(default, rename = "excluded-files")]
+    pub excluded_files: Vec<String>,
+
+    /// Allowlist of labels the agent is permitted to use.
+    /// If empty, any labels are accepted.
+    #[serde(default, rename = "allowed-labels")]
+    pub allowed_labels: Vec<String>,
+
     /// Reviewers to add to the PR (email addresses or user IDs)
     #[serde(default)]
     pub reviewers: Vec<String>,
@@ -261,6 +368,10 @@ pub struct CreatePrConfig {
     /// Work item IDs to link to the PR
     #[serde(default, rename = "work-items")]
     pub work_items: Vec<i32>,
+
+    /// Whether to create a fallback work item on PR failure (default: true)
+    #[serde(default = "default_true", rename = "fallback-as-work-item")]
+    pub fallback_as_work_item: bool,
 }
 
 fn default_target_branch() -> String {
@@ -271,16 +382,36 @@ fn default_true() -> bool {
     true
 }
 
+fn default_if_no_changes() -> String {
+    "warn".to_string()
+}
+
+fn default_max_files() -> usize {
+    DEFAULT_MAX_FILES
+}
+
+fn default_protected_files() -> String {
+    "blocked".to_string()
+}
+
 impl Default for CreatePrConfig {
     fn default() -> Self {
         Self {
             target_branch: default_target_branch(),
+            draft: true,
             auto_complete: false,
             delete_source_branch: true,
             squash_merge: true,
+            title_prefix: None,
+            if_no_changes: default_if_no_changes(),
+            max_files: default_max_files(),
+            protected_files: default_protected_files(),
+            excluded_files: Vec::new(),
+            allowed_labels: Vec::new(),
             reviewers: Vec::new(),
             labels: Vec::new(),
             work_items: Vec::new(),
+            fallback_as_work_item: true,
         }
     }
 }
@@ -319,8 +450,16 @@ impl Executor for CreatePrResult {
 
         let config: CreatePrConfig = ctx.get_tool_config("create-pull-request");
         debug!("Target branch from config: {}", config.target_branch);
+        debug!("Draft: {}", config.draft);
         debug!("Auto-complete: {}", config.auto_complete);
         debug!("Squash merge: {}", config.squash_merge);
+
+        // Apply title prefix if configured
+        let effective_title = if let Some(ref prefix) = config.title_prefix {
+            format!("{}{}", prefix, self.title)
+        } else {
+            self.title.clone()
+        };
 
         // Validate repository against allowed list
         debug!(
@@ -419,6 +558,40 @@ impl Executor for CreatePrResult {
             .context("Failed to read patch file")?;
         debug!("Patch content size: {} bytes", patch_content.len());
 
+        // Filter excluded files from patch content if configured
+        let patch_content = if !config.excluded_files.is_empty() {
+            debug!("Filtering {} excluded-files patterns from patch", config.excluded_files.len());
+            let filtered = filter_excluded_files_from_patch(&patch_content, &config.excluded_files);
+            debug!("Patch size after exclusion: {} bytes (was {} bytes)", filtered.len(), patch_content.len());
+            if filtered.trim().is_empty() {
+                // All files were excluded
+                match config.if_no_changes.as_str() {
+                    "error" => {
+                        return Ok(ExecutionResult::failure(
+                            "All files in patch were excluded by excluded-files patterns".to_string(),
+                        ));
+                    }
+                    "ignore" => {
+                        return Ok(ExecutionResult::success(
+                            "All files in patch were excluded — nothing to do".to_string(),
+                        ));
+                    }
+                    _ => {
+                        return Ok(ExecutionResult::failure(
+                            "All files in patch were excluded by excluded-files patterns".to_string(),
+                        ));
+                    }
+                }
+            }
+            // Rewrite the filtered patch to the patch file
+            tokio::fs::write(&patch_path, &filtered)
+                .await
+                .context("Failed to write filtered patch file")?;
+            filtered
+        } else {
+            patch_content
+        };
+
         // Security: Validate patch paths before applying
         debug!("Validating patch paths for security");
         if let Err(e) = validate_patch_paths(&patch_content) {
@@ -429,6 +602,39 @@ impl Executor for CreatePrResult {
             )));
         }
         debug!("Patch path validation passed");
+
+        // Extract file paths from patch for validation
+        let patch_paths = extract_paths_from_patch(&patch_content);
+
+        // Security: File protection check
+        if config.protected_files != "allowed" {
+            let protected = find_protected_files(&patch_paths);
+            if !protected.is_empty() {
+                warn!(
+                    "Patch modifies {} protected file(s): {:?}",
+                    protected.len(),
+                    protected
+                );
+                return Ok(ExecutionResult::failure(format!(
+                    "Patch modifies protected files (set protected-files: allowed to override): {}",
+                    protected.join(", ")
+                )));
+            }
+        }
+
+        // Security: Max files per PR check
+        if patch_paths.len() > config.max_files {
+            warn!(
+                "Patch contains {} files, exceeding max of {}",
+                patch_paths.len(),
+                config.max_files
+            );
+            return Ok(ExecutionResult::failure(format!(
+                "Patch contains {} files, exceeding maximum of {} files per PR",
+                patch_paths.len(),
+                config.max_files
+            )));
+        }
 
         // Use target branch from config
         let target_branch = &config.target_branch;
@@ -539,79 +745,128 @@ impl Executor for CreatePrResult {
         }
         debug!("Source branch created");
 
-        // Security: Validate patch with git apply --check first (dry run)
-        debug!("Running git apply --check (dry run)");
-        let check_output = Command::new("git")
-            .args(["apply", "--check", &patch_path.to_string_lossy()])
+        // Apply the format-patch using git am --3way for proper conflict handling.
+        // git am handles the email-style patch format from git format-patch and
+        // --3way enables three-way merge for better conflict resolution.
+        debug!("Applying patch with git am --3way");
+        let am_output = Command::new("git")
+            .args(["am", "--3way", &patch_path.to_string_lossy()])
             .current_dir(&worktree_path)
             .output()
             .await
-            .context("Failed to run git apply --check")?;
+            .context("Failed to run git am")?;
 
-        if !check_output.status.success() {
-            warn!(
-                "Patch dry-run failed: {}",
-                String::from_utf8_lossy(&check_output.stderr)
-            );
-            return Ok(ExecutionResult::failure(format!(
-                "Patch validation failed (git apply --check): {}",
-                String::from_utf8_lossy(&check_output.stderr)
-            )));
+        // Track whether git am created a commit (affects how we collect changes)
+        let patch_committed = am_output.status.success();
+
+        if !patch_committed {
+            let stderr = String::from_utf8_lossy(&am_output.stderr);
+            debug!("git am --3way failed: {}", stderr);
+
+            // Abort the failed am to leave worktree clean
+            let _ = Command::new("git")
+                .args(["am", "--abort"])
+                .current_dir(&worktree_path)
+                .output()
+                .await;
+
+            // Fallback: try git apply (handles plain diff format for backward compatibility)
+            debug!("Falling back to git apply --3way");
+            let apply_output = Command::new("git")
+                .args(["apply", "--3way", &patch_path.to_string_lossy()])
+                .current_dir(&worktree_path)
+                .output()
+                .await
+                .context("Failed to run git apply --3way")?;
+
+            if !apply_output.status.success() {
+                let err_msg = format!(
+                    "Patch could not be applied (conflicts): {}",
+                    String::from_utf8_lossy(&apply_output.stderr)
+                );
+                warn!("{}", err_msg);
+                return Ok(ExecutionResult::failure(err_msg));
+            }
+            debug!("Patch applied with git apply --3way fallback");
+        } else {
+            debug!("Patch applied successfully with git am");
         }
-        debug!("Patch dry-run passed");
 
-        // Apply the patch
-        debug!("Applying patch");
-        let apply_output = Command::new("git")
-            .args(["apply", &patch_path.to_string_lossy()])
-            .current_dir(&worktree_path)
-            .output()
-            .await
-            .context("Failed to run git apply")?;
-
-        if !apply_output.status.success() {
-            warn!(
-                "Failed to apply patch: {}",
-                String::from_utf8_lossy(&apply_output.stderr)
-            );
-            return Ok(ExecutionResult::failure(format!(
-                "Failed to apply patch: {}",
-                String::from_utf8_lossy(&apply_output.stderr)
-            )));
-        }
-        debug!("Patch applied successfully");
-
-        // Get list of changed files using git status
+        // Collect changed files. The method depends on how the patch was applied:
+        // - git am: changes are committed → use git diff-tree to compare with parent
+        // - git apply: changes are in working tree → use git status --porcelain
         debug!("Getting list of changed files");
-        let status_output = Command::new("git")
-            .args(["status", "--porcelain"])
-            .current_dir(&worktree_path)
-            .output()
-            .await
-            .context("Failed to run git status")?;
+        let (status_str, use_diff_tree) = if patch_committed {
+            let diff_tree_output = Command::new("git")
+                .args(["diff-tree", "--no-commit-id", "-r", "--name-status", "HEAD"])
+                .current_dir(&worktree_path)
+                .output()
+                .await
+                .context("Failed to run git diff-tree")?;
 
-        if !status_output.status.success() {
-            warn!(
-                "Failed to get git status: {}",
-                String::from_utf8_lossy(&status_output.stderr)
-            );
-            return Ok(ExecutionResult::failure(format!(
-                "Failed to get git status: {}",
-                String::from_utf8_lossy(&status_output.stderr)
-            )));
-        }
+            if !diff_tree_output.status.success() {
+                warn!(
+                    "Failed to get diff-tree: {}",
+                    String::from_utf8_lossy(&diff_tree_output.stderr)
+                );
+                return Ok(ExecutionResult::failure(format!(
+                    "Failed to get diff-tree: {}",
+                    String::from_utf8_lossy(&diff_tree_output.stderr)
+                )));
+            }
+            (String::from_utf8_lossy(&diff_tree_output.stdout).to_string(), true)
+        } else {
+            let status_output = Command::new("git")
+                .args(["status", "--porcelain"])
+                .current_dir(&worktree_path)
+                .output()
+                .await
+                .context("Failed to run git status")?;
 
-        // Parse changed files and build ADO push payload
-        let status_str = String::from_utf8_lossy(&status_output.stdout);
-        debug!("Git status output:\n{}", status_str);
-        let changes = collect_changes_from_worktree(&worktree_path, &status_str).await?;
+            if !status_output.status.success() {
+                warn!(
+                    "Failed to get git status: {}",
+                    String::from_utf8_lossy(&status_output.stderr)
+                );
+                return Ok(ExecutionResult::failure(format!(
+                    "Failed to get git status: {}",
+                    String::from_utf8_lossy(&status_output.stderr)
+                )));
+            }
+            (String::from_utf8_lossy(&status_output.stdout).to_string(), false)
+        };
+
+        debug!("Change detection output:\n{}", status_str);
+        let changes = if use_diff_tree {
+            collect_changes_from_diff_tree(&worktree_path, &status_str).await?
+        } else {
+            collect_changes_from_worktree(&worktree_path, &status_str).await?
+        };
         debug!("Collected {} file changes for push", changes.len());
 
         if changes.is_empty() {
-            warn!("No changes detected after applying patch");
-            return Ok(ExecutionResult::failure(
-                "No changes detected after applying patch".to_string(),
-            ));
+            // Handle no-changes based on config
+            match config.if_no_changes.as_str() {
+                "error" => {
+                    warn!("No changes detected after applying patch (if-no-changes: error)");
+                    return Ok(ExecutionResult::failure(
+                        "No changes detected after applying patch".to_string(),
+                    ));
+                }
+                "ignore" => {
+                    info!("No changes detected after applying patch (if-no-changes: ignore)");
+                    return Ok(ExecutionResult::success(
+                        "No changes detected — nothing to do".to_string(),
+                    ));
+                }
+                _ => {
+                    // "warn" (default)
+                    warn!("No changes detected after applying patch (if-no-changes: warn)");
+                    return Ok(ExecutionResult::failure(
+                        "No changes detected after applying patch".to_string(),
+                    ));
+                }
+            }
         }
 
         // Use ADO REST API to create branch and push changes
@@ -671,7 +926,7 @@ impl Executor for CreatePrResult {
                 "oldObjectId": "0000000000000000000000000000000000000000"
             }],
             "commits": [{
-                "comment": self.title,
+                "comment": effective_title,
                 "changes": changes,
                 "parents": [base_commit]
             }]
@@ -701,6 +956,9 @@ impl Executor for CreatePrResult {
         }
         debug!("Changes pushed successfully");
 
+        // Append provenance footer to description
+        let description_with_footer = format!("{}{}", self.description, generate_pr_footer());
+
         // Create the pull request via REST API
         info!("Creating pull request");
         let pr_url = format!(
@@ -712,8 +970,9 @@ impl Executor for CreatePrResult {
         let mut pr_body = serde_json::json!({
             "sourceRefName": source_ref,
             "targetRefName": target_ref,
-            "title": self.title,
-            "description": self.description,
+            "title": effective_title,
+            "description": description_with_footer,
+            "isDraft": config.draft,
         });
 
         // Add work item links if configured
@@ -728,12 +987,40 @@ impl Executor for CreatePrResult {
             );
         }
 
-        // Add labels if configured
-        if !config.labels.is_empty() {
-            debug!("Adding {} labels", config.labels.len());
+        // Validate and add labels (merge operator labels + validated agent labels)
+        let mut all_labels = config.labels.clone();
+
+        // Validate agent-provided labels against allowed-labels
+        if !self.agent_labels.is_empty() {
+            if !config.allowed_labels.is_empty() {
+                let disallowed: Vec<_> = self
+                    .agent_labels
+                    .iter()
+                    .filter(|l| !config.allowed_labels.contains(l))
+                    .collect();
+                if !disallowed.is_empty() {
+                    warn!(
+                        "Agent labels not in allowed-labels: {:?}",
+                        disallowed
+                    );
+                    return Ok(ExecutionResult::failure(format!(
+                        "Agent-provided labels not in allowed-labels: {}",
+                        disallowed.iter().map(|l| l.as_str()).collect::<Vec<_>>().join(", ")
+                    )));
+                }
+            }
+            // Merge agent labels (dedup)
+            for label in &self.agent_labels {
+                if !all_labels.contains(label) {
+                    all_labels.push(label.clone());
+                }
+            }
+        }
+
+        if !all_labels.is_empty() {
+            debug!("Adding {} labels", all_labels.len());
             pr_body["labels"] = serde_json::json!(
-                config
-                    .labels
+                all_labels
                     .iter()
                     .map(|l| serde_json::json!({"name": l}))
                     .collect::<Vec<_>>()
@@ -752,6 +1039,41 @@ impl Executor for CreatePrResult {
             let status = pr_response.status();
             let body = pr_response.text().await.unwrap_or_default();
             warn!("Failed to create pull request: {} - {}", status, body);
+
+            // Fallback: create a work item with branch reference if enabled
+            if config.fallback_as_work_item {
+                info!("PR creation failed, recording fallback info");
+                let fallback_description = format!(
+                    "## Pull Request Creation Failed\n\n\
+                    A pull request could not be created automatically.\n\n\
+                    **Branch:** `{}`\n\
+                    **Target:** `{}`\n\
+                    **Repository:** `{}`\n\n\
+                    **Error:** {} - {}\n\n\
+                    ### Original PR Description\n\n\
+                    {}\n\n\
+                    ---\n\
+                    *To create the PR manually, merge branch `{}` into `{}`.*",
+                    self.source_branch, target_branch, self.repository,
+                    status, body,
+                    self.description,
+                    self.source_branch, target_branch
+                );
+                return Ok(ExecutionResult::failure_with_data(
+                    format!(
+                        "Failed to create pull request: {} - {}. Branch '{}' was pushed. Consider creating a work item to track the manual PR creation.",
+                        status, body, self.source_branch,
+                    ),
+                    serde_json::json!({
+                        "fallback": "work-item",
+                        "branch": self.source_branch,
+                        "target_branch": target_branch,
+                        "repository": self.repository,
+                        "description": fallback_description
+                    }),
+                ));
+            }
+
             return Ok(ExecutionResult::failure(format!(
                 "Failed to create pull request: {} - {}",
                 status, body
@@ -866,17 +1188,19 @@ impl Executor for CreatePrResult {
         }
 
         info!(
-            "PR #{} created successfully: {} -> {}",
-            pr_id, self.source_branch, target_branch
+            "PR #{} created successfully: {} -> {}{}",
+            pr_id, self.source_branch, target_branch,
+            if config.draft { " (draft)" } else { "" }
         );
 
         Ok(ExecutionResult::success_with_data(
-            format!("Created pull request #{}: {}", pr_id, self.title),
+            format!("Created pull request #{}: {}", pr_id, effective_title),
             serde_json::json!({
                 "pull_request_id": pr_id,
                 "url": pr_web_url,
                 "source_branch": self.source_branch,
-                "target_branch": target_branch
+                "target_branch": target_branch,
+                "draft": config.draft
             }),
         ))
     }
@@ -998,7 +1322,98 @@ async fn collect_changes_from_worktree(
     Ok(changes)
 }
 
-/// Validate that patch file paths don't contain dangerous patterns
+/// Collect file changes from a git diff-tree --name-status output.
+///
+/// Used when git am has already committed the changes. Parses the output format:
+/// `M\tpath`, `A\tpath`, `D\tpath`, `R100\told_path\tnew_path`
+async fn collect_changes_from_diff_tree(
+    worktree_path: &std::path::Path,
+    diff_tree_output: &str,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    let mut changes = Vec::new();
+
+    for line in diff_tree_output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 2 {
+            continue;
+        }
+
+        let status_code = parts[0];
+        let file_path = parts[1];
+
+        // Validate path for security
+        validate_single_path(file_path)?;
+
+        let full_path = worktree_path.join(file_path);
+
+        if status_code == "D" {
+            // Deleted file
+            changes.push(serde_json::json!({
+                "changeType": "delete",
+                "item": {
+                    "path": format!("/{}", file_path)
+                }
+            }));
+        } else if status_code == "A" {
+            // Added file
+            if full_path.is_file() {
+                let content = tokio::fs::read_to_string(&full_path)
+                    .await
+                    .with_context(|| format!("Failed to read new file: {}", file_path))?;
+
+                changes.push(serde_json::json!({
+                    "changeType": "add",
+                    "item": {
+                        "path": format!("/{}", file_path)
+                    },
+                    "newContent": {
+                        "content": content,
+                        "contentType": "rawtext"
+                    }
+                }));
+            }
+        } else if status_code.starts_with('R') && parts.len() >= 3 {
+            // Renamed file: R100\told_path\tnew_path
+            let old_path = file_path;
+            let new_path = parts[2];
+            validate_single_path(old_path)?;
+            validate_single_path(new_path)?;
+
+            changes.push(serde_json::json!({
+                "changeType": "rename",
+                "sourceServerItem": format!("/{}", old_path),
+                "item": {
+                    "path": format!("/{}", new_path)
+                }
+            }));
+        } else {
+            // Modified or other — read current content
+            if full_path.is_file() {
+                let content = tokio::fs::read_to_string(&full_path)
+                    .await
+                    .with_context(|| format!("Failed to read modified file: {}", file_path))?;
+
+                changes.push(serde_json::json!({
+                    "changeType": "edit",
+                    "item": {
+                        "path": format!("/{}", file_path)
+                    },
+                    "newContent": {
+                        "content": content,
+                        "contentType": "rawtext"
+                    }
+                }));
+            }
+        }
+    }
+
+    Ok(changes)
+}
 ///
 /// Security checks:
 /// - No path traversal (..)
@@ -1078,6 +1493,165 @@ fn validate_single_path(path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Extract all file paths from a patch/diff content.
+/// Returns deduplicated list of file paths referenced in diff headers.
+fn extract_paths_from_patch(patch_content: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for line in patch_content.lines() {
+        if line.starts_with("diff --git") {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            for part in parts.iter().skip(2) {
+                let path = part.trim_start_matches("a/").trim_start_matches("b/");
+                if !path.is_empty() {
+                    paths.push(path.to_string());
+                }
+            }
+        } else if line.starts_with("rename from ") || line.starts_with("rename to ") ||
+                  line.starts_with("copy from ") || line.starts_with("copy to ") {
+            if let Some(path) = line.split_whitespace().last() {
+                if !path.is_empty() {
+                    paths.push(path.to_string());
+                }
+            }
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+/// Check if any file paths in the patch are protected.
+///
+/// Protected files include:
+/// - Runtime manifests (package.json, go.mod, Cargo.toml, etc.)
+/// - CI/pipeline configurations (.github/, .pipelines/, etc.)
+/// - Agent instruction files (.agents/, .claude/, .codex/, .copilot/)
+/// - Access control files (CODEOWNERS)
+///
+/// Returns a list of protected file paths found, or empty vec if none.
+fn find_protected_files(paths: &[String]) -> Vec<String> {
+    let mut protected = Vec::new();
+    for path in paths {
+        let lower_path = path.to_lowercase();
+
+        // Check basename against manifest list
+        let basename = path.rsplit('/').next().unwrap_or(path);
+        let lower_basename = basename.to_lowercase();
+        for manifest in PROTECTED_MANIFEST_BASENAMES {
+            if lower_basename == *manifest {
+                protected.push(path.clone());
+                break;
+            }
+        }
+
+        // Check path prefixes
+        for prefix in PROTECTED_PATH_PREFIXES {
+            if lower_path.starts_with(prefix) || lower_path.starts_with(&prefix.replace('/', "\\")) {
+                if !protected.contains(path) {
+                    protected.push(path.clone());
+                }
+                break;
+            }
+        }
+
+        // Check exact paths
+        for exact in PROTECTED_EXACT_PATHS {
+            if lower_path == exact.to_lowercase() {
+                if !protected.contains(path) {
+                    protected.push(path.clone());
+                }
+                break;
+            }
+        }
+    }
+    protected
+}
+
+/// Check if file paths match an allowed-files glob allowlist.
+/// Returns list of paths that do NOT match any allowed pattern.
+#[cfg(test)]
+fn find_disallowed_files(paths: &[String], allowed_patterns: &[String]) -> Vec<String> {
+    if allowed_patterns.is_empty() {
+        return Vec::new(); // No allowlist = all files allowed
+    }
+    paths
+        .iter()
+        .filter(|path| {
+            !allowed_patterns
+                .iter()
+                .any(|pattern| glob_match::glob_match(pattern, path))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Generate a provenance footer for the PR body
+fn generate_pr_footer() -> String {
+    let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+    format!(
+        "\n\n---\n\
+        > 🤖 *This pull request was created by an automated agent.*\n\
+        > Generated at: {}\n\
+        > Compiler: ado-aw v{}",
+        timestamp,
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+/// Filter out diff entries for files matching excluded-files glob patterns.
+/// Splits the patch into per-file diff blocks and removes those matching any pattern.
+fn filter_excluded_files_from_patch(patch_content: &str, excluded_patterns: &[String]) -> String {
+    if excluded_patterns.is_empty() {
+        return patch_content.to_string();
+    }
+
+    let mut result = String::with_capacity(patch_content.len());
+    let mut current_block = String::new();
+    let mut current_path: Option<String> = None;
+
+    for line in patch_content.lines() {
+        if line.starts_with("diff --git") {
+            // Flush previous block if it's not excluded
+            if let Some(ref path) = current_path {
+                if !excluded_patterns.iter().any(|p| glob_match::glob_match(p, path)) {
+                    result.push_str(&current_block);
+                } else {
+                    debug!("Excluding file from patch: {}", path);
+                }
+            } else if !current_block.is_empty() {
+                result.push_str(&current_block);
+            }
+
+            // Start new block
+            current_block = String::new();
+            current_block.push_str(line);
+            current_block.push('\n');
+
+            // Extract path from "diff --git a/path b/path"
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            current_path = parts.get(3).map(|p| {
+                p.trim_start_matches("b/").to_string()
+            });
+        } else {
+            current_block.push_str(line);
+            current_block.push('\n');
+        }
+    }
+
+    // Flush last block
+    if let Some(ref path) = current_path {
+        if !excluded_patterns.iter().any(|p| glob_match::glob_match(p, path)) {
+            result.push_str(&current_block);
+        } else {
+            debug!("Excluding file from patch: {}", path);
+        }
+    } else if !current_block.is_empty() {
+        result.push_str(&current_block);
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1088,6 +1662,7 @@ mod tests {
             title: "Fix bug in parser".to_string(),
             description: "This PR fixes a critical bug in the parser module.".to_string(),
             repository: None,
+            labels: vec![],
         };
         assert!(params.validate().is_ok());
     }
@@ -1098,6 +1673,7 @@ mod tests {
             title: "Fix".to_string(),
             description: "This PR fixes a critical bug in the parser module.".to_string(),
             repository: None,
+            labels: vec![],
         };
         assert!(params.validate().is_err());
     }
@@ -1108,6 +1684,7 @@ mod tests {
             title: "Fix bug in parser".to_string(),
             description: "Fix bug".to_string(),
             repository: None,
+            labels: vec![],
         };
         assert!(params.validate().is_err());
     }
@@ -1116,9 +1693,16 @@ mod tests {
     fn test_config_default_target_branch() {
         let config = CreatePrConfig::default();
         assert_eq!(config.target_branch, "main");
+        assert!(config.draft);
         assert!(!config.auto_complete);
         assert!(config.delete_source_branch);
         assert!(config.squash_merge);
+        assert_eq!(config.if_no_changes, "warn");
+        assert_eq!(config.max_files, 100);
+        assert_eq!(config.protected_files, "blocked");
+        assert!(config.excluded_files.is_empty());
+        assert!(config.allowed_labels.is_empty());
+        assert!(config.fallback_as_work_item);
     }
 
     #[test]
@@ -1212,5 +1796,111 @@ new file mode 100755
     #[test]
     fn test_validate_single_path_null_byte() {
         assert!(validate_single_path("file\0.txt").is_err());
+    }
+
+    // ─── Protected files detection ──────────────────────────────────────────
+
+    #[test]
+    fn test_find_protected_files_manifests() {
+        let paths = vec![
+            "src/main.rs".to_string(),
+            "package.json".to_string(),
+            "go.mod".to_string(),
+        ];
+        let protected = find_protected_files(&paths);
+        assert_eq!(protected, vec!["package.json", "go.mod"]);
+    }
+
+    #[test]
+    fn test_find_protected_files_ci_configs() {
+        let paths = vec![
+            "src/lib.rs".to_string(),
+            ".github/workflows/ci.yml".to_string(),
+            ".pipelines/build.yml".to_string(),
+        ];
+        let protected = find_protected_files(&paths);
+        assert!(protected.contains(&".github/workflows/ci.yml".to_string()));
+        assert!(protected.contains(&".pipelines/build.yml".to_string()));
+    }
+
+    #[test]
+    fn test_find_protected_files_agent_configs() {
+        let paths = vec![
+            ".agents/config.md".to_string(),
+            ".claude/settings.json".to_string(),
+            ".copilot/instructions.md".to_string(),
+        ];
+        let protected = find_protected_files(&paths);
+        assert_eq!(protected.len(), 3);
+    }
+
+    #[test]
+    fn test_find_protected_files_codeowners() {
+        let paths = vec!["CODEOWNERS".to_string(), "README.md".to_string()];
+        let protected = find_protected_files(&paths);
+        assert_eq!(protected, vec!["CODEOWNERS"]);
+    }
+
+    #[test]
+    fn test_find_protected_files_none() {
+        let paths = vec![
+            "src/main.rs".to_string(),
+            "docs/README.md".to_string(),
+        ];
+        let protected = find_protected_files(&paths);
+        assert!(protected.is_empty());
+    }
+
+    #[test]
+    fn test_find_protected_files_nested_manifest() {
+        let paths = vec!["services/api/package.json".to_string()];
+        let protected = find_protected_files(&paths);
+        assert_eq!(protected, vec!["services/api/package.json"]);
+    }
+
+    // ─── Excluded files filtering ───────────────────────────────────────────
+
+    #[test]
+    fn test_filter_excluded_files_basic() {
+        let patch = "diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/Cargo.lock b/Cargo.lock\n--- a/Cargo.lock\n+++ b/Cargo.lock\n@@ -1 +1 @@\n-old\n+new\n";
+        let result = filter_excluded_files_from_patch(patch, &["*.lock".to_string()]);
+        assert!(result.contains("src/main.rs"));
+        assert!(!result.contains("Cargo.lock"));
+    }
+
+    #[test]
+    fn test_filter_excluded_files_empty_patterns() {
+        let patch = "diff --git a/file.txt b/file.txt\n+content\n";
+        let result = filter_excluded_files_from_patch(patch, &[]);
+        assert_eq!(result, patch);
+    }
+
+    // ─── Extract paths from patch ───────────────────────────────────────────
+
+    #[test]
+    fn test_extract_paths_from_patch() {
+        let patch = "diff --git a/src/main.rs b/src/main.rs\nindex abc..def\n--- a/src/main.rs\n+++ b/src/main.rs\ndiff --git a/README.md b/README.md\n";
+        let paths = extract_paths_from_patch(patch);
+        assert!(paths.contains(&"src/main.rs".to_string()));
+        assert!(paths.contains(&"README.md".to_string()));
+    }
+
+    // ─── Allowed-labels validation ──────────────────────────────────────────
+
+    #[test]
+    fn test_find_disallowed_files_with_allowlist() {
+        let paths = vec!["src/main.rs".to_string(), "tests/test.rs".to_string(), "docs/api.md".to_string()];
+        let allowed = vec!["src/**".to_string()];
+        let disallowed = find_disallowed_files(&paths, &allowed);
+        assert!(disallowed.contains(&"tests/test.rs".to_string()));
+        assert!(disallowed.contains(&"docs/api.md".to_string()));
+        assert!(!disallowed.contains(&"src/main.rs".to_string()));
+    }
+
+    #[test]
+    fn test_find_disallowed_files_empty_allowlist() {
+        let paths = vec!["anything.rs".to_string()];
+        let disallowed = find_disallowed_files(&paths, &[]);
+        assert!(disallowed.is_empty());
     }
 }

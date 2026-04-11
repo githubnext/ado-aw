@@ -30,6 +30,8 @@ terminal_size = "0.4.3"
 url = "2.5.8"
 axum = { version = "0.8.8", features = ["tokio"] }
 subtle = "2.6.1"
+rand = "0.10.1"
+glob-match = "0.2.1"
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["blocking"] }

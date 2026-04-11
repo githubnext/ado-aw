@@ -140,6 +140,15 @@ impl ExecutionResult {
             data: None,
         }
     }
+
+    /// Create a failed execution result with additional data
+    pub fn failure_with_data(message: impl Into<String>, data: serde_json::Value) -> Self {
+        Self {
+            success: false,
+            message: message.into(),
+            data: Some(data),
+        }
+    }
 }
 
 /// Trait for executing tool results in Stage 2 of the pipeline.

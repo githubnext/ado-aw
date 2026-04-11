@@ -52,15 +52,11 @@ fn slugify_title(title: &str) -> String {
     collapsed.chars().take(50).collect()
 }
 
-/// Generate a short random suffix for branch uniqueness
+/// Generate a short cryptographically random suffix for branch uniqueness
 fn generate_short_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    // Take last 6 hex digits of timestamp for short unique suffix
-    format!("{:06x}", (timestamp & 0xFFFFFF) as u32)
+    use rand::RngExt;
+    let value: u32 = rand::rng().random();
+    format!("{:08x}", value)
 }
 
 // ============================================================================
@@ -198,79 +194,80 @@ impl SafeOutputs {
             }
         };
 
-        // Run git diff against the target branch to capture all changes
-        // Try origin/main first (remote tracking), then main, then HEAD as fallback
-        let diff_targets = ["origin/main", "main", "HEAD"];
-        let mut last_error = String::new();
-        let mut diff_output = None;
+        // Generate patch using git format-patch for proper commit metadata,
+        // rename detection, and binary file handling.
+        //
+        // Steps:
+        // 1. Stage all changes (tracked + untracked)
+        // 2. Create a temporary commit
+        // 3. Generate format-patch output
+        // 4. Reset to undo the temporary commit (preserving working tree)
 
-        for target in &diff_targets {
-            let output = Command::new("git")
-                .args(["diff", target])
-                .current_dir(&git_dir)
-                .output()
-                .await
-                .map_err(|e| {
-                    anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git diff: {}", e))
-                })?;
-
-            if output.status.success() {
-                diff_output = Some(output);
-                break;
-            }
-            last_error = String::from_utf8_lossy(&output.stderr).to_string();
-        }
-
-        let mut patch = if let Some(output) = diff_output {
-            String::from_utf8_lossy(&output.stdout).to_string()
-        } else {
-            return Err(anyhow_to_mcp_error(anyhow::anyhow!(
-                "git diff failed against all targets (origin/main, main, HEAD): {}",
-                last_error
-            )));
-        };
-
-        // Also include untracked files that have been added
-        let status_output = Command::new("git")
-            .args(["status", "--porcelain"])
+        // Stage all changes including untracked files
+        let add_output = Command::new("git")
+            .args(["add", "-A"])
             .current_dir(&git_dir)
             .output()
             .await
-            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git status: {}", e)))?;
+            .map_err(|e| {
+                anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git add -A: {}", e))
+            })?;
 
-        if !status_output.status.success() {
+        if !add_output.status.success() {
             return Err(anyhow_to_mcp_error(anyhow::anyhow!(
-                "git status failed: {}",
-                String::from_utf8_lossy(&status_output.stderr)
+                "git add -A failed: {}",
+                String::from_utf8_lossy(&add_output.stderr)
             )));
         }
 
-        let status = String::from_utf8_lossy(&status_output.stdout);
-        for line in status.lines() {
-            if line.starts_with("?? ") {
-                // Untracked file - generate a diff for it
-                let file_path = line[3..].trim();
-                let file_full_path = git_dir.join(file_path);
+        // Create a temporary commit with the staged changes
+        let commit_output = Command::new("git")
+            .args(["commit", "-m", "agent changes", "--allow-empty", "--no-verify"])
+            .current_dir(&git_dir)
+            .output()
+            .await
+            .map_err(|e| {
+                anyhow_to_mcp_error(anyhow::anyhow!("Failed to create temporary commit: {}", e))
+            })?;
 
-                if file_full_path.is_file() {
-                    if let Ok(content) = tokio::fs::read_to_string(&file_full_path).await {
-                        patch.push_str(&format!("diff --git a/{} b/{}\n", file_path, file_path));
-                        patch.push_str("new file mode 100644\n");
-                        patch.push_str("--- /dev/null\n");
-                        patch.push_str(&format!("+++ b/{}\n", file_path));
-
-                        let line_count = content.lines().count();
-                        patch.push_str(&format!("@@ -0,0 +1,{} @@\n", line_count));
-
-                        for line in content.lines() {
-                            patch.push('+');
-                            patch.push_str(line);
-                            patch.push('\n');
-                        }
-                    }
-                }
-            }
+        if !commit_output.status.success() {
+            // Reset staging on failure
+            let _ = Command::new("git")
+                .args(["reset", "HEAD", "--quiet"])
+                .current_dir(&git_dir)
+                .output()
+                .await;
+            return Err(anyhow_to_mcp_error(anyhow::anyhow!(
+                "Failed to create temporary commit: {}",
+                String::from_utf8_lossy(&commit_output.stderr)
+            )));
         }
+
+        // Generate format-patch for the last commit (the temporary one)
+        let format_patch_output = Command::new("git")
+            .args(["format-patch", "-1", "--stdout", "-M"])
+            .current_dir(&git_dir)
+            .output()
+            .await
+            .map_err(|e| {
+                anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git format-patch: {}", e))
+            })?;
+
+        // Undo the temporary commit but keep changes in working tree
+        let _ = Command::new("git")
+            .args(["reset", "HEAD~1", "--mixed", "--quiet"])
+            .current_dir(&git_dir)
+            .output()
+            .await;
+
+        if !format_patch_output.status.success() {
+            return Err(anyhow_to_mcp_error(anyhow::anyhow!(
+                "git format-patch failed: {}",
+                String::from_utf8_lossy(&format_patch_output.stderr)
+            )));
+        }
+
+        let patch = String::from_utf8_lossy(&format_patch_output.stdout).to_string();
 
         Ok(patch)
     }
@@ -407,7 +404,10 @@ fields you want to update."
 
     #[tool(
         name = "create-pull-request",
-        description = "Create a new pull request to propose code changes. Use this after making file edits to submit them for review and merging. The PR will be created from the current branch with your committed changes. Use 'self' for the pipeline's own repository, or a repository alias from the checkout list."
+        description = "Create a new pull request to propose code changes. Before calling this tool, \
+stage and commit your changes using git add and git commit — each logical change should be its \
+own commit with a descriptive message. The PR will be created from your committed changes. \
+Use 'self' for the pipeline's own repository, or a repository alias from the checkout list."
     )]
     async fn create_pr(
         &self,
@@ -464,6 +464,7 @@ fields you want to update."
             source_branch,
             patch_filename,
             repository.to_string(),
+            sanitized.labels,
         );
 
         // Write to safe outputs
@@ -1035,7 +1036,7 @@ mod tests {
     #[test]
     fn test_generate_short_id_format() {
         let id = generate_short_id();
-        assert_eq!(id.len(), 6);
+        assert_eq!(id.len(), 8);
         assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
     }
 

@@ -261,9 +261,9 @@ pub fn validate_checkout_list(repositories: &[Repository], checkout: &[String]) 
     Ok(())
 }
 
-/// Default bash commands allowed for agents (matches gh-aw defaults + yq)
+/// Default bash commands allowed for agents (matches gh-aw defaults + yq + git)
 const DEFAULT_BASH_COMMANDS: &[&str] = &[
-    "cat", "date", "echo", "grep", "head", "ls", "pwd", "sort", "tail", "uniq", "wc", "yq",
+    "cat", "date", "echo", "git", "grep", "head", "ls", "pwd", "sort", "tail", "uniq", "wc", "yq",
 ];
 
 /// Generate copilot CLI params from front matter configuration
