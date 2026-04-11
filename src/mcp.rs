@@ -943,19 +943,17 @@ pub async fn run_http(
                 }
 
                 // Constant-time comparison to prevent timing side-channels.
-                // Pad to equal length so ct_eq compares all bytes even when lengths differ.
+                // Length check is non-constant-time but leaking length doesn't
+                // help brute-force a high-entropy token.
                 if let Some(auth) = req.headers().get("authorization") {
                     if let Ok(auth_str) = auth.to_str() {
                         let expected_header = format!("Bearer {}", expected);
                         use subtle::ConstantTimeEq;
                         let expected_bytes = expected_header.as_bytes();
                         let provided_bytes = auth_str.as_bytes();
-                        let len = expected_bytes.len().max(provided_bytes.len());
-                        let mut e = vec![0u8; len];
-                        let mut p = vec![0u8; len];
-                        e[..expected_bytes.len()].copy_from_slice(expected_bytes);
-                        p[..provided_bytes.len()].copy_from_slice(provided_bytes);
-                        if e.ct_eq(&p).into() {
+                        if expected_bytes.len() == provided_bytes.len()
+                            && expected_bytes.ct_eq(provided_bytes).into()
+                        {
                             return next.run(req).await;
                         }
                     }
