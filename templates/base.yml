@@ -17,6 +17,7 @@ jobs:
   - job: PerformAgenticTask
     displayName: "{{ agent_name }} (Agent Automations)"
     {{ agentic_depends_on }}
+    {{ job_timeout }}
     pool:
       name: {{ pool }}
     steps:
@@ -223,7 +224,7 @@ jobs:
             --container-workdir "{{ working_directory }}" \
             --log-level info \
             --proxy-logs-dir "$(Agent.TempDirectory)/staging/logs/firewall" \
-            -- '/tmp/awf-tools/copilot --prompt "$(cat /tmp/awf-tools/agent-prompt.md)" --additional-mcp-config @/tmp/awf-tools/mcp-config.json {{ agency_params }}' \
+            -- '/tmp/awf-tools/copilot --prompt "$(cat /tmp/awf-tools/agent-prompt.md)" --additional-mcp-config @/tmp/awf-tools/mcp-config.json {{ copilot_params }}' \
             > "$AGENT_OUTPUT_FILE" 2>&1 \
             && AGENT_EXIT_CODE=0 || AGENT_EXIT_CODE=$?
 
@@ -262,9 +263,6 @@ jobs:
           mkdir -p "$(Agent.TempDirectory)/staging/logs"
           if [ -d ~/.copilot/logs ]; then
             cp -r ~/.copilot/logs/* "$(Agent.TempDirectory)/staging/logs/" 2>/dev/null || true
-          fi
-          if [ -d ~/.agency/logs ]; then
-            cp -r ~/.agency/logs/* "$(Agent.TempDirectory)/staging/logs/" 2>/dev/null || true
           fi
           if [ -d ~/.ado-aw/logs ]; then
             cp -r ~/.ado-aw/logs/* "$(Agent.TempDirectory)/staging/logs/" 2>/dev/null || true
@@ -395,7 +393,7 @@ jobs:
             --container-workdir "{{ working_directory }}" \
             --log-level info \
             --proxy-logs-dir "$(Agent.TempDirectory)/threat-analysis-logs/firewall" \
-            -- '/tmp/awf-tools/copilot --prompt "$(cat /tmp/awf-tools/threat-analysis-prompt.md)" {{ agency_params }}' \
+            -- '/tmp/awf-tools/copilot --prompt "$(cat /tmp/awf-tools/threat-analysis-prompt.md)" {{ copilot_params }}' \
             > "$THREAT_OUTPUT_FILE" 2>&1
           AGENT_EXIT_CODE=$?
 
@@ -480,10 +478,6 @@ jobs:
             mkdir -p "$(Agent.TempDirectory)/analyzed_outputs/logs/copilot"
             cp -r ~/.copilot/logs/* "$(Agent.TempDirectory)/analyzed_outputs/logs/copilot/" 2>/dev/null || true
           fi
-          if [ -d ~/.agency/logs ]; then
-            mkdir -p "$(Agent.TempDirectory)/analyzed_outputs/logs/agency"
-            cp -r ~/.agency/logs/* "$(Agent.TempDirectory)/analyzed_outputs/logs/agency/" 2>/dev/null || true
-          fi
           if [ -d ~/.ado-aw/logs ]; then
             mkdir -p "$(Agent.TempDirectory)/analyzed_outputs/logs/ado-aw"
             cp -r ~/.ado-aw/logs/* "$(Agent.TempDirectory)/analyzed_outputs/logs/ado-aw/" 2>/dev/null || true
@@ -554,10 +548,6 @@ jobs:
           if [ -d ~/.copilot/logs ]; then
             mkdir -p "$(Agent.TempDirectory)/staging/logs/copilot"
             cp -r ~/.copilot/logs/* "$(Agent.TempDirectory)/staging/logs/copilot/" 2>/dev/null || true
-          fi
-          if [ -d ~/.agency/logs ]; then
-            mkdir -p "$(Agent.TempDirectory)/staging/logs/agency"
-            cp -r ~/.agency/logs/* "$(Agent.TempDirectory)/staging/logs/agency/" 2>/dev/null || true
           fi
           if [ -d ~/.ado-aw/logs ]; then
             mkdir -p "$(Agent.TempDirectory)/staging/logs/ado-aw"

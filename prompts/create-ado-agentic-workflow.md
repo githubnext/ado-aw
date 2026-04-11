@@ -50,7 +50,6 @@ Object form with extra options:
 ```yaml
 engine:
   model: claude-sonnet-4.5
-  max-turns: 50
   timeout-minutes: 30
 ```
 

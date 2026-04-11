@@ -68,8 +68,8 @@ Tests checkout step generation for:
 - Empty repository list
 - Multiple repositories
 
-### `test_generate_agency_params_*` (3 tests)
-Tests agency parameter generation for:
+### `test_generate_copilot_params_*` (3 tests)
+Tests copilot parameter generation for:
 - Built-in MCPs (enabled)
 - Built-in MCPs (disabled)
 - Custom MCPs (should be skipped)
@@ -101,7 +101,7 @@ Verifies that the base template contains all required markers:
 - `{{ checkout_repositories }}`
 - `{{ agent }}`
 - `{{ agent_name }}`
-- `{{ agency_params }}`
+- `{{ copilot_params }}`
 
 ### `test_example_file_structure`
 Validates the example file (`examples/sample-agent.md`) to ensure:
@@ -126,7 +126,7 @@ The current test suite provides coverage for:
 - ✅ Schedule generation
 - ✅ Repository configuration generation
 - ✅ Checkout step generation
-- ✅ Agency parameter generation
+- ✅ Copilot parameter generation
 - ✅ Markdown parsing
 - ✅ Template structure validation
 - ✅ Example file validation

@@ -78,10 +78,12 @@ fn test_with_hashmap() {
     mcps.insert("ado".to_string(), McpConfig::Enabled(true));
     mcps.insert("es-chat".to_string(), McpConfig::Enabled(true));
     
-    let result = generate_agency_params(&mcps);
+    let result = generate_copilot_params(&mcps);
     
     assert!(result.contains("--prompt"));
-    assert!(result.contains("--mcp ado") || result.contains("--mcp es-chat"));
+    // MCPs are handled via the MCP firewall, not --mcp flags
+    assert!(!result.contains("--mcp ado"));
+    assert!(!result.contains("--mcp es-chat"));
 }
 ```
 
@@ -101,7 +103,7 @@ fn test_with_options() {
         }),
     );
     
-    let result = generate_agency_params(&mcps);
+    let result = generate_copilot_params(&mcps);
     
     assert!(!result.contains("--mcp custom-tool"));
 }

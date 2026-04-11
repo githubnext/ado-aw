@@ -136,7 +136,7 @@ fn test_compile_pipeline_basic() {
   - `test_generate_schedule_*` - verifies schedule generation
   - `test_generate_repositories_*` - verifies repository YAML generation
   - `test_generate_checkout_steps_*` - verifies checkout step generation
-  - `test_generate_agency_params_*` - verifies parameter generation
+  - `test_generate_copilot_params_*` - verifies parameter generation
   - `test_parse_markdown_*` - verifies markdown parsing including error cases
   - Template and structure validation tests
 

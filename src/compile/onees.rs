@@ -20,10 +20,11 @@ use super::common::{
     self, AWF_VERSION, COPILOT_CLI_VERSION, DEFAULT_POOL, compute_effective_workspace, generate_copilot_params,
     generate_acquire_ado_token, generate_checkout_self, generate_checkout_steps,
     generate_ci_trigger, generate_copilot_ado_env, generate_executor_ado_env,
-    generate_header_comment, generate_pipeline_path, generate_pipeline_resources,
-    generate_pr_trigger, generate_repositories, generate_schedule, generate_source_path,
-    generate_working_directory, replace_with_indent, validate_comment_target,
-    validate_update_work_item_target, validate_write_permissions, validate_submit_pr_review_events,
+    generate_header_comment, generate_job_timeout, generate_pipeline_path,
+    generate_pipeline_resources, generate_pr_trigger, generate_repositories,
+    generate_schedule, generate_source_path, generate_working_directory,
+    replace_with_indent, validate_comment_target, validate_update_work_item_target,
+    validate_write_permissions, validate_submit_pr_review_events,
     validate_update_pr_votes,
 };
 use super::types::{FrontMatter, McpConfig};
@@ -59,7 +60,7 @@ impl Compiler for OneESCompiler {
         let repositories = generate_repositories(&front_matter.repositories);
         let checkout_steps = generate_checkout_steps(&front_matter.checkout);
         let checkout_self = generate_checkout_self();
-        let agency_params = generate_copilot_params(front_matter);
+        let copilot_params = generate_copilot_params(front_matter);
 
         let effective_workspace = compute_effective_workspace(
             &front_matter.workspace,
@@ -105,6 +106,7 @@ displayName: "Finalize""#,
         } else {
             String::new()
         };
+        let job_timeout = generate_job_timeout(front_matter);
 
         // Load threat analysis prompt template
         let threat_analysis_prompt = include_str!("../../templates/threat-analysis.md");
@@ -168,13 +170,14 @@ displayName: "Finalize""#,
             ("{{ log_level }}", ""),
             ("{{ mcp_configuration }}", &mcp_configuration),
             ("{{ agentic_depends_on }}", &agentic_depends_on),
+            ("{{ job_timeout }}", &job_timeout),
             ("{{ setup_job }}", &setup_job),
             ("{{ teardown_job }}", &teardown_job),
             ("{{ source_path }}", &source_path),
             ("{{ pipeline_path }}", &pipeline_path),
             ("{{ working_directory }}", &working_directory),
             ("{{ workspace }}", &working_directory),
-            ("{{ agency_params }}", &agency_params),
+            ("{{ copilot_params }}", &copilot_params),
             ("{{ acquire_ado_token }}", &acquire_read_token),
             ("{{ copilot_ado_env }}", &copilot_ado_env),
             ("{{ acquire_write_token }}", &acquire_write_token),

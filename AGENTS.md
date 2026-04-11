@@ -104,7 +104,6 @@ target: standalone # Optional: "standalone" (default) or "1es". See Target Platf
 engine: claude-opus-4.5 # AI engine to use. Defaults to claude-opus-4.5. Other options include claude-sonnet-4.5, gpt-5.2-codex, gemini-3-pro-preview, etc.
 # engine:                        # Alternative object format (with additional options)
 #   model: claude-opus-4.5
-#   max-turns: 50
 #   timeout-minutes: 30
 schedule: daily around 14:00 # Fuzzy schedule syntax - see Schedule Syntax section below
 # schedule:                       # Alternative object format (with branch filtering)
@@ -296,7 +295,6 @@ engine: claude-opus-4.5
 # Object format with additional options
 engine:
   model: claude-opus-4.5
-  max-turns: 50
   timeout-minutes: 30
 ```
 
@@ -305,28 +303,19 @@ engine:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `model` | string | `claude-opus-4.5` | AI model to use. Options include `claude-sonnet-4.5`, `gpt-5.2-codex`, `gemini-3-pro-preview`, etc. |
-| `max-turns` | integer | *(none)* | Maximum number of agentic turns (tool-use iterations) the model is allowed per run. Maps to the `--max-turns` Copilot CLI argument. Use this to cap compute and prevent runaway loops. |
-| `timeout-minutes` | integer | *(none)* | Maximum time in minutes the agent workflow is allowed to run. Maps to the `--max-timeout` Copilot CLI argument. Use this to cap long-running agent sessions. |
+| `timeout-minutes` | integer | *(none)* | Maximum time in minutes the agent job is allowed to run. Sets `timeoutInMinutes` on the `PerformAgenticTask` job in the generated pipeline. |
 
-#### `max-turns`
-
-Each "turn" is one iteration of the model calling a tool and receiving its output. Setting `max-turns` places an upper bound on how many such iterations the agent can perform in a single pipeline run. This is useful for:
-
-- **Cost control** — limiting expensive model invocations.
-- **Safety** — preventing infinite loops where the agent repeatedly calls tools without converging on a result.
-- **Predictability** — ensuring the pipeline completes within a reasonable time frame.
-
-When omitted, the Copilot CLI uses its built-in default. When set, the compiler emits `--max-turns <value>` in the generated pipeline's copilot params.
+> **Deprecated:** `max-turns` is still accepted in front matter for backwards compatibility but is ignored at compile time (a warning is emitted). It was specific to Claude Code and is not supported by Copilot CLI.
 
 #### `timeout-minutes`
 
-The `timeout-minutes` field sets a wall-clock limit (in minutes) for the entire agent session. It maps to the `--max-timeout` Copilot CLI argument. This is useful for:
+The `timeout-minutes` field sets a wall-clock limit (in minutes) for the entire agent job. It maps to the Azure DevOps `timeoutInMinutes` job property on `PerformAgenticTask`. This is useful for:
 
 - **Budget enforcement** — hard-capping the total runtime of an agent to control compute costs.
 - **Pipeline hygiene** — preventing agents from occupying a runner indefinitely if they stall or enter long retry loops.
 - **SLA compliance** — ensuring scheduled agents complete within a known window.
 
-When omitted, the Copilot CLI uses its built-in default. When set, the compiler emits `--max-timeout <value>` in the generated pipeline's copilot params.
+When omitted, Azure DevOps uses its default job timeout (60 minutes). When set, the compiler emits `timeoutInMinutes: <value>` on the agentic job.
 
 ### Tools Configuration
 
@@ -409,7 +398,7 @@ The compiler transforms the input into valid Azure DevOps pipeline YAML based on
 - **Standalone**: Uses `templates/base.yml`
 - **1ES**: Uses `templates/1es-base.yml`
 
-Explicit markings are embedded in these templates that the compiler is allowed to replace e.g. `{{ agency_params }}` denotes parameters which are passed to the agency command line tool. The compiler should not replace sections denoted by `${{ some content }}`. What follows is a mapping of markings to responsibilities (primarily for the standalone template).
+Explicit markings are embedded in these templates that the compiler is allowed to replace e.g. `{{ copilot_params }}` denotes parameters which are passed to the copilot command line tool. The compiler should not replace sections denoted by `${{ some content }}`. What follows is a mapping of markings to responsibilities (primarily for the standalone template).
 
 ## {{ repositories }}
 For each additional repository specified in the front matter append:
@@ -478,19 +467,16 @@ This distinction allows resources (like templates) to be available as pipeline r
 
 Should be replaced with the human-readable name from the front matter (e.g., "Daily Code Review"). This is used for display purposes like stage names.
 
-## {{ agency_params }}
+## {{ copilot_params }}
 
-Additional params provided to agency CLI. The compiler generates:
+Additional params provided to copilot CLI. The compiler generates:
 - `--model <model>` - AI model from `engine` front matter field (default: claude-opus-4.5)
-- `--max-turns <n>` - Maximum agentic turns from `engine.max-turns` (omitted when not set)
-- `--max-timeout <n>` - Workflow timeout in minutes from `engine.timeout-minutes` (omitted when not set)
 - `--disable-builtin-mcps` - Disables all built-in MCPs initially
 - `--no-ask-user` - Prevents interactive prompts
 - `--allow-tool <tool>` - Explicitly allows specific tools (github, safeoutputs, write, shell commands like cat, date, echo, grep, head, ls, pwd, sort, tail, uniq, wc, yq)
-- `--disable-mcp-server <name>` - Disables specific MCPs (all built-in MCPs are disabled by default and must be explicitly enabled via mcp-servers config)
-- `--mcp <name>` - Enables MCPs specified in front matter
+- `--disable-mcp-server <name>` - Disables specific Copilot CLI MCPs
 
-Only built-in MCPs are passed via params. Custom MCPs (with command field) are handled separately.
+All MCPs (both built-in and custom) are handled via the MCP firewall config, not via `--mcp` flags.
 
 ## {{ pool }}
 
@@ -544,6 +530,12 @@ Generates a `dependsOn: SetupJob` clause for `PerformAgenticTask` if a setup job
 
 If no setup job is configured, this is replaced with an empty string.
 
+## {{ job_timeout }}
+
+Generates a `timeoutInMinutes: <value>` job property for `PerformAgenticTask` when `engine.timeout-minutes` is configured. This sets the Azure DevOps job-level timeout for the agentic task.
+
+If `timeout-minutes` is not configured, this is replaced with an empty string.
+
 ## {{ working_directory }}
 
 Should be replaced with the appropriate working directory based on the effective workspace setting.
@@ -559,7 +551,7 @@ Should be replaced with the appropriate working directory based on the effective
 - `root`: `$(Build.SourcesDirectory)` - the checkout root directory
 - `repo`: `$(Build.SourcesDirectory)/$(Build.Repository.Name)` - the repository's subfolder
 
-This is used for the `workingDirectory` property of the agency copilot task.
+This is used for the `workingDirectory` property of the copilot task.
 
 ## {{ source_path }}
 
@@ -733,16 +725,16 @@ Should be replaced with the agent context root for 1ES Agency jobs. This determi
 
 ## {{ mcp_configuration }}
 
-Should be replaced with the MCP server configuration for 1ES templates. For each enabled built-in MCP, generates service connection references:
+Should be replaced with the MCP server configuration for 1ES templates. For each `mcp-servers:` entry without a `command:` field, generates a service connection reference using the entry name:
 
 ```yaml
-ado:
-  serviceConnection: mcp-ado-service-connection
-kusto:
-  serviceConnection: mcp-kusto-service-connection
+my-mcp:
+  serviceConnection: mcp-my-mcp-service-connection
+other-mcp:
+  serviceConnection: mcp-other-mcp-service-connection
 ```
 
-Custom MCP servers (with `command:` field) are not supported in 1ES target. Only built-in MCPs with corresponding service connections are supported.
+Custom MCP servers (with `command:` field) are not supported in 1ES target. Only entries without a `command:` (which have a corresponding service connection) are supported.
 
 ## {{ global_options }}
 
@@ -1126,30 +1118,7 @@ cargo add <crate-name>
 
 ## MCP Configuration
 
-The `mcp-servers:` field provides a unified way to configure both built-in and custom MCP (Model Context Protocol) servers. The compiler distinguishes between them by checking for the `command:` field—if present, it's a custom server; otherwise, it's a built-in.
-
-### Built-in MCP Servers
-
-Enable built-in servers with `true` or configure them with options:
-
-```yaml
-mcp-servers:
-  ado: true                    # enabled with all default functions
-  ado-ext: true                # Extended ADO functionality
-  asa: true                    # Azure Stream Analytics MCP
-  bluebird: true               # Bluebird MCP
-  calculator: true             # Calculator MCP
-  es-chat: true
-  icm:                         # enabled with restricted functions
-    allowed:
-      - create_incident
-      - get_incident
-  kusto:
-    allowed:
-      - query
-  msft-learn: true
-  stack: true                  # Stack MCP
-```
+The `mcp-servers:` field configures custom MCP (Model Context Protocol) servers that the agent can use. Each entry must include a `command:` field specifying the executable to spawn.
 
 ### Custom MCP Servers
 
@@ -1167,28 +1136,16 @@ mcp-servers:
 
 ### Configuration Properties
 
-**For built-in MCPs:**
-- `true` - Enable with all default functions
-- `allowed:` - Array of function names to restrict available tools
-- `service-connection:` - (1ES target only) Override the service connection name used for this MCP. If not specified, defaults to `mcp-<name>-service-connection` (e.g., `mcp-ado-service-connection` for the `ado` MCP)
-
-**For custom MCPs (requires `command:`):**
 - `command:` - The executable to run (e.g., `"node"`, `"python"`, `"dotnet"`)
 - `args:` - Array of command-line arguments passed to the command
 - `allowed:` - Array of function names agents are permitted to call (required for security)
 - `env:` - Optional environment variables for the MCP server process
+- `service-connection:` - (1ES target only) Override the service connection name used for this MCP. If not specified, defaults to `mcp-<name>-service-connection`
 
-### Example: Mixed Configuration
+### Example: Multiple Custom MCP Servers
 
 ```yaml
 mcp-servers:
-  # Built-in servers
-  ado: true
-  ado-ext: true
-  es-chat: true
-  icm:
-    allowed: [create_incident, get_incident]
-
   # Custom Python MCP server
   data-processor:
     command: "python"
@@ -1214,7 +1171,6 @@ mcp-servers:
 2. **Command Validation**: The compiler validates that commands are from a trusted set
 3. **Argument Sanitization**: Arguments are validated to prevent injection attacks
 4. **Environment Isolation**: MCP servers run in the same isolated sandbox as the pipeline
-5. **Built-in Trust**: Built-in MCPs are pre-vetted; custom MCPs require explicit `allowed:` list
 
 ## Network Isolation (AWF)
 
@@ -1330,17 +1286,13 @@ When agents are configured with multiple MCPs (e.g., `ado`, `kusto`, `icm`), the
 
 ```
 ┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│             │     │                  │     │  ado MCP        │
-│   Agent     │────▶│   MCP Firewall   │────▶│  (agency mcp ado)│
-│  (Agency)   │     │                  │     └─────────────────┘
+│             │     │                  │     │  custom MCP     │
+│   Agent     │────▶│   MCP Firewall   │────▶│  (node server.js)│
+│  (Copilot)  │     │                  │     └─────────────────┘
 │             │     │  - Policy check  │     ┌─────────────────┐
-└─────────────┘     │  - Tool routing  │────▶│  icm MCP        │
-                    │  - Audit logging │     │  (agency mcp icm)│
+└─────────────┘     │  - Tool routing  │────▶│  custom MCP     │
+                    │  - Audit logging │     │  (python -m ...) │
                     └──────────────────┘     └─────────────────┘
-                                             ┌─────────────────┐
-                                        ────▶│  custom MCP     │
-                                             │  (node server.js)│
-                                             └─────────────────┘
 ```
 
 ### Configuration File Format
@@ -1350,23 +1302,11 @@ The firewall reads a JSON configuration file at runtime:
 ```json
 {
   "upstreams": {
-    "ado": {
-      "command": "agency",
-      "args": ["mcp", "ado"],
-      "env": {},
-      "allowed": ["*"]
-    },
-    "icm": {
-      "command": "agency",
-      "args": ["mcp", "icm"],
-      "env": {},
-      "allowed": ["create_incident", "get_incident"]
-    },
-    "kusto": {
-      "command": "agency",
-      "args": ["mcp", "kusto"],
-      "env": {},
-      "allowed": ["query"]
+    "data-processor": {
+      "command": "python",
+      "args": ["-m", "my_mcp_server"],
+      "env": { "DATA_DIR": "/data" },
+      "allowed": ["process_data", "query_database"]
     },
     "custom-tool": {
       "command": "node",
@@ -1405,9 +1345,8 @@ The `allowed` field supports several patterns:
 
 All tools exposed by the firewall are namespaced with their upstream name:
 
-- `ado:create-work-item` - from the `ado` upstream
-- `icm:create_incident` - from the `icm` upstream
-- `kusto:query` - from the `kusto` upstream
+- `data-processor:process_data` - from the `data-processor` upstream
+- `custom-tool:get_status` - from the `custom-tool` upstream
 
 This prevents tool name collisions and makes it clear which upstream handles each call.
 
@@ -1423,8 +1362,8 @@ ado-aw mcp-firewall --config /path/to/config.json
 The firewall is automatically configured in generated pipelines:
 
 1. **Config Generation**: The compiler generates `mcp-firewall-config.json` from the agent's `mcp-servers:` front matter
-2. **MCP Registration**: The firewall is registered in the agency MCP config as `mcp-firewall`
-3. **Runtime Launch**: When agency starts, it launches the firewall which spawns upstream MCPs
+2. **MCP Registration**: The firewall is registered in the copilot MCP config as `mcp-firewall`
+3. **Runtime Launch**: When copilot starts, it launches the firewall which spawns upstream MCPs
 
 The firewall config is written to `$(Agent.TempDirectory)/staging/mcp-firewall-config.json` in its own pipeline step, making it easy to inspect and debug.
 
@@ -1433,9 +1372,9 @@ The firewall config is written to `$(Agent.TempDirectory)/staging/mcp-firewall-c
 All tool call attempts are logged to the centralized log file at `$HOME/.ado-aw/logs/YYYY-MM-DD.log`:
 
 ```
-[2026-01-29T10:15:32Z] [INFO] [firewall] ALLOWED icm:create_incident (args: {"title": "...", "severity": 3})
-[2026-01-29T10:15:45Z] [INFO] [firewall] BLOCKED icm:delete_incident (not in allowlist)
-[2026-01-29T10:16:01Z] [INFO] [firewall] ALLOWED kusto:query (args: {"cluster": "...", "query": "..."})
+[2026-01-29T10:15:32Z] [INFO] [firewall] ALLOWED custom-tool:process_data (args: {"input": "..."})
+[2026-01-29T10:15:45Z] [INFO] [firewall] BLOCKED custom-tool:delete_all (not in allowlist)
+[2026-01-29T10:16:01Z] [INFO] [firewall] ALLOWED data-processor:query_database (args: {"query": "..."})
 ```
 
 This provides a complete audit trail of agent actions for security review.

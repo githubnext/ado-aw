@@ -17,11 +17,11 @@ use super::common::{
     self, AWF_VERSION, COPILOT_CLI_VERSION, DEFAULT_POOL, compute_effective_workspace, generate_copilot_params,
     generate_acquire_ado_token, generate_cancel_previous_builds, generate_checkout_self,
     generate_checkout_steps, generate_ci_trigger, generate_copilot_ado_env,
-    generate_executor_ado_env, generate_header_comment, generate_pipeline_path,
-    generate_pipeline_resources, generate_pr_trigger, generate_repositories,
-    generate_schedule, generate_source_path, generate_working_directory,
-    replace_with_indent, sanitize_filename, validate_write_permissions,
-    validate_comment_target, validate_update_work_item_target, validate_submit_pr_review_events,
+    generate_executor_ado_env, generate_header_comment, generate_job_timeout,
+    generate_pipeline_path, generate_pipeline_resources, generate_pr_trigger,
+    generate_repositories, generate_schedule, generate_source_path,
+    generate_working_directory, replace_with_indent, sanitize_filename,
+    validate_write_permissions, validate_comment_target, validate_update_work_item_target, validate_submit_pr_review_events,
     validate_update_pr_votes,
 };
 use super::types::{FrontMatter, McpConfig};
@@ -60,7 +60,7 @@ impl Compiler for StandaloneCompiler {
         let repositories = generate_repositories(&front_matter.repositories);
         let checkout_steps = generate_checkout_steps(&front_matter.checkout);
         let checkout_self = generate_checkout_self();
-        let agency_params = generate_copilot_params(front_matter);
+        let copilot_params = generate_copilot_params(front_matter);
         let agent_name = sanitize_filename(&front_matter.name);
 
         // Compute effective workspace
@@ -107,6 +107,7 @@ impl Compiler for StandaloneCompiler {
         let prepare_steps = generate_prepare_steps(&front_matter.steps, has_memory);
         let finalize_steps = generate_finalize_steps(&front_matter.post_steps);
         let agentic_depends_on = generate_agentic_depends_on(&front_matter.setup);
+        let job_timeout = generate_job_timeout(front_matter);
 
         // Generate service connection token acquisition steps and env vars
         let acquire_read_token = generate_acquire_ado_token(
@@ -157,6 +158,7 @@ impl Compiler for StandaloneCompiler {
             ("{{ prepare_steps }}", &prepare_steps),
             ("{{ finalize_steps }}", &finalize_steps),
             ("{{ agentic_depends_on }}", &agentic_depends_on),
+            ("{{ job_timeout }}", &job_timeout),
             ("{{ repositories }}", &repositories),
             ("{{ schedule }}", &schedule),
             ("{{ pipeline_resources }}", &pipeline_resources),
@@ -168,7 +170,7 @@ impl Compiler for StandaloneCompiler {
             ("{{ agent }}", &agent_name),
             ("{{ agent_name }}", &front_matter.name),
             ("{{ agent_description }}", &front_matter.description),
-            ("{{ agency_params }}", &agency_params),
+            ("{{ copilot_params }}", &copilot_params),
             ("{{ source_path }}", &source_path),
             ("{{ pipeline_path }}", &pipeline_path),
             ("{{ working_directory }}", &working_directory),
@@ -392,41 +394,16 @@ pub fn generate_firewall_config(front_matter: &FrontMatter) -> FirewallConfig {
                     },
                     spawn_timeout_secs: 30,
                 }
-            } else if common::is_builtin_mcp(name) {
-                // Built-in MCP with options
-                let mut args = vec!["mcp".to_string(), name.clone()];
-                args.extend(opts.args.clone());
-
-                UpstreamConfig {
-                    command: "agency".to_string(),
-                    args,
-                    env: opts.env.clone(),
-                    allowed: if opts.allowed.is_empty() {
-                        vec!["*".to_string()]
-                    } else {
-                        opts.allowed.clone()
-                    },
-                    spawn_timeout_secs: 30,
-                }
             } else {
                 log::warn!(
-                    "MCP '{}' has no command and is not a built-in - skipping",
+                    "MCP '{}' has no command - skipping",
                     name
                 );
                 continue;
             }
-        } else if common::is_builtin_mcp(name) {
-            // Built-in MCP with simple enablement
-            UpstreamConfig {
-                command: "agency".to_string(),
-                args: vec!["mcp".to_string(), name.clone()],
-                env: HashMap::new(),
-                allowed: vec!["*".to_string()],
-                spawn_timeout_secs: 30,
-            }
         } else {
             log::warn!(
-                "MCP '{}' is not a built-in and has no command - skipping",
+                "MCP '{}' has no command - skipping",
                 name
             );
             continue;
@@ -506,38 +483,6 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_firewall_config_builtin_simple_enabled() {
-        let mut fm = minimal_front_matter();
-        fm.mcp_servers
-            .insert("ado".to_string(), McpConfig::Enabled(true));
-        let config = generate_firewall_config(&fm);
-        let upstream = config.upstreams.get("ado").unwrap();
-        assert_eq!(upstream.command, "agency");
-        assert_eq!(upstream.args, vec!["mcp", "ado"]);
-        assert_eq!(upstream.allowed, vec!["*"]);
-    }
-
-    #[test]
-    fn test_generate_firewall_config_builtin_with_allowed_list() {
-        let mut fm = minimal_front_matter();
-        fm.mcp_servers.insert(
-            "icm".to_string(),
-            McpConfig::WithOptions(McpOptions {
-                allowed: vec!["create_incident".to_string(), "get_incident".to_string()],
-                ..Default::default()
-            }),
-        );
-        let config = generate_firewall_config(&fm);
-        let upstream = config.upstreams.get("icm").unwrap();
-        assert_eq!(upstream.command, "agency");
-        assert_eq!(upstream.args, vec!["mcp", "icm"]);
-        assert_eq!(
-            upstream.allowed,
-            vec!["create_incident".to_string(), "get_incident".to_string()]
-        );
-    }
-
-    #[test]
     fn test_generate_firewall_config_custom_mcp() {
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
@@ -574,12 +519,22 @@ mod tests {
 
     #[test]
     fn test_generate_firewall_config_unknown_non_builtin_skipped() {
-        // An MCP that is neither built-in nor has a command should be skipped
+        // An MCP with no command should be skipped
         let mut fm = minimal_front_matter();
         fm.mcp_servers
             .insert("phantom".to_string(), McpConfig::Enabled(true));
         let config = generate_firewall_config(&fm);
         assert!(!config.upstreams.contains_key("phantom"));
+    }
+
+    #[test]
+    fn test_generate_firewall_config_builtin_without_command_skipped() {
+        // A built-in MCP enabled without a custom command should be skipped
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers
+            .insert("ado".to_string(), McpConfig::Enabled(true));
+        let config = generate_firewall_config(&fm);
+        assert!(!config.upstreams.contains_key("ado"));
     }
 
     #[test]

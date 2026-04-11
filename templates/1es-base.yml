@@ -43,6 +43,7 @@ extends:
           - job: PerformAgenticTask
             displayName: "{{ agent_name }} (Agent)"
             {{ agentic_depends_on }}
+            {{ job_timeout }}
             templateContext:
               type: agencyJob
               arguments:
@@ -128,9 +129,9 @@ extends:
                 postAgentSteps:
                   {{ finalize_steps }}
                 globalOptions: '--log-dir $(Agency_LogPath) {{ global_options }}'
-                commandOptions: '{{ agency_params }}'
+                commandOptions: '{{ copilot_params }}'
                 logLevel: '{{ log_level }}'
-                logPath: '$(Build.StagingDirectory)/agency-logs'
+                logPath: '$(Build.StagingDirectory)/copilot-logs'
                 createArtifact: true
                 mcpConfiguration:
                   {{ mcp_configuration }}
@@ -230,7 +231,7 @@ extends:
                   THREAT_OUTPUT_FILE="$(Agent.TempDirectory)/threat-analysis-output.txt"
 
                   # Use $(cat file) like gh-aw does - the command is executed directly, not via a variable
-                  copilot --prompt "$(cat $(Agent.TempDirectory)/threat-analysis-prompt.md)" {{ agency_params }} > "$THREAT_OUTPUT_FILE" 2>&1
+                  copilot --prompt "$(cat $(Agent.TempDirectory)/threat-analysis-prompt.md)" {{ copilot_params }} > "$THREAT_OUTPUT_FILE" 2>&1
                   AGENT_EXIT_CODE=$?
 
                   echo "=== Threat Analysis Output (sanitized) ==="
