@@ -51,6 +51,9 @@ pub async fn append_to_ndjson_file<T: ToolResult>(path: &Path, value: &T) -> Res
     file.write_all(line.as_bytes())
         .await
         .with_context(|| format!("Failed to write to NDJSON file: {}", path.display()))?;
+    file.flush()
+        .await
+        .with_context(|| format!("Failed to flush NDJSON file: {}", path.display()))?;
     debug!("Appended {} bytes to NDJSON", line.len());
     Ok(())
 }

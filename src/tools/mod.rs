@@ -104,27 +104,112 @@ pub(crate) async fn resolve_wiki_branch(
     }
 }
 
+/// Resolve a repository alias to its ADO repo name.
+///
+/// "self" (or None) → `ctx.repository_name`, otherwise look up in `ctx.allowed_repositories`.
+pub(crate) fn resolve_repo_name(
+    repo_alias: Option<&str>,
+    ctx: &ExecutionContext,
+) -> Result<String, ExecutionResult> {
+    let alias = repo_alias.unwrap_or("self");
+    if alias == "self" {
+        ctx.repository_name
+            .clone()
+            .ok_or_else(|| ExecutionResult::failure("BUILD_REPOSITORY_NAME not set"))
+    } else {
+        ctx.allowed_repositories
+            .get(alias)
+            .cloned()
+            .ok_or_else(|| {
+                ExecutionResult::failure(format!(
+                    "Repository '{}' is not in the allowed repository list",
+                    alias
+                ))
+            })
+    }
+}
+
+/// Validate a string against `git check-ref-format` rules.
+///
+/// Returns `Ok(())` if the name is valid, or an `Err` describing the violation.
+/// This covers the structural rules that Azure DevOps also enforces — catching
+/// them early gives clearer error messages than letting the API fail.
+pub(crate) fn validate_git_ref_name(name: &str, label: &str) -> anyhow::Result<()> {
+    use anyhow::ensure;
+
+    ensure!(!name.is_empty(), "{label} must not be empty");
+    ensure!(!name.contains(".."), "{label} must not contain '..'");
+    ensure!(!name.contains("@{{"), "{label} must not contain '@{{'");
+    ensure!(!name.ends_with('.'), "{label} must not end with '.'");
+    ensure!(!name.ends_with(".lock"), "{label} must not end with '.lock'");
+    ensure!(
+        !name.contains('\\'),
+        "{label} must not contain backslash"
+    );
+    ensure!(
+        !name.contains("//"),
+        "{label} must not contain consecutive slashes"
+    );
+    for ch in ['~', '^', ':', '?', '*', '['] {
+        ensure!(
+            !name.contains(ch),
+            "{label} must not contain '{ch}'"
+        );
+    }
+    for component in name.split('/') {
+        ensure!(
+            !component.starts_with('.'),
+            "{label} path component must not start with '.'"
+        );
+    }
+    Ok(())
+}
+
+mod add_build_tag;
+mod add_pr_comment;
 mod comment_on_work_item;
+mod create_branch;
+mod create_git_tag;
 mod create_pr;
 mod create_wiki_page;
 mod create_work_item;
-mod update_wiki_page;
+mod link_work_items;
 pub mod memory;
 mod missing_data;
 mod missing_tool;
 mod noop;
+mod queue_build;
+mod reply_to_pr_comment;
+mod report_incomplete;
+mod resolve_pr_thread;
 mod result;
+mod submit_pr_review;
+mod update_pr;
+mod update_wiki_page;
 mod update_work_item;
+mod upload_attachment;
 
+pub use add_build_tag::*;
+pub use add_pr_comment::*;
 pub use comment_on_work_item::*;
+pub use create_branch::*;
+pub use create_git_tag::*;
 pub use create_pr::*;
 pub use create_wiki_page::*;
 pub use create_work_item::*;
-pub use update_wiki_page::*;
+pub use link_work_items::*;
 pub use missing_data::*;
 pub use missing_tool::*;
 pub use noop::*;
+pub use queue_build::*;
+pub use reply_to_pr_comment::*;
+pub use report_incomplete::*;
+pub use resolve_pr_thread::*;
 pub use result::{
     ExecutionContext, ExecutionResult, Executor, ToolResult, Validate, anyhow_to_mcp_error,
 };
+pub use submit_pr_review::*;
+pub use update_pr::*;
+pub use update_wiki_page::*;
 pub use update_work_item::*;
+pub use upload_attachment::*;

@@ -10,10 +10,14 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
+use crate::sanitize::Sanitize;
 use crate::tools::{
+    AddBuildTagResult, AddPrCommentResult, CreateBranchResult, CreateGitTagResult,
     CreatePrResult, CreateWikiPageResult, CreateWorkItemResult, CommentOnWorkItemResult,
-    ExecutionContext, ExecutionResult, Executor, ToolResult,
-    UpdateWikiPageResult, UpdateWorkItemResult,
+    ExecutionContext, ExecutionResult, Executor, LinkWorkItemsResult, QueueBuildResult,
+    ReplyToPrCommentResult, ReportIncompleteResult, ResolvePrThreadResult, SubmitPrReviewResult,
+    ToolResult, UpdatePrResult, UpdateWikiPageResult, UpdateWorkItemResult,
+    UploadAttachmentResult,
 };
 
 // Re-export memory types for use by main.rs
@@ -113,6 +117,17 @@ pub async fn execute_safe_outputs(
         CommentOnWorkItemResult,
         CreateWikiPageResult,
         UpdateWikiPageResult,
+        AddPrCommentResult,
+        LinkWorkItemsResult,
+        QueueBuildResult,
+        CreateGitTagResult,
+        AddBuildTagResult,
+        CreateBranchResult,
+        UpdatePrResult,
+        UploadAttachmentResult,
+        SubmitPrReviewResult,
+        ReplyToPrCommentResult,
+        ResolvePrThreadResult,
     );
 
     let mut results = Vec::new();
@@ -264,9 +279,115 @@ pub async fn execute_safe_output(
             );
             output.execute_sanitized(ctx).await?
         }
+        "add-pr-comment" => {
+            debug!("Parsing add-pr-comment payload");
+            let mut output: AddPrCommentResult = serde_json::from_value(entry.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to parse add-pr-comment: {}", e))?;
+            debug!(
+                "add-pr-comment: pr_id={}, content length={}",
+                output.pull_request_id,
+                output.content.len()
+            );
+            output.execute_sanitized(ctx).await?
+        }
+        "link-work-items" => {
+            debug!("Parsing link-work-items payload");
+            let mut output: LinkWorkItemsResult = serde_json::from_value(entry.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to parse link-work-items: {}", e))?;
+            debug!(
+                "link-work-items: source={}, target={}, type={}",
+                output.source_id, output.target_id, output.link_type
+            );
+            output.execute_sanitized(ctx).await?
+        }
+        "queue-build" => {
+            debug!("Parsing queue-build payload");
+            let mut output: QueueBuildResult = serde_json::from_value(entry.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to parse queue-build: {}", e))?;
+            debug!("queue-build: pipeline_id={}", output.pipeline_id);
+            output.execute_sanitized(ctx).await?
+        }
+        "create-git-tag" => {
+            debug!("Parsing create-git-tag payload");
+            let mut output: CreateGitTagResult = serde_json::from_value(entry.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to parse create-git-tag: {}", e))?;
+            debug!("create-git-tag: tag_name='{}'", output.tag_name);
+            output.execute_sanitized(ctx).await?
+        }
+        "add-build-tag" => {
+            debug!("Parsing add-build-tag payload");
+            let mut output: AddBuildTagResult = serde_json::from_value(entry.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to parse add-build-tag: {}", e))?;
+            debug!("add-build-tag: build_id={}, tag='{}'", output.build_id, output.tag);
+            output.execute_sanitized(ctx).await?
+        }
+        "create-branch" => {
+            debug!("Parsing create-branch payload");
+            let mut output: CreateBranchResult = serde_json::from_value(entry.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to parse create-branch: {}", e))?;
+            debug!("create-branch: branch_name='{}'", output.branch_name);
+            output.execute_sanitized(ctx).await?
+        }
+        "update-pr" => {
+            debug!("Parsing update-pr payload");
+            let mut output: UpdatePrResult = serde_json::from_value(entry.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to parse update-pr: {}", e))?;
+            debug!(
+                "update-pr: pr_id={}, operation='{}'",
+                output.pull_request_id, output.operation
+            );
+            output.execute_sanitized(ctx).await?
+        }
+        "upload-attachment" => {
+            debug!("Parsing upload-attachment payload");
+            let mut output: UploadAttachmentResult = serde_json::from_value(entry.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to parse upload-attachment: {}", e))?;
+            debug!(
+                "upload-attachment: work_item_id={}, file_path='{}'",
+                output.work_item_id, output.file_path
+            );
+            output.execute_sanitized(ctx).await?
+        }
+        "submit-pr-review" => {
+            debug!("Parsing submit-pr-review payload");
+            let mut output: SubmitPrReviewResult = serde_json::from_value(entry.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to parse submit-pr-review: {}", e))?;
+            debug!(
+                "submit-pr-review: pr_id={}, event='{}'",
+                output.pull_request_id, output.event
+            );
+            output.execute_sanitized(ctx).await?
+        }
+        "reply-to-pr-review-comment" => {
+            debug!("Parsing reply-to-pr-review-comment payload");
+            let mut output: ReplyToPrCommentResult = serde_json::from_value(entry.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to parse reply-to-pr-review-comment: {}", e))?;
+            debug!(
+                "reply-to-pr-review-comment: pr_id={}, thread_id={}",
+                output.pull_request_id, output.thread_id
+            );
+            output.execute_sanitized(ctx).await?
+        }
+        "resolve-pr-review-thread" => {
+            debug!("Parsing resolve-pr-review-thread payload");
+            let mut output: ResolvePrThreadResult = serde_json::from_value(entry.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to parse resolve-pr-review-thread: {}", e))?;
+            debug!(
+                "resolve-pr-review-thread: pr_id={}, thread_id={}, status='{}'",
+                output.pull_request_id, output.thread_id, output.status
+            );
+            output.execute_sanitized(ctx).await?
+        }
         "noop" => {
             debug!("Skipping noop entry");
             ExecutionResult::success("Skipped informational output: noop")
+        }
+        "report-incomplete" => {
+            let mut output: ReportIncompleteResult = serde_json::from_value(entry.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to parse report-incomplete: {}", e))?;
+            output.sanitize_fields();
+            debug!("report-incomplete: {}", output.reason);
+            ExecutionResult::failure(format!("Agent reported task incomplete: {}", output.reason))
         }
         "missing-tool" => {
             debug!("Skipping missing-tool entry");
