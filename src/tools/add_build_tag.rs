@@ -71,6 +71,7 @@ impl Sanitize for AddBuildTagResult {
 ///       - verified
 ///       - release-candidate
 ///     tag-prefix: "agent-"
+///     allow-any-build: false
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddBuildTagConfig {
@@ -82,6 +83,11 @@ pub struct AddBuildTagConfig {
     /// Prefix prepended to all tags before applying
     #[serde(default, rename = "tag-prefix")]
     pub tag_prefix: Option<String>,
+
+    /// Whether the agent may tag any build. When false (default), only the
+    /// current pipeline build (BUILD_BUILDID) may be tagged.
+    #[serde(default, rename = "allow-any-build")]
+    pub allow_any_build: bool,
 }
 
 impl Default for AddBuildTagConfig {
@@ -89,6 +95,7 @@ impl Default for AddBuildTagConfig {
         Self {
             allowed_tags: Vec::new(),
             tag_prefix: None,
+            allow_any_build: false,
         }
     }
 }
@@ -118,6 +125,23 @@ impl Executor for AddBuildTagResult {
         // 2. Get tool-specific configuration
         let config: AddBuildTagConfig = ctx.get_tool_config("add-build-tag");
         debug!("Config: {:?}", config);
+
+        // 2b. Scope check: by default only the current build can be tagged
+        if !config.allow_any_build {
+            let current_build_id: Option<i32> = std::env::var("BUILD_BUILDID")
+                .ok()
+                .and_then(|s| s.parse().ok());
+            if let Some(current_id) = current_build_id {
+                if self.build_id != current_id {
+                    return Ok(ExecutionResult::failure(format!(
+                        "Build #{} cannot be tagged: only the current build (#{}) is \
+                         allowed unless 'allow-any-build: true' is configured",
+                        self.build_id, current_id
+                    )));
+                }
+            }
+            // If BUILD_BUILDID is not set (e.g. local execution), allow any build
+        }
 
         // 3. Apply tag prefix if configured
         let final_tag = match &config.tag_prefix {

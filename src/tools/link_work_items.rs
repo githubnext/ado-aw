@@ -9,6 +9,7 @@ use super::PATH_SEGMENT;
 use crate::sanitize::{Sanitize, sanitize as sanitize_text};
 use crate::tool_result;
 use crate::tools::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::tools::comment_on_work_item::CommentTarget;
 use anyhow::{Context, ensure};
 
 /// Resolve a human-friendly link type name to the ADO relation type string.
@@ -102,6 +103,7 @@ impl Sanitize for LinkWorkItemsResult {
 /// ```yaml
 /// safe-outputs:
 ///   link-work-items:
+///     target: "*"
 ///     allowed-link-types:
 ///       - parent
 ///       - child
@@ -113,12 +115,19 @@ pub struct LinkWorkItemsConfig {
     /// An empty list (the default) means all link types are allowed.
     #[serde(default, rename = "allowed-link-types")]
     pub allowed_link_types: Vec<String>,
+
+    /// Target scope — which work items can be linked.
+    /// `None` means no target was configured; execution must reject this.
+    /// Accepts the same values as comment-on-work-item: "*", a single ID,
+    /// a list of IDs, or an area path string.
+    pub target: Option<CommentTarget>,
 }
 
 impl Default for LinkWorkItemsConfig {
     fn default() -> Self {
         Self {
             allowed_link_types: Vec::new(),
+            target: None,
         }
     }
 }
@@ -147,6 +156,36 @@ impl Executor for LinkWorkItemsResult {
 
         let config: LinkWorkItemsConfig = ctx.get_tool_config("link-work-items");
         debug!("Allowed link types: {:?}", config.allowed_link_types);
+
+        // Validate work item IDs against target scope
+        match &config.target {
+            None => {
+                return Ok(ExecutionResult::failure(
+                    "link-work-items requires a 'target' field in safe-outputs configuration \
+                     to scope which work items can be linked. Example:\n  safe-outputs:\n    \
+                     link-work-items:\n      target: \"*\""
+                        .to_string(),
+                ));
+            }
+            Some(target) => {
+                // Check source_id
+                if let Some(false) = target.allows_id(self.source_id) {
+                    return Ok(ExecutionResult::failure(format!(
+                        "Source work item #{} is not allowed by the configured target scope",
+                        self.source_id
+                    )));
+                }
+                // Check target_id
+                if let Some(false) = target.allows_id(self.target_id) {
+                    return Ok(ExecutionResult::failure(format!(
+                        "Target work item #{} is not allowed by the configured target scope",
+                        self.target_id
+                    )));
+                }
+                // Area path validation is deferred — would need API calls for both IDs.
+                // For now, ID-based and wildcard scoping is enforced.
+            }
+        }
 
         // Validate link type against configured allow-list
         if !config.allowed_link_types.is_empty()

@@ -5,7 +5,7 @@ use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::PATH_SEGMENT;
+use super::{PATH_SEGMENT, validate_git_ref_name};
 use crate::sanitize::{Sanitize, sanitize as sanitize_text};
 use crate::tool_result;
 use crate::tools::{ExecutionContext, ExecutionResult, Executor, Validate};
@@ -50,6 +50,7 @@ impl Validate for CreateBranchParams {
             !self.branch_name.contains(' '),
             "branch_name must not contain spaces"
         );
+        validate_git_ref_name(&self.branch_name, "branch_name")?;
 
         if let Some(ref commit) = self.source_commit {
             ensure!(
@@ -67,6 +68,7 @@ impl Validate for CreateBranchParams {
                 !branch.contains('\0'),
                 "source_branch must not contain null bytes"
             );
+            validate_git_ref_name(branch, "source_branch")?;
         }
 
         Ok(())

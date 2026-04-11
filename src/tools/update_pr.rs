@@ -292,7 +292,7 @@ impl Executor for UpdatePrResult {
 
         match self.operation.as_str() {
             "set-auto-complete" => {
-                self.execute_set_auto_complete(&client, &base_url, &repo_name, token, &config)
+                self.execute_set_auto_complete(&client, &base_url, &repo_name, token, org_url, &config)
                     .await
             }
             "vote" => {
@@ -335,14 +335,16 @@ impl Executor for UpdatePrResult {
 impl UpdatePrResult {
     /// Set auto-complete on a pull request.
     ///
-    /// First fetches the PR to get the `createdBy.id`, then patches the PR
-    /// with `autoCompleteSetBy` and default completion options.
+    /// Resolves the authenticated user identity via `_apis/connectiondata`, then
+    /// patches the PR with `autoCompleteSetBy` and default completion options.
+    /// Uses the agent's own identity (not the PR creator) for proper audit trail.
     async fn execute_set_auto_complete(
         &self,
         client: &reqwest::Client,
         base_url: &str,
         repo_name: &str,
         token: &str,
+        org_url: &str,
         config: &UpdatePrConfig,
     ) -> anyhow::Result<ExecutionResult> {
         // Validate merge_strategy before any network I/O
@@ -356,52 +358,50 @@ impl UpdatePrResult {
 
         let encoded_repo = utf8_percent_encode(repo_name, PATH_SEGMENT).to_string();
 
-        // Fetch the PR to get createdBy.id
-        let get_url = format!(
-            "{}/{}/pullRequests/{}?api-version=7.1",
-            base_url, encoded_repo, self.pull_request_id
+        // Resolve the agent's identity via connection data
+        let connection_url = format!(
+            "{}/_apis/connectiondata",
+            org_url.trim_end_matches('/')
         );
-        debug!("GET PR URL: {}", get_url);
-
-        let pr_response = client
-            .get(&get_url)
+        let conn_response = client
+            .get(&connection_url)
             .basic_auth("", Some(token))
             .send()
             .await
-            .context("Failed to fetch pull request")?;
+            .context("Failed to fetch connection data for auto-complete identity")?;
 
-        if !pr_response.status().is_success() {
-            let status = pr_response.status();
-            let error_body = pr_response
+        if !conn_response.status().is_success() {
+            let status = conn_response.status();
+            let error_body = conn_response
                 .text()
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
             return Ok(ExecutionResult::failure(format!(
-                "Failed to fetch PR #{} (HTTP {}): {}",
-                self.pull_request_id, status, error_body
+                "Failed to fetch connection data (HTTP {}): {}",
+                status, error_body
             )));
         }
 
-        let pr_body: serde_json::Value = pr_response
+        let conn_body: serde_json::Value = conn_response
             .json()
             .await
-            .context("Failed to parse PR response")?;
+            .context("Failed to parse connection data response")?;
 
-        let created_by_id = pr_body
-            .get("createdBy")
-            .and_then(|cb| cb.get("id"))
+        let agent_user_id = conn_body
+            .get("authenticatedUser")
+            .and_then(|au| au.get("id"))
             .and_then(|id| id.as_str())
-            .context("PR response missing createdBy.id")?;
-        debug!("PR created by: {}", created_by_id);
+            .context("Connection data response missing authenticatedUser.id")?;
+        debug!("Agent user ID for auto-complete: {}", agent_user_id);
 
-        // PATCH to set auto-complete
+        // PATCH to set auto-complete using the agent's identity
         let patch_url = format!(
             "{}/{}/pullRequests/{}?api-version=7.1",
             base_url, encoded_repo, self.pull_request_id
         );
         let patch_body = serde_json::json!({
             "autoCompleteSetBy": {
-                "id": created_by_id
+                "id": agent_user_id
             },
             "completionOptions": {
                 "deleteSourceBranch": config.delete_source_branch,

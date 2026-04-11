@@ -129,6 +129,42 @@ pub(crate) fn resolve_repo_name(
     }
 }
 
+/// Validate a string against `git check-ref-format` rules.
+///
+/// Returns `Ok(())` if the name is valid, or an `Err` describing the violation.
+/// This covers the structural rules that Azure DevOps also enforces — catching
+/// them early gives clearer error messages than letting the API fail.
+pub(crate) fn validate_git_ref_name(name: &str, label: &str) -> anyhow::Result<()> {
+    use anyhow::ensure;
+
+    ensure!(!name.is_empty(), "{label} must not be empty");
+    ensure!(!name.contains(".."), "{label} must not contain '..'");
+    ensure!(!name.contains("@{{"), "{label} must not contain '@{{'");
+    ensure!(!name.ends_with('.'), "{label} must not end with '.'");
+    ensure!(!name.ends_with(".lock"), "{label} must not end with '.lock'");
+    ensure!(
+        !name.contains('\\'),
+        "{label} must not contain backslash"
+    );
+    ensure!(
+        !name.contains("//"),
+        "{label} must not contain consecutive slashes"
+    );
+    for ch in ['~', '^', ':', '?', '*', '['] {
+        ensure!(
+            !name.contains(ch),
+            "{label} must not contain '{ch}'"
+        );
+    }
+    for component in name.split('/') {
+        ensure!(
+            !component.starts_with('.'),
+            "{label} path component must not start with '.'"
+        );
+    }
+    Ok(())
+}
+
 mod add_build_tag;
 mod add_pr_comment;
 mod comment_on_work_item;

@@ -208,6 +208,16 @@ impl Executor for QueueBuildResult {
                     }
                 }
             }
+            // Reject parameter values containing ADO variable/expression syntax
+            for (key, value) in params {
+                if value.contains("$(") || value.contains("${{") || value.contains("$[") {
+                    return Ok(ExecutionResult::failure(format!(
+                        "Parameter '{}' value contains ADO variable/expression syntax \
+                         which is not allowed",
+                        key
+                    )));
+                }
+            }
         }
 
         // Build the source branch ref

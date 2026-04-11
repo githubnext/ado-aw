@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
+use crate::sanitize::Sanitize;
 use crate::tools::{
     AddBuildTagResult, AddPrCommentResult, CreateBranchResult, CreateGitTagResult,
     CreatePrResult, CreateWikiPageResult, CreateWorkItemResult, CommentOnWorkItemResult,
@@ -382,8 +383,9 @@ pub async fn execute_safe_output(
             ExecutionResult::success("Skipped informational output: noop")
         }
         "report-incomplete" => {
-            let output: ReportIncompleteResult = serde_json::from_value(entry.clone())
+            let mut output: ReportIncompleteResult = serde_json::from_value(entry.clone())
                 .map_err(|e| anyhow::anyhow!("Failed to parse report-incomplete: {}", e))?;
+            output.sanitize_fields();
             debug!("report-incomplete: {}", output.reason);
             ExecutionResult::failure(format!("Agent reported task incomplete: {}", output.reason))
         }

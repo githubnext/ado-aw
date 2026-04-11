@@ -29,11 +29,11 @@ impl Validate for UploadAttachmentParams {
         ensure!(self.work_item_id > 0, "work_item_id must be positive");
         ensure!(!self.file_path.is_empty(), "file_path must not be empty");
         ensure!(
-            !self.file_path.split('/').any(|component| component == ".."),
+            !self.file_path.split(['/', '\\']).any(|component| component == ".."),
             "file_path must not contain '..' path components"
         );
         ensure!(
-            !self.file_path.starts_with('/'),
+            !self.file_path.starts_with('/') && !self.file_path.starts_with('\\'),
             "file_path must not be an absolute path"
         );
         ensure!(
@@ -47,7 +47,7 @@ impl Validate for UploadAttachmentParams {
         ensure!(
             !self
                 .file_path
-                .split('/')
+                .split(['/', '\\'])
                 .any(|component| component == ".git"),
             "file_path must not contain '.git' components"
         );
@@ -421,6 +421,28 @@ mod tests {
         let params = UploadAttachmentParams {
             work_item_id: 42,
             file_path: "src/../secret".to_string(),
+            comment: None,
+        };
+        let result: Result<UploadAttachmentResult, _> = params.try_into();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validation_rejects_backslash_traversal() {
+        let params = UploadAttachmentParams {
+            work_item_id: 42,
+            file_path: "src\\..\\secret.txt".to_string(),
+            comment: None,
+        };
+        let result: Result<UploadAttachmentResult, _> = params.try_into();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validation_rejects_backslash_absolute_path() {
+        let params = UploadAttachmentParams {
+            work_item_id: 42,
+            file_path: "\\etc\\passwd".to_string(),
             comment: None,
         };
         let result: Result<UploadAttachmentResult, _> = params.try_into();

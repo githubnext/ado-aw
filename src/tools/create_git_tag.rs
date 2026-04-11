@@ -5,7 +5,7 @@ use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::PATH_SEGMENT;
+use super::{PATH_SEGMENT, validate_git_ref_name};
 use crate::sanitize::{Sanitize, sanitize as sanitize_text};
 use crate::tool_result;
 use crate::tools::{ExecutionContext, ExecutionResult, Executor, Validate};
@@ -53,6 +53,7 @@ impl Validate for CreateGitTagParams {
             "tag_name contains invalid characters (only alphanumeric, dots, dashes, underscores, and slashes are allowed): {}",
             self.tag_name
         );
+        validate_git_ref_name(&self.tag_name, "tag_name")?;
 
         if let Some(commit) = &self.commit {
             ensure!(
