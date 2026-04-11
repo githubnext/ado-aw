@@ -867,7 +867,7 @@ pub fn validate_resolve_pr_thread_statuses(front_matter: &FrontMatter) -> Result
                      statuses without explicit operator consent. Example:\n\n  \
                      safe-outputs:\n    resolve-pr-review-thread:\n      allowed-statuses:\n\
                      \x20       - fixed\n\n\
-                     Valid statuses: active, fixed, wont-fix, closed, by-design, pending\n"
+                     Valid statuses: active, fixed, wont-fix, closed, by-design\n"
                 );
             }
         } else {

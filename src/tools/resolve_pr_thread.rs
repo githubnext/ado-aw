@@ -5,6 +5,7 @@ use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::resolve_repo_name;
 use super::PATH_SEGMENT;
 use crate::sanitize::{Sanitize, sanitize as sanitize_text};
 use crate::tool_result;
@@ -163,7 +164,7 @@ impl Executor for ResolvePrThreadResult {
                  safe-outputs.resolve-pr-review-thread. This prevents agents from \
                  manipulating thread statuses without explicit operator consent. Example:\n  \
                  safe-outputs:\n    resolve-pr-review-thread:\n      allowed-statuses:\n        \
-                 - fixed\n\nValid statuses: active, fixed, wont-fix, closed, by-design, pending"
+                 - fixed\n\nValid statuses: active, fixed, wont-fix, closed, by-design"
                     .to_string(),
             ));
         }
@@ -201,22 +202,12 @@ impl Executor for ResolvePrThreadResult {
             }
         };
 
-        // Resolve repository name
-        let repo_name = if effective_repo == "self" || effective_repo.is_empty() {
-            ctx.repository_name
-                .as_ref()
-                .context("BUILD_REPOSITORY_NAME not set and repository is 'self'")?
-                .clone()
-        } else {
-            match ctx.allowed_repositories.get(effective_repo) {
-                Some(name) => name.clone(),
-                None => {
-                    return Ok(ExecutionResult::failure(format!(
-                        "Repository alias '{}' not found in allowed repositories",
-                        effective_repo
-                    )));
-                }
-            }
+        // Resolve repository alias to actual repo name via the shared helper.
+        // Treat an empty string the same as "self" (pipeline repository).
+        let alias = self.repository.as_deref().filter(|s| !s.is_empty());
+        let repo_name = match resolve_repo_name(alias, ctx) {
+            Ok(name) => name,
+            Err(result) => return Ok(result),
         };
 
         // Build the Azure DevOps REST API URL for updating a thread

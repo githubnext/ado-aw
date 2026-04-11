@@ -176,12 +176,12 @@ fn status_to_int(status: &str) -> Option<i32> {
 /// All valid thread status strings (kebab-case canonical form)
 const VALID_STATUSES: &[&str] = &["active", "fixed", "wont-fix", "closed", "by-design"];
 
-/// Validate a file path for inline comments: no `..`, not absolute
+/// Validate a file path for inline comments: no `..` path traversal, not absolute
 fn validate_file_path(path: &str) -> anyhow::Result<()> {
     ensure!(!path.is_empty(), "file_path must not be empty");
     ensure!(
-        !path.contains(".."),
-        "file_path must not contain '..'"
+        !path.split(['/', '\\']).any(|component| component == ".."),
+        "file_path must not contain a '..' path component"
     );
     ensure!(
         !path.starts_with('/') && !path.starts_with('\\'),
@@ -530,6 +530,9 @@ allowed-statuses:
     fn test_validate_file_path_accepts_valid() {
         assert!(validate_file_path("src/main.rs").is_ok());
         assert!(validate_file_path("path/to/file.txt").is_ok());
+        // ".." within a component name is not a traversal — must be accepted
+        assert!(validate_file_path("releases..notes/v1.md").is_ok());
+        assert!(validate_file_path("v2..beta/file.txt").is_ok());
     }
 
     #[test]
