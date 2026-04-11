@@ -1031,10 +1031,7 @@ mod tests {
         )
         .unwrap();
         let params = generate_copilot_params(&fm);
-        assert!(
-            !params.contains("--max-turns"),
-            "max-turns should not be emitted as a CLI arg"
-        );
+        assert!(!params.contains("--max-turns"), "max-turns should not be emitted as a CLI arg");
     }
 
     #[test]
@@ -1051,10 +1048,7 @@ mod tests {
         )
         .unwrap();
         let params = generate_copilot_params(&fm);
-        assert!(
-            !params.contains("--max-timeout"),
-            "timeout-minutes should not be emitted as a CLI arg"
-        );
+        assert!(!params.contains("--max-timeout"), "timeout-minutes should not be emitted as a CLI arg");
     }
 
     #[test]
@@ -1071,10 +1065,7 @@ mod tests {
         )
         .unwrap();
         let params = generate_copilot_params(&fm);
-        assert!(
-            !params.contains("--max-turns"),
-            "max-turns should not be emitted as a CLI arg"
-        );
+        assert!(!params.contains("--max-turns"), "max-turns should not be emitted as a CLI arg");
     }
 
     #[test]
@@ -1084,10 +1075,7 @@ mod tests {
         )
         .unwrap();
         let params = generate_copilot_params(&fm);
-        assert!(
-            !params.contains("--max-timeout"),
-            "timeout-minutes should not be emitted as a CLI arg"
-        );
+        assert!(!params.contains("--max-timeout"), "timeout-minutes should not be emitted as a CLI arg");
     }
 
     #[test]
@@ -1520,9 +1508,8 @@ mod tests {
     #[test]
     fn test_submit_pr_review_events_fails_when_value_is_scalar() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  submit-pr-review: true\n---\n",
-        )
-        .unwrap();
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  submit-pr-review: true\n---\n"
+        ).unwrap();
         let result = validate_submit_pr_review_events(&fm);
         assert!(result.is_err());
     }
