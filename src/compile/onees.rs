@@ -244,7 +244,7 @@ fn generate_mcp_configuration(mcps: &HashMap<String, McpConfig>) -> String {
         .filter_map(|(name, config)| {
             let (is_enabled, opts) = match config {
                 McpConfig::Enabled(enabled) => (*enabled, None),
-                McpConfig::WithOptions(o) => (true, Some(o)),
+                McpConfig::WithOptions(o) => (o.enabled.unwrap_or(true), Some(o)),
             };
 
             if !is_enabled {
