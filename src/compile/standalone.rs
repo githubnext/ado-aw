@@ -643,6 +643,129 @@ mod tests {
         let config = generate_mcpg_config(&fm);
         assert_eq!(config.gateway.port, 80);
         assert_eq!(config.gateway.domain, "host.docker.internal");
+        assert_eq!(config.gateway.api_key, "${MCP_GATEWAY_API_KEY}");
+        assert_eq!(config.gateway.payload_dir, "/tmp/gh-aw/mcp-payloads");
+    }
+
+    #[test]
+    fn test_generate_mcpg_config_json_roundtrip() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers.insert(
+            "my-tool".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                command: Some("python".to_string()),
+                args: vec!["-m".to_string(), "server".to_string()],
+                allowed: vec!["query".to_string()],
+                ..Default::default()
+            }),
+        );
+        let config = generate_mcpg_config(&fm);
+        let json = serde_json::to_string_pretty(&config)
+            .expect("Config should serialize to JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("Serialized JSON should parse back");
+
+        // Verify top-level structure matches MCPG expectation
+        assert!(parsed.get("mcpServers").is_some(), "Should have mcpServers key");
+        assert!(parsed.get("gateway").is_some(), "Should have gateway key");
+
+        let gw = parsed.get("gateway").unwrap();
+        assert!(gw.get("port").is_some(), "Gateway should have port");
+        assert!(gw.get("domain").is_some(), "Gateway should have domain");
+        assert!(gw.get("apiKey").is_some(), "Gateway should have apiKey");
+        assert!(gw.get("payloadDir").is_some(), "Gateway should have payloadDir");
+    }
+
+    #[test]
+    fn test_generate_mcpg_config_safeoutputs_variable_placeholders() {
+        let fm = minimal_front_matter();
+        let config = generate_mcpg_config(&fm);
+        let so = config.mcp_servers.get("safeoutputs").unwrap();
+
+        // URL should reference the runtime-substituted port
+        let url = so.url.as_ref().unwrap();
+        assert!(
+            url.contains("${SAFE_OUTPUTS_PORT}"),
+            "SafeOutputs URL should use ${{SAFE_OUTPUTS_PORT}} placeholder, got: {url}"
+        );
+
+        // Auth header should reference the runtime-substituted API key
+        let headers = so.headers.as_ref().unwrap();
+        let auth = headers.get("Authorization").unwrap();
+        assert!(
+            auth.contains("${SAFE_OUTPUTS_API_KEY}"),
+            "SafeOutputs auth header should use ${{SAFE_OUTPUTS_API_KEY}} placeholder, got: {auth}"
+        );
+    }
+
+    #[test]
+    fn test_generate_mcpg_config_safeoutputs_is_http_type() {
+        let fm = minimal_front_matter();
+        let config = generate_mcpg_config(&fm);
+        let so = config.mcp_servers.get("safeoutputs").unwrap();
+        assert_eq!(so.server_type, "http");
+        assert!(so.command.is_none(), "HTTP backend should have no command");
+        assert!(so.args.is_none(), "HTTP backend should have no args");
+        assert!(so.url.is_some(), "HTTP backend must have a URL");
+    }
+
+    #[test]
+    fn test_generate_mcpg_config_custom_mcp_is_stdio_type() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers.insert(
+            "runner".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                command: Some("node".to_string()),
+                args: vec!["srv.js".to_string()],
+                allowed: vec!["run".to_string()],
+                ..Default::default()
+            }),
+        );
+        let config = generate_mcpg_config(&fm);
+        let srv = config.mcp_servers.get("runner").unwrap();
+        assert_eq!(srv.server_type, "stdio");
+        assert!(srv.command.is_some(), "stdio server must have a command");
+        assert!(srv.url.is_none(), "stdio server should have no URL");
+    }
+
+    #[test]
+    fn test_generate_mcpg_config_custom_mcp_with_env() {
+        let mut fm = minimal_front_matter();
+        let mut env = std::collections::HashMap::new();
+        env.insert("TOKEN".to_string(), "secret".to_string());
+        fm.mcp_servers.insert(
+            "with-env".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                command: Some("node".to_string()),
+                args: vec![],
+                allowed: vec![],
+                env,
+                ..Default::default()
+            }),
+        );
+        let config = generate_mcpg_config(&fm);
+        let srv = config.mcp_servers.get("with-env").unwrap();
+        let e = srv.env.as_ref().unwrap();
+        assert_eq!(e.get("TOKEN").unwrap(), "secret");
+    }
+
+    #[test]
+    fn test_generate_mcpg_config_reserved_safeoutputs_name_rejected() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers.insert(
+            "safeoutputs".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                command: Some("evil".to_string()),
+                args: vec![],
+                allowed: vec![],
+                ..Default::default()
+            }),
+        );
+        let config = generate_mcpg_config(&fm);
+        // The reserved entry should still be the HTTP backend, not the user's command
+        let so = config.mcp_servers.get("safeoutputs").unwrap();
+        assert_eq!(so.server_type, "http", "safeoutputs should remain HTTP backend");
+        assert!(so.command.is_none(), "User command should not overwrite safeoutputs");
     }
 
     #[test]
