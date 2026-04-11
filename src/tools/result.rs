@@ -106,6 +106,10 @@ impl Default for ExecutionContext {
 pub struct ExecutionResult {
     /// Whether the execution succeeded
     pub success: bool,
+    /// Whether this is a warning (succeeded with issues).
+    /// When true, success is also true — the action completed but with caveats.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub warning: bool,
     /// Human-readable message describing the outcome
     pub message: String,
     /// Optional additional data (e.g., work item ID)
@@ -118,6 +122,7 @@ impl ExecutionResult {
     pub fn success(message: impl Into<String>) -> Self {
         Self {
             success: true,
+            warning: false,
             message: message.into(),
             data: None,
         }
@@ -127,8 +132,21 @@ impl ExecutionResult {
     pub fn success_with_data(message: impl Into<String>, data: serde_json::Value) -> Self {
         Self {
             success: true,
+            warning: false,
             message: message.into(),
             data: Some(data),
+        }
+    }
+
+    /// Create a warning result (succeeded with issues).
+    /// The action completed but something noteworthy occurred.
+    /// Exit code 2 signals the pipeline to set SucceededWithIssues.
+    pub fn warning(message: impl Into<String>) -> Self {
+        Self {
+            success: true,
+            warning: true,
+            message: message.into(),
+            data: None,
         }
     }
 
@@ -136,6 +154,7 @@ impl ExecutionResult {
     pub fn failure(message: impl Into<String>) -> Self {
         Self {
             success: false,
+            warning: false,
             message: message.into(),
             data: None,
         }
@@ -145,6 +164,7 @@ impl ExecutionResult {
     pub fn failure_with_data(message: impl Into<String>, data: serde_json::Value) -> Self {
         Self {
             success: false,
+            warning: false,
             message: message.into(),
             data: Some(data),
         }

@@ -577,7 +577,9 @@ impl Executor for CreatePrResult {
                         ));
                     }
                     _ => {
-                        return Ok(ExecutionResult::failure(
+                        // "warn" (default) — succeed with warning
+                        warn!("All files in patch were excluded by excluded-files patterns (if-no-changes: warn)");
+                        return Ok(ExecutionResult::warning(
                             "All files in patch were excluded by excluded-files patterns".to_string(),
                         ));
                     }
@@ -860,9 +862,9 @@ impl Executor for CreatePrResult {
                     ));
                 }
                 _ => {
-                    // "warn" (default)
+                    // "warn" (default) — succeed with warning
                     warn!("No changes detected after applying patch (if-no-changes: warn)");
-                    return Ok(ExecutionResult::failure(
+                    return Ok(ExecutionResult::warning(
                         "No changes detected after applying patch".to_string(),
                     ));
                 }
@@ -1494,24 +1496,28 @@ fn validate_single_path(path: &str) -> anyhow::Result<()> {
 }
 
 /// Extract all file paths from a patch/diff content.
-/// Returns deduplicated list of file paths referenced in diff headers.
+/// Returns deduplicated list of file paths referenced in the patch.
+/// Uses `--- a/` and `+++ b/` lines for robust parsing (handles quoted paths
+/// with spaces that break `diff --git` header parsing via split_whitespace).
 fn extract_paths_from_patch(patch_content: &str) -> Vec<String> {
     let mut paths = Vec::new();
     for line in patch_content.lines() {
-        if line.starts_with("diff --git") {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            for part in parts.iter().skip(2) {
-                let path = part.trim_start_matches("a/").trim_start_matches("b/");
-                if !path.is_empty() {
-                    paths.push(path.to_string());
-                }
+        if let Some(rest) = line.strip_prefix("--- a/") {
+            let path = rest.trim().trim_matches('"');
+            if !path.is_empty() {
+                paths.push(path.to_string());
+            }
+        } else if let Some(rest) = line.strip_prefix("+++ b/") {
+            let path = rest.trim().trim_matches('"');
+            if !path.is_empty() {
+                paths.push(path.to_string());
             }
         } else if line.starts_with("rename from ") || line.starts_with("rename to ") ||
                   line.starts_with("copy from ") || line.starts_with("copy to ") {
-            if let Some(path) = line.split_whitespace().last() {
-                if !path.is_empty() {
-                    paths.push(path.to_string());
-                }
+            // "rename from <path>" / "rename to <path>"
+            let path = line.splitn(3, ' ').nth(2).unwrap_or("").trim_matches('"');
+            if !path.is_empty() {
+                paths.push(path.to_string());
             }
         }
     }
@@ -1567,24 +1573,6 @@ fn find_protected_files(paths: &[String]) -> Vec<String> {
     protected
 }
 
-/// Check if file paths match an allowed-files glob allowlist.
-/// Returns list of paths that do NOT match any allowed pattern.
-#[cfg(test)]
-fn find_disallowed_files(paths: &[String], allowed_patterns: &[String]) -> Vec<String> {
-    if allowed_patterns.is_empty() {
-        return Vec::new(); // No allowlist = all files allowed
-    }
-    paths
-        .iter()
-        .filter(|path| {
-            !allowed_patterns
-                .iter()
-                .any(|pattern| glob_match::glob_match(pattern, path))
-        })
-        .cloned()
-        .collect()
-}
-
 /// Generate a provenance footer for the PR body
 fn generate_pr_footer() -> String {
     let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
@@ -1600,6 +1588,7 @@ fn generate_pr_footer() -> String {
 
 /// Filter out diff entries for files matching excluded-files glob patterns.
 /// Splits the patch into per-file diff blocks and removes those matching any pattern.
+/// Uses `+++ b/` lines for path extraction (robust with quoted/space-containing paths).
 fn filter_excluded_files_from_patch(patch_content: &str, excluded_patterns: &[String]) -> String {
     if excluded_patterns.is_empty() {
         return patch_content.to_string();
@@ -1622,17 +1611,16 @@ fn filter_excluded_files_from_patch(patch_content: &str, excluded_patterns: &[St
                 result.push_str(&current_block);
             }
 
-            // Start new block
+            // Start new block, path will be set when we see +++ b/
             current_block = String::new();
             current_block.push_str(line);
             current_block.push('\n');
-
-            // Extract path from "diff --git a/path b/path"
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            current_path = parts.get(3).map(|p| {
-                p.trim_start_matches("b/").to_string()
-            });
+            current_path = None;
         } else {
+            // Extract path from "+++ b/path" line (handles quoted paths)
+            if let Some(rest) = line.strip_prefix("+++ b/") {
+                current_path = Some(rest.trim().trim_matches('"').to_string());
+            }
             current_block.push_str(line);
             current_block.push('\n');
         }
@@ -1879,28 +1867,26 @@ new file mode 100755
 
     #[test]
     fn test_extract_paths_from_patch() {
-        let patch = "diff --git a/src/main.rs b/src/main.rs\nindex abc..def\n--- a/src/main.rs\n+++ b/src/main.rs\ndiff --git a/README.md b/README.md\n";
+        let patch = "diff --git a/src/main.rs b/src/main.rs\nindex abc..def\n--- a/src/main.rs\n+++ b/src/main.rs\ndiff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n";
         let paths = extract_paths_from_patch(patch);
         assert!(paths.contains(&"src/main.rs".to_string()));
         assert!(paths.contains(&"README.md".to_string()));
     }
 
-    // ─── Allowed-labels validation ──────────────────────────────────────────
-
     #[test]
-    fn test_find_disallowed_files_with_allowlist() {
-        let paths = vec!["src/main.rs".to_string(), "tests/test.rs".to_string(), "docs/api.md".to_string()];
-        let allowed = vec!["src/**".to_string()];
-        let disallowed = find_disallowed_files(&paths, &allowed);
-        assert!(disallowed.contains(&"tests/test.rs".to_string()));
-        assert!(disallowed.contains(&"docs/api.md".to_string()));
-        assert!(!disallowed.contains(&"src/main.rs".to_string()));
+    fn test_extract_paths_from_patch_with_spaces() {
+        let patch = "diff --git \"a/path with spaces/file.txt\" \"b/path with spaces/file.txt\"\n--- a/path with spaces/file.txt\n+++ b/path with spaces/file.txt\n";
+        let paths = extract_paths_from_patch(patch);
+        assert!(paths.contains(&"path with spaces/file.txt".to_string()));
     }
 
     #[test]
-    fn test_find_disallowed_files_empty_allowlist() {
-        let paths = vec!["anything.rs".to_string()];
-        let disallowed = find_disallowed_files(&paths, &[]);
-        assert!(disallowed.is_empty());
+    fn test_extract_paths_new_file() {
+        let patch = "diff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n";
+        let paths = extract_paths_from_patch(patch);
+        assert!(paths.contains(&"new.txt".to_string()));
+        // /dev/null from --- should not be included (no a/ prefix)
+        assert!(!paths.contains(&"/dev/null".to_string()));
     }
+
 }

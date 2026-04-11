@@ -634,7 +634,14 @@ jobs:
           mkdir -p "$(Agent.TempDirectory)/staging"
         displayName: "Prepare output directory"
 
-      - bash: ado-aw execute --source "{{ source_path }}" --safe-output-dir "$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)" --output-dir "$(Agent.TempDirectory)/staging"
+      - bash: |
+          ado-aw execute --source "{{ source_path }}" --safe-output-dir "$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)" --output-dir "$(Agent.TempDirectory)/staging"
+          EXIT_CODE=$?
+          if [ $EXIT_CODE -eq 2 ]; then
+            echo "##vso[task.complete result=SucceededWithIssues;]Executor completed with warnings"
+            exit 0
+          fi
+          exit $EXIT_CODE
         displayName: Process safe outputs
         workingDirectory: {{ working_directory }}
         env:

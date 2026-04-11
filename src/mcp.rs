@@ -254,11 +254,21 @@ impl SafeOutputs {
             })?;
 
         // Undo the temporary commit but keep changes in working tree
-        let _ = Command::new("git")
+        let reset_output = Command::new("git")
             .args(["reset", "HEAD~1", "--mixed", "--quiet"])
             .current_dir(&git_dir)
             .output()
-            .await;
+            .await
+            .map_err(|e| {
+                anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git reset: {}", e))
+            })?;
+
+        if !reset_output.status.success() {
+            return Err(anyhow_to_mcp_error(anyhow::anyhow!(
+                "git reset HEAD~1 failed (repository may retain synthetic commit): {}",
+                String::from_utf8_lossy(&reset_output.stderr)
+            )));
+        }
 
         if !format_patch_output.status.success() {
             return Err(anyhow_to_mcp_error(anyhow::anyhow!(

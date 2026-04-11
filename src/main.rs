@@ -237,18 +237,24 @@ async fn main() -> Result<()> {
 
                 // Print summary
                 let success_count = results.iter().filter(|r| r.success).count();
-                let failure_count = results.len() - success_count;
+                let warning_count = results.iter().filter(|r| r.warning).count();
+                let failure_count = results.iter().filter(|r| !r.success).count();
 
                 println!("\n--- Execution Summary ---");
                 println!(
-                    "Total: {} | Success: {} | Failed: {}",
+                    "Total: {} | Success: {} | Warnings: {} | Failed: {}",
                     results.len(),
-                    success_count,
+                    success_count - warning_count,
+                    warning_count,
                     failure_count
                 );
 
                 if failure_count > 0 {
                     std::process::exit(1);
+                } else if warning_count > 0 {
+                    // Exit code 2 signals "succeeded with issues" — the pipeline
+                    // step wraps this to emit ##vso[task.complete result=SucceededWithIssues;]
+                    std::process::exit(2);
                 }
             }
             Commands::Proxy { allowed_hosts } => {
