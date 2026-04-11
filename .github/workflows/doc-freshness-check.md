@@ -42,7 +42,7 @@ Look for:
 
 ### 2. CLI Commands
 
-Extract the actual CLI commands from `src/main.rs` (look at the `Commands` enum with clap derive) and compare against documented commands in `.github/copilot-instructions.md`.
+Extract the actual CLI commands from `src/main.rs` (look at the `Commands` enum with clap derive) and compare against documented commands in both `.github/copilot-instructions.md` and `README.md` (CLI Reference section).
 
 Check:
 - All subcommands are documented
@@ -51,7 +51,7 @@ Check:
 
 ### 3. Front Matter Fields
 
-Compare the `FrontMatter` struct in `src/compile/types.rs` against the documented fields:
+Compare the `FrontMatter` struct in `src/compile/types.rs` against the documented fields in both `.github/copilot-instructions.md` and `README.md` (Agent File Reference → Front Matter Fields).
 
 - Are all struct fields documented?
 - Do documented defaults match `#[serde(default)]` values?
@@ -74,9 +74,21 @@ Compare against documented markers in `.github/copilot-instructions.md`. Check f
 
 ### 5. Safe Output Tools
 
-Compare tools defined in `src/tools/` against what's documented:
+Compare tools defined in `src/tools/` against what's documented in both `.github/copilot-instructions.md` and `README.md` (Safe Outputs section):
 - Are all tools documented with correct parameters?
 - Do configuration options match the actual implementation?
+- Does `README.md` list all available safe output tools?
+
+### 6. README Accuracy (`README.md`)
+
+Check the human-facing documentation in `README.md` against the codebase:
+
+- **Quick Start** — do the example commands and workflows still work with the current CLI?
+- **Schedule Syntax** — does the documented syntax match `src/fuzzy_schedule.rs`?
+- **MCP Servers** — are all built-in MCP server names listed? Compare against the MCP handling in `src/compile/common.rs` and `src/compile/types.rs`.
+- **Network Isolation** — do the listed default allowed domains match `src/allowed_hosts.rs`?
+- **Safe Outputs configuration examples** — do the YAML examples match the config structs in `src/tools/`?
+- **Front Matter Fields table** — do field names, types, and defaults match `src/compile/types.rs`?
 
 ## Decision Criteria
 

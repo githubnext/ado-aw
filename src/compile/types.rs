@@ -129,7 +129,6 @@ pub struct ScheduleOptions {
 /// # Object format (with additional options)
 /// engine:
 ///   model: claude-opus-4.5
-///   max-turns: 50
 ///   timeout-minutes: 30
 /// ```
 #[derive(Debug, Deserialize, Clone)]
@@ -156,7 +155,7 @@ impl EngineConfig {
         }
     }
 
-    /// Get the max turns setting
+    /// Get the max turns setting (deprecated — ignored at compile time)
     pub fn max_turns(&self) -> Option<u32> {
         match self {
             EngineConfig::Simple(_) => None,
@@ -178,7 +177,7 @@ pub struct EngineOptions {
     /// AI model to use (defaults to claude-opus-4.5)
     #[serde(default)]
     pub model: Option<String>,
-    /// Maximum number of chat iterations per run
+    /// Maximum number of chat iterations per run (deprecated — not supported by Copilot CLI)
     #[serde(default, rename = "max-turns")]
     pub max_turns: Option<u32>,
     /// Workflow timeout in minutes

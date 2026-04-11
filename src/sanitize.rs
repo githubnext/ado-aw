@@ -34,6 +34,7 @@ const MAX_LINE_COUNT: usize = 65_536;
 /// 7. Apply content size limits (IS-08)
 pub fn sanitize(input: &str) -> String {
     let mut s = remove_control_characters(input);
+    s = neutralize_pipeline_commands(&s);
     s = neutralize_mentions(&s);
     s = neutralize_bot_triggers(&s);
     s = remove_xml_comments(&s);
@@ -82,6 +83,37 @@ fn remove_control_characters(input: &str) -> String {
         result.push(c);
     }
 
+    result
+}
+
+// ── Azure DevOps pipeline command neutralization ───────────────────────────
+
+/// Neutralize `##vso[` logging command sequences that Azure DevOps interprets
+/// when they appear in pipeline stdout/stderr. Wraps them in backticks so they
+/// render as code instead of being executed.
+///
+/// Also handles `##[` (the shorthand form used for `##[section]`, `##[error]`,
+/// etc.) which ADO pipelines also interpret.
+fn neutralize_pipeline_commands(input: &str) -> String {
+    let mut result = String::with_capacity(input.len() + 32);
+    let mut rest = input;
+
+    while let Some(pos) = rest.find("##") {
+        result.push_str(&rest[..pos]);
+        let after = &rest[pos + 2..];
+        if after.starts_with("vso[") {
+            result.push_str("`##vso[`");
+            rest = &after[4..];
+        } else if after.starts_with('[') {
+            result.push_str("`##[`");
+            rest = &after[1..];
+        } else {
+            // Harmless "##" (e.g. markdown heading)
+            result.push_str("##");
+            rest = after;
+        }
+    }
+    result.push_str(rest);
     result
 }
 
@@ -481,5 +513,33 @@ mod tests {
     fn test_sanitize_preserves_normal_text() {
         let input = "This is a normal description of a work item.";
         assert_eq!(sanitize(input), input);
+    }
+
+    // ── Pipeline command neutralization tests ──────────────────────────────
+
+    #[test]
+    fn test_neutralize_vso_command() {
+        let input = "##vso[task.setvariable variable=secret]hack";
+        let result = sanitize(input);
+        // The raw ##vso[ should be wrapped in backticks so ADO won't interpret it
+        assert!(result.contains("`##vso[`"));
+        // Verify it's not present in its original unescaped form (i.e. without backtick prefix)
+        assert!(!result.contains("##vso[task."));
+    }
+
+    #[test]
+    fn test_neutralize_vso_shorthand() {
+        let input = "##[error]Something bad happened";
+        let result = sanitize(input);
+        assert!(result.contains("`##[`"));
+    }
+
+    #[test]
+    fn test_neutralize_vso_preserves_single_hash() {
+        let input = "# Heading\n## Sub-heading\nIssue #123";
+        let result = sanitize(input);
+        assert!(result.contains("# Heading"));
+        assert!(result.contains("## Sub-heading"));
+        assert!(result.contains("#123"));
     }
 }

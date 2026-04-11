@@ -32,6 +32,8 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 │   ├── fuzzy_schedule.rs # Fuzzy schedule parsing
 │   ├── logging.rs        # File-based logging infrastructure
 │   ├── mcp.rs            # SafeOutputs MCP server (stdio + HTTP)
+│   ├── configure.rs      # `configure` CLI command — detects and updates pipeline variables
+│   ├── detect.rs         # Agentic pipeline detection (helper for `configure`)
 │   ├── ndjson.rs         # NDJSON parsing utilities
 │   ├── proxy.rs          # Network proxy implementation
 │   ├── sanitize.rs       # Input sanitization for safe outputs
@@ -99,7 +101,6 @@ target: standalone # Optional: "standalone" (default) or "1es". See Target Platf
 engine: claude-opus-4.5 # AI engine to use. Defaults to claude-opus-4.5. Other options include claude-sonnet-4.5, gpt-5.2-codex, gemini-3-pro-preview, etc.
 # engine:                        # Alternative object format (with additional options)
 #   model: claude-opus-4.5
-#   max-turns: 50
 #   timeout-minutes: 30
 schedule: daily around 14:00 # Fuzzy schedule syntax - see Schedule Syntax section below
 # schedule:                       # Alternative object format (with branch filtering)
@@ -269,6 +270,39 @@ schedule:
     - release/*
 ```
 
+### Engine Configuration
+
+The `engine` field specifies which AI model to use and optional execution parameters. It accepts both a simple string format (model name only) and an object format with additional options.
+
+```yaml
+# Simple string format (just a model name)
+engine: claude-opus-4.5
+
+# Object format with additional options
+engine:
+  model: claude-opus-4.5
+  timeout-minutes: 30
+```
+
+#### Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `model` | string | `claude-opus-4.5` | AI model to use. Options include `claude-sonnet-4.5`, `gpt-5.2-codex`, `gemini-3-pro-preview`, etc. |
+| `timeout-minutes` | integer | *(none)* | Maximum time in minutes the agent job is allowed to run. Sets `timeoutInMinutes` on the `PerformAgenticTask` job in the generated pipeline. |
+
+> **Deprecated:** `max-turns` is still accepted in front matter for backwards compatibility but is ignored at compile time (a warning is emitted). It was specific to Claude Code and is not supported by Copilot CLI.
+
+#### `timeout-minutes`
+
+The `timeout-minutes` field sets a wall-clock limit (in minutes) for the entire agent job. It maps to the Azure DevOps `timeoutInMinutes` job property on `PerformAgenticTask`. This is useful for:
+
+- **Budget enforcement** — hard-capping the total runtime of an agent to control compute costs.
+- **Pipeline hygiene** — preventing agents from occupying a runner indefinitely if they stall or enter long retry loops.
+- **SLA compliance** — ensuring scheduled agents complete within a known window.
+
+When omitted, Azure DevOps uses its default job timeout (60 minutes). When set, the compiler emits `timeoutInMinutes: <value>` on the agentic job.
+
 ### Tools Configuration
 
 The `tools` field controls which tools are available to the agent. Both sub-fields are optional and have sensible defaults.
@@ -350,7 +384,7 @@ The compiler transforms the input into valid Azure DevOps pipeline YAML based on
 - **Standalone**: Uses `templates/base.yml`
 - **1ES**: Uses `templates/1es-base.yml`
 
-Explicit markings are embedded in these templates that the compiler is allowed to replace e.g. `{{ agency_params }}` denotes parameters which are passed to the agency command line tool. The compiler should not replace sections denoted by `${{ some content }}`. What follows is a mapping of markings to responsibilities (primarily for the standalone template).
+Explicit markings are embedded in these templates that the compiler is allowed to replace e.g. `{{ copilot_params }}` denotes parameters which are passed to the copilot command line tool. The compiler should not replace sections denoted by `${{ some content }}`. What follows is a mapping of markings to responsibilities (primarily for the standalone template).
 
 ## {{ repositories }}
 For each additional repository specified in the front matter append:
@@ -419,12 +453,13 @@ This distinction allows resources (like templates) to be available as pipeline r
 
 Should be replaced with the human-readable name from the front matter (e.g., "Daily Code Review"). This is used for display purposes like stage names.
 
-## {{ agency_params }}
+## {{ copilot_params }}
 
-Additional params provided to agency CLI. The compiler generates:
+Additional params provided to copilot CLI. The compiler generates:
 - `--model <model>` - AI model from `engine` front matter field (default: claude-opus-4.5)
 - `--no-ask-user` - Prevents interactive prompts
 - `--allow-tool <tool>` - Explicitly allows specific tools (github, safeoutputs, write, shell commands like cat, date, echo, grep, head, ls, pwd, sort, tail, uniq, wc, yq)
+- `--disable-mcp-server <name>` - Disables specific Copilot CLI MCPs
 
 MCP servers are handled entirely by the MCP Gateway (MCPG) and are not passed as copilot CLI params.
 
@@ -480,6 +515,12 @@ Generates a `dependsOn: SetupJob` clause for `PerformAgenticTask` if a setup job
 
 If no setup job is configured, this is replaced with an empty string.
 
+## {{ job_timeout }}
+
+Generates a `timeoutInMinutes: <value>` job property for `PerformAgenticTask` when `engine.timeout-minutes` is configured. This sets the Azure DevOps job-level timeout for the agentic task.
+
+If `timeout-minutes` is not configured, this is replaced with an empty string.
+
 ## {{ working_directory }}
 
 Should be replaced with the appropriate working directory based on the effective workspace setting.
@@ -495,7 +536,7 @@ Should be replaced with the appropriate working directory based on the effective
 - `root`: `$(Build.SourcesDirectory)` - the checkout root directory
 - `repo`: `$(Build.SourcesDirectory)/$(Build.Repository.Name)` - the repository's subfolder
 
-This is used for the `workingDirectory` property of the agency copilot task.
+This is used for the `workingDirectory` property of the copilot task.
 
 ## {{ source_path }}
 
@@ -685,16 +726,16 @@ Should be replaced with the agent context root for 1ES Agency jobs. This determi
 
 ## {{ mcp_configuration }}
 
-Should be replaced with the MCP server configuration for 1ES templates. For each enabled MCP with a service connection, generates service connection references:
+Should be replaced with the MCP server configuration for 1ES templates. For each `mcp-servers:` entry without a `command:` field, generates a service connection reference using the entry name:
 
 ```yaml
-ado:
-  serviceConnection: mcp-ado-service-connection
-kusto:
-  serviceConnection: mcp-kusto-service-connection
+my-mcp:
+  serviceConnection: mcp-my-mcp-service-connection
+other-mcp:
+  serviceConnection: mcp-other-mcp-service-connection
 ```
 
-Custom MCP servers (with `command:` field) are not supported in 1ES target. MCPs must have service connection configuration.
+Custom MCP servers (with `command:` field) are not supported in 1ES target. Only entries without a `command:` (which have a corresponding service connection) are supported.
 
 ## {{ global_options }}
 
@@ -712,11 +753,11 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - `--output, -o <path>` - Output directory for the generated file (defaults to current directory)
   - Guides you through: name, description, engine selection, schedule, workspace, repositories, checkout, and MCPs
   - The generated file includes a placeholder for agent instructions that you edit directly
-- `compile <path>` - Compile a markdown file to Azure DevOps pipeline YAML
-  - `--output, -o <path>` - Optional output path for generated YAML
-- `check <source> <pipeline>` - Verify that a compiled pipeline matches its source markdown
-  - `<source>` - Path to the source markdown file
+- `compile [<path>]` - Compile a markdown file to Azure DevOps pipeline YAML. If no path is given, auto-discovers and recompiles all detected agentic pipelines in the current directory.
+  - `--output, -o <path>` - Optional output path for generated YAML (only valid when a path is provided)
+- `check <pipeline>` - Verify that a compiled pipeline matches its source markdown
   - `<pipeline>` - Path to the pipeline YAML file to verify
+  - The source markdown path is auto-detected from the `@ado-aw` header in the pipeline file
   - Useful for CI checks to ensure pipelines are regenerated after source changes
 - `mcp <output_directory> <bounding_directory>` - Run SafeOutputs as a stdio MCP server
 - `mcp-http <output_directory> <bounding_directory>` - Run SafeOutputs as an HTTP MCP server (for MCPG integration)
@@ -728,8 +769,14 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - `--output-dir <path>` - Output directory for processed artifacts (e.g., agent memory)
   - `--ado-org-url <url>` - Azure DevOps organization URL override
   - `--ado-project <name>` - Azure DevOps project name override
-- `proxy` - Start an HTTP proxy for network filtering
-  - `--allow <host>` - Allowed hosts (supports wildcards, can be repeated)
+- `configure` - Detect agentic pipelines in a local repository and update the `GITHUB_TOKEN` pipeline variable on their Azure DevOps build definitions
+  - `--token <token>` / `GITHUB_TOKEN` env var - The new GITHUB_TOKEN value (prompted if omitted)
+  - `--org <url>` - Override: Azure DevOps organization URL (inferred from git remote by default)
+  - `--project <name>` - Override: Azure DevOps project name (inferred from git remote by default)
+  - `--pat <pat>` / `AZURE_DEVOPS_EXT_PAT` env var - PAT for ADO API authentication (prompted if omitted)
+  - `--path <path>` - Path to the repository root (defaults to current directory)
+  - `--dry-run` - Preview changes without applying them
+  - `--definition-ids <ids>` - Explicit pipeline definition IDs to update (comma-separated, skips auto-detection)
 
 ## Safe Outputs Configuration
 
@@ -973,6 +1020,7 @@ safe-outputs:
   create-wiki-page:
     wiki-name: "MyProject.wiki"     # Required — wiki identifier (name or GUID)
     wiki-project: "OtherProject"    # Optional — ADO project that owns the wiki; defaults to current pipeline project
+    branch: "main"                  # Optional — git branch override; auto-detected for code wikis (see note below)
     path-prefix: "/agent-output"    # Optional — prepended to the agent-supplied path (restricts write scope)
     title-prefix: "[Agent] "        # Optional — prepended to the last path segment (the page title)
     comment: "Created by agent"     # Optional — default commit comment when agent omits one
@@ -980,6 +1028,8 @@ safe-outputs:
 ```
 
 Note: `wiki-name` is required. If it is not set, execution fails with an explicit error message.
+
+**Code wikis vs project wikis:** The executor automatically detects code wikis (type 1) and resolves the published branch from the wiki metadata. You only need to set `branch` explicitly to override the auto-detected value (e.g. targeting a non-default branch). Project wikis (type 0) need no branch configuration.
 
 #### update-wiki-page
 Updates the content of an existing Azure DevOps wiki page. The wiki page must already exist; this tool edits its content but does not create new pages.
@@ -995,6 +1045,7 @@ safe-outputs:
   update-wiki-page:
     wiki-name: "MyProject.wiki"     # Required — wiki identifier (name or GUID)
     wiki-project: "OtherProject"    # Optional — ADO project that owns the wiki; defaults to current pipeline project
+    branch: "main"                  # Optional — git branch override; auto-detected for code wikis (see note below)
     path-prefix: "/agent-output"    # Optional — prepended to the agent-supplied path (restricts write scope)
     title-prefix: "[Agent] "        # Optional — prepended to the last path segment (the page title)
     comment: "Updated by agent"     # Optional — default commit comment when agent omits one
@@ -1002,6 +1053,8 @@ safe-outputs:
 ```
 
 Note: `wiki-name` is required. If it is not set, execution fails with an explicit error message.
+
+**Code wikis vs project wikis:** The executor automatically detects code wikis (type 1) and resolves the published branch from the wiki metadata. You only need to set `branch` explicitly to override the auto-detected value (e.g. targeting a non-default branch). Project wikis (type 0) need no branch configuration.
 
 ### Adding New Features
 
@@ -1044,6 +1097,13 @@ cargo clippy
 cargo run -- compile ./path/to/agent.md
 ```
 
+### Recompile all agentic pipelines in the current directory
+
+```bash
+# Auto-discovers and recompiles all detected agentic pipelines
+cargo run -- compile
+```
+
 ### Add a new dependency
 
 ```bash
@@ -1059,6 +1119,7 @@ cargo add <crate-name>
 ## MCP Configuration
 
 The `mcp-servers:` field configures MCP (Model Context Protocol) servers that are made available to the agent via the MCP Gateway (MCPG). All MCPs require explicit `command:` configuration — there are no built-in MCPs in the copilot CLI.
+The `mcp-servers:` field configures custom MCP (Model Context Protocol) servers that the agent can use. Each entry must include a `command:` field specifying the executable to spawn.
 
 ### Custom MCP Servers
 
@@ -1076,13 +1137,13 @@ mcp-servers:
 
 ### Configuration Properties
 
-
 - `command:` - The executable to run (e.g., `"node"`, `"python"`, `"dotnet"`)
 - `args:` - Array of command-line arguments passed to the command
 - `allowed:` - Array of function names agents are permitted to call (required for security)
 - `env:` - Optional environment variables for the MCP server process
+- `service-connection:` - (1ES target only) Override the service connection name used for this MCP. If not specified, defaults to `mcp-<name>-service-connection`
 
-### Example Configuration
+### Example: Multiple Custom MCP Servers
 
 ```yaml
 mcp-servers:

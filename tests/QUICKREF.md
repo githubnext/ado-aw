@@ -49,7 +49,7 @@ ado-aw/
 ✅ Schedule generation (hourly/daily)  
 ✅ Repository configuration  
 ✅ Checkout steps  
-✅ Agency parameters  
+✅ Copilot parameters  
 ✅ Markdown parsing  
 ✅ Error handling  
 ✅ Edge cases  

@@ -7,6 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
+use super::resolve_wiki_branch;
 use crate::sanitize::{Sanitize, sanitize as sanitize_text};
 use crate::tool_result;
 use crate::tools::{ExecutionContext, ExecutionResult, Executor, Validate};
@@ -103,6 +104,12 @@ pub struct UpdateWikiPageConfig {
     /// (`SYSTEM_TEAMPROJECT`). Set this when the wiki lives in a different project.
     #[serde(default, rename = "wiki-project")]
     pub wiki_project: Option<String>,
+
+    /// Git branch for the wiki. Required for **code wikis** (type 1) where the
+    /// ADO API demands an explicit `versionDescriptor`. For project wikis this
+    /// can be omitted (defaults to `wikiMaster` server-side).
+    #[serde(default)]
+    pub branch: Option<String>,
 
     /// Security restriction: the agent may only write wiki pages whose paths
     /// start with this prefix (e.g. `"/agent-output"`). Paths that do not match
@@ -227,13 +234,34 @@ impl Executor for UpdateWikiPageResult {
 
         let client = reqwest::Client::new();
 
+        // Resolve the effective branch: explicit config → auto-detect from wiki
+        // metadata (code wikis need an explicit versionDescriptor).
+        let resolved_branch = match resolve_wiki_branch(
+            &client,
+            org_url,
+            project,
+            wiki_name,
+            token,
+            config.branch.as_deref(),
+        )
+        .await
+        {
+            Ok(b) => b,
+            Err(msg) => return Ok(ExecutionResult::failure(msg)),
+        };
+
         // ── GET: check whether the page exists and obtain its ETag ────────────
+        let mut get_query: Vec<(&str, &str)> = vec![
+            ("path", effective_path.as_str()),
+            ("api-version", "7.0"),
+        ];
+        if let Some(branch) = &resolved_branch {
+            get_query.push(("versionDescriptor.version", branch.as_str()));
+            get_query.push(("versionDescriptor.versionType", "branch"));
+        }
         let get_resp = client
             .get(&base_url)
-            .query(&[
-                ("path", effective_path.as_str()),
-                ("api-version", "7.0"),
-            ])
+            .query(&get_query)
             .basic_auth("", Some(token))
             .send()
             .await
@@ -272,13 +300,18 @@ impl Executor for UpdateWikiPageResult {
         debug!("Updating existing wiki page: {effective_path}");
 
         // ── PUT: create or update the page ────────────────────────────────────
+        let mut put_query: Vec<(&str, &str)> = vec![
+            ("path", effective_path.as_str()),
+            ("comment", comment),
+            ("api-version", "7.0"),
+        ];
+        if let Some(branch) = &resolved_branch {
+            put_query.push(("versionDescriptor.version", branch.as_str()));
+            put_query.push(("versionDescriptor.versionType", "branch"));
+        }
         let mut put_req = client
             .put(&base_url)
-            .query(&[
-                ("path", effective_path.as_str()),
-                ("comment", comment),
-                ("api-version", "7.0"),
-            ])
+            .query(&put_query)
             .header("Content-Type", "application/json")
             .basic_auth("", Some(token))
             .json(&serde_json::json!({ "content": self.content }));
@@ -465,6 +498,7 @@ mod tests {
         let config = UpdateWikiPageConfig::default();
         assert!(config.wiki_name.is_none());
         assert!(config.wiki_project.is_none());
+        assert!(config.branch.is_none());
         assert!(config.path_prefix.is_none());
         assert!(config.title_prefix.is_none());
         assert!(config.comment.is_none());
@@ -482,9 +516,21 @@ comment: "Updated by agent"
         let config: UpdateWikiPageConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.wiki_name.as_deref(), Some("MyProject.wiki"));
         assert_eq!(config.wiki_project.as_deref(), Some("OtherProject"));
+        assert!(config.branch.is_none());
         assert_eq!(config.path_prefix.as_deref(), Some("/agent-output"));
         assert_eq!(config.title_prefix.as_deref(), Some("[Agent] "));
         assert_eq!(config.comment.as_deref(), Some("Updated by agent"));
+    }
+
+    #[test]
+    fn test_config_deserializes_with_branch() {
+        let yaml = r#"
+wiki-name: "Azure Sphere"
+branch: "main"
+"#;
+        let config: UpdateWikiPageConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.wiki_name.as_deref(), Some("Azure Sphere"));
+        assert_eq!(config.branch.as_deref(), Some("main"));
     }
 
     #[test]

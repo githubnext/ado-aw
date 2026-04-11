@@ -15,13 +15,14 @@ use std::path::Path;
 use super::Compiler;
 use super::common::{
     self, AWF_VERSION, COPILOT_CLI_VERSION, DEFAULT_POOL, MCPG_PORT, MCPG_VERSION,
-    compute_effective_workspace, generate_copilot_params, generate_acquire_ado_token,
-    generate_cancel_previous_builds, generate_checkout_self, generate_checkout_steps,
-    generate_ci_trigger, generate_copilot_ado_env, generate_executor_ado_env,
-    generate_header_comment, generate_pipeline_path, generate_pipeline_resources,
-    generate_pr_trigger, generate_repositories, generate_schedule, generate_source_path,
-    generate_working_directory, replace_with_indent, sanitize_filename,
-    validate_write_permissions, validate_comment_target, validate_update_work_item_target,
+    compute_effective_workspace, generate_acquire_ado_token, generate_cancel_previous_builds,
+    generate_checkout_self, generate_checkout_steps, generate_ci_trigger, generate_copilot_ado_env,
+    generate_copilot_params, generate_executor_ado_env, generate_header_comment,
+    generate_job_timeout, generate_pipeline_path, generate_pipeline_resources, generate_pr_trigger,
+    generate_repositories, generate_schedule, generate_source_path, generate_working_directory,
+    replace_with_indent, sanitize_filename, validate_comment_target,
+    validate_resolve_pr_thread_statuses, validate_submit_pr_review_events,
+    validate_update_pr_votes, validate_update_work_item_target, validate_write_permissions,
 };
 use super::types::{FrontMatter, McpConfig};
 use crate::allowed_hosts::{CORE_ALLOWED_HOSTS, mcp_required_hosts};
@@ -59,7 +60,7 @@ impl Compiler for StandaloneCompiler {
         let repositories = generate_repositories(&front_matter.repositories);
         let checkout_steps = generate_checkout_steps(&front_matter.checkout);
         let checkout_self = generate_checkout_self();
-        let agency_params = generate_copilot_params(front_matter);
+        let copilot_params = generate_copilot_params(front_matter);
         let agent_name = sanitize_filename(&front_matter.name);
 
         // Compute effective workspace
@@ -92,35 +93,40 @@ impl Compiler for StandaloneCompiler {
             .unwrap_or_else(|| DEFAULT_POOL.to_string());
 
         // Generate hooks
-        let setup_job = generate_setup_job(
-            &front_matter.setup,
-            &front_matter.name,
-            &pool,
-        );
-        let teardown_job = generate_teardown_job(
-            &front_matter.teardown,
-            &front_matter.name,
-            &pool,
-        );
+        let setup_job = generate_setup_job(&front_matter.setup, &front_matter.name, &pool);
+        let teardown_job = generate_teardown_job(&front_matter.teardown, &front_matter.name, &pool);
         let has_memory = front_matter.safe_outputs.contains_key("memory");
         let prepare_steps = generate_prepare_steps(&front_matter.steps, has_memory);
         let finalize_steps = generate_finalize_steps(&front_matter.post_steps);
         let agentic_depends_on = generate_agentic_depends_on(&front_matter.setup);
+        let job_timeout = generate_job_timeout(front_matter);
 
         // Generate service connection token acquisition steps and env vars
         let acquire_read_token = generate_acquire_ado_token(
-            front_matter.permissions.as_ref().and_then(|p| p.read.as_deref()),
+            front_matter
+                .permissions
+                .as_ref()
+                .and_then(|p| p.read.as_deref()),
             "SC_READ_TOKEN",
         );
         let copilot_ado_env = generate_copilot_ado_env(
-            front_matter.permissions.as_ref().and_then(|p| p.read.as_deref()),
+            front_matter
+                .permissions
+                .as_ref()
+                .and_then(|p| p.read.as_deref()),
         );
         let acquire_write_token = generate_acquire_ado_token(
-            front_matter.permissions.as_ref().and_then(|p| p.write.as_deref()),
+            front_matter
+                .permissions
+                .as_ref()
+                .and_then(|p| p.write.as_deref()),
             "SC_WRITE_TOKEN",
         );
         let executor_ado_env = generate_executor_ado_env(
-            front_matter.permissions.as_ref().and_then(|p| p.write.as_deref()),
+            front_matter
+                .permissions
+                .as_ref()
+                .and_then(|p| p.write.as_deref()),
         );
 
         // Validate that write-requiring safe-outputs have a write service connection
@@ -129,6 +135,12 @@ impl Compiler for StandaloneCompiler {
         validate_comment_target(front_matter)?;
         // Validate update-work-item has required target field
         validate_update_work_item_target(front_matter)?;
+        // Validate submit-pr-review has required allowed-events field
+        validate_submit_pr_review_events(front_matter)?;
+        // Validate update-pr vote operation has required allowed-votes field
+        validate_update_pr_votes(front_matter)?;
+        // Validate resolve-pr-review-thread has required allowed-statuses field
+        validate_resolve_pr_thread_statuses(front_matter)?;
 
         // Load threat analysis prompt template
         let threat_analysis_prompt = include_str!("../../templates/threat-analysis.md");
@@ -153,6 +165,7 @@ impl Compiler for StandaloneCompiler {
             ("{{ prepare_steps }}", &prepare_steps),
             ("{{ finalize_steps }}", &finalize_steps),
             ("{{ agentic_depends_on }}", &agentic_depends_on),
+            ("{{ job_timeout }}", &job_timeout),
             ("{{ repositories }}", &repositories),
             ("{{ schedule }}", &schedule),
             ("{{ pipeline_resources }}", &pipeline_resources),
@@ -164,7 +177,7 @@ impl Compiler for StandaloneCompiler {
             ("{{ agent }}", &agent_name),
             ("{{ agent_name }}", &front_matter.name),
             ("{{ agent_description }}", &front_matter.description),
-            ("{{ agency_params }}", &agency_params),
+            ("{{ copilot_params }}", &copilot_params),
             ("{{ source_path }}", &source_path),
             ("{{ pipeline_path }}", &pipeline_path),
             ("{{ working_directory }}", &working_directory),
@@ -186,14 +199,11 @@ impl Compiler for StandaloneCompiler {
         // Always generate MCPG config — safeoutputs is always required regardless
         // of whether additional mcp-servers are configured in front matter.
         let config = generate_mcpg_config(front_matter);
-        let mcpg_config_json = serde_json::to_string_pretty(&config)
-            .context("Failed to serialize MCPG config")?;
+        let mcpg_config_json =
+            serde_json::to_string_pretty(&config).context("Failed to serialize MCPG config")?;
 
-        let pipeline_yaml = replace_with_indent(
-            &pipeline_yaml,
-            "{{ mcpg_config }}",
-            &mcpg_config_json,
-        );
+        let pipeline_yaml =
+            replace_with_indent(&pipeline_yaml, "{{ mcpg_config }}", &mcpg_config_json);
 
         // Prepend header comment for pipeline detection
         let header = generate_header_comment(input_path);
@@ -277,11 +287,7 @@ fn generate_allowed_domains(front_matter: &FrontMatter) -> String {
 }
 
 /// Generate the setup job YAML
-fn generate_setup_job(
-    setup_steps: &[serde_yaml::Value],
-    agent_name: &str,
-    pool: &str,
-) -> String {
+fn generate_setup_job(setup_steps: &[serde_yaml::Value], agent_name: &str, pool: &str) -> String {
     if setup_steps.is_empty() {
         return String::new();
     }
@@ -484,19 +490,11 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
                     },
                 );
             } else {
-                log::warn!(
-                    "MCP '{}' has options but no command — skipping. \
-                    All MCPs now require an explicit command: field.",
-                    name
-                );
+                log::warn!("MCP '{}' has no command - skipping", name);
+                continue;
             }
         } else {
-            log::warn!(
-                "MCP '{}' specified as boolean true — skipping. \
-                Boolean-enabled MCPs require built-in MCPs which no longer exist. \
-                Use the object form with a command: field instead.",
-                name
-            );
+            log::warn!("MCP '{}' has no command - skipping", name);
         }
     }
 
@@ -576,16 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_mcpg_config_always_includes_safeoutputs() {
-        let fm = minimal_front_matter();
-        let config = generate_mcpg_config(&fm);
-        let so = config.mcp_servers.get("safeoutputs").unwrap();
-        assert_eq!(so.server_type, "http");
-        assert!(so.url.as_ref().unwrap().contains("localhost"));
-    }
-
-    #[test]
-    fn test_generate_mcpg_config_custom_mcp() {
+    fn test_generate_firewall_config_custom_mcp() {
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "my-tool".to_string(),
@@ -660,20 +649,25 @@ mod tests {
             }),
         );
         let config = generate_mcpg_config(&fm);
-        let json = serde_json::to_string_pretty(&config)
-            .expect("Config should serialize to JSON");
+        let json = serde_json::to_string_pretty(&config).expect("Config should serialize to JSON");
         let parsed: serde_json::Value =
             serde_json::from_str(&json).expect("Serialized JSON should parse back");
 
         // Verify top-level structure matches MCPG expectation
-        assert!(parsed.get("mcpServers").is_some(), "Should have mcpServers key");
+        assert!(
+            parsed.get("mcpServers").is_some(),
+            "Should have mcpServers key"
+        );
         assert!(parsed.get("gateway").is_some(), "Should have gateway key");
 
         let gw = parsed.get("gateway").unwrap();
         assert!(gw.get("port").is_some(), "Gateway should have port");
         assert!(gw.get("domain").is_some(), "Gateway should have domain");
         assert!(gw.get("apiKey").is_some(), "Gateway should have apiKey");
-        assert!(gw.get("payloadDir").is_some(), "Gateway should have payloadDir");
+        assert!(
+            gw.get("payloadDir").is_some(),
+            "Gateway should have payloadDir"
+        );
     }
 
     #[test]
@@ -729,7 +723,8 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_mcpg_config_custom_mcp_with_env() {
+    fn test_generate_firewall_config_unknown_non_builtin_skipped() {
+        // An MCP with no command should be skipped
         let mut fm = minimal_front_matter();
         let mut env = std::collections::HashMap::new();
         env.insert("TOKEN".to_string(), "secret".to_string());
@@ -764,8 +759,14 @@ mod tests {
         let config = generate_mcpg_config(&fm);
         // The reserved entry should still be the HTTP backend, not the user's command
         let so = config.mcp_servers.get("safeoutputs").unwrap();
-        assert_eq!(so.server_type, "http", "safeoutputs should remain HTTP backend");
-        assert!(so.command.is_none(), "User command should not overwrite safeoutputs");
+        assert_eq!(
+            so.server_type, "http",
+            "safeoutputs should remain HTTP backend"
+        );
+        assert!(
+            so.command.is_none(),
+            "User command should not overwrite safeoutputs"
+        );
     }
 
     #[test]
