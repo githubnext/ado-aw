@@ -452,7 +452,7 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
 
         let (is_enabled, options) = match config {
             McpConfig::Enabled(enabled) => (*enabled, None),
-            McpConfig::WithOptions(opts) => (true, Some(opts)),
+            McpConfig::WithOptions(opts) => (opts.enabled.unwrap_or(true), Some(opts)),
         };
 
         if !is_enabled {
