@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use log::{debug, error, info, warn};
 use rmcp::{
     ErrorData as McpError, ServerHandler, ServiceExt, handler::server::tool::ToolRouter,
@@ -67,6 +67,9 @@ fn generate_short_id() -> String {
 // SafeOutputs MCP Server
 // ============================================================================
 
+/// SafeOutputs is safe to clone for concurrent use: it only contains immutable
+/// `PathBuf` fields and a `ToolRouter`. File I/O (NDJSON append) opens files
+/// fresh on each call, so no shared mutable state exists between clones.
 #[derive(Clone, Debug)]
 pub struct SafeOutputs {
     bounding_directory: PathBuf,
@@ -857,6 +860,119 @@ pub async fn run(output_directory: &str, bounding_directory: &str) -> Result<()>
         .waiting()
         .await
         .map_err(|e| anyhow::anyhow!("MCP exited with error: {:?}", e))?;
+    Ok(())
+}
+
+/// Run SafeOutputs MCP server over HTTP using the Streamable HTTP protocol.
+///
+/// This is used for MCPG integration: the gateway connects to this server as an
+/// HTTP backend and proxies tool calls from the agent.
+pub async fn run_http(
+    output_directory: &str,
+    bounding_directory: &str,
+    port: u16,
+    api_key: Option<&str>,
+) -> Result<()> {
+    use axum::Router;
+    use rmcp::transport::streamable_http_server::{
+        StreamableHttpServerConfig, StreamableHttpService,
+        session::local::LocalSessionManager,
+    };
+    use std::sync::Arc;
+
+    let bounding = bounding_directory.to_string();
+    let output = output_directory.to_string();
+
+    // Generate or use provided API key.
+    // In production the pipeline always passes --api-key with a cryptographically
+    // random value; this fallback covers dev/test invocations.
+    let api_key = match api_key {
+        Some(k) => k.to_string(),
+        None => {
+            let mut buf = [0u8; 32];
+            std::fs::File::open("/dev/urandom")
+                .and_then(|mut f| {
+                    use std::io::Read;
+                    f.read_exact(&mut buf)
+                })
+                .context(
+                    "Cannot generate secure API key: /dev/urandom unavailable. \
+                    Pass --api-key explicitly.",
+                )?;
+            buf.iter().map(|b| format!("{:02x}", b)).collect()
+        }
+    };
+
+    info!("Starting SafeOutputs HTTP server on port {}", port);
+
+    let config = StreamableHttpServerConfig {
+        sse_keep_alive: Some(std::time::Duration::from_secs(15)),
+        stateful_mode: true,
+    };
+
+    let session_manager = Arc::new(LocalSessionManager::default());
+
+    // Pre-initialize SafeOutputs once and share via clone.
+    // The factory closure runs on a Tokio worker thread, so we cannot
+    // use block_on() inside it — that would panic with "Cannot start
+    // a runtime from within a runtime".
+    let safe_outputs_template = SafeOutputs::new(&bounding, &output).await?;
+    let mcp_service = StreamableHttpService::new(
+        move || Ok(safe_outputs_template.clone()),
+        session_manager,
+        config,
+    );
+
+    // Wrap with API key auth middleware (constant-time comparison to
+    // prevent timing side-channels from a compromised AWF container).
+    let expected_key = api_key.clone();
+    let app = Router::new()
+        .route("/health", axum::routing::get(|| async { "ok" }))
+        .route(
+            "/mcp",
+            axum::routing::post(axum::routing::any_service(mcp_service.clone()))
+                .get(axum::routing::any_service(mcp_service.clone()))
+                .delete(axum::routing::any_service(mcp_service)),
+        )
+        .layer(axum::middleware::from_fn(move |req: axum::extract::Request, next: axum::middleware::Next| {
+            let expected = expected_key.clone();
+            async move {
+                // Skip auth for health endpoint
+                if req.uri().path() == "/health" {
+                    return next.run(req).await;
+                }
+
+                // Check Bearer token with constant-time comparison
+                if let Some(auth) = req.headers().get("authorization") {
+                    if let Ok(auth_str) = auth.to_str() {
+                        let expected_header = format!("Bearer {}", expected);
+                        use subtle::ConstantTimeEq;
+                        if auth_str.as_bytes().ct_eq(expected_header.as_bytes()).into() {
+                            return next.run(req).await;
+                        }
+                    }
+                }
+
+                use axum::response::IntoResponse;
+                (axum::http::StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
+            }
+        }));
+
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    info!("SafeOutputs HTTP server listening on {}", addr);
+
+    // Print port for pipeline capture (key is already known by the caller)
+    println!("SAFE_OUTPUTS_PORT={}", port);
+    log::debug!("SafeOutputs API key configured (not printed for security)");
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            tokio::signal::ctrl_c().await.ok();
+            info!("SafeOutputs HTTP server shutting down");
+        })
+        .await?;
+
     Ok(())
 }
 

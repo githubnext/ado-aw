@@ -17,15 +17,15 @@ use std::path::Path;
 
 use super::Compiler;
 use super::common::{
-    self, AWF_VERSION, COPILOT_CLI_VERSION, DEFAULT_POOL, compute_effective_workspace, generate_copilot_params,
+    self, AWF_VERSION, COPILOT_CLI_VERSION, DEFAULT_POOL, compute_effective_workspace,
     generate_acquire_ado_token, generate_checkout_self, generate_checkout_steps,
-    generate_ci_trigger, generate_copilot_ado_env, generate_executor_ado_env,
-    generate_header_comment, generate_job_timeout, generate_pipeline_path,
-    generate_pipeline_resources, generate_pr_trigger, generate_repositories,
-    generate_schedule, generate_source_path, generate_working_directory,
-    replace_with_indent, validate_comment_target, validate_update_work_item_target,
-    validate_write_permissions, validate_submit_pr_review_events,
-    validate_update_pr_votes, validate_resolve_pr_thread_statuses,
+    generate_ci_trigger, generate_copilot_ado_env, generate_copilot_params,
+    generate_executor_ado_env, generate_header_comment, generate_job_timeout,
+    generate_pipeline_path, generate_pipeline_resources, generate_pr_trigger,
+    generate_repositories, generate_schedule, generate_source_path, generate_working_directory,
+    is_custom_mcp, replace_with_indent, validate_comment_target,
+    validate_resolve_pr_thread_statuses, validate_submit_pr_review_events,
+    validate_update_pr_votes, validate_update_work_item_target, validate_write_permissions,
 };
 use super::types::{FrontMatter, McpConfig};
 
@@ -120,18 +120,30 @@ displayName: "Finalize""#,
 
         // Generate service connection token acquisition steps and env vars
         let acquire_read_token = generate_acquire_ado_token(
-            front_matter.permissions.as_ref().and_then(|p| p.read.as_deref()),
+            front_matter
+                .permissions
+                .as_ref()
+                .and_then(|p| p.read.as_deref()),
             "SC_READ_TOKEN",
         );
         let copilot_ado_env = generate_copilot_ado_env(
-            front_matter.permissions.as_ref().and_then(|p| p.read.as_deref()),
+            front_matter
+                .permissions
+                .as_ref()
+                .and_then(|p| p.read.as_deref()),
         );
         let acquire_write_token = generate_acquire_ado_token(
-            front_matter.permissions.as_ref().and_then(|p| p.write.as_deref()),
+            front_matter
+                .permissions
+                .as_ref()
+                .and_then(|p| p.write.as_deref()),
             "SC_WRITE_TOKEN",
         );
         let executor_ado_env = generate_executor_ado_env(
-            front_matter.permissions.as_ref().and_then(|p| p.write.as_deref()),
+            front_matter
+                .permissions
+                .as_ref()
+                .and_then(|p| p.write.as_deref()),
         );
 
         // Validate that write-requiring safe-outputs have a write service connection
@@ -222,24 +234,47 @@ fn generate_agent_context_root(effective_workspace: &str) -> String {
     }
 }
 
-/// Generate MCP configuration for 1ES templates
+/// Generate MCP configuration for 1ES templates.
+///
+/// In 1ES, MCPs require service connections. Only MCPs with explicit
+/// `service_connection` configuration or custom commands are included.
 fn generate_mcp_configuration(mcps: &HashMap<String, McpConfig>) -> String {
     let mut mcp_entries: Vec<_> = mcps
         .iter()
         .filter_map(|(name, config)| {
             let (is_enabled, opts) = match config {
                 McpConfig::Enabled(enabled) => (*enabled, None),
-                McpConfig::WithOptions(o) => (o.command.is_none(), Some(o)), // Custom MCPs not supported
+                McpConfig::WithOptions(o) => (true, Some(o)),
             };
 
-            if !is_enabled || !common::is_builtin_mcp(name) {
+            if !is_enabled {
                 return None;
             }
 
-            // Use explicit service connection or generate default
+            // Custom MCPs with command: not supported in 1ES (needs service connection)
+            if is_custom_mcp(config) {
+                log::warn!(
+                    "MCP '{}' uses custom command — not supported in 1ES target (requires service connection)",
+                    name
+                );
+                return None;
+            }
+
+            // Use explicit service connection or generate default.
+            // Warn when falling back to the naming convention — the generated
+            // service connection reference may not exist in the ADO project.
             let service_connection = opts
                 .and_then(|o| o.service_connection.clone())
-                .unwrap_or_else(|| format!("mcp-{}-service-connection", name));
+                .unwrap_or_else(|| {
+                    let default = format!("mcp-{}-service-connection", name);
+                    log::warn!(
+                        "MCP '{}' has no explicit service connection in 1ES target — \
+                        assuming '{}' exists",
+                        name,
+                        default,
+                    );
+                    default
+                });
 
             Some((name.clone(), service_connection))
         })

@@ -14,19 +14,19 @@ use std::path::Path;
 
 use super::Compiler;
 use super::common::{
-    self, AWF_VERSION, COPILOT_CLI_VERSION, DEFAULT_POOL, compute_effective_workspace, generate_copilot_params,
-    generate_acquire_ado_token, generate_cancel_previous_builds, generate_checkout_self,
-    generate_checkout_steps, generate_ci_trigger, generate_copilot_ado_env,
-    generate_executor_ado_env, generate_header_comment, generate_job_timeout,
-    generate_pipeline_path, generate_pipeline_resources, generate_pr_trigger,
-    generate_repositories, generate_schedule, generate_source_path,
-    generate_working_directory, replace_with_indent, sanitize_filename,
-    validate_write_permissions, validate_comment_target, validate_update_work_item_target, validate_submit_pr_review_events,
-    validate_update_pr_votes, validate_resolve_pr_thread_statuses,
+    self, AWF_VERSION, COPILOT_CLI_VERSION, DEFAULT_POOL, MCPG_PORT, MCPG_VERSION,
+    compute_effective_workspace, generate_acquire_ado_token, generate_cancel_previous_builds,
+    generate_checkout_self, generate_checkout_steps, generate_ci_trigger, generate_copilot_ado_env,
+    generate_copilot_params, generate_executor_ado_env, generate_header_comment,
+    generate_job_timeout, generate_pipeline_path, generate_pipeline_resources, generate_pr_trigger,
+    generate_repositories, generate_schedule, generate_source_path, generate_working_directory,
+    replace_with_indent, sanitize_filename, validate_comment_target,
+    validate_resolve_pr_thread_statuses, validate_submit_pr_review_events,
+    validate_update_pr_votes, validate_update_work_item_target, validate_write_permissions,
 };
 use super::types::{FrontMatter, McpConfig};
 use crate::allowed_hosts::{CORE_ALLOWED_HOSTS, mcp_required_hosts};
-use crate::mcp_firewall::{FirewallConfig, UpstreamConfig};
+use serde::Serialize;
 use std::collections::HashSet;
 
 /// Standalone pipeline compiler.
@@ -93,16 +93,8 @@ impl Compiler for StandaloneCompiler {
             .unwrap_or_else(|| DEFAULT_POOL.to_string());
 
         // Generate hooks
-        let setup_job = generate_setup_job(
-            &front_matter.setup,
-            &front_matter.name,
-            &pool,
-        );
-        let teardown_job = generate_teardown_job(
-            &front_matter.teardown,
-            &front_matter.name,
-            &pool,
-        );
+        let setup_job = generate_setup_job(&front_matter.setup, &front_matter.name, &pool);
+        let teardown_job = generate_teardown_job(&front_matter.teardown, &front_matter.name, &pool);
         let has_memory = front_matter.safe_outputs.contains_key("memory");
         let prepare_steps = generate_prepare_steps(&front_matter.steps, has_memory);
         let finalize_steps = generate_finalize_steps(&front_matter.post_steps);
@@ -111,18 +103,30 @@ impl Compiler for StandaloneCompiler {
 
         // Generate service connection token acquisition steps and env vars
         let acquire_read_token = generate_acquire_ado_token(
-            front_matter.permissions.as_ref().and_then(|p| p.read.as_deref()),
+            front_matter
+                .permissions
+                .as_ref()
+                .and_then(|p| p.read.as_deref()),
             "SC_READ_TOKEN",
         );
         let copilot_ado_env = generate_copilot_ado_env(
-            front_matter.permissions.as_ref().and_then(|p| p.read.as_deref()),
+            front_matter
+                .permissions
+                .as_ref()
+                .and_then(|p| p.read.as_deref()),
         );
         let acquire_write_token = generate_acquire_ado_token(
-            front_matter.permissions.as_ref().and_then(|p| p.write.as_deref()),
+            front_matter
+                .permissions
+                .as_ref()
+                .and_then(|p| p.write.as_deref()),
             "SC_WRITE_TOKEN",
         );
         let executor_ado_env = generate_executor_ado_env(
-            front_matter.permissions.as_ref().and_then(|p| p.write.as_deref()),
+            front_matter
+                .permissions
+                .as_ref()
+                .and_then(|p| p.write.as_deref()),
         );
 
         // Validate that write-requiring safe-outputs have a write service connection
@@ -153,6 +157,7 @@ impl Compiler for StandaloneCompiler {
         let replacements: Vec<(&str, &str)> = vec![
             ("{{ compiler_version }}", compiler_version),
             ("{{ firewall_version }}", AWF_VERSION),
+            ("{{ mcpg_version }}", MCPG_VERSION),
             ("{{ copilot_version }}", COPILOT_CLI_VERSION),
             ("{{ pool }}", &pool),
             ("{{ setup_job }}", &setup_job),
@@ -191,20 +196,14 @@ impl Compiler for StandaloneCompiler {
                 replace_with_indent(&yaml, placeholder, replacement)
             });
 
-        // Generate MCP firewall config JSON
-        let firewall_config_json = if !front_matter.mcp_servers.is_empty() {
-            let config = generate_firewall_config(front_matter);
-            serde_json::to_string_pretty(&config)
-                .unwrap_or_else(|_| r#"{"upstreams":{}}"#.to_string())
-        } else {
-            r#"{"upstreams":{}}"#.to_string()
-        };
+        // Always generate MCPG config — safeoutputs is always required regardless
+        // of whether additional mcp-servers are configured in front matter.
+        let config = generate_mcpg_config(front_matter);
+        let mcpg_config_json =
+            serde_json::to_string_pretty(&config).context("Failed to serialize MCPG config")?;
 
-        let pipeline_yaml = replace_with_indent(
-            &pipeline_yaml,
-            "{{ firewall_config }}",
-            &firewall_config_json,
-        );
+        let pipeline_yaml =
+            replace_with_indent(&pipeline_yaml, "{{ mcpg_config }}", &mcpg_config_json);
 
         // Prepend header comment for pipeline detection
         let header = generate_header_comment(input_path);
@@ -252,6 +251,11 @@ fn generate_allowed_domains(front_matter: &FrontMatter) -> String {
         hosts.insert((*host).to_string());
     }
 
+    // Add host.docker.internal — required for the AWF container to reach
+    // MCPG and SafeOutputs on the host. Only added for standalone pipelines
+    // that always use MCPG.
+    hosts.insert("host.docker.internal".to_string());
+
     // Add MCP-specific hosts
     for mcp in &enabled_mcps {
         for host in mcp_required_hosts(mcp) {
@@ -283,11 +287,7 @@ fn generate_allowed_domains(front_matter: &FrontMatter) -> String {
 }
 
 /// Generate the setup job YAML
-fn generate_setup_job(
-    setup_steps: &[serde_yaml::Value],
-    agent_name: &str,
-    pool: &str,
-) -> String {
+fn generate_setup_job(setup_steps: &[serde_yaml::Value], agent_name: &str, pool: &str) -> String {
     if setup_steps.is_empty() {
         return String::new();
     }
@@ -368,11 +368,88 @@ fn generate_agentic_depends_on(setup_steps: &[serde_yaml::Value]) -> String {
     }
 }
 
-/// Generate MCP firewall configuration from front matter
-pub fn generate_firewall_config(front_matter: &FrontMatter) -> FirewallConfig {
-    let mut upstreams = HashMap::new();
+/// MCPG server configuration for a single MCP upstream.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct McpgServerConfig {
+    /// Server type: "stdio" for command-based, "http" for HTTP backends
+    #[serde(rename = "type")]
+    pub server_type: String,
+    /// Command to run (for stdio type)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Command arguments (for stdio type)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    /// URL for HTTP backends
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// HTTP headers (e.g., Authorization)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headers: Option<HashMap<String, String>>,
+    /// Environment variables for the server process
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<HashMap<String, String>>,
+    /// Tool allow-list (if empty or absent, all tools are allowed)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
+}
+
+/// MCPG gateway configuration.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct McpgGatewayConfig {
+    pub port: u16,
+    pub domain: String,
+    pub api_key: String,
+    pub payload_dir: String,
+}
+
+/// Top-level MCPG configuration.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct McpgConfig {
+    pub mcp_servers: HashMap<String, McpgServerConfig>,
+    pub gateway: McpgGatewayConfig,
+}
+
+/// Generate MCPG configuration from front matter.
+///
+/// Converts the front matter `mcp-servers` definitions into MCPG-compatible JSON.
+/// SafeOutputs is always included as an HTTP backend. Custom MCPs with explicit
+/// `command:` are included as stdio servers.
+pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
+    let mut mcp_servers = HashMap::new();
+
+    // SafeOutputs is always included as an HTTP backend.
+    // MCPG runs with --network host, so it reaches SafeOutputs via localhost
+    // (not host.docker.internal, which requires Docker DNS and isn't available
+    // in host network mode on Linux).
+    mcp_servers.insert(
+        "safeoutputs".to_string(),
+        McpgServerConfig {
+            server_type: "http".to_string(),
+            command: None,
+            args: None,
+            url: Some("http://localhost:${SAFE_OUTPUTS_PORT}/mcp".to_string()),
+            headers: Some(HashMap::from([(
+                "Authorization".to_string(),
+                "Bearer ${SAFE_OUTPUTS_API_KEY}".to_string(),
+            )])),
+            env: None,
+            tools: None,
+        },
+    );
 
     for (name, config) in &front_matter.mcp_servers {
+        // Prevent user-defined MCPs from overwriting the reserved safeoutputs backend
+        if name.eq_ignore_ascii_case("safeoutputs") {
+            log::warn!(
+                "MCP name 'safeoutputs' is reserved for the safe outputs HTTP backend — skipping"
+            );
+            continue;
+        }
+
         let (is_enabled, options) = match config {
             McpConfig::Enabled(enabled) => (*enabled, None),
             McpConfig::WithOptions(opts) => (true, Some(opts)),
@@ -382,41 +459,53 @@ pub fn generate_firewall_config(front_matter: &FrontMatter) -> FirewallConfig {
             continue;
         }
 
-        let upstream = if let Some(opts) = options {
+        if let Some(opts) = options {
             if let Some(command) = &opts.command {
-                // Custom MCP with explicit command
-                UpstreamConfig {
-                    command: command.clone(),
-                    args: opts.args.clone(),
-                    env: opts.env.clone(),
-                    allowed: if opts.allowed.is_empty() {
-                        vec!["*".to_string()]
-                    } else {
-                        opts.allowed.clone()
+                // Custom MCP with explicit command → stdio server
+                let args = if opts.args.is_empty() {
+                    None
+                } else {
+                    Some(opts.args.clone())
+                };
+                let env = if opts.env.is_empty() {
+                    None
+                } else {
+                    Some(opts.env.clone())
+                };
+                let tools = if opts.allowed.is_empty() {
+                    None
+                } else {
+                    Some(opts.allowed.clone())
+                };
+                mcp_servers.insert(
+                    name.clone(),
+                    McpgServerConfig {
+                        server_type: "stdio".to_string(),
+                        command: Some(command.clone()),
+                        args,
+                        url: None,
+                        headers: None,
+                        env,
+                        tools,
                     },
-                    spawn_timeout_secs: 30,
-                }
-            } else {
-                log::warn!(
-                    "MCP '{}' has no command - skipping",
-                    name
                 );
+            } else {
+                log::warn!("MCP '{}' has no command - skipping", name);
                 continue;
             }
         } else {
-            log::warn!(
-                "MCP '{}' has no command - skipping",
-                name
-            );
-            continue;
-        };
-
-        upstreams.insert(name.clone(), upstream);
+            log::warn!("MCP '{}' has no command - skipping", name);
+        }
     }
 
-    FirewallConfig {
-        upstreams,
-        metadata_path: None,
+    McpgConfig {
+        mcp_servers,
+        gateway: McpgGatewayConfig {
+            port: MCPG_PORT,
+            domain: "host.docker.internal".to_string(),
+            api_key: "${MCP_GATEWAY_API_KEY}".to_string(),
+            payload_dir: "/tmp/gh-aw/mcp-payloads".to_string(),
+        },
     }
 }
 
@@ -496,62 +585,208 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_firewall_config(&fm);
-        let upstream = config.upstreams.get("my-tool").unwrap();
-        assert_eq!(upstream.command, "node");
-        assert_eq!(upstream.args, vec!["server.js"]);
-        assert_eq!(upstream.allowed, vec!["do_thing"]);
+        let config = generate_mcpg_config(&fm);
+        let server = config.mcp_servers.get("my-tool").unwrap();
+        assert_eq!(server.server_type, "stdio");
+        assert_eq!(server.command.as_ref().unwrap(), "node");
+        assert_eq!(server.args.as_ref().unwrap(), &vec!["server.js"]);
+        assert_eq!(
+            server.tools.as_ref().unwrap(),
+            &vec!["do_thing".to_string()]
+        );
     }
 
     #[test]
-    fn test_generate_firewall_config_custom_mcp_empty_allowed_defaults_to_wildcard() {
+    fn test_generate_mcpg_config_mcp_without_command_skipped() {
+        let mut fm = minimal_front_matter();
+        // An MCP with no command should be skipped (no built-in MCPs)
+        fm.mcp_servers
+            .insert("phantom".to_string(), McpConfig::Enabled(true));
+        let config = generate_mcpg_config(&fm);
+        assert!(!config.mcp_servers.contains_key("phantom"));
+        // safeoutputs is always present
+        assert!(config.mcp_servers.contains_key("safeoutputs"));
+    }
+
+    #[test]
+    fn test_generate_mcpg_config_disabled_mcp_skipped() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers
+            .insert("my-tool".to_string(), McpConfig::Enabled(false));
+        let config = generate_mcpg_config(&fm);
+        assert!(!config.mcp_servers.contains_key("my-tool"));
+    }
+
+    #[test]
+    fn test_generate_mcpg_config_empty_mcp_servers() {
+        let fm = minimal_front_matter();
+        let config = generate_mcpg_config(&fm);
+        // Only safeoutputs should be present
+        assert_eq!(config.mcp_servers.len(), 1);
+        assert!(config.mcp_servers.contains_key("safeoutputs"));
+    }
+
+    #[test]
+    fn test_generate_mcpg_config_gateway_defaults() {
+        let fm = minimal_front_matter();
+        let config = generate_mcpg_config(&fm);
+        assert_eq!(config.gateway.port, 80);
+        assert_eq!(config.gateway.domain, "host.docker.internal");
+        assert_eq!(config.gateway.api_key, "${MCP_GATEWAY_API_KEY}");
+        assert_eq!(config.gateway.payload_dir, "/tmp/gh-aw/mcp-payloads");
+    }
+
+    #[test]
+    fn test_generate_mcpg_config_json_roundtrip() {
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "my-tool".to_string(),
             McpConfig::WithOptions(McpOptions {
                 command: Some("python".to_string()),
-                allowed: vec![],
+                args: vec!["-m".to_string(), "server".to_string()],
+                allowed: vec!["query".to_string()],
                 ..Default::default()
             }),
         );
-        let config = generate_firewall_config(&fm);
-        let upstream = config.upstreams.get("my-tool").unwrap();
-        assert_eq!(upstream.allowed, vec!["*"]);
+        let config = generate_mcpg_config(&fm);
+        let json = serde_json::to_string_pretty(&config).expect("Config should serialize to JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("Serialized JSON should parse back");
+
+        // Verify top-level structure matches MCPG expectation
+        assert!(
+            parsed.get("mcpServers").is_some(),
+            "Should have mcpServers key"
+        );
+        assert!(parsed.get("gateway").is_some(), "Should have gateway key");
+
+        let gw = parsed.get("gateway").unwrap();
+        assert!(gw.get("port").is_some(), "Gateway should have port");
+        assert!(gw.get("domain").is_some(), "Gateway should have domain");
+        assert!(gw.get("apiKey").is_some(), "Gateway should have apiKey");
+        assert!(
+            gw.get("payloadDir").is_some(),
+            "Gateway should have payloadDir"
+        );
+    }
+
+    #[test]
+    fn test_generate_mcpg_config_safeoutputs_variable_placeholders() {
+        let fm = minimal_front_matter();
+        let config = generate_mcpg_config(&fm);
+        let so = config.mcp_servers.get("safeoutputs").unwrap();
+
+        // URL should reference the runtime-substituted port
+        let url = so.url.as_ref().unwrap();
+        assert!(
+            url.contains("${SAFE_OUTPUTS_PORT}"),
+            "SafeOutputs URL should use ${{SAFE_OUTPUTS_PORT}} placeholder, got: {url}"
+        );
+
+        // Auth header should reference the runtime-substituted API key
+        let headers = so.headers.as_ref().unwrap();
+        let auth = headers.get("Authorization").unwrap();
+        assert!(
+            auth.contains("${SAFE_OUTPUTS_API_KEY}"),
+            "SafeOutputs auth header should use ${{SAFE_OUTPUTS_API_KEY}} placeholder, got: {auth}"
+        );
+    }
+
+    #[test]
+    fn test_generate_mcpg_config_safeoutputs_is_http_type() {
+        let fm = minimal_front_matter();
+        let config = generate_mcpg_config(&fm);
+        let so = config.mcp_servers.get("safeoutputs").unwrap();
+        assert_eq!(so.server_type, "http");
+        assert!(so.command.is_none(), "HTTP backend should have no command");
+        assert!(so.args.is_none(), "HTTP backend should have no args");
+        assert!(so.url.is_some(), "HTTP backend must have a URL");
+    }
+
+    #[test]
+    fn test_generate_mcpg_config_custom_mcp_is_stdio_type() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers.insert(
+            "runner".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                command: Some("node".to_string()),
+                args: vec!["srv.js".to_string()],
+                allowed: vec!["run".to_string()],
+                ..Default::default()
+            }),
+        );
+        let config = generate_mcpg_config(&fm);
+        let srv = config.mcp_servers.get("runner").unwrap();
+        assert_eq!(srv.server_type, "stdio");
+        assert!(srv.command.is_some(), "stdio server must have a command");
+        assert!(srv.url.is_none(), "stdio server should have no URL");
     }
 
     #[test]
     fn test_generate_firewall_config_unknown_non_builtin_skipped() {
         // An MCP with no command should be skipped
         let mut fm = minimal_front_matter();
-        fm.mcp_servers
-            .insert("phantom".to_string(), McpConfig::Enabled(true));
-        let config = generate_firewall_config(&fm);
-        assert!(!config.upstreams.contains_key("phantom"));
+        let mut env = std::collections::HashMap::new();
+        env.insert("TOKEN".to_string(), "secret".to_string());
+        fm.mcp_servers.insert(
+            "with-env".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                command: Some("node".to_string()),
+                args: vec![],
+                allowed: vec![],
+                env,
+                ..Default::default()
+            }),
+        );
+        let config = generate_mcpg_config(&fm);
+        let srv = config.mcp_servers.get("with-env").unwrap();
+        let e = srv.env.as_ref().unwrap();
+        assert_eq!(e.get("TOKEN").unwrap(), "secret");
     }
 
     #[test]
-    fn test_generate_firewall_config_builtin_without_command_skipped() {
-        // A built-in MCP enabled without a custom command should be skipped
+    fn test_generate_mcpg_config_reserved_safeoutputs_name_rejected() {
         let mut fm = minimal_front_matter();
-        fm.mcp_servers
-            .insert("ado".to_string(), McpConfig::Enabled(true));
-        let config = generate_firewall_config(&fm);
-        assert!(!config.upstreams.contains_key("ado"));
+        fm.mcp_servers.insert(
+            "safeoutputs".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                command: Some("evil".to_string()),
+                args: vec![],
+                allowed: vec![],
+                ..Default::default()
+            }),
+        );
+        let config = generate_mcpg_config(&fm);
+        // The reserved entry should still be the HTTP backend, not the user's command
+        let so = config.mcp_servers.get("safeoutputs").unwrap();
+        assert_eq!(
+            so.server_type, "http",
+            "safeoutputs should remain HTTP backend"
+        );
+        assert!(
+            so.command.is_none(),
+            "User command should not overwrite safeoutputs"
+        );
     }
 
     #[test]
-    fn test_generate_firewall_config_disabled_mcp_skipped() {
+    fn test_generate_mcpg_config_safeoutputs_reserved_name_skipped() {
         let mut fm = minimal_front_matter();
-        fm.mcp_servers
-            .insert("ado".to_string(), McpConfig::Enabled(false));
-        let config = generate_firewall_config(&fm);
-        assert!(!config.upstreams.contains_key("ado"));
-    }
-
-    #[test]
-    fn test_generate_firewall_config_empty_mcp_servers() {
-        let fm = minimal_front_matter();
-        let config = generate_firewall_config(&fm);
-        assert!(config.upstreams.is_empty());
+        fm.mcp_servers.insert(
+            "SafeOutputs".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                command: Some("node".to_string()),
+                args: vec!["evil.js".to_string()],
+                allowed: vec!["hijack".to_string()],
+                ..Default::default()
+            }),
+        );
+        let config = generate_mcpg_config(&fm);
+        // The user-defined "SafeOutputs" must not overwrite the built-in entry
+        let so = config.mcp_servers.get("safeoutputs").unwrap();
+        assert_eq!(so.server_type, "http");
+        assert!(so.url.as_ref().unwrap().contains("localhost"));
+        // No stdio entry should have been added under any casing
+        assert_eq!(config.mcp_servers.len(), 1);
     }
 }

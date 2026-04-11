@@ -54,6 +54,9 @@ pub static CORE_ALLOWED_HOSTS: &[&str] = &[
     // ===== Agency / Copilot configuration =====
     "config.edge.skype.com",
     // Note: 168.63.129.16 (Azure DNS) is handled separately as it's an IP
+    // Note: host.docker.internal is NOT in CORE — it's always added by the
+    // standalone compiler in generate_allowed_domains (standalone always uses
+    // MCPG, which needs host access from the AWF container).
 ];
 
 /// Hosts required by specific MCP servers.

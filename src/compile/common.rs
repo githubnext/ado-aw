@@ -3,13 +3,14 @@
 use anyhow::{Context, Result};
 
 use super::types::{FrontMatter, Repository, TriggerConfig};
+use crate::compile::types::McpConfig;
 use crate::fuzzy_schedule;
-use crate::mcp_metadata::McpMetadataFile;
 
-/// Check if an MCP name is a built-in (known to the Copilot CLI via mcp-metadata.json)
-pub fn is_builtin_mcp(name: &str) -> bool {
-    let metadata = McpMetadataFile::bundled();
-    metadata.get(name).map(|m| m.builtin).unwrap_or(false)
+/// Check if an MCP has a custom command (i.e., is not just a name-based reference).
+/// All MCPs now require explicit command configuration — there are no built-in MCPs
+/// in the copilot CLI.
+pub fn is_custom_mcp(config: &McpConfig) -> bool {
+    matches!(config, McpConfig::WithOptions(opts) if opts.command.is_some())
 }
 
 /// Parse the markdown file and extract front matter and body
@@ -303,10 +304,6 @@ pub fn generate_copilot_params(front_matter: &FrontMatter) -> String {
         allowed_tools.push(format!("shell({})", cmd));
     }
 
-    let metadata = McpMetadataFile::bundled();
-    let mut disallowed_mcps: Vec<&str> = metadata.mcp_names();
-    disallowed_mcps.sort();
-
     let mut params = Vec::new();
 
     params.push(format!("--model {}", front_matter.engine.model()));
@@ -338,10 +335,6 @@ pub fn generate_copilot_params(front_matter: &FrontMatter) -> String {
         } else {
             params.push(format!("--allow-tool {}", tool));
         }
-    }
-
-    for mcp in disallowed_mcps {
-        params.push(format!("--disable-mcp-server {}", mcp));
     }
 
     params.join(" ")
@@ -505,6 +498,14 @@ pub fn generate_header_comment(input_path: &std::path::Path) -> String {
         source_path, version
     )
 }
+
+/// Docker image and version for the MCP Gateway (gh-aw-mcpg).
+/// Update this when upgrading to a new MCPG release.
+/// See: https://github.com/github/gh-aw-mcpg/releases
+pub const MCPG_VERSION: &str = "0.1.9";
+
+/// Default port MCPG listens on inside the container (host network mode).
+pub const MCPG_PORT: u16 = 80;
 
 /// Generate source path for the execute command.
 ///

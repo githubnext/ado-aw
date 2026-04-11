@@ -13,9 +13,13 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_yaml = "0.9.34"
 serde_json = "1.0.149"
 schemars = "1.2"
-rmcp = { version = "0.8.0", features = ["server", "transport-io"] }
+rmcp = { version = "0.8.0", features = [
+    "server",
+    "transport-io",
+    "transport-streamable-http-server",
+] }
 percent-encoding = "2.3"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "blocking"] }
 tempfile = "3"
 tokio = { version = "1.43", features = ["full"] }
 log = "0.4"
@@ -24,3 +28,5 @@ regex-lite = "0.1"
 inquire = { version = "0.9.2", features = ["editor"] }
 terminal_size = "0.4.3"
 url = "2.5.8"
+axum = { version = "0.8.8", features = ["tokio"] }
+subtle = "2.6.1"

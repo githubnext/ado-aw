@@ -174,6 +174,30 @@ fn test_compiled_yaml_structure() {
         template_content.contains("{{ firewall_version }}"),
         "Template should contain firewall_version marker"
     );
+
+    // Verify MCPG integration
+    assert!(
+        template_content.contains("{{ mcpg_config }}"),
+        "Template should contain mcpg_config marker"
+    );
+    assert!(
+        template_content.contains("{{ mcpg_version }}"),
+        "Template should contain mcpg_version marker"
+    );
+    assert!(
+        template_content.contains("--enable-host-access"),
+        "Template should include --enable-host-access for MCPG"
+    );
+
+    // Verify no legacy mcp-firewall references in template
+    assert!(
+        !template_content.contains("mcp-firewall-config"),
+        "Template should not reference legacy mcp-firewall config"
+    );
+    assert!(
+        !template_content.contains("MCP_FIREWALL_EOF"),
+        "Template should not contain legacy firewall heredoc"
+    );
 }
 
 /// Test that the example file is valid and can be parsed
@@ -321,8 +345,7 @@ fn test_fixture_complete_agent() {
         "Should have mcp-servers"
     );
 
-    // Verify it has both built-in and custom MCPs
-    assert!(content.contains("ado: true"), "Should have built-in MCP");
+    // Verify it has MCP configuration and custom MCPs
     assert!(content.contains("command:"), "Should have custom MCP");
 
     // Verify permissions
@@ -395,6 +418,30 @@ fn test_compiled_output_no_unreplaced_markers() {
     assert!(
         compiled.contains("github.com/github/gh-aw-firewall/releases"),
         "Compiled output should reference GitHub Releases for AWF"
+    );
+
+    // Verify MCPG references
+    assert!(
+        compiled.contains("ghcr.io/github/gh-aw-mcpg"),
+        "Compiled output should reference MCPG Docker image"
+    );
+    assert!(
+        compiled.contains("host.docker.internal"),
+        "Compiled output should reference host.docker.internal for MCPG"
+    );
+    assert!(
+        compiled.contains("--enable-host-access"),
+        "Compiled output should include --enable-host-access for AWF"
+    );
+
+    // Verify no legacy MCP firewall references
+    assert!(
+        !compiled.contains("mcp-firewall"),
+        "Compiled output should not reference legacy mcp-firewall"
+    );
+    assert!(
+        !compiled.contains("mcp_firewall"),
+        "Compiled output should not reference legacy mcp_firewall"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);

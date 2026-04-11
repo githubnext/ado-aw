@@ -5,7 +5,6 @@ use std::fmt;
 use std::path::PathBuf;
 
 use crate::compile::sanitize_filename;
-use crate::mcp_metadata::McpMetadataFile;
 
 /// Available AI models for agent configuration
 const AVAILABLE_MODELS: &[&str] = &[
@@ -139,7 +138,6 @@ pub async fn create_agent(output_dir: Option<PathBuf>) -> Result<()> {
 
     let mut config = AgentConfig::default();
     let mut step = WizardStep::Name;
-    let mcp_metadata = McpMetadataFile::bundled();
 
     loop {
         match step {
@@ -272,7 +270,7 @@ pub async fn create_agent(output_dir: Option<PathBuf>) -> Result<()> {
             }
 
             WizardStep::Mcps => {
-                match prompt_mcps_with_back(&mcp_metadata, &mut step)? {
+                match prompt_mcps_with_back(&mut step)? {
                     Some(mcps) => {
                         config.mcps = mcps;
                         step = step.next();
@@ -623,110 +621,64 @@ fn prompt_schedule_with_back(step: &mut WizardStep) -> Result<Option<Option<Stri
     }
 }
 
-/// Prompt for MCPs with back navigation
-fn prompt_mcps_with_back(
-    metadata: &McpMetadataFile,
-    step: &mut WizardStep,
-) -> Result<Option<Vec<McpSelection>>> {
-    use std::collections::{HashMap, HashSet};
-    use terminal_size::{Height, Width, terminal_size};
+/// Prompt for MCPs with back navigation.
+///
+/// There are no built-in MCPs — all MCPs require explicit command configuration.
+/// The wizard collects custom MCP names; command/args are configured in the
+/// generated markdown front matter.
+fn prompt_mcps_with_back(step: &mut WizardStep) -> Result<Option<Vec<McpSelection>>> {
+    println!("\n🔧 MCP Server Configuration");
+    println!("Add custom MCP servers. Each requires a command and args in the front matter.");
+    println!("You can add MCP servers later by editing the generated markdown file.\n");
 
-    // Get terminal dimensions for dynamic sizing
-    let (term_width, term_height) = terminal_size()
-        .map(|(Width(w), Height(h))| (w as usize, h as usize))
-        .unwrap_or((80, 24));
-
-    let page_size = term_height.saturating_sub(10).max(5).min(30);
-
-    let builtin_mcps = metadata.builtin_mcp_names();
-
-    let mut all_tools: Vec<McpToolOption> = Vec::new();
-    for mcp_name in &builtin_mcps {
-        if let Some(mcp) = metadata.get(mcp_name) {
-            for tool in &mcp.tools {
-                all_tools.push(McpToolOption {
-                    mcp_name: mcp_name.to_string(),
-                    tool_name: tool.name.clone(),
-                    description: tool.description.clone().unwrap_or_default(),
-                    max_width: term_width,
-                });
-            }
-        }
-    }
-
-    all_tools.sort_by(|a, b| a.full_name().cmp(&b.full_name()));
-
-    let total_tools = all_tools.len();
-    let total_mcps = builtin_mcps.len();
-
-    println!("\n🔧 MCP Tool Selection");
-    println!("Select tools to enable. Tools are shown as mcp:tool_name.");
-    println!("Type to search/filter, Space to toggle, Enter to confirm, Esc to go back.");
-    println!("({} tools across {} MCPs)\n", total_tools, total_mcps);
-
-    let prompt = MultiSelect::new("Select tools to enable:", all_tools)
-        .with_help_message(
-            "Type to filter (e.g., 'ado:' or 'work_item'), Space to toggle, Enter to confirm",
-        )
-        .with_page_size(page_size)
-        .prompt();
-
-    match prompt {
-        Ok(selected) => {
-            if selected.is_empty() {
-                return Ok(Some(Vec::new()));
-            }
-
-            let mut mcp_tools: HashMap<String, HashSet<String>> = HashMap::new();
-            for tool in selected {
-                mcp_tools
-                    .entry(tool.mcp_name.clone())
-                    .or_default()
-                    .insert(tool.tool_name);
-            }
-
-            let mut mcp_selections: Vec<McpSelection> = mcp_tools
-                .into_iter()
-                .map(|(mcp_name, selected_tools)| {
-                    let total_for_mcp = metadata.get(&mcp_name).map(|m| m.tools.len()).unwrap_or(0);
-
-                    if selected_tools.len() == total_for_mcp {
-                        McpSelection {
-                            name: mcp_name,
-                            allowed_tools: None,
-                        }
-                    } else {
-                        let mut tools: Vec<String> = selected_tools.into_iter().collect();
-                        tools.sort();
-                        McpSelection {
-                            name: mcp_name,
-                            allowed_tools: Some(tools),
-                        }
-                    }
-                })
-                .collect();
-
-            mcp_selections.sort_by(|a, b| a.name.cmp(&b.name));
-
-            println!("\n📋 Selected {} MCPs:", mcp_selections.len());
-            for mcp in &mcp_selections {
-                match &mcp.allowed_tools {
-                    None => println!("   {} (all tools)", mcp.name),
-                    Some(tools) => println!("   {} ({} tools)", mcp.name, tools.len()),
-                }
-            }
-
-            Ok(Some(mcp_selections))
-        }
+    let add_mcps = match Confirm::new("Would you like to add any custom MCP servers?")
+        .with_default(false)
+        .prompt()
+    {
+        Ok(val) => val,
         Err(InquireError::OperationCanceled) => {
             *step = step.prev();
-            Ok(None)
+            return Ok(None);
         }
         Err(InquireError::OperationInterrupted) => {
             anyhow::bail!("Wizard interrupted");
         }
-        Err(e) => Err(e).context("Failed to select tools"),
+        Err(e) => return Err(e).context("Failed to prompt for MCPs"),
+    };
+
+    if !add_mcps {
+        return Ok(Some(Vec::new()));
     }
+
+    let mut selections = Vec::new();
+    loop {
+        let name = match Text::new("MCP server name (or empty to finish):")
+            .with_help_message("e.g., my-custom-tool")
+            .prompt()
+        {
+            Ok(name) if name.trim().is_empty() => break,
+            Ok(name) => name.trim().to_string(),
+            Err(InquireError::OperationCanceled) => break,
+            Err(InquireError::OperationInterrupted) => {
+                anyhow::bail!("Wizard interrupted");
+            }
+            Err(e) => return Err(e).context("Failed to read MCP name"),
+        };
+
+        selections.push(McpSelection {
+            name,
+            allowed_tools: None,
+        });
+    }
+
+    if !selections.is_empty() {
+        println!("\n📋 Added {} custom MCP(s):", selections.len());
+        for mcp in &selections {
+            println!("   {} (configure command/args in front matter)", mcp.name);
+        }
+    }
+
+    Ok(Some(selections))
 }
 
 /// Workspace option for display
@@ -959,49 +911,6 @@ fn prompt_custom_schedule() -> Result<Option<String>> {
         Ok(None)
     } else {
         Ok(Some(schedule))
-    }
-}
-
-/// MCP tool option for flat list display (mcp:tool format)
-struct McpToolOption {
-    mcp_name: String,
-    tool_name: String,
-    description: String,
-    /// Maximum width for the display (set based on terminal width)
-    max_width: usize,
-}
-
-impl McpToolOption {
-    fn full_name(&self) -> String {
-        format!("{}:{}", self.mcp_name, self.tool_name)
-    }
-}
-
-impl fmt::Display for McpToolOption {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let full_name = self.full_name();
-        if self.description.is_empty() {
-            write!(f, "{}", full_name)
-        } else {
-            // Calculate available space for description
-            // Format is: "mcp:tool_name: description"
-            // Account for ": " separator (2 chars) and margin for inquire's UI
-            let prefix_len = full_name.len() + 2;
-            let margin = 6; // Space for checkbox, cursor, and padding
-            let available = self.max_width.saturating_sub(prefix_len + margin);
-
-            if available < 10 {
-                // Not enough space for description, just show the name
-                write!(f, "{}", full_name)
-            } else {
-                let desc = if self.description.len() > available {
-                    format!("{}...", &self.description[..available.saturating_sub(3)])
-                } else {
-                    self.description.clone()
-                };
-                write!(f, "{}: {}", full_name, desc)
-            }
-        }
     }
 }
 
