@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.9.0](https://github.com/githubnext/ado-aw/compare/v0.8.3...v0.9.0) (2026-04-11)
+
+
+### Features
+
+* add COPILOT_CLI_VERSION to dependency version updater workflow ([#137](https://github.com/githubnext/ado-aw/issues/137)) ([8155d24](https://github.com/githubnext/ado-aw/commit/8155d240522658805fed12210d17df5c2a943b5a))
+* map engine max-turns and timeout-minutes to Copilot CLI arguments ([#134](https://github.com/githubnext/ado-aw/issues/134)) ([2dbe162](https://github.com/githubnext/ado-aw/commit/2dbe1629400ed358199e94b5907e66b1ac221dec))
+
+
+### Bug Fixes
+
+* deprecate max-turns and move timeout-minutes to YAML job property ([#138](https://github.com/githubnext/ado-aw/issues/138)) ([9887c97](https://github.com/githubnext/ado-aw/commit/9887c9794d732d76eade8fb1b33cfb99cb02522a))
+* report-incomplete fails pipeline, percent-encode user_id, stage-1 status validation, merge_strategy validation, dead code removal ([#141](https://github.com/githubnext/ado-aw/issues/141)) ([e81c570](https://github.com/githubnext/ado-aw/commit/e81c5707baf9572e31de3fef21de232bb60bf796))
+
 ## [0.8.3](https://github.com/githubnext/ado-aw/compare/v0.8.2...v0.8.3) (2026-04-02)
 
 
