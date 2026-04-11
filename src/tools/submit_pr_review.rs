@@ -251,6 +251,52 @@ impl Executor for SubmitPrReviewResult {
             .context("Connection data response missing authenticatedUser.id")?;
         debug!("Authenticated user ID: {}", user_id);
 
+        // Self-approval guard: prevent the agent from approving PRs it created.
+        // Positive votes (approve=10, approve-with-suggestions=5) are blocked when
+        // the authenticated user is also the PR author.
+        if vote_value > 0 {
+            let pr_url = format!(
+                "{}/{}/pullRequests/{}?api-version=7.1",
+                base_url, encoded_repo, self.pull_request_id
+            );
+            let pr_response = client
+                .get(&pr_url)
+                .basic_auth("", Some(token))
+                .send()
+                .await
+                .context("Failed to fetch PR for self-approval check")?;
+
+            if pr_response.status().is_success() {
+                let pr_body: serde_json::Value = pr_response
+                    .json()
+                    .await
+                    .context("Failed to parse PR response")?;
+
+                let creator_id = pr_body
+                    .get("createdBy")
+                    .and_then(|cb| cb.get("id"))
+                    .and_then(|id| id.as_str());
+
+                if creator_id == Some(user_id) {
+                    return Ok(ExecutionResult::failure(format!(
+                        "Self-approval blocked: the authenticated identity created PR #{} \
+                         and cannot cast a positive vote ('{}') on it",
+                        self.pull_request_id, self.event
+                    )));
+                }
+            } else {
+                let status = pr_response.status();
+                let error_body = pr_response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "Unknown error".to_string());
+                return Ok(ExecutionResult::failure(format!(
+                    "Failed to fetch PR #{} for self-approval check (HTTP {}): {}",
+                    self.pull_request_id, status, error_body
+                )));
+            }
+        }
+
         // PUT vote to reviewers endpoint
         let encoded_user_id = utf8_percent_encode(user_id, PATH_SEGMENT).to_string();
         let vote_url = format!(

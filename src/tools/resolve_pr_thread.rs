@@ -114,7 +114,7 @@ pub struct ResolvePrThreadConfig {
     pub allowed_repositories: Vec<String>,
 
     /// Restrict which thread statuses can be set.
-    /// If empty, all valid statuses are allowed.
+    /// REQUIRED — empty list rejects all status transitions.
     #[serde(default, rename = "allowed-statuses")]
     pub allowed_statuses: Vec<String>,
 }
@@ -153,10 +153,21 @@ impl Executor for ResolvePrThreadResult {
         let config: ResolvePrThreadConfig = ctx.get_tool_config("resolve-pr-review-thread");
         debug!("Config: {:?}", config);
 
-        // Validate status against allowed-statuses config
-        if !config.allowed_statuses.is_empty()
-            && !config.allowed_statuses.contains(&self.status)
-        {
+        // Validate status against allowed-statuses — REQUIRED.
+        // An empty allowed-statuses list means the operator hasn't opted in, so reject.
+        // This prevents agents from resolving review threads (e.g. marking security
+        // concerns as "fixed") without explicit operator consent.
+        if config.allowed_statuses.is_empty() {
+            return Ok(ExecutionResult::failure(
+                "resolve-pr-review-thread requires 'allowed-statuses' to be configured in \
+                 safe-outputs.resolve-pr-review-thread. This prevents agents from \
+                 manipulating thread statuses without explicit operator consent. Example:\n  \
+                 safe-outputs:\n    resolve-pr-review-thread:\n      allowed-statuses:\n        \
+                 - fixed\n\nValid statuses: active, fixed, wont-fix, closed, by-design, pending"
+                    .to_string(),
+            ));
+        }
+        if !config.allowed_statuses.contains(&self.status) {
             return Ok(ExecutionResult::failure(format!(
                 "Status '{}' is not in the allowed-statuses list",
                 self.status
