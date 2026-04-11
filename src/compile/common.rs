@@ -671,6 +671,41 @@ pub fn generate_executor_ado_env(write_service_connection: Option<&str>) -> Stri
     }
 }
 
+/// Generate `--enabled-tools` CLI args for the SafeOutputs MCP server.
+///
+/// Derives the tool list from `safe-outputs:` front matter keys plus always-on
+/// diagnostic tools. If `safe-outputs:` is empty, returns an empty string
+/// (all tools enabled for backward compatibility).
+pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
+    use crate::mcp::ALWAYS_ON_TOOLS;
+
+    if front_matter.safe_outputs.is_empty() {
+        return String::new();
+    }
+
+    let mut tools: Vec<String> = front_matter
+        .safe_outputs
+        .keys()
+        .cloned()
+        .collect();
+
+    // Always include diagnostic tools
+    for tool in ALWAYS_ON_TOOLS {
+        let name = tool.to_string();
+        if !tools.contains(&name) {
+            tools.push(name);
+        }
+    }
+
+    tools.sort();
+
+    tools
+        .iter()
+        .map(|t| format!("--enabled-tools {}", t))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Safe-output names that require write access to ADO.
 const WRITE_REQUIRING_SAFE_OUTPUTS: &[&str] = &[
     "create-pull-request",
@@ -1636,5 +1671,42 @@ mod tests {
             "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pr-review-thread:\n    allowed-statuses:\n      - fixed\n      - wont-fix\n---\n"
         ).unwrap();
         assert!(validate_resolve_pr_thread_statuses(&fm).is_ok());
+    }
+
+    // ─── Enabled tools args generation ──────────────────────────────────
+
+    #[test]
+    fn test_generate_enabled_tools_args_empty_safe_outputs() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\n---\n"
+        ).unwrap();
+        let args = generate_enabled_tools_args(&fm);
+        assert!(args.is_empty(), "Empty safe-outputs should produce no args");
+    }
+
+    #[test]
+    fn test_generate_enabled_tools_args_with_configured_tools() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n  create-work-item:\n    work-item-type: Task\n---\n"
+        ).unwrap();
+        let args = generate_enabled_tools_args(&fm);
+        assert!(args.contains("--enabled-tools create-pull-request"));
+        assert!(args.contains("--enabled-tools create-work-item"));
+        // Always-on tools should also be included
+        assert!(args.contains("--enabled-tools noop"));
+        assert!(args.contains("--enabled-tools missing-data"));
+        assert!(args.contains("--enabled-tools missing-tool"));
+        assert!(args.contains("--enabled-tools report-incomplete"));
+    }
+
+    #[test]
+    fn test_generate_enabled_tools_args_no_duplicates() {
+        // If a diagnostic tool is also in safe-outputs, it shouldn't appear twice
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  noop:\n    max: 5\n---\n"
+        ).unwrap();
+        let args = generate_enabled_tools_args(&fm);
+        let noop_count = args.matches("--enabled-tools noop").count();
+        assert_eq!(noop_count, 1, "noop should appear exactly once");
     }
 }

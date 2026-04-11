@@ -216,6 +216,7 @@ jobs:
           nohup /tmp/awf-tools/ado-aw mcp-http \
             --port "$SAFE_OUTPUTS_PORT" \
             --api-key "$SAFE_OUTPUTS_API_KEY" \
+            {{ enabled_tools_args }}\
             "/tmp/awf-tools/staging" \
             "{{ working_directory }}" \
             > "$(Agent.TempDirectory)/staging/logs/safeoutputs.log" 2>&1 &
