@@ -352,6 +352,9 @@ pub enum McpConfig {
 /// Detailed MCP options
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct McpOptions {
+    /// Whether this MCP is enabled (default: true)
+    #[serde(default)]
+    pub enabled: Option<bool>,
     /// Custom command (if present, it's a custom MCP - standalone only)
     #[serde(default)]
     pub command: Option<String>,
