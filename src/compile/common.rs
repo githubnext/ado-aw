@@ -730,15 +730,10 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
         }
     }
 
-    if user_tool_count == 0 && !front_matter.safe_outputs.is_empty() {
-        // Every user-specified key was either invalid, unrecognized, or non-MCP.
-        // Only diagnostic tools will be available — this is almost certainly a mistake.
-        let keys: Vec<&String> = front_matter.safe_outputs.keys().collect();
-        eprintln!(
-            "Warning: no valid MCP tools resolved from safe-outputs keys {:?} — \
-             the agent will only have access to diagnostic tools (noop, missing-data, etc.)",
-            keys
-        );
+    if user_tool_count == 0 {
+        // Every user-specified key was either invalid, unrecognized, or non-MCP
+        // (e.g. memory-only). Return empty to keep all tools available (backward compat).
+        return String::new();
     }
 
     // Always include diagnostic tools
@@ -1781,16 +1776,14 @@ mod tests {
 
     #[test]
     fn test_generate_enabled_tools_args_skips_unknown_tool() {
-        // An unrecognized (but safe-formatted) tool name should be skipped
-        // from the output and a warning is emitted to stderr.
+        // An unrecognized (but safe-formatted) tool name should be skipped.
+        // When no valid MCP tools remain, return empty (all tools available).
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nsafe-outputs:\n  crate-pull-request:\n    target-branch: main\n---\n"
         ).unwrap();
         let args = generate_enabled_tools_args(&fm);
-        // Typo'd name is NOT forwarded — it would silently disable the real tool
         assert!(!args.contains("crate-pull-request"), "Unrecognized tool should be skipped");
-        // Always-on tools are still included
-        assert!(args.contains("--enabled-tools noop"));
+        assert!(args.is_empty(), "All-unrecognized safe-outputs should produce no args (all tools available)");
     }
 
     #[test]
@@ -1807,15 +1800,12 @@ mod tests {
 
     #[test]
     fn test_generate_enabled_tools_args_memory_only_does_not_filter() {
-        // When `memory` is the only safe-output key, no MCP tool args should be
-        // generated (backward compat: all tools available). But since safe_outputs
-        // is non-empty, we still get ALWAYS_ON_TOOLS in the args.
+        // When `memory` is the only safe-output key, no --enabled-tools args should
+        // be generated so all tools remain available (backward compat).
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nsafe-outputs:\n  memory:\n    allowed-extensions:\n      - .md\n---\n"
         ).unwrap();
         let args = generate_enabled_tools_args(&fm);
-        assert!(!args.contains("--enabled-tools memory"), "Non-MCP key 'memory' should be skipped");
-        // Always-on tools are still present
-        assert!(args.contains("--enabled-tools noop"));
+        assert!(args.is_empty(), "memory-only safe-outputs should produce no args (all tools available)");
     }
 }

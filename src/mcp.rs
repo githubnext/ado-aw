@@ -160,6 +160,12 @@ impl SafeOutputs {
                     tool_router.remove_route(tool_name);
                 }
             }
+            // Warn about enabled-tools entries that don't match any registered route
+            for name in enabled {
+                if !all_tools.iter().any(|t| t == name) {
+                    debug!("Enabled-tools entry '{}' has no matching route (ignored)", name);
+                }
+            }
             let remaining: Vec<String> = tool_router.list_all().iter().map(|t| t.name.to_string()).collect();
             info!("Tool filtering applied: {} of {} tools enabled: {:?}", remaining.len(), total, remaining);
         }
