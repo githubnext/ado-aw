@@ -479,6 +479,10 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
         if let Some(opts) = options {
             if let Some(container) = &opts.container {
                 // Container-based stdio MCP (MCPG-native, per spec §3.2.1)
+                // Validate mount paths for sensitive host directories
+                for mount in &opts.mounts {
+                    validate_mount_source(mount, name);
+                }
                 let entrypoint_args = if opts.entrypoint_args.is_empty() {
                     None
                 } else {
@@ -521,6 +525,7 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
                 );
             } else if let Some(url) = &opts.url {
                 // HTTP-based MCP (remote server)
+                validate_mcp_url(url, name);
                 if !opts.env.is_empty() {
                     log::warn!(
                         "MCP '{}': env vars are not supported for HTTP MCPs — they will be ignored. \
@@ -573,6 +578,45 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
     }
 }
 
+/// Sensitive host path prefixes that should not be bind-mounted into MCP containers.
+const SENSITIVE_MOUNT_PREFIXES: &[&str] = &[
+    "/etc",
+    "/root",
+    "/home",
+    "/var/run/docker.sock",
+    "/proc",
+    "/sys",
+];
+
+/// Validate a volume mount source path, rejecting paths that reference sensitive host directories.
+fn validate_mount_source(mount: &str, mcp_name: &str) {
+    // Format: "source:dest:mode"
+    if let Some(source) = mount.split(':').next() {
+        let source_lower = source.to_lowercase();
+        for prefix in SENSITIVE_MOUNT_PREFIXES {
+            if source_lower.starts_with(prefix) {
+                log::warn!(
+                    "MCP '{}': mount source '{}' references a sensitive host path ({}). \
+                    Ensure this is intentional.",
+                    mcp_name, source, prefix
+                );
+                break;
+            }
+        }
+    }
+}
+
+/// Validate that an MCP HTTP URL uses an allowed scheme.
+fn validate_mcp_url(url: &str, mcp_name: &str) {
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        log::warn!(
+            "MCP '{}': URL '{}' does not use http:// or https:// scheme. \
+            This may not work with MCPG.",
+            mcp_name, url
+        );
+    }
+}
+
 /// Validate that a string is a legal environment variable name (`[A-Za-z_][A-Za-z0-9_]*`).
 /// Prevents injection of arbitrary Docker flags via user-controlled front matter keys.
 fn is_valid_env_var_name(name: &str) -> bool {
@@ -589,6 +633,10 @@ fn is_valid_env_var_name(name: &str) -> bool {
 /// the pipeline through the MCPG container (passthrough). This function:
 /// 1. Auto-maps `AZURE_DEVOPS_EXT_PAT` from `SC_READ_TOKEN` when `permissions.read` is configured
 /// 2. Collects all passthrough env vars (value is `""`) from MCP configs and adds `-e` flags
+///
+/// Returns flags formatted for inline insertion in the `docker run` command.
+/// The marker sits after the last hardcoded `-e` flag, so the output must
+/// include leading `\\\n` for line continuation when non-empty.
 pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
     let mut env_flags: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -631,9 +679,14 @@ pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
 
     env_flags.sort();
     if env_flags.is_empty() {
-        String::new()
+        // No extra flags — just emit the line continuation backslash
+        "\\".to_string()
     } else {
-        format!("\\\n            {}", env_flags.join(" \\\n            "))
+        // Emit each flag on its own continuation line, ending with `\`
+        // replace_with_indent will NOT add indentation here because the marker
+        // is inline (not at the start of a line), so we include indentation ourselves.
+        let flags = env_flags.join(" \\\n            ");
+        format!("\\\n            {} \\", flags)
     }
 }
 
