@@ -15,7 +15,8 @@ const MAX_PATCH_SIZE_BYTES: u64 = 5 * 1024 * 1024;
 /// Default maximum files allowed in a single PR
 const DEFAULT_MAX_FILES: usize = 100;
 
-/// Runtime manifest files that are protected by default.
+/// Runtime manifest files that are protected by default (all lowercase for
+/// case-insensitive comparison).
 /// These are dependency/build files that could be modified to introduce supply chain attacks.
 const PROTECTED_MANIFEST_BASENAMES: &[&str] = &[
     // npm / Node.js
@@ -29,15 +30,15 @@ const PROTECTED_MANIFEST_BASENAMES: &[&str] = &[
     "go.sum",
     // Python
     "requirements.txt",
-    "Pipfile",
-    "Pipfile.lock",
+    "pipfile",
+    "pipfile.lock",
     "pyproject.toml",
     "setup.py",
     "setup.cfg",
     "poetry.lock",
     // Ruby
-    "Gemfile",
-    "Gemfile.lock",
+    "gemfile",
+    "gemfile.lock",
     // Java / Kotlin / Gradle
     "pom.xml",
     "build.gradle",
@@ -46,12 +47,12 @@ const PROTECTED_MANIFEST_BASENAMES: &[&str] = &[
     "settings.gradle.kts",
     "gradle.properties",
     // .NET / C#
-    "Directory.Build.props",
-    "Directory.Build.targets",
+    "directory.build.props",
+    "directory.build.targets",
     "global.json",
     // Rust
-    "Cargo.toml",
-    "Cargo.lock",
+    "cargo.toml",
+    "cargo.lock",
 ];
 
 /// Path prefixes that are protected by default.
@@ -582,12 +583,19 @@ impl Executor for CreatePrResult {
             .context("Failed to read patch file")?;
         debug!("Patch content size: {} bytes", patch_content.len());
 
-        // Filter excluded files from patch content if configured
+        // Filter excluded files from patch content if configured.
+        // Note: Exclusion runs before the protection check. If a protected file matches
+        // an excluded-files pattern, it is silently dropped from the patch rather than
+        // triggering a protection error. This is intentional — exclusion removes the file
+        // from the PR entirely, so there is no security-relevant modification to block.
         let patch_content = if !config.excluded_files.is_empty() {
             debug!("Filtering {} excluded-files patterns from patch", config.excluded_files.len());
             let filtered = filter_excluded_files_from_patch(&patch_content, &config.excluded_files);
             debug!("Patch size after exclusion: {} bytes (was {} bytes)", filtered.len(), patch_content.len());
-            if filtered.trim().is_empty() {
+            // Check if any actual diff blocks remain. For format-patch output the commit
+            // envelope (From <SHA>, Subject:, etc.) persists even when all diffs are
+            // excluded, so we count diff --git headers rather than checking for empty string.
+            if count_patch_files(&filtered) == 0 {
                 // All files were excluded
                 match config.if_no_changes {
                     IfNoChanges::Error => {
@@ -1897,6 +1905,21 @@ new file mode 100755
         let paths = vec!["services/api/package.json".to_string()];
         let protected = find_protected_files(&paths);
         assert_eq!(protected, vec!["services/api/package.json"]);
+    }
+
+    #[test]
+    fn test_find_protected_files_mixed_case_manifests() {
+        let paths = vec![
+            "Cargo.toml".to_string(),
+            "Cargo.lock".to_string(),
+            "Pipfile".to_string(),
+            "Gemfile".to_string(),
+            "Gemfile.lock".to_string(),
+            "Directory.Build.props".to_string(),
+            "sub/Directory.Build.targets".to_string(),
+        ];
+        let protected = find_protected_files(&paths);
+        assert_eq!(protected.len(), 7);
     }
 
     // ─── Excluded files filtering ───────────────────────────────────────────

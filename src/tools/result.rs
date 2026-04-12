@@ -107,9 +107,9 @@ pub struct ExecutionResult {
     /// Whether the execution succeeded
     pub success: bool,
     /// Whether this is a warning (succeeded with issues).
-    /// When true, success is also true — the action completed but with caveats.
+    /// Invariant: warning == true implies success == true.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub warning: bool,
+    warning: bool,
     /// Human-readable message describing the outcome
     pub message: String,
     /// Optional additional data (e.g., work item ID)
@@ -118,6 +118,10 @@ pub struct ExecutionResult {
 }
 
 impl ExecutionResult {
+    /// Whether this is a warning (succeeded with issues)
+    pub fn is_warning(&self) -> bool {
+        self.warning
+    }
     /// Create a successful execution result
     pub fn success(message: impl Into<String>) -> Self {
         Self {

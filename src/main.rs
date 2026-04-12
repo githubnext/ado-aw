@@ -236,8 +236,8 @@ async fn main() -> Result<()> {
                 }
 
                 // Print summary
-                let success_count = results.iter().filter(|r| r.success && !r.warning).count();
-                let warning_count = results.iter().filter(|r| r.warning).count();
+                let success_count = results.iter().filter(|r| r.success && !r.is_warning()).count();
+                let warning_count = results.iter().filter(|r| r.is_warning()).count();
                 let failure_count = results.iter().filter(|r| !r.success).count();
 
                 println!("\n--- Execution Summary ---");

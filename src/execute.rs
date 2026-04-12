@@ -156,7 +156,7 @@ pub async fn execute_safe_outputs(
 
         match execute_safe_output(entry, ctx).await {
             Ok((tool_name, result)) => {
-                if result.warning {
+                if result.is_warning() {
                     warn!(
                         "[{}/{}] {} warning: {}",
                         i + 1,
@@ -181,7 +181,7 @@ pub async fn execute_safe_outputs(
                         result.message
                     );
                 }
-                let symbol = if result.warning { "⚠" } else if result.success { "✓" } else { "✗" };
+                let symbol = if result.is_warning() { "⚠" } else if result.success { "✓" } else { "✗" };
                 println!(
                     "[{}/{}] {} - {} - {}",
                     i + 1,
@@ -202,8 +202,8 @@ pub async fn execute_safe_outputs(
     }
 
     // Log final summary
-    let success_count = results.iter().filter(|r| r.success && !r.warning).count();
-    let warning_count = results.iter().filter(|r| r.warning).count();
+    let success_count = results.iter().filter(|r| r.success && !r.is_warning()).count();
+    let warning_count = results.iter().filter(|r| r.is_warning()).count();
     let failure_count = results.iter().filter(|r| !r.success).count();
     info!(
         "Stage 2 execution complete: {} succeeded, {} warnings, {} failed",
