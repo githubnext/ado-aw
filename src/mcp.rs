@@ -63,14 +63,8 @@ fn generate_short_id() -> String {
     format!("{:06x}", (timestamp & 0xFFFFFF) as u32)
 }
 
-/// Safe output tools that are always available regardless of filtering.
-/// These are diagnostic/transparency tools that agents should always have access to.
-pub const ALWAYS_ON_TOOLS: &[&str] = &[
-    "noop",
-    "missing-data",
-    "missing-tool",
-    "report-incomplete",
-];
+// Re-export from tools module
+use crate::tools::ALWAYS_ON_TOOLS;
 
 // ============================================================================
 // SafeOutputs MCP Server
@@ -157,6 +151,7 @@ impl SafeOutputs {
         // Filter tools if an enabled list is provided
         if let Some(enabled) = enabled_tools {
             let all_tools: Vec<String> = tool_router.list_all().iter().map(|t| t.name.to_string()).collect();
+            let total = all_tools.len();
             for tool_name in &all_tools {
                 let is_always_on = ALWAYS_ON_TOOLS.contains(&tool_name.as_str());
                 let is_enabled = enabled.iter().any(|e| e == tool_name);
@@ -166,7 +161,7 @@ impl SafeOutputs {
                 }
             }
             let remaining: Vec<String> = tool_router.list_all().iter().map(|t| t.name.to_string()).collect();
-            info!("Tool filtering applied: {} of {} tools enabled: {:?}", remaining.len(), all_tools.len(), remaining);
+            info!("Tool filtering applied: {} of {} tools enabled: {:?}", remaining.len(), total, remaining);
         }
 
         Ok(Self {

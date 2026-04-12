@@ -685,7 +685,7 @@ fn is_safe_tool_name(name: &str) -> bool {
 /// Tool names are validated to contain only ASCII alphanumerics and hyphens
 /// to prevent shell injection when the args are embedded in bash commands.
 pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
-    use crate::mcp::ALWAYS_ON_TOOLS;
+    use crate::tools::ALWAYS_ON_TOOLS;
 
     if front_matter.safe_outputs.is_empty() {
         return String::new();
@@ -713,11 +713,15 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
 
     tools.sort();
 
-    tools
+    let args = tools
         .iter()
         .map(|t| format!("--enabled-tools {}", t))
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" ");
+
+    // Trailing space so the args don't concatenate with the next positional
+    // argument when embedded inline in the shell template.
+    if args.is_empty() { args } else { args + " " }
 }
 
 /// Safe-output names that require write access to ADO.

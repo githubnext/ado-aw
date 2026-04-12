@@ -10,6 +10,15 @@ use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 /// types) against accidental corruption of the URL structure.
 pub(crate) const PATH_SEGMENT: &AsciiSet = &CONTROLS.add(b'#').add(b'?').add(b'/').add(b' ');
 
+/// Safe output tools that are always available regardless of filtering.
+/// These are diagnostic/transparency tools that agents should always have access to.
+pub const ALWAYS_ON_TOOLS: &[&str] = &[
+    "noop",
+    "missing-data",
+    "missing-tool",
+    "report-incomplete",
+];
+
 /// Resolve the effective branch for a wiki.
 ///
 /// If `configured_branch` is `Some`, that value is returned directly.
