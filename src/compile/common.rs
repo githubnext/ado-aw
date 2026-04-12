@@ -698,6 +698,8 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
         return String::new();
     }
 
+    // `seen` deduplicates across user keys and ALWAYS_ON_TOOLS (e.g. if the user
+    // configures `noop` explicitly, it shouldn't appear twice in the output).
     let mut seen = HashSet::new();
     let mut tools: Vec<String> = Vec::new();
     let mut user_tool_count = 0usize;
