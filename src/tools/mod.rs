@@ -19,6 +19,37 @@ pub const ALWAYS_ON_TOOLS: &[&str] = &[
     "report-incomplete",
 ];
 
+/// All recognised safe-output keys accepted in front matter `safe-outputs:`.
+/// This is the union of MCP tool names, always-on diagnostics, and non-MCP
+/// safe-output keys (like `memory`) that are handled by the compiler/executor.
+pub const ALL_KNOWN_SAFE_OUTPUTS: &[&str] = &[
+    // Always-on diagnostics
+    "noop",
+    "missing-data",
+    "missing-tool",
+    "report-incomplete",
+    // Write-requiring MCP tools
+    "create-pull-request",
+    "create-work-item",
+    "comment-on-work-item",
+    "update-work-item",
+    "create-wiki-page",
+    "update-wiki-page",
+    "add-pr-comment",
+    "link-work-items",
+    "queue-build",
+    "create-git-tag",
+    "add-build-tag",
+    "create-branch",
+    "update-pr",
+    "upload-attachment",
+    "submit-pr-review",
+    "reply-to-pr-review-comment",
+    "resolve-pr-review-thread",
+    // Non-MCP safe-output keys (handled by compiler/executor)
+    "memory",
+];
+
 /// Resolve the effective branch for a wiki.
 ///
 /// If `configured_branch` is `Some`, that value is returned directly.

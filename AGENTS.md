@@ -605,6 +605,16 @@ Should be replaced with the comma-separated domain list for AWF's `--allow-domai
 
 The output is formatted as a comma-separated string (e.g., `github.com,*.dev.azure.com,api.github.com`).
 
+## {{ enabled_tools_args }}
+
+Should be replaced with `--enabled-tools <name>` CLI arguments for the SafeOutputs MCP HTTP server. The tool list is derived from `safe-outputs:` front matter keys plus always-on diagnostic tools (`noop`, `missing-data`, `missing-tool`, `report-incomplete`).
+
+When `safe-outputs:` is empty (or omitted), this is replaced with an empty string and all tools remain available (backward compatibility). When non-empty, the replacement includes a trailing space to prevent concatenation with the next positional argument in the shell command.
+
+Tool names are validated at compile time:
+- Names must contain only ASCII alphanumerics and hyphens (shell injection prevention)
+- Unrecognized names (not in `ALL_KNOWN_SAFE_OUTPUTS`) emit a warning to catch typos
+
 ## {{ cancel_previous_builds }}
 
 When `triggers.pipeline` is configured, this generates a bash step that cancels any previously queued or in-progress builds of the same pipeline definition. This prevents multiple builds from accumulating when the upstream pipeline triggers rapidly (e.g., multiple PRs merged in quick succession).

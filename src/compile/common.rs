@@ -684,13 +684,16 @@ fn is_safe_tool_name(name: &str) -> bool {
 ///
 /// Tool names are validated to contain only ASCII alphanumerics and hyphens
 /// to prevent shell injection when the args are embedded in bash commands.
+/// Unrecognized tool names emit a compile-time warning.
 pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
-    use crate::tools::ALWAYS_ON_TOOLS;
+    use crate::tools::{ALL_KNOWN_SAFE_OUTPUTS, ALWAYS_ON_TOOLS};
+    use std::collections::HashSet;
 
     if front_matter.safe_outputs.is_empty() {
         return String::new();
     }
 
+    let mut seen = HashSet::new();
     let mut tools: Vec<String> = Vec::new();
     for key in front_matter.safe_outputs.keys() {
         if !is_safe_tool_name(key) {
@@ -700,13 +703,21 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
             );
             continue;
         }
-        tools.push(key.clone());
+        if !ALL_KNOWN_SAFE_OUTPUTS.contains(&key.as_str()) {
+            eprintln!(
+                "Warning: unrecognized safe-output tool '{}' — will be ignored at runtime",
+                key
+            );
+        }
+        if seen.insert(key.clone()) {
+            tools.push(key.clone());
+        }
     }
 
     // Always include diagnostic tools
     for tool in ALWAYS_ON_TOOLS {
         let name = tool.to_string();
-        if !tools.contains(&name) {
+        if seen.insert(name.clone()) {
             tools.push(name);
         }
     }
@@ -1741,16 +1752,17 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_enabled_tools_args_skips_unsafe_names() {
-        // We can't easily inject unsafe names through parse_markdown (YAML
-        // keys are validated), so we test the validation function directly.
-        // The is_safe_tool_name + generate_enabled_tools_args integration
-        // is covered by the unit tests for is_safe_tool_name above.
+    fn test_generate_enabled_tools_args_warns_on_unknown_tool() {
+        // An unrecognized (but safe-formatted) tool name should still appear
+        // in the output (it passes is_safe_tool_name) but a warning is emitted
+        // to stderr. We verify it's included in the args string.
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n"
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  crate-pull-request:\n    target-branch: main\n---\n"
         ).unwrap();
         let args = generate_enabled_tools_args(&fm);
-        // All tool names from YAML are safe alphanumeric-hyphen names
-        assert!(args.contains("--enabled-tools create-pull-request"));
+        // Typo'd name is still forwarded (warning is printed to stderr)
+        assert!(args.contains("--enabled-tools crate-pull-request"));
+        // Always-on tools are also included
+        assert!(args.contains("--enabled-tools noop"));
     }
 }
