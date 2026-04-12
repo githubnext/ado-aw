@@ -780,6 +780,18 @@ impl Executor for CreatePrResult {
         }
         debug!("Source branch created");
 
+        // Record the worktree HEAD before applying the patch so we can diff against
+        // it later. For multi-commit patches, git am creates N commits and diff-tree HEAD
+        // alone only shows the last commit's changes — we need base_sha..HEAD.
+        let base_sha_output = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&worktree_path)
+            .output()
+            .await
+            .context("Failed to get worktree HEAD SHA")?;
+        let base_sha = String::from_utf8_lossy(&base_sha_output.stdout).trim().to_string();
+        debug!("Worktree base SHA before patch: {}", base_sha);
+
         // Apply the format-patch using git am --3way for proper conflict handling.
         // git am handles the email-style patch format from git format-patch and
         // --3way enables three-way merge for better conflict resolution.
@@ -828,12 +840,13 @@ impl Executor for CreatePrResult {
         }
 
         // Collect changed files. The method depends on how the patch was applied:
-        // - git am: changes are committed → use git diff-tree to compare with parent
+        // - git am: changes are committed → use git diff-tree to compare base_sha..HEAD
+        //   (covers all commits in multi-commit patches, not just the last one)
         // - git apply: changes are in working tree → use git status --porcelain
         debug!("Getting list of changed files");
         let (status_str, use_diff_tree) = if patch_committed {
             let diff_tree_output = Command::new("git")
-                .args(["diff-tree", "--no-commit-id", "-r", "--name-status", "HEAD"])
+                .args(["diff-tree", "-r", "--name-status", &base_sha, "HEAD"])
                 .current_dir(&worktree_path)
                 .output()
                 .await
@@ -1030,7 +1043,12 @@ impl Executor for CreatePrResult {
                 let disallowed: Vec<_> = self
                     .agent_labels
                     .iter()
-                    .filter(|l| !config.allowed_labels.contains(l))
+                    .filter(|l| {
+                        !config
+                            .allowed_labels
+                            .iter()
+                            .any(|al| al.eq_ignore_ascii_case(l))
+                    })
                     .collect();
                 if !disallowed.is_empty() {
                     warn!(
@@ -1587,9 +1605,9 @@ fn find_protected_files(paths: &[String]) -> Vec<String> {
             }
         }
 
-        // Check path prefixes
+        // Check path prefixes (git diffs always use forward slashes)
         for prefix in PROTECTED_PATH_PREFIXES {
-            if lower_path.starts_with(prefix) || lower_path.starts_with(&prefix.replace('/', "\\")) {
+            if lower_path.starts_with(prefix) {
                 if !protected.contains(path) {
                     protected.push(path.clone());
                 }
@@ -1630,10 +1648,10 @@ fn generate_pr_footer() -> String {
 /// Patterns without a `/` are automatically prefixed with `**/` so that e.g. `*.lock`
 /// matches `subdir/Cargo.lock` (not just root-level lockfiles).
 ///
-/// Note: When using format-patch output with multiple commits, excluding all diffs within
-/// a commit leaves the `From <SHA> ...` / `Subject:` envelope intact with no diff hunks.
-/// `git am` treats these as empty commits, which is harmless but may leave no-op commits
-/// on the branch.
+/// For multi-commit format-patch output, commit envelopes (`From <SHA>...`, `Subject:`,
+/// etc.) are always preserved — only `diff --git` blocks are subject to exclusion. When
+/// all diffs within a commit are excluded, the envelope remains and `git am` treats it
+/// as an empty commit.
 fn filter_excluded_files_from_patch(patch_content: &str, excluded_patterns: &[String]) -> String {
     if excluded_patterns.is_empty() {
         return patch_content.to_string();
@@ -1645,49 +1663,69 @@ fn filter_excluded_files_from_patch(patch_content: &str, excluded_patterns: &[St
         .collect();
 
     let mut result = String::with_capacity(patch_content.len());
-    let mut current_block = String::new();
+    let mut current_diff_block = String::new();
     let mut current_path: Option<String> = None;
+    let mut in_diff_block = false;
 
     for line in patch_content.lines() {
         if line.starts_with("diff --git") {
-            // Flush previous block if it's not excluded
-            if let Some(ref path) = current_path {
-                if !normalized.iter().any(|p| glob_match::glob_match(p, path)) {
-                    result.push_str(&current_block);
-                } else {
-                    debug!("Excluding file from patch: {}", path);
-                }
-            } else if !current_block.is_empty() {
-                result.push_str(&current_block);
-            }
+            // Flush previous diff block if not excluded
+            flush_diff_block(&mut result, &current_diff_block, &current_path, &normalized);
 
-            // Start new block, path will be set when we see +++ b/
-            current_block = String::new();
-            current_block.push_str(line);
-            current_block.push('\n');
+            // Start a new diff block
+            current_diff_block = String::new();
+            current_diff_block.push_str(line);
+            current_diff_block.push('\n');
             current_path = None;
-        } else {
-            // Extract path from "+++ b/path" line (handles quoted paths)
+            in_diff_block = true;
+        } else if in_diff_block && line.starts_with("From ") {
+            // A new commit envelope starts — flush the current diff block and
+            // switch back to envelope mode
+            flush_diff_block(&mut result, &current_diff_block, &current_path, &normalized);
+            current_diff_block = String::new();
+            current_path = None;
+            in_diff_block = false;
+
+            result.push_str(line);
+            result.push('\n');
+        } else if in_diff_block {
+            // Extract path from "+++ b/path" line
             if let Some(rest) = line.strip_prefix("+++ b/") {
                 current_path = Some(rest.trim().trim_matches('"').to_string());
             }
-            current_block.push_str(line);
-            current_block.push('\n');
+            current_diff_block.push_str(line);
+            current_diff_block.push('\n');
+        } else {
+            // Not inside a diff block — this is a commit envelope line
+            // (From <SHA>, Subject:, etc.) or preamble. Always preserve.
+            result.push_str(line);
+            result.push('\n');
         }
     }
 
-    // Flush last block
-    if let Some(ref path) = current_path {
-        if !normalized.iter().any(|p| glob_match::glob_match(p, path)) {
-            result.push_str(&current_block);
-        } else {
-            debug!("Excluding file from patch: {}", path);
-        }
-    } else if !current_block.is_empty() {
-        result.push_str(&current_block);
-    }
+    // Flush the last diff block
+    flush_diff_block(&mut result, &current_diff_block, &current_path, &normalized);
 
     result
+}
+
+/// Helper to flush a diff block, excluding it if the path matches any pattern.
+fn flush_diff_block(
+    result: &mut String,
+    block: &str,
+    path: &Option<String>,
+    patterns: &[String],
+) {
+    if block.is_empty() {
+        return;
+    }
+    if let Some(p) = path {
+        if patterns.iter().any(|pat| glob_match::glob_match(pat, p)) {
+            debug!("Excluding file from patch: {}", p);
+            return;
+        }
+    }
+    result.push_str(block);
 }
 
 /// Normalize a glob pattern for cross-directory matching.
@@ -1940,6 +1978,38 @@ new file mode 100755
             filter_excluded_files_from_patch(patch, &["package-lock.json".to_string()]);
         assert!(result.contains("src/main.rs"));
         assert!(!result.contains("package-lock.json"));
+    }
+
+    #[test]
+    fn test_filter_excluded_files_multi_commit_preserves_envelopes() {
+        // Multi-commit format-patch: commit envelopes must be preserved even
+        // when a diff block between them is excluded.
+        let patch = "\
+From abc123 Mon Sep 17 00:00:00 2001\n\
+Subject: [PATCH 1/2] First commit\n\
+---\n\
+diff --git a/file1.rs b/file1.rs\n\
+--- a/file1.rs\n\
++++ b/file1.rs\n\
+@@ -1 +1 @@\n\
+-old\n\
++new\n\
+\n\
+From def456 Mon Sep 17 00:00:00 2001\n\
+Subject: [PATCH 2/2] Second commit\n\
+---\n\
+diff --git a/file2.rs b/file2.rs\n\
+--- a/file2.rs\n\
++++ b/file2.rs\n\
+@@ -1 +1 @@\n\
+-old\n\
++new\n";
+        // Exclude file1.rs — commit 2 envelope and file2 diff must survive
+        let result = filter_excluded_files_from_patch(patch, &["file1.rs".to_string()]);
+        assert!(!result.contains("file1.rs"), "file1.rs should be excluded");
+        assert!(result.contains("From def456"), "commit 2 envelope must survive");
+        assert!(result.contains("file2.rs"), "file2.rs should remain");
+        assert!(result.contains("From abc123"), "commit 1 envelope must survive");
     }
 
     #[test]
