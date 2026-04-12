@@ -339,7 +339,7 @@ impl SafeOutputs {
     /// Tries (in order):
     /// 1. `git merge-base HEAD origin/HEAD`
     /// 2. `git merge-base HEAD origin/main`
-    /// 3. Falls back to `HEAD~1` if no remote tracking branch is available
+    /// 3. Root commit via `git rev-list --max-parents=0 HEAD` (handles single-commit repos)
     async fn find_merge_base(git_dir: &std::path::Path) -> Result<String, McpError> {
         use tokio::process::Command;
 
@@ -361,9 +361,26 @@ impl SafeOutputs {
             }
         }
 
-        // Fallback: use HEAD~1 (single parent)
-        warn!("Could not find merge-base with origin, falling back to HEAD~1");
-        Ok("HEAD~1".to_string())
+        // Fallback: find the root commit (works for single-commit repos where HEAD~1
+        // doesn't exist)
+        warn!("Could not find merge-base with origin, falling back to root commit");
+        let root_output = Command::new("git")
+            .args(["rev-list", "--max-parents=0", "HEAD"])
+            .current_dir(git_dir)
+            .output()
+            .await
+            .ok();
+
+        if let Some(out) = root_output.filter(|o| o.status.success()) {
+            let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !sha.is_empty() {
+                return Ok(sha);
+            }
+        }
+
+        Err(anyhow_to_mcp_error(anyhow::anyhow!(
+            "Cannot determine diff base: no remote tracking branch and no commits found"
+        )))
     }
 
     #[tool(

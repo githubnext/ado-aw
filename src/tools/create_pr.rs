@@ -284,6 +284,28 @@ impl CreatePrResult {
     }
 }
 
+/// Behavior when the patch is empty or all files were excluded
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IfNoChanges {
+    /// Succeed with a warning (default)
+    Warn,
+    /// Fail the pipeline step
+    Error,
+    /// Succeed silently
+    Ignore,
+}
+
+/// File protection policy controlling whether manifest/CI files can be modified
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProtectedFiles {
+    /// Block modifications to protected files (default)
+    Blocked,
+    /// Allow modifications to all files
+    Allowed,
+}
+
 /// Configuration for the create_pr tool (specified in front matter)
 ///
 /// Example front matter:
@@ -337,7 +359,7 @@ pub struct CreatePrConfig {
 
     /// Behavior when the patch is empty: "warn" (default), "error", "ignore"
     #[serde(default = "default_if_no_changes", rename = "if-no-changes")]
-    pub if_no_changes: String,
+    pub if_no_changes: IfNoChanges,
 
     /// Maximum number of files allowed in a single PR (default: 100)
     #[serde(default = "default_max_files", rename = "max-files")]
@@ -346,7 +368,7 @@ pub struct CreatePrConfig {
     /// File protection policy: "blocked" (default) or "allowed"
     /// Controls whether manifest/CI files can be modified
     #[serde(default = "default_protected_files", rename = "protected-files")]
-    pub protected_files: String,
+    pub protected_files: ProtectedFiles,
 
     /// Glob patterns for files to exclude from the patch
     #[serde(default, rename = "excluded-files")]
@@ -369,9 +391,11 @@ pub struct CreatePrConfig {
     #[serde(default, rename = "work-items")]
     pub work_items: Vec<i32>,
 
-    /// Whether to create a fallback work item on PR failure (default: true)
-    #[serde(default = "default_true", rename = "fallback-as-work-item")]
-    pub fallback_as_work_item: bool,
+    /// Whether to record branch info in failure data when PR creation fails (default: true).
+    /// When enabled, the failure response includes the pushed branch name and target branch
+    /// so operators can manually create the PR. No work item is created automatically.
+    #[serde(default = "default_true", rename = "record-branch-on-failure")]
+    pub record_branch_on_failure: bool,
 }
 
 fn default_target_branch() -> String {
@@ -382,16 +406,16 @@ fn default_true() -> bool {
     true
 }
 
-fn default_if_no_changes() -> String {
-    "warn".to_string()
+fn default_if_no_changes() -> IfNoChanges {
+    IfNoChanges::Warn
 }
 
 fn default_max_files() -> usize {
     DEFAULT_MAX_FILES
 }
 
-fn default_protected_files() -> String {
-    "blocked".to_string()
+fn default_protected_files() -> ProtectedFiles {
+    ProtectedFiles::Blocked
 }
 
 impl Default for CreatePrConfig {
@@ -411,7 +435,7 @@ impl Default for CreatePrConfig {
             reviewers: Vec::new(),
             labels: Vec::new(),
             work_items: Vec::new(),
-            fallback_as_work_item: true,
+            record_branch_on_failure: true,
         }
     }
 }
@@ -453,25 +477,6 @@ impl Executor for CreatePrResult {
         debug!("Draft: {}", config.draft);
         debug!("Auto-complete: {}", config.auto_complete);
         debug!("Squash merge: {}", config.squash_merge);
-
-        // Validate string-enum config values
-        const VALID_IF_NO_CHANGES: &[&str] = &["warn", "error", "ignore"];
-        if !VALID_IF_NO_CHANGES.contains(&config.if_no_changes.as_str()) {
-            return Ok(ExecutionResult::failure(format!(
-                "Invalid if-no-changes value '{}'. Must be one of: {}",
-                config.if_no_changes,
-                VALID_IF_NO_CHANGES.join(", ")
-            )));
-        }
-
-        const VALID_PROTECTED_FILES: &[&str] = &["blocked", "allowed"];
-        if !VALID_PROTECTED_FILES.contains(&config.protected_files.as_str()) {
-            return Ok(ExecutionResult::failure(format!(
-                "Invalid protected-files value '{}'. Must be one of: {}",
-                config.protected_files,
-                VALID_PROTECTED_FILES.join(", ")
-            )));
-        }
 
         // Apply title prefix if configured
         let effective_title = if let Some(ref prefix) = config.title_prefix {
@@ -584,19 +589,18 @@ impl Executor for CreatePrResult {
             debug!("Patch size after exclusion: {} bytes (was {} bytes)", filtered.len(), patch_content.len());
             if filtered.trim().is_empty() {
                 // All files were excluded
-                match config.if_no_changes.as_str() {
-                    "error" => {
+                match config.if_no_changes {
+                    IfNoChanges::Error => {
                         return Ok(ExecutionResult::failure(
                             "All files in patch were excluded by excluded-files patterns".to_string(),
                         ));
                     }
-                    "ignore" => {
+                    IfNoChanges::Ignore => {
                         return Ok(ExecutionResult::success(
                             "All files in patch were excluded — nothing to do".to_string(),
                         ));
                     }
-                    _ => {
-                        // "warn" (default) — succeed with warning
+                    IfNoChanges::Warn => {
                         warn!("All files in patch were excluded by excluded-files patterns (if-no-changes: warn)");
                         return Ok(ExecutionResult::warning(
                             "All files in patch were excluded by excluded-files patterns".to_string(),
@@ -628,7 +632,7 @@ impl Executor for CreatePrResult {
         let patch_paths = extract_paths_from_patch(&patch_content);
 
         // Security: File protection check
-        if config.protected_files != "allowed" {
+        if config.protected_files != ProtectedFiles::Allowed {
             let protected = find_protected_files(&patch_paths);
             if !protected.is_empty() {
                 warn!(
@@ -643,16 +647,18 @@ impl Executor for CreatePrResult {
             }
         }
 
-        // Security: Max files per PR check
-        if patch_paths.len() > config.max_files {
+        // Security: Max files per PR check (count diff blocks, not paths, to avoid
+        // double-counting renames which appear in both --- and +++ lines)
+        let file_count = count_patch_files(&patch_content);
+        if file_count > config.max_files {
             warn!(
                 "Patch contains {} files, exceeding max of {}",
-                patch_paths.len(),
+                file_count,
                 config.max_files
             );
             return Ok(ExecutionResult::failure(format!(
                 "Patch contains {} files, exceeding maximum of {} files per PR",
-                patch_paths.len(),
+                file_count,
                 config.max_files
             )));
         }
@@ -867,21 +873,20 @@ impl Executor for CreatePrResult {
 
         if changes.is_empty() {
             // Handle no-changes based on config
-            match config.if_no_changes.as_str() {
-                "error" => {
+            match config.if_no_changes {
+                IfNoChanges::Error => {
                     warn!("No changes detected after applying patch (if-no-changes: error)");
                     return Ok(ExecutionResult::failure(
                         "No changes detected after applying patch".to_string(),
                     ));
                 }
-                "ignore" => {
+                IfNoChanges::Ignore => {
                     info!("No changes detected after applying patch (if-no-changes: ignore)");
                     return Ok(ExecutionResult::success(
                         "No changes detected — nothing to do".to_string(),
                     ));
                 }
-                _ => {
-                    // "warn" (default) — succeed with warning
+                IfNoChanges::Warn => {
                     warn!("No changes detected after applying patch (if-no-changes: warn)");
                     return Ok(ExecutionResult::warning(
                         "No changes detected after applying patch".to_string(),
@@ -1061,9 +1066,9 @@ impl Executor for CreatePrResult {
             let body = pr_response.text().await.unwrap_or_default();
             warn!("Failed to create pull request: {} - {}", status, body);
 
-            // Fallback: create a work item with branch reference if enabled
-            if config.fallback_as_work_item {
-                info!("PR creation failed, recording fallback info");
+            // Record branch info for manual recovery if enabled
+            if config.record_branch_on_failure {
+                info!("PR creation failed, recording branch info for manual recovery");
                 let fallback_description = format!(
                     "## Pull Request Creation Failed\n\n\
                     A pull request could not be created automatically.\n\n\
@@ -1082,11 +1087,11 @@ impl Executor for CreatePrResult {
                 );
                 return Ok(ExecutionResult::failure_with_data(
                     format!(
-                        "Failed to create pull request: {} - {}. Branch '{}' was pushed. Consider creating a work item to track the manual PR creation.",
+                        "Failed to create pull request: {} - {}. Branch '{}' was pushed — create the PR manually.",
                         status, body, self.source_branch,
                     ),
                     serde_json::json!({
-                        "fallback": "work-item",
+                        "fallback": "branch-recorded",
                         "branch": self.source_branch,
                         "target_branch": target_branch,
                         "repository": self.repository,
@@ -1278,6 +1283,10 @@ async fn collect_changes_from_worktree(
                 }
             }
             // Renamed files - format is "R  old_path -> new_path"
+            // For "RM" (renamed + modified), we emit both a rename and an edit change.
+            // The ADO Pushes API processes changes sequentially within a single push,
+            // so the rename establishes the file at the new path, then the edit updates
+            // its content — this is the correct way to express rename-with-modification.
             "R " | " R" | "RM" => {
                 if let Some((old_path, new_path)) = file_path.split_once(" -> ") {
                     validate_single_path(old_path.trim())?;
@@ -1505,7 +1514,7 @@ fn validate_single_path(path: &str) -> anyhow::Result<()> {
 }
 
 /// Extract all file paths from a patch/diff content.
-/// Returns deduplicated list of file paths referenced in the patch.
+/// Returns deduplicated list of file paths referenced in the patch (both source and destination).
 /// Uses `--- a/` and `+++ b/` lines for robust parsing (handles quoted paths
 /// with spaces that break `diff --git` header parsing via split_whitespace).
 fn extract_paths_from_patch(patch_content: &str) -> Vec<String> {
@@ -1533,6 +1542,17 @@ fn extract_paths_from_patch(patch_content: &str) -> Vec<String> {
     paths.sort();
     paths.dedup();
     paths
+}
+
+/// Count the number of distinct file changes in a patch.
+/// Uses `diff --git` headers as the canonical count — each header represents exactly
+/// one file change (add, edit, delete, or rename). This avoids double-counting renames,
+/// which produce both `--- a/old` and `+++ b/new` lines.
+fn count_patch_files(patch_content: &str) -> usize {
+    patch_content
+        .lines()
+        .filter(|line| line.starts_with("diff --git"))
+        .count()
 }
 
 /// Check if any file paths in the patch are protected.
@@ -1601,6 +1621,11 @@ fn generate_pr_footer() -> String {
 ///
 /// Patterns without a `/` are automatically prefixed with `**/` so that e.g. `*.lock`
 /// matches `subdir/Cargo.lock` (not just root-level lockfiles).
+///
+/// Note: When using format-patch output with multiple commits, excluding all diffs within
+/// a commit leaves the `From <SHA> ...` / `Subject:` envelope intact with no diff hunks.
+/// `git am` treats these as empty commits, which is harmless but may leave no-op commits
+/// on the branch.
 fn filter_excluded_files_from_patch(patch_content: &str, excluded_patterns: &[String]) -> String {
     if excluded_patterns.is_empty() {
         return patch_content.to_string();
@@ -1713,12 +1738,12 @@ mod tests {
         assert!(!config.auto_complete);
         assert!(config.delete_source_branch);
         assert!(config.squash_merge);
-        assert_eq!(config.if_no_changes, "warn");
+        assert_eq!(config.if_no_changes, IfNoChanges::Warn);
         assert_eq!(config.max_files, 100);
-        assert_eq!(config.protected_files, "blocked");
+        assert_eq!(config.protected_files, ProtectedFiles::Blocked);
         assert!(config.excluded_files.is_empty());
         assert!(config.allowed_labels.is_empty());
-        assert!(config.fallback_as_work_item);
+        assert!(config.record_branch_on_failure);
     }
 
     #[test]
