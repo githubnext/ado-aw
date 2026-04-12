@@ -672,6 +672,8 @@ pub fn generate_executor_ado_env(write_service_connection: Option<&str>) -> Stri
 }
 
 /// Returns true if the name contains only ASCII alphanumerics and hyphens.
+/// This value is embedded inline in a shell command, so control characters
+/// (including newlines) and whitespace must be rejected to prevent corruption.
 fn is_safe_tool_name(name: &str) -> bool {
     !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
@@ -705,9 +707,10 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
         }
         if !ALL_KNOWN_SAFE_OUTPUTS.contains(&key.as_str()) {
             eprintln!(
-                "Warning: unrecognized safe-output tool '{}' — will be ignored at runtime",
+                "Warning: unrecognized safe-output tool '{}' — skipping (no registered tool matches this name)",
                 key
             );
+            continue;
         }
         if seen.insert(key.clone()) {
             tools.push(key.clone());
@@ -1752,17 +1755,16 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_enabled_tools_args_warns_on_unknown_tool() {
-        // An unrecognized (but safe-formatted) tool name should still appear
-        // in the output (it passes is_safe_tool_name) but a warning is emitted
-        // to stderr. We verify it's included in the args string.
+    fn test_generate_enabled_tools_args_skips_unknown_tool() {
+        // An unrecognized (but safe-formatted) tool name should be skipped
+        // from the output and a warning is emitted to stderr.
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nsafe-outputs:\n  crate-pull-request:\n    target-branch: main\n---\n"
         ).unwrap();
         let args = generate_enabled_tools_args(&fm);
-        // Typo'd name is still forwarded (warning is printed to stderr)
-        assert!(args.contains("--enabled-tools crate-pull-request"));
-        // Always-on tools are also included
+        // Typo'd name is NOT forwarded — it would silently disable the real tool
+        assert!(!args.contains("crate-pull-request"), "Unrecognized tool should be skipped");
+        // Always-on tools are still included
         assert!(args.contains("--enabled-tools noop"));
     }
 }

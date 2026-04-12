@@ -1353,4 +1353,31 @@ mod tests {
         assert!(!tool_names.contains(&"update-wiki-page".to_string()),
             "Non-enabled tool should be filtered out");
     }
+
+    /// Asserts that ALL_KNOWN_SAFE_OUTPUTS contains every tool registered in the
+    /// router (plus the non-MCP keys like "memory"). This prevents the list from
+    /// drifting when new tools are added to the router but not to the constant.
+    #[tokio::test]
+    async fn test_all_known_safe_outputs_covers_router() {
+        use crate::tools::ALL_KNOWN_SAFE_OUTPUTS;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), None)
+            .await
+            .unwrap();
+        let router_tools: Vec<String> = so
+            .tool_router
+            .list_all()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+
+        for tool_name in &router_tools {
+            assert!(
+                ALL_KNOWN_SAFE_OUTPUTS.contains(&tool_name.as_str()),
+                "Tool '{}' is registered in the router but missing from ALL_KNOWN_SAFE_OUTPUTS in src/tools/mod.rs",
+                tool_name
+            );
+        }
+    }
 }

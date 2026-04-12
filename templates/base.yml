@@ -213,6 +213,8 @@ jobs:
           mkdir -p "$(Agent.TempDirectory)/staging/logs"
 
           # Start SafeOutputs as HTTP server in the background
+          # NOTE: {{ enabled_tools_args }} expands to either "" or "--enabled-tools X ... "
+          # (with trailing space). The value MUST be newline-free; is_safe_tool_name enforces this.
           nohup /tmp/awf-tools/ado-aw mcp-http \
             --port "$SAFE_OUTPUTS_PORT" \
             --api-key "$SAFE_OUTPUTS_API_KEY" \
