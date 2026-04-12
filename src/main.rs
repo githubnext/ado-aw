@@ -236,7 +236,7 @@ async fn main() -> Result<()> {
                 }
 
                 // Print summary
-                let success_count = results.iter().filter(|r| r.success).count();
+                let success_count = results.iter().filter(|r| r.success && !r.warning).count();
                 let warning_count = results.iter().filter(|r| r.warning).count();
                 let failure_count = results.iter().filter(|r| !r.success).count();
 
@@ -244,7 +244,7 @@ async fn main() -> Result<()> {
                 println!(
                     "Total: {} | Success: {} | Warnings: {} | Failed: {}",
                     results.len(),
-                    success_count - warning_count,
+                    success_count,
                     warning_count,
                     failure_count
                 );

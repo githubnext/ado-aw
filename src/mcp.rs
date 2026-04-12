@@ -197,55 +197,93 @@ impl SafeOutputs {
         // Generate patch using git format-patch for proper commit metadata,
         // rename detection, and binary file handling.
         //
-        // Steps:
-        // 1. Stage all changes (tracked + untracked)
-        // 2. Create a temporary commit
-        // 3. Generate format-patch output
-        // 4. Reset to undo the temporary commit (preserving working tree)
+        // Handles both committed and uncommitted changes:
+        // 1. Find the merge-base with the upstream branch (origin/HEAD or origin/main)
+        // 2. If there are uncommitted changes, stage and create a temporary commit
+        // 3. Generate format-patch from merge-base..HEAD to capture ALL changes
+        // 4. If a temporary commit was created, reset it (preserving working tree)
 
-        // Stage all changes including untracked files
-        let add_output = Command::new("git")
-            .args(["add", "-A"])
+        // Find the merge-base to diff against
+        let merge_base = Self::find_merge_base(&git_dir).await?;
+        debug!("Using merge base: {}", merge_base);
+
+        // Check if there are uncommitted changes (staged or unstaged)
+        let status_output = Command::new("git")
+            .args(["status", "--porcelain"])
             .current_dir(&git_dir)
             .output()
             .await
             .map_err(|e| {
-                anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git add -A: {}", e))
+                anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git status: {}", e))
             })?;
 
-        if !add_output.status.success() {
-            return Err(anyhow_to_mcp_error(anyhow::anyhow!(
-                "git add -A failed: {}",
-                String::from_utf8_lossy(&add_output.stderr)
-            )));
-        }
+        let has_uncommitted = !String::from_utf8_lossy(&status_output.stdout)
+            .trim()
+            .is_empty();
+        let mut made_synthetic_commit = false;
 
-        // Create a temporary commit with the staged changes
-        let commit_output = Command::new("git")
-            .args(["commit", "-m", "agent changes", "--allow-empty", "--no-verify"])
-            .current_dir(&git_dir)
-            .output()
-            .await
-            .map_err(|e| {
-                anyhow_to_mcp_error(anyhow::anyhow!("Failed to create temporary commit: {}", e))
-            })?;
+        if has_uncommitted {
+            debug!("Uncommitted changes detected, creating synthetic commit");
 
-        if !commit_output.status.success() {
-            // Reset staging on failure
-            let _ = Command::new("git")
-                .args(["reset", "HEAD", "--quiet"])
+            // Stage all changes including untracked files
+            let add_output = Command::new("git")
+                .args(["add", "-A"])
                 .current_dir(&git_dir)
                 .output()
-                .await;
-            return Err(anyhow_to_mcp_error(anyhow::anyhow!(
-                "Failed to create temporary commit: {}",
-                String::from_utf8_lossy(&commit_output.stderr)
-            )));
+                .await
+                .map_err(|e| {
+                    anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git add -A: {}", e))
+                })?;
+
+            if !add_output.status.success() {
+                return Err(anyhow_to_mcp_error(anyhow::anyhow!(
+                    "git add -A failed: {}",
+                    String::from_utf8_lossy(&add_output.stderr)
+                )));
+            }
+
+            // Create a temporary commit with git identity flags to avoid config dependency
+            let commit_output = Command::new("git")
+                .args([
+                    "-c", "user.email=agent@ado-aw",
+                    "-c", "user.name=ADO Agent",
+                    "commit", "-m", "agent changes", "--allow-empty", "--no-verify",
+                ])
+                .current_dir(&git_dir)
+                .output()
+                .await
+                .map_err(|e| {
+                    anyhow_to_mcp_error(anyhow::anyhow!(
+                        "Failed to create temporary commit: {}",
+                        e
+                    ))
+                })?;
+
+            if !commit_output.status.success() {
+                // Reset staging on failure
+                let _ = Command::new("git")
+                    .args(["reset", "HEAD", "--quiet"])
+                    .current_dir(&git_dir)
+                    .output()
+                    .await;
+                return Err(anyhow_to_mcp_error(anyhow::anyhow!(
+                    "Failed to create temporary commit: {}",
+                    String::from_utf8_lossy(&commit_output.stderr)
+                )));
+            }
+            made_synthetic_commit = true;
+        } else {
+            debug!("No uncommitted changes — capturing committed changes only");
         }
 
-        // Generate format-patch for the last commit (the temporary one)
+        // Generate format-patch from merge-base..HEAD to capture all changes
         let format_patch_output = Command::new("git")
-            .args(["format-patch", "-1", "--stdout", "-M"])
+            .args([
+                "format-patch",
+                &format!("{}..HEAD", merge_base),
+                "--stdout",
+                "-M",
+            ])
             .current_dir(&git_dir)
             .output()
             .await
@@ -253,21 +291,23 @@ impl SafeOutputs {
                 anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git format-patch: {}", e))
             })?;
 
-        // Undo the temporary commit but keep changes in working tree
-        let reset_output = Command::new("git")
-            .args(["reset", "HEAD~1", "--mixed", "--quiet"])
-            .current_dir(&git_dir)
-            .output()
-            .await
-            .map_err(|e| {
-                anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git reset: {}", e))
-            })?;
+        // Undo the temporary commit (if we made one) but keep changes in working tree
+        if made_synthetic_commit {
+            let reset_output = Command::new("git")
+                .args(["reset", "HEAD~1", "--mixed", "--quiet"])
+                .current_dir(&git_dir)
+                .output()
+                .await
+                .map_err(|e| {
+                    anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git reset: {}", e))
+                })?;
 
-        if !reset_output.status.success() {
-            return Err(anyhow_to_mcp_error(anyhow::anyhow!(
-                "git reset HEAD~1 failed (repository may retain synthetic commit): {}",
-                String::from_utf8_lossy(&reset_output.stderr)
-            )));
+            if !reset_output.status.success() {
+                return Err(anyhow_to_mcp_error(anyhow::anyhow!(
+                    "git reset HEAD~1 failed (repository may retain synthetic commit): {}",
+                    String::from_utf8_lossy(&reset_output.stderr)
+                )));
+            }
         }
 
         if !format_patch_output.status.success() {
@@ -292,6 +332,38 @@ impl SafeOutputs {
         // Sanitize repository name for filename
         let safe_repo = repository.replace(['/', '\\'], "-");
         format!("pr-{}-{}.patch", safe_repo, timestamp)
+    }
+
+    /// Find the merge-base commit to diff against.
+    ///
+    /// Tries (in order):
+    /// 1. `git merge-base HEAD origin/HEAD`
+    /// 2. `git merge-base HEAD origin/main`
+    /// 3. Falls back to `HEAD~1` if no remote tracking branch is available
+    async fn find_merge_base(git_dir: &std::path::Path) -> Result<String, McpError> {
+        use tokio::process::Command;
+
+        for remote_ref in &["origin/HEAD", "origin/main"] {
+            let output = Command::new("git")
+                .args(["merge-base", "HEAD", remote_ref])
+                .current_dir(git_dir)
+                .output()
+                .await
+                .ok();
+
+            if let Some(out) = output {
+                if out.status.success() {
+                    let base = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if !base.is_empty() {
+                        return Ok(base);
+                    }
+                }
+            }
+        }
+
+        // Fallback: use HEAD~1 (single parent)
+        warn!("Could not find merge-base with origin, falling back to HEAD~1");
+        Ok("HEAD~1".to_string())
     }
 
     #[tool(

@@ -454,6 +454,25 @@ impl Executor for CreatePrResult {
         debug!("Auto-complete: {}", config.auto_complete);
         debug!("Squash merge: {}", config.squash_merge);
 
+        // Validate string-enum config values
+        const VALID_IF_NO_CHANGES: &[&str] = &["warn", "error", "ignore"];
+        if !VALID_IF_NO_CHANGES.contains(&config.if_no_changes.as_str()) {
+            return Ok(ExecutionResult::failure(format!(
+                "Invalid if-no-changes value '{}'. Must be one of: {}",
+                config.if_no_changes,
+                VALID_IF_NO_CHANGES.join(", ")
+            )));
+        }
+
+        const VALID_PROTECTED_FILES: &[&str] = &["blocked", "allowed"];
+        if !VALID_PROTECTED_FILES.contains(&config.protected_files.as_str()) {
+            return Ok(ExecutionResult::failure(format!(
+                "Invalid protected-files value '{}'. Must be one of: {}",
+                config.protected_files,
+                VALID_PROTECTED_FILES.join(", ")
+            )));
+        }
+
         // Apply title prefix if configured
         let effective_title = if let Some(ref prefix) = config.title_prefix {
             format!("{}{}", prefix, self.title)
@@ -1249,39 +1268,13 @@ async fn collect_changes_from_worktree(
             // New/untracked files
             "??" | "A " | " A" | "AM" => {
                 if full_path.is_file() {
-                    let content = tokio::fs::read_to_string(&full_path)
-                        .await
-                        .with_context(|| format!("Failed to read new file: {}", file_path))?;
-
-                    changes.push(serde_json::json!({
-                        "changeType": "add",
-                        "item": {
-                            "path": format!("/{}", file_path)
-                        },
-                        "newContent": {
-                            "content": content,
-                            "contentType": "rawtext"
-                        }
-                    }));
+                    changes.push(read_file_change("add", file_path, &full_path).await?);
                 }
             }
             // Modified files
             " M" | "M " | "MM" => {
                 if full_path.is_file() {
-                    let content = tokio::fs::read_to_string(&full_path)
-                        .await
-                        .with_context(|| format!("Failed to read modified file: {}", file_path))?;
-
-                    changes.push(serde_json::json!({
-                        "changeType": "edit",
-                        "item": {
-                            "path": format!("/{}", file_path)
-                        },
-                        "newContent": {
-                            "content": content,
-                            "contentType": "rawtext"
-                        }
-                    }));
+                    changes.push(read_file_change("edit", file_path, &full_path).await?);
                 }
             }
             // Renamed files - format is "R  old_path -> new_path"
@@ -1297,25 +1290,20 @@ async fn collect_changes_from_worktree(
                             "path": format!("/{}", new_path.trim())
                         }
                     }));
+
+                    // If status is "RM" (renamed + modified), also emit content
+                    if status_code == "RM" {
+                        let new_full_path = worktree_path.join(new_path.trim());
+                        if new_full_path.is_file() {
+                            changes.push(read_file_change("edit", new_path.trim(), &new_full_path).await?);
+                        }
+                    }
                 }
             }
             // Other statuses - try to handle as edit if file exists
             _ => {
                 if full_path.is_file() {
-                    let content = tokio::fs::read_to_string(&full_path)
-                        .await
-                        .with_context(|| format!("Failed to read file: {}", file_path))?;
-
-                    changes.push(serde_json::json!({
-                        "changeType": "edit",
-                        "item": {
-                            "path": format!("/{}", file_path)
-                        },
-                        "newContent": {
-                            "content": content,
-                            "contentType": "rawtext"
-                        }
-                    }));
+                    changes.push(read_file_change("edit", file_path, &full_path).await?);
                 }
             }
         }
@@ -1364,20 +1352,7 @@ async fn collect_changes_from_diff_tree(
         } else if status_code == "A" {
             // Added file
             if full_path.is_file() {
-                let content = tokio::fs::read_to_string(&full_path)
-                    .await
-                    .with_context(|| format!("Failed to read new file: {}", file_path))?;
-
-                changes.push(serde_json::json!({
-                    "changeType": "add",
-                    "item": {
-                        "path": format!("/{}", file_path)
-                    },
-                    "newContent": {
-                        "content": content,
-                        "contentType": "rawtext"
-                    }
-                }));
+                changes.push(read_file_change("add", file_path, &full_path).await?);
             }
         } else if status_code.starts_with('R') && parts.len() >= 3 {
             // Renamed file: R100\told_path\tnew_path
@@ -1386,6 +1361,7 @@ async fn collect_changes_from_diff_tree(
             validate_single_path(old_path)?;
             validate_single_path(new_path)?;
 
+            // Emit the rename
             changes.push(serde_json::json!({
                 "changeType": "rename",
                 "sourceServerItem": format!("/{}", old_path),
@@ -1393,28 +1369,61 @@ async fn collect_changes_from_diff_tree(
                     "path": format!("/{}", new_path)
                 }
             }));
+
+            // If the file was also modified (similarity < 100), emit an edit with content
+            let new_full_path = worktree_path.join(new_path);
+            if status_code != "R100" && new_full_path.is_file() {
+                changes.push(read_file_change("edit", new_path, &new_full_path).await?);
+            }
         } else {
             // Modified or other — read current content
             if full_path.is_file() {
-                let content = tokio::fs::read_to_string(&full_path)
-                    .await
-                    .with_context(|| format!("Failed to read modified file: {}", file_path))?;
-
-                changes.push(serde_json::json!({
-                    "changeType": "edit",
-                    "item": {
-                        "path": format!("/{}", file_path)
-                    },
-                    "newContent": {
-                        "content": content,
-                        "contentType": "rawtext"
-                    }
-                }));
+                changes.push(read_file_change("edit", file_path, &full_path).await?);
             }
         }
     }
 
     Ok(changes)
+}
+
+/// Read a file and produce an ADO push change entry.
+/// Handles both text (rawtext) and binary (base64encoded) content.
+async fn read_file_change(
+    change_type: &str,
+    file_path: &str,
+    full_path: &std::path::Path,
+) -> anyhow::Result<serde_json::Value> {
+    let bytes = tokio::fs::read(full_path)
+        .await
+        .with_context(|| format!("Failed to read file: {}", file_path))?;
+
+    // Try UTF-8 first; fall back to base64 for binary files
+    match String::from_utf8(bytes.clone()) {
+        Ok(content) => Ok(serde_json::json!({
+            "changeType": change_type,
+            "item": {
+                "path": format!("/{}", file_path)
+            },
+            "newContent": {
+                "content": content,
+                "contentType": "rawtext"
+            }
+        })),
+        Err(_) => {
+            use base64::Engine;
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            Ok(serde_json::json!({
+                "changeType": change_type,
+                "item": {
+                    "path": format!("/{}", file_path)
+                },
+                "newContent": {
+                    "content": encoded,
+                    "contentType": "base64encoded"
+                }
+            }))
+        }
+    }
 }
 ///
 /// Security checks:
@@ -1589,10 +1598,18 @@ fn generate_pr_footer() -> String {
 /// Filter out diff entries for files matching excluded-files glob patterns.
 /// Splits the patch into per-file diff blocks and removes those matching any pattern.
 /// Uses `+++ b/` lines for path extraction (robust with quoted/space-containing paths).
+///
+/// Patterns without a `/` are automatically prefixed with `**/` so that e.g. `*.lock`
+/// matches `subdir/Cargo.lock` (not just root-level lockfiles).
 fn filter_excluded_files_from_patch(patch_content: &str, excluded_patterns: &[String]) -> String {
     if excluded_patterns.is_empty() {
         return patch_content.to_string();
     }
+
+    let normalized: Vec<String> = excluded_patterns
+        .iter()
+        .map(|p| normalize_glob_pattern(p))
+        .collect();
 
     let mut result = String::with_capacity(patch_content.len());
     let mut current_block = String::new();
@@ -1602,7 +1619,7 @@ fn filter_excluded_files_from_patch(patch_content: &str, excluded_patterns: &[St
         if line.starts_with("diff --git") {
             // Flush previous block if it's not excluded
             if let Some(ref path) = current_path {
-                if !excluded_patterns.iter().any(|p| glob_match::glob_match(p, path)) {
+                if !normalized.iter().any(|p| glob_match::glob_match(p, path)) {
                     result.push_str(&current_block);
                 } else {
                     debug!("Excluding file from patch: {}", path);
@@ -1628,7 +1645,7 @@ fn filter_excluded_files_from_patch(patch_content: &str, excluded_patterns: &[St
 
     // Flush last block
     if let Some(ref path) = current_path {
-        if !excluded_patterns.iter().any(|p| glob_match::glob_match(p, path)) {
+        if !normalized.iter().any(|p| glob_match::glob_match(p, path)) {
             result.push_str(&current_block);
         } else {
             debug!("Excluding file from patch: {}", path);
@@ -1638,6 +1655,17 @@ fn filter_excluded_files_from_patch(patch_content: &str, excluded_patterns: &[St
     }
 
     result
+}
+
+/// Normalize a glob pattern for cross-directory matching.
+/// Patterns without a `/` are prefixed with `**/` so that e.g. `*.lock` matches
+/// `subdir/Cargo.lock`, not just root-level files.
+fn normalize_glob_pattern(pattern: &str) -> String {
+    if pattern.contains('/') || pattern.starts_with("**/") {
+        pattern.to_string()
+    } else {
+        format!("**/{}", pattern)
+    }
 }
 
 #[cfg(test)]
@@ -1854,6 +1882,27 @@ new file mode 100755
         let result = filter_excluded_files_from_patch(patch, &["*.lock".to_string()]);
         assert!(result.contains("src/main.rs"));
         assert!(!result.contains("Cargo.lock"));
+    }
+
+    #[test]
+    fn test_filter_excluded_files_nested_glob() {
+        // *.lock should match subdir/Cargo.lock thanks to auto-prepended **/
+        let patch = "diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/services/api/package-lock.json b/services/api/package-lock.json\n--- a/services/api/package-lock.json\n+++ b/services/api/package-lock.json\n@@ -1 +1 @@\n-old\n+new\n";
+        let result =
+            filter_excluded_files_from_patch(patch, &["package-lock.json".to_string()]);
+        assert!(result.contains("src/main.rs"));
+        assert!(!result.contains("package-lock.json"));
+    }
+
+    #[test]
+    fn test_normalize_glob_pattern() {
+        // Patterns without / get **/ prefix
+        assert_eq!(normalize_glob_pattern("*.lock"), "**/*.lock");
+        assert_eq!(normalize_glob_pattern("Cargo.toml"), "**/Cargo.toml");
+        // Patterns with / stay as-is
+        assert_eq!(normalize_glob_pattern("src/*.rs"), "src/*.rs");
+        // Already-prefixed patterns stay as-is
+        assert_eq!(normalize_glob_pattern("**/*.lock"), "**/*.lock");
     }
 
     #[test]
