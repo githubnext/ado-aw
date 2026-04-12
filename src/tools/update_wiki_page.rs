@@ -53,6 +53,7 @@ impl Validate for UpdateWikiPageParams {
 
 tool_result! {
     name = "update-wiki-page",
+    write = true,
     params = UpdateWikiPageParams,
     /// Result of editing a wiki page
     pub struct UpdateWikiPageResult {

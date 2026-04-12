@@ -1,5 +1,6 @@
 //! Tool parameter and result structs for MCP tools
 
+use crate::{all_safe_output_names, tool_names};
 use log::{debug, warn};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 
@@ -12,42 +13,77 @@ pub(crate) const PATH_SEGMENT: &AsciiSet = &CONTROLS.add(b'#').add(b'?').add(b'/
 
 /// Safe output tools that are always available regardless of filtering.
 /// These are diagnostic/transparency tools that agents should always have access to.
-pub const ALWAYS_ON_TOOLS: &[&str] = &[
-    "noop",
-    "missing-data",
-    "missing-tool",
-    "report-incomplete",
+///
+/// Derived from diagnostic tool types — adding a new diagnostic tool means adding
+/// its type here and the name is extracted automatically via `ToolResult::NAME`.
+pub const ALWAYS_ON_TOOLS: &[&str] = tool_names![
+    NoopResult,
+    MissingDataResult,
+    MissingToolResult,
+    ReportIncompleteResult,
 ];
 
+/// Safe-output tools that require write access to ADO.
+/// Compile-time derived from tool types via `ToolResult::NAME`.
+///
+/// Adding a new write-requiring tool: create the struct with `tool_result!{ write = true, ... }`,
+/// then add its type to this list.
+pub const WRITE_REQUIRING_SAFE_OUTPUTS: &[&str] = tool_names![
+    CreateWorkItemResult,
+    CommentOnWorkItemResult,
+    UpdateWorkItemResult,
+    CreatePrResult,
+    CreateWikiPageResult,
+    UpdateWikiPageResult,
+    AddPrCommentResult,
+    LinkWorkItemsResult,
+    QueueBuildResult,
+    CreateGitTagResult,
+    AddBuildTagResult,
+    CreateBranchResult,
+    UpdatePrResult,
+    UploadAttachmentResult,
+    SubmitPrReviewResult,
+    ReplyToPrCommentResult,
+    ResolvePrThreadResult,
+];
+
+/// Non-MCP safe-output keys handled by the compiler/executor, not the MCP server.
+/// These must not appear in `--enabled-tools` or they cause real MCP tools to be
+/// filtered out (the router has no route for them).
+pub const NON_MCP_SAFE_OUTPUT_KEYS: &[&str] = &["memory"];
+
 /// All recognised safe-output keys accepted in front matter `safe-outputs:`.
-/// This is the union of MCP tool names, always-on diagnostics, and non-MCP
-/// safe-output keys (like `memory`) that are handled by the compiler/executor.
-pub const ALL_KNOWN_SAFE_OUTPUTS: &[&str] = &[
-    // Always-on diagnostics
-    "noop",
-    "missing-data",
-    "missing-tool",
-    "report-incomplete",
+/// This is the union of write-requiring tool types, diagnostic tool types, and
+/// non-MCP safe-output keys (like `memory`).
+///
+/// Derived at compile time from tool types — no hand-maintained string lists.
+pub const ALL_KNOWN_SAFE_OUTPUTS: &[&str] = all_safe_output_names![
     // Write-requiring MCP tools
-    "create-pull-request",
-    "create-work-item",
-    "comment-on-work-item",
-    "update-work-item",
-    "create-wiki-page",
-    "update-wiki-page",
-    "add-pr-comment",
-    "link-work-items",
-    "queue-build",
-    "create-git-tag",
-    "add-build-tag",
-    "create-branch",
-    "update-pr",
-    "upload-attachment",
-    "submit-pr-review",
-    "reply-to-pr-review-comment",
-    "resolve-pr-review-thread",
-    // Non-MCP safe-output keys (handled by compiler/executor)
-    "memory",
+    CreateWorkItemResult,
+    CommentOnWorkItemResult,
+    UpdateWorkItemResult,
+    CreatePrResult,
+    CreateWikiPageResult,
+    UpdateWikiPageResult,
+    AddPrCommentResult,
+    LinkWorkItemsResult,
+    QueueBuildResult,
+    CreateGitTagResult,
+    AddBuildTagResult,
+    CreateBranchResult,
+    UpdatePrResult,
+    UploadAttachmentResult,
+    SubmitPrReviewResult,
+    ReplyToPrCommentResult,
+    ResolvePrThreadResult,
+    // Always-on diagnostics
+    NoopResult,
+    MissingDataResult,
+    MissingToolResult,
+    ReportIncompleteResult;
+    // Non-MCP safe-output keys
+    "memory"
 ];
 
 /// Resolve the effective branch for a wiki.
@@ -253,3 +289,85 @@ pub use update_pr::*;
 pub use update_wiki_page::*;
 pub use update_work_item::*;
 pub use upload_attachment::*;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_write_requiring_subset_of_all_known() {
+        for name in WRITE_REQUIRING_SAFE_OUTPUTS {
+            assert!(
+                ALL_KNOWN_SAFE_OUTPUTS.contains(name),
+                "WRITE_REQUIRING_SAFE_OUTPUTS entry '{}' is missing from ALL_KNOWN_SAFE_OUTPUTS",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_always_on_subset_of_all_known() {
+        for name in ALWAYS_ON_TOOLS {
+            assert!(
+                ALL_KNOWN_SAFE_OUTPUTS.contains(name),
+                "ALWAYS_ON_TOOLS entry '{}' is missing from ALL_KNOWN_SAFE_OUTPUTS",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_non_mcp_keys_subset_of_all_known() {
+        for name in NON_MCP_SAFE_OUTPUT_KEYS {
+            assert!(
+                ALL_KNOWN_SAFE_OUTPUTS.contains(name),
+                "NON_MCP_SAFE_OUTPUT_KEYS entry '{}' is missing from ALL_KNOWN_SAFE_OUTPUTS",
+                name
+            );
+        }
+    }
+
+    /// Verify that every type in the write-requiring list actually has
+    /// `REQUIRES_WRITE == true`, and every diagnostic type has `false`.
+    #[test]
+    fn test_requires_write_consistency() {
+        // Write-requiring tools
+        assert!(CreateWorkItemResult::REQUIRES_WRITE);
+        assert!(CommentOnWorkItemResult::REQUIRES_WRITE);
+        assert!(UpdateWorkItemResult::REQUIRES_WRITE);
+        assert!(CreatePrResult::REQUIRES_WRITE);
+        assert!(CreateWikiPageResult::REQUIRES_WRITE);
+        assert!(UpdateWikiPageResult::REQUIRES_WRITE);
+        assert!(AddPrCommentResult::REQUIRES_WRITE);
+        assert!(LinkWorkItemsResult::REQUIRES_WRITE);
+        assert!(QueueBuildResult::REQUIRES_WRITE);
+        assert!(CreateGitTagResult::REQUIRES_WRITE);
+        assert!(AddBuildTagResult::REQUIRES_WRITE);
+        assert!(CreateBranchResult::REQUIRES_WRITE);
+        assert!(UpdatePrResult::REQUIRES_WRITE);
+        assert!(UploadAttachmentResult::REQUIRES_WRITE);
+        assert!(SubmitPrReviewResult::REQUIRES_WRITE);
+        assert!(ReplyToPrCommentResult::REQUIRES_WRITE);
+        assert!(ResolvePrThreadResult::REQUIRES_WRITE);
+
+        // Diagnostic tools (should NOT require write)
+        assert!(!NoopResult::REQUIRES_WRITE);
+        assert!(!MissingDataResult::REQUIRES_WRITE);
+        assert!(!MissingToolResult::REQUIRES_WRITE);
+        assert!(!ReportIncompleteResult::REQUIRES_WRITE);
+    }
+
+    /// Verify ALL_KNOWN_SAFE_OUTPUTS has exactly the right count:
+    /// write tools + diagnostics + non-MCP keys.
+    #[test]
+    fn test_all_known_completeness() {
+        let expected = WRITE_REQUIRING_SAFE_OUTPUTS.len()
+            + ALWAYS_ON_TOOLS.len()
+            + NON_MCP_SAFE_OUTPUT_KEYS.len();
+        assert_eq!(
+            ALL_KNOWN_SAFE_OUTPUTS.len(),
+            expected,
+            "ALL_KNOWN_SAFE_OUTPUTS should be the union of write + diagnostic + non-MCP lists"
+        );
+    }
+}

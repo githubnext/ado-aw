@@ -691,17 +691,12 @@ fn is_safe_tool_name(name: &str) -> bool {
 /// to prevent shell injection when the args are embedded in bash commands.
 /// Unrecognized tool names emit a compile-time warning and are skipped.
 pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
-    use crate::tools::{ALL_KNOWN_SAFE_OUTPUTS, ALWAYS_ON_TOOLS};
+    use crate::tools::{ALL_KNOWN_SAFE_OUTPUTS, ALWAYS_ON_TOOLS, NON_MCP_SAFE_OUTPUT_KEYS};
     use std::collections::HashSet;
 
     if front_matter.safe_outputs.is_empty() {
         return String::new();
     }
-
-    // Non-MCP safe-output keys handled by the compiler/executor, not the MCP server.
-    // These must not appear in --enabled-tools or they cause real MCP tools to be
-    // filtered out (the router has no route for them).
-    const NON_MCP_SAFE_OUTPUT_KEYS: &[&str] = &["memory"];
 
     let mut seen = HashSet::new();
     let mut tools: Vec<String> = Vec::new();
@@ -758,29 +753,10 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
     args + " "
 }
 
-/// Safe-output names that require write access to ADO.
-const WRITE_REQUIRING_SAFE_OUTPUTS: &[&str] = &[
-    "create-pull-request",
-    "create-work-item",
-    "comment-on-work-item",
-    "update-work-item",
-    "create-wiki-page",
-    "update-wiki-page",
-    "add-pr-comment",
-    "link-work-items",
-    "queue-build",
-    "create-git-tag",
-    "add-build-tag",
-    "create-branch",
-    "update-pr",
-    "upload-attachment",
-    "submit-pr-review",
-    "reply-to-pr-review-comment",
-    "resolve-pr-review-thread",
-];
-
 /// Validate that write-requiring safe-outputs have a write service connection configured.
 pub fn validate_write_permissions(front_matter: &FrontMatter) -> Result<()> {
+    use crate::tools::WRITE_REQUIRING_SAFE_OUTPUTS;
+
     let has_write_sc = front_matter
         .permissions
         .as_ref()
