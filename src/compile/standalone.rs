@@ -521,6 +521,13 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
                 );
             } else if let Some(url) = &opts.url {
                 // HTTP-based MCP (remote server)
+                if !opts.env.is_empty() {
+                    log::warn!(
+                        "MCP '{}': env vars are not supported for HTTP MCPs — they will be ignored. \
+                        Use headers for authentication instead.",
+                        name
+                    );
+                }
                 let headers = if opts.headers.is_empty() {
                     None
                 } else {
@@ -566,6 +573,16 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
     }
 }
 
+/// Validate that a string is a legal environment variable name (`[A-Za-z_][A-Za-z0-9_]*`).
+/// Prevents injection of arbitrary Docker flags via user-controlled front matter keys.
+fn is_valid_env_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// Generate additional `-e` flags for the MCPG Docker run command.
 ///
 /// MCP containers spawned by MCPG may need environment variables that flow from
@@ -585,13 +602,21 @@ pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
     }
 
     // Collect passthrough env vars from all MCP configs
-    for (_name, config) in &front_matter.mcp_servers {
+    for (mcp_name, config) in &front_matter.mcp_servers {
         let opts = match config {
             McpConfig::WithOptions(opts) if opts.enabled.unwrap_or(true) => opts,
             _ => continue,
         };
 
         for (var_name, var_value) in &opts.env {
+            // Validate env var name to prevent Docker flag injection (e.g. "X --privileged")
+            if !is_valid_env_var_name(var_name) {
+                log::warn!(
+                    "MCP '{}': skipping invalid env var name '{}' — must match [A-Za-z_][A-Za-z0-9_]*",
+                    mcp_name, var_name
+                );
+                continue;
+            }
             if seen.contains(var_name) {
                 continue;
             }
@@ -1032,5 +1057,48 @@ mod tests {
         let env = generate_mcpg_docker_env(&fm);
         assert!(env.contains("-e PASS_THROUGH"), "Should include passthrough var");
         assert!(!env.contains("-e STATIC"), "Should NOT include static var");
+    }
+
+    #[test]
+    fn test_generate_mcpg_docker_env_rejects_invalid_names() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers.insert(
+            "evil".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                container: Some("img:latest".to_string()),
+                env: {
+                    let mut e = HashMap::new();
+                    // Injection attempt: env var name with Docker flag
+                    e.insert("MY_VAR --privileged".to_string(), "".to_string());
+                    // Valid env var for comparison
+                    e.insert("GOOD_VAR".to_string(), "".to_string());
+                    e
+                },
+                ..Default::default()
+            }),
+        );
+        let env = generate_mcpg_docker_env(&fm);
+        assert!(
+            !env.contains("--privileged"),
+            "Should reject invalid env var name with Docker flag injection"
+        );
+        assert!(
+            env.contains("-e GOOD_VAR"),
+            "Should include valid env var"
+        );
+    }
+
+    #[test]
+    fn test_is_valid_env_var_name() {
+        assert!(is_valid_env_var_name("MY_VAR"));
+        assert!(is_valid_env_var_name("_PRIVATE"));
+        assert!(is_valid_env_var_name("A"));
+        assert!(is_valid_env_var_name("VAR123"));
+        assert!(!is_valid_env_var_name(""));
+        assert!(!is_valid_env_var_name("123ABC"));
+        assert!(!is_valid_env_var_name("MY-VAR"));
+        assert!(!is_valid_env_var_name("MY VAR"));
+        assert!(!is_valid_env_var_name("X --privileged"));
+        assert!(!is_valid_env_var_name("X -v /etc:/etc:rw"));
     }
 }
