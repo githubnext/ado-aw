@@ -6,11 +6,11 @@ use super::types::{FrontMatter, Repository, TriggerConfig};
 use crate::compile::types::McpConfig;
 use crate::fuzzy_schedule;
 
-/// Check if an MCP has a custom command (i.e., is not just a name-based reference).
-/// All MCPs now require explicit command configuration — there are no built-in MCPs
-/// in the copilot CLI.
+/// Check if an MCP has a transport configuration (container or URL).
+/// MCPs with a container are containerized stdio servers; MCPs with a URL
+/// are HTTP servers. Both are routed through the MCP Gateway (MCPG).
 pub fn is_custom_mcp(config: &McpConfig) -> bool {
-    matches!(config, McpConfig::WithOptions(opts) if opts.command.is_some())
+    matches!(config, McpConfig::WithOptions(opts) if opts.container.is_some() || opts.url.is_some())
 }
 
 /// Parse the markdown file and extract front matter and body
@@ -1006,7 +1006,7 @@ mod tests {
         fm.mcp_servers.insert(
             "my-tool".to_string(),
             McpConfig::WithOptions(McpOptions {
-                command: Some("node".to_string()),
+                container: Some("node:20-slim".to_string()),
                 ..Default::default()
             }),
         );

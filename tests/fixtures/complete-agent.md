@@ -25,8 +25,9 @@ mcp-servers:
     allowed:
       - query
   custom-tool:
-    command: "node"
-    args: ["server.js"]
+    container: "node:20-slim"
+    entrypoint: "node"
+    entrypoint-args: ["server.js"]
     allowed:
       - custom_function_1
       - custom_function_2

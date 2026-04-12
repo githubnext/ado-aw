@@ -355,16 +355,31 @@ pub struct McpOptions {
     /// Whether this MCP is enabled (default: true)
     #[serde(default)]
     pub enabled: Option<bool>,
-    /// Custom command (if present, it's a custom MCP - standalone only)
+    /// Docker container image for containerized stdio MCPs (MCPG-native)
     #[serde(default)]
-    pub command: Option<String>,
-    /// Command arguments
+    pub container: Option<String>,
+    /// Container entrypoint override (equivalent to `docker run --entrypoint`)
+    #[serde(default)]
+    pub entrypoint: Option<String>,
+    /// Arguments passed to the container entrypoint
+    #[serde(default, rename = "entrypoint-args")]
+    pub entrypoint_args: Vec<String>,
+    /// Additional Docker runtime arguments (inserted before the image in `docker run`)
     #[serde(default)]
     pub args: Vec<String>,
-    /// Allowed tool names (for firewall filtering)
+    /// HTTP endpoint URL for remote MCPs
+    #[serde(default)]
+    pub url: Option<String>,
+    /// HTTP headers for remote MCPs (e.g., Authorization, X-MCP-Toolsets)
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    /// Volume mounts for containerized MCPs (format: "source:dest:mode")
+    #[serde(default)]
+    pub mounts: Vec<String>,
+    /// Allowed tool names (for MCPG tool filtering)
     #[serde(default)]
     pub allowed: Vec<String>,
-    /// Environment variables
+    /// Environment variables for the MCP server process
     #[serde(default)]
     pub env: HashMap<String, String>,
     /// Service connection name (1ES only, auto-generated if not specified)
