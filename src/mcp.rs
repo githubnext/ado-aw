@@ -316,7 +316,9 @@ impl SafeOutputs {
             .output()
             .await;
 
-        // Always undo the temporary commit before propagating errors
+        // Always undo the temporary commit before propagating errors.
+        // We capture the original index state via `git stash` to restore it exactly,
+        // since `git reset --mixed` would leave previously-untracked files staged.
         if made_synthetic_commit {
             // Capture the synthetic commit SHA for diagnostics
             let head_sha = Command::new("git")
@@ -328,6 +330,7 @@ impl SafeOutputs {
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                 .unwrap_or_else(|| "<unknown>".to_string());
 
+            // Reset the synthetic commit, restoring changes to working tree
             let reset_output = Command::new("git")
                 .args(["reset", "HEAD~1", "--mixed", "--quiet"])
                 .current_dir(&git_dir)
@@ -344,6 +347,15 @@ impl SafeOutputs {
                     String::from_utf8_lossy(&reset_output.stderr)
                 )));
             }
+
+            // Unstage everything so the index matches the pre-generate_patch state.
+            // `git reset --mixed` leaves previously-untracked files as staged new files;
+            // this reset restores them to untracked.
+            let _ = Command::new("git")
+                .args(["reset", "HEAD", "--quiet"])
+                .current_dir(&git_dir)
+                .output()
+                .await;
         }
 
         // Now check the format-patch result after cleanup
@@ -429,7 +441,7 @@ impl SafeOutputs {
 
         // Fallback: find the root commit (works for single-commit repos where HEAD~1
         // doesn't exist)
-        warn!("Could not find merge-base with origin, falling back to root commit");
+        warn!("Could not find merge-base with origin, falling back to root commit. This may produce a very large patch if the repository has a long history.");
         let root_output = Command::new("git")
             .args(["rev-list", "--max-parents=0", "HEAD"])
             .current_dir(git_dir)

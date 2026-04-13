@@ -402,8 +402,12 @@ pub struct CreatePrConfig {
     /// Whether to record branch info in failure data when PR creation fails (default: true).
     /// When enabled, the failure response includes the pushed branch name and target branch
     /// so operators can manually create the PR. No work item is created automatically.
-    #[serde(default = "default_true", rename = "record-branch-on-failure")]
-    pub record_branch_on_failure: bool,
+    #[serde(
+        default = "default_true",
+        rename = "fallback-as-work-item",
+        alias = "record-branch-on-failure"
+    )]
+    pub fallback_as_work_item: bool,
 }
 
 fn default_target_branch() -> String {
@@ -447,7 +451,7 @@ impl Default for CreatePrConfig {
             reviewers: Vec::new(),
             labels: Vec::new(),
             work_items: Vec::new(),
-            record_branch_on_failure: true,
+            fallback_as_work_item: true,
         }
     }
 }
@@ -1104,7 +1108,7 @@ impl Executor for CreatePrResult {
             warn!("Failed to create pull request: {} - {}", status, body);
 
             // Record branch info for manual recovery if enabled
-            if config.record_branch_on_failure {
+            if config.fallback_as_work_item {
                 info!("PR creation failed, recording branch info for manual recovery");
                 let fallback_description = format!(
                     "## Pull Request Creation Failed\n\n\
@@ -1118,7 +1122,7 @@ impl Executor for CreatePrResult {
                     ---\n\
                     *To create the PR manually, merge branch `{}` into `{}`.*",
                     self.source_branch, target_branch, self.repository,
-                    status, truncate_error_body(&body, 500),
+                    status, sanitize_text(truncate_error_body(&body, 500)),
                     self.description,
                     self.source_branch, target_branch
                 );
@@ -1730,6 +1734,11 @@ fn filter_excluded_files_from_patch(patch_content: &str, excluded_patterns: &[St
             if matches!(current_kind, SegmentKind::Diff) {
                 if let Some(rest) = line.strip_prefix("+++ b/") {
                     current_path = Some(rest.trim().trim_matches('"').to_string());
+                } else if current_path.is_none() {
+                    // For deleted files, +++ is /dev/null; use --- a/<path> as fallback
+                    if let Some(rest) = line.strip_prefix("--- a/") {
+                        current_path = Some(rest.trim().trim_matches('"').to_string());
+                    }
                 }
             }
             current.push_str(line);
@@ -1847,7 +1856,7 @@ mod tests {
         assert_eq!(config.protected_files, ProtectedFiles::Blocked);
         assert!(config.excluded_files.is_empty());
         assert!(config.allowed_labels.is_empty());
-        assert!(config.record_branch_on_failure);
+        assert!(config.fallback_as_work_item);
     }
 
     #[test]
