@@ -702,7 +702,7 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
     // configures `noop` explicitly, it shouldn't appear twice in the output).
     let mut seen = HashSet::new();
     let mut tools: Vec<String> = Vec::new();
-    let mut user_tool_count = 0usize;
+    let mut effective_mcp_tool_count = 0usize;
     for key in front_matter.safe_outputs.keys() {
         if !is_safe_tool_name(key) {
             eprintln!(
@@ -721,13 +721,13 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
             );
             continue;
         }
-        user_tool_count += 1;
+        effective_mcp_tool_count += 1;
         if seen.insert(key.clone()) {
             tools.push(key.clone());
         }
     }
 
-    if user_tool_count == 0 {
+    if effective_mcp_tool_count == 0 {
         // Every user-specified key was either invalid, unrecognized, or non-MCP
         // (e.g. memory-only). Return empty to keep all tools available (backward compat).
         return String::new();

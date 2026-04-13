@@ -410,17 +410,16 @@ macro_rules! tool_names {
     };
 }
 
-/// Derive `ALL_KNOWN_SAFE_OUTPUTS` from multiple type lists plus extra string literals.
+/// Derive `ALL_KNOWN_SAFE_OUTPUTS` from a list of types plus extra string literals.
 ///
-/// Combines write-requiring tool types, diagnostic tool types, and non-MCP string keys
-/// (like `"memory"`) into a single `&[&str]` array.
+/// All tool types go before the semicolon; non-MCP string keys go after it.
 ///
 /// # Usage
 /// ```ignore
 /// const ALL: &[&str] = all_safe_output_names![
-///     WriteToolA, WriteToolB;   // write-requiring types
-///     DiagToolA, DiagToolB;     // diagnostic types
-///     "memory"                  // non-MCP string keys
+///     WriteToolA, WriteToolB,   // write-requiring types
+///     DiagToolA, DiagToolB;     // diagnostic types (all types before `;`)
+///     "memory"                  // non-MCP string keys (after `;`)
 /// ];
 /// ```
 #[macro_export]
