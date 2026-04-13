@@ -492,14 +492,15 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
 
             if let Some(container) = &opts.container {
                 // Container-based stdio MCP (MCPG-native, per spec §3.2.1)
+                validate_container_image(container, name);
                 // Validate mount paths for sensitive host directories
                 for mount in &opts.mounts {
                     validate_mount_source(mount, name);
                 }
                 // Validate Docker runtime args for privilege escalation
                 validate_docker_args(&opts.args, name);
-                // Warn about potential inline secrets
-                warn_potential_secrets(name, &opts.env, &HashMap::new());
+                // Warn about potential inline secrets (check headers too in case user set both)
+                warn_potential_secrets(name, &opts.env, &opts.headers);
                 let entrypoint_args = if opts.entrypoint_args.is_empty() {
                     None
                 } else {
@@ -615,10 +616,31 @@ const DANGEROUS_DOCKER_FLAGS: &[&str] = &[
     "--pid",
     "--network",
     "--ipc",
+    "--user",
+    "-u",
+    "--add-host",
+    "--entrypoint",
 ];
+
+/// Validate a container image name for injection attempts.
+/// Allows `[a-zA-Z0-9./_:-]` which covers standard Docker image references.
+fn validate_container_image(image: &str, mcp_name: &str) {
+    if image.is_empty() {
+        eprintln!("Warning: MCP '{}': container image name is empty.", mcp_name);
+        return;
+    }
+    if !image.chars().all(|c| c.is_ascii_alphanumeric() || "._/:-@".contains(c)) {
+        eprintln!(
+            "Warning: MCP '{}': container image '{}' contains unexpected characters. \
+            Image names should only contain [a-zA-Z0-9./_:-@].",
+            mcp_name, image
+        );
+    }
+}
 
 /// Validate a volume mount source path, warning on sensitive host directories.
 /// Docker socket mounts are escalated to stderr warnings since they grant container escape.
+/// Note: paths are lowercased for comparison to catch cross-platform casing (e.g. `/ETC/shadow`).
 fn validate_mount_source(mount: &str, mcp_name: &str) {
     // Format: "source:dest:mode"
     if let Some(source) = mount.split(':').next() {
@@ -808,7 +830,10 @@ pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
 
     env_flags.sort();
     if env_flags.is_empty() {
-        // No extra flags — the template line is replaced with just a line continuation
+        // No extra flags — emit a lone `\` so the bash line continuation from the
+        // preceding `-e MCP_GATEWAY_API_KEY=...` flag connects to the image name on
+        // the next line. This is valid bash: a backslash at end-of-line continues
+        // the command. replace_with_indent preserves this on its own indented line.
         "\\".to_string()
     } else {
         // Emit each flag on its own line with `\` continuation.
