@@ -81,6 +81,7 @@ impl Validate for CreateGitTagParams {
 
 tool_result! {
     name = "create-git-tag",
+    write = true,
     params = CreateGitTagParams,
     /// Result of creating a git tag
     pub struct CreateGitTagResult {

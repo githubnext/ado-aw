@@ -17,12 +17,13 @@ use super::common::{
     self, AWF_VERSION, COPILOT_CLI_VERSION, DEFAULT_POOL, MCPG_PORT, MCPG_VERSION,
     compute_effective_workspace, generate_acquire_ado_token, generate_cancel_previous_builds,
     generate_checkout_self, generate_checkout_steps, generate_ci_trigger, generate_copilot_ado_env,
-    generate_copilot_params, generate_executor_ado_env, generate_header_comment,
-    generate_job_timeout, generate_pipeline_path, generate_pipeline_resources, generate_pr_trigger,
-    generate_repositories, generate_schedule, generate_source_path, generate_working_directory,
-    replace_with_indent, sanitize_filename, validate_comment_target,
-    validate_resolve_pr_thread_statuses, validate_submit_pr_review_events,
-    validate_update_pr_votes, validate_update_work_item_target, validate_write_permissions,
+    generate_copilot_params, generate_enabled_tools_args, generate_executor_ado_env,
+    generate_header_comment, generate_job_timeout, generate_pipeline_path,
+    generate_pipeline_resources, generate_pr_trigger, generate_repositories, generate_schedule,
+    generate_source_path, generate_working_directory, replace_with_indent, sanitize_filename,
+    validate_comment_target, validate_resolve_pr_thread_statuses,
+    validate_submit_pr_review_events, validate_update_pr_votes,
+    validate_update_work_item_target, validate_write_permissions,
 };
 use super::types::{FrontMatter, McpConfig};
 use crate::allowed_hosts::{CORE_ALLOWED_HOSTS, mcp_required_hosts};
@@ -84,6 +85,9 @@ impl Compiler for StandaloneCompiler {
 
         // Generate comma-separated domain list for AWF
         let allowed_domains = generate_allowed_domains(front_matter);
+
+        // Generate --enabled-tools args for SafeOutputs tool filtering
+        let enabled_tools_args = generate_enabled_tools_args(front_matter);
 
         // Pool name
         let pool = front_matter
@@ -183,6 +187,7 @@ impl Compiler for StandaloneCompiler {
             ("{{ working_directory }}", &working_directory),
             ("{{ workspace }}", &working_directory),
             ("{{ allowed_domains }}", &allowed_domains),
+            ("{{ enabled_tools_args }}", &enabled_tools_args),
             ("{{ agent_content }}", markdown_body),
             ("{{ acquire_ado_token }}", &acquire_read_token),
             ("{{ copilot_ado_env }}", &copilot_ado_env),

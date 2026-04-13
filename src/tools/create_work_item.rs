@@ -31,6 +31,7 @@ impl Validate for CreateWorkItemParams {
 
 tool_result! {
     name = "create-work-item",
+    write = true,
     params = CreateWorkItemParams,
     /// Result of creating a work item
     pub struct CreateWorkItemResult {

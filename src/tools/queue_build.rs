@@ -52,6 +52,7 @@ impl Validate for QueueBuildParams {
 
 tool_result! {
     name = "queue-build",
+    write = true,
     params = QueueBuildParams,
     default_max = 3,
     /// Result of queuing a build

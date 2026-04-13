@@ -77,6 +77,7 @@ impl Validate for CreateBranchParams {
 
 tool_result! {
     name = "create-branch",
+    write = true,
     params = CreateBranchParams,
     /// Result of creating a branch
     pub struct CreateBranchResult {

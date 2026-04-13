@@ -94,6 +94,7 @@ impl Validate for AddPrCommentParams {
 
 tool_result! {
     name = "add-pr-comment",
+    write = true,
     params = AddPrCommentParams,
     /// Result of adding a comment thread on a pull request
     pub struct AddPrCommentResult {

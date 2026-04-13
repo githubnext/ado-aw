@@ -63,6 +63,7 @@ impl Validate for UploadAttachmentParams {
 
 tool_result! {
     name = "upload-attachment",
+    write = true,
     params = UploadAttachmentParams,
     /// Result of uploading an attachment to a work item
     pub struct UploadAttachmentResult {
