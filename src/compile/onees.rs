@@ -388,3 +388,160 @@ fn generate_teardown_job(teardown_steps: &[serde_yaml::Value], agent_name: &str)
         steps_yaml.join("\n    ")
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::types::McpOptions;
+
+    // ─── generate_agent_context_root ─────────────────────────────────────────
+
+    #[test]
+    fn test_generate_agent_context_root_repo() {
+        assert_eq!(
+            generate_agent_context_root("repo"),
+            "$(Build.Repository.Name)"
+        );
+    }
+
+    #[test]
+    fn test_generate_agent_context_root_root() {
+        assert_eq!(generate_agent_context_root("root"), ".");
+    }
+
+    #[test]
+    fn test_generate_agent_context_root_unknown_defaults_to_dot() {
+        // Any unrecognised workspace value should fall through to "."
+        assert_eq!(generate_agent_context_root("something-else"), ".");
+    }
+
+    // ─── generate_mcp_configuration ──────────────────────────────────────────
+
+    #[test]
+    fn test_generate_mcp_configuration_empty_returns_braces() {
+        let mcps = HashMap::new();
+        let result = generate_mcp_configuration(&mcps);
+        assert_eq!(result, "{}");
+    }
+
+    #[test]
+    fn test_generate_mcp_configuration_skips_custom_mcp_with_command() {
+        let mut mcps = HashMap::new();
+        mcps.insert(
+            "my-tool".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                command: Some("node".to_string()),
+                ..Default::default()
+            }),
+        );
+        let result = generate_mcp_configuration(&mcps);
+        // Custom MCPs with `command:` are not supported in 1ES — must be excluded
+        assert!(
+            !result.contains("my-tool"),
+            "Custom MCP with command should be excluded in 1ES target"
+        );
+        assert_eq!(result, "{}", "Only custom MCPs → empty config");
+    }
+
+    #[test]
+    fn test_generate_mcp_configuration_service_connection_mcp() {
+        let mut mcps = HashMap::new();
+        mcps.insert(
+            "my-mcp".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                service_connection: Some("mcp-my-mcp-sc".to_string()),
+                ..Default::default()
+            }),
+        );
+        let result = generate_mcp_configuration(&mcps);
+        assert!(result.contains("my-mcp"), "Service-connection MCP should appear in output");
+        assert!(
+            result.contains("serviceConnection: mcp-my-mcp-sc"),
+            "Should reference the explicit service connection"
+        );
+    }
+
+    #[test]
+    fn test_generate_mcp_configuration_default_service_connection_naming() {
+        // When no explicit service_connection is set, a default name is generated.
+        let mut mcps = HashMap::new();
+        mcps.insert("my-tool".to_string(), McpConfig::Enabled(true));
+        let result = generate_mcp_configuration(&mcps);
+        assert!(result.contains("my-tool"));
+        assert!(result.contains("serviceConnection: mcp-my-tool-service-connection"));
+    }
+
+    #[test]
+    fn test_generate_mcp_configuration_disabled_mcp_excluded() {
+        let mut mcps = HashMap::new();
+        mcps.insert("disabled-mcp".to_string(), McpConfig::Enabled(false));
+        let result = generate_mcp_configuration(&mcps);
+        assert!(!result.contains("disabled-mcp"), "Disabled MCP should not appear in output");
+        assert_eq!(result, "{}");
+    }
+
+    // ─── generate_inline_steps ────────────────────────────────────────────────
+
+    #[test]
+    fn test_generate_inline_steps_empty() {
+        let result = generate_inline_steps(&[]);
+        assert!(result.is_empty(), "Empty steps list should return empty string");
+    }
+
+    #[test]
+    fn test_generate_inline_steps_single_step() {
+        let step: serde_yaml::Value =
+            serde_yaml::from_str("bash: echo hello").expect("valid yaml");
+        let result = generate_inline_steps(&[step]);
+        assert!(result.contains("bash"), "Step YAML should contain the bash key");
+        assert!(result.contains("echo hello"), "Step YAML should contain the command");
+    }
+
+    // ─── generate_setup_job ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_generate_setup_job_empty_steps() {
+        let result = generate_setup_job(&[], "My Agent");
+        assert!(result.is_empty(), "Empty setup steps should return empty string");
+    }
+
+    #[test]
+    fn test_generate_setup_job_with_steps() {
+        let step: serde_yaml::Value =
+            serde_yaml::from_str("bash: echo setup").expect("valid yaml");
+        let result = generate_setup_job(&[step], "My Agent");
+        assert!(result.contains("SetupJob"), "Should define a SetupJob");
+        assert!(
+            result.contains("My Agent - Setup"),
+            "Should include agent name in display name"
+        );
+        assert!(result.contains("checkout: self"), "Should include self checkout");
+        assert!(result.contains("echo setup"), "Should include the step content");
+    }
+
+    // ─── generate_teardown_job ───────────────────────────────────────────────
+
+    #[test]
+    fn test_generate_teardown_job_empty_steps() {
+        let result = generate_teardown_job(&[], "My Agent");
+        assert!(result.is_empty(), "Empty teardown steps should return empty string");
+    }
+
+    #[test]
+    fn test_generate_teardown_job_with_steps() {
+        let step: serde_yaml::Value =
+            serde_yaml::from_str("bash: echo teardown").expect("valid yaml");
+        let result = generate_teardown_job(&[step], "My Agent");
+        assert!(result.contains("TeardownJob"), "Should define a TeardownJob");
+        assert!(
+            result.contains("My Agent - Teardown"),
+            "Should include agent name in display name"
+        );
+        assert!(
+            result.contains("ProcessSafeOutputs"),
+            "Should depend on ProcessSafeOutputs"
+        );
+        assert!(result.contains("checkout: self"), "Should include self checkout");
+        assert!(result.contains("echo teardown"), "Should include the step content");
+    }
+}

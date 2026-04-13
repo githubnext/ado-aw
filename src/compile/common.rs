@@ -1786,4 +1786,155 @@ mod tests {
         let args = generate_enabled_tools_args(&fm);
         assert!(args.is_empty(), "memory-only safe-outputs should produce no args (all tools available)");
     }
+
+    // ─── replace_with_indent ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_replace_with_indent_multiline_replacement() {
+        let template = "steps:\n    {{ my_marker }}\n";
+        let replacement = "- bash: echo hello\n  displayName: Hello";
+        let result = replace_with_indent(template, "{{ my_marker }}", replacement);
+        // The 4-space indent on the placeholder line is inherited by continuation lines
+        assert_eq!(result, "steps:\n    - bash: echo hello\n      displayName: Hello\n");
+    }
+
+    #[test]
+    fn test_replace_with_indent_not_at_line_start_no_indent() {
+        // When the placeholder is not at the start of a line (preceded by non-whitespace),
+        // no extra indentation is added to continuation lines.
+        let template = "prefix {{ marker }} suffix";
+        let result = replace_with_indent(template, "{{ marker }}", "VALUE");
+        assert_eq!(result, "prefix VALUE suffix");
+    }
+
+    #[test]
+    fn test_replace_with_indent_single_line_replacement_preserves_trailing_newline() {
+        let template = "    {{ placeholder }}\n";
+        let result = replace_with_indent(template, "{{ placeholder }}", "value");
+        assert_eq!(result, "    value\n");
+    }
+
+    #[test]
+    fn test_replace_with_indent_replacement_ending_with_newline() {
+        let template = "    {{ placeholder }}\n";
+        let result = replace_with_indent(template, "{{ placeholder }}", "line1\nline2\n");
+        // The trailing \n in the replacement should be preserved
+        assert!(result.contains("line1"));
+        assert!(result.contains("line2"));
+        assert!(result.ends_with('\n'));
+    }
+
+    // ─── format_step_yaml / format_step_yaml_indented ────────────────────────
+
+    #[test]
+    fn test_format_step_yaml_single_line() {
+        let result = format_step_yaml("bash: echo hi");
+        assert_eq!(result, "  - bash: echo hi");
+    }
+
+    #[test]
+    fn test_format_step_yaml_multiline() {
+        let result = format_step_yaml("bash: |\n  echo hi\n  echo bye");
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines[0], "  - bash: |");
+        // Continuation lines get 8 spaces prepended (existing indent is preserved)
+        assert_eq!(lines[1], "          echo hi");
+        assert_eq!(lines[2], "          echo bye");
+    }
+
+    #[test]
+    fn test_format_step_yaml_strips_yaml_document_separator() {
+        let result = format_step_yaml("--- bash: echo hi");
+        assert_eq!(result, "  - bash: echo hi");
+    }
+
+    #[test]
+    fn test_format_step_yaml_indented_custom_base() {
+        let result = format_step_yaml_indented("bash: echo hi", 6);
+        assert_eq!(result, "      - bash: echo hi");
+    }
+
+    #[test]
+    fn test_format_step_yaml_indented_zero_base() {
+        let result = format_step_yaml_indented("bash: echo hi", 0);
+        assert_eq!(result, "- bash: echo hi");
+    }
+
+    // ─── generate_acquire_ado_token ──────────────────────────────────────────
+
+    #[test]
+    fn test_generate_acquire_ado_token_with_sc() {
+        let result = generate_acquire_ado_token(Some("my-arm-sc"), "SC_READ_TOKEN");
+        assert!(result.contains("AzureCLI@2"), "Should use AzureCLI@2 task");
+        assert!(
+            result.contains("azureSubscription: 'my-arm-sc'"),
+            "Should embed service connection name"
+        );
+        assert!(
+            result.contains("variable=SC_READ_TOKEN;issecret=true"),
+            "Should set correct pipeline variable as secret"
+        );
+        assert!(
+            result.contains("az account get-access-token"),
+            "Should call az CLI to get access token"
+        );
+    }
+
+    #[test]
+    fn test_generate_acquire_ado_token_none_returns_empty() {
+        let result = generate_acquire_ado_token(None, "SC_READ_TOKEN");
+        assert!(result.is_empty(), "None service connection should return empty string");
+    }
+
+    #[test]
+    fn test_generate_acquire_ado_token_write_token_variable() {
+        let result = generate_acquire_ado_token(Some("write-sc"), "SC_WRITE_TOKEN");
+        assert!(result.contains("variable=SC_WRITE_TOKEN;issecret=true"));
+        assert!(!result.contains("SC_READ_TOKEN"));
+    }
+
+    // ─── generate_copilot_ado_env / generate_executor_ado_env ────────────────
+
+    #[test]
+    fn test_generate_copilot_ado_env_with_connection() {
+        let result = generate_copilot_ado_env(Some("my-sc"));
+        assert!(
+            result.contains("AZURE_DEVOPS_EXT_PAT: $(SC_READ_TOKEN)"),
+            "Should set AZURE_DEVOPS_EXT_PAT to SC_READ_TOKEN"
+        );
+        assert!(
+            result.contains("SYSTEM_ACCESSTOKEN: $(SC_READ_TOKEN)"),
+            "Should set SYSTEM_ACCESSTOKEN to SC_READ_TOKEN"
+        );
+    }
+
+    #[test]
+    fn test_generate_copilot_ado_env_none_empty() {
+        assert!(
+            generate_copilot_ado_env(None).is_empty(),
+            "None service connection should produce empty env block"
+        );
+    }
+
+    #[test]
+    fn test_generate_executor_ado_env_with_connection() {
+        let result = generate_executor_ado_env(Some("my-sc"));
+        assert!(
+            result.contains("SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)"),
+            "Executor should use SC_WRITE_TOKEN"
+        );
+        // Must NOT expose the read token in the executor env
+        assert!(
+            !result.contains("SC_READ_TOKEN"),
+            "Executor env must not contain SC_READ_TOKEN"
+        );
+    }
+
+    #[test]
+    fn test_generate_executor_ado_env_none_empty() {
+        assert!(
+            generate_executor_ado_env(None).is_empty(),
+            "None service connection should produce empty env block"
+        );
+    }
 }
