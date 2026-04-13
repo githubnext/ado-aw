@@ -268,6 +268,7 @@ jobs:
             --network host \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -e MCP_GATEWAY_API_KEY="$(MCP_GATEWAY_API_KEY)" \
+            {{ mcpg_docker_env }}
             ghcr.io/github/gh-aw-mcpg:v{{ mcpg_version }} &
           MCPG_PID=$!
           echo "MCPG started (PID: $MCPG_PID)"

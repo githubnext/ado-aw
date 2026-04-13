@@ -210,6 +210,11 @@ impl Compiler for StandaloneCompiler {
         let pipeline_yaml =
             replace_with_indent(&pipeline_yaml, "{{ mcpg_config }}", &mcpg_config_json);
 
+        // Generate additional -e flags for MCPG Docker run (env passthrough for MCP containers)
+        let mcpg_docker_env = generate_mcpg_docker_env(front_matter);
+        let pipeline_yaml =
+            replace_with_indent(&pipeline_yaml, "{{ mcpg_docker_env }}", &mcpg_docker_env);
+
         // Prepend header comment for pipeline detection
         let header = generate_header_comment(input_path);
         let pipeline_yaml = format!("{}{}", header, pipeline_yaml);
@@ -377,13 +382,22 @@ fn generate_agentic_depends_on(setup_steps: &[serde_yaml::Value]) -> String {
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct McpgServerConfig {
-    /// Server type: "stdio" for command-based, "http" for HTTP backends
+    /// Server type: "stdio" for container-based, "http" for HTTP backends
     #[serde(rename = "type")]
     pub server_type: String,
-    /// Command to run (for stdio type)
+    /// Docker container image (for stdio type, per MCPG spec §4.1.2)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-    /// Command arguments (for stdio type)
+    pub container: Option<String>,
+    /// Container entrypoint override (for stdio type)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<String>,
+    /// Arguments passed to the container entrypoint (for stdio type)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entrypoint_args: Option<Vec<String>>,
+    /// Volume mounts for containerized servers (format: "source:dest:mode")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mounts: Option<Vec<String>>,
+    /// Additional Docker runtime arguments (inserted before image in `docker run`)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
     /// URL for HTTP backends
@@ -434,7 +448,10 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
         "safeoutputs".to_string(),
         McpgServerConfig {
             server_type: "http".to_string(),
-            command: None,
+            container: None,
+            entrypoint: None,
+            entrypoint_args: None,
+            mounts: None,
             args: None,
             url: Some("http://localhost:${SAFE_OUTPUTS_PORT}/mcp".to_string()),
             headers: Some(HashMap::from([(
@@ -465,12 +482,39 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
         }
 
         if let Some(opts) = options {
-            if let Some(command) = &opts.command {
-                // Custom MCP with explicit command → stdio server
+            if opts.container.is_some() && opts.url.is_some() {
+                log::warn!(
+                    "MCP '{}': both 'container' and 'url' are set — using 'container' (stdio). \
+                    Remove 'url' to silence this warning.",
+                    name
+                );
+            }
+
+            if let Some(container) = &opts.container {
+                // Container-based stdio MCP (MCPG-native, per spec §3.2.1)
+                validate_container_image(container, name);
+                // Validate mount paths for sensitive host directories
+                for mount in &opts.mounts {
+                    validate_mount_source(mount, name);
+                }
+                // Validate Docker runtime args for privilege escalation
+                validate_docker_args(&opts.args, name);
+                // Warn about potential inline secrets (check headers too in case user set both)
+                warn_potential_secrets(name, &opts.env, &opts.headers);
+                let entrypoint_args = if opts.entrypoint_args.is_empty() {
+                    None
+                } else {
+                    Some(opts.entrypoint_args.clone())
+                };
                 let args = if opts.args.is_empty() {
                     None
                 } else {
                     Some(opts.args.clone())
+                };
+                let mounts = if opts.mounts.is_empty() {
+                    None
+                } else {
+                    Some(opts.mounts.clone())
                 };
                 let env = if opts.env.is_empty() {
                     None
@@ -486,7 +530,10 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
                     name.clone(),
                     McpgServerConfig {
                         server_type: "stdio".to_string(),
-                        command: Some(command.clone()),
+                        container: Some(container.clone()),
+                        entrypoint: opts.entrypoint.clone(),
+                        entrypoint_args,
+                        mounts,
                         args,
                         url: None,
                         headers: None,
@@ -494,12 +541,49 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
                         tools,
                     },
                 );
+            } else if let Some(url) = &opts.url {
+                // HTTP-based MCP (remote server)
+                validate_mcp_url(url, name);
+                // Warn about potential inline secrets in headers
+                warn_potential_secrets(name, &HashMap::new(), &opts.headers);
+                if !opts.env.is_empty() {
+                    eprintln!(
+                        "Warning: MCP '{}': env vars are not supported for HTTP MCPs — they will be ignored. \
+                        Use headers for authentication instead.",
+                        name
+                    );
+                }
+                let headers = if opts.headers.is_empty() {
+                    None
+                } else {
+                    Some(opts.headers.clone())
+                };
+                let tools = if opts.allowed.is_empty() {
+                    None
+                } else {
+                    Some(opts.allowed.clone())
+                };
+                mcp_servers.insert(
+                    name.clone(),
+                    McpgServerConfig {
+                        server_type: "http".to_string(),
+                        container: None,
+                        entrypoint: None,
+                        entrypoint_args: None,
+                        mounts: None,
+                        args: None,
+                        url: Some(url.clone()),
+                        headers,
+                        env: None,
+                        tools,
+                    },
+                );
             } else {
-                log::warn!("MCP '{}' has no command - skipping", name);
+                log::warn!("MCP '{}' has no container or url — skipping", name);
                 continue;
             }
         } else {
-            log::warn!("MCP '{}' has no command - skipping", name);
+            log::warn!("MCP '{}' has no container or url — skipping", name);
         }
     }
 
@@ -511,6 +595,263 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
             api_key: "${MCP_GATEWAY_API_KEY}".to_string(),
             payload_dir: "/tmp/gh-aw/mcp-payloads".to_string(),
         },
+    }
+}
+
+/// Sensitive host path prefixes that should not be bind-mounted into MCP containers.
+const SENSITIVE_MOUNT_PREFIXES: &[&str] = &[
+    "/etc",
+    "/root",
+    "/home",
+    "/proc",
+    "/sys",
+];
+
+/// Docker runtime flag names that grant dangerous host access.
+/// Checked both as `--flag=value` and as `--flag value` (split across two args).
+const DANGEROUS_DOCKER_FLAGS: &[&str] = &[
+    "--privileged",
+    "--cap-add",
+    "--security-opt",
+    "--pid",
+    "--network",
+    "--ipc",
+    "--user",
+    "-u",
+    "--add-host",
+    "--entrypoint",
+];
+
+/// Validate a container image name for injection attempts.
+/// Allows `[a-zA-Z0-9./_:-]` which covers standard Docker image references.
+fn validate_container_image(image: &str, mcp_name: &str) {
+    if image.is_empty() {
+        eprintln!("Warning: MCP '{}': container image name is empty.", mcp_name);
+        return;
+    }
+    if !image.chars().all(|c| c.is_ascii_alphanumeric() || "._/:-@".contains(c)) {
+        eprintln!(
+            "Warning: MCP '{}': container image '{}' contains unexpected characters. \
+            Image names should only contain [a-zA-Z0-9./_:-@].",
+            mcp_name, image
+        );
+    }
+}
+
+/// Validate a volume mount source path, warning on sensitive host directories.
+/// Docker socket mounts are escalated to stderr warnings since they grant container escape.
+/// Note: paths are lowercased for comparison to catch cross-platform casing (e.g. `/ETC/shadow`).
+fn validate_mount_source(mount: &str, mcp_name: &str) {
+    // Format: "source:dest:mode"
+    if let Some(source) = mount.split(':').next() {
+        let source_lower = source.to_lowercase();
+        if source_lower.contains("docker.sock") {
+            eprintln!(
+                "Warning: MCP '{}': mount '{}' exposes the Docker socket to the MCP container. \
+                This grants full host Docker access and may allow container escape.",
+                mcp_name, mount
+            );
+            return;
+        }
+        for prefix in SENSITIVE_MOUNT_PREFIXES {
+            // Match exact path or path with trailing separator to avoid false positives
+            // (e.g. /etc matches /etc and /etc/shadow, but not /etc-configs)
+            if source_lower == *prefix || source_lower.starts_with(&format!("{}/", prefix)) {
+                eprintln!(
+                    "Warning: MCP '{}': mount source '{}' references a sensitive host path ({}). \
+                    Ensure this is intentional.",
+                    mcp_name, source, prefix
+                );
+                break;
+            }
+        }
+    }
+}
+
+/// Validate Docker runtime args for dangerous flags that could escalate privileges.
+/// Also detects volume mounts smuggled via `-v`/`--volume` that bypass `mounts` validation.
+/// Handles both `--flag=value` and `--flag value` (split) forms.
+fn validate_docker_args(args: &[String], mcp_name: &str) {
+    for (i, arg) in args.iter().enumerate() {
+        let arg_lower = arg.to_lowercase();
+        // Check for dangerous Docker flags (both --flag=value and --flag value)
+        for dangerous in DANGEROUS_DOCKER_FLAGS {
+            if arg_lower == *dangerous
+                || arg_lower.starts_with(&format!("{}=", dangerous))
+            {
+                let extra_hint = if *dangerous == "--entrypoint" {
+                    " Use the 'entrypoint:' field instead of passing --entrypoint in args."
+                } else {
+                    ""
+                };
+                eprintln!(
+                    "Warning: MCP '{}': Docker arg '{}' grants elevated privileges. \
+                    Ensure this is intentional.{}",
+                    mcp_name, arg, extra_hint
+                );
+            }
+        }
+        // Check for volume mounts smuggled via args (bypasses mounts validation)
+        if arg == "-v" || arg == "--volume" {
+            if let Some(mount_spec) = args.get(i + 1) {
+                eprintln!(
+                    "Warning: MCP '{}': volume mount '{}' in args bypasses mounts validation. \
+                    Use the 'mounts:' field instead.",
+                    mcp_name, mount_spec
+                );
+                validate_mount_source(mount_spec, mcp_name);
+            }
+        } else if arg_lower.starts_with("-v=") || arg_lower.starts_with("--volume=") {
+            let mount_spec = arg.splitn(2, '=').nth(1).unwrap_or("");
+            eprintln!(
+                "Warning: MCP '{}': volume mount '{}' in args bypasses mounts validation. \
+                Use the 'mounts:' field instead.",
+                mcp_name, mount_spec
+            );
+            validate_mount_source(mount_spec, mcp_name);
+        }
+    }
+}
+
+/// Validate that an MCP HTTP URL uses an allowed scheme.
+fn validate_mcp_url(url: &str, mcp_name: &str) {
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        eprintln!(
+            "Warning: MCP '{}': URL '{}' does not use http:// or https:// scheme. \
+            This may not work with MCPG.",
+            mcp_name, url
+        );
+    }
+}
+
+/// Warn when env values or headers look like they contain inline secrets.
+/// Secrets should use pipeline variables and passthrough ("") instead.
+fn warn_potential_secrets(mcp_name: &str, env: &HashMap<String, String>, headers: &HashMap<String, String>) {
+    for (key, value) in env {
+        if !value.is_empty() && (key.to_lowercase().contains("token")
+            || key.to_lowercase().contains("secret")
+            || key.to_lowercase().contains("key")
+            || key.to_lowercase().contains("password")
+            || key.to_lowercase().contains("pat"))
+        {
+            eprintln!(
+                "Warning: MCP '{}': env var '{}' has an inline value that may be a secret. \
+                Use an empty string (\"\") for passthrough from pipeline variables instead.",
+                mcp_name, key
+            );
+        }
+    }
+    for (key, value) in headers {
+        if value.to_lowercase().contains("bearer ")
+            || key.to_lowercase() == "authorization"
+        {
+            eprintln!(
+                "Warning: MCP '{}': header '{}' may contain inline credentials. \
+                These will appear in plaintext in the compiled pipeline YAML.",
+                mcp_name, key
+            );
+        }
+    }
+}
+
+/// Validate that a string is a legal environment variable name (`[A-Za-z_][A-Za-z0-9_]*`).
+/// Prevents injection of arbitrary Docker flags via user-controlled front matter keys.
+fn is_valid_env_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Generate additional `-e` flags for the MCPG Docker run command.
+///
+/// MCP containers spawned by MCPG may need environment variables that flow from
+/// the pipeline through the MCPG container (passthrough). This function:
+/// 1. Auto-maps `AZURE_DEVOPS_EXT_PAT` from `SC_READ_TOKEN` when `permissions.read` is configured
+/// 2. Collects passthrough env vars (value is `""`) from container-based MCP configs
+///
+/// Only container-based MCPs are considered — HTTP MCPs don't have child containers
+/// that need env passthrough.
+///
+/// Returns flags formatted for inline insertion in the `docker run` command.
+/// The marker sits after the last hardcoded `-e` flag, so the output must
+/// include leading `\\\n` for line continuation when non-empty.
+pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
+    let mut env_flags: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Check if any container MCP requests AZURE_DEVOPS_EXT_PAT passthrough
+    let any_mcp_needs_ado_token = front_matter.mcp_servers.values().any(|config| {
+        matches!(config, McpConfig::WithOptions(opts)
+            if opts.enabled.unwrap_or(true)
+                && opts.container.is_some()
+                && opts.env.contains_key("AZURE_DEVOPS_EXT_PAT"))
+    });
+
+    // Auto-map AZURE_DEVOPS_EXT_PAT from SC_READ_TOKEN when permissions.read is configured
+    // AND at least one container MCP requests it via env passthrough
+    if any_mcp_needs_ado_token {
+        if front_matter.permissions.as_ref().and_then(|p| p.read.as_ref()).is_some() {
+            env_flags.push(
+                "-e AZURE_DEVOPS_EXT_PAT=\"$(SC_READ_TOKEN)\"".to_string(),
+            );
+            seen.insert("AZURE_DEVOPS_EXT_PAT".to_string());
+        } else {
+            eprintln!(
+                "Warning: one or more container MCPs request AZURE_DEVOPS_EXT_PAT passthrough \
+                but permissions.read is not configured. The token will be empty at runtime. \
+                Add `permissions: {{ read: <service-connection> }}` to enable auto-mapping."
+            );
+        }
+    }
+
+    // Collect passthrough env vars from container-based MCP configs only.
+    // HTTP MCPs don't have child containers — env passthrough doesn't apply.
+    for (mcp_name, config) in &front_matter.mcp_servers {
+        let opts = match config {
+            McpConfig::WithOptions(opts) if opts.enabled.unwrap_or(true) => opts,
+            _ => continue,
+        };
+
+        // Only container-based MCPs need env passthrough on the MCPG Docker run
+        if opts.container.is_none() {
+            continue;
+        }
+
+        for (var_name, var_value) in &opts.env {
+            // Validate env var name to prevent Docker flag injection (e.g. "X --privileged")
+            if !is_valid_env_var_name(var_name) {
+                log::warn!(
+                    "MCP '{}': skipping invalid env var name '{}' — must match [A-Za-z_][A-Za-z0-9_]*",
+                    mcp_name, var_name
+                );
+                continue;
+            }
+            if seen.contains(var_name) {
+                continue;
+            }
+            // Passthrough: empty string means forward from host/pipeline environment
+            if var_value.is_empty() {
+                env_flags.push(format!("-e {}", var_name));
+                seen.insert(var_name.clone());
+            }
+        }
+    }
+
+    env_flags.sort();
+    if env_flags.is_empty() {
+        // No extra flags — emit a lone `\` so the bash line continuation from the
+        // preceding `-e MCP_GATEWAY_API_KEY=...` flag connects to the image name on
+        // the next line. This is valid bash: a backslash at end-of-line continues
+        // the command. replace_with_indent preserves this on its own indented line.
+        "\\".to_string()
+    } else {
+        // Emit each flag on its own line with `\` continuation.
+        // replace_with_indent handles indentation from the template (base.yml),
+        // so we only emit the content without hardcoded spaces.
+        let flags = env_flags.join(" \\\n");
+        format!("{} \\", flags)
     }
 }
 
@@ -584,8 +925,9 @@ mod tests {
         fm.mcp_servers.insert(
             "my-tool".to_string(),
             McpConfig::WithOptions(McpOptions {
-                command: Some("node".to_string()),
-                args: vec!["server.js".to_string()],
+                container: Some("node:20-slim".to_string()),
+                entrypoint: Some("node".to_string()),
+                entrypoint_args: vec!["server.js".to_string()],
                 allowed: vec!["do_thing".to_string()],
                 ..Default::default()
             }),
@@ -593,8 +935,12 @@ mod tests {
         let config = generate_mcpg_config(&fm);
         let server = config.mcp_servers.get("my-tool").unwrap();
         assert_eq!(server.server_type, "stdio");
-        assert_eq!(server.command.as_ref().unwrap(), "node");
-        assert_eq!(server.args.as_ref().unwrap(), &vec!["server.js"]);
+        assert_eq!(server.container.as_ref().unwrap(), "node:20-slim");
+        assert_eq!(server.entrypoint.as_ref().unwrap(), "node");
+        assert_eq!(
+            server.entrypoint_args.as_ref().unwrap(),
+            &vec!["server.js"]
+        );
         assert_eq!(
             server.tools.as_ref().unwrap(),
             &vec!["do_thing".to_string()]
@@ -602,9 +948,9 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_mcpg_config_mcp_without_command_skipped() {
+    fn test_generate_mcpg_config_mcp_without_transport_skipped() {
         let mut fm = minimal_front_matter();
-        // An MCP with no command should be skipped (no built-in MCPs)
+        // An MCP with no container or url should be skipped
         fm.mcp_servers
             .insert("phantom".to_string(), McpConfig::Enabled(true));
         let config = generate_mcpg_config(&fm);
@@ -647,8 +993,9 @@ mod tests {
         fm.mcp_servers.insert(
             "my-tool".to_string(),
             McpConfig::WithOptions(McpOptions {
-                command: Some("python".to_string()),
-                args: vec!["-m".to_string(), "server".to_string()],
+                container: Some("python:3.12-slim".to_string()),
+                entrypoint: Some("python".to_string()),
+                entrypoint_args: vec!["-m".to_string(), "server".to_string()],
                 allowed: vec!["query".to_string()],
                 ..Default::default()
             }),
@@ -703,19 +1050,23 @@ mod tests {
         let config = generate_mcpg_config(&fm);
         let so = config.mcp_servers.get("safeoutputs").unwrap();
         assert_eq!(so.server_type, "http");
-        assert!(so.command.is_none(), "HTTP backend should have no command");
+        assert!(
+            so.container.is_none(),
+            "HTTP backend should have no container"
+        );
         assert!(so.args.is_none(), "HTTP backend should have no args");
         assert!(so.url.is_some(), "HTTP backend must have a URL");
     }
 
     #[test]
-    fn test_generate_mcpg_config_custom_mcp_is_stdio_type() {
+    fn test_generate_mcpg_config_container_mcp_is_stdio_type() {
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "runner".to_string(),
             McpConfig::WithOptions(McpOptions {
-                command: Some("node".to_string()),
-                args: vec!["srv.js".to_string()],
+                container: Some("node:20-slim".to_string()),
+                entrypoint: Some("node".to_string()),
+                entrypoint_args: vec!["srv.js".to_string()],
                 allowed: vec!["run".to_string()],
                 ..Default::default()
             }),
@@ -723,22 +1074,22 @@ mod tests {
         let config = generate_mcpg_config(&fm);
         let srv = config.mcp_servers.get("runner").unwrap();
         assert_eq!(srv.server_type, "stdio");
-        assert!(srv.command.is_some(), "stdio server must have a command");
+        assert!(
+            srv.container.is_some(),
+            "stdio server must have a container"
+        );
         assert!(srv.url.is_none(), "stdio server should have no URL");
     }
 
     #[test]
-    fn test_generate_firewall_config_unknown_non_builtin_skipped() {
-        // An MCP with no command should be skipped
+    fn test_generate_mcpg_config_container_with_env() {
         let mut fm = minimal_front_matter();
         let mut env = std::collections::HashMap::new();
         env.insert("TOKEN".to_string(), "secret".to_string());
         fm.mcp_servers.insert(
             "with-env".to_string(),
             McpConfig::WithOptions(McpOptions {
-                command: Some("node".to_string()),
-                args: vec![],
-                allowed: vec![],
+                container: Some("node:20-slim".to_string()),
                 env,
                 ..Default::default()
             }),
@@ -755,22 +1106,20 @@ mod tests {
         fm.mcp_servers.insert(
             "safeoutputs".to_string(),
             McpConfig::WithOptions(McpOptions {
-                command: Some("evil".to_string()),
-                args: vec![],
-                allowed: vec![],
+                container: Some("evil:latest".to_string()),
                 ..Default::default()
             }),
         );
         let config = generate_mcpg_config(&fm);
-        // The reserved entry should still be the HTTP backend, not the user's command
+        // The reserved entry should still be the HTTP backend, not the user's container
         let so = config.mcp_servers.get("safeoutputs").unwrap();
         assert_eq!(
             so.server_type, "http",
             "safeoutputs should remain HTTP backend"
         );
         assert!(
-            so.command.is_none(),
-            "User command should not overwrite safeoutputs"
+            so.container.is_none(),
+            "User container should not overwrite safeoutputs"
         );
     }
 
@@ -780,8 +1129,9 @@ mod tests {
         fm.mcp_servers.insert(
             "SafeOutputs".to_string(),
             McpConfig::WithOptions(McpOptions {
-                command: Some("node".to_string()),
-                args: vec!["evil.js".to_string()],
+                container: Some("node:20-slim".to_string()),
+                entrypoint: Some("node".to_string()),
+                entrypoint_args: vec!["evil.js".to_string()],
                 allowed: vec!["hijack".to_string()],
                 ..Default::default()
             }),
@@ -793,5 +1143,247 @@ mod tests {
         assert!(so.url.as_ref().unwrap().contains("localhost"));
         // No stdio entry should have been added under any casing
         assert_eq!(config.mcp_servers.len(), 1);
+    }
+
+    #[test]
+    fn test_generate_mcpg_config_http_mcp() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers.insert(
+            "remote".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                url: Some("https://mcp.example.com/api".to_string()),
+                headers: {
+                    let mut h = HashMap::new();
+                    h.insert("X-Custom".to_string(), "value".to_string());
+                    h
+                },
+                allowed: vec!["query".to_string()],
+                ..Default::default()
+            }),
+        );
+        let config = generate_mcpg_config(&fm);
+        let srv = config.mcp_servers.get("remote").unwrap();
+        assert_eq!(srv.server_type, "http");
+        assert_eq!(
+            srv.url.as_ref().unwrap(),
+            "https://mcp.example.com/api"
+        );
+        assert_eq!(
+            srv.headers.as_ref().unwrap().get("X-Custom").unwrap(),
+            "value"
+        );
+        assert!(srv.container.is_none(), "HTTP server should have no container");
+    }
+
+    #[test]
+    fn test_generate_mcpg_config_container_with_entrypoint() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers.insert(
+            "ado".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                container: Some("node:20-slim".to_string()),
+                entrypoint: Some("npx".to_string()),
+                entrypoint_args: vec!["-y".to_string(), "@azure-devops/mcp".to_string()],
+                ..Default::default()
+            }),
+        );
+        let config = generate_mcpg_config(&fm);
+        let srv = config.mcp_servers.get("ado").unwrap();
+        assert_eq!(srv.server_type, "stdio");
+        assert_eq!(srv.container.as_ref().unwrap(), "node:20-slim");
+        assert_eq!(srv.entrypoint.as_ref().unwrap(), "npx");
+        assert_eq!(
+            srv.entrypoint_args.as_ref().unwrap(),
+            &vec!["-y", "@azure-devops/mcp"]
+        );
+    }
+
+    #[test]
+    fn test_generate_mcpg_config_container_with_mounts() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers.insert(
+            "data-tool".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                container: Some("data-tool:latest".to_string()),
+                mounts: vec!["/host/data:/app/data:ro".to_string()],
+                ..Default::default()
+            }),
+        );
+        let config = generate_mcpg_config(&fm);
+        let srv = config.mcp_servers.get("data-tool").unwrap();
+        assert_eq!(
+            srv.mounts.as_ref().unwrap(),
+            &vec!["/host/data:/app/data:ro"]
+        );
+    }
+
+    #[test]
+    fn test_generate_mcpg_config_no_transport_skipped() {
+        let mut fm = minimal_front_matter();
+        // MCP with options but no container or url should be skipped
+        fm.mcp_servers.insert(
+            "no-transport".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                allowed: vec!["tool".to_string()],
+                ..Default::default()
+            }),
+        );
+        let config = generate_mcpg_config(&fm);
+        assert!(!config.mcp_servers.contains_key("no-transport"));
+    }
+
+    #[test]
+    fn test_generate_mcpg_docker_env_with_permissions_read() {
+        let mut fm = minimal_front_matter();
+        fm.permissions = Some(crate::compile::types::PermissionsConfig {
+            read: Some("my-read-sc".to_string()),
+            write: None,
+        });
+        // A container MCP must request AZURE_DEVOPS_EXT_PAT for the auto-map to trigger
+        fm.mcp_servers.insert(
+            "ado-tool".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                container: Some("node:20-slim".to_string()),
+                env: {
+                    let mut e = HashMap::new();
+                    e.insert("AZURE_DEVOPS_EXT_PAT".to_string(), "".to_string());
+                    e
+                },
+                ..Default::default()
+            }),
+        );
+        let env = generate_mcpg_docker_env(&fm);
+        assert!(
+            env.contains("-e AZURE_DEVOPS_EXT_PAT=\"$(SC_READ_TOKEN)\""),
+            "Should auto-map ADO token when permissions.read is set and MCP requests it"
+        );
+    }
+
+    #[test]
+    fn test_generate_mcpg_docker_env_permissions_read_no_mcp_request() {
+        let mut fm = minimal_front_matter();
+        fm.permissions = Some(crate::compile::types::PermissionsConfig {
+            read: Some("my-read-sc".to_string()),
+            write: None,
+        });
+        // No MCP requests AZURE_DEVOPS_EXT_PAT — auto-map should NOT trigger
+        fm.mcp_servers.insert(
+            "unrelated-tool".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                container: Some("node:20-slim".to_string()),
+                ..Default::default()
+            }),
+        );
+        let env = generate_mcpg_docker_env(&fm);
+        assert!(
+            !env.contains("AZURE_DEVOPS_EXT_PAT"),
+            "Should NOT auto-map ADO token when no MCP requests it"
+        );
+    }
+
+    #[test]
+    fn test_generate_mcpg_docker_env_dedup_auto_map_and_passthrough() {
+        // When permissions.read is set AND MCP has AZURE_DEVOPS_EXT_PAT: "",
+        // the auto-mapped form (with SC_READ_TOKEN) should win — no duplicate
+        let mut fm = minimal_front_matter();
+        fm.permissions = Some(crate::compile::types::PermissionsConfig {
+            read: Some("my-read-sc".to_string()),
+            write: None,
+        });
+        fm.mcp_servers.insert(
+            "ado-tool".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                container: Some("node:20-slim".to_string()),
+                env: {
+                    let mut e = HashMap::new();
+                    e.insert("AZURE_DEVOPS_EXT_PAT".to_string(), "".to_string());
+                    e
+                },
+                ..Default::default()
+            }),
+        );
+        let env = generate_mcpg_docker_env(&fm);
+        // Should have the SC_READ_TOKEN form (auto-mapped), not bare passthrough
+        assert!(
+            env.contains("-e AZURE_DEVOPS_EXT_PAT=\"$(SC_READ_TOKEN)\""),
+            "Auto-mapped form should be present"
+        );
+        // Should appear exactly once
+        let count = env.matches("AZURE_DEVOPS_EXT_PAT").count();
+        assert_eq!(count, 1, "AZURE_DEVOPS_EXT_PAT should appear exactly once, got {}", count);
+    }
+
+    #[test]
+    fn test_generate_mcpg_docker_env_without_permissions() {
+        let fm = minimal_front_matter();
+        let env = generate_mcpg_docker_env(&fm);
+        assert!(
+            !env.contains("AZURE_DEVOPS_EXT_PAT"),
+            "Should not map ADO token when permissions.read is not set"
+        );
+    }
+
+    #[test]
+    fn test_generate_mcpg_docker_env_passthrough_vars() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers.insert(
+            "tool".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                container: Some("img:latest".to_string()),
+                env: {
+                    let mut e = HashMap::new();
+                    e.insert("PASS_THROUGH".to_string(), "".to_string());
+                    e.insert("STATIC".to_string(), "value".to_string());
+                    e
+                },
+                ..Default::default()
+            }),
+        );
+        let env = generate_mcpg_docker_env(&fm);
+        assert!(env.contains("-e PASS_THROUGH"), "Should include passthrough var");
+        assert!(!env.contains("-e STATIC"), "Should NOT include static var");
+    }
+
+    #[test]
+    fn test_generate_mcpg_docker_env_rejects_invalid_names() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers.insert(
+            "evil".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                container: Some("img:latest".to_string()),
+                env: {
+                    let mut e = HashMap::new();
+                    // Injection attempt: env var name with Docker flag
+                    e.insert("MY_VAR --privileged".to_string(), "".to_string());
+                    // Valid env var for comparison
+                    e.insert("GOOD_VAR".to_string(), "".to_string());
+                    e
+                },
+                ..Default::default()
+            }),
+        );
+        let env = generate_mcpg_docker_env(&fm);
+        assert!(
+            !env.contains("--privileged"),
+            "Should reject invalid env var name with Docker flag injection"
+        );
+        assert!(
+            env.contains("-e GOOD_VAR"),
+            "Should include valid env var"
+        );
+    }
+
+    #[test]
+    fn test_is_valid_env_var_name() {
+        assert!(is_valid_env_var_name("MY_VAR"));
+        assert!(is_valid_env_var_name("_PRIVATE"));
+        assert!(is_valid_env_var_name("A"));
+        assert!(is_valid_env_var_name("VAR123"));
+        assert!(!is_valid_env_var_name(""));
+        assert!(!is_valid_env_var_name("123ABC"));
+        assert!(!is_valid_env_var_name("MY-VAR"));
+        assert!(!is_valid_env_var_name("MY VAR"));
+        assert!(!is_valid_env_var_name("X --privileged"));
+        assert!(!is_valid_env_var_name("X -v /etc:/etc:rw"));
     }
 }

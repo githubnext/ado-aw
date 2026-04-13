@@ -128,9 +128,10 @@ tools:                         # optional tool configuration
 # env:                          # RESERVED: workflow-level environment variables (not yet implemented)
 #   CUSTOM_VAR: "value"
 mcp-servers:
-  my-custom-tool:              # custom MCP server (requires command field)
-    command: "node"
-    args: ["path/to/mcp-server.js"]
+  my-custom-tool:              # containerized MCP server (requires container field)
+    container: "node:20-slim"
+    entrypoint: "node"
+    entrypoint-args: ["path/to/mcp-server.js"]
     allowed:
       - custom_function_1
       - custom_function_2
@@ -589,12 +590,24 @@ Should be replaced with the markdown body (agent instructions) extracted from th
 Should be replaced with the MCP Gateway (MCPG) configuration JSON generated from the `mcp-servers:` front matter. This configuration defines the MCPG server entries and gateway settings.
 
 The generated JSON has two top-level sections:
-- `mcpServers`: Maps server names to their configuration (type, command/url, tools, etc.)
+- `mcpServers`: Maps server names to their configuration (type, container/url, tools, etc.)
 - `gateway`: Gateway settings (port, domain, apiKey, payloadDir)
 
-SafeOutputs is always included as an HTTP backend (`type: "http"`) pointing to `localhost` (MCPG runs with `--network host`, so `localhost` is the host loopback). Custom MCPs with explicit `command:` are included as stdio servers (`type: "stdio"`). MCPs without a command are skipped (there are no built-in MCPs in the copilot CLI).
+SafeOutputs is always included as an HTTP backend (`type: "http"`) pointing to `localhost` (MCPG runs with `--network host`, so `localhost` is the host loopback). Containerized MCPs with `container:` are included as stdio servers (`type: "stdio"` with `container`, `entrypoint`, `entrypointArgs`). HTTP MCPs with `url:` are included as HTTP servers. MCPs without a container or url are skipped.
 
 Runtime placeholders (`${SAFE_OUTPUTS_PORT}`, `${SAFE_OUTPUTS_API_KEY}`, `${MCP_GATEWAY_API_KEY}`) are substituted by the pipeline at runtime before passing the config to MCPG.
+
+## {{ mcpg_docker_env }}
+
+Should be replaced with additional `-e` flags for the MCPG Docker run command, enabling environment variable passthrough from the pipeline to MCP containers.
+
+When `permissions.read` is configured, the compiler automatically adds `-e AZURE_DEVOPS_EXT_PAT="$(SC_READ_TOKEN)"` to forward the ADO access token to MCP containers that need it (e.g., Azure DevOps MCP).
+
+Additionally, any env vars in MCP configs with empty string values (`""`) are collected and forwarded as `-e VAR_NAME` flags, enabling passthrough from the pipeline environment through MCPG to MCP child containers.
+
+Environment variable names are validated against `[A-Za-z_][A-Za-z0-9_]*` to prevent Docker flag injection.
+
+If no passthrough env vars are needed, this marker is replaced with an empty string.
 
 ## {{ allowed_domains }}
 
@@ -1129,61 +1142,100 @@ cargo add <crate-name>
 
 ## MCP Configuration
 
-The `mcp-servers:` field configures MCP (Model Context Protocol) servers that are made available to the agent via the MCP Gateway (MCPG). All MCPs require explicit `command:` configuration — there are no built-in MCPs in the copilot CLI.
-The `mcp-servers:` field configures custom MCP (Model Context Protocol) servers that the agent can use. Each entry must include a `command:` field specifying the executable to spawn.
+The `mcp-servers:` field configures MCP (Model Context Protocol) servers that are made available to the agent via the MCP Gateway (MCPG). MCPs can be **containerized stdio servers** (Docker-based) or **HTTP servers** (remote endpoints). All MCP traffic flows through the MCP Gateway.
 
-### Custom MCP Servers
+### Docker Container MCP Servers (stdio)
 
-Define MCP servers by including a `command:` field:
+Run containerized MCP servers. MCPG spawns these as sibling Docker containers:
 
 ```yaml
 mcp-servers:
-  my-custom-tool:
-    command: "node"
-    args: ["path/to/mcp-server.js"]
+  azure-devops:
+    container: "node:20-slim"
+    entrypoint: "npx"
+    entrypoint-args: ["-y", "@azure-devops/mcp", "myorg", "-d", "core", "work-items"]
+    env:
+      AZURE_DEVOPS_EXT_PAT: ""
     allowed:
-      - custom_function_1
-      - custom_function_2
+      - core_list_projects
+      - wit_get_work_item
+      - wit_create_work_item
+```
+
+### HTTP MCP Servers (remote)
+
+Connect to remote MCP servers accessible via HTTP:
+
+```yaml
+mcp-servers:
+  remote-ado:
+    url: "https://mcp.dev.azure.com/myorg"
+    headers:
+      X-MCP-Toolsets: "repos,wit"
+      X-MCP-Readonly: "true"
+    allowed:
+      - wit_get_work_item
+      - repo_list_repos_by_project
 ```
 
 ### Configuration Properties
 
-- `command:` - The executable to run (e.g., `"node"`, `"python"`, `"dotnet"`)
-- `args:` - Array of command-line arguments passed to the command
-- `allowed:` - Array of function names agents are permitted to call (required for security)
-- `env:` - Optional environment variables for the MCP server process
-- `service-connection:` - (1ES target only) Override the service connection name used for this MCP. If not specified, defaults to `mcp-<name>-service-connection`
+**Container stdio servers:**
+- `container:` - Docker image to run (e.g., `"node:20-slim"`, `"ghcr.io/org/tool:latest"`)
+- `entrypoint:` - Container entrypoint override (equivalent to `docker run --entrypoint`)
+- `entrypoint-args:` - Arguments passed to the entrypoint (after the image in `docker run`)
+- `args:` - Additional Docker runtime arguments (inserted before the image in `docker run`). **Security note**: dangerous flags like `--privileged`, `--network host` will trigger compile-time warnings.
+- `mounts:` - Volume mounts in `"source:dest:mode"` format (e.g., `["/host/data:/app/data:ro"]`)
 
-### Example: Multiple Custom MCP Servers
+**HTTP servers:**
+- `url:` - HTTP endpoint URL for the remote MCP server
+- `headers:` - HTTP headers to include in requests (e.g., `Authorization`, `X-MCP-Toolsets`)
+
+**Common (both types):**
+- `allowed:` - Array of tool names the agent is permitted to call (required for security)
+- `env:` - Environment variables for the MCP server process. Use `""` (empty string) for passthrough from the pipeline environment.
+- `service-connection:` - (1ES target only) Override the service connection name. Defaults to `mcp-<name>-service-connection`
+
+### Environment Variable Passthrough
+
+MCP containers may need secrets from the pipeline (e.g., ADO tokens). The `env:` field supports passthrough:
+
+```yaml
+env:
+  AZURE_DEVOPS_EXT_PAT: ""        # Passthrough from pipeline environment
+  STATIC_CONFIG: "some-value"     # Literal value embedded in config
+```
+
+When `permissions.read` is configured, the compiler automatically maps `SC_READ_TOKEN` → `AZURE_DEVOPS_EXT_PAT` on the MCPG container, so agents can access ADO APIs without manual wiring.
+
+### Example: Azure DevOps MCP with Authentication
 
 ```yaml
 mcp-servers:
-  # Custom Python MCP server
-  data-processor:
-    command: "python"
-    args: ["-m", "my_mcp_server"]
+  azure-devops:
+    container: "node:20-slim"
+    entrypoint: "npx"
+    entrypoint-args: ["-y", "@azure-devops/mcp", "myorg"]
     env:
-      DATA_DIR: "/data"
+      AZURE_DEVOPS_EXT_PAT: ""
     allowed:
-      - process_data
-      - query_database
-
-  # Custom .NET MCP server
-  azure-tools:
-    command: "dotnet"
-    args: ["./tools/AzureMcp.dll"]
-    allowed:
-      - list_resources
-      - get_deployment_status
+      - core_list_projects
+      - wit_get_work_item
+permissions:
+  read: my-read-arm-connection
+network:
+  allow:
+    - "dev.azure.com"
+    - "*.dev.azure.com"
 ```
 
 ### Security Notes
 
-1. **Allow-listing**: Only functions explicitly listed in `allowed:` are accessible to agents
-2. **Command Validation**: The compiler validates that commands are from a trusted set
-3. **Argument Sanitization**: Arguments are validated to prevent injection attacks
-4. **Environment Isolation**: MCP servers run in the same isolated sandbox as the pipeline
-5. **MCPG Gateway**: All MCP traffic flows through the MCP Gateway which enforces tool-level filtering
+1. **Allow-listing**: Only tools explicitly listed in `allowed:` are accessible to agents
+2. **Containerization**: Stdio MCP servers run as isolated Docker containers (per MCPG spec §3.2.1)
+3. **Environment Isolation**: MCP containers are spawned by MCPG with only the configured environment variables
+4. **MCPG Gateway**: All MCP traffic flows through the MCP Gateway which enforces tool-level filtering
+5. **Network Isolation**: MCP containers run within the same AWF-isolated network. Users must explicitly allow external domains via `network.allow`
 
 ## Network Isolation (AWF)
 
@@ -1346,8 +1398,9 @@ The compiler generates MCPG configuration JSON from the `mcp-servers:` front mat
     },
     "custom-tool": {
       "type": "stdio",
-      "command": "node",
-      "args": ["server.js"],
+      "container": "node:20-slim",
+      "entrypoint": "node",
+      "entrypointArgs": ["server.js"],
       "tools": ["process_data", "get_status"]
     }
   },

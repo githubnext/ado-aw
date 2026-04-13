@@ -214,10 +214,10 @@ displayName: "Finalize""#,
         if front_matter
             .mcp_servers
             .iter()
-            .any(|(_, c)| matches!(c, McpConfig::WithOptions(o) if o.command.is_some()))
+            .any(|(_, c)| is_custom_mcp(c))
         {
             eprintln!(
-                "Warning: Custom MCP servers (with command:) are not supported in 1ES target. \
+                "Warning: Custom MCP servers (with container: or url:) are not supported in 1ES target. \
                 They will be ignored. Use standalone target for full MCP support."
             );
         }
@@ -257,10 +257,10 @@ fn generate_mcp_configuration(mcps: &HashMap<String, McpConfig>) -> String {
                 return None;
             }
 
-            // Custom MCPs with command: not supported in 1ES (needs service connection)
+            // Custom MCPs with container/url: not supported in 1ES (needs service connection)
             if is_custom_mcp(config) {
                 log::warn!(
-                    "MCP '{}' uses custom command — not supported in 1ES target (requires service connection)",
+                    "MCP '{}' uses custom container/url — not supported in 1ES target (requires service connection)",
                     name
                 );
                 return None;
