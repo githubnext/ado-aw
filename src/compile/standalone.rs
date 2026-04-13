@@ -491,6 +491,10 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
                 for mount in &opts.mounts {
                     validate_mount_source(mount, name);
                 }
+                // Validate Docker runtime args for privilege escalation
+                validate_docker_args(&opts.args, name);
+                // Warn about potential inline secrets
+                warn_potential_secrets(name, &opts.env, &HashMap::new());
                 let entrypoint_args = if opts.entrypoint_args.is_empty() {
                     None
                 } else {
@@ -534,9 +538,11 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
             } else if let Some(url) = &opts.url {
                 // HTTP-based MCP (remote server)
                 validate_mcp_url(url, name);
+                // Warn about potential inline secrets in headers
+                warn_potential_secrets(name, &HashMap::new(), &opts.headers);
                 if !opts.env.is_empty() {
-                    log::warn!(
-                        "MCP '{}': env vars are not supported for HTTP MCPs — they will be ignored. \
+                    eprintln!(
+                        "Warning: MCP '{}': env vars are not supported for HTTP MCPs — they will be ignored. \
                         Use headers for authentication instead.",
                         name
                     );
@@ -596,6 +602,16 @@ const SENSITIVE_MOUNT_PREFIXES: &[&str] = &[
     "/sys",
 ];
 
+/// Docker runtime args that grant dangerous host access.
+const DANGEROUS_DOCKER_ARGS: &[&str] = &[
+    "--privileged",
+    "--cap-add",
+    "--security-opt",
+    "--pid=host",
+    "--network=host",
+    "--ipc=host",
+];
+
 /// Validate a volume mount source path, warning on sensitive host directories.
 /// Docker socket mounts are escalated to stderr warnings since they grant container escape.
 fn validate_mount_source(mount: &str, mcp_name: &str) {
@@ -624,14 +640,81 @@ fn validate_mount_source(mount: &str, mcp_name: &str) {
     }
 }
 
+/// Validate Docker runtime args for dangerous flags that could escalate privileges.
+/// Also detects volume mounts smuggled via `-v`/`--volume` that bypass `mounts` validation.
+fn validate_docker_args(args: &[String], mcp_name: &str) {
+    for (i, arg) in args.iter().enumerate() {
+        let arg_lower = arg.to_lowercase();
+        // Check for dangerous Docker flags
+        for dangerous in DANGEROUS_DOCKER_ARGS {
+            if arg_lower == *dangerous || arg_lower.starts_with(&format!("{}=", dangerous)) {
+                eprintln!(
+                    "Warning: MCP '{}': Docker arg '{}' grants elevated privileges. \
+                    Ensure this is intentional.",
+                    mcp_name, arg
+                );
+            }
+        }
+        // Check for volume mounts smuggled via args (bypasses mounts validation)
+        if arg == "-v" || arg == "--volume" {
+            if let Some(mount_spec) = args.get(i + 1) {
+                eprintln!(
+                    "Warning: MCP '{}': volume mount '{}' in args bypasses mounts validation. \
+                    Use the 'mounts:' field instead.",
+                    mcp_name, mount_spec
+                );
+                validate_mount_source(mount_spec, mcp_name);
+            }
+        } else if arg_lower.starts_with("-v=") || arg_lower.starts_with("--volume=") {
+            let mount_spec = arg.splitn(2, '=').nth(1).unwrap_or("");
+            eprintln!(
+                "Warning: MCP '{}': volume mount '{}' in args bypasses mounts validation. \
+                Use the 'mounts:' field instead.",
+                mcp_name, mount_spec
+            );
+            validate_mount_source(mount_spec, mcp_name);
+        }
+    }
+}
+
 /// Validate that an MCP HTTP URL uses an allowed scheme.
 fn validate_mcp_url(url: &str, mcp_name: &str) {
     if !url.starts_with("https://") && !url.starts_with("http://") {
-        log::warn!(
-            "MCP '{}': URL '{}' does not use http:// or https:// scheme. \
+        eprintln!(
+            "Warning: MCP '{}': URL '{}' does not use http:// or https:// scheme. \
             This may not work with MCPG.",
             mcp_name, url
         );
+    }
+}
+
+/// Warn when env values or headers look like they contain inline secrets.
+/// Secrets should use pipeline variables and passthrough ("") instead.
+fn warn_potential_secrets(mcp_name: &str, env: &HashMap<String, String>, headers: &HashMap<String, String>) {
+    for (key, value) in env {
+        if !value.is_empty() && (key.to_lowercase().contains("token")
+            || key.to_lowercase().contains("secret")
+            || key.to_lowercase().contains("key")
+            || key.to_lowercase().contains("password")
+            || key.to_lowercase().contains("pat"))
+        {
+            eprintln!(
+                "Warning: MCP '{}': env var '{}' has an inline value that may be a secret. \
+                Use an empty string (\"\") for passthrough from pipeline variables instead.",
+                mcp_name, key
+            );
+        }
+    }
+    for (key, value) in headers {
+        if value.to_lowercase().contains("bearer ")
+            || key.to_lowercase() == "authorization"
+        {
+            eprintln!(
+                "Warning: MCP '{}': header '{}' may contain inline credentials. \
+                These will appear in plaintext in the compiled pipeline YAML.",
+                mcp_name, key
+            );
+        }
     }
 }
 
