@@ -597,19 +597,19 @@ const SENSITIVE_MOUNT_PREFIXES: &[&str] = &[
     "/etc",
     "/root",
     "/home",
-    "/var/run/docker.sock",
     "/proc",
     "/sys",
 ];
 
-/// Docker runtime args that grant dangerous host access.
-const DANGEROUS_DOCKER_ARGS: &[&str] = &[
+/// Docker runtime flag names that grant dangerous host access.
+/// Checked both as `--flag=value` and as `--flag value` (split across two args).
+const DANGEROUS_DOCKER_FLAGS: &[&str] = &[
     "--privileged",
     "--cap-add",
     "--security-opt",
-    "--pid=host",
-    "--network=host",
-    "--ipc=host",
+    "--pid",
+    "--network",
+    "--ipc",
 ];
 
 /// Validate a volume mount source path, warning on sensitive host directories.
@@ -618,7 +618,6 @@ fn validate_mount_source(mount: &str, mcp_name: &str) {
     // Format: "source:dest:mode"
     if let Some(source) = mount.split(':').next() {
         let source_lower = source.to_lowercase();
-        // Docker socket is especially dangerous — escalate to stderr
         if source_lower.contains("docker.sock") {
             eprintln!(
                 "Warning: MCP '{}': mount '{}' exposes the Docker socket to the MCP container. \
@@ -628,7 +627,9 @@ fn validate_mount_source(mount: &str, mcp_name: &str) {
             return;
         }
         for prefix in SENSITIVE_MOUNT_PREFIXES {
-            if source_lower.starts_with(prefix) {
+            // Match exact path or path with trailing separator to avoid false positives
+            // (e.g. /etc matches /etc and /etc/shadow, but not /etc-configs)
+            if source_lower == *prefix || source_lower.starts_with(&format!("{}/", prefix)) {
                 eprintln!(
                     "Warning: MCP '{}': mount source '{}' references a sensitive host path ({}). \
                     Ensure this is intentional.",
@@ -642,12 +643,15 @@ fn validate_mount_source(mount: &str, mcp_name: &str) {
 
 /// Validate Docker runtime args for dangerous flags that could escalate privileges.
 /// Also detects volume mounts smuggled via `-v`/`--volume` that bypass `mounts` validation.
+/// Handles both `--flag=value` and `--flag value` (split) forms.
 fn validate_docker_args(args: &[String], mcp_name: &str) {
     for (i, arg) in args.iter().enumerate() {
         let arg_lower = arg.to_lowercase();
-        // Check for dangerous Docker flags
-        for dangerous in DANGEROUS_DOCKER_ARGS {
-            if arg_lower == *dangerous || arg_lower.starts_with(&format!("{}=", dangerous)) {
+        // Check for dangerous Docker flags (both --flag=value and --flag value)
+        for dangerous in DANGEROUS_DOCKER_FLAGS {
+            if arg_lower == *dangerous
+                || arg_lower.starts_with(&format!("{}=", dangerous))
+            {
                 eprintln!(
                     "Warning: MCP '{}': Docker arg '{}' grants elevated privileges. \
                     Ensure this is intentional.",
@@ -745,8 +749,19 @@ pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
     let mut env_flags: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+    // Check if any container MCP requests AZURE_DEVOPS_EXT_PAT passthrough
+    let any_mcp_needs_ado_token = front_matter.mcp_servers.values().any(|config| {
+        matches!(config, McpConfig::WithOptions(opts)
+            if opts.enabled.unwrap_or(true)
+                && opts.container.is_some()
+                && opts.env.contains_key("AZURE_DEVOPS_EXT_PAT"))
+    });
+
     // Auto-map AZURE_DEVOPS_EXT_PAT from SC_READ_TOKEN when permissions.read is configured
-    if front_matter.permissions.as_ref().and_then(|p| p.read.as_ref()).is_some() {
+    // AND at least one container MCP requests it via env passthrough
+    if any_mcp_needs_ado_token
+        && front_matter.permissions.as_ref().and_then(|p| p.read.as_ref()).is_some()
+    {
         env_flags.push(
             "-e AZURE_DEVOPS_EXT_PAT=\"$(SC_READ_TOKEN)\"".to_string(),
         );
@@ -1184,11 +1199,78 @@ mod tests {
             read: Some("my-read-sc".to_string()),
             write: None,
         });
+        // A container MCP must request AZURE_DEVOPS_EXT_PAT for the auto-map to trigger
+        fm.mcp_servers.insert(
+            "ado-tool".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                container: Some("node:20-slim".to_string()),
+                env: {
+                    let mut e = HashMap::new();
+                    e.insert("AZURE_DEVOPS_EXT_PAT".to_string(), "".to_string());
+                    e
+                },
+                ..Default::default()
+            }),
+        );
         let env = generate_mcpg_docker_env(&fm);
         assert!(
             env.contains("-e AZURE_DEVOPS_EXT_PAT=\"$(SC_READ_TOKEN)\""),
-            "Should auto-map ADO token when permissions.read is set"
+            "Should auto-map ADO token when permissions.read is set and MCP requests it"
         );
+    }
+
+    #[test]
+    fn test_generate_mcpg_docker_env_permissions_read_no_mcp_request() {
+        let mut fm = minimal_front_matter();
+        fm.permissions = Some(crate::compile::types::PermissionsConfig {
+            read: Some("my-read-sc".to_string()),
+            write: None,
+        });
+        // No MCP requests AZURE_DEVOPS_EXT_PAT — auto-map should NOT trigger
+        fm.mcp_servers.insert(
+            "unrelated-tool".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                container: Some("node:20-slim".to_string()),
+                ..Default::default()
+            }),
+        );
+        let env = generate_mcpg_docker_env(&fm);
+        assert!(
+            !env.contains("AZURE_DEVOPS_EXT_PAT"),
+            "Should NOT auto-map ADO token when no MCP requests it"
+        );
+    }
+
+    #[test]
+    fn test_generate_mcpg_docker_env_dedup_auto_map_and_passthrough() {
+        // When permissions.read is set AND MCP has AZURE_DEVOPS_EXT_PAT: "",
+        // the auto-mapped form (with SC_READ_TOKEN) should win — no duplicate
+        let mut fm = minimal_front_matter();
+        fm.permissions = Some(crate::compile::types::PermissionsConfig {
+            read: Some("my-read-sc".to_string()),
+            write: None,
+        });
+        fm.mcp_servers.insert(
+            "ado-tool".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                container: Some("node:20-slim".to_string()),
+                env: {
+                    let mut e = HashMap::new();
+                    e.insert("AZURE_DEVOPS_EXT_PAT".to_string(), "".to_string());
+                    e
+                },
+                ..Default::default()
+            }),
+        );
+        let env = generate_mcpg_docker_env(&fm);
+        // Should have the SC_READ_TOKEN form (auto-mapped), not bare passthrough
+        assert!(
+            env.contains("-e AZURE_DEVOPS_EXT_PAT=\"$(SC_READ_TOKEN)\""),
+            "Auto-mapped form should be present"
+        );
+        // Should appear exactly once
+        let count = env.matches("AZURE_DEVOPS_EXT_PAT").count();
+        assert_eq!(count, 1, "AZURE_DEVOPS_EXT_PAT should appear exactly once, got {}", count);
     }
 
     #[test]

@@ -2189,7 +2189,7 @@ fn test_mcpg_docker_env_passthrough() {
     ));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
-    let input = "---\nname: \"Env Test\"\ndescription: \"Tests env passthrough\"\npermissions:\n  read: my-read-sc\n  write: my-write-sc\nmcp-servers:\n  my-tool:\n    container: \"node:20-slim\"\n    env:\n      MY_TOKEN: \"\"\n      STATIC_VAR: \"static-value\"\nsafe-outputs:\n  create-work-item:\n    work-item-type: Task\n---\n\n## Test\n";
+    let input = "---\nname: \"Env Test\"\ndescription: \"Tests env passthrough\"\npermissions:\n  read: my-read-sc\n  write: my-write-sc\nmcp-servers:\n  my-tool:\n    container: \"node:20-slim\"\n    env:\n      AZURE_DEVOPS_EXT_PAT: \"\"\n      MY_TOKEN: \"\"\n      STATIC_VAR: \"static-value\"\nsafe-outputs:\n  create-work-item:\n    work-item-type: Task\n---\n\n## Test\n";
 
     let input_path = temp_dir.join("env-passthrough.md");
     let output_path = temp_dir.join("env-passthrough.yml");
