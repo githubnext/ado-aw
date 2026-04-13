@@ -679,10 +679,15 @@ fn validate_docker_args(args: &[String], mcp_name: &str) {
             if arg_lower == *dangerous
                 || arg_lower.starts_with(&format!("{}=", dangerous))
             {
+                let extra_hint = if *dangerous == "--entrypoint" {
+                    " Use the 'entrypoint:' field instead of passing --entrypoint in args."
+                } else {
+                    ""
+                };
                 eprintln!(
                     "Warning: MCP '{}': Docker arg '{}' grants elevated privileges. \
-                    Ensure this is intentional.",
-                    mcp_name, arg
+                    Ensure this is intentional.{}",
+                    mcp_name, arg, extra_hint
                 );
             }
         }
@@ -786,13 +791,19 @@ pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
 
     // Auto-map AZURE_DEVOPS_EXT_PAT from SC_READ_TOKEN when permissions.read is configured
     // AND at least one container MCP requests it via env passthrough
-    if any_mcp_needs_ado_token
-        && front_matter.permissions.as_ref().and_then(|p| p.read.as_ref()).is_some()
-    {
-        env_flags.push(
-            "-e AZURE_DEVOPS_EXT_PAT=\"$(SC_READ_TOKEN)\"".to_string(),
-        );
-        seen.insert("AZURE_DEVOPS_EXT_PAT".to_string());
+    if any_mcp_needs_ado_token {
+        if let Some(_) = front_matter.permissions.as_ref().and_then(|p| p.read.as_ref()) {
+            env_flags.push(
+                "-e AZURE_DEVOPS_EXT_PAT=\"$(SC_READ_TOKEN)\"".to_string(),
+            );
+            seen.insert("AZURE_DEVOPS_EXT_PAT".to_string());
+        } else {
+            eprintln!(
+                "Warning: one or more container MCPs request AZURE_DEVOPS_EXT_PAT passthrough \
+                but permissions.read is not configured. The token will be empty at runtime. \
+                Add `permissions: {{ read: <service-connection> }}` to enable auto-mapping."
+            );
+        }
     }
 
     // Collect passthrough env vars from container-based MCP configs only.
