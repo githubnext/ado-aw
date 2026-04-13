@@ -361,6 +361,28 @@ mod tests {
     /// write tools + diagnostics + non-MCP keys.
     #[test]
     fn test_all_known_completeness() {
+        // The three sub-lists must be disjoint — a tool in multiple lists would
+        // be duplicated in ALL_KNOWN and the count would mismatch.
+        for name in WRITE_REQUIRING_SAFE_OUTPUTS {
+            assert!(
+                !ALWAYS_ON_TOOLS.contains(name),
+                "Tool '{}' appears in both WRITE_REQUIRING and ALWAYS_ON — lists must be disjoint",
+                name
+            );
+            assert!(
+                !NON_MCP_SAFE_OUTPUT_KEYS.contains(name),
+                "Tool '{}' appears in both WRITE_REQUIRING and NON_MCP — lists must be disjoint",
+                name
+            );
+        }
+        for name in ALWAYS_ON_TOOLS {
+            assert!(
+                !NON_MCP_SAFE_OUTPUT_KEYS.contains(name),
+                "Tool '{}' appears in both ALWAYS_ON and NON_MCP — lists must be disjoint",
+                name
+            );
+        }
+
         let expected = WRITE_REQUIRING_SAFE_OUTPUTS.len()
             + ALWAYS_ON_TOOLS.len()
             + NON_MCP_SAFE_OUTPUT_KEYS.len();

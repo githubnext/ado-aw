@@ -163,7 +163,7 @@ impl SafeOutputs {
             // Warn about enabled-tools entries that don't match any registered route
             for name in enabled {
                 if !all_tools.iter().any(|t| t == name) {
-                    debug!("Enabled-tools entry '{}' has no matching route (ignored)", name);
+                    warn!("Enabled-tools entry '{}' has no matching route (ignored)", name);
                 }
             }
             let remaining: Vec<String> = tool_router.list_all().iter().map(|t| t.name.to_string()).collect();
