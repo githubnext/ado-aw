@@ -402,11 +402,7 @@ pub struct CreatePrConfig {
     /// Whether to record branch info in failure data when PR creation fails (default: true).
     /// When enabled, the failure response includes the pushed branch name and target branch
     /// so operators can manually create the PR. No work item is created automatically.
-    #[serde(
-        default = "default_true",
-        rename = "fallback-as-work-item",
-        alias = "record-branch-on-failure"
-    )]
+    #[serde(default = "default_true", rename = "fallback-as-work-item")]
     pub fallback_as_work_item: bool,
 }
 
