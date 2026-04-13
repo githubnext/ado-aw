@@ -808,15 +808,14 @@ pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
 
     env_flags.sort();
     if env_flags.is_empty() {
-        // No extra flags — just emit the line continuation backslash
+        // No extra flags — the template line is replaced with just a line continuation
         "\\".to_string()
     } else {
-        // Emit each flag on its own continuation line, ending with `\`
-        // replace_with_indent will NOT add indentation here because the marker
-        // is inline (not at the start of a line), so we include indentation ourselves.
-        // NOTE: the 12-space indentation must match the `docker run` block in base.yml
-        let flags = env_flags.join(" \\\n            ");
-        format!("\\\n            {} \\", flags)
+        // Emit each flag on its own line with `\` continuation.
+        // replace_with_indent handles indentation from the template (base.yml),
+        // so we only emit the content without hardcoded spaces.
+        let flags = env_flags.join(" \\\n");
+        format!("{} \\", flags)
     }
 }
 
