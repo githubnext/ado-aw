@@ -477,6 +477,14 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
         }
 
         if let Some(opts) = options {
+            if opts.container.is_some() && opts.url.is_some() {
+                log::warn!(
+                    "MCP '{}': both 'container' and 'url' are set — using 'container' (stdio). \
+                    Remove 'url' to silence this warning.",
+                    name
+                );
+            }
+
             if let Some(container) = &opts.container {
                 // Container-based stdio MCP (MCPG-native, per spec §3.2.1)
                 // Validate mount paths for sensitive host directories
@@ -588,15 +596,25 @@ const SENSITIVE_MOUNT_PREFIXES: &[&str] = &[
     "/sys",
 ];
 
-/// Validate a volume mount source path, rejecting paths that reference sensitive host directories.
+/// Validate a volume mount source path, warning on sensitive host directories.
+/// Docker socket mounts are escalated to stderr warnings since they grant container escape.
 fn validate_mount_source(mount: &str, mcp_name: &str) {
     // Format: "source:dest:mode"
     if let Some(source) = mount.split(':').next() {
         let source_lower = source.to_lowercase();
+        // Docker socket is especially dangerous — escalate to stderr
+        if source_lower.contains("docker.sock") {
+            eprintln!(
+                "Warning: MCP '{}': mount '{}' exposes the Docker socket to the MCP container. \
+                This grants full host Docker access and may allow container escape.",
+                mcp_name, mount
+            );
+            return;
+        }
         for prefix in SENSITIVE_MOUNT_PREFIXES {
             if source_lower.starts_with(prefix) {
-                log::warn!(
-                    "MCP '{}': mount source '{}' references a sensitive host path ({}). \
+                eprintln!(
+                    "Warning: MCP '{}': mount source '{}' references a sensitive host path ({}). \
                     Ensure this is intentional.",
                     mcp_name, source, prefix
                 );
@@ -632,7 +650,10 @@ fn is_valid_env_var_name(name: &str) -> bool {
 /// MCP containers spawned by MCPG may need environment variables that flow from
 /// the pipeline through the MCPG container (passthrough). This function:
 /// 1. Auto-maps `AZURE_DEVOPS_EXT_PAT` from `SC_READ_TOKEN` when `permissions.read` is configured
-/// 2. Collects all passthrough env vars (value is `""`) from MCP configs and adds `-e` flags
+/// 2. Collects passthrough env vars (value is `""`) from container-based MCP configs
+///
+/// Only container-based MCPs are considered — HTTP MCPs don't have child containers
+/// that need env passthrough.
 ///
 /// Returns flags formatted for inline insertion in the `docker run` command.
 /// The marker sits after the last hardcoded `-e` flag, so the output must
@@ -649,12 +670,18 @@ pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
         seen.insert("AZURE_DEVOPS_EXT_PAT".to_string());
     }
 
-    // Collect passthrough env vars from all MCP configs
+    // Collect passthrough env vars from container-based MCP configs only.
+    // HTTP MCPs don't have child containers — env passthrough doesn't apply.
     for (mcp_name, config) in &front_matter.mcp_servers {
         let opts = match config {
             McpConfig::WithOptions(opts) if opts.enabled.unwrap_or(true) => opts,
             _ => continue,
         };
+
+        // Only container-based MCPs need env passthrough on the MCPG Docker run
+        if opts.container.is_none() {
+            continue;
+        }
 
         for (var_name, var_value) in &opts.env {
             // Validate env var name to prevent Docker flag injection (e.g. "X --privileged")
@@ -668,9 +695,8 @@ pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
             if seen.contains(var_name) {
                 continue;
             }
-            // Passthrough: empty string means forward from host environment
-            // Expansion: ${VAR} means MCPG resolves from its own environment
-            if var_value.is_empty() || var_value.contains("${") {
+            // Passthrough: empty string means forward from host/pipeline environment
+            if var_value.is_empty() {
                 env_flags.push(format!("-e {}", var_name));
                 seen.insert(var_name.clone());
             }
@@ -685,6 +711,7 @@ pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
         // Emit each flag on its own continuation line, ending with `\`
         // replace_with_indent will NOT add indentation here because the marker
         // is inline (not at the start of a line), so we include indentation ourselves.
+        // NOTE: the 12-space indentation must match the `docker run` block in base.yml
         let flags = env_flags.join(" \\\n            ");
         format!("\\\n            {} \\", flags)
     }
