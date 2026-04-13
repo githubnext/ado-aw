@@ -792,7 +792,7 @@ pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
     // Auto-map AZURE_DEVOPS_EXT_PAT from SC_READ_TOKEN when permissions.read is configured
     // AND at least one container MCP requests it via env passthrough
     if any_mcp_needs_ado_token {
-        if let Some(_) = front_matter.permissions.as_ref().and_then(|p| p.read.as_ref()) {
+        if front_matter.permissions.as_ref().and_then(|p| p.read.as_ref()).is_some() {
             env_flags.push(
                 "-e AZURE_DEVOPS_EXT_PAT=\"$(SC_READ_TOKEN)\"".to_string(),
             );
