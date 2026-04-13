@@ -72,6 +72,7 @@ impl Validate for UpdateWorkItemParams {
 
 tool_result! {
     name = "update-work-item",
+    write = true,
     params = UpdateWorkItemParams,
     /// Result of updating a work item
     pub struct UpdateWorkItemResult {

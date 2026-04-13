@@ -59,6 +59,9 @@ fn generate_short_id() -> String {
     format!("{:08x}", value)
 }
 
+// Re-export from tools module
+use crate::tools::ALWAYS_ON_TOOLS;
+
 // ============================================================================
 // SafeOutputs MCP Server
 // ============================================================================
@@ -115,6 +118,7 @@ impl SafeOutputs {
     async fn new(
         bounding_directory: impl Into<PathBuf>,
         output_directory: impl Into<PathBuf>,
+        enabled_tools: Option<&[String]>,
     ) -> Result<Self> {
         let bounding_dir = bounding_directory.into();
         let output_dir = output_directory.into();
@@ -138,10 +142,34 @@ impl SafeOutputs {
         debug!("Initializing safe output file");
         ndjson::init_ndjson_file(&output_dir.join(SAFE_OUTPUT_FILENAME)).await?;
 
+        let mut tool_router = Self::tool_router();
+
+        // Filter tools if an enabled list is provided
+        if let Some(enabled) = enabled_tools {
+            let all_tools: Vec<String> = tool_router.list_all().iter().map(|t| t.name.to_string()).collect();
+            let total = all_tools.len();
+            for tool_name in &all_tools {
+                let is_always_on = ALWAYS_ON_TOOLS.contains(&tool_name.as_str());
+                let is_enabled = enabled.iter().any(|e| e == tool_name);
+                if !is_always_on && !is_enabled {
+                    debug!("Filtering out tool: {}", tool_name);
+                    tool_router.remove_route(tool_name);
+                }
+            }
+            // Warn about enabled-tools entries that don't match any registered route
+            for name in enabled {
+                if !all_tools.iter().any(|t| t == name) {
+                    warn!("Enabled-tools entry '{}' has no matching route (ignored)", name);
+                }
+            }
+            let remaining: Vec<String> = tool_router.list_all().iter().map(|t| t.name.to_string()).collect();
+            info!("Tool filtering applied: {} of {} tools enabled: {:?}", remaining.len(), total, remaining);
+        }
+
         Ok(Self {
             bounding_directory: bounding_dir,
             output_directory: output_dir,
-            tool_router: Self::tool_router(),
+            tool_router,
         })
     }
 
@@ -985,9 +1013,9 @@ impl ServerHandler for SafeOutputs {
     }
 }
 
-pub async fn run(output_directory: &str, bounding_directory: &str) -> Result<()> {
+pub async fn run(output_directory: &str, bounding_directory: &str, enabled_tools: Option<&[String]>) -> Result<()> {
     // Create and run the server with STDIO transport
-    let service = SafeOutputs::new(bounding_directory, output_directory)
+    let service = SafeOutputs::new(bounding_directory, output_directory, enabled_tools)
         .await?
         .serve(stdio())
         .await
@@ -1010,6 +1038,7 @@ pub async fn run_http(
     bounding_directory: &str,
     port: u16,
     api_key: Option<&str>,
+    enabled_tools: Option<&[String]>,
 ) -> Result<()> {
     use axum::Router;
     use rmcp::transport::streamable_http_server::{
@@ -1054,7 +1083,7 @@ pub async fn run_http(
     // The factory closure runs on a Tokio worker thread, so we cannot
     // use block_on() inside it — that would panic with "Cannot start
     // a runtime from within a runtime".
-    let safe_outputs_template = SafeOutputs::new(&bounding, &output).await?;
+    let safe_outputs_template = SafeOutputs::new(&bounding, &output, enabled_tools).await?;
     let mcp_service = StreamableHttpService::new(
         move || Ok(safe_outputs_template.clone()),
         session_manager,
@@ -1127,7 +1156,7 @@ mod tests {
 
     async fn create_test_safe_outputs() -> (SafeOutputs, tempfile::TempDir) {
         let temp_dir = tempdir().unwrap();
-        let safe_outputs = SafeOutputs::new(temp_dir.path(), temp_dir.path())
+        let safe_outputs = SafeOutputs::new(temp_dir.path(), temp_dir.path(), None)
             .await
             .unwrap();
         (safe_outputs, temp_dir)
@@ -1188,7 +1217,7 @@ mod tests {
     #[tokio::test]
     async fn test_new_fails_with_invalid_bounding_directory() {
         let temp_dir = tempdir().unwrap();
-        let result = SafeOutputs::new("/nonexistent/path", temp_dir.path()).await;
+        let result = SafeOutputs::new("/nonexistent/path", temp_dir.path(), None).await;
 
         assert!(result.is_err());
         assert!(
@@ -1202,7 +1231,7 @@ mod tests {
     #[tokio::test]
     async fn test_new_fails_with_invalid_output_directory() {
         let temp_dir = tempdir().unwrap();
-        let result = SafeOutputs::new(temp_dir.path(), "/nonexistent/path").await;
+        let result = SafeOutputs::new(temp_dir.path(), "/nonexistent/path", None).await;
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("output_directory"));
@@ -1375,5 +1404,124 @@ mod tests {
         assert_eq!(json["name"], "missing-tool");
         assert_eq!(json["tool_name"], "my_tool");
         assert_eq!(json["context"], "ctx");
+    }
+
+    // ─── Tool filtering tests ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_tool_filtering_none_exposes_all() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), None)
+            .await
+            .unwrap();
+        let tools = so.tool_router.list_all();
+        // Should have many tools (all registered)
+        assert!(tools.len() > 10, "Expected all tools, got {}", tools.len());
+    }
+
+    #[tokio::test]
+    async fn test_tool_filtering_specific_tools() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let enabled = vec!["create-pull-request".to_string()];
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled))
+            .await
+            .unwrap();
+        let tools = so.tool_router.list_all();
+        let tool_names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
+
+        // Should have create-pull-request + always-on tools
+        assert!(tool_names.contains(&"create-pull-request".to_string()));
+        assert!(tool_names.contains(&"noop".to_string()));
+        assert!(tool_names.contains(&"missing-data".to_string()));
+        assert!(tool_names.contains(&"missing-tool".to_string()));
+        assert!(tool_names.contains(&"report-incomplete".to_string()));
+
+        // Should NOT have other tools
+        assert!(!tool_names.contains(&"create-work-item".to_string()));
+        assert!(!tool_names.contains(&"update-wiki-page".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_tool_filtering_always_on_never_removed() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        // Enable only a tool that doesn't exist — should still have always-on tools
+        let enabled = vec!["nonexistent-tool".to_string()];
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled))
+            .await
+            .unwrap();
+        let tools = so.tool_router.list_all();
+        let tool_names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
+
+        for always_on in ALWAYS_ON_TOOLS {
+            assert!(
+                tool_names.contains(&always_on.to_string()),
+                "Always-on tool '{}' should be present",
+                always_on
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_filtering_multiple_tools() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let enabled = vec![
+            "create-pull-request".to_string(),
+            "create-work-item".to_string(),
+            "comment-on-work-item".to_string(),
+        ];
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled))
+            .await
+            .unwrap();
+        let tools = so.tool_router.list_all();
+        let tool_names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
+
+        // All enabled tools should be present
+        for tool in &enabled {
+            assert!(
+                tool_names.contains(tool),
+                "Enabled tool '{}' should be present, got {:?}",
+                tool,
+                tool_names
+            );
+        }
+        // Always-on tools should be present
+        for tool in ALWAYS_ON_TOOLS {
+            assert!(
+                tool_names.contains(&tool.to_string()),
+                "Always-on tool '{}' should be present, got {:?}",
+                tool,
+                tool_names
+            );
+        }
+        // Non-enabled tools should be absent
+        assert!(!tool_names.contains(&"update-wiki-page".to_string()),
+            "Non-enabled tool should be filtered out");
+    }
+
+    /// Asserts that ALL_KNOWN_SAFE_OUTPUTS contains every tool registered in the
+    /// router (plus the non-MCP keys like "memory"). This prevents the list from
+    /// drifting when new tools are added to the router but not to the constant.
+    #[tokio::test]
+    async fn test_all_known_safe_outputs_covers_router() {
+        use crate::tools::ALL_KNOWN_SAFE_OUTPUTS;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), None)
+            .await
+            .unwrap();
+        let router_tools: Vec<String> = so
+            .tool_router
+            .list_all()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+
+        for tool_name in &router_tools {
+            assert!(
+                ALL_KNOWN_SAFE_OUTPUTS.contains(&tool_name.as_str()),
+                "Tool '{}' is registered in the router but missing from ALL_KNOWN_SAFE_OUTPUTS in src/tools/mod.rs",
+                tool_name
+            );
+        }
     }
 }

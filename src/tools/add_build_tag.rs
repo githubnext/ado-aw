@@ -44,6 +44,7 @@ impl Validate for AddBuildTagParams {
 
 tool_result! {
     name = "add-build-tag",
+    write = true,
     params = AddBuildTagParams,
     /// Result of adding a tag to a build
     pub struct AddBuildTagResult {

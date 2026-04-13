@@ -159,6 +159,12 @@ displayName: "Finalize""#,
         // Validate resolve-pr-review-thread has required allowed-statuses field
         validate_resolve_pr_thread_statuses(front_matter)?;
 
+        // NOTE: 1ES target does not support --enabled-tools filtering (safe-outputs
+        // tool filtering). 1ES uses service connections for MCP servers rather than
+        // mcp-http, so generate_enabled_tools_args is not called here. If safe-outputs
+        // filtering is needed for 1ES, it would require changes to the 1ES pipeline
+        // template and agency job configuration.
+
         // Replace all template markers
         let compiler_version = env!("CARGO_PKG_VERSION");
         let replacements: Vec<(&str, &str)> = vec![

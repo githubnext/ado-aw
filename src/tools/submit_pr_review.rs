@@ -83,6 +83,7 @@ impl Validate for SubmitPrReviewParams {
 
 tool_result! {
     name = "submit-pr-review",
+    write = true,
     params = SubmitPrReviewParams,
     /// Result of submitting a pull request review
     pub struct SubmitPrReviewResult {

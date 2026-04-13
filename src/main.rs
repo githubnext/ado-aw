@@ -47,6 +47,9 @@ enum Commands {
         output_directory: String,
         /// Guard against directory traversal attacks by specifying the agent cannot influence folders outside this path
         bounding_directory: String,
+        /// Only expose these safe output tools (can be repeated). If omitted, all tools are exposed.
+        #[arg(long = "enabled-tools")]
+        enabled_tools: Vec<String>,
     },
     /// Execute safe outputs from Stage 1 (Stage 2 of the pipeline)
     Execute {
@@ -84,6 +87,9 @@ enum Commands {
         output_directory: String,
         /// Guard against directory traversal attacks
         bounding_directory: String,
+        /// Only expose these safe output tools (can be repeated). If omitted, all tools are exposed.
+        #[arg(long = "enabled-tools")]
+        enabled_tools: Vec<String>,
     },
     /// Detect agentic pipelines and update GITHUB_TOKEN on their ADO definitions
     Configure {
@@ -167,7 +173,11 @@ async fn main() -> Result<()> {
             Commands::Mcp {
                 output_directory,
                 bounding_directory,
-            } => mcp::run(&output_directory, &bounding_directory).await?,
+                enabled_tools,
+            } => {
+                let filter = if enabled_tools.is_empty() { None } else { Some(enabled_tools) };
+                mcp::run(&output_directory, &bounding_directory, filter.as_deref()).await?
+            }
             Commands::Execute {
                 source,
                 safe_output_dir,
@@ -279,8 +289,10 @@ async fn main() -> Result<()> {
                 api_key,
                 output_directory,
                 bounding_directory,
+                enabled_tools,
             } => {
-                mcp::run_http(&output_directory, &bounding_directory, port, api_key.as_deref())
+                let filter = if enabled_tools.is_empty() { None } else { Some(enabled_tools) };
+                mcp::run_http(&output_directory, &bounding_directory, port, api_key.as_deref(), filter.as_deref())
                     .await?;
             }
             Commands::Configure {
