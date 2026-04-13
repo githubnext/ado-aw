@@ -293,6 +293,16 @@ impl SafeOutputs {
 
         // Undo the temporary commit (if we made one) but keep changes in working tree
         if made_synthetic_commit {
+            // Capture the synthetic commit SHA for diagnostics
+            let head_sha = Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&git_dir)
+                .output()
+                .await
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_else(|| "<unknown>".to_string());
+
             let reset_output = Command::new("git")
                 .args(["reset", "HEAD~1", "--mixed", "--quiet"])
                 .current_dir(&git_dir)
@@ -304,7 +314,8 @@ impl SafeOutputs {
 
             if !reset_output.status.success() {
                 return Err(anyhow_to_mcp_error(anyhow::anyhow!(
-                    "git reset HEAD~1 failed (repository may retain synthetic commit): {}",
+                    "git reset HEAD~1 failed (synthetic commit {} may remain): {}",
+                    head_sha,
                     String::from_utf8_lossy(&reset_output.stderr)
                 )));
             }
@@ -337,13 +348,38 @@ impl SafeOutputs {
     /// Find the merge-base commit to diff against.
     ///
     /// Tries (in order):
-    /// 1. `git merge-base HEAD origin/HEAD`
-    /// 2. `git merge-base HEAD origin/main`
+    /// 1. Detect actual default branch via `git symbolic-ref refs/remotes/origin/HEAD`
+    /// 2. Common default branch names: `origin/main`, `origin/master`
     /// 3. Root commit via `git rev-list --max-parents=0 HEAD` (handles single-commit repos)
     async fn find_merge_base(git_dir: &std::path::Path) -> Result<String, McpError> {
         use tokio::process::Command;
 
-        for remote_ref in &["origin/HEAD", "origin/main"] {
+        // First, try to discover the actual default branch from origin/HEAD
+        let symbolic_output = Command::new("git")
+            .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
+            .current_dir(git_dir)
+            .output()
+            .await
+            .ok();
+
+        let mut candidates: Vec<String> = Vec::new();
+
+        if let Some(out) = symbolic_output.filter(|o| o.status.success()) {
+            let refname = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            // e.g. "refs/remotes/origin/main" → "origin/main"
+            if let Some(branch) = refname.strip_prefix("refs/remotes/") {
+                candidates.push(branch.to_string());
+            }
+        }
+
+        // Always try common defaults as fallbacks
+        for name in &["origin/main", "origin/master"] {
+            if !candidates.iter().any(|c| c == *name) {
+                candidates.push(name.to_string());
+            }
+        }
+
+        for remote_ref in &candidates {
             let output = Command::new("git")
                 .args(["merge-base", "HEAD", remote_ref])
                 .current_dir(git_dir)
