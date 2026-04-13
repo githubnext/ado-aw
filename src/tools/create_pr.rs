@@ -53,6 +53,12 @@ const PROTECTED_MANIFEST_BASENAMES: &[&str] = &[
     // Rust
     "cargo.toml",
     "cargo.lock",
+    // Docker / container
+    "dockerfile",
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "compose.yml",
+    "compose.yaml",
 ];
 
 /// Path prefixes that are protected by default.
@@ -338,8 +344,8 @@ pub struct CreatePrConfig {
     #[serde(default = "default_target_branch", rename = "target-branch")]
     pub target_branch: String,
 
-    /// Whether to create the PR as a draft (default: false)
-    #[serde(default)]
+    /// Whether to create the PR as a draft (default: true)
+    #[serde(default = "default_draft")]
     pub draft: bool,
 
     /// Whether to set auto-complete on the PR (default: false)
@@ -403,6 +409,10 @@ fn default_target_branch() -> String {
     "main".to_string()
 }
 
+fn default_draft() -> bool {
+    true
+}
+
 fn default_true() -> bool {
     true
 }
@@ -423,7 +433,7 @@ impl Default for CreatePrConfig {
     fn default() -> Self {
         Self {
             target_branch: default_target_branch(),
-            draft: false,
+            draft: true,
             auto_complete: false,
             delete_source_branch: true,
             squash_merge: true,
@@ -1107,7 +1117,7 @@ impl Executor for CreatePrResult {
                     ---\n\
                     *To create the PR manually, merge branch `{}` into `{}`.*",
                     self.source_branch, target_branch, self.repository,
-                    status, body,
+                    status, truncate_error_body(&body, 500),
                     self.description,
                     self.source_branch, target_branch
                 );
@@ -1393,7 +1403,7 @@ async fn collect_changes_from_diff_tree(
             // Renamed file: R100\told_path\tnew_path
             let old_path = file_path;
             let new_path = parts[2];
-            validate_single_path(old_path)?;
+            // old_path (= file_path) is already validated above
             validate_single_path(new_path)?;
 
             // Emit the rename
@@ -1493,6 +1503,14 @@ fn validate_patch_paths(patch_content: &str) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Truncate an error response body to avoid embedding large or sensitive content.
+fn truncate_error_body(body: &str, max_len: usize) -> &str {
+    match body.char_indices().nth(max_len) {
+        Some((idx, _)) => &body[..idx],
+        None => body,
+    }
 }
 
 /// Validate a single file path for security issues
@@ -1819,7 +1837,7 @@ mod tests {
     fn test_config_default_target_branch() {
         let config = CreatePrConfig::default();
         assert_eq!(config.target_branch, "main");
-        assert!(!config.draft);
+        assert!(config.draft);
         assert!(!config.auto_complete);
         assert!(config.delete_source_branch);
         assert!(config.squash_merge);

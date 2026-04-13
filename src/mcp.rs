@@ -277,7 +277,7 @@ impl SafeOutputs {
         }
 
         // Generate format-patch from merge-base..HEAD to capture all changes
-        let format_patch_output = Command::new("git")
+        let format_patch_result = Command::new("git")
             .args([
                 "format-patch",
                 &format!("{}..HEAD", merge_base),
@@ -286,12 +286,9 @@ impl SafeOutputs {
             ])
             .current_dir(&git_dir)
             .output()
-            .await
-            .map_err(|e| {
-                anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git format-patch: {}", e))
-            })?;
+            .await;
 
-        // Undo the temporary commit (if we made one) but keep changes in working tree
+        // Always undo the temporary commit before propagating errors
         if made_synthetic_commit {
             // Capture the synthetic commit SHA for diagnostics
             let head_sha = Command::new("git")
@@ -320,6 +317,11 @@ impl SafeOutputs {
                 )));
             }
         }
+
+        // Now check the format-patch result after cleanup
+        let format_patch_output = format_patch_result.map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git format-patch: {}", e))
+        })?;
 
         if !format_patch_output.status.success() {
             return Err(anyhow_to_mcp_error(anyhow::anyhow!(
