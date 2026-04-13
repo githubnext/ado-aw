@@ -299,6 +299,10 @@ jobs:
           # (MCPG and SafeOutputs) via host.docker.internal.
           # AWF auto-mounts /tmp:/tmp:rw into the container, so copilot binary,
           # agent prompt, and MCP config are placed under /tmp/awf-tools/.
+          # Stream agent output in real-time while filtering VSO commands.
+          # sed -u = unbuffered (line-by-line) so output appears immediately.
+          # tee writes to both stdout (ADO pipeline log) and the artifact file.
+          # pipefail (set above) ensures AWF's exit code propagates through the pipe.
           sudo -E "$(Pipeline.Workspace)/awf/awf" \
             --allow-domains {{ allowed_domains }} \
             --skip-pull \
@@ -308,13 +312,10 @@ jobs:
             --log-level info \
             --proxy-logs-dir "$(Agent.TempDirectory)/staging/logs/firewall" \
             -- '/tmp/awf-tools/copilot --prompt "$(cat /tmp/awf-tools/agent-prompt.md)" --additional-mcp-config @/tmp/awf-tools/mcp-config.json {{ copilot_params }}' \
-            > "$AGENT_OUTPUT_FILE" 2>&1 \
+            2>&1 \
+            | sed -u 's/##vso\[/[VSO-FILTERED] vso[/g; s/##\[/[VSO-FILTERED] [/g' \
+            | tee "$AGENT_OUTPUT_FILE" \
             && AGENT_EXIT_CODE=0 || AGENT_EXIT_CODE=$?
-
-          # Display sanitized output
-          echo "=== Agent Output (sanitized) ==="
-          sed 's/##vso\[/[SANITIZED] vso[/g' "$AGENT_OUTPUT_FILE"
-          echo "=== End Agent Output ==="
 
           # Print firewall summary if available
           if [ -x "$(Pipeline.Workspace)/awf/awf" ]; then
@@ -481,9 +482,12 @@ jobs:
         displayName: "Setup agentic pipeline compiler"
 
       - bash: |
+          set -o pipefail
+
           # Run threat analysis with AWF network isolation
           THREAT_OUTPUT_FILE="$(Agent.TempDirectory)/threat-analysis-output.txt"
 
+          # Stream threat analysis output in real-time with VSO command filtering
           sudo -E "$(Pipeline.Workspace)/awf/awf" \
             --allow-domains {{ allowed_domains }} \
             --skip-pull \
@@ -492,13 +496,10 @@ jobs:
             --log-level info \
             --proxy-logs-dir "$(Agent.TempDirectory)/threat-analysis-logs/firewall" \
             -- '/tmp/awf-tools/copilot --prompt "$(cat /tmp/awf-tools/threat-analysis-prompt.md)" {{ copilot_params }}' \
-            > "$THREAT_OUTPUT_FILE" 2>&1
-          AGENT_EXIT_CODE=$?
-
-          # Display sanitized output
-          echo "=== Threat Analysis Output (sanitized) ==="
-          sed 's/##vso\[/## [SANITIZED] vso[/g' "$THREAT_OUTPUT_FILE"
-          echo "=== End Threat Analysis Output ==="
+            2>&1 \
+            | sed -u 's/##vso\[/[VSO-FILTERED] vso[/g; s/##\[/[VSO-FILTERED] [/g' \
+            | tee "$THREAT_OUTPUT_FILE" \
+            && AGENT_EXIT_CODE=0 || AGENT_EXIT_CODE=$?
 
           exit $AGENT_EXIT_CODE
         displayName: "Run threat analysis (AWF network isolated)"
@@ -643,6 +644,9 @@ jobs:
       - bash: |
           # Copy all logs to output directory for artifact upload
           mkdir -p "$(Agent.TempDirectory)/staging/logs"
+          # Copy agent output log from analyzed_outputs for optimisation use
+          cp "$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)/logs/agent-output.txt" \
+            "$(Agent.TempDirectory)/staging/logs/agent-output.txt" 2>/dev/null || true
           if [ -d ~/.copilot/logs ]; then
             mkdir -p "$(Agent.TempDirectory)/staging/logs/copilot"
             cp -r ~/.copilot/logs/* "$(Agent.TempDirectory)/staging/logs/copilot/" 2>/dev/null || true
