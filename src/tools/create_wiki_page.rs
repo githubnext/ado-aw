@@ -57,6 +57,7 @@ impl Validate for CreateWikiPageParams {
 
 tool_result! {
     name = "create-wiki-page",
+    write = true,
     params = CreateWikiPageParams,
     /// Result of creating a wiki page
     pub struct CreateWikiPageResult {

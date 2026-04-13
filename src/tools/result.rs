@@ -15,6 +15,11 @@ pub trait ToolResult: Serialize {
     /// Default maximum number of outputs allowed per pipeline run.
     /// Each tool can override this; the operator can further override via `max` in front matter.
     const DEFAULT_MAX: u32 = 1;
+
+    /// Whether this tool requires write access to ADO.
+    /// Write-requiring tools need a `permissions.write` service connection.
+    /// Diagnostic/read-only tools default to `false`.
+    const REQUIRES_WRITE: bool = false;
 }
 
 /// Trait for validating tool parameters before conversion to results.
@@ -203,8 +208,107 @@ pub fn anyhow_to_mcp_error(err: anyhow::Error) -> McpError {
 ///     }
 /// }
 /// ```
+///
+/// Write-requiring tool (sets `REQUIRES_WRITE = true`):
+/// ```ignore
+/// tool_result! {
+///     name = "my_tool",
+///     write = true,
+///     params = MyToolParams,
+///     pub struct MyToolResult {
+///         field1: String,
+///     }
+/// }
+/// ```
 #[macro_export]
 macro_rules! tool_result {
+    // write = true, with default_max
+    (
+        name = $tool_name:literal,
+        write = true,
+        params = $params:ty,
+        default_max = $default_max:literal,
+        $(#[$meta:meta])*
+        $vis:vis struct $name:ident {
+            $(
+                $(#[$field_meta:meta])*
+                $field_vis:vis $field:ident : $ty:ty
+            ),* $(,)?
+        }
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+        $vis struct $name {
+            /// Tool identifier
+            pub name: String,
+            $(
+                $(#[$field_meta])*
+                pub $field: $ty,
+            )*
+        }
+
+        impl $crate::tools::ToolResult for $name {
+            const NAME: &'static str = $tool_name;
+            const DEFAULT_MAX: u32 = $default_max;
+            const REQUIRES_WRITE: bool = true;
+        }
+
+        impl TryFrom<$params> for $name {
+            type Error = rmcp::ErrorData;
+
+            fn try_from(params: $params) -> Result<Self, Self::Error> {
+                <$params as $crate::tools::Validate>::validate(&params)
+                    .map_err($crate::tools::anyhow_to_mcp_error)?;
+                Ok(Self {
+                    name: <Self as $crate::tools::ToolResult>::NAME.to_string(),
+                    $($field: params.$field,)*
+                })
+            }
+        }
+    };
+    // write = true, without default_max
+    (
+        name = $tool_name:literal,
+        write = true,
+        params = $params:ty,
+        $(#[$meta:meta])*
+        $vis:vis struct $name:ident {
+            $(
+                $(#[$field_meta:meta])*
+                $field_vis:vis $field:ident : $ty:ty
+            ),* $(,)?
+        }
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+        $vis struct $name {
+            /// Tool identifier
+            pub name: String,
+            $(
+                $(#[$field_meta])*
+                pub $field: $ty,
+            )*
+        }
+
+        impl $crate::tools::ToolResult for $name {
+            const NAME: &'static str = $tool_name;
+            const REQUIRES_WRITE: bool = true;
+        }
+
+        impl TryFrom<$params> for $name {
+            type Error = rmcp::ErrorData;
+
+            fn try_from(params: $params) -> Result<Self, Self::Error> {
+                <$params as $crate::tools::Validate>::validate(&params)
+                    .map_err($crate::tools::anyhow_to_mcp_error)?;
+                Ok(Self {
+                    name: <Self as $crate::tools::ToolResult>::NAME.to_string(),
+                    $($field: params.$field,)*
+                })
+            }
+        }
+    };
+    // default_max, without write
     (
         name = $tool_name:literal,
         params = $params:ty,
@@ -246,6 +350,7 @@ macro_rules! tool_result {
             }
         }
     };
+    // basic (no write, no default_max)
     (
         name = $tool_name:literal,
         params = $params:ty,
@@ -284,6 +389,43 @@ macro_rules! tool_result {
                 })
             }
         }
+    };
+}
+
+/// Derive a `&[&str]` array of tool names from a list of types implementing `ToolResult`.
+///
+/// This macro is the foundation for compile-time safe output tool list generation.
+/// Instead of maintaining string arrays by hand, list the concrete types and the
+/// macro extracts each type's `NAME` constant automatically.
+///
+/// # Usage
+/// ```ignore
+/// const MY_TOOLS: &[&str] = tool_names![FooResult, BarResult];
+/// // expands to: &[FooResult::NAME, BarResult::NAME]
+/// ```
+#[macro_export]
+macro_rules! tool_names {
+    ($($ty:ty),* $(,)?) => {
+        &[$(<$ty as $crate::tools::ToolResult>::NAME),*]
+    };
+}
+
+/// Derive `ALL_KNOWN_SAFE_OUTPUTS` from a list of types plus extra string literals.
+///
+/// All tool types go before the semicolon; non-MCP string keys go after it.
+///
+/// # Usage
+/// ```ignore
+/// const ALL: &[&str] = all_safe_output_names![
+///     WriteToolA, WriteToolB,   // write-requiring types
+///     DiagToolA, DiagToolB;     // diagnostic types (all types before `;`)
+///     "memory"                  // non-MCP string keys (after `;`)
+/// ];
+/// ```
+#[macro_export]
+macro_rules! all_safe_output_names {
+    ($($ty:ty),* $(,)?; $($extra:expr),* $(,)?) => {
+        &[$(<$ty as $crate::tools::ToolResult>::NAME),*, $($extra),*]
     };
 }
 

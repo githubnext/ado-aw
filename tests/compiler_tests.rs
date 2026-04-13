@@ -2013,3 +2013,82 @@ Vote on pull requests.
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+/// Integration test: compiling a pipeline with safe-outputs produces --enabled-tools flags
+/// in the rendered YAML. This exercises standalone.rs wiring + generate_enabled_tools_args
+/// + template substitution end-to-end.
+#[test]
+fn test_safe_outputs_enabled_tools_in_compiled_output() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-enabled-tools-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("tools-agent.md");
+    let test_content = r#"---
+name: "Enabled Tools Agent"
+description: "Agent with specific safe-outputs to verify enabled-tools flags"
+permissions:
+  write: my-write-sc
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+  create-work-item:
+    work-item-type: Task
+---
+
+## Agent
+
+Do something.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("tools-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+
+    // Configured safe-output tools must appear as --enabled-tools flags
+    assert!(
+        compiled.contains("--enabled-tools create-pull-request"),
+        "Compiled output should contain --enabled-tools create-pull-request"
+    );
+    assert!(
+        compiled.contains("--enabled-tools create-work-item"),
+        "Compiled output should contain --enabled-tools create-work-item"
+    );
+
+    // Always-on diagnostic tools must also appear
+    assert!(
+        compiled.contains("--enabled-tools noop"),
+        "Compiled output should contain --enabled-tools noop"
+    );
+    assert!(
+        compiled.contains("--enabled-tools missing-data"),
+        "Compiled output should contain --enabled-tools missing-data"
+    );
+
+    // Tools NOT in safe-outputs should NOT appear (verifies filtering is selective)
+    assert!(
+        !compiled.contains("--enabled-tools update-wiki-page"),
+        "Non-configured tools should not appear in --enabled-tools"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}

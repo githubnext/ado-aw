@@ -133,6 +133,7 @@ impl Validate for UpdatePrParams {
 
 tool_result! {
     name = "update-pr",
+    write = true,
     params = UpdatePrParams,
     /// Result of updating a pull request
     pub struct UpdatePrResult {

@@ -47,6 +47,7 @@ impl Validate for ReplyToPrCommentParams {
 
 tool_result! {
     name = "reply-to-pr-review-comment",
+    write = true,
     params = ReplyToPrCommentParams,
     /// Result of replying to a review comment thread on a pull request
     pub struct ReplyToPrCommentResult {

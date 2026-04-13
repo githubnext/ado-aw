@@ -188,6 +188,7 @@ pub struct CreatePrResult {
 
 impl crate::tools::ToolResult for CreatePrResult {
     const NAME: &'static str = "create-pull-request";
+    const REQUIRES_WRITE: bool = true;
 }
 
 impl Sanitize for CreatePrResult {

@@ -75,6 +75,7 @@ impl Validate for ResolvePrThreadParams {
 
 tool_result! {
     name = "resolve-pr-review-thread",
+    write = true,
     params = ResolvePrThreadParams,
     /// Result of resolving or reactivating a PR review thread
     pub struct ResolvePrThreadResult {

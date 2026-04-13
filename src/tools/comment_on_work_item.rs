@@ -31,6 +31,7 @@ impl Validate for CommentOnWorkItemParams {
 
 tool_result! {
     name = "comment-on-work-item",
+    write = true,
     params = CommentOnWorkItemParams,
     /// Result of commenting on a work item
     pub struct CommentOnWorkItemResult {
