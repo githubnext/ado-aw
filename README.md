@@ -237,6 +237,7 @@ the service connections. Approve the permissions and the pipeline is ready.
 | `setup` | list | — | Separate job before agentic task |
 | `teardown` | list | — | Separate job after safe outputs |
 | `network` | object | — | Additional allowed/blocked hosts |
+| `env` | map | — | Workflow-level environment variables (reserved, not yet implemented) |
 
 ### Markdown Body
 
@@ -315,7 +316,23 @@ actions, and the executor processes them after threat analysis.
 |------|-------------|
 | `create-pull-request` | Creates a PR from the agent's code changes |
 | `create-work-item` | Creates an ADO work item (Task, Bug, etc.) |
+| `comment-on-work-item` | Adds a comment to an existing ADO work item |
+| `update-work-item` | Updates fields on an existing ADO work item |
+| `create-wiki-page` | Creates a new Azure DevOps wiki page |
+| `update-wiki-page` | Updates the content of an existing wiki page |
+| `add-pr-comment` | Adds a comment thread on a pull request |
+| `reply-to-pr-comment` | Replies to an existing PR review comment thread |
+| `resolve-pr-thread` | Resolves or updates the status of a PR review thread |
+| `submit-pr-review` | Submits a review vote on a pull request |
+| `update-pr` | Updates pull request metadata (reviewers, labels, auto-complete, etc.) |
+| `link-work-items` | Links two ADO work items together |
+| `queue-build` | Queues a pipeline build by definition ID |
+| `create-git-tag` | Creates a git tag on a repository ref |
+| `create-branch` | Creates a new branch from an existing ref |
+| `add-build-tag` | Adds a tag to an ADO build |
+| `upload-attachment` | Uploads a workspace file as an attachment to a work item |
 | `memory` | Persists files across agent runs |
+| `report-incomplete` | Reports that a task could not be completed |
 | `noop` | Reports no action was needed |
 | `missing-data` | Reports required data was unavailable |
 | `missing-tool` | Reports a needed tool was missing |
@@ -384,9 +401,10 @@ Commands:
   compile       Compile markdown to pipeline definition
   check         Verify a compiled pipeline matches its source
   mcp           Run as an MCP server (safe outputs)
+  mcp-http      Run as an HTTP MCP server (for MCPG integration)
   execute       Execute safe outputs (Stage 2)
   proxy         Start an HTTP proxy for network filtering
-  mcp-firewall  Start an MCP firewall server
+  configure     Detect agentic pipelines and update GITHUB_TOKEN on ADO definitions
 
 Options:
   -v, --verbose  Enable info-level logging
