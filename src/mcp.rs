@@ -1361,8 +1361,8 @@ mod tests {
     }
 
     /// Asserts that ALL_KNOWN_SAFE_OUTPUTS contains every tool registered in the
-    /// router (plus the non-MCP keys like "memory"). This prevents the list from
-    /// drifting when new tools are added to the router but not to the constant.
+    /// router. This prevents the list from drifting when new tools are added to
+    /// the router but not to the constant.
     #[tokio::test]
     async fn test_all_known_safe_outputs_covers_router() {
         use crate::safeoutputs::ALL_KNOWN_SAFE_OUTPUTS;
