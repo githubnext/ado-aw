@@ -806,7 +806,10 @@ impl Executor for CreatePrResult {
             worktree_path: worktree_path.clone(),
         };
 
-        // Create and checkout the source branch in the worktree
+        // Create and checkout a local branch in the worktree for patch application.
+        // Note: this local branch name may differ from the final remote branch name
+        // if a collision is detected later — the ADO push is REST-only, so the local
+        // branch name is not used for the remote ref.
         debug!("Creating source branch: {}", source_branch);
         let checkout_output = Command::new("git")
             .args(["checkout", "-b", &source_branch])
@@ -883,18 +886,24 @@ impl Executor for CreatePrResult {
             }
             debug!("Patch applied with git apply --3way fallback");
 
-            // Check for unresolved conflict markers — git apply --3way can succeed
-            // while leaving conflict markers in files
+            // Scan for unresolved conflict markers in working tree files.
+            // We use git grep instead of git diff --check because diff --check
+            // also flags trailing whitespace, producing false positives.
             let conflict_check = Command::new("git")
-                .args(["diff", "--check"])
+                .args(["grep", "-l", "-P", r"^[<=>]{7}( |$)"])
                 .current_dir(&worktree_path)
                 .output()
                 .await
-                .context("Failed to run git diff --check")?;
+                .context("Failed to run git grep for conflict markers")?;
 
-            if !conflict_check.status.success() {
-                let err_msg =
-                    "Patch applied with unresolved conflicts — resolve manually".to_string();
+            // git grep exits 0 when matches are found, 1 when no matches
+            if conflict_check.status.success() {
+                let conflicting_files =
+                    String::from_utf8_lossy(&conflict_check.stdout).trim().to_string();
+                let err_msg = format!(
+                    "Patch applied with unresolved conflict markers in: {}",
+                    conflicting_files
+                );
                 warn!("{}", err_msg);
                 return Ok(ExecutionResult::failure(err_msg));
             }
