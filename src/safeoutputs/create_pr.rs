@@ -841,37 +841,16 @@ impl Executor for CreatePrResult {
         let base_sha = String::from_utf8_lossy(&base_sha_output.stdout).trim().to_string();
         debug!("Worktree base SHA before patch: {}", base_sha);
 
-        // Apply the format-patch using git am --3way for proper conflict handling.
-        // git am handles the email-style patch format from git format-patch and
-        // --3way enables three-way merge for better conflict resolution.
-        // Excluded files are filtered via --exclude flags at the git level.
-        debug!("Applying patch with git am --3way");
-        let mut am_args: Vec<String> = vec!["am".into(), "--3way".into()];
-        am_args.extend(exclude_args.iter().cloned());
-        am_args.push(patch_path.to_string_lossy().into_owned());
-        let am_output = Command::new("git")
-            .args(&am_args)
-            .current_dir(&worktree_path)
-            .output()
-            .await
-            .context("Failed to run git am")?;
+        // Apply the patch. Strategy depends on whether excluded-files are configured:
+        // - Without exclusions: prefer git am --3way (preserves commit metadata)
+        //   with git apply --3way as fallback
+        // - With exclusions: use git apply --3way directly (git am does not support
+        //   --exclude flags; git apply does)
+        let use_git_apply = !exclude_args.is_empty();
+        let patch_committed;
 
-        // Track whether git am created a commit (affects how we collect changes)
-        let patch_committed = am_output.status.success();
-
-        if !patch_committed {
-            let stderr = String::from_utf8_lossy(&am_output.stderr);
-            debug!("git am --3way failed: {}", stderr);
-
-            // Abort the failed am to leave worktree clean
-            let _ = Command::new("git")
-                .args(["am", "--abort"])
-                .current_dir(&worktree_path)
-                .output()
-                .await;
-
-            // Fallback: try git apply (handles plain diff format for backward compatibility)
-            debug!("Falling back to git apply --3way");
+        if use_git_apply {
+            debug!("Using git apply --3way (excluded-files configured)");
             let mut apply_args: Vec<String> = vec!["apply".into(), "--3way".into()];
             apply_args.extend(exclude_args.iter().cloned());
             apply_args.push(patch_path.to_string_lossy().into_owned());
@@ -890,7 +869,7 @@ impl Executor for CreatePrResult {
                 warn!("{}", err_msg);
                 return Ok(ExecutionResult::failure(err_msg));
             }
-            debug!("Patch applied with git apply --3way fallback");
+            debug!("Patch applied with git apply --3way");
 
             // Scan for unresolved conflict markers in working tree files.
             // Use specific patterns: <<<<<<< and >>>>>>> always have a trailing space
@@ -904,7 +883,6 @@ impl Executor for CreatePrResult {
                 .await
                 .context("Failed to run git grep for conflict markers")?;
 
-            // git grep exits 0 when matches are found, 1 when no matches
             if conflict_check.status.success() {
                 let conflicting_files =
                     String::from_utf8_lossy(&conflict_check.stdout).trim().to_string();
@@ -915,8 +893,71 @@ impl Executor for CreatePrResult {
                 warn!("{}", err_msg);
                 return Ok(ExecutionResult::failure(err_msg));
             }
+
+            patch_committed = false;
         } else {
-            debug!("Patch applied successfully with git am");
+            // No exclusions — use git am --3way for proper commit metadata preservation
+            debug!("Applying patch with git am --3way");
+            let am_output = Command::new("git")
+                .args(["am", "--3way", &patch_path.to_string_lossy()])
+                .current_dir(&worktree_path)
+                .output()
+                .await
+                .context("Failed to run git am")?;
+
+            patch_committed = am_output.status.success();
+
+            if !patch_committed {
+                let stderr = String::from_utf8_lossy(&am_output.stderr);
+                debug!("git am --3way failed: {}", stderr);
+
+                // Abort the failed am to leave worktree clean
+                let _ = Command::new("git")
+                    .args(["am", "--abort"])
+                    .current_dir(&worktree_path)
+                    .output()
+                    .await;
+
+                // Fallback: try git apply --3way
+                debug!("Falling back to git apply --3way");
+                let apply_output = Command::new("git")
+                    .args(["apply", "--3way", &patch_path.to_string_lossy()])
+                    .current_dir(&worktree_path)
+                    .output()
+                    .await
+                    .context("Failed to run git apply --3way")?;
+
+                if !apply_output.status.success() {
+                    let err_msg = format!(
+                        "Patch could not be applied (conflicts): {}",
+                        String::from_utf8_lossy(&apply_output.stderr)
+                    );
+                    warn!("{}", err_msg);
+                    return Ok(ExecutionResult::failure(err_msg));
+                }
+                debug!("Patch applied with git apply --3way fallback");
+
+                // Scan for unresolved conflict markers
+                let conflict_check = Command::new("git")
+                    .args(["grep", "-l", "-E", r"^(<<<<<<<\s|>>>>>>>\s)"])
+                    .current_dir(&worktree_path)
+                    .output()
+                    .await
+                    .context("Failed to run git grep for conflict markers")?;
+
+                if conflict_check.status.success() {
+                    let conflicting_files =
+                        String::from_utf8_lossy(&conflict_check.stdout).trim().to_string();
+                    let err_msg = format!(
+                        "Patch applied with unresolved conflict markers in: {}",
+                        conflicting_files
+                    );
+                    warn!("{}", err_msg);
+                    return Ok(ExecutionResult::failure(err_msg));
+                }
+            } else {
+                debug!("Patch applied successfully with git am");
+            }
         }
 
         // Collect changed files. The method depends on how the patch was applied:
@@ -2162,6 +2203,61 @@ new file mode 100755
         ];
         let protected = find_protected_files(&paths);
         assert_eq!(protected.len(), 7);
+    }
+
+    // ─── Glob matching ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_glob_match_simple_basename_wildcard() {
+        assert!(glob_match_simple("*.lock", "Cargo.lock"));
+        assert!(glob_match_simple("*.lock", "subdir/Cargo.lock"));
+        assert!(glob_match_simple("*.lock", "a/b/c/yarn.lock"));
+        assert!(!glob_match_simple("*.lock", "Cargo.toml"));
+    }
+
+    #[test]
+    fn test_glob_match_simple_basename_exact() {
+        assert!(glob_match_simple("package.json", "package.json"));
+        assert!(glob_match_simple("package.json", "subdir/package.json"));
+        assert!(!glob_match_simple("package.json", "other.json"));
+    }
+
+    #[test]
+    fn test_glob_match_simple_double_star_prefix() {
+        assert!(glob_match_simple("**/Cargo.lock", "Cargo.lock"));
+        assert!(glob_match_simple("**/Cargo.lock", "subdir/Cargo.lock"));
+        assert!(glob_match_simple("**/Cargo.lock", "a/b/c/Cargo.lock"));
+        assert!(!glob_match_simple("**/Cargo.lock", "Cargo.toml"));
+    }
+
+    #[test]
+    fn test_glob_match_simple_double_star_wildcard() {
+        assert!(glob_match_simple("**/*.json", "package.json"));
+        assert!(glob_match_simple("**/*.json", "subdir/package.json"));
+        assert!(!glob_match_simple("**/*.json", "package.lock"));
+    }
+
+    #[test]
+    fn test_glob_match_simple_path_with_slash() {
+        assert!(glob_match_simple("src/*.rs", "src/main.rs"));
+        assert!(!glob_match_simple("src/*.rs", "tests/main.rs"));
+    }
+
+    #[test]
+    fn test_glob_match_does_not_match_adjacent_protected() {
+        // *.lock should not match package.json
+        assert!(!glob_match_simple("*.lock", "package.json"));
+        assert!(!glob_match_simple("*.lock", "go.mod"));
+    }
+
+    #[test]
+    fn test_wildcard_match() {
+        assert!(wildcard_match("*.lock", "Cargo.lock"));
+        assert!(wildcard_match("foo", "foo"));
+        assert!(!wildcard_match("foo", "bar"));
+        assert!(wildcard_match("*", "anything"));
+        assert!(wildcard_match("pre*suf", "pre-middle-suf"));
+        assert!(!wildcard_match("pre*suf", "pre-middle-other"));
     }
 
     // ─── Extract paths from patch ───────────────────────────────────────────
