@@ -445,7 +445,9 @@ impl SafeOutputs {
         }
 
         // Fallback: find the root commit. Only valid for single-commit repos where HEAD~1
-        // doesn't exist. For repos with longer history this would produce enormous patches.
+        // doesn't exist. Verify the repo truly has only one commit total before
+        // using the root commit — most repos have exactly one root commit regardless
+        // of total commits (roots.len() == 1 would match virtually any repo).
         let root_output = Command::new("git")
             .args(["rev-list", "--max-parents=0", "HEAD"])
             .current_dir(git_dir)
@@ -457,15 +459,35 @@ impl SafeOutputs {
             let output_str = String::from_utf8_lossy(&out.stdout).to_string();
             let roots: Vec<&str> = output_str.trim().lines().collect();
 
-            // Only use root commit fallback for repos with a single commit
             if roots.len() == 1 {
-                let sha = roots[0].to_string();
-                warn!(
-                    "Could not find merge-base with origin; using root commit {} \
-                     (single-commit repository)",
-                    sha
-                );
-                return Ok(sha);
+                // Check total commit count to distinguish single-commit repos
+                // from normal repos that happen to have one root
+                let count_output = Command::new("git")
+                    .args(["rev-list", "--count", "HEAD"])
+                    .current_dir(git_dir)
+                    .output()
+                    .await
+                    .ok();
+
+                let commit_count = count_output
+                    .filter(|o| o.status.success())
+                    .and_then(|o| {
+                        String::from_utf8_lossy(&o.stdout)
+                            .trim()
+                            .parse::<u64>()
+                            .ok()
+                    })
+                    .unwrap_or(0);
+
+                if commit_count <= 1 {
+                    let sha = roots[0].to_string();
+                    warn!(
+                        "Could not find merge-base with origin; using root commit {} \
+                         (single-commit repository)",
+                        sha
+                    );
+                    return Ok(sha);
+                }
             }
         }
 
