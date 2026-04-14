@@ -147,7 +147,6 @@ tools:                         # optional tool configuration
   #   toolsets: [repos, wit]
   #   allowed: [wit_get_work_item]
   #   org: myorg
-  #   project: MyProject
 # env:                          # RESERVED: workflow-level environment variables (not yet implemented)
 #   CUSTOM_VAR: "value"
 mcp-servers:
@@ -443,7 +442,7 @@ During Stage 2 execution, memory files are validated (path safety, extension fil
 First-class Azure DevOps MCP integration. Auto-configures the ADO MCP container, token mapping, MCPG entry, and network allowlist.
 
 ```yaml
-# Simple enablement (auto-infers org/project from pipeline vars)
+# Simple enablement (auto-infers org from git remote)
 tools:
   azure-devops: true
 
@@ -452,15 +451,15 @@ tools:
   azure-devops:
     toolsets: [repos, wit, core]                    # ADO API toolset groups
     allowed: [wit_get_work_item, core_list_projects] # Explicit tool allow-list
-    org: myorg                                       # Optional override
-    project: MyProject                               # Optional override
+    org: myorg                                       # Optional override (inferred from git remote)
 ```
 
 When enabled, the compiler:
 - Generates a containerized stdio MCP entry (`node:20-slim` + `npx @azure-devops/mcp`) in the MCPG config
 - Auto-maps `AZURE_DEVOPS_EXT_PAT` token passthrough when `permissions.read` is configured
 - Adds ADO-specific hosts to the network allowlist
-- Auto-infers org from `$(System.TeamFoundationCollectionUri)` at runtime (overridable via `org:` field)
+- Auto-infers org from the git remote URL at compile time (overridable via `org:` field)
+- Fails compilation if org cannot be determined (no explicit override and no ADO git remote)
 
 ### Target Platforms
 

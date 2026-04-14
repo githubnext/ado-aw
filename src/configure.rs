@@ -151,7 +151,7 @@ pub fn parse_ado_remote(remote_url: &str) -> Result<AdoContext> {
 }
 
 /// Get the git remote URL for the repository at `repo_path`.
-async fn get_git_remote_url(repo_path: &Path) -> Result<String> {
+pub async fn get_git_remote_url(repo_path: &Path) -> Result<String> {
     let output = tokio::process::Command::new("git")
         .args(["remote", "get-url", "origin"])
         .current_dir(repo_path)

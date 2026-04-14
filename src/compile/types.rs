@@ -273,7 +273,7 @@ pub struct CacheMemoryOptions {
 ///
 /// Examples:
 /// ```yaml
-/// # Simple enablement (auto-infers org/project from pipeline vars)
+/// # Simple enablement (auto-infers org from git remote)
 /// azure-devops: true
 ///
 /// # With scoping options
@@ -281,7 +281,6 @@ pub struct CacheMemoryOptions {
 ///   toolsets: [repos, wit, core]
 ///   allowed: [wit_get_work_item, wit_my_work_items]
 ///   org: myorg
-///   project: MyProject
 /// ```
 #[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
@@ -317,19 +316,11 @@ impl AzureDevOpsToolConfig {
         }
     }
 
-    /// Get the org override (None = auto-infer from pipeline vars)
+    /// Get the org override (None = auto-infer from git remote)
     pub fn org(&self) -> Option<&str> {
         match self {
             AzureDevOpsToolConfig::Enabled(_) => None,
             AzureDevOpsToolConfig::WithOptions(opts) => opts.org.as_deref(),
-        }
-    }
-
-    /// Get the project override (None = auto-infer from pipeline vars)
-    pub fn project(&self) -> Option<&str> {
-        match self {
-            AzureDevOpsToolConfig::Enabled(_) => None,
-            AzureDevOpsToolConfig::WithOptions(opts) => opts.project.as_deref(),
         }
     }
 }
@@ -346,13 +337,9 @@ pub struct AzureDevOpsOptions {
     #[serde(default)]
     pub allowed: Vec<String>,
     /// Azure DevOps organization name override.
-    /// Auto-inferred from pipeline variables if not specified.
+    /// Auto-inferred from the git remote URL at compile time if not specified.
     #[serde(default)]
     pub org: Option<String>,
-    /// Azure DevOps project name override.
-    /// Auto-inferred from pipeline variables if not specified.
-    #[serde(default)]
-    pub project: Option<String>,
 }
 
 /// Azure DevOps runtime parameter definition.
@@ -899,7 +886,6 @@ Body
         assert!(ado.toolsets().is_empty());
         assert!(ado.allowed().is_empty());
         assert!(ado.org().is_none());
-        assert!(ado.project().is_none());
     }
 
     #[test]
@@ -912,7 +898,6 @@ tools:
     toolsets: [repos, wit, core]
     allowed: [wit_get_work_item, core_list_projects]
     org: myorg
-    project: MyProject
 ---
 
 Body
@@ -923,7 +908,6 @@ Body
         assert_eq!(ado.toolsets(), &["repos", "wit", "core"]);
         assert_eq!(ado.allowed(), &["wit_get_work_item", "core_list_projects"]);
         assert_eq!(ado.org(), Some("myorg"));
-        assert_eq!(ado.project(), Some("MyProject"));
     }
 
     #[test]
