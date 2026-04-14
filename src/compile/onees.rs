@@ -432,7 +432,7 @@ mod tests {
         mcps.insert(
             "my-tool".to_string(),
             McpConfig::WithOptions(McpOptions {
-                command: Some("node".to_string()),
+                container: Some("node:20-slim".to_string()),
                 ..Default::default()
             }),
         );
