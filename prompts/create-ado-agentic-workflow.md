@@ -180,7 +180,7 @@ target: 1es
 
 MCP servers give the agent tools at runtime. Two kinds:
 
-**Built-in** (no `command:` field):
+**Built-in** (no `container:` field):
 ```yaml
 mcp-servers:
   ado: true                  # All ADO tools
@@ -200,12 +200,13 @@ mcp-servers:
   calculator: true
 ```
 
-**Custom** (has `command:` field):
+**Custom** (containerized MCP with `container:` field):
 ```yaml
 mcp-servers:
   my-tool:
-    command: "node"
-    args: ["path/to/server.js"]
+    container: "node:20-slim"
+    entrypoint: "node"
+    entrypoint-args: ["path/to/server.js"]
     env:
       API_KEY: "$(MY_SECRET)"
     allowed:
@@ -215,7 +216,7 @@ mcp-servers:
 
 > **Security**: Custom MCPs must have an explicit `allowed:` list. Built-in MCPs default to all tools when set to `true`.
 >
-> **1ES target**: Custom MCPs (`command:`) are not supported — only built-ins with service connections.
+> **1ES target**: Custom containerized MCPs are not supported — only built-ins with service connections.
 
 ### Step 9 — Safe Outputs
 
@@ -251,17 +252,17 @@ safe-outputs:
       branch: main
 ```
 
-**memory** — persistent agent memory across runs:
+**cache-memory** — persistent agent memory across runs (configured under `tools:`, not `safe-outputs:`):
 ```yaml
-safe-outputs:
-  memory:
+tools:
+  cache-memory:
     allowed-extensions:
       - .md
       - .json
       - .txt
 ```
 
-Other safe output tools (no configuration needed): `noop`, `missing-data`, `missing-tool`.
+Other safe output tools (no configuration needed): `noop`, `missing-data`, `missing-tool`, `report-incomplete`.
 
 > **Validation**: The compiler enforces that if `create-pull-request` or `create-work-item` are configured, `permissions.write` must be set.
 

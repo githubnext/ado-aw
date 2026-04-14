@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.11.0](https://github.com/githubnext/ado-aw/compare/v0.10.0...v0.11.0) (2026-04-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* The create subcommand has been removed. Use ado-aw init instead.
+
+### Features
+
+* **create-pr:** align with gh-aw create-pull-request implementation ([#155](https://github.com/githubnext/ado-aw/issues/155)) ([b1859ae](https://github.com/githubnext/ado-aw/commit/b1859ae92934a12ff6d305d06804929cff96bf0b))
+* replace create wizard with AI-first onboarding ([#187](https://github.com/githubnext/ado-aw/issues/187)) ([c468320](https://github.com/githubnext/ado-aw/commit/c468320d868b943826129d08b17a0c3ad5ca805c))
+
+
+### Bug Fixes
+
+* address injection vulnerabilities from red team audit ([#171](https://github.com/githubnext/ado-aw/issues/171)) ([#175](https://github.com/githubnext/ado-aw/issues/175)) ([5e3ac1b](https://github.com/githubnext/ado-aw/commit/5e3ac1bcba42da9f640479fd4bd77766db97c5de))
+* pin prompt URLs to version tag instead of main branch ([#191](https://github.com/githubnext/ado-aw/issues/191)) ([1f3b6da](https://github.com/githubnext/ado-aw/commit/1f3b6da140edba1b527d79c5a20560abe5fb923a))
+
 ## [0.10.0](https://github.com/githubnext/ado-aw/compare/v0.9.0...v0.10.0) (2026-04-14)
 
 

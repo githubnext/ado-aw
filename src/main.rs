@@ -8,14 +8,12 @@ mod init;
 mod logging;
 mod mcp;
 mod ndjson;
-mod proxy;
 pub mod sanitize;
 mod safeoutputs;
 mod tools;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use log::debug;
 use std::path::PathBuf;
 
 use crate::safeoutputs::ExecutionContext;
@@ -63,12 +61,6 @@ enum Commands {
         /// Azure DevOps project name (overrides SYSTEM_TEAMPROJECT env var)
         #[arg(long)]
         ado_project: Option<String>,
-    },
-    /// Start an HTTP proxy for network filtering
-    Proxy {
-        /// Allowed hosts (can be specified multiple times, supports wildcards like *.github.com)
-        #[arg(long = "allow")]
-        allowed_hosts: Vec<String>,
     },
     /// Run SafeOutputs MCP server over HTTP (for MCPG integration)
     McpHttp {
@@ -144,7 +136,6 @@ async fn main() -> Result<()> {
         Some(Commands::Check { .. }) => "check",
         Some(Commands::Mcp { .. }) => "mcp",
         Some(Commands::Execute { .. }) => "execute",
-        Some(Commands::Proxy { .. }) => "proxy",
         Some(Commands::McpHttp { .. }) => "mcp-http",
         Some(Commands::Init { .. }) => "init",
         Some(Commands::Configure { .. }) => "configure",
@@ -254,37 +245,26 @@ async fn main() -> Result<()> {
                 }
 
                 // Print summary
-                let success_count = results.iter().filter(|r| r.success).count();
-                let failure_count = results.len() - success_count;
+                let success_count = results.iter().filter(|r| r.success && !r.is_warning()).count();
+                let warning_count = results.iter().filter(|r| r.is_warning()).count();
+                let failure_count = results.iter().filter(|r| !r.success).count();
 
                 println!("\n--- Execution Summary ---");
                 println!(
-                    "Total: {} | Success: {} | Failed: {}",
+                    "Total: {} | Success: {} | Warnings: {} | Failed: {}",
                     results.len(),
                     success_count,
+                    warning_count,
                     failure_count
                 );
 
                 if failure_count > 0 {
                     std::process::exit(1);
+                } else if warning_count > 0 {
+                    // Exit code 2 signals "succeeded with issues" — the pipeline
+                    // step wraps this to emit ##vso[task.complete result=SucceededWithIssues;]
+                    std::process::exit(2);
                 }
-            }
-            Commands::Proxy { allowed_hosts } => {
-                // NetworkPolicy::new() includes default hosts plus any user-specified additional hosts
-                let policy = proxy::NetworkPolicy::new(allowed_hosts);
-
-                // start_proxy prints the port and flushes stdout before spawning the listener
-                let _port = proxy::start_proxy(policy).await?;
-
-                debug!("Proxy started, waiting for termination signal");
-
-                // Keep running until terminated - the shell backgrounds this process
-                // and captures the PID for cleanup
-                #[cfg(unix)]
-                tokio::signal::ctrl_c().await?;
-
-                #[cfg(windows)]
-                std::future::pending::<()>().await;
             }
             Commands::McpHttp {
                 port,
