@@ -94,23 +94,68 @@ pub fn replace_with_indent(template: &str, placeholder: &str, replacement: &str)
 /// ```
 ///
 /// Returns an empty string if the parameters list is empty.
-pub fn generate_parameters(parameters: &[PipelineParameter]) -> String {
+/// Returns an error if any parameter name is not a valid ADO identifier.
+pub fn generate_parameters(parameters: &[PipelineParameter]) -> Result<String> {
     if parameters.is_empty() {
-        return String::new();
+        return Ok(String::new());
+    }
+
+    // Validate parameter names — must be valid ADO identifiers to prevent
+    // YAML injection or template expression injection.
+    for p in parameters {
+        if !is_valid_parameter_name(&p.name) {
+            anyhow::bail!(
+                "Invalid parameter name '{}': must match [A-Za-z_][A-Za-z0-9_]* (ADO identifier)",
+                p.name
+            );
+        }
     }
 
     let yaml = serde_yaml::to_string(&serde_yaml::Value::Sequence(
         parameters
             .iter()
-            .map(|p| serde_yaml::to_value(p).expect("PipelineParameter should serialize"))
-            .collect(),
+            .map(|p| serde_yaml::to_value(p).context("Failed to serialize pipeline parameter"))
+            .collect::<Result<Vec<_>>>()?,
     ))
-    .expect("parameters should serialize to YAML");
+    .context("Failed to serialize parameters to YAML")?;
 
     // serde_yaml outputs the sequence without a key; we need to wrap it under `parameters:`
-    format!("parameters:\n{}", yaml)
+    Ok(format!("parameters:\n{}", yaml))
 }
 
+/// Validate that a string is a valid ADO pipeline parameter name (`[A-Za-z_][A-Za-z0-9_]*`).
+fn is_valid_parameter_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Build the final parameters list by combining user-defined parameters
+/// with auto-injected parameters (e.g., `clearMemory` when memory is enabled).
+pub fn build_parameters(user_params: &[PipelineParameter], has_memory: bool) -> Vec<PipelineParameter> {
+    let mut params = user_params.to_vec();
+
+    // Auto-inject clearMemory parameter when memory is configured,
+    // unless the user already defined one with the same name.
+    if has_memory && !params.iter().any(|p| p.name == "clearMemory") {
+        params.insert(
+            0,
+            PipelineParameter {
+                name: "clearMemory".to_string(),
+                display_name: Some("Clear agent memory".to_string()),
+                param_type: Some("boolean".to_string()),
+                default: Some(serde_yaml::Value::Bool(false)),
+                values: None,
+            },
+        );
+    }
+
+    params
+}
+
+/// Generate a schedule YAML block from a fuzzy schedule expression.
 pub fn generate_schedule(name: &str, config: &super::types::ScheduleConfig) -> Result<String> {
     let branches = config.branches();
     let fallback;
@@ -1814,6 +1859,65 @@ mod tests {
         ).unwrap();
         let args = generate_enabled_tools_args(&fm);
         assert!(args.is_empty(), "memory-only safe-outputs should produce no args (all tools available)");
+    }
+
+    // ─── parameter name validation ──────────────────────────────────────────
+
+    #[test]
+    fn test_is_valid_parameter_name() {
+        assert!(is_valid_parameter_name("clearMemory"));
+        assert!(is_valid_parameter_name("myParam"));
+        assert!(is_valid_parameter_name("_private"));
+        assert!(is_valid_parameter_name("param123"));
+        assert!(!is_valid_parameter_name(""));
+        assert!(!is_valid_parameter_name("has space"));
+        assert!(!is_valid_parameter_name("has-dash"));
+        assert!(!is_valid_parameter_name("${{inject}}"));
+        assert!(!is_valid_parameter_name("123startsWithDigit"));
+    }
+
+    #[test]
+    fn test_generate_parameters_rejects_invalid_name() {
+        let params = vec![PipelineParameter {
+            name: "${{evil}}".to_string(),
+            display_name: None,
+            param_type: None,
+            default: None,
+            values: None,
+        }];
+        let result = generate_parameters(&params);
+        assert!(result.is_err(), "Should reject invalid parameter name");
+        assert!(
+            result.unwrap_err().to_string().contains("Invalid parameter name"),
+            "Error should mention invalid parameter name"
+        );
+    }
+
+    #[test]
+    fn test_build_parameters_auto_injects_clear_memory() {
+        let params = build_parameters(&[], true);
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "clearMemory");
+    }
+
+    #[test]
+    fn test_build_parameters_no_inject_without_memory() {
+        let params = build_parameters(&[], false);
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_build_parameters_no_duplicate_clear_memory() {
+        let user = vec![PipelineParameter {
+            name: "clearMemory".to_string(),
+            display_name: Some("Custom".to_string()),
+            param_type: Some("boolean".to_string()),
+            default: Some(serde_yaml::Value::Bool(true)),
+            values: None,
+        }];
+        let params = build_parameters(&user, true);
+        assert_eq!(params.len(), 1, "Should not duplicate clearMemory");
+        assert_eq!(params[0].display_name.as_deref(), Some("Custom"), "Should keep user's definition");
     }
 
     // ─── replace_with_indent ─────────────────────────────────────────────────
