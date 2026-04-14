@@ -109,6 +109,19 @@ pub fn generate_parameters(parameters: &[PipelineParameter]) -> Result<String> {
                 p.name
             );
         }
+        // Reject ADO expressions in string fields to prevent template expression injection.
+        // Parameter definitions should only contain literal values.
+        if let Some(ref display_name) = p.display_name {
+            reject_ado_expressions(display_name, &p.name, "displayName")?;
+        }
+        if let Some(ref default) = p.default {
+            reject_ado_expressions_in_value(default, &p.name, "default")?;
+        }
+        if let Some(ref values) = p.values {
+            for v in values {
+                reject_ado_expressions_in_value(v, &p.name, "values")?;
+            }
+        }
     }
 
     let yaml = serde_yaml::to_string(&serde_yaml::Value::Sequence(
@@ -130,6 +143,40 @@ fn is_valid_parameter_name(name: &str) -> bool {
         .next()
         .map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Reject ADO template expressions (`${{`) and macro expressions (`$(`) in a string value.
+/// Parameter definitions should only contain literal values — expressions could enable
+/// information disclosure or logic manipulation in the generated pipeline.
+fn reject_ado_expressions(value: &str, param_name: &str, field_name: &str) -> Result<()> {
+    if value.contains("${{") || value.contains("$(") {
+        anyhow::bail!(
+            "Parameter '{}' field '{}' contains an ADO expression ('${{{{' or '$(') which is not \
+             allowed in parameter definitions. Use literal values only.",
+            param_name,
+            field_name,
+        );
+    }
+    Ok(())
+}
+
+/// Reject ADO expressions in a serde_yaml::Value, recursing into strings within sequences.
+fn reject_ado_expressions_in_value(
+    value: &serde_yaml::Value,
+    param_name: &str,
+    field_name: &str,
+) -> Result<()> {
+    match value {
+        serde_yaml::Value::String(s) => reject_ado_expressions(s, param_name, field_name),
+        serde_yaml::Value::Sequence(seq) => {
+            for item in seq {
+                reject_ado_expressions_in_value(item, param_name, field_name)?;
+            }
+            Ok(())
+        }
+        // Booleans, numbers, null — safe, no injection risk
+        _ => Ok(()),
+    }
 }
 
 /// Build the final parameters list by combining user-defined parameters
@@ -1918,6 +1965,64 @@ mod tests {
         let params = build_parameters(&user, true);
         assert_eq!(params.len(), 1, "Should not duplicate clearMemory");
         assert_eq!(params[0].display_name.as_deref(), Some("Custom"), "Should keep user's definition");
+    }
+
+    #[test]
+    fn test_generate_parameters_rejects_expression_in_display_name() {
+        let params = vec![PipelineParameter {
+            name: "myParam".to_string(),
+            display_name: Some("Test ${{ variables.evil }}".to_string()),
+            param_type: None,
+            default: None,
+            values: None,
+        }];
+        let result = generate_parameters(&params);
+        assert!(result.is_err(), "Should reject ADO expression in displayName");
+    }
+
+    #[test]
+    fn test_generate_parameters_rejects_expression_in_default() {
+        let params = vec![PipelineParameter {
+            name: "myParam".to_string(),
+            display_name: None,
+            param_type: None,
+            default: Some(serde_yaml::Value::String("$(secretVar)".to_string())),
+            values: None,
+        }];
+        let result = generate_parameters(&params);
+        assert!(result.is_err(), "Should reject ADO macro expression in default");
+    }
+
+    #[test]
+    fn test_generate_parameters_rejects_expression_in_values() {
+        let params = vec![PipelineParameter {
+            name: "myParam".to_string(),
+            display_name: None,
+            param_type: None,
+            default: None,
+            values: Some(vec![
+                serde_yaml::Value::String("safe".to_string()),
+                serde_yaml::Value::String("${{ parameters.inject }}".to_string()),
+            ]),
+        }];
+        let result = generate_parameters(&params);
+        assert!(result.is_err(), "Should reject ADO expression in values");
+    }
+
+    #[test]
+    fn test_generate_parameters_allows_literal_values() {
+        let params = vec![PipelineParameter {
+            name: "region".to_string(),
+            display_name: Some("Target Region".to_string()),
+            param_type: Some("string".to_string()),
+            default: Some(serde_yaml::Value::String("us-east".to_string())),
+            values: Some(vec![
+                serde_yaml::Value::String("us-east".to_string()),
+                serde_yaml::Value::String("eu-west".to_string()),
+            ]),
+        }];
+        let result = generate_parameters(&params);
+        assert!(result.is_ok(), "Should accept literal values");
     }
 
     // ─── replace_with_indent ─────────────────────────────────────────────────

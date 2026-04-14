@@ -2403,11 +2403,11 @@ Do the thing.
 
     // Verify memory download has condition
     assert!(
-        compiled.contains("condition: eq('${{ parameters.clearMemory }}', false)"),
+        compiled.contains("condition: eq(${{ parameters.clearMemory }}, false)"),
         "Memory download should be conditional on clearMemory=false"
     );
     assert!(
-        compiled.contains("condition: eq('${{ parameters.clearMemory }}', true)"),
+        compiled.contains("condition: eq(${{ parameters.clearMemory }}, true)"),
         "Clear memory step should run when clearMemory=true"
     );
     assert!(

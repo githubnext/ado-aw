@@ -869,7 +869,7 @@ pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
 fn generate_memory_download() -> String {
     r#"- task: DownloadPipelineArtifact@2
   displayName: "Download previous agent memory"
-  condition: eq('${{ parameters.clearMemory }}', false)
+  condition: eq(${{ parameters.clearMemory }}, false)
   continueOnError: true
   inputs:
     source: "specific"
@@ -891,14 +891,14 @@ fn generate_memory_download() -> String {
       echo "No previous agent memory found - empty memory directory created"
     fi
   displayName: "Restore previous agent memory"
-  condition: eq('${{ parameters.clearMemory }}', false)
+  condition: eq(${{ parameters.clearMemory }}, false)
   continueOnError: true
 
 - bash: |
     mkdir -p /tmp/awf-tools/staging/agent_memory
     echo "Memory cleared by pipeline parameter - starting fresh"
   displayName: "Initialize empty agent memory (clearMemory=true)"
-  condition: eq('${{ parameters.clearMemory }}', true)"#
+  condition: eq(${{ parameters.clearMemory }}, true)"#
         .to_string()
 }
 
