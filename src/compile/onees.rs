@@ -24,9 +24,9 @@ use super::common::{
     generate_job_timeout, generate_parameters, generate_pipeline_path,
     generate_pipeline_resources, generate_pr_trigger, generate_repositories, generate_schedule,
     generate_source_path, generate_working_directory, is_custom_mcp, replace_with_indent,
-    validate_comment_target, validate_resolve_pr_thread_statuses,
-    validate_submit_pr_review_events, validate_update_pr_votes,
-    validate_update_work_item_target, validate_write_permissions,
+    validate_comment_target, validate_front_matter_identity,
+    validate_resolve_pr_thread_statuses, validate_submit_pr_review_events,
+    validate_update_pr_votes, validate_update_work_item_target, validate_write_permissions,
 };
 use super::types::{FrontMatter, McpConfig};
 
@@ -48,6 +48,9 @@ impl Compiler for OneESCompiler {
     ) -> Result<String> {
         info!("Compiling for 1ES target");
 
+        // Validate inputs early, before any values are used in template substitution
+        validate_front_matter_identity(front_matter)?;
+
         // Load 1ES template
         let template = include_str!("../../templates/1es-base.yml");
 
@@ -61,7 +64,7 @@ impl Compiler for OneESCompiler {
         let repositories = generate_repositories(&front_matter.repositories);
         let checkout_steps = generate_checkout_steps(&front_matter.checkout);
         let checkout_self = generate_checkout_self();
-        let copilot_params = generate_copilot_params(front_matter);
+        let copilot_params = generate_copilot_params(front_matter)?;
         let has_memory = front_matter
             .tools
             .as_ref()

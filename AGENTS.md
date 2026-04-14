@@ -189,7 +189,7 @@ teardown:                      # separate job AFTER safe outputs processing
 network:                       # optional network policy (standalone target only)
   allow:                       # additional allowed host patterns
     - "*.mycompany.com"
-  blocked:                     # blocked host patterns (takes precedence over allow)
+  blocked:                     # blocked host patterns (removes exact entries from the allow list)
     - "evil.example.com"
 permissions:                   # optional ADO access token configuration
   read: my-read-arm-connection   # ARM service connection for read-only ADO access (Stage 1 agent)

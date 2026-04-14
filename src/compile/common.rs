@@ -145,17 +145,44 @@ fn is_valid_parameter_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Reject ADO template expressions (`${{`) and macro expressions (`$(`) in a string value.
-/// Parameter definitions should only contain literal values — expressions could enable
-/// information disclosure or logic manipulation in the generated pipeline.
+/// Reject ADO template expressions (`${{`), macro expressions (`$(`), and runtime
+/// expressions (`$[`) in a string value. Parameter definitions should only contain
+/// literal values — expressions could enable information disclosure or logic manipulation
+/// in the generated pipeline.
 fn reject_ado_expressions(value: &str, param_name: &str, field_name: &str) -> Result<()> {
-    if value.contains("${{") || value.contains("$(") {
+    if value.contains("${{") || value.contains("$(") || value.contains("$[") {
         anyhow::bail!(
-            "Parameter '{}' field '{}' contains an ADO expression ('${{{{' or '$(') which is not \
-             allowed in parameter definitions. Use literal values only.",
+            "Parameter '{}' field '{}' contains an ADO expression ('${{{{', '$(', or '$[') which \
+             is not allowed in parameter definitions. Use literal values only.",
             param_name,
             field_name,
         );
+    }
+    Ok(())
+}
+
+/// Validate front matter `name` and `description` fields.
+///
+/// These values are substituted directly into the pipeline YAML template and must not
+/// contain ADO expressions (`${{`, `$(`, `$[`) which could disclose secrets or manipulate
+/// pipeline logic. Newlines are also rejected to prevent YAML structure injection.
+pub fn validate_front_matter_identity(front_matter: &FrontMatter) -> Result<()> {
+    for (field, value) in [("name", &front_matter.name), ("description", &front_matter.description)] {
+        if value.contains("${{") || value.contains("$(") || value.contains("$[") {
+            anyhow::bail!(
+                "Front matter '{}' contains an ADO expression ('${{{{', '$(', or '$[') which is not allowed. \
+                 Use literal values only. Found: '{}'",
+                field,
+                value,
+            );
+        }
+        if value.contains('\n') || value.contains('\r') {
+            anyhow::bail!(
+                "Front matter '{}' must be a single line (no newlines). \
+                 Multi-line values could inject YAML structure into the generated pipeline.",
+                field,
+            );
+        }
     }
     Ok(())
 }
@@ -265,10 +292,10 @@ pub fn generate_pipeline_resources(triggers: &Option<TriggerConfig>) -> Result<S
     let mut yaml = String::from("pipelines:\n");
 
     yaml.push_str(&format!("    - pipeline: {}\n", resource_id));
-    yaml.push_str(&format!("      source: '{}'\n", pipeline.name));
+    yaml.push_str(&format!("      source: '{}'\n", pipeline.name.replace('\'', "''")));
 
     if let Some(project) = &pipeline.project {
-        yaml.push_str(&format!("      project: '{}'\n", project));
+        yaml.push_str(&format!("      project: '{}'\n", project.replace('\'', "''")));
     }
 
     // If no branches specified, trigger on any branch
@@ -279,7 +306,7 @@ pub fn generate_pipeline_resources(triggers: &Option<TriggerConfig>) -> Result<S
         yaml.push_str("        branches:\n");
         yaml.push_str("          include:\n");
         for branch in &pipeline.branches {
-            yaml.push_str(&format!("            - {}\n", branch));
+            yaml.push_str(&format!("            - '{}'\n", branch.replace('\'', "''")));
         }
     }
 
@@ -388,7 +415,7 @@ const DEFAULT_BASH_COMMANDS: &[&str] = &[
 ];
 
 /// Generate copilot CLI params from front matter configuration
-pub fn generate_copilot_params(front_matter: &FrontMatter) -> String {
+pub fn generate_copilot_params(front_matter: &FrontMatter) -> Result<String> {
     let mut allowed_tools: Vec<String> = vec!["github".to_string(), "safeoutputs".to_string()];
 
     // Edit tool: enabled by default, can be disabled with `edit: false`
@@ -422,12 +449,35 @@ pub fn generate_copilot_params(front_matter: &FrontMatter) -> String {
         }
     };
     for cmd in bash_commands {
+        // Reject single quotes in bash commands — copilot_params are embedded inside
+        // a single-quoted bash string in the AWF command.
+        if cmd.contains('\'') {
+            anyhow::bail!(
+                "Bash command '{}' contains a single quote, which is not allowed \
+                 (would break AWF shell quoting).",
+                cmd
+            );
+        }
         allowed_tools.push(format!("shell({})", cmd));
     }
 
     let mut params = Vec::new();
 
-    params.push(format!("--model {}", front_matter.engine.model()));
+    // Validate model name to prevent shell injection — copilot_params are embedded
+    // inside a single-quoted bash string in the AWF command.
+    let model = front_matter.engine.model();
+    if model.is_empty()
+        || !model
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'))
+    {
+        anyhow::bail!(
+            "Model name '{}' contains invalid characters. \
+             Only ASCII alphanumerics, '.', '_', ':', and '-' are allowed.",
+            model
+        );
+    }
+    params.push(format!("--model {}", model));
     if front_matter.engine.max_turns().is_some() {
         eprintln!(
             "Warning: Agent '{}' has max-turns set, but max-turns is not supported by Copilot CLI \
@@ -458,7 +508,7 @@ pub fn generate_copilot_params(front_matter: &FrontMatter) -> String {
         }
     }
 
-    params.join(" ")
+    Ok(params.join(" "))
 }
 
 /// Compute the effective workspace based on explicit setting and checkout configuration.
@@ -1194,7 +1244,7 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = generate_copilot_params(&fm);
+        let params = generate_copilot_params(&fm).unwrap();
         assert!(params.contains("--allow-tool \"shell(:*)\""));
     }
 
@@ -1207,7 +1257,7 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = generate_copilot_params(&fm);
+        let params = generate_copilot_params(&fm).unwrap();
         assert!(!params.contains("shell("));
     }
 
@@ -1221,7 +1271,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let params = generate_copilot_params(&fm);
+        let params = generate_copilot_params(&fm).unwrap();
         assert!(!params.contains("--mcp my-tool"));
     }
 
@@ -1230,7 +1280,7 @@ mod tests {
         let mut fm = minimal_front_matter();
         fm.mcp_servers
             .insert("ado".to_string(), McpConfig::Enabled(true));
-        let params = generate_copilot_params(&fm);
+        let params = generate_copilot_params(&fm).unwrap();
         // Copilot CLI has no built-in MCPs — all MCPs are handled via the MCP firewall
         assert!(!params.contains("--mcp ado"));
     }
@@ -1241,14 +1291,14 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  max-turns: 50\n---\n",
         )
         .unwrap();
-        let params = generate_copilot_params(&fm);
+        let params = generate_copilot_params(&fm).unwrap();
         assert!(!params.contains("--max-turns"), "max-turns should not be emitted as a CLI arg");
     }
 
     #[test]
     fn test_copilot_params_no_max_turns_when_simple_engine() {
         let fm = minimal_front_matter();
-        let params = generate_copilot_params(&fm);
+        let params = generate_copilot_params(&fm).unwrap();
         assert!(!params.contains("--max-turns"));
     }
 
@@ -1258,14 +1308,14 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  timeout-minutes: 30\n---\n",
         )
         .unwrap();
-        let params = generate_copilot_params(&fm);
+        let params = generate_copilot_params(&fm).unwrap();
         assert!(!params.contains("--max-timeout"), "timeout-minutes should not be emitted as a CLI arg");
     }
 
     #[test]
     fn test_copilot_params_no_max_timeout_when_simple_engine() {
         let fm = minimal_front_matter();
-        let params = generate_copilot_params(&fm);
+        let params = generate_copilot_params(&fm).unwrap();
         assert!(!params.contains("--max-timeout"));
     }
 
@@ -1275,7 +1325,7 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  max-turns: 0\n---\n",
         )
         .unwrap();
-        let params = generate_copilot_params(&fm);
+        let params = generate_copilot_params(&fm).unwrap();
         assert!(!params.contains("--max-turns"), "max-turns should not be emitted as a CLI arg");
     }
 
@@ -1285,7 +1335,7 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  timeout-minutes: 0\n---\n",
         )
         .unwrap();
-        let params = generate_copilot_params(&fm);
+        let params = generate_copilot_params(&fm).unwrap();
         assert!(!params.contains("--max-timeout"), "timeout-minutes should not be emitted as a CLI arg");
     }
 
@@ -2199,5 +2249,110 @@ mod tests {
             generate_executor_ado_env(None).is_empty(),
             "None service connection should produce empty env block"
         );
+    }
+
+    // ─── Security validation tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_model_name_rejects_single_quote() {
+        let (mut fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine: claude-opus-4.5\n---\n",
+        )
+        .unwrap();
+        fm.engine = crate::compile::types::EngineConfig::Simple("model' && echo pwned".to_string());
+        let result = generate_copilot_params(&fm);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid characters"));
+    }
+
+    #[test]
+    fn test_model_name_rejects_space() {
+        let mut fm = minimal_front_matter();
+        fm.engine = crate::compile::types::EngineConfig::Simple("model && curl evil.com".to_string());
+        let result = generate_copilot_params(&fm);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_model_name_allows_valid_names() {
+        for name in &["claude-opus-4.5", "gpt-5.2-codex", "gemini-3-pro-preview", "my_model:latest"] {
+            let mut fm = minimal_front_matter();
+            fm.engine = crate::compile::types::EngineConfig::Simple(name.to_string());
+            let result = generate_copilot_params(&fm);
+            assert!(result.is_ok(), "Model name '{}' should be valid", name);
+        }
+    }
+
+    #[test]
+    fn test_bash_command_rejects_single_quote() {
+        let mut fm = minimal_front_matter();
+        fm.tools = Some(crate::compile::types::ToolsConfig {
+            bash: Some(vec!["cat'".to_string()]),
+            edit: None,
+            cache_memory: None,
+            azure_devops: None,
+        });
+        let result = generate_copilot_params(&fm);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("single quote"));
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_ado_expression_in_name() {
+        let mut fm = minimal_front_matter();
+        fm.name = "My Agent ${{ variables['System.AccessToken'] }}".to_string();
+        let result = validate_front_matter_identity(&fm);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("ADO expression"));
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_macro_in_description() {
+        let mut fm = minimal_front_matter();
+        fm.description = "Agent $(System.AccessToken)".to_string();
+        let result = validate_front_matter_identity(&fm);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("ADO expression"));
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_newline_in_name() {
+        let mut fm = minimal_front_matter();
+        fm.name = "My Agent\ninjected: true".to_string();
+        let result = validate_front_matter_identity(&fm);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("single line"));
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_allows_valid_values() {
+        let mut fm = minimal_front_matter();
+        fm.name = "Daily Code Review Agent".to_string();
+        fm.description = "Reviews code daily for quality issues".to_string();
+        let result = validate_front_matter_identity(&fm);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_runtime_expression() {
+        let mut fm = minimal_front_matter();
+        fm.name = "Agent $[variables['System.AccessToken']]".to_string();
+        let result = validate_front_matter_identity(&fm);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("ADO expression"));
+    }
+
+    #[test]
+    fn test_pipeline_resources_escapes_single_quotes() {
+        let triggers = Some(TriggerConfig {
+            pipeline: Some(crate::compile::types::PipelineTrigger {
+                name: "Build's Pipeline".to_string(),
+                project: Some("My'Project".to_string()),
+                branches: vec!["main".to_string()],
+            }),
+        });
+        let result = generate_pipeline_resources(&triggers).unwrap();
+        assert!(result.contains("source: 'Build''s Pipeline'"));
+        assert!(result.contains("project: 'My''Project'"));
     }
 }
