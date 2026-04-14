@@ -52,15 +52,11 @@ fn slugify_title(title: &str) -> String {
     collapsed.chars().take(50).collect()
 }
 
-/// Generate a short random suffix for branch uniqueness
+/// Generate a short cryptographically random suffix for branch uniqueness
 fn generate_short_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    // Take last 6 hex digits of timestamp for short unique suffix
-    format!("{:06x}", (timestamp & 0xFFFFFF) as u32)
+    use rand::RngExt;
+    let value: u32 = rand::rng().random();
+    format!("{:08x}", value)
 }
 
 // Re-export from tools module
@@ -180,7 +176,7 @@ impl SafeOutputs {
     /// Generate a git diff patch from a specific directory
     /// If `repository` is Some, it's treated as a subdirectory of bounding_directory
     /// If `repository` is None or "self", use bounding_directory directly
-    async fn generate_patch(&self, repository: Option<&str>) -> Result<String, McpError> {
+    async fn generate_patch(&self, repository: Option<&str>) -> Result<(String, String), McpError> {
         use tokio::process::Command;
 
         // Determine the git directory based on repository
@@ -226,45 +222,28 @@ impl SafeOutputs {
             }
         };
 
-        // Run git diff against the target branch to capture all changes
-        // Try origin/main first (remote tracking), then main, then HEAD as fallback
-        let diff_targets = ["origin/main", "main", "HEAD"];
-        let mut last_error = String::new();
-        let mut diff_output = None;
+        // Generate patch using git format-patch for proper commit metadata,
+        // rename detection, and binary file handling.
+        //
+        // Handles both committed and uncommitted changes:
+        // 1. Find the merge-base with the upstream branch (origin/HEAD or origin/main)
+        // 2. If there are uncommitted changes, stage and create a temporary commit
+        // 3. Generate format-patch from merge-base..HEAD to capture ALL changes
+        // 4. If a temporary commit was created, reset it (preserving working tree)
 
-        for target in &diff_targets {
-            let output = Command::new("git")
-                .args(["diff", target])
-                .current_dir(&git_dir)
-                .output()
-                .await
-                .map_err(|e| {
-                    anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git diff: {}", e))
-                })?;
+        // Find the merge-base to diff against
+        let merge_base = Self::find_merge_base(&git_dir).await?;
+        debug!("Using merge base: {}", merge_base);
 
-            if output.status.success() {
-                diff_output = Some(output);
-                break;
-            }
-            last_error = String::from_utf8_lossy(&output.stderr).to_string();
-        }
-
-        let mut patch = if let Some(output) = diff_output {
-            String::from_utf8_lossy(&output.stdout).to_string()
-        } else {
-            return Err(anyhow_to_mcp_error(anyhow::anyhow!(
-                "git diff failed against all targets (origin/main, main, HEAD): {}",
-                last_error
-            )));
-        };
-
-        // Also include untracked files that have been added
+        // Check if there are uncommitted changes (staged or unstaged)
         let status_output = Command::new("git")
             .args(["status", "--porcelain"])
             .current_dir(&git_dir)
             .output()
             .await
-            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git status: {}", e)))?;
+            .map_err(|e| {
+                anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git status: {}", e))
+            })?;
 
         if !status_output.status.success() {
             return Err(anyhow_to_mcp_error(anyhow::anyhow!(
@@ -273,34 +252,142 @@ impl SafeOutputs {
             )));
         }
 
-        let status = String::from_utf8_lossy(&status_output.stdout);
-        for line in status.lines() {
-            if line.starts_with("?? ") {
-                // Untracked file - generate a diff for it
-                let file_path = line[3..].trim();
-                let file_full_path = git_dir.join(file_path);
+        let has_uncommitted = !String::from_utf8_lossy(&status_output.stdout)
+            .trim()
+            .is_empty();
+        let mut made_synthetic_commit = false;
 
-                if file_full_path.is_file() {
-                    if let Ok(content) = tokio::fs::read_to_string(&file_full_path).await {
-                        patch.push_str(&format!("diff --git a/{} b/{}\n", file_path, file_path));
-                        patch.push_str("new file mode 100644\n");
-                        patch.push_str("--- /dev/null\n");
-                        patch.push_str(&format!("+++ b/{}\n", file_path));
+        if has_uncommitted {
+            debug!("Uncommitted changes detected, creating synthetic commit");
 
-                        let line_count = content.lines().count();
-                        patch.push_str(&format!("@@ -0,0 +1,{} @@\n", line_count));
+            // Stage all changes including untracked files
+            let add_output = Command::new("git")
+                .args(["add", "-A"])
+                .current_dir(&git_dir)
+                .output()
+                .await
+                .map_err(|e| {
+                    anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git add -A: {}", e))
+                })?;
 
-                        for line in content.lines() {
-                            patch.push('+');
-                            patch.push_str(line);
-                            patch.push('\n');
-                        }
-                    }
-                }
+            if !add_output.status.success() {
+                // Reset index to clean state on failure
+                let _ = Command::new("git")
+                    .args(["reset", "HEAD", "--quiet"])
+                    .current_dir(&git_dir)
+                    .output()
+                    .await;
+                return Err(anyhow_to_mcp_error(anyhow::anyhow!(
+                    "git add -A failed: {}",
+                    String::from_utf8_lossy(&add_output.stderr)
+                )));
+            }
+
+            // Create a temporary commit with git identity flags to avoid config dependency
+            let commit_output = Command::new("git")
+                .args([
+                    "-c", "user.email=agent@ado-aw",
+                    "-c", "user.name=ADO Agent",
+                    "commit", "-m", "agent changes", "--allow-empty", "--no-verify",
+                ])
+                .current_dir(&git_dir)
+                .output()
+                .await
+                .map_err(|e| {
+                    anyhow_to_mcp_error(anyhow::anyhow!(
+                        "Failed to create temporary commit: {}",
+                        e
+                    ))
+                })?;
+
+            if !commit_output.status.success() {
+                // Reset staging on failure
+                let _ = Command::new("git")
+                    .args(["reset", "HEAD", "--quiet"])
+                    .current_dir(&git_dir)
+                    .output()
+                    .await;
+                return Err(anyhow_to_mcp_error(anyhow::anyhow!(
+                    "Failed to create temporary commit: {}",
+                    String::from_utf8_lossy(&commit_output.stderr)
+                )));
+            }
+            made_synthetic_commit = true;
+        } else {
+            debug!("No uncommitted changes — capturing committed changes only");
+        }
+
+        // Generate format-patch from merge-base..HEAD to capture all changes
+        let format_patch_result = Command::new("git")
+            .args([
+                "format-patch",
+                &format!("{}..HEAD", merge_base),
+                "--stdout",
+                "-M",
+            ])
+            .current_dir(&git_dir)
+            .output()
+            .await;
+
+        // Always undo the temporary commit before propagating errors.
+        // Reset the synthetic commit, restoring changes to the working tree.
+        // `git reset --mixed HEAD~1` undoes the commit and resets the index
+        // to the parent tree, which leaves modified files as unstaged changes
+        // and previously-untracked files as untracked again.
+        if made_synthetic_commit {
+            // Capture the synthetic commit SHA for diagnostics
+            let head_sha = Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&git_dir)
+                .output()
+                .await
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_else(|| "<unknown>".to_string());
+
+            // Reset the synthetic commit, restoring changes to working tree
+            let reset_output = Command::new("git")
+                .args(["reset", "HEAD~1", "--mixed", "--quiet"])
+                .current_dir(&git_dir)
+                .output()
+                .await
+                .map_err(|e| {
+                    anyhow_to_mcp_error(anyhow::anyhow!(
+                        "Failed to run git reset (synthetic commit {} may remain): {}",
+                        head_sha,
+                        e
+                    ))
+                })?;
+
+            if !reset_output.status.success() {
+                warn!(
+                    "WARNING: synthetic commit {} was not cleaned up; \
+                     run `git reset HEAD~1` to restore state",
+                    head_sha
+                );
+                return Err(anyhow_to_mcp_error(anyhow::anyhow!(
+                    "git reset HEAD~1 failed (synthetic commit {} may remain): {}",
+                    head_sha,
+                    String::from_utf8_lossy(&reset_output.stderr)
+                )));
             }
         }
 
-        Ok(patch)
+        // Now check the format-patch result after cleanup
+        let format_patch_output = format_patch_result.map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git format-patch: {}", e))
+        })?;
+
+        if !format_patch_output.status.success() {
+            return Err(anyhow_to_mcp_error(anyhow::anyhow!(
+                "git format-patch failed: {}",
+                String::from_utf8_lossy(&format_patch_output.stderr)
+            )));
+        }
+
+        let patch = String::from_utf8_lossy(&format_patch_output.stdout).to_string();
+
+        Ok((patch, merge_base))
     }
 
     /// Generate a unique patch filename
@@ -313,6 +400,131 @@ impl SafeOutputs {
         // Sanitize repository name for filename
         let safe_repo = repository.replace(['/', '\\'], "-");
         format!("pr-{}-{}.patch", safe_repo, timestamp)
+    }
+
+    /// Find the merge-base commit to diff against.
+    ///
+    /// Tries (in order):
+    /// 1. Detect actual default branch via `git symbolic-ref refs/remotes/origin/HEAD`
+    /// 2. Common default branch names: `origin/main`, `origin/master`
+    /// 3. Root commit via `git rev-list --max-parents=0 HEAD` (handles single-commit repos)
+    async fn find_merge_base(git_dir: &std::path::Path) -> Result<String, McpError> {
+        use tokio::process::Command;
+
+        // First, try to discover the actual default branch from origin/HEAD
+        let symbolic_output = Command::new("git")
+            .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
+            .current_dir(git_dir)
+            .output()
+            .await
+            .ok();
+
+        let mut candidates: Vec<String> = Vec::new();
+
+        if let Some(out) = symbolic_output.filter(|o| o.status.success()) {
+            let refname = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            // e.g. "refs/remotes/origin/main" → "origin/main"
+            if let Some(branch) = refname.strip_prefix("refs/remotes/") {
+                candidates.push(branch.to_string());
+            }
+        }
+
+        // Always try common defaults as fallbacks
+        for name in &["origin/main", "origin/master"] {
+            if !candidates.iter().any(|c| c == *name) {
+                candidates.push(name.to_string());
+            }
+        }
+
+        let mut found_remote_ref = false;
+        for remote_ref in &candidates {
+            let output = Command::new("git")
+                .args(["merge-base", "HEAD", remote_ref])
+                .current_dir(git_dir)
+                .output()
+                .await
+                .ok();
+
+            if let Some(out) = output {
+                if out.status.success() {
+                    let base = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if !base.is_empty() {
+                        return Ok(base);
+                    }
+                }
+                // Check if the ref exists even though merge-base failed (diverged branches)
+                let ref_check = Command::new("git")
+                    .args(["rev-parse", "--verify", remote_ref])
+                    .current_dir(git_dir)
+                    .output()
+                    .await
+                    .ok();
+                if ref_check.is_some_and(|o| o.status.success()) {
+                    found_remote_ref = true;
+                }
+            }
+        }
+
+        // Fallback: find the root commit. Only valid for single-commit repos where HEAD~1
+        // doesn't exist. Verify the repo truly has only one commit total before
+        // using the root commit — most repos have exactly one root commit regardless
+        // of total commits (roots.len() == 1 would match virtually any repo).
+        let root_output = Command::new("git")
+            .args(["rev-list", "--max-parents=0", "HEAD"])
+            .current_dir(git_dir)
+            .output()
+            .await
+            .ok();
+
+        if let Some(out) = root_output.filter(|o| o.status.success()) {
+            let output_str = String::from_utf8_lossy(&out.stdout).to_string();
+            let roots: Vec<&str> = output_str.trim().lines().collect();
+
+            if roots.len() == 1 {
+                // Check total commit count to distinguish single-commit repos
+                // from normal repos that happen to have one root
+                let count_output = Command::new("git")
+                    .args(["rev-list", "--count", "HEAD"])
+                    .current_dir(git_dir)
+                    .output()
+                    .await
+                    .ok();
+
+                let commit_count = count_output
+                    .filter(|o| o.status.success())
+                    .and_then(|o| {
+                        String::from_utf8_lossy(&o.stdout)
+                            .trim()
+                            .parse::<u64>()
+                            .ok()
+                    })
+                    .unwrap_or(0);
+
+                if commit_count <= 1 {
+                    let sha = roots[0].to_string();
+                    warn!(
+                        "Could not find merge-base with origin; using root commit {} \
+                         (single-commit repository)",
+                        sha
+                    );
+                    return Ok(sha);
+                }
+            }
+        }
+
+        if found_remote_ref {
+            Err(anyhow_to_mcp_error(anyhow::anyhow!(
+                "Cannot determine diff base: remote tracking branch exists but shares no \
+                 common ancestry with HEAD (orphan or force-pushed branch). \
+                 Ensure HEAD is based on the target branch."
+            )))
+        } else {
+            Err(anyhow_to_mcp_error(anyhow::anyhow!(
+                "Cannot determine diff base: no remote tracking branch found. \
+                 This can happen with shallow clones (fetchDepth: 1). \
+                 Ensure the pipeline fetches full history or push a tracking branch."
+            )))
+        }
     }
 
     #[tool(
@@ -435,7 +647,9 @@ fields you want to update."
 
     #[tool(
         name = "create-pull-request",
-        description = "Create a new pull request to propose code changes. Use this after making file edits to submit them for review and merging. The PR will be created from the current branch with your committed changes. Use 'self' for the pipeline's own repository, or a repository alias from the checkout list."
+        description = "Create a new pull request to propose code changes. This tool captures all \
+changes in the repository (both committed and uncommitted) and creates a PR from them. \
+Use 'self' for the pipeline's own repository, or a repository alias from the checkout list."
     )]
     async fn create_pr(
         &self,
@@ -453,7 +667,7 @@ fields you want to update."
 
         // Generate the patch from current git changes in the specified repository
         debug!("Generating patch for repository: {}", repository);
-        let patch_content = self.generate_patch(Some(repository)).await?;
+        let (patch_content, merge_base) = self.generate_patch(Some(repository)).await?;
 
         if patch_content.trim().is_empty() {
             warn!("No changes detected in repository '{}'", repository);
@@ -492,6 +706,8 @@ fields you want to update."
             source_branch,
             patch_filename,
             repository.to_string(),
+            sanitized.labels,
+            Some(merge_base),
         );
 
         // Write to safe outputs
@@ -1064,7 +1280,7 @@ mod tests {
     #[test]
     fn test_generate_short_id_format() {
         let id = generate_short_id();
-        assert_eq!(id.len(), 6);
+        assert_eq!(id.len(), 8);
         assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
