@@ -280,7 +280,7 @@ macro_rules! tool_result {
             )*
         }
 
-        impl $crate::tools::ToolResult for $name {
+        impl $crate::safeoutputs::ToolResult for $name {
             const NAME: &'static str = $tool_name;
             const DEFAULT_MAX: u32 = $default_max;
             const REQUIRES_WRITE: bool = true;
@@ -290,10 +290,10 @@ macro_rules! tool_result {
             type Error = rmcp::ErrorData;
 
             fn try_from(params: $params) -> Result<Self, Self::Error> {
-                <$params as $crate::tools::Validate>::validate(&params)
-                    .map_err($crate::tools::anyhow_to_mcp_error)?;
+                <$params as $crate::safeoutputs::Validate>::validate(&params)
+                    .map_err($crate::safeoutputs::anyhow_to_mcp_error)?;
                 Ok(Self {
-                    name: <Self as $crate::tools::ToolResult>::NAME.to_string(),
+                    name: <Self as $crate::safeoutputs::ToolResult>::NAME.to_string(),
                     $($field: params.$field,)*
                 })
             }
@@ -323,7 +323,7 @@ macro_rules! tool_result {
             )*
         }
 
-        impl $crate::tools::ToolResult for $name {
+        impl $crate::safeoutputs::ToolResult for $name {
             const NAME: &'static str = $tool_name;
             const REQUIRES_WRITE: bool = true;
         }
@@ -332,10 +332,10 @@ macro_rules! tool_result {
             type Error = rmcp::ErrorData;
 
             fn try_from(params: $params) -> Result<Self, Self::Error> {
-                <$params as $crate::tools::Validate>::validate(&params)
-                    .map_err($crate::tools::anyhow_to_mcp_error)?;
+                <$params as $crate::safeoutputs::Validate>::validate(&params)
+                    .map_err($crate::safeoutputs::anyhow_to_mcp_error)?;
                 Ok(Self {
-                    name: <Self as $crate::tools::ToolResult>::NAME.to_string(),
+                    name: <Self as $crate::safeoutputs::ToolResult>::NAME.to_string(),
                     $($field: params.$field,)*
                 })
             }
@@ -365,7 +365,7 @@ macro_rules! tool_result {
             )*
         }
 
-        impl $crate::tools::ToolResult for $name {
+        impl $crate::safeoutputs::ToolResult for $name {
             const NAME: &'static str = $tool_name;
             const DEFAULT_MAX: u32 = $default_max;
         }
@@ -374,10 +374,10 @@ macro_rules! tool_result {
             type Error = rmcp::ErrorData;
 
             fn try_from(params: $params) -> Result<Self, Self::Error> {
-                <$params as $crate::tools::Validate>::validate(&params)
-                    .map_err($crate::tools::anyhow_to_mcp_error)?;
+                <$params as $crate::safeoutputs::Validate>::validate(&params)
+                    .map_err($crate::safeoutputs::anyhow_to_mcp_error)?;
                 Ok(Self {
-                    name: <Self as $crate::tools::ToolResult>::NAME.to_string(),
+                    name: <Self as $crate::safeoutputs::ToolResult>::NAME.to_string(),
                     $($field: params.$field,)*
                 })
             }
@@ -406,7 +406,7 @@ macro_rules! tool_result {
             )*
         }
 
-        impl $crate::tools::ToolResult for $name {
+        impl $crate::safeoutputs::ToolResult for $name {
             const NAME: &'static str = $tool_name;
         }
 
@@ -414,10 +414,10 @@ macro_rules! tool_result {
             type Error = rmcp::ErrorData;
 
             fn try_from(params: $params) -> Result<Self, Self::Error> {
-                <$params as $crate::tools::Validate>::validate(&params)
-                    .map_err($crate::tools::anyhow_to_mcp_error)?;
+                <$params as $crate::safeoutputs::Validate>::validate(&params)
+                    .map_err($crate::safeoutputs::anyhow_to_mcp_error)?;
                 Ok(Self {
-                    name: <Self as $crate::tools::ToolResult>::NAME.to_string(),
+                    name: <Self as $crate::safeoutputs::ToolResult>::NAME.to_string(),
                     $($field: params.$field,)*
                 })
             }
@@ -439,7 +439,7 @@ macro_rules! tool_result {
 #[macro_export]
 macro_rules! tool_names {
     ($($ty:ty),* $(,)?) => {
-        &[$(<$ty as $crate::tools::ToolResult>::NAME),*]
+        &[$(<$ty as $crate::safeoutputs::ToolResult>::NAME),*]
     };
 }
 
@@ -458,7 +458,7 @@ macro_rules! tool_names {
 #[macro_export]
 macro_rules! all_safe_output_names {
     ($($ty:ty),* $(,)?; $($extra:expr),* $(,)?) => {
-        &[$(<$ty as $crate::tools::ToolResult>::NAME),*, $($extra),*]
+        &[$(<$ty as $crate::safeoutputs::ToolResult>::NAME),*, $($extra),*]
     };
 }
 

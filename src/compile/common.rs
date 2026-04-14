@@ -2,15 +2,15 @@
 
 use anyhow::{Context, Result};
 
-use super::types::{FrontMatter, Repository, TriggerConfig};
+use super::types::{FrontMatter, PipelineParameter, Repository, TriggerConfig};
 use crate::compile::types::McpConfig;
 use crate::fuzzy_schedule;
 
-/// Check if an MCP has a custom command (i.e., is not just a name-based reference).
-/// All MCPs now require explicit command configuration — there are no built-in MCPs
-/// in the copilot CLI.
+/// Check if an MCP has a transport configuration (container or URL).
+/// MCPs with a container are containerized stdio servers; MCPs with a URL
+/// are HTTP servers. Both are routed through the MCP Gateway (MCPG).
 pub fn is_custom_mcp(config: &McpConfig) -> bool {
-    matches!(config, McpConfig::WithOptions(opts) if opts.command.is_some())
+    matches!(config, McpConfig::WithOptions(opts) if opts.container.is_some() || opts.url.is_some())
 }
 
 /// Parse the markdown file and extract front matter and body
@@ -82,6 +82,127 @@ pub fn replace_with_indent(template: &str, placeholder: &str, replacement: &str)
 
 /// Generate a schedule YAML block from a ScheduleConfig.
 /// When no explicit schedule branches are configured, defaults to `main`.
+/// Generate the top-level `parameters:` YAML block from front matter parameters.
+///
+/// Returns a YAML block like:
+/// ```yaml
+/// parameters:
+///   - name: clearMemory
+///     displayName: "Clear agent memory"
+///     type: boolean
+///     default: false
+/// ```
+///
+/// Returns an empty string if the parameters list is empty.
+/// Returns an error if any parameter name is not a valid ADO identifier.
+pub fn generate_parameters(parameters: &[PipelineParameter]) -> Result<String> {
+    if parameters.is_empty() {
+        return Ok(String::new());
+    }
+
+    // Validate parameter names — must be valid ADO identifiers to prevent
+    // YAML injection or template expression injection.
+    for p in parameters {
+        if !is_valid_parameter_name(&p.name) {
+            anyhow::bail!(
+                "Invalid parameter name '{}': must match [A-Za-z_][A-Za-z0-9_]* (ADO identifier)",
+                p.name
+            );
+        }
+        // Reject ADO expressions in string fields to prevent template expression injection.
+        // Parameter definitions should only contain literal values.
+        if let Some(ref display_name) = p.display_name {
+            reject_ado_expressions(display_name, &p.name, "displayName")?;
+        }
+        if let Some(ref default) = p.default {
+            reject_ado_expressions_in_value(default, &p.name, "default")?;
+        }
+        if let Some(ref values) = p.values {
+            for v in values {
+                reject_ado_expressions_in_value(v, &p.name, "values")?;
+            }
+        }
+    }
+
+    let yaml = serde_yaml::to_string(&serde_yaml::Value::Sequence(
+        parameters
+            .iter()
+            .map(|p| serde_yaml::to_value(p).context("Failed to serialize pipeline parameter"))
+            .collect::<Result<Vec<_>>>()?,
+    ))
+    .context("Failed to serialize parameters to YAML")?;
+
+    // serde_yaml outputs the sequence without a key; we need to wrap it under `parameters:`
+    Ok(format!("parameters:\n{}", yaml))
+}
+
+/// Validate that a string is a valid ADO pipeline parameter name (`[A-Za-z_][A-Za-z0-9_]*`).
+fn is_valid_parameter_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Reject ADO template expressions (`${{`) and macro expressions (`$(`) in a string value.
+/// Parameter definitions should only contain literal values — expressions could enable
+/// information disclosure or logic manipulation in the generated pipeline.
+fn reject_ado_expressions(value: &str, param_name: &str, field_name: &str) -> Result<()> {
+    if value.contains("${{") || value.contains("$(") {
+        anyhow::bail!(
+            "Parameter '{}' field '{}' contains an ADO expression ('${{{{' or '$(') which is not \
+             allowed in parameter definitions. Use literal values only.",
+            param_name,
+            field_name,
+        );
+    }
+    Ok(())
+}
+
+/// Reject ADO expressions in a serde_yaml::Value, recursing into strings within sequences.
+fn reject_ado_expressions_in_value(
+    value: &serde_yaml::Value,
+    param_name: &str,
+    field_name: &str,
+) -> Result<()> {
+    match value {
+        serde_yaml::Value::String(s) => reject_ado_expressions(s, param_name, field_name),
+        serde_yaml::Value::Sequence(seq) => {
+            for item in seq {
+                reject_ado_expressions_in_value(item, param_name, field_name)?;
+            }
+            Ok(())
+        }
+        // Booleans, numbers, null — safe, no injection risk
+        _ => Ok(()),
+    }
+}
+
+/// Build the final parameters list by combining user-defined parameters
+/// with auto-injected parameters (e.g., `clearMemory` when memory is enabled).
+pub fn build_parameters(user_params: &[PipelineParameter], has_memory: bool) -> Vec<PipelineParameter> {
+    let mut params = user_params.to_vec();
+
+    // Auto-inject clearMemory parameter when memory is configured,
+    // unless the user already defined one with the same name.
+    if has_memory && !params.iter().any(|p| p.name == "clearMemory") {
+        params.insert(
+            0,
+            PipelineParameter {
+                name: "clearMemory".to_string(),
+                display_name: Some("Clear agent memory".to_string()),
+                param_type: Some("boolean".to_string()),
+                default: Some(serde_yaml::Value::Bool(false)),
+                values: None,
+            },
+        );
+    }
+
+    params
+}
+
+/// Generate a schedule YAML block from a fuzzy schedule expression.
 pub fn generate_schedule(name: &str, config: &super::types::ScheduleConfig) -> Result<String> {
     let branches = config.branches();
     let fallback;
@@ -458,7 +579,7 @@ pub const DEFAULT_POOL: &str = "AZS-1ES-L-MMS-ubuntu-22.04";
 /// Version of the AWF (Agentic Workflow Firewall) binary to download from GitHub Releases.
 /// Update this when upgrading to a new AWF release.
 /// See: https://github.com/github/gh-aw-firewall/releases
-pub const AWF_VERSION: &str = "0.25.18";
+pub const AWF_VERSION: &str = "0.25.20";
 
 /// Version of the GitHub Copilot CLI (Microsoft.Copilot.CLI.linux-x64) NuGet package to install.
 /// Update this when upgrading to a new Copilot CLI release.
@@ -502,10 +623,26 @@ pub fn generate_header_comment(input_path: &std::path::Path) -> String {
 /// Docker image and version for the MCP Gateway (gh-aw-mcpg).
 /// Update this when upgrading to a new MCPG release.
 /// See: https://github.com/github/gh-aw-mcpg/releases
-pub const MCPG_VERSION: &str = "0.2.17";
+pub const MCPG_VERSION: &str = "0.2.18";
+
+/// Docker image for the MCPG container.
+pub const MCPG_IMAGE: &str = "ghcr.io/github/gh-aw-mcpg";
 
 /// Default port MCPG listens on inside the container (host network mode).
 pub const MCPG_PORT: u16 = 80;
+
+/// Docker image for the Azure DevOps MCP container.
+/// This is the container used when `tools: azure-devops:` is configured.
+pub const ADO_MCP_IMAGE: &str = "node:20-slim";
+
+/// Default entrypoint for the Azure DevOps MCP container.
+pub const ADO_MCP_ENTRYPOINT: &str = "npx";
+
+/// Default entrypoint args for the Azure DevOps MCP npm package.
+pub const ADO_MCP_PACKAGE: &str = "@azure-devops/mcp";
+
+/// Reserved MCPG server name for the auto-configured ADO MCP.
+pub const ADO_MCP_SERVER_NAME: &str = "azure-devops";
 
 /// Generate source path for the execute command.
 ///
@@ -684,14 +821,11 @@ fn is_safe_tool_name(name: &str) -> bool {
 /// diagnostic tools. If `safe-outputs:` is empty, returns an empty string
 /// (all tools enabled for backward compatibility).
 ///
-/// Non-MCP keys (like `memory`) are silently skipped — they are handled by the
-/// executor and have no corresponding MCP route.
-///
 /// Tool names are validated to contain only ASCII alphanumerics and hyphens
 /// to prevent shell injection when the args are embedded in bash commands.
 /// Unrecognized tool names emit a compile-time warning and are skipped.
 pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
-    use crate::tools::{ALL_KNOWN_SAFE_OUTPUTS, ALWAYS_ON_TOOLS, NON_MCP_SAFE_OUTPUT_KEYS};
+    use crate::safeoutputs::{ALL_KNOWN_SAFE_OUTPUTS, ALWAYS_ON_TOOLS, NON_MCP_SAFE_OUTPUT_KEYS};
     use std::collections::HashSet;
 
     if front_matter.safe_outputs.is_empty() {
@@ -714,6 +848,14 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
         if NON_MCP_SAFE_OUTPUT_KEYS.contains(&key.as_str()) {
             continue;
         }
+        if key == "memory" {
+            eprintln!(
+                "Warning: Agent '{}': 'safe-outputs: memory:' has moved to \
+                 'tools: cache-memory:'. Update your front matter to restore memory support.",
+                front_matter.name
+            );
+            continue;
+        }
         if !ALL_KNOWN_SAFE_OUTPUTS.contains(&key.as_str()) {
             eprintln!(
                 "Warning: unrecognized safe-output tool '{}' — skipping (no registered tool matches this name)",
@@ -728,8 +870,8 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
     }
 
     if effective_mcp_tool_count == 0 {
-        // Every user-specified key was either invalid, unrecognized, or non-MCP
-        // (e.g. memory-only). Return empty to keep all tools available (backward compat).
+        // Every user-specified key was either invalid or unrecognized.
+        // Return empty to keep all tools available (backward compat).
         return String::new();
     }
 
@@ -757,7 +899,7 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
 
 /// Validate that write-requiring safe-outputs have a write service connection configured.
 pub fn validate_write_permissions(front_matter: &FrontMatter) -> Result<()> {
-    use crate::tools::WRITE_REQUIRING_SAFE_OUTPUTS;
+    use crate::safeoutputs::WRITE_REQUIRING_SAFE_OUTPUTS;
 
     let has_write_sc = front_matter
         .permissions
@@ -1049,6 +1191,8 @@ mod tests {
         fm.tools = Some(crate::compile::types::ToolsConfig {
             bash: Some(vec![":*".to_string()]),
             edit: None,
+            cache_memory: None,
+            azure_devops: None,
         });
         let params = generate_copilot_params(&fm);
         assert!(params.contains("--allow-tool \"shell(:*)\""));
@@ -1060,6 +1204,8 @@ mod tests {
         fm.tools = Some(crate::compile::types::ToolsConfig {
             bash: Some(vec![]),
             edit: None,
+            cache_memory: None,
+            azure_devops: None,
         });
         let params = generate_copilot_params(&fm);
         assert!(!params.contains("shell("));
@@ -1071,7 +1217,7 @@ mod tests {
         fm.mcp_servers.insert(
             "my-tool".to_string(),
             McpConfig::WithOptions(McpOptions {
-                command: Some("node".to_string()),
+                container: Some("node:20-slim".to_string()),
                 ..Default::default()
             }),
         );
@@ -1765,25 +1911,293 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_enabled_tools_args_skips_memory_key() {
-        // `memory` is a non-MCP executor-only key. It must not appear in
-        // --enabled-tools or it would cause real MCP tools to be filtered out.
+    fn test_generate_enabled_tools_args_memory_no_longer_safe_output() {
+        // `memory` is no longer a safe-output key — it moved to `tools: cache-memory:`.
+        // If someone still puts it in safe-outputs, it should be treated as unrecognized
+        // and the real MCP tool should still be present.
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  memory:\n    allowed-extensions:\n      - .md\n  create-pull-request:\n    target-branch: main\n---\n"
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n"
         ).unwrap();
         let args = generate_enabled_tools_args(&fm);
-        assert!(!args.contains("--enabled-tools memory"), "Non-MCP key 'memory' should be skipped");
         assert!(args.contains("--enabled-tools create-pull-request"), "Real MCP tool should be present");
     }
 
     #[test]
-    fn test_generate_enabled_tools_args_memory_only_does_not_filter() {
-        // When `memory` is the only safe-output key, no --enabled-tools args should
-        // be generated so all tools remain available (backward compat).
+    fn test_generate_enabled_tools_args_empty_safe_outputs_no_filter() {
+        // When safe-outputs is empty, no --enabled-tools args should be generated
+        // so all tools remain available.
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  memory:\n    allowed-extensions:\n      - .md\n---\n"
+            "---\nname: test\ndescription: test\n---\n"
         ).unwrap();
         let args = generate_enabled_tools_args(&fm);
-        assert!(args.is_empty(), "memory-only safe-outputs should produce no args (all tools available)");
+        assert!(args.is_empty(), "empty safe-outputs should produce no args (all tools available)");
+    }
+
+    // ─── parameter name validation ──────────────────────────────────────────
+
+    #[test]
+    fn test_is_valid_parameter_name() {
+        assert!(is_valid_parameter_name("clearMemory"));
+        assert!(is_valid_parameter_name("myParam"));
+        assert!(is_valid_parameter_name("_private"));
+        assert!(is_valid_parameter_name("param123"));
+        assert!(!is_valid_parameter_name(""));
+        assert!(!is_valid_parameter_name("has space"));
+        assert!(!is_valid_parameter_name("has-dash"));
+        assert!(!is_valid_parameter_name("${{inject}}"));
+        assert!(!is_valid_parameter_name("123startsWithDigit"));
+    }
+
+    #[test]
+    fn test_generate_parameters_rejects_invalid_name() {
+        let params = vec![PipelineParameter {
+            name: "${{evil}}".to_string(),
+            display_name: None,
+            param_type: None,
+            default: None,
+            values: None,
+        }];
+        let result = generate_parameters(&params);
+        assert!(result.is_err(), "Should reject invalid parameter name");
+        assert!(
+            result.unwrap_err().to_string().contains("Invalid parameter name"),
+            "Error should mention invalid parameter name"
+        );
+    }
+
+    #[test]
+    fn test_build_parameters_auto_injects_clear_memory() {
+        let params = build_parameters(&[], true);
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "clearMemory");
+    }
+
+    #[test]
+    fn test_build_parameters_no_inject_without_memory() {
+        let params = build_parameters(&[], false);
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_build_parameters_no_duplicate_clear_memory() {
+        let user = vec![PipelineParameter {
+            name: "clearMemory".to_string(),
+            display_name: Some("Custom".to_string()),
+            param_type: Some("boolean".to_string()),
+            default: Some(serde_yaml::Value::Bool(true)),
+            values: None,
+        }];
+        let params = build_parameters(&user, true);
+        assert_eq!(params.len(), 1, "Should not duplicate clearMemory");
+        assert_eq!(params[0].display_name.as_deref(), Some("Custom"), "Should keep user's definition");
+    }
+
+    #[test]
+    fn test_generate_parameters_rejects_expression_in_display_name() {
+        let params = vec![PipelineParameter {
+            name: "myParam".to_string(),
+            display_name: Some("Test ${{ variables.evil }}".to_string()),
+            param_type: None,
+            default: None,
+            values: None,
+        }];
+        let result = generate_parameters(&params);
+        assert!(result.is_err(), "Should reject ADO expression in displayName");
+    }
+
+    #[test]
+    fn test_generate_parameters_rejects_expression_in_default() {
+        let params = vec![PipelineParameter {
+            name: "myParam".to_string(),
+            display_name: None,
+            param_type: None,
+            default: Some(serde_yaml::Value::String("$(secretVar)".to_string())),
+            values: None,
+        }];
+        let result = generate_parameters(&params);
+        assert!(result.is_err(), "Should reject ADO macro expression in default");
+    }
+
+    #[test]
+    fn test_generate_parameters_rejects_expression_in_values() {
+        let params = vec![PipelineParameter {
+            name: "myParam".to_string(),
+            display_name: None,
+            param_type: None,
+            default: None,
+            values: Some(vec![
+                serde_yaml::Value::String("safe".to_string()),
+                serde_yaml::Value::String("${{ parameters.inject }}".to_string()),
+            ]),
+        }];
+        let result = generate_parameters(&params);
+        assert!(result.is_err(), "Should reject ADO expression in values");
+    }
+
+    #[test]
+    fn test_generate_parameters_allows_literal_values() {
+        let params = vec![PipelineParameter {
+            name: "region".to_string(),
+            display_name: Some("Target Region".to_string()),
+            param_type: Some("string".to_string()),
+            default: Some(serde_yaml::Value::String("us-east".to_string())),
+            values: Some(vec![
+                serde_yaml::Value::String("us-east".to_string()),
+                serde_yaml::Value::String("eu-west".to_string()),
+            ]),
+        }];
+        let result = generate_parameters(&params);
+        assert!(result.is_ok(), "Should accept literal values");
+    }
+
+    // ─── replace_with_indent ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_replace_with_indent_multiline_replacement() {
+        let template = "steps:\n    {{ my_marker }}\n";
+        let replacement = "- bash: echo hello\n  displayName: Hello";
+        let result = replace_with_indent(template, "{{ my_marker }}", replacement);
+        // The 4-space indent on the placeholder line is inherited by continuation lines
+        assert_eq!(result, "steps:\n    - bash: echo hello\n      displayName: Hello\n");
+    }
+
+    #[test]
+    fn test_replace_with_indent_not_at_line_start_no_indent() {
+        // When the placeholder is not at the start of a line (preceded by non-whitespace),
+        // no extra indentation is added to continuation lines.
+        let template = "prefix {{ marker }} suffix";
+        let result = replace_with_indent(template, "{{ marker }}", "VALUE");
+        assert_eq!(result, "prefix VALUE suffix");
+    }
+
+    #[test]
+    fn test_replace_with_indent_single_line_replacement_preserves_trailing_newline() {
+        let template = "    {{ placeholder }}\n";
+        let result = replace_with_indent(template, "{{ placeholder }}", "value");
+        assert_eq!(result, "    value\n");
+    }
+
+    #[test]
+    fn test_replace_with_indent_replacement_ending_with_newline() {
+        let template = "    {{ placeholder }}\n";
+        let result = replace_with_indent(template, "{{ placeholder }}", "line1\nline2\n");
+        // The trailing \n in the replacement should be preserved
+        assert!(result.contains("line1"));
+        assert!(result.contains("line2"));
+        assert!(result.ends_with('\n'));
+    }
+
+    // ─── format_step_yaml / format_step_yaml_indented ────────────────────────
+
+    #[test]
+    fn test_format_step_yaml_single_line() {
+        let result = format_step_yaml("bash: echo hi");
+        assert_eq!(result, "  - bash: echo hi");
+    }
+
+    #[test]
+    fn test_format_step_yaml_multiline() {
+        let result = format_step_yaml("bash: |\n  echo hi\n  echo bye");
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines[0], "  - bash: |");
+        // Continuation lines get 8 spaces prepended (existing indent is preserved)
+        assert_eq!(lines[1], "          echo hi");
+        assert_eq!(lines[2], "          echo bye");
+    }
+
+    #[test]
+    fn test_format_step_yaml_strips_yaml_document_separator() {
+        let result = format_step_yaml("--- bash: echo hi");
+        assert_eq!(result, "  - bash: echo hi");
+    }
+
+    #[test]
+    fn test_format_step_yaml_indented_custom_base() {
+        let result = format_step_yaml_indented("bash: echo hi", 6);
+        assert_eq!(result, "      - bash: echo hi");
+    }
+
+    #[test]
+    fn test_format_step_yaml_indented_zero_base() {
+        let result = format_step_yaml_indented("bash: echo hi", 0);
+        assert_eq!(result, "- bash: echo hi");
+    }
+
+    // ─── generate_acquire_ado_token ──────────────────────────────────────────
+
+    #[test]
+    fn test_generate_acquire_ado_token_with_sc() {
+        let result = generate_acquire_ado_token(Some("my-arm-sc"), "SC_READ_TOKEN");
+        assert!(result.contains("AzureCLI@2"), "Should use AzureCLI@2 task");
+        assert!(
+            result.contains("azureSubscription: 'my-arm-sc'"),
+            "Should embed service connection name"
+        );
+        assert!(
+            result.contains("variable=SC_READ_TOKEN;issecret=true"),
+            "Should set correct pipeline variable as secret"
+        );
+        assert!(
+            result.contains("az account get-access-token"),
+            "Should call az CLI to get access token"
+        );
+    }
+
+    #[test]
+    fn test_generate_acquire_ado_token_none_returns_empty() {
+        let result = generate_acquire_ado_token(None, "SC_READ_TOKEN");
+        assert!(result.is_empty(), "None service connection should return empty string");
+    }
+
+    #[test]
+    fn test_generate_acquire_ado_token_write_token_variable() {
+        let result = generate_acquire_ado_token(Some("write-sc"), "SC_WRITE_TOKEN");
+        assert!(result.contains("variable=SC_WRITE_TOKEN;issecret=true"));
+        assert!(!result.contains("SC_READ_TOKEN"));
+    }
+
+    // ─── generate_copilot_ado_env / generate_executor_ado_env ────────────────
+
+    #[test]
+    fn test_generate_copilot_ado_env_with_connection() {
+        let result = generate_copilot_ado_env(Some("my-sc"));
+        assert!(
+            result.contains("AZURE_DEVOPS_EXT_PAT: $(SC_READ_TOKEN)"),
+            "Should set AZURE_DEVOPS_EXT_PAT to SC_READ_TOKEN"
+        );
+        assert!(
+            result.contains("SYSTEM_ACCESSTOKEN: $(SC_READ_TOKEN)"),
+            "Should set SYSTEM_ACCESSTOKEN to SC_READ_TOKEN"
+        );
+    }
+
+    #[test]
+    fn test_generate_copilot_ado_env_none_empty() {
+        assert!(
+            generate_copilot_ado_env(None).is_empty(),
+            "None service connection should produce empty env block"
+        );
+    }
+
+    #[test]
+    fn test_generate_executor_ado_env_with_connection() {
+        let result = generate_executor_ado_env(Some("my-sc"));
+        assert!(
+            result.contains("SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)"),
+            "Executor should use SC_WRITE_TOKEN"
+        );
+        // Must NOT expose the read token in the executor env
+        assert!(
+            !result.contains("SC_READ_TOKEN"),
+            "Executor env must not contain SC_READ_TOKEN"
+        );
+    }
+
+    #[test]
+    fn test_generate_executor_ado_env_none_empty() {
+        assert!(
+            generate_executor_ado_env(None).is_empty(),
+            "None service connection should produce empty env block"
+        );
     }
 }

@@ -346,7 +346,7 @@ fn test_fixture_complete_agent() {
     );
 
     // Verify it has MCP configuration and custom MCPs
-    assert!(content.contains("command:"), "Should have custom MCP");
+    assert!(content.contains("container:"), "Should have custom MCP");
 
     // Verify permissions
     assert!(
@@ -2014,6 +2014,7 @@ Vote on pull requests.
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
+
 /// Integration test: compiling a pipeline with safe-outputs produces --enabled-tools flags
 /// in the rendered YAML. This exercises standalone.rs wiring + generate_enabled_tools_args
 /// + template substitution end-to-end.
@@ -2089,6 +2090,435 @@ Do something.
         !compiled.contains("--enabled-tools update-wiki-page"),
         "Non-configured tools should not appear in --enabled-tools"
     );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+
+// ==================== Azure DevOps MCP Integration Tests ====================
+
+/// Test that the Azure DevOps MCP fixture compiles successfully with no unreplaced markers
+#[test]
+fn test_fixture_azure_devops_mcp_compiled_output() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-ado-mcp-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("azure-devops-mcp-agent.md");
+
+    let output_path = temp_dir.join("azure-devops-mcp-agent.yml");
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            fixture_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed for Azure DevOps MCP fixture: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled output");
+
+    // No unreplaced template markers (except ADO ${{ }} expressions)
+    for line in compiled.lines() {
+        let stripped = line.replace("${{", "");
+        assert!(
+            !stripped.contains("{{ "),
+            "Compiled output should not contain unreplaced marker: {}",
+            line.trim()
+        );
+    }
+
+    // Should contain MCPG references
+    assert!(
+        compiled.contains("ghcr.io/github/gh-aw-mcpg"),
+        "Should reference MCPG Docker image"
+    );
+
+    // Should contain the container-based MCP config (container field, not command)
+    assert!(
+        compiled.contains("\"container\""),
+        "MCPG config should use container field"
+    );
+    assert!(
+        compiled.contains("node:20-slim"),
+        "MCPG config should contain the container image"
+    );
+    assert!(
+        compiled.contains("\"entrypoint\""),
+        "MCPG config should have entrypoint field"
+    );
+    assert!(
+        compiled.contains("\"entrypointArgs\""),
+        "MCPG config should have entrypointArgs field"
+    );
+    assert!(
+        !compiled.contains("\"command\""),
+        "MCPG config should NOT use command field"
+    );
+
+    // Should contain env passthrough for AZURE_DEVOPS_EXT_PAT
+    assert!(
+        compiled.contains("AZURE_DEVOPS_EXT_PAT"),
+        "Should reference AZURE_DEVOPS_EXT_PAT"
+    );
+
+    // Should contain SC_READ_TOKEN (from permissions.read)
+    assert!(
+        compiled.contains("SC_READ_TOKEN"),
+        "Should contain SC_READ_TOKEN"
+    );
+
+    // Should contain the MCPG docker env passthrough (auto-mapped ADO token)
+    assert!(
+        compiled.contains("-e AZURE_DEVOPS_EXT_PAT=\"$(SC_READ_TOKEN)\""),
+        "Should auto-map SC_READ_TOKEN to AZURE_DEVOPS_EXT_PAT on MCPG Docker run"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that container-based MCPs generate correct MCPG config JSON structure
+#[test]
+fn test_mcpg_config_container_based_mcp() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-mcpg-container-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = "---\nname: \"Container MCP Test\"\ndescription: \"Tests container-based MCP\"\nmcp-servers:\n  my-tool:\n    container: \"ghcr.io/example/my-tool:latest\"\n    entrypoint: \"my-tool\"\n    entrypoint-args: [\"--mode\", \"stdio\"]\n    mounts:\n      - \"/host/data:/app/data:ro\"\n    env:\n      API_KEY: \"test-key\"\n    allowed:\n      - tool_a\n      - tool_b\n---\n\n## Test\n";
+
+    let input_path = temp_dir.join("container-mcp.md");
+    let output_path = temp_dir.join("container-mcp.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args(["compile", input_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(output.status.success(), "Compiler should succeed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let compiled = fs::read_to_string(&output_path).unwrap();
+
+    assert!(compiled.contains("\"container\": \"ghcr.io/example/my-tool:latest\""));
+    assert!(compiled.contains("\"entrypoint\": \"my-tool\""));
+    assert!(compiled.contains("\"entrypointArgs\""));
+    assert!(compiled.contains("\"mounts\""));
+    assert!(compiled.contains("/host/data:/app/data:ro"));
+    assert!(compiled.contains("\"API_KEY\": \"test-key\""));
+    assert!(compiled.contains("\"tool_a\""));
+    assert!(!compiled.contains("\"command\""));
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that HTTP-based MCPs generate correct MCPG config JSON structure
+#[test]
+fn test_mcpg_config_http_based_mcp() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-mcpg-http-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = "---\nname: \"HTTP MCP Test\"\ndescription: \"Tests HTTP MCP\"\nmcp-servers:\n  remote-ado:\n    url: \"https://mcp.dev.azure.com/myorg\"\n    headers:\n      X-MCP-Toolsets: \"repos,wit\"\n    allowed:\n      - wit_get_work_item\n---\n\n## Test\n";
+
+    let input_path = temp_dir.join("http-mcp.md");
+    let output_path = temp_dir.join("http-mcp.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args(["compile", input_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(output.status.success(), "Compiler should succeed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let compiled = fs::read_to_string(&output_path).unwrap();
+
+    assert!(compiled.contains("\"url\": \"https://mcp.dev.azure.com/myorg\""));
+    assert!(compiled.contains("\"X-MCP-Toolsets\": \"repos,wit\""));
+    assert!(compiled.contains("\"wit_get_work_item\""));
+    assert!(!compiled.contains("\"command\""));
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that env passthrough generates -e flags in MCPG Docker run
+#[test]
+fn test_mcpg_docker_env_passthrough() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-mcpg-env-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = "---\nname: \"Env Test\"\ndescription: \"Tests env passthrough\"\npermissions:\n  read: my-read-sc\n  write: my-write-sc\nmcp-servers:\n  my-tool:\n    container: \"node:20-slim\"\n    env:\n      AZURE_DEVOPS_EXT_PAT: \"\"\n      MY_TOKEN: \"\"\n      STATIC_VAR: \"static-value\"\nsafe-outputs:\n  create-work-item:\n    work-item-type: Task\n---\n\n## Test\n";
+
+    let input_path = temp_dir.join("env-passthrough.md");
+    let output_path = temp_dir.join("env-passthrough.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args(["compile", input_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(output.status.success(), "Compiler should succeed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let compiled = fs::read_to_string(&output_path).unwrap();
+
+    // Should auto-map AZURE_DEVOPS_EXT_PAT from SC_READ_TOKEN
+    assert!(compiled.contains("-e AZURE_DEVOPS_EXT_PAT=\"$(SC_READ_TOKEN)\""), "Should auto-map ADO token");
+
+    // Should forward passthrough env var MY_TOKEN
+    assert!(compiled.contains("-e MY_TOKEN"), "Should forward passthrough env var");
+
+    // Static var should be in config
+    assert!(compiled.contains("\"STATIC_VAR\": \"static-value\""), "Static env var should be in config");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that user-defined parameters are emitted in the compiled pipeline YAML
+#[test]
+fn test_parameters_in_compiled_output() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-params-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = r#"---
+name: "Params Agent"
+description: "Tests parameters feature"
+parameters:
+  - name: verbose
+    displayName: "Verbose output"
+    type: boolean
+    default: false
+  - name: region
+    displayName: "Target region"
+    type: string
+    default: "us-east"
+    values:
+      - us-east
+      - eu-west
+---
+
+## Test
+
+Do the thing.
+"#;
+
+    let input_path = temp_dir.join("params-agent.md");
+    let output_path = temp_dir.join("params-agent.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args(["compile", input_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(output.status.success(), "Compiler should succeed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let compiled = fs::read_to_string(&output_path).unwrap();
+
+    // Verify parameters block is present
+    assert!(compiled.contains("parameters:"), "Should contain parameters: block");
+    assert!(compiled.contains("name: verbose"), "Should contain verbose parameter");
+    assert!(compiled.contains("name: region"), "Should contain region parameter");
+    assert!(compiled.contains("displayName: Verbose output"), "Should contain displayName");
+    assert!(compiled.contains("default: false"), "Should contain default for verbose");
+    assert!(compiled.contains("default: us-east"), "Should contain default for region");
+    assert!(compiled.contains("- us-east"), "Should contain values for region");
+    assert!(compiled.contains("- eu-west"), "Should contain values for region");
+
+    // No clearMemory should be injected (no memory configured)
+    assert!(!compiled.contains("clearMemory"), "Should NOT contain clearMemory without memory");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that clearMemory is auto-injected when memory is enabled
+#[test]
+fn test_parameters_clear_memory_auto_injected() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-clear-memory-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = r#"---
+name: "Memory Agent"
+description: "Tests clearMemory auto-injection"
+tools:
+  cache-memory:
+    allowed-extensions:
+      - .md
+---
+
+## Test
+
+Do the thing.
+"#;
+
+    let input_path = temp_dir.join("memory-agent.md");
+    let output_path = temp_dir.join("memory-agent.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args(["compile", input_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(output.status.success(), "Compiler should succeed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let compiled = fs::read_to_string(&output_path).unwrap();
+
+    // Verify clearMemory parameter is auto-injected
+    assert!(compiled.contains("name: clearMemory"), "Should auto-inject clearMemory parameter");
+    assert!(compiled.contains("displayName: Clear agent memory"), "Should have displayName");
+    assert!(compiled.contains("type: boolean"), "Should be boolean type");
+
+    // Verify memory download has condition
+    assert!(
+        compiled.contains("condition: eq(${{ parameters.clearMemory }}, false)"),
+        "Memory download should be conditional on clearMemory=false"
+    );
+    assert!(
+        compiled.contains("condition: eq(${{ parameters.clearMemory }}, true)"),
+        "Clear memory step should run when clearMemory=true"
+    );
+    assert!(
+        compiled.contains("Initialize empty agent memory (clearMemory=true)"),
+        "Should have the clear memory initialization step"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that user-defined clearMemory is not duplicated
+#[test]
+fn test_parameters_user_defined_clear_memory_not_duplicated() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-user-clear-memory-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = r#"---
+name: "Custom Memory Agent"
+description: "Tests user-defined clearMemory not duplicated"
+parameters:
+  - name: clearMemory
+    displayName: "Reset memory"
+    type: boolean
+    default: true
+tools:
+  cache-memory:
+    allowed-extensions:
+      - .md
+---
+
+## Test
+
+Do the thing.
+"#;
+
+    let input_path = temp_dir.join("custom-memory.md");
+    let output_path = temp_dir.join("custom-memory.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args(["compile", input_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(output.status.success(), "Compiler should succeed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let compiled = fs::read_to_string(&output_path).unwrap();
+
+    // Verify user's clearMemory is present (with their custom displayName and default)
+    assert!(compiled.contains("displayName: Reset memory"), "Should use user's displayName");
+    assert!(compiled.contains("default: true"), "Should use user's default value");
+
+    // Verify clearMemory only appears once (not duplicated)
+    let count = compiled.matches("name: clearMemory").count();
+    assert_eq!(count, 1, "clearMemory should appear exactly once, not duplicated");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that parameters block has no unreplaced markers
+#[test]
+fn test_parameters_no_unreplaced_markers() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-params-markers-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = r#"---
+name: "Markers Agent"
+description: "Tests no unreplaced markers with parameters"
+parameters:
+  - name: myParam
+    type: string
+    default: "hello"
+tools:
+  cache-memory:
+    allowed-extensions:
+      - .md
+---
+
+## Test
+"#;
+
+    let input_path = temp_dir.join("markers-agent.md");
+    let output_path = temp_dir.join("markers-agent.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args(["compile", input_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(output.status.success(), "Compiler should succeed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let compiled = fs::read_to_string(&output_path).unwrap();
+
+    // Verify no unreplaced {{ markers }} remain (excluding ${{ }} which are ADO expressions)
+    for line in compiled.lines() {
+        let stripped = line.replace("${{", "");
+        assert!(
+            !stripped.contains("{{ "),
+            "Should not contain unreplaced marker: {}",
+            line.trim()
+        );
+    }
 
     let _ = fs::remove_dir_all(&temp_dir);
 }

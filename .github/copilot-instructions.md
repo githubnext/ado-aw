@@ -1,6 +1,6 @@
 # Copilot Instructions for Azure DevOps Agentic Pipelines
 
-This repository contains a compiler for Azure DevOps pipelines that transforms natural language markdown files with YAML front matter into Azure DevOps pipeline definitions. The design is inspired by [GitHub Agentic Workflows (gh-aw)](https://github.com/githubnext/gh-aw).
+This repository contains a compiler for Azure DevOps pipelines that transforms natural language markdown files with YAML front matter into Azure DevOps pipeline definitions. The design is inspired by <a href="https://github.com/githubnext/gh-aw">GitHub Agentic Workflows (gh-aw)</a>.
 
 ## Project Overview
 
@@ -37,33 +37,31 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 │   ├── ndjson.rs         # NDJSON parsing utilities
 │   ├── proxy.rs          # Network proxy implementation
 │   ├── sanitize.rs       # Input sanitization for safe outputs
-│   ├── safeoutputs/      # Safe-output MCP tool implementations (Stage 1 → NDJSON → Stage 2)
-│   │   ├── mod.rs
-│   │   ├── add_build_tag.rs
-│   │   ├── add_pr_comment.rs
-│   │   ├── comment_on_work_item.rs
-│   │   ├── create_branch.rs
-│   │   ├── create_git_tag.rs
-│   │   ├── create_pr.rs
-│   │   ├── create_wiki_page.rs
-│   │   ├── create_work_item.rs
-│   │   ├── link_work_items.rs
-│   │   ├── missing_data.rs
-│   │   ├── missing_tool.rs
-│   │   ├── noop.rs
-│   │   ├── queue_build.rs
-│   │   ├── reply_to_pr_comment.rs
-│   │   ├── report_incomplete.rs
-│   │   ├── resolve_pr_thread.rs
-│   │   ├── result.rs
-│   │   ├── submit_pr_review.rs
-│   │   ├── update_pr.rs
-│   │   ├── update_wiki_page.rs
-│   │   ├── update_work_item.rs
-│   │   └── upload_attachment.rs
-│   └── tools/            # First-class tool implementations (compiler auto-configures)
+│   └── tools/            # MCP tool implementations
 │       ├── mod.rs
-│       └── cache_memory.rs
+│       ├── add_build_tag.rs
+│       ├── add_pr_comment.rs
+│       ├── comment_on_work_item.rs
+│       ├── create_branch.rs
+│       ├── create_git_tag.rs
+│       ├── create_pr.rs
+│       ├── create_wiki_page.rs
+│       ├── create_work_item.rs
+│       ├── link_work_items.rs
+│       ├── memory.rs
+│       ├── missing_data.rs
+│       ├── missing_tool.rs
+│       ├── noop.rs
+│       ├── queue_build.rs
+│       ├── reply_to_pr_comment.rs
+│       ├── report_incomplete.rs
+│       ├── resolve_pr_thread.rs
+│       ├── result.rs
+│       ├── submit_pr_review.rs
+│       ├── update_pr.rs
+│       ├── update_wiki_page.rs
+│       ├── update_work_item.rs
+│       └── upload_attachment.rs
 ├── templates/
 │   ├── base.yml          # Base pipeline template for standalone
 │   ├── 1es-base.yml      # Base pipeline template for 1ES target
@@ -88,7 +86,7 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 
 ### Commit Message Convention
 
-This project uses [Conventional Commits](https://www.conventionalcommits.org/) for automated releases via `release-please`. All commit messages **must** follow the format:
+This project uses <a href="https://www.conventionalcommits.org/">Conventional Commits</a> for automated releases via `release-please`. All commit messages **must** follow the format:
 
 ```
 type(optional scope): description
@@ -139,14 +137,6 @@ checkout: # optional list of repository aliases for the agent to checkout and wo
 tools:                         # optional tool configuration
   bash: ["cat", "ls", "grep"]  # bash command allow-list (defaults to safe built-in list)
   edit: true                   # enable file editing tool (default: true)
-  cache-memory: true           # persistent memory across runs (see Cache Memory section)
-  # cache-memory:              # Alternative object format (with options)
-  #   allowed-extensions: [.md, .json]
-  azure-devops: true           # first-class ADO MCP integration (see Azure DevOps MCP section)
-  # azure-devops:              # Alternative object format (with scoping)
-  #   toolsets: [repos, wit]
-  #   allowed: [wit_get_work_item]
-  #   org: myorg
 # env:                          # RESERVED: workflow-level environment variables (not yet implemented)
 #   CUSTOM_VAR: "value"
 mcp-servers:
@@ -194,11 +184,6 @@ network:                       # optional network policy (standalone target only
 permissions:                   # optional ADO access token configuration
   read: my-read-arm-connection   # ARM service connection for read-only ADO access (Stage 1 agent)
   write: my-write-arm-connection # ARM service connection for write ADO access (Stage 2 executor only)
-parameters:                    # optional ADO runtime parameters (surfaced in UI when queuing a run)
-  - name: clearMemory
-    displayName: "Clear agent memory"
-    type: boolean
-    default: false
 ---
 
 
@@ -209,7 +194,7 @@ Build the project and run all tests...
 
 ### Schedule Syntax (Fuzzy Schedule Time Syntax)
 
-The `schedule` field supports a human-friendly fuzzy schedule syntax that automatically distributes execution times to prevent server load spikes. The syntax is based on the [Fuzzy Schedule Time Syntax Specification](https://github.com/githubnext/gh-aw/blob/main/docs/src/content/docs/reference/fuzzy-schedule-specification.md).
+The `schedule` field supports a human-friendly fuzzy schedule syntax that automatically distributes execution times to prevent server load spikes. The syntax is based on the <a href="https://github.com/githubnext/gh-aw/blob/main/docs/src/content/docs/reference/fuzzy-schedule-specification.md">Fuzzy Schedule Time Syntax Specification</a>.
 
 #### Daily Schedules
 
@@ -319,7 +304,7 @@ engine:
 | `model` | string | `claude-opus-4.5` | AI model to use. Options include `claude-sonnet-4.5`, `gpt-5.2-codex`, `gemini-3-pro-preview`, etc. |
 | `timeout-minutes` | integer | *(none)* | Maximum time in minutes the agent job is allowed to run. Sets `timeoutInMinutes` on the `PerformAgenticTask` job in the generated pipeline. |
 
-> **Deprecated:** `max-turns` is still accepted in front matter for backwards compatibility but is ignored at compile time (a warning is emitted). It was specific to Claude Code and is not supported by Copilot CLI.
+&gt; **Deprecated:** `max-turns` is still accepted in front matter for backwards compatibility but is ignored at compile time (a warning is emitted). It was specific to Claude Code and is not supported by Copilot CLI.
 
 #### `timeout-minutes`
 
@@ -330,48 +315,6 @@ The `timeout-minutes` field sets a wall-clock limit (in minutes) for the entire 
 - **SLA compliance** — ensuring scheduled agents complete within a known window.
 
 When omitted, Azure DevOps uses its default job timeout (60 minutes). When set, the compiler emits `timeoutInMinutes: <value>` on the agentic job.
-
-### Runtime Parameters
-
-The `parameters` field defines Azure DevOps [runtime parameters](https://learn.microsoft.com/en-us/azure/devops/pipelines/process/runtime-parameters) that are surfaced in the ADO UI when manually queuing a pipeline run. Parameters are emitted as a top-level `parameters:` block in the generated pipeline YAML.
-
-```yaml
-parameters:
-  - name: verbose
-    displayName: "Verbose output"
-    type: boolean
-    default: false
-  - name: region
-    displayName: "Target region"
-    type: string
-    default: "us-east"
-    values:
-      - us-east
-      - eu-west
-      - ap-south
-```
-
-#### Fields
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `name` | string | Yes | Parameter identifier (valid ADO identifier) |
-| `displayName` | string | No | Human-readable label in the ADO UI |
-| `type` | string | No | ADO parameter type: `boolean`, `string`, `number`, `object` |
-| `default` | any | No | Default value when not specified at queue time |
-| `values` | list | No | Allowed values (for `string`/`number` parameters) |
-
-Parameters can be referenced in custom steps using `${{ parameters.paramName }}`.
-
-#### Auto-injected `clearMemory` Parameter
-
-When `safe-outputs.memory` is configured, the compiler automatically injects a `clearMemory` boolean parameter (default: `false`) at the beginning of the parameters list. This parameter:
-
-- Is surfaced in the ADO UI when manually queuing a run
-- When set to `true`, skips downloading the previous agent memory artifact
-- Creates an empty memory directory so the agent starts fresh
-
-If you define your own `clearMemory` parameter in the front matter, the auto-injected one is suppressed — your definition takes precedence.
 
 ### Tools Configuration
 
@@ -414,53 +357,6 @@ tools:
   edit: false
 ```
 
-#### Cache Memory (`cache-memory:`)
-
-Persistent memory storage across agent runs. The agent reads/writes files to a memory directory that persists between pipeline executions via pipeline artifacts.
-
-```yaml
-# Simple enablement
-tools:
-  cache-memory: true
-
-# With options
-tools:
-  cache-memory:
-    allowed-extensions: [.md, .json, .txt]
-```
-
-When enabled, the compiler auto-generates pipeline steps to:
-- Download previous memory from the last successful run's artifact
-- Restore files to `/tmp/awf-tools/staging/agent_memory/`
-- Append a memory prompt to the agent instructions
-- Auto-inject a `clearMemory` pipeline parameter (allows clearing memory from the ADO UI)
-
-During Stage 2 execution, memory files are validated (path safety, extension filtering, `##vso[` injection detection, 5 MB size limit) and published as a pipeline artifact.
-
-#### Azure DevOps MCP (`azure-devops:`)
-
-First-class Azure DevOps MCP integration. Auto-configures the ADO MCP container, token mapping, MCPG entry, and network allowlist.
-
-```yaml
-# Simple enablement (auto-infers org from git remote)
-tools:
-  azure-devops: true
-
-# With scoping options
-tools:
-  azure-devops:
-    toolsets: [repos, wit, core]                    # ADO API toolset groups
-    allowed: [wit_get_work_item, core_list_projects] # Explicit tool allow-list
-    org: myorg                                       # Optional override (inferred from git remote)
-```
-
-When enabled, the compiler:
-- Generates a containerized stdio MCP entry (`node:20-slim` + `npx @azure-devops/mcp`) in the MCPG config
-- Auto-maps `AZURE_DEVOPS_EXT_PAT` token passthrough when `permissions.read` is configured
-- Adds ADO-specific hosts to the network allowlist
-- Auto-infers org from the git remote URL at compile time (overridable via `org:` field)
-- Fails compilation if org cannot be determined (no explicit override and no ADO git remote)
-
 ### Target Platforms
 
 The `target` field in the front matter determines the output format and execution environment for the compiled pipeline.
@@ -502,25 +398,6 @@ The compiler transforms the input into valid Azure DevOps pipeline YAML based on
 - **1ES**: Uses `templates/1es-base.yml`
 
 Explicit markings are embedded in these templates that the compiler is allowed to replace e.g. `{{ copilot_params }}` denotes parameters which are passed to the copilot command line tool. The compiler should not replace sections denoted by `${{ some content }}`. What follows is a mapping of markings to responsibilities (primarily for the standalone template).
-
-## {{ parameters }}
-
-Should be replaced with the top-level `parameters:` block generated from the `parameters` front matter field. If no parameters are defined (and no auto-injected parameters apply), this marker is replaced with an empty string.
-
-When `safe-outputs.memory` is configured, the compiler auto-injects a `clearMemory` boolean parameter (default: `false`) unless one is already user-defined.
-
-Example output:
-```yaml
-parameters:
-- name: clearMemory
-  displayName: Clear agent memory
-  type: boolean
-  default: false
-- name: verbose
-  displayName: Verbose output
-  type: boolean
-  default: false
-```
 
 ## {{ repositories }}
 For each additional repository specified in the front matter append:
@@ -859,10 +736,6 @@ A `checksums.txt` file is also downloaded and verified via `sha256sum -c checksu
 
 Should be replaced with the pinned version of the MCP Gateway (defined as `MCPG_VERSION` constant in `src/compile/common.rs`). Used to tag the MCPG Docker image in the pipeline.
 
-## {{ mcpg_image }}
-
-Should be replaced with the MCPG Docker image name (defined as `MCPG_IMAGE` constant in `src/compile/common.rs`). Currently `ghcr.io/github/gh-aw-mcpg`.
-
 ## {{ copilot_version }}
 
 Should be replaced with the pinned version of the `Microsoft.Copilot.CLI.linux-x64` NuGet package (defined as `COPILOT_CLI_VERSION` constant in `src/compile/common.rs`). This version is used in the pipeline step that installs the Copilot CLI tool from Azure Artifacts.
@@ -927,7 +800,8 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - `--output-dir <path>` - Output directory for processed artifacts (e.g., agent memory)
   - `--ado-org-url <url>` - Azure DevOps organization URL override
   - `--ado-project <name>` - Azure DevOps project name override
-
+- `proxy` - Start an HTTP proxy for network filtering
+  - `--allow <host>` - Allowed host pattern (can be repeated, supports wildcards like `*.github.com`)
 - `configure` - Detect agentic pipelines in a local repository and update the `GITHUB_TOKEN` pipeline variable on their Azure DevOps build definitions
   - `--token <token>` / `GITHUB_TOKEN` env var - The new GITHUB_TOKEN value (prompted if omitted)
   - `--org <url>` - Override: Azure DevOps organization URL (inferred from git remote by default)
@@ -1055,40 +929,6 @@ Creates a pull request with code changes made by the agent. When invoked:
 
 During Stage 2 execution, the repository is validated against the allowed list (from `checkout:` + "self"), then the patch is applied and a PR is created in Azure DevOps.
 
-**Stage 2 Execution Architecture (Hybrid Git + ADO API):**
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Stage 2 Execution                        │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  1. Security Validation                                         │
-│     ├── Patch file size limit (5 MB)                           │
-│     └── Path validation (no .., .git, absolute paths)          │
-│                                                                 │
-│  2. Git Worktree (local operations only)                       │
-│     ├── Create worktree at target branch                       │
-│     ├── git apply --check (dry run)                            │
-│     ├── git apply (apply patch correctly)                      │
-│     └── git status --porcelain (detect changes)                │
-│                                                                 │
-│  3. ADO REST API (authenticated, no git config needed)         │
-│     ├── Read full file contents from worktree                  │
-│     ├── POST /pushes (create branch + commit)                  │
-│     ├── POST /pullrequests (create PR)                         │
-│     ├── PATCH (set auto-complete if configured)                │
-│     └── PUT (add reviewers)                                    │
-│                                                                 │
-│  4. Cleanup                                                     │
-│     └── WorktreeGuard removes worktree on drop                 │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-This hybrid approach combines:
-- **Git worktree + apply**: Correct patch application using git's battle-tested diff parser
-- **ADO REST API**: No git config (user.email/name) needed, authentication handled via token
-
 **Agent parameters:**
 - `title` - PR title (required, 5-200 characters)
 - `description` - PR description in markdown (required, 10+ characters)
@@ -1106,13 +946,130 @@ Note: The source branch name is auto-generated from a sanitized version of the P
 - `work-items` - List of work item IDs to link
 - `max` - Maximum number of create-pull-request outputs allowed per run (default: 1)
 
-**Multi-repository support:**
-When `workspace: root` and multiple repositories are checked out, agents can create PRs for any allowed repository:
-```json
-{"title": "Fix in main repo", "description": "...", "repository": "self"}
-{"title": "Fix in other repo", "description": "...", "repository": "other-repo"}
-```
-The `repository` value must be "self" or an alias from the `checkout:` list in the front matter.
+#### add-pr-comment
+Adds a new comment thread to a pull request.
+
+**Agent parameters:**
+- `pull_request_id` - The PR ID to comment on (required, must be positive)
+- `body` - Comment text in markdown format (required, at least 10 characters)
+- `repository` - Repository alias (default: "self")
+
+**Configuration options (front matter):**
+- `max` - Maximum number of add-pr-comment outputs allowed per run (default: 1)
+
+#### reply-to-pr-comment
+Replies to an existing review comment thread on a pull request.
+
+**Agent parameters:**
+- `pull_request_id` - The PR ID containing the thread (required)
+- `thread_id` - The thread ID to reply to (required)
+- `body` - Reply text in markdown format (required, at least 10 characters)
+- `repository` - Repository alias (default: "self")
+
+**Configuration options (front matter):**
+- `max` - Maximum number of reply-to-pr-comment outputs allowed per run (default: 1)
+
+#### resolve-pr-thread
+Resolves or updates the status of a pull request review thread.
+
+**Agent parameters:**
+- `pull_request_id` - The PR ID containing the thread (required)
+- `thread_id` - The thread ID to resolve (required)
+- `status` - New thread status: `active`, `fixed`, `wont-fix`, `closed`, or `by-design` (required)
+- `repository` - Repository alias (default: "self")
+
+**Configuration options (front matter):**
+- `max` - Maximum number of resolve-pr-thread outputs allowed per run (default: 1)
+
+#### submit-pr-review
+Submits a review vote on a pull request.
+
+**Agent parameters:**
+- `pull_request_id` - The PR ID to review (required)
+- `event` - Review action: `approve`, `approve-with-suggestions`, `request-changes`, or `comment` (required)
+- `body` - Optional review comment body
+- `repository` - Repository alias (default: "self")
+
+**Configuration options (front matter):**
+- `max` - Maximum number of submit-pr-review outputs allowed per run (default: 1)
+
+#### update-pr
+Updates pull request metadata (reviewers, labels, auto-complete, vote, description).
+
+**Agent parameters:**
+- `pull_request_id` - The PR ID to update (required)
+- `operation` - Update operation: `add-reviewers`, `add-labels`, `set-auto-complete`, `vote`, or `update-description` (required)
+- Additional parameters depend on the operation chosen
+- `repository` - Repository alias (default: "self")
+
+**Configuration options (front matter):**
+- `max` - Maximum number of update-pr outputs allowed per run (default: 1)
+
+#### link-work-items
+Links two Azure DevOps work items together.
+
+**Agent parameters:**
+- `source_id` - Source work item ID (required)
+- `target_id` - Target work item ID (required)
+- `link_type` - Relationship type: `parent`, `child`, `related`, `duplicate`, `duplicate-of`, `predecessor`, `successor` (required)
+
+**Configuration options (front matter):**
+- `max` - Maximum number of link-work-items outputs allowed per run (default: 1)
+
+#### queue-build
+Queues an Azure DevOps pipeline build by definition ID.
+
+**Agent parameters:**
+- `pipeline_id` - Pipeline definition ID to trigger (required, must be positive)
+- `branch` - Branch to build (optional, defaults to the pipeline's default branch)
+- `parameters` - Key-value pairs of pipeline parameters (optional)
+
+**Configuration options (front matter):**
+- `max` - Maximum number of queue-build outputs allowed per run (default: 1)
+
+#### create-git-tag
+Creates a git tag on a repository ref.
+
+**Agent parameters:**
+- `tag_name` - Tag name (e.g., `v1.2.3`; 3-100 characters, alphanumeric plus `.`, `-`, `_`, `/`)
+- `ref` - Git ref to tag (branch name, commit SHA, etc.; default: `main`)
+- `message` - Optional tag message (creates an annotated tag if provided)
+- `repository` - Repository alias (default: "self")
+
+**Configuration options (front matter):**
+- `max` - Maximum number of create-git-tag outputs allowed per run (default: 1)
+
+#### create-branch
+Creates a new branch from an existing ref.
+
+**Agent parameters:**
+- `branch_name` - Branch name to create (1-200 characters)
+- `from` - Branch or ref to create from (default: `main`)
+- `repository` - Repository alias (default: "self")
+
+**Configuration options (front matter):**
+- `max` - Maximum number of create-branch outputs allowed per run (default: 1)
+
+#### add-build-tag
+Adds a tag to an Azure DevOps build.
+
+**Agent parameters:**
+- `build_id` - Build ID to tag (required, must be positive)
+- `tag` - Tag value to add (required)
+
+**Configuration options (front matter):**
+- `max` - Maximum number of add-build-tag outputs allowed per run (default: 1)
+
+#### upload-attachment
+Uploads a workspace file as an attachment to an Azure DevOps work item.
+
+**Agent parameters:**
+- `work_item_id` - Work item ID to attach the file to (required)
+- `file_path` - Relative path to the file in the workspace (no directory traversal)
+- `file_name` - Optional display name for the attachment
+
+**Configuration options (front matter):**
+- `max` - Maximum number of upload-attachment outputs allowed per run (default: 1)
 
 #### noop
 Reports that no action was needed. Use this to provide visibility when analysis is complete but no changes or outputs are required.
@@ -1135,8 +1092,42 @@ Reports that a tool or capability needed to complete the task is not available.
 - `tool_name` - Name of the tool that was expected but not found
 - `context` - Optional context about why the tool was needed
 
-#### cache-memory (moved to `tools:`)
-Memory is now configured as a first-class tool under `tools: cache-memory:` instead of `safe-outputs: memory:`. See the [Cache Memory](#cache-memory-cache-memory) section under Tools Configuration for details.
+#### report-incomplete
+Reports that a task could not be completed.
+
+**Agent parameters:**
+- `reason` - Why the task could not be completed (required)
+- `context` - Optional additional context about what was attempted
+
+#### memory
+Provides persistent memory across agent runs. When enabled, the agent can read and write files to a memory directory that persists between pipeline executions.
+
+**Configuration options (front matter):**
+```yaml
+safe-outputs:
+  memory:
+    allowed-extensions:    # Optional: restrict file types (defaults to all)
+      - .md
+      - .json
+      - .txt
+```
+
+**How it works:**
+1. During Stage 1 (agent execution), the agent can write files to `/tmp/awf-tools/staging/agent_memory/`
+2. A prompt is automatically appended to inform the agent about its memory location
+3. During Stage 2 execution, memory files are validated and sanitized:
+   - Path traversal attempts are blocked
+   - Files are checked for `##vso[` command injection
+   - Total size is limited to 5 MB
+   - File extensions can be restricted via configuration
+4. Sanitized memory files are published as a pipeline artifact
+5. On the next run, the previous memory is downloaded and restored to the staging directory
+
+**Security validations:**
+- Maximum total memory size: 5 MB
+- Path validation: no `..`, `.git`, absolute paths, or null bytes
+- Content validation: text files are scanned for `##vso[` commands
+- Extension filtering: can restrict to specific file types
 
 #### create-wiki-page
 Creates a new Azure DevOps wiki page. The page must **not** already exist; the tool enforces an atomic create-only operation (via `If-Match: ""`). Attempting to create a page that already exists results in an explicit failure.
@@ -1196,9 +1187,7 @@ When extending the compiler:
 2. **New compile targets**: Implement the `Compiler` trait in a new file under `src/compile/`
 3. **New front matter fields**: Add fields to `FrontMatter` in `src/compile/types.rs`
 4. **New template markers**: Handle replacements in the target-specific compiler (e.g., `standalone.rs` or `onees.rs`)
-5. **New safe-output tools**: Add to `src/safeoutputs/` — implement `ToolResult`, `Executor`, register in `mod.rs`, `mcp.rs`, `execute.rs`
-6. **New first-class tools**: Add to `src/tools/` — extend `ToolsConfig` in `types.rs`, wire in compilers
-7. **Validation**: Add compile-time validation for safe outputs and permissions
+5. **Validation**: Add compile-time validation for safe outputs and permissions
 
 ### Security Considerations
 
@@ -1351,7 +1340,7 @@ network:
 
 Network isolation is provided by AWF (Agentic Workflow Firewall), which provides L7 (HTTP/HTTPS) egress control using Squid proxy and Docker containers. AWF restricts network access to a whitelist of approved domains.
 
-The `ado-aw` compiler binary is distributed via [GitHub Releases](https://github.com/githubnext/ado-aw/releases) with SHA256 checksum verification. The AWF binary is distributed via [GitHub Releases](https://github.com/github/gh-aw-firewall/releases) with SHA256 checksum verification. Docker is sourced via the `DockerInstaller@0` ADO task.
+The `ado-aw` compiler binary is distributed via <a href="https://github.com/githubnext/ado-aw/releases">GitHub Releases</a> with SHA256 checksum verification. The AWF binary is distributed via <a href="https://github.com/github/gh-aw-firewall/releases">GitHub Releases</a> with SHA256 checksum verification. Docker is sourced via the `DockerInstaller@0` ADO task.
 
 ### Default Allowed Domains
 
@@ -1445,7 +1434,7 @@ permissions:
 
 ## MCP Gateway (MCPG)
 
-The MCP Gateway ([gh-aw-mcpg](https://github.com/github/gh-aw-mcpg)) is the upstream MCP routing layer that connects agents to their configured MCP servers. It replaces the previous custom MCP firewall with the standard gh-aw gateway implementation.
+The MCP Gateway (<a href="https://github.com/github/gh-aw-mcpg">gh-aw-mcpg</a>) is the upstream MCP routing layer that connects agents to their configured MCP servers. It replaces the previous custom MCP firewall with the standard gh-aw gateway implementation.
 
 ### Architecture
 
@@ -1539,10 +1528,10 @@ The MCPG config is written to `$(Agent.TempDirectory)/staging/mcpg-config.json` 
 
 ## References
 
-- [GitHub Agentic Workflows](https://github.com/githubnext/gh-aw) - Inspiration for this project
-- [MCP Gateway (gh-aw-mcpg)](https://github.com/github/gh-aw-mcpg) - MCP routing gateway
-- [AWF (gh-aw-firewall)](https://github.com/github/gh-aw-firewall) - Network isolation firewall
-- [Azure DevOps YAML Schema](https://docs.microsoft.com/en-us/azure/devops/pipelines/yaml-schema)
-- [OneBranch Documentation](https://aka.ms/onebranchdocs)
-- [Clap Documentation](https://docs.rs/clap/latest/clap/)
-- [Anyhow Documentation](https://docs.rs/anyhow/latest/anyhow/)
+- <a href="https://github.com/githubnext/gh-aw">GitHub Agentic Workflows</a> - Inspiration for this project
+- <a href="https://github.com/github/gh-aw-mcpg">MCP Gateway (gh-aw-mcpg)</a> - MCP routing gateway
+- <a href="https://github.com/github/gh-aw-firewall">AWF (gh-aw-firewall)</a> - Network isolation firewall
+- <a href="https://docs.microsoft.com/en-us/azure/devops/pipelines/yaml-schema">Azure DevOps YAML Schema</a>
+- <a href="https://aka.ms/onebranchdocs">OneBranch Documentation</a>
+- <a href="https://docs.rs/clap/latest/clap/">Clap Documentation</a>
+- <a href="https://docs.rs/anyhow/latest/anyhow/">Anyhow Documentation</a>

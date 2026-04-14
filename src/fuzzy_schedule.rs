@@ -1036,6 +1036,38 @@ mod tests {
         assert!(err.to_string().contains("at least 5 minutes"));
     }
 
+    // ─── invalid hour interval error path ────────────────────────────────────
+
+    #[test]
+    fn test_parse_invalid_hour_interval_5h() {
+        let err = parse_fuzzy_schedule("every 5h").unwrap_err();
+        assert!(
+            err.to_string().contains("Valid intervals"),
+            "Error for 5h should mention valid intervals: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_invalid_hour_interval_7h() {
+        let err = parse_fuzzy_schedule("every 7h").unwrap_err();
+        assert!(
+            err.to_string().contains("not recommended"),
+            "Error for 7h should say 'not recommended': {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_zero_hour_interval() {
+        let err = parse_fuzzy_schedule("every 0h").unwrap_err();
+        assert!(
+            err.to_string().contains("greater than 0"),
+            "Error for 0h should mention interval must be greater than 0: {}",
+            err
+        );
+    }
+
     #[test]
     fn test_backward_compatibility() {
         // Test that simple "hourly" and "daily" still work

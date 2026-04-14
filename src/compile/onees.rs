@@ -17,15 +17,16 @@ use std::path::Path;
 
 use super::Compiler;
 use super::common::{
-    self, AWF_VERSION, COPILOT_CLI_VERSION, DEFAULT_POOL, compute_effective_workspace,
-    generate_acquire_ado_token, generate_checkout_self, generate_checkout_steps,
-    generate_ci_trigger, generate_copilot_ado_env, generate_copilot_params,
-    generate_executor_ado_env, generate_header_comment, generate_job_timeout,
-    generate_pipeline_path, generate_pipeline_resources, generate_pr_trigger,
-    generate_repositories, generate_schedule, generate_source_path, generate_working_directory,
-    is_custom_mcp, replace_with_indent, validate_comment_target,
-    validate_resolve_pr_thread_statuses, validate_submit_pr_review_events,
-    validate_update_pr_votes, validate_update_work_item_target, validate_write_permissions,
+    self, AWF_VERSION, COPILOT_CLI_VERSION, DEFAULT_POOL, build_parameters,
+    compute_effective_workspace, generate_acquire_ado_token, generate_checkout_self,
+    generate_checkout_steps, generate_ci_trigger, generate_copilot_ado_env,
+    generate_copilot_params, generate_executor_ado_env, generate_header_comment,
+    generate_job_timeout, generate_parameters, generate_pipeline_path,
+    generate_pipeline_resources, generate_pr_trigger, generate_repositories, generate_schedule,
+    generate_source_path, generate_working_directory, is_custom_mcp, replace_with_indent,
+    validate_comment_target, validate_resolve_pr_thread_statuses,
+    validate_submit_pr_review_events, validate_update_pr_votes,
+    validate_update_work_item_target, validate_write_permissions,
 };
 use super::types::{FrontMatter, McpConfig};
 
@@ -61,6 +62,13 @@ impl Compiler for OneESCompiler {
         let checkout_steps = generate_checkout_steps(&front_matter.checkout);
         let checkout_self = generate_checkout_self();
         let copilot_params = generate_copilot_params(front_matter);
+        let has_memory = front_matter
+            .tools
+            .as_ref()
+            .and_then(|t| t.cache_memory.as_ref())
+            .is_some_and(|cm| cm.is_enabled());
+        let parameters = build_parameters(&front_matter.parameters, has_memory);
+        let parameters_yaml = generate_parameters(&parameters)?;
 
         let effective_workspace = compute_effective_workspace(
             &front_matter.workspace,
@@ -168,6 +176,7 @@ displayName: "Finalize""#,
         // Replace all template markers
         let compiler_version = env!("CARGO_PKG_VERSION");
         let replacements: Vec<(&str, &str)> = vec![
+            ("{{ parameters }}", &parameters_yaml),
             ("{{ compiler_version }}", compiler_version),
             // No-op for 1ES (template doesn't use AWF), but included for forward-compatibility
             ("{{ firewall_version }}", AWF_VERSION),
@@ -214,10 +223,10 @@ displayName: "Finalize""#,
         if front_matter
             .mcp_servers
             .iter()
-            .any(|(_, c)| matches!(c, McpConfig::WithOptions(o) if o.command.is_some()))
+            .any(|(_, c)| is_custom_mcp(c))
         {
             eprintln!(
-                "Warning: Custom MCP servers (with command:) are not supported in 1ES target. \
+                "Warning: Custom MCP servers (with container: or url:) are not supported in 1ES target. \
                 They will be ignored. Use standalone target for full MCP support."
             );
         }
@@ -257,10 +266,10 @@ fn generate_mcp_configuration(mcps: &HashMap<String, McpConfig>) -> String {
                 return None;
             }
 
-            // Custom MCPs with command: not supported in 1ES (needs service connection)
+            // Custom MCPs with container/url: not supported in 1ES (needs service connection)
             if is_custom_mcp(config) {
                 log::warn!(
-                    "MCP '{}' uses custom command — not supported in 1ES target (requires service connection)",
+                    "MCP '{}' uses custom container/url — not supported in 1ES target (requires service connection)",
                     name
                 );
                 return None;
@@ -387,4 +396,161 @@ fn generate_teardown_job(teardown_steps: &[serde_yaml::Value], agent_name: &str)
         agent_name,
         steps_yaml.join("\n    ")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::types::McpOptions;
+
+    // ─── generate_agent_context_root ─────────────────────────────────────────
+
+    #[test]
+    fn test_generate_agent_context_root_repo() {
+        assert_eq!(
+            generate_agent_context_root("repo"),
+            "$(Build.Repository.Name)"
+        );
+    }
+
+    #[test]
+    fn test_generate_agent_context_root_root() {
+        assert_eq!(generate_agent_context_root("root"), ".");
+    }
+
+    #[test]
+    fn test_generate_agent_context_root_unknown_defaults_to_dot() {
+        // Any unrecognised workspace value should fall through to "."
+        assert_eq!(generate_agent_context_root("something-else"), ".");
+    }
+
+    // ─── generate_mcp_configuration ──────────────────────────────────────────
+
+    #[test]
+    fn test_generate_mcp_configuration_empty_returns_braces() {
+        let mcps = HashMap::new();
+        let result = generate_mcp_configuration(&mcps);
+        assert_eq!(result, "{}");
+    }
+
+    #[test]
+    fn test_generate_mcp_configuration_skips_custom_mcp_with_command() {
+        let mut mcps = HashMap::new();
+        mcps.insert(
+            "my-tool".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                container: Some("node:20-slim".to_string()),
+                ..Default::default()
+            }),
+        );
+        let result = generate_mcp_configuration(&mcps);
+        // Custom MCPs with `command:` are not supported in 1ES — must be excluded
+        assert!(
+            !result.contains("my-tool"),
+            "Custom MCP with command should be excluded in 1ES target"
+        );
+        assert_eq!(result, "{}", "Only custom MCPs → empty config");
+    }
+
+    #[test]
+    fn test_generate_mcp_configuration_service_connection_mcp() {
+        let mut mcps = HashMap::new();
+        mcps.insert(
+            "my-mcp".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                service_connection: Some("mcp-my-mcp-sc".to_string()),
+                ..Default::default()
+            }),
+        );
+        let result = generate_mcp_configuration(&mcps);
+        assert!(result.contains("my-mcp"), "Service-connection MCP should appear in output");
+        assert!(
+            result.contains("serviceConnection: mcp-my-mcp-sc"),
+            "Should reference the explicit service connection"
+        );
+    }
+
+    #[test]
+    fn test_generate_mcp_configuration_default_service_connection_naming() {
+        // When no explicit service_connection is set, a default name is generated.
+        let mut mcps = HashMap::new();
+        mcps.insert("my-tool".to_string(), McpConfig::Enabled(true));
+        let result = generate_mcp_configuration(&mcps);
+        assert!(result.contains("my-tool"));
+        assert!(result.contains("serviceConnection: mcp-my-tool-service-connection"));
+    }
+
+    #[test]
+    fn test_generate_mcp_configuration_disabled_mcp_excluded() {
+        let mut mcps = HashMap::new();
+        mcps.insert("disabled-mcp".to_string(), McpConfig::Enabled(false));
+        let result = generate_mcp_configuration(&mcps);
+        assert!(!result.contains("disabled-mcp"), "Disabled MCP should not appear in output");
+        assert_eq!(result, "{}");
+    }
+
+    // ─── generate_inline_steps ────────────────────────────────────────────────
+
+    #[test]
+    fn test_generate_inline_steps_empty() {
+        let result = generate_inline_steps(&[]);
+        assert!(result.is_empty(), "Empty steps list should return empty string");
+    }
+
+    #[test]
+    fn test_generate_inline_steps_single_step() {
+        let step: serde_yaml::Value =
+            serde_yaml::from_str("bash: echo hello").expect("valid yaml");
+        let result = generate_inline_steps(&[step]);
+        assert!(result.contains("bash"), "Step YAML should contain the bash key");
+        assert!(result.contains("echo hello"), "Step YAML should contain the command");
+    }
+
+    // ─── generate_setup_job ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_generate_setup_job_empty_steps() {
+        let result = generate_setup_job(&[], "My Agent");
+        assert!(result.is_empty(), "Empty setup steps should return empty string");
+    }
+
+    #[test]
+    fn test_generate_setup_job_with_steps() {
+        let step: serde_yaml::Value =
+            serde_yaml::from_str("bash: echo setup").expect("valid yaml");
+        let result = generate_setup_job(&[step], "My Agent");
+        assert!(result.contains("SetupJob"), "Should define a SetupJob");
+        assert!(
+            result.contains("My Agent - Setup"),
+            "Should include agent name in display name"
+        );
+        assert!(result.contains("checkout: self"), "Should include self checkout");
+        assert!(result.contains("echo setup"), "Should include the step content");
+    }
+
+    // ─── generate_teardown_job ───────────────────────────────────────────────
+
+    #[test]
+    fn test_generate_teardown_job_empty_steps() {
+        let result = generate_teardown_job(&[], "My Agent");
+        assert!(result.is_empty(), "Empty teardown steps should return empty string");
+    }
+
+    #[test]
+    fn test_generate_teardown_job_with_steps() {
+        let step: serde_yaml::Value =
+            serde_yaml::from_str("bash: echo teardown").expect("valid yaml");
+        let result = generate_teardown_job(&[step], "My Agent");
+        assert!(result.contains("TeardownJob"), "Should define a TeardownJob");
+        assert!(
+            result.contains("My Agent - Teardown"),
+            "Should include agent name in display name"
+        );
+        assert!(
+            result.contains("ProcessSafeOutputs"),
+            "Should depend on ProcessSafeOutputs"
+        );
+        assert!(result.contains("checkout: self"), "Should include self checkout");
+        assert!(result.contains("echo teardown"), "Should include the step content");
+    }
 }

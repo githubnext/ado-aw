@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use super::PATH_SEGMENT;
 use crate::sanitize::{Sanitize, sanitize as sanitize_text};
 use crate::tool_result;
-use crate::tools::{ExecutionContext, ExecutionResult, Executor, Validate};
-use crate::tools::comment_on_work_item::CommentTarget;
+use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::safeoutputs::comment_on_work_item::CommentTarget;
 use anyhow::{Context, ensure};
 
 /// Resolve a human-friendly link type name to the ADO relation type string.
@@ -305,7 +305,7 @@ impl Executor for LinkWorkItemsResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::ToolResult;
+    use crate::safeoutputs::ToolResult;
 
     #[test]
     fn test_result_has_correct_name() {

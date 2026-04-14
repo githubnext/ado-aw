@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::tool_result;
-use crate::tools::Validate;
+use crate::safeoutputs::Validate;
 
 /// Parameters for reporting a missing tool
 #[derive(Deserialize, JsonSchema)]
@@ -32,7 +32,7 @@ tool_result! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::ToolResult;
+    use crate::safeoutputs::ToolResult;
 
     #[test]
     fn test_result_has_correct_name() {

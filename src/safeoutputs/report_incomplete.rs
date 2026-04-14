@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use crate::sanitize::{Sanitize, sanitize as sanitize_text};
 use crate::tool_result;
-use crate::tools::Validate;
+use crate::safeoutputs::Validate;
 use anyhow::ensure;
 
 /// Parameters for reporting that a task could not be completed
@@ -52,7 +52,7 @@ impl Sanitize for ReportIncompleteResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::ToolResult;
+    use crate::safeoutputs::ToolResult;
 
     #[test]
     fn test_result_has_correct_name() {

@@ -3,7 +3,7 @@
 # for the main agent task, while adding custom jobs for safe output analysis and processing.
 
 name: {{ agent_name }}-$(BuildID)
-
+{{ parameters }}
 {{ schedule }}
 {{ pr_trigger }}
 {{ ci_trigger }}
@@ -228,15 +228,16 @@ extends:
                 displayName: "Start network proxy"
 
               - bash: |
+                  set -o pipefail
+
                   THREAT_OUTPUT_FILE="$(Agent.TempDirectory)/threat-analysis-output.txt"
 
-                  # Use $(cat file) like gh-aw does - the command is executed directly, not via a variable
-                  copilot --prompt "$(cat $(Agent.TempDirectory)/threat-analysis-prompt.md)" {{ copilot_params }} > "$THREAT_OUTPUT_FILE" 2>&1
-                  AGENT_EXIT_CODE=$?
-
-                  echo "=== Threat Analysis Output (sanitized) ==="
-                  sed 's/##vso\[/## [SANITIZED] vso[/g' "$THREAT_OUTPUT_FILE"
-                  echo "=== End Threat Analysis Output ==="
+                  # Stream threat analysis output in real-time with VSO command filtering
+                  copilot --prompt "$(cat $(Agent.TempDirectory)/threat-analysis-prompt.md)" {{ copilot_params }} \
+                    2>&1 \
+                    | sed -u 's/##vso\[/[VSO-FILTERED] vso[/g; s/##\[/[VSO-FILTERED] [/g' \
+                    | tee "$THREAT_OUTPUT_FILE" \
+                    && AGENT_EXIT_CODE=0 || AGENT_EXIT_CODE=$?
 
                   exit $AGENT_EXIT_CODE
                 displayName: "Run threat analysis"

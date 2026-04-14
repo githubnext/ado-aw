@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
 use crate::sanitize::{Sanitize, sanitize as sanitize_text};
-use crate::tools::{
+use crate::safeoutputs::{
     AddBuildTagParams, AddBuildTagResult,
     AddPrCommentParams, AddPrCommentResult,
     CommentOnWorkItemParams, CommentOnWorkItemResult,
@@ -60,7 +60,7 @@ fn generate_short_id() -> String {
 }
 
 // Re-export from tools module
-use crate::tools::ALWAYS_ON_TOOLS;
+use crate::safeoutputs::ALWAYS_ON_TOOLS;
 
 // ============================================================================
 // SafeOutputs MCP Server
@@ -1523,11 +1523,11 @@ mod tests {
     }
 
     /// Asserts that ALL_KNOWN_SAFE_OUTPUTS contains every tool registered in the
-    /// router (plus the non-MCP keys like "memory"). This prevents the list from
-    /// drifting when new tools are added to the router but not to the constant.
+    /// router. This prevents the list from drifting when new tools are added to
+    /// the router but not to the constant.
     #[tokio::test]
     async fn test_all_known_safe_outputs_covers_router() {
-        use crate::tools::ALL_KNOWN_SAFE_OUTPUTS;
+        use crate::safeoutputs::ALL_KNOWN_SAFE_OUTPUTS;
 
         let temp_dir = tempfile::tempdir().unwrap();
         let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), None)
