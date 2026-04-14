@@ -720,7 +720,7 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter, inferred_org: Option<&st
                 );
             } else if let Some(url) = &opts.url {
                 // HTTP-based MCP (remote server)
-                validate_mcp_url(url, name);
+                for w in validate_mcp_url(url, name) { eprintln!("{}", w); }
                 // Warn about potential inline secrets in headers
                 for w in warn_potential_secrets(name, &HashMap::new(), &opts.headers) { eprintln!("{}", w); }
                 if !opts.env.is_empty() {
@@ -882,6 +882,12 @@ fn validate_docker_args(args: &[String], mcp_name: &str) -> Vec<String> {
                     mcp_name, mount_spec
                 ));
                 warnings.extend(validate_mount_source(mount_spec, mcp_name));
+            } else {
+                warnings.push(format!(
+                    "Warning: MCP '{}': '{}' flag is the last arg with no mount spec following it. \
+                    This is likely a malformed args list.",
+                    mcp_name, arg
+                ));
             }
         } else if arg_lower.starts_with("-v=") || arg_lower.starts_with("--volume=") {
             let mount_spec = arg.splitn(2, '=').nth(1).unwrap_or("");
@@ -897,14 +903,16 @@ fn validate_docker_args(args: &[String], mcp_name: &str) -> Vec<String> {
 }
 
 /// Validate that an MCP HTTP URL uses an allowed scheme.
-fn validate_mcp_url(url: &str, mcp_name: &str) {
+fn validate_mcp_url(url: &str, mcp_name: &str) -> Vec<String> {
+    let mut warnings = Vec::new();
     if !url.starts_with("https://") && !url.starts_with("http://") {
-        eprintln!(
+        warnings.push(format!(
             "Warning: MCP '{}': URL '{}' does not use http:// or https:// scheme. \
             This may not work with MCPG.",
             mcp_name, url
-        );
+        ));
     }
+    warnings
 }
 
 /// Warn when env values or headers look like they contain inline secrets.
@@ -1815,6 +1823,50 @@ mod tests {
     fn test_validate_docker_args_empty_no_warnings() {
         let warnings = validate_docker_args(&[], "my-mcp");
         assert!(warnings.is_empty(), "empty args should not produce warnings");
+    }
+
+    #[test]
+    fn test_validate_docker_args_volume_flag_trailing_warns() {
+        // -v as the last arg with no mount spec is malformed
+        let warnings = validate_docker_args(&["-v".to_string()], "my-mcp");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("malformed"), "trailing -v with no mount spec should warn");
+    }
+
+    #[test]
+    fn test_validate_docker_args_long_volume_flag_trailing_warns() {
+        // --volume as the last arg with no mount spec is malformed
+        let warnings = validate_docker_args(&["--volume".to_string()], "my-mcp");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("malformed"), "trailing --volume with no mount spec should warn");
+    }
+
+    // ─── validate_mcp_url ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_mcp_url_https_no_warnings() {
+        let warnings = validate_mcp_url("https://mcp.dev.azure.com/myorg", "my-mcp");
+        assert!(warnings.is_empty(), "https URL should not produce warnings");
+    }
+
+    #[test]
+    fn test_validate_mcp_url_http_no_warnings() {
+        let warnings = validate_mcp_url("http://localhost:8100/mcp", "my-mcp");
+        assert!(warnings.is_empty(), "http URL should not produce warnings");
+    }
+
+    #[test]
+    fn test_validate_mcp_url_bad_scheme_warns() {
+        let warnings = validate_mcp_url("ftp://files.example.com", "my-mcp");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("does not use http://"), "non-HTTP scheme should warn");
+    }
+
+    #[test]
+    fn test_validate_mcp_url_no_scheme_warns() {
+        let warnings = validate_mcp_url("mcp.dev.azure.com/myorg", "my-mcp");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("does not use http://"), "URL without scheme should warn");
     }
 
     // ─── validate_mount_source ───────────────────────────────────────────────

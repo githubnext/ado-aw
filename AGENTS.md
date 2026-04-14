@@ -1406,6 +1406,17 @@ network:
 
 All hosts (core + MCP-specific + user-specified) are combined into a comma-separated domain list passed to AWF's `--allow-domains` flag.
 
+#### Blocking Hosts
+
+The `network.blocked` field removes hosts from the combined allowlist using **exact-string matching**. Blocking `"github.com"` removes only that exact entry — it does **not** remove wildcard variants like `"*.github.com"`. To fully block a domain and its subdomains, list both the exact host and the wildcard pattern:
+
+```yaml
+network:
+  blocked:
+    - "github.com"
+    - "*.github.com"
+```
+
 ### Permissions (ADO Access Tokens)
 
 ADO does not support fine-grained permissions — there are two access levels: blanket read and blanket write. Tokens are minted from ARM service connections; `System.AccessToken` is never used for agent or executor operations.
