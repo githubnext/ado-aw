@@ -24,7 +24,7 @@ cd /tmp && grep "ado-aw-linux-x64" checksums.txt | sha256sum -c - && chmod +x /t
 VERSION="{{ compiler_version }}"
 curl -fsSL -o /tmp/ado-aw "https://github.com/githubnext/ado-aw/releases/download/v${VERSION}/ado-aw-darwin-x64"
 curl -fsSL -o /tmp/checksums.txt "https://github.com/githubnext/ado-aw/releases/download/v${VERSION}/checksums.txt"
-cd /tmp && grep "ado-aw-darwin-x64" checksums.txt | sha256sum -c - && chmod +x /tmp/ado-aw
+cd /tmp && grep "ado-aw-darwin-x64" checksums.txt | shasum -a 256 -c - && chmod +x /tmp/ado-aw
 
 # Windows (PowerShell)
 $VERSION = "{{ compiler_version }}"

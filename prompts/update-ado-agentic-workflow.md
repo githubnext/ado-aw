@@ -35,7 +35,7 @@ Do not proceed until you understand the current state.
 
 Modify **only** what the user requests. Do not refactor unrelated sections, reorder fields, or rewrite the agent instructions unless asked.
 
-When adding new fields, place them in the conventional order used by `ado-aw create`:
+When adding new fields, place them in the conventional front matter order:
 
 ```
 name → description → target → engine → schedule → workspace → pool →
