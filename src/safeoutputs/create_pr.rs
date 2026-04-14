@@ -1766,58 +1766,17 @@ fn truncate_error_body(body: &str, max_len: usize) -> &str {
 /// Supports `*` (match any sequence within a path segment) and leading `**/`
 /// (match any directory prefix). Patterns without `/` are treated as basename
 /// matches (e.g., `*.lock` matches `subdir/Cargo.lock`).
+/// Match a file path against a glob pattern for excluded-files filtering.
+/// Patterns without `/` are treated as basename matches (e.g., `*.lock` matches
+/// `subdir/Cargo.lock`). Patterns with `**/` prefix match at any depth.
+/// Uses the `glob-match` crate for correct glob semantics (`*` does not cross `/`).
 fn glob_match_simple(pattern: &str, path: &str) -> bool {
     if !pattern.contains('/') {
-        // Basename-only pattern: match against the last path component
-        let basename = path.rsplit('/').next().unwrap_or(path);
-        return wildcard_match(pattern, basename);
+        // Basename-only pattern: auto-prefix with **/ for any-depth matching
+        let full_pattern = format!("**/{}", pattern);
+        return glob_match::glob_match(&full_pattern, path);
     }
-
-    if let Some(rest) = pattern.strip_prefix("**/") {
-        // **/foo matches foo at any depth: try matching against the full path
-        // and every directory suffix (e.g., "a/b/c" → "a/b/c", "b/c", "c")
-        if wildcard_match(rest, path) {
-            return true;
-        }
-        let mut search = path;
-        while let Some(pos) = search.find('/') {
-            search = &search[pos + 1..];
-            if wildcard_match(rest, search) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    wildcard_match(pattern, path)
-}
-
-/// Match a pattern containing `*` wildcards against a string.
-/// `*` matches any sequence of characters (including empty).
-fn wildcard_match(pattern: &str, text: &str) -> bool {
-    let parts: Vec<&str> = pattern.split('*').collect();
-    if parts.len() == 1 {
-        return text == pattern;
-    }
-    let mut remaining = text;
-    for (i, part) in parts.iter().enumerate() {
-        if part.is_empty() {
-            continue;
-        }
-        if i == 0 {
-            if !remaining.starts_with(part) {
-                return false;
-            }
-            remaining = &remaining[part.len()..];
-        } else if i == parts.len() - 1 {
-            return remaining.ends_with(part);
-        } else if let Some(pos) = remaining.find(part) {
-            remaining = &remaining[pos + part.len()..];
-        } else {
-            return false;
-        }
-    }
-    true
+    glob_match::glob_match(pattern, path)
 }
 
 /// Validate a single file path for security issues
@@ -2257,6 +2216,8 @@ new file mode 100755
     fn test_glob_match_simple_path_with_slash() {
         assert!(glob_match_simple("src/*.rs", "src/main.rs"));
         assert!(!glob_match_simple("src/*.rs", "tests/main.rs"));
+        // * should NOT cross directory boundaries
+        assert!(!glob_match_simple("src/*.rs", "src/nested/file.rs"));
     }
 
     #[test]
@@ -2264,16 +2225,6 @@ new file mode 100755
         // *.lock should not match package.json
         assert!(!glob_match_simple("*.lock", "package.json"));
         assert!(!glob_match_simple("*.lock", "go.mod"));
-    }
-
-    #[test]
-    fn test_wildcard_match() {
-        assert!(wildcard_match("*.lock", "Cargo.lock"));
-        assert!(wildcard_match("foo", "foo"));
-        assert!(!wildcard_match("foo", "bar"));
-        assert!(wildcard_match("*", "anything"));
-        assert!(wildcard_match("pre*suf", "pre-middle-suf"));
-        assert!(!wildcard_match("pre*suf", "pre-middle-other"));
     }
 
     // ─── Extract paths from patch ───────────────────────────────────────────

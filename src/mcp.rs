@@ -436,6 +436,7 @@ impl SafeOutputs {
             }
         }
 
+        let mut found_remote_ref = false;
         for remote_ref in &candidates {
             let output = Command::new("git")
                 .args(["merge-base", "HEAD", remote_ref])
@@ -450,6 +451,16 @@ impl SafeOutputs {
                     if !base.is_empty() {
                         return Ok(base);
                     }
+                }
+                // Check if the ref exists even though merge-base failed (diverged branches)
+                let ref_check = Command::new("git")
+                    .args(["rev-parse", "--verify", remote_ref])
+                    .current_dir(git_dir)
+                    .output()
+                    .await
+                    .ok();
+                if ref_check.is_some_and(|o| o.status.success()) {
+                    found_remote_ref = true;
                 }
             }
         }
@@ -501,11 +512,19 @@ impl SafeOutputs {
             }
         }
 
-        Err(anyhow_to_mcp_error(anyhow::anyhow!(
-            "Cannot determine diff base: no remote tracking branch found. \
-             This can happen with shallow clones (fetchDepth: 1). \
-             Ensure the pipeline fetches full history or push a tracking branch."
-        )))
+        if found_remote_ref {
+            Err(anyhow_to_mcp_error(anyhow::anyhow!(
+                "Cannot determine diff base: remote tracking branch exists but shares no \
+                 common ancestry with HEAD (orphan or force-pushed branch). \
+                 Ensure HEAD is based on the target branch."
+            )))
+        } else {
+            Err(anyhow_to_mcp_error(anyhow::anyhow!(
+                "Cannot determine diff base: no remote tracking branch found. \
+                 This can happen with shallow clones (fetchDepth: 1). \
+                 Ensure the pipeline fetches full history or push a tracking branch."
+            )))
+        }
     }
 
     #[tool(
