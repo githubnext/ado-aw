@@ -24,11 +24,23 @@ You are a technical documentation auditor for the **ado-aw** project — a Rust 
 
 Audit the project documentation for accuracy and completeness by comparing docs against the actual codebase. If you find meaningful drift, create an issue detailing what needs updating.
 
+## Documentation Files
+
+The project maintains three documentation files, each serving a different audience:
+
+| File | Audience | Purpose |
+|------|----------|---------|
+| `AGENTS.md` | AI agents (Copilot coding agent) | Full project reference: architecture, types, template markers, safe outputs, CLI commands |
+| `README.md` | Human developers | Quick start, setup guide, CLI reference, configuration examples |
+| `prompts/create-ado-agentic-workflow.md` | AI agents creating workflows | Step-by-step guide for authoring agent `.md` files with correct front matter |
+
+All three must stay consistent with the codebase and with each other.
+
 ## What to Check
 
-### 1. Architecture Section (`copilot-instructions.md`)
+### 1. Architecture Section (`AGENTS.md`)
 
-Compare the directory tree in `.github/copilot-instructions.md` against actual files:
+Compare the directory tree in `AGENTS.md` against actual files:
 
 ```bash
 find src -type f -name '*.rs' | sort
@@ -40,25 +52,25 @@ Look for:
 - New source files not reflected in the architecture tree
 - Moved or renamed files
 
-### 2. CLI Commands
+### 2. CLI Commands (`AGENTS.md` + `README.md`)
 
-Extract the actual CLI commands from `src/main.rs` (look at the `Commands` enum with clap derive) and compare against documented commands in both `.github/copilot-instructions.md` and `README.md` (CLI Reference section).
+Extract the actual CLI commands from `src/main.rs` (look at the `Commands` enum with clap derive) and compare against documented commands in both `AGENTS.md` (CLI Commands section) and `README.md` (CLI Reference section).
 
 Check:
-- All subcommands are documented
+- All subcommands are documented in both files
 - Arguments and flags match what's in the code
 - Default values in docs match actual defaults in code
 
-### 3. Front Matter Fields
+### 3. Front Matter Fields (`AGENTS.md` + `README.md`)
 
-Compare the `FrontMatter` struct in `src/compile/types.rs` against the documented fields in both `.github/copilot-instructions.md` and `README.md` (Agent File Reference → Front Matter Fields).
+Compare the `FrontMatter` struct in `src/compile/types.rs` against the documented fields in both `AGENTS.md` and `README.md` (Agent File Reference → Front Matter Fields).
 
 - Are all struct fields documented?
 - Do documented defaults match `#[serde(default)]` values?
 - Are new fields missing from the documentation?
 - Are removed fields still documented?
 
-### 4. Template Markers
+### 4. Template Markers (`AGENTS.md`)
 
 Scan template files for markers:
 
@@ -67,14 +79,14 @@ grep -oP '\{\{[^}]+\}\}' templates/base.yml
 grep -oP '\{\{[^}]+\}\}' templates/1es-base.yml
 ```
 
-Compare against documented markers in `.github/copilot-instructions.md`. Check for:
+Compare against documented markers in `AGENTS.md`. Check for:
 - Undocumented markers
 - Documented markers that no longer exist in templates
 - Markers whose documented behavior doesn't match the compiler implementation
 
-### 5. Safe Output Tools
+### 5. Safe Output Tools (`AGENTS.md` + `README.md`)
 
-Compare tools defined in `src/tools/` against what's documented in both `.github/copilot-instructions.md` and `README.md` (Safe Outputs section):
+Compare tools defined in `src/tools/` against what's documented in both `AGENTS.md` and `README.md` (Safe Outputs section):
 - Are all tools documented with correct parameters?
 - Do configuration options match the actual implementation?
 - Does `README.md` list all available safe output tools?
@@ -90,9 +102,24 @@ Check the human-facing documentation in `README.md` against the codebase:
 - **Safe Outputs configuration examples** — do the YAML examples match the config structs in `src/tools/`?
 - **Front Matter Fields table** — do field names, types, and defaults match `src/compile/types.rs`?
 
+### 7. Workflow Authoring Prompt (`prompts/create-ado-agentic-workflow.md`)
+
+This file is the primary guide AI agents use when creating new workflow files. Drift here directly causes agents to produce broken pipelines. Check it thoroughly:
+
+- **Model table** (Step 2) — do the listed engine values match what `src/compile/types.rs` accepts?
+- **Schedule syntax** (Step 3) — does the documented syntax and frequency table match `src/fuzzy_schedule.rs`?
+- **Front matter steps** (Steps 1–12) — do all documented fields, defaults, and examples match the `FrontMatter` struct in `src/compile/types.rs`?
+- **Safe output tools** — do the documented tool names and configuration options match `src/tools/`? Are all available tools listed?
+- **MCP configuration** — does the documented format match `src/compile/types.rs` MCP types? Are the configuration properties (container, entrypoint, allowed, env, etc.) accurate?
+- **Common Patterns** — are the YAML examples valid against the current front matter schema?
+- **Key Rules** — is the guidance accurate? (e.g., compile-time validation rules, permission requirements)
+
 ## Decision Criteria
 
-**Create an issue** if you find 2+ documentation inconsistencies, OR any single critical inconsistency (wrong CLI syntax, missing required field documentation, incorrect defaults).
+**Create an issue** if you find any of the following:
+- 2+ documentation inconsistencies across any files
+- Any single critical inconsistency (wrong CLI syntax, missing required field documentation, incorrect defaults)
+- **Any inconsistency in `prompts/create-ado-agentic-workflow.md`** — this file directly drives agent behavior, so even a single inaccuracy is high-priority
 
 **Do NOT create an issue** if documentation is accurate or only has trivial differences (whitespace, comment wording).
 
