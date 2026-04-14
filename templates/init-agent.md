@@ -48,7 +48,7 @@ This is a **dispatcher agent** that routes your request to the appropriate speci
 ### Create New Agentic Pipeline
 **Load when**: User wants to create a new agentic pipeline from scratch
 
-**Prompt file**: https://raw.githubusercontent.com/githubnext/ado-aw/main/prompts/create-ado-agentic-workflow.md
+**Prompt file**: https://raw.githubusercontent.com/githubnext/ado-aw/v{{ compiler_version }}/prompts/create-ado-agentic-workflow.md
 
 **Use cases**:
 - "Create an agentic pipeline that reviews PRs weekly"
@@ -58,7 +58,7 @@ This is a **dispatcher agent** that routes your request to the appropriate speci
 ### Update Existing Pipeline
 **Load when**: User wants to modify an existing agent workflow file
 
-**Prompt file**: https://raw.githubusercontent.com/githubnext/ado-aw/main/prompts/update-ado-agentic-workflow.md
+**Prompt file**: https://raw.githubusercontent.com/githubnext/ado-aw/v{{ compiler_version }}/prompts/update-ado-agentic-workflow.md
 
 **Use cases**:
 - "Add the Azure DevOps MCP to my pipeline"
@@ -68,7 +68,7 @@ This is a **dispatcher agent** that routes your request to the appropriate speci
 ### Debug Failing Pipeline
 **Load when**: User needs to troubleshoot a failing agentic pipeline
 
-**Prompt file**: https://raw.githubusercontent.com/githubnext/ado-aw/main/prompts/debug-ado-agentic-workflow.md
+**Prompt file**: https://raw.githubusercontent.com/githubnext/ado-aw/v{{ compiler_version }}/prompts/debug-ado-agentic-workflow.md
 
 **Use cases**:
 - "Why is my agentic pipeline failing?"
@@ -111,4 +111,4 @@ When a user interacts with you:
 - Agent files must be compiled with `ado-aw compile` after YAML frontmatter changes
 - Markdown body (agent instructions) changes do NOT require recompilation
 - The agent never has direct write access — all mutations go through safe outputs
-- Full reference: https://raw.githubusercontent.com/githubnext/ado-aw/main/AGENTS.md
+- Full reference: https://raw.githubusercontent.com/githubnext/ado-aw/v{{ compiler_version }}/AGENTS.md

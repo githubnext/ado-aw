@@ -44,7 +44,7 @@ pub async fn run(path: Option<&std::path::Path>, force: bool) -> Result<()> {
     println!("  \"Create an ADO agentic workflow that <describe your workflow>\"");
     println!();
     println!("Or use the prompt directly with any AI agent:");
-    println!("  https://raw.githubusercontent.com/githubnext/ado-aw/main/prompts/create-ado-agentic-workflow.md");
+    println!("  https://raw.githubusercontent.com/githubnext/ado-aw/v{version}/prompts/create-ado-agentic-workflow.md");
 
     Ok(())
 }
