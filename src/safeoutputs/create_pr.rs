@@ -890,7 +890,7 @@ impl Executor for CreatePrResult {
             // We use git grep instead of git diff --check because diff --check
             // also flags trailing whitespace, producing false positives.
             let conflict_check = Command::new("git")
-                .args(["grep", "-l", "-P", r"^[<=>]{7}( |$)"])
+                .args(["grep", "-l", "-E", r"^(<<<<<<<|=======|>>>>>>>)"])
                 .current_dir(&worktree_path)
                 .output()
                 .await
@@ -1240,7 +1240,7 @@ impl Executor for CreatePrResult {
                 return Ok(ExecutionResult::failure_with_data(
                     format!(
                         "Failed to create pull request: {} - {}. Branch '{}' was pushed — create the PR manually.",
-                        status, truncate_error_body(&body, 500), source_branch,
+                        status, sanitize_text(truncate_error_body(&body, 500)), source_branch,
                     ),
                     serde_json::json!({
                         "fallback": "branch-recorded",
