@@ -230,6 +230,16 @@ impl SafeOutputs {
         // 2. If there are uncommitted changes, stage and create a temporary commit
         // 3. Generate format-patch from merge-base..HEAD to capture ALL changes
         // 4. If a temporary commit was created, reset it (preserving working tree)
+        //
+        // SAFETY: If the process is hard-killed (OOM, SIGKILL) between step 2 and
+        // step 4, the synthetic commit persists in the agent's working directory.
+        // This is low-probability and acceptable because:
+        // - The agent runs in an ephemeral container (AWF sandbox) that is destroyed
+        //   after the pipeline completes
+        // - The synthetic commit is on a detached/local branch, not pushed anywhere
+        // - If re-invoked, the agent would see the commit as part of normal history
+        // A stash-based approach was considered but git stash doesn't support
+        // format-patch's rename detection and binary handling capabilities.
 
         // Find the merge-base to diff against
         let merge_base = Self::find_merge_base(&git_dir).await?;
@@ -257,6 +267,24 @@ impl SafeOutputs {
             .is_empty();
         let mut made_synthetic_commit = false;
 
+        // Check for and clean up a stranded synthetic commit from a previous
+        // hard-killed process (OOM, SIGKILL). The marker file signals that a
+        // synthetic commit was created but never cleaned up.
+        let marker_path = git_dir.join(".ado-aw-synthetic-commit");
+        if marker_path.exists() {
+            warn!(
+                "Detected stranded synthetic commit marker at {}; \
+                 attempting cleanup with git reset HEAD~1",
+                marker_path.display()
+            );
+            let _ = Command::new("git")
+                .args(["reset", "HEAD~1", "--mixed", "--quiet"])
+                .current_dir(&git_dir)
+                .output()
+                .await;
+            let _ = tokio::fs::remove_file(&marker_path).await;
+        }
+
         if has_uncommitted {
             debug!("Uncommitted changes detected, creating synthetic commit");
 
@@ -283,7 +311,11 @@ impl SafeOutputs {
                 )));
             }
 
-            // Create a temporary commit with git identity flags to avoid config dependency
+            // Create a temporary commit with git identity flags to avoid config dependency.
+            // Write a marker file FIRST so that a hard kill leaves evidence for cleanup.
+            if let Err(e) = tokio::fs::write(&marker_path, "synthetic-commit-pending\n").await {
+                debug!("Could not write synthetic commit marker: {}", e);
+            }
             let commit_output = Command::new("git")
                 .args([
                     "-c", "user.email=agent@ado-aw",
@@ -371,6 +403,9 @@ impl SafeOutputs {
                     String::from_utf8_lossy(&reset_output.stderr)
                 )));
             }
+
+            // Remove the marker file now that the synthetic commit has been cleaned up
+            let _ = tokio::fs::remove_file(&marker_path).await;
         }
 
         // Now check the format-patch result after cleanup
