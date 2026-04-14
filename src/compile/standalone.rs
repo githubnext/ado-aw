@@ -219,12 +219,10 @@ impl Compiler for StandaloneCompiler {
             .and_then(|t| t.azure_devops.as_ref())
             .is_some_and(|ado| ado.is_enabled() && ado.org().is_none())
         {
-            // Only resolve git remote if ADO tool is enabled and no explicit org override
             let input_dir = input_path.parent().unwrap_or(std::path::Path::new("."));
             match crate::configure::get_git_remote_url(input_dir).await {
                 Ok(url) => match crate::configure::parse_ado_remote(&url) {
                     Ok(ctx) => {
-                        // Extract org name from org_url (e.g., "https://dev.azure.com/myorg" -> "myorg")
                         let org = ctx
                             .org_url
                             .trim_end_matches('/')
