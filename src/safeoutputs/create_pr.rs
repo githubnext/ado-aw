@@ -7,6 +7,7 @@ use tokio::process::Command;
 
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, ToolResult, Validate};
 use crate::sanitize::{Sanitize, sanitize as sanitize_text};
+use crate::tool_result;
 use anyhow::{Context, ensure};
 
 /// Maximum allowed patch file size (5 MB)
@@ -169,26 +170,37 @@ impl Validate for CreatePrParams {
     }
 }
 
-/// Result of creating a pull request - stored as safe output
-#[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct CreatePrResult {
-    /// Tool identifier
-    pub name: String,
-    /// Title for the pull request
-    pub title: String,
-    /// Description/body of the pull request (markdown)
-    pub description: String,
-    /// Source branch name (generated or provided)
-    pub source_branch: String,
-    /// Path to the patch file in the safe outputs directory
-    pub patch_file: String,
-    /// Repository alias ("self" or alias from checkout list)
-    pub repository: String,
+/// Internal params struct mirroring CreatePrResult fields for the tool_result! macro.
+/// The actual MCP parameters come from CreatePrParams; this struct enables the macro's
+/// TryFrom generation while CreatePrResult is constructed via CreatePrResult::new().
+#[derive(Deserialize, JsonSchema)]
+struct CreatePrResultFields {
+    title: String,
+    description: String,
+    source_branch: String,
+    patch_file: String,
+    repository: String,
 }
 
-impl crate::safeoutputs::ToolResult for CreatePrResult {
-    const NAME: &'static str = "create-pull-request";
-    const REQUIRES_WRITE: bool = true;
+impl Validate for CreatePrResultFields {}
+
+tool_result! {
+    name = "create-pull-request",
+    write = true,
+    params = CreatePrResultFields,
+    /// Result of creating a pull request - stored as safe output
+    pub struct CreatePrResult {
+        /// Title for the pull request
+        title: String,
+        /// Description/body of the pull request (markdown)
+        description: String,
+        /// Source branch name (generated or provided)
+        source_branch: String,
+        /// Path to the patch file in the safe outputs directory
+        patch_file: String,
+        /// Repository alias ("self" or alias from checkout list)
+        repository: String,
+    }
 }
 
 impl Sanitize for CreatePrResult {
