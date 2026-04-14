@@ -2522,3 +2522,219 @@ tools:
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+/// Test that network.allow with a valid leading wildcard (*.example.com) compiles successfully
+#[test]
+fn test_network_allow_valid_wildcard_compiles() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-network-valid-wildcard-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = r#"---
+name: "Network Wildcard Agent"
+description: "Agent with valid leading wildcard in network.allow"
+network:
+  allow:
+    - "*.mycompany.com"
+    - "api.external-service.com"
+---
+
+## Test
+"#;
+
+    let input_path = temp_dir.join("network-valid-wildcard.md");
+    let output_path = temp_dir.join("network-valid-wildcard.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args(["compile", input_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed for valid wildcard '*.mycompany.com': {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that network.allow with a trailing wildcard (example.*) fails compilation
+#[test]
+fn test_network_allow_trailing_wildcard_fails() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-network-trailing-wildcard-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = r#"---
+name: "Network Trailing Wildcard Agent"
+description: "Agent with trailing wildcard in network.allow"
+network:
+  allow:
+    - "example.*"
+---
+
+## Test
+"#;
+
+    let input_path = temp_dir.join("network-trailing-wildcard.md");
+    let output_path = temp_dir.join("network-trailing-wildcard.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args(["compile", input_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should fail for trailing wildcard 'example.*'"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unsupported position"),
+        "Error message should mention unsupported position: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that network.allow with a mid-string wildcard (ex*ample.com) fails compilation
+#[test]
+fn test_network_allow_mid_wildcard_fails() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-network-mid-wildcard-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = r#"---
+name: "Network Mid Wildcard Agent"
+description: "Agent with mid-string wildcard in network.allow"
+network:
+  allow:
+    - "ex*ample.com"
+---
+
+## Test
+"#;
+
+    let input_path = temp_dir.join("network-mid-wildcard.md");
+    let output_path = temp_dir.join("network-mid-wildcard.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args(["compile", input_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should fail for mid-string wildcard 'ex*ample.com'"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unsupported position"),
+        "Error message should mention unsupported position: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that network.allow with a double wildcard (*.*.com) fails compilation
+#[test]
+fn test_network_allow_double_wildcard_fails() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-network-double-wildcard-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = r#"---
+name: "Network Double Wildcard Agent"
+description: "Agent with double wildcard in network.allow"
+network:
+  allow:
+    - "*.*.com"
+---
+
+## Test
+"#;
+
+    let input_path = temp_dir.join("network-double-wildcard.md");
+    let output_path = temp_dir.join("network-double-wildcard.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args(["compile", input_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should fail for double wildcard '*.*.com'"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unsupported position"),
+        "Error message should mention unsupported position: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that network.allow with a bare '*' fails compilation
+#[test]
+fn test_network_allow_bare_wildcard_fails() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-network-bare-wildcard-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = r#"---
+name: "Network Bare Wildcard Agent"
+description: "Agent with bare wildcard in network.allow"
+network:
+  allow:
+    - "*"
+---
+
+## Test
+"#;
+
+    let input_path = temp_dir.join("network-bare-wildcard.md");
+    let output_path = temp_dir.join("network-bare-wildcard.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args(["compile", input_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should fail for bare wildcard '*'"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unsupported position"),
+        "Error message should mention unsupported position: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
