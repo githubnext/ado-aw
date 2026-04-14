@@ -617,9 +617,8 @@ fields you want to update."
 
     #[tool(
         name = "create-pull-request",
-        description = "Create a new pull request to propose code changes. Before calling this tool, \
-stage and commit your changes using git add and git commit — each logical change should be its \
-own commit with a descriptive message. The PR will be created from your committed changes. \
+        description = "Create a new pull request to propose code changes. This tool captures all \
+changes in the repository (both committed and uncommitted) and creates a PR from them. \
 Use 'self' for the pipeline's own repository, or a repository alias from the checkout list."
     )]
     async fn create_pr(
