@@ -567,12 +567,24 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter, inferred_org: Option<&st
                     front_matter.name
                 );
             };
+            if !org.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                anyhow::bail!(
+                    "Invalid ADO org name '{}': must contain only alphanumerics and hyphens",
+                    org
+                );
+            }
             entrypoint_args.push(org);
 
             // Toolsets: passed as -d flag followed by space-separated toolset names
             if !ado_config.toolsets().is_empty() {
                 entrypoint_args.push("-d".to_string());
                 for toolset in ado_config.toolsets() {
+                    if !toolset.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                        anyhow::bail!(
+                            "Invalid ADO toolset name '{}': must contain only alphanumerics and hyphens",
+                            toolset
+                        );
+                    }
                     entrypoint_args.push(toolset.clone());
                 }
             }
@@ -1631,6 +1643,34 @@ mod tests {
         assert!(
             result.unwrap_err().to_string().contains("no ADO organization"),
             "Error should mention missing org"
+        );
+    }
+
+    #[test]
+    fn test_ado_tool_invalid_org_fails() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: \"my org/bad\"\n---\n",
+        )
+        .unwrap();
+        let result = generate_mcpg_config(&fm, None);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("Invalid ADO org name"),
+            "Error should mention invalid org"
+        );
+    }
+
+    #[test]
+    fn test_ado_tool_invalid_toolset_fails() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: myorg\n    toolsets: [\"repos\", \"bad toolset\"]\n---\n",
+        )
+        .unwrap();
+        let result = generate_mcpg_config(&fm, None);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("Invalid ADO toolset name"),
+            "Error should mention invalid toolset"
         );
     }
 

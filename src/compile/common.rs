@@ -848,6 +848,14 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
         if NON_MCP_SAFE_OUTPUT_KEYS.contains(&key.as_str()) {
             continue;
         }
+        if key == "memory" {
+            eprintln!(
+                "Warning: Agent '{}': 'safe-outputs: memory:' has moved to \
+                 'tools: cache-memory:'. Update your front matter to restore memory support.",
+                front_matter.name
+            );
+            continue;
+        }
         if !ALL_KNOWN_SAFE_OUTPUTS.contains(&key.as_str()) {
             eprintln!(
                 "Warning: unrecognized safe-output tool '{}' — skipping (no registered tool matches this name)",
