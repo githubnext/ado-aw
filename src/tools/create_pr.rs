@@ -267,6 +267,9 @@ impl Sanitize for CreatePrResult {
     fn sanitize_fields(&mut self) {
         self.title = sanitize_text(&self.title);
         self.description = sanitize_text(&self.description);
+        for label in &mut self.agent_labels {
+            *label = sanitize_text(label);
+        }
     }
 }
 
@@ -402,8 +405,8 @@ pub struct CreatePrConfig {
     /// Whether to record branch info in failure data when PR creation fails (default: true).
     /// When enabled, the failure response includes the pushed branch name and target branch
     /// so operators can manually create the PR. No work item is created automatically.
-    #[serde(default = "default_true", rename = "fallback-as-work-item")]
-    pub fallback_as_work_item: bool,
+    #[serde(default = "default_true", rename = "fallback-record-branch")]
+    pub fallback_record_branch: bool,
 }
 
 fn default_target_branch() -> String {
@@ -447,7 +450,7 @@ impl Default for CreatePrConfig {
             reviewers: Vec::new(),
             labels: Vec::new(),
             work_items: Vec::new(),
-            fallback_as_work_item: true,
+            fallback_record_branch: true,
         }
     }
 }
@@ -846,6 +849,22 @@ impl Executor for CreatePrResult {
                 return Ok(ExecutionResult::failure(err_msg));
             }
             debug!("Patch applied with git apply --3way fallback");
+
+            // Check for unresolved conflict markers — git apply --3way can succeed
+            // while leaving conflict markers in files
+            let conflict_check = Command::new("git")
+                .args(["diff", "--check"])
+                .current_dir(&worktree_path)
+                .output()
+                .await
+                .context("Failed to run git diff --check")?;
+
+            if !conflict_check.status.success() {
+                let err_msg =
+                    "Patch applied with unresolved conflicts — resolve manually".to_string();
+                warn!("{}", err_msg);
+                return Ok(ExecutionResult::failure(err_msg));
+            }
         } else {
             debug!("Patch applied successfully with git am");
         }
@@ -1104,7 +1123,7 @@ impl Executor for CreatePrResult {
             warn!("Failed to create pull request: {} - {}", status, body);
 
             // Record branch info for manual recovery if enabled
-            if config.fallback_as_work_item {
+            if config.fallback_record_branch {
                 info!("PR creation failed, recording branch info for manual recovery");
                 let fallback_description = format!(
                     "## Pull Request Creation Failed\n\n\
@@ -1119,7 +1138,7 @@ impl Executor for CreatePrResult {
                     *To create the PR manually, merge branch `{}` into `{}`.*",
                     self.source_branch, target_branch, self.repository,
                     status, sanitize_text(truncate_error_body(&body, 500)),
-                    self.description,
+                    sanitize_text(&self.description),
                     self.source_branch, target_branch
                 );
                 return Ok(ExecutionResult::failure_with_data(
@@ -1852,7 +1871,7 @@ mod tests {
         assert_eq!(config.protected_files, ProtectedFiles::Blocked);
         assert!(config.excluded_files.is_empty());
         assert!(config.allowed_labels.is_empty());
-        assert!(config.fallback_as_work_item);
+        assert!(config.fallback_record_branch);
     }
 
     #[test]

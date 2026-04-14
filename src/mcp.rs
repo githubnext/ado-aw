@@ -341,6 +341,11 @@ impl SafeOutputs {
                 })?;
 
             if !reset_output.status.success() {
+                warn!(
+                    "WARNING: synthetic commit {} was not cleaned up; \
+                     run `git reset HEAD~1` to restore state",
+                    head_sha
+                );
                 return Err(anyhow_to_mcp_error(anyhow::anyhow!(
                     "git reset HEAD~1 failed (synthetic commit {} may remain): {}",
                     head_sha,
@@ -439,9 +444,8 @@ impl SafeOutputs {
             }
         }
 
-        // Fallback: find the root commit (works for single-commit repos where HEAD~1
-        // doesn't exist)
-        warn!("Could not find merge-base with origin, falling back to root commit. This may produce a very large patch if the repository has a long history.");
+        // Fallback: find the root commit. Only valid for single-commit repos where HEAD~1
+        // doesn't exist. For repos with longer history this would produce enormous patches.
         let root_output = Command::new("git")
             .args(["rev-list", "--max-parents=0", "HEAD"])
             .current_dir(git_dir)
@@ -450,14 +454,24 @@ impl SafeOutputs {
             .ok();
 
         if let Some(out) = root_output.filter(|o| o.status.success()) {
-            let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !sha.is_empty() {
+            let output_str = String::from_utf8_lossy(&out.stdout).to_string();
+            let roots: Vec<&str> = output_str.trim().lines().collect();
+
+            // Only use root commit fallback for repos with a single commit
+            if roots.len() == 1 {
+                let sha = roots[0].to_string();
+                warn!(
+                    "Could not find merge-base with origin; using root commit {} \
+                     (single-commit repository)",
+                    sha
+                );
                 return Ok(sha);
             }
         }
 
         Err(anyhow_to_mcp_error(anyhow::anyhow!(
-            "Cannot determine diff base: no remote tracking branch and no commits found"
+            "Cannot determine diff base: no remote tracking branch found. \
+             Push a tracking branch or ensure origin/HEAD is configured."
         )))
     }
 
