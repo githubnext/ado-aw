@@ -1711,23 +1711,39 @@ async fn read_file_change(
 /// - No absolute paths
 /// - No null bytes
 fn validate_patch_paths(patch_content: &str) -> anyhow::Result<()> {
+    let mut in_diff = false;
     for line in patch_content.lines() {
-        // Check diff headers for file paths
+        // Only validate paths within diff blocks, not commit message bodies.
+        // format-patch output includes commit messages before each diff section.
         if line.starts_with("diff --git") {
-            // Extract paths from "diff --git a/path b/path"
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            for part in parts.iter().skip(2) {
-                let path = part.trim_start_matches("a/").trim_start_matches("b/");
-                validate_single_path(path)?;
-            }
-        } else if line.starts_with("---") || line.starts_with("+++") {
-            // Extract path from "--- a/path" or "+++ b/path"
-            if let Some(path) = line.split_whitespace().nth(1) {
-                if path != "/dev/null" {
-                    let clean_path = path.trim_start_matches("a/").trim_start_matches("b/");
-                    validate_single_path(clean_path)?;
+            in_diff = true;
+            // Extract paths using strip_prefix for correct handling of spaces
+            if let Some(rest) = line.strip_prefix("diff --git a/") {
+                // The b/ path starts after the last " b/" — but for simple validation,
+                // validate the a/ path (everything before " b/") and the b/ path
+                if let Some((a_path, b_path)) = rest.rsplit_once(" b/") {
+                    validate_single_path(a_path.trim_matches('"'))?;
+                    validate_single_path(b_path.trim_matches('"'))?;
                 }
             }
+            continue;
+        }
+        // Reset on commit envelope boundaries
+        if line.starts_with("From ") && in_diff {
+            in_diff = false;
+            continue;
+        }
+        if !in_diff {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("--- a/") {
+            let path = rest.trim().trim_matches('"');
+            validate_single_path(path)?;
+        } else if let Some(rest) = line.strip_prefix("+++ b/") {
+            let path = rest.trim().trim_matches('"');
+            validate_single_path(path)?;
+        } else if line.starts_with("--- /dev/null") || line.starts_with("+++ /dev/null") {
+            // New or deleted files — no path to validate
         } else if line.starts_with("rename from ") || line.starts_with("rename to ")
             || line.starts_with("copy from ") || line.starts_with("copy to ")
         {
