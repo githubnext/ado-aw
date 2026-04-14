@@ -539,10 +539,11 @@ impl Executor for CreatePrResult {
         };
 
         // ADO PR titles have a 400-character limit
-        if effective_title.len() > 400 {
+        let title_char_count = effective_title.chars().count();
+        if title_char_count > 400 {
             return Ok(ExecutionResult::failure(format!(
                 "PR title too long after applying title-prefix ({} chars, max 400)",
-                effective_title.len()
+                title_char_count
             )));
         }
 
@@ -679,10 +680,7 @@ impl Executor for CreatePrResult {
         let patch_paths: Vec<String> = extract_paths_from_patch(&patch_content)
             .into_iter()
             .filter(|p| {
-                !config.excluded_files.iter().any(|pat| {
-                    // Match the same way git --exclude does: pattern matches path suffix
-                    p.ends_with(pat) || glob_match_simple(pat, p)
-                })
+                !config.excluded_files.iter().any(|pat| glob_match_simple(pat, p))
             })
             .collect();
 
@@ -895,10 +893,12 @@ impl Executor for CreatePrResult {
             debug!("Patch applied with git apply --3way fallback");
 
             // Scan for unresolved conflict markers in working tree files.
-            // We use git grep instead of git diff --check because diff --check
-            // also flags trailing whitespace, producing false positives.
+            // Use specific patterns: <<<<<<< and >>>>>>> always have a trailing space
+            // and marker (e.g., "<<<<<<< HEAD"), while ======= is on its own line.
+            // We require the trailing space on <<<<<<< and >>>>>>> to avoid false
+            // positives from reStructuredText/markdown heading underlines.
             let conflict_check = Command::new("git")
-                .args(["grep", "-l", "-E", r"^(<<<<<<<|=======|>>>>>>>)"])
+                .args(["grep", "-l", "-E", r"^(<<<<<<<\s|>>>>>>>\s)"])
                 .current_dir(&worktree_path)
                 .output()
                 .await
@@ -1137,11 +1137,63 @@ impl Executor for CreatePrResult {
         if !push_response.status().is_success() {
             let status = push_response.status();
             let body = push_response.text().await.unwrap_or_default();
-            warn!("Failed to push changes: {} - {}", status, body);
-            return Ok(ExecutionResult::failure(format!(
-                "Failed to push changes: {} - {}",
-                status, body
-            )));
+
+            // Handle TOCTOU branch collision: if the push fails because the branch
+            // was created between our check and the push, retry with a new suffix
+            if status.as_u16() == 409
+                || (status.as_u16() == 400 && body.contains("already exists"))
+            {
+                warn!(
+                    "Push failed due to branch collision, retrying with new suffix: {}",
+                    body
+                );
+                use rand::RngExt;
+                let new_suffix: u32 = rand::rng().random();
+                let new_hex = format!("{:08x}", new_suffix);
+                source_branch = if let Some(pos) = source_branch.rfind('-') {
+                    format!("{}-{}", &source_branch[..pos], new_hex)
+                } else {
+                    format!("{}-{}", source_branch, new_hex)
+                };
+                source_ref = format!("refs/heads/{}", source_branch);
+                info!("Retrying push with branch '{}'", source_branch);
+
+                let retry_body = serde_json::json!({
+                    "refUpdates": [{
+                        "name": source_ref,
+                        "oldObjectId": "0000000000000000000000000000000000000000"
+                    }],
+                    "commits": [{
+                        "comment": effective_title,
+                        "changes": changes,
+                        "parents": [base_commit]
+                    }]
+                });
+
+                let retry_response = client
+                    .post(&push_url)
+                    .basic_auth("", Some(token))
+                    .json(&retry_body)
+                    .send()
+                    .await
+                    .context("Failed to push changes (retry)")?;
+
+                if !retry_response.status().is_success() {
+                    let retry_status = retry_response.status();
+                    let retry_body_text = retry_response.text().await.unwrap_or_default();
+                    warn!("Retry push also failed: {} - {}", retry_status, retry_body_text);
+                    return Ok(ExecutionResult::failure(format!(
+                        "Failed to push changes after retry: {} - {}",
+                        retry_status, retry_body_text
+                    )));
+                }
+            } else {
+                warn!("Failed to push changes: {} - {}", status, body);
+                return Ok(ExecutionResult::failure(format!(
+                    "Failed to push changes: {} - {}",
+                    status, body
+                )));
+            }
         }
         debug!("Changes pushed successfully");
 
@@ -1802,20 +1854,10 @@ fn extract_paths_from_patch(patch_content: &str) -> Vec<String> {
 }
 
 /// Count the number of distinct files changed in a patch.
-/// In multi-commit format-patch output, the same file may appear in multiple commits.
-/// Deduplicates by extracting the `b/` path from each `diff --git a/... b/...` header.
+/// Reuses `extract_paths_from_patch` which correctly handles quoted paths,
+/// renames, copies, and multi-commit deduplication.
 fn count_patch_files(patch_content: &str) -> usize {
-    use std::collections::HashSet;
-    patch_content
-        .lines()
-        .filter_map(|line| {
-            // Extract "b/<path>" from "diff --git a/<path> b/<path>"
-            line.strip_prefix("diff --git a/")
-                .and_then(|rest| rest.rsplit_once(" b/"))
-                .map(|(_, b_path)| b_path)
-        })
-        .collect::<HashSet<_>>()
-        .len()
+    extract_paths_from_patch(patch_content).len()
 }
 
 /// Check if any file paths in the patch are protected.
