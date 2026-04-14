@@ -35,7 +35,6 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 │   ├── configure.rs      # `configure` CLI command — detects and updates pipeline variables
 │   ├── detect.rs         # Agentic pipeline detection (helper for `configure`)
 │   ├── ndjson.rs         # NDJSON parsing utilities
-│   ├── proxy.rs          # Network proxy implementation
 │   ├── sanitize.rs       # Input sanitization for safe outputs
 │   ├── safeoutputs/      # Safe-output MCP tool implementations (Stage 1 → NDJSON → Stage 2)
 │   │   ├── mod.rs

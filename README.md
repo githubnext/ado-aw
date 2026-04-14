@@ -405,7 +405,6 @@ Commands:
   mcp           Run as an MCP server (safe outputs)
   mcp-http      Run as an HTTP MCP server (for MCPG integration)
   execute       Execute safe outputs (Stage 2)
-  proxy         Start an HTTP proxy for network filtering
   configure     Detect agentic pipelines and update GITHUB_TOKEN on ADO definitions
 
 Options:
