@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.10.0](https://github.com/githubnext/ado-aw/compare/v0.9.0...v0.10.0) (2026-04-14)
+
+
+### Features
+
+* add red team security auditor agentic workflow ([#170](https://github.com/githubnext/ado-aw/issues/170)) ([6700677](https://github.com/githubnext/ado-aw/commit/67006771abd5119c9bf8109c87110a91f4406f63))
+* add runtime parameters support with auto-injected clearMemory ([#166](https://github.com/githubnext/ado-aw/issues/166)) ([dc5b766](https://github.com/githubnext/ado-aw/commit/dc5b76654f59557092201289d0b9d2bfd5613536))
+* align MCP config with MCPG spec — container/HTTP transport ([#157](https://github.com/githubnext/ado-aw/issues/157)) ([a46a85b](https://github.com/githubnext/ado-aw/commit/a46a85b2c9870e7bd4bd36f99e6ff1cbb06c7ad7))
+* enable real-time agent output streaming with VSO filtering ([#159](https://github.com/githubnext/ado-aw/issues/159)) ([7497cd6](https://github.com/githubnext/ado-aw/commit/7497cd6bf243b781137c3994ba7187b34331bcb3))
+* **mcp:** filter SafeOutputs tools based on front matter config ([#156](https://github.com/githubnext/ado-aw/issues/156)) ([f43b22e](https://github.com/githubnext/ado-aw/commit/f43b22ed1228b98b7bc9085494b275681e06a265))
+* promote memory to cache-memory tool and add first-class azure-devops tool ([#167](https://github.com/githubnext/ado-aw/issues/167)) ([39103e1](https://github.com/githubnext/ado-aw/commit/39103e1237fdeacfd6bc1b39bac62e493cb7848c))
+* swap to using aw-mcpg ([#19](https://github.com/githubnext/ado-aw/issues/19)) ([1cddfb3](https://github.com/githubnext/ado-aw/commit/1cddfb3e6001736c5cd1cc0ce572521370001e1c))
+
+
+### Bug Fixes
+
+* address review findings — MCPG_IMAGE constant, constant-time auth, reqwest dev-dep, MCP enabled check ([#151](https://github.com/githubnext/ado-aw/issues/151)) ([09be1f2](https://github.com/githubnext/ado-aw/commit/09be1f213152f151da44efece2cd114e52cf6fc4))
+* use length-check + ct_eq for constant-time auth comparison ([#153](https://github.com/githubnext/ado-aw/issues/153)) ([d0aed74](https://github.com/githubnext/ado-aw/commit/d0aed7422f3a473491392a4198158f1ea03f56e3))
+
 ## [0.9.0](https://github.com/githubnext/ado-aw/compare/v0.8.3...v0.9.0) (2026-04-11)
 
 
