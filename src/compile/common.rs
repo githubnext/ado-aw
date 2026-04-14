@@ -458,25 +458,62 @@ pub fn generate_copilot_params(front_matter: &FrontMatter) -> Result<String> {
     }
 
     // Bash tool: use configured list, or defaults if not specified
-    let bash_commands: Vec<&str> = match front_matter.tools.as_ref().and_then(|t| t.bash.as_ref()) {
-        Some(cmds) if cmds.len() == 1 && cmds[0] == ":*" => {
-            // Unrestricted: single wildcard entry
-            allowed_tools.push("shell(:*)".to_string());
-            vec![]
+    let mut bash_commands: Vec<&str> =
+        match front_matter.tools.as_ref().and_then(|t| t.bash.as_ref()) {
+            Some(cmds) if cmds.len() == 1 && cmds[0] == ":*" => {
+                // Unrestricted: single wildcard entry
+                allowed_tools.push("shell(:*)".to_string());
+                vec![]
+            }
+            Some(cmds) if cmds.is_empty() => {
+                // Explicitly disabled: no bash commands
+                vec![]
+            }
+            Some(cmds) => {
+                // Explicit list of commands
+                cmds.iter().map(|s| s.as_str()).collect()
+            }
+            None => {
+                // Default safe commands
+                DEFAULT_BASH_COMMANDS.to_vec()
+            }
+        };
+
+    // Auto-add lean/lake/elan when tools.lean is enabled
+    let has_lean = front_matter
+        .tools
+        .as_ref()
+        .and_then(|t| t.lean.as_ref())
+        .is_some_and(|l| l.is_enabled());
+
+    let is_unrestricted_bash = front_matter
+        .tools
+        .as_ref()
+        .and_then(|t| t.bash.as_ref())
+        .is_some_and(|cmds| cmds.len() == 1 && cmds[0] == ":*");
+
+    if has_lean && !is_unrestricted_bash {
+        let bash_disabled = front_matter
+            .tools
+            .as_ref()
+            .and_then(|t| t.bash.as_ref())
+            .is_some_and(|cmds| cmds.is_empty());
+
+        if bash_disabled {
+            eprintln!(
+                "Warning: Agent '{}' has tools.lean enabled but tools.bash is empty. \
+                Lean requires bash access (lean, lake, elan commands).",
+                front_matter.name
+            );
+        } else {
+            for cmd in &["lean", "lake", "elan"] {
+                if !bash_commands.contains(cmd) {
+                    bash_commands.push(cmd);
+                }
+            }
         }
-        Some(cmds) if cmds.is_empty() => {
-            // Explicitly disabled: no bash commands
-            vec![]
-        }
-        Some(cmds) => {
-            // Explicit list of commands
-            cmds.iter().map(|s| s.as_str()).collect()
-        }
-        None => {
-            // Default safe commands
-            DEFAULT_BASH_COMMANDS.to_vec()
-        }
-    };
+    }
+
     for cmd in bash_commands {
         // Reject single quotes in bash commands — copilot_params are embedded inside
         // a single-quoted bash string in the AWF command.
@@ -1272,6 +1309,7 @@ mod tests {
             edit: None,
             cache_memory: None,
             azure_devops: None,
+            lean: None,
         });
         let params = generate_copilot_params(&fm).unwrap();
         assert!(params.contains("--allow-tool \"shell(:*)\""));
@@ -1285,9 +1323,44 @@ mod tests {
             edit: None,
             cache_memory: None,
             azure_devops: None,
+            lean: None,
         });
         let params = generate_copilot_params(&fm).unwrap();
         assert!(!params.contains("shell("));
+    }
+
+    #[test]
+    fn test_copilot_params_lean_adds_bash_commands() {
+        let mut fm = minimal_front_matter();
+        fm.tools = Some(crate::compile::types::ToolsConfig {
+            bash: None,
+            edit: None,
+            cache_memory: None,
+            azure_devops: None,
+            lean: Some(crate::compile::types::LeanToolConfig::Enabled(true)),
+        });
+        let params = generate_copilot_params(&fm).unwrap();
+        assert!(params.contains("shell(lean)"), "lean command should be allowed");
+        assert!(params.contains("shell(lake)"), "lake command should be allowed");
+        assert!(params.contains("shell(elan)"), "elan command should be allowed");
+        // Default bash commands should still be present
+        assert!(params.contains("shell(cat)"), "default commands should remain");
+    }
+
+    #[test]
+    fn test_copilot_params_lean_with_unrestricted_bash() {
+        let mut fm = minimal_front_matter();
+        fm.tools = Some(crate::compile::types::ToolsConfig {
+            bash: Some(vec![":*".to_string()]),
+            edit: None,
+            cache_memory: None,
+            azure_devops: None,
+            lean: Some(crate::compile::types::LeanToolConfig::Enabled(true)),
+        });
+        let params = generate_copilot_params(&fm).unwrap();
+        assert!(params.contains("shell(:*)"), "unrestricted should be preserved");
+        // Should NOT add individual lean commands when unrestricted
+        assert!(!params.contains("shell(lean)"), "lean not needed with :*");
     }
 
     #[test]
@@ -2320,6 +2393,7 @@ mod tests {
             edit: None,
             cache_memory: None,
             azure_devops: None,
+            lean: None,
         });
         let result = generate_copilot_params(&fm);
         assert!(result.is_err());

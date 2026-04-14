@@ -220,6 +220,11 @@ pub struct ToolsConfig {
     /// and network allowlist domains.
     #[serde(default, rename = "azure-devops")]
     pub azure_devops: Option<AzureDevOpsToolConfig>,
+    /// First-class Lean 4 theorem prover integration.
+    /// Auto-installs elan/lean/lake, adds Lean domains to the network allowlist,
+    /// extends the bash command allow-list, and appends a prompt supplement.
+    #[serde(default)]
+    pub lean: Option<LeanToolConfig>,
 }
 
 /// Cache memory tool configuration — accepts both `true` and object formats
@@ -340,6 +345,54 @@ pub struct AzureDevOpsOptions {
     /// Auto-inferred from the git remote URL at compile time if not specified.
     #[serde(default)]
     pub org: Option<String>,
+}
+
+/// Lean 4 tool configuration — accepts both `true` and object formats
+///
+/// Examples:
+/// ```yaml
+/// # Simple enablement
+/// lean: true
+///
+/// # With options
+/// lean:
+///   toolchain: "leanprover/lean4:v4.29.1"
+/// ```
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum LeanToolConfig {
+    /// Simple boolean enablement
+    Enabled(bool),
+    /// Full configuration with options
+    WithOptions(LeanOptions),
+}
+
+impl LeanToolConfig {
+    /// Whether Lean is enabled
+    pub fn is_enabled(&self) -> bool {
+        match self {
+            LeanToolConfig::Enabled(enabled) => *enabled,
+            LeanToolConfig::WithOptions(_) => true,
+        }
+    }
+
+    /// Get the toolchain override (None = use "stable" default)
+    pub fn toolchain(&self) -> Option<&str> {
+        match self {
+            LeanToolConfig::Enabled(_) => None,
+            LeanToolConfig::WithOptions(opts) => opts.toolchain.as_deref(),
+        }
+    }
+}
+
+/// Lean 4 options
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct LeanOptions {
+    /// Lean toolchain to install (e.g., "stable", "leanprover/lean4:v4.29.1").
+    /// Defaults to "stable" if not specified. If a `lean-toolchain` file exists
+    /// in the repository, elan will override to that version automatically.
+    #[serde(default)]
+    pub toolchain: Option<String>,
 }
 
 /// Azure DevOps runtime parameter definition.
@@ -962,6 +1015,116 @@ Body
         let tools = fm.tools.as_ref().unwrap();
         assert!(tools.cache_memory.as_ref().unwrap().is_enabled());
         assert!(tools.azure_devops.as_ref().unwrap().is_enabled());
+        assert_eq!(tools.bash.as_ref().unwrap(), &["cat", "ls"]);
+        assert_eq!(tools.edit, Some(true));
+    }
+
+    // ─── LeanToolConfig deserialization ──────────────────────────────────
+
+    #[test]
+    fn test_lean_bool_true() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+tools:
+  lean: true
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let lean = fm.tools.as_ref().unwrap().lean.as_ref().unwrap();
+        assert!(lean.is_enabled());
+        assert!(lean.toolchain().is_none());
+    }
+
+    #[test]
+    fn test_lean_bool_false() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+tools:
+  lean: false
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let lean = fm.tools.as_ref().unwrap().lean.as_ref().unwrap();
+        assert!(!lean.is_enabled());
+    }
+
+    #[test]
+    fn test_lean_with_toolchain() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+tools:
+  lean:
+    toolchain: "leanprover/lean4:v4.29.1"
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let lean = fm.tools.as_ref().unwrap().lean.as_ref().unwrap();
+        assert!(lean.is_enabled());
+        assert_eq!(lean.toolchain(), Some("leanprover/lean4:v4.29.1"));
+    }
+
+    #[test]
+    fn test_lean_with_empty_options() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+tools:
+  lean: {}
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let lean = fm.tools.as_ref().unwrap().lean.as_ref().unwrap();
+        assert!(lean.is_enabled());
+        assert!(lean.toolchain().is_none());
+    }
+
+    #[test]
+    fn test_lean_not_set() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+tools:
+  edit: true
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        assert!(fm.tools.as_ref().unwrap().lean.is_none());
+    }
+
+    #[test]
+    fn test_all_tools_together() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+tools:
+  bash: ["cat", "ls"]
+  edit: true
+  cache-memory: true
+  azure-devops:
+    toolsets: [wit]
+  lean: true
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let tools = fm.tools.as_ref().unwrap();
+        assert!(tools.cache_memory.as_ref().unwrap().is_enabled());
+        assert!(tools.azure_devops.as_ref().unwrap().is_enabled());
+        assert!(tools.lean.as_ref().unwrap().is_enabled());
         assert_eq!(tools.bash.as_ref().unwrap(), &["cat", "ls"]);
         assert_eq!(tools.edit, Some(true));
     }

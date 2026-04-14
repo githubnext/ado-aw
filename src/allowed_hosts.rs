@@ -112,6 +112,9 @@ pub fn mcp_required_hosts(mcp_name: &str) -> &'static [&'static str] {
         // GitHub MCP (for non-Copilot GitHub access)
         "github" => &["api.github.com", "github.com", "*.githubusercontent.com"],
 
+        // Lean 4 theorem prover (elan toolchain installer + package resolution)
+        "lean" => &["elan.lean-lang.org", "leanprover.github.io", "lean-lang.org"],
+
         // Unknown MCP - return empty, user must specify hosts
         _ => &[],
     }
@@ -138,5 +141,13 @@ mod tests {
     fn test_mcp_hosts_unknown_returns_empty() {
         let hosts = mcp_required_hosts("unknown-mcp");
         assert!(hosts.is_empty());
+    }
+
+    #[test]
+    fn test_lean_hosts() {
+        let hosts = mcp_required_hosts("lean");
+        assert!(hosts.contains(&"elan.lean-lang.org"));
+        assert!(hosts.contains(&"leanprover.github.io"));
+        assert!(hosts.contains(&"lean-lang.org"));
     }
 }

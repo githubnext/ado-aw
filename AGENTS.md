@@ -461,6 +461,31 @@ When enabled, the compiler:
 - Auto-infers org from the git remote URL at compile time (overridable via `org:` field)
 - Fails compilation if org cannot be determined (no explicit override and no ADO git remote)
 
+#### Lean 4 (`lean:`)
+
+First-class Lean 4 theorem prover integration. Auto-installs the Lean toolchain via elan, extends the bash command allow-list, adds Lean-specific domains to the network allowlist, and appends a prompt supplement informing the agent that Lean is available.
+
+```yaml
+# Simple enablement (installs latest stable toolchain)
+tools:
+  lean: true
+
+# With options (pin specific toolchain version)
+tools:
+  lean:
+    toolchain: "leanprover/lean4:v4.29.1"
+```
+
+When enabled, the compiler:
+- Injects an elan installation step into `{{ prepare_steps }}` (runs before AWF network isolation)
+- Defaults to the `stable` toolchain; if a `lean-toolchain` file exists in the repo, elan overrides to that version automatically
+- Auto-adds `lean`, `lake`, and `elan` to the bash command allow-list
+- Adds Lean-specific domains to the network allowlist: `elan.lean-lang.org`, `leanprover.github.io`, `lean-lang.org`
+- Appends a prompt supplement informing the agent about Lean 4 availability and basic commands
+- Emits a compile-time warning if `tools.bash` is empty (Lean requires bash access)
+
+**Note:** In the 1ES target, the bash command allow-list is updated but elan installation must be done manually via `steps:` front matter. The 1ES target handles network isolation separately.
+
 ### Target Platforms
 
 The `target` field in the front matter determines the output format and execution environment for the compiled pipeline.
