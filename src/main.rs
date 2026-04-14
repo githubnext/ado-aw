@@ -1,10 +1,10 @@
 mod allowed_hosts;
 mod compile;
 mod configure;
-mod create;
 mod detect;
 mod execute;
 mod fuzzy_schedule;
+mod init;
 mod logging;
 mod mcp;
 mod ndjson;
@@ -22,12 +22,6 @@ use crate::safeoutputs::ExecutionContext;
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Create a new agent markdown file interactively
-    Create {
-        /// Output directory for the generated markdown file (defaults to current directory)
-        #[arg(short, long)]
-        output: Option<PathBuf>,
-    },
     /// Compile markdown to pipeline definition (or recompile all detected pipelines)
     Compile {
         /// Path to the input markdown file. If omitted, auto-discovers and
@@ -92,6 +86,15 @@ enum Commands {
         #[arg(long = "enabled-tools")]
         enabled_tools: Vec<String>,
     },
+    /// Initialize a repository for AI-first agentic pipeline authoring
+    Init {
+        /// Target directory (defaults to current directory)
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Overwrite existing agent file
+        #[arg(long)]
+        force: bool,
+    },
     /// Detect agentic pipelines and update GITHUB_TOKEN on their ADO definitions
     Configure {
         /// The new GITHUB_TOKEN value (defaults to GITHUB_TOKEN env var; prompted if omitted)
@@ -137,13 +140,13 @@ async fn main() -> Result<()> {
 
     // Determine command name for logging
     let command_name = match &args.command {
-        Some(Commands::Create { .. }) => "create",
         Some(Commands::Compile { .. }) => "compile",
         Some(Commands::Check { .. }) => "check",
         Some(Commands::Mcp { .. }) => "mcp",
         Some(Commands::Execute { .. }) => "execute",
         Some(Commands::Proxy { .. }) => "proxy",
         Some(Commands::McpHttp { .. }) => "mcp-http",
+        Some(Commands::Init { .. }) => "init",
         Some(Commands::Configure { .. }) => "configure",
         None => "ado-aw",
     };
@@ -153,9 +156,6 @@ async fn main() -> Result<()> {
 
     if let Some(command) = args.command {
         match command {
-            Commands::Create { output } => {
-                create::create_agent(output).await?;
-            }
             Commands::Compile { path, output } => match path {
                 Some(p) => compile::compile_pipeline(&p, output.as_deref()).await?,
                 None => {
@@ -296,6 +296,9 @@ async fn main() -> Result<()> {
                 let filter = if enabled_tools.is_empty() { None } else { Some(enabled_tools) };
                 mcp::run_http(&output_directory, &bounding_directory, port, api_key.as_deref(), filter.as_deref())
                     .await?;
+            }
+            Commands::Init { path, force } => {
+                init::run(path.as_deref(), force).await?;
             }
             Commands::Configure {
                 token,

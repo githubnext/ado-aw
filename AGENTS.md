@@ -27,7 +27,7 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 │   │   ├── standalone.rs # Standalone pipeline compiler
 │   │   ├── onees.rs      # 1ES Pipeline Template compiler
 │   │   └── types.rs      # Front matter grammar and types
-│   ├── create.rs         # Interactive agent creation wizard
+│   ├── init.rs           # Repository initialization for AI-first authoring
 │   ├── execute.rs        # Stage 2 safe output execution
 │   ├── fuzzy_schedule.rs # Fuzzy schedule parsing
 │   ├── logging.rs        # File-based logging infrastructure
@@ -907,10 +907,11 @@ Reserved for future use. Currently replaced with an empty string.
 
 Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logging), `--debug, -d` (enable debug-level logging, implies verbose)
 
-- `create` - Interactively create a new agent markdown file
-  - `--output, -o <path>` - Output directory for the generated file (defaults to current directory)
-  - Guides you through: name, description, engine selection, schedule, workspace, repositories, checkout, and MCPs
-  - The generated file includes a placeholder for agent instructions that you edit directly
+- `init` - Initialize a repository for AI-first agentic pipeline authoring
+  - `--path <path>` - Target directory (defaults to current directory)
+  - `--force` - Overwrite existing agent file
+  - Creates `.github/agents/ado-aw.agent.md` — a Copilot dispatcher agent that routes to specialized prompts for creating, updating, and debugging agentic pipelines
+  - The agent auto-downloads the ado-aw compiler and handles the full lifecycle (create → compile → check)
 - `compile [<path>]` - Compile a markdown file to Azure DevOps pipeline YAML. If no path is given, auto-discovers and recompiles all detected agentic pipelines in the current directory.
   - `--output, -o <path>` - Optional output path for generated YAML (only valid when a path is provided)
 - `check <pipeline>` - Verify that a compiled pipeline matches its source markdown
