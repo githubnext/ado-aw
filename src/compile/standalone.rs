@@ -23,8 +23,9 @@ use super::common::{
     generate_job_timeout, generate_parameters, generate_pipeline_path, generate_pipeline_resources,
     generate_pr_trigger, generate_repositories, generate_schedule, generate_source_path,
     generate_working_directory, replace_with_indent, sanitize_filename, validate_comment_target,
-    validate_resolve_pr_thread_statuses, validate_submit_pr_review_events,
-    validate_update_pr_votes, validate_update_work_item_target, validate_write_permissions,
+    validate_front_matter_identity, validate_resolve_pr_thread_statuses,
+    validate_submit_pr_review_events, validate_update_pr_votes, validate_update_work_item_target,
+    validate_write_permissions,
 };
 use super::types::{FrontMatter, McpConfig};
 use crate::allowed_hosts::{CORE_ALLOWED_HOSTS, mcp_required_hosts};
@@ -49,6 +50,9 @@ impl Compiler for StandaloneCompiler {
     ) -> Result<String> {
         info!("Compiling for standalone target");
 
+        // Validate inputs early, before any values are used in template substitution
+        validate_front_matter_identity(front_matter)?;
+
         // Load base template
         let template = include_str!("../../templates/base.yml");
 
@@ -62,7 +66,7 @@ impl Compiler for StandaloneCompiler {
         let repositories = generate_repositories(&front_matter.repositories);
         let checkout_steps = generate_checkout_steps(&front_matter.checkout);
         let checkout_self = generate_checkout_self();
-        let copilot_params = generate_copilot_params(front_matter);
+        let copilot_params = generate_copilot_params(front_matter)?;
         let agent_name = sanitize_filename(&front_matter.name);
 
         // Compute effective workspace
@@ -85,7 +89,7 @@ impl Compiler for StandaloneCompiler {
         let pipeline_path = generate_pipeline_path(output_path);
 
         // Generate comma-separated domain list for AWF
-        let allowed_domains = generate_allowed_domains(front_matter);
+        let allowed_domains = generate_allowed_domains(front_matter)?;
 
         // Generate --enabled-tools args for SafeOutputs tool filtering
         let enabled_tools_args = generate_enabled_tools_args(front_matter);
@@ -283,7 +287,7 @@ impl Compiler for StandaloneCompiler {
 /// 1. Core Azure DevOps/GitHub endpoints
 /// 2. MCP-specific endpoints for each enabled MCP
 /// 3. User-specified additional hosts from network.allow
-fn generate_allowed_domains(front_matter: &FrontMatter) -> String {
+fn generate_allowed_domains(front_matter: &FrontMatter) -> Result<String> {
     // Collect enabled MCP names
     let enabled_mcps: Vec<String> = front_matter
         .mcp_servers
@@ -336,8 +340,19 @@ fn generate_allowed_domains(front_matter: &FrontMatter) -> String {
         }
     }
 
-    // Add user-specified hosts
+    // Add user-specified hosts (validated against DNS-safe characters)
     for host in &user_hosts {
+        let valid = !host.is_empty()
+            && host
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '*'));
+        if !valid {
+            anyhow::bail!(
+                "network.allow domain '{}' contains characters invalid in DNS names. \
+                 Only ASCII alphanumerics, '.', '-', and '*' are allowed.",
+                host
+            );
+        }
         hosts.insert(host.clone());
     }
 
@@ -356,7 +371,7 @@ fn generate_allowed_domains(front_matter: &FrontMatter) -> String {
     allowlist.sort();
 
     // Format as comma-separated list for AWF --allow-domains
-    allowlist.join(",")
+    Ok(allowlist.join(","))
 }
 
 /// Generate the setup job YAML

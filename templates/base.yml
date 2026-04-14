@@ -310,7 +310,7 @@ jobs:
           # tee writes to both stdout (ADO pipeline log) and the artifact file.
           # pipefail (set above) ensures AWF's exit code propagates through the pipe.
           sudo -E "$(Pipeline.Workspace)/awf/awf" \
-            --allow-domains {{ allowed_domains }} \
+            --allow-domains "{{ allowed_domains }}" \
             --skip-pull \
             --env-all \
             --enable-host-access \
@@ -495,7 +495,7 @@ jobs:
 
           # Stream threat analysis output in real-time with VSO command filtering
           sudo -E "$(Pipeline.Workspace)/awf/awf" \
-            --allow-domains {{ allowed_domains }} \
+            --allow-domains "{{ allowed_domains }}" \
             --skip-pull \
             --env-all \
             --container-workdir "{{ working_directory }}" \
