@@ -2371,8 +2371,8 @@ fn test_parameters_clear_memory_auto_injected() {
     let input = r#"---
 name: "Memory Agent"
 description: "Tests clearMemory auto-injection"
-safe-outputs:
-  memory:
+tools:
+  cache-memory:
     allowed-extensions:
       - .md
 ---
@@ -2435,8 +2435,8 @@ parameters:
     displayName: "Reset memory"
     type: boolean
     default: true
-safe-outputs:
-  memory:
+tools:
+  cache-memory:
     allowed-extensions:
       - .md
 ---
@@ -2487,8 +2487,8 @@ parameters:
   - name: myParam
     type: string
     default: "hello"
-safe-outputs:
-  memory:
+tools:
+  cache-memory:
     allowed-extensions:
       - .md
 ---

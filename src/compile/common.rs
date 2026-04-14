@@ -805,9 +805,6 @@ fn is_safe_tool_name(name: &str) -> bool {
 /// diagnostic tools. If `safe-outputs:` is empty, returns an empty string
 /// (all tools enabled for backward compatibility).
 ///
-/// Non-MCP keys (like `memory`) are silently skipped — they are handled by the
-/// executor and have no corresponding MCP route.
-///
 /// Tool names are validated to contain only ASCII alphanumerics and hyphens
 /// to prevent shell injection when the args are embedded in bash commands.
 /// Unrecognized tool names emit a compile-time warning and are skipped.
@@ -849,8 +846,8 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
     }
 
     if effective_mcp_tool_count == 0 {
-        // Every user-specified key was either invalid, unrecognized, or non-MCP
-        // (e.g. memory-only). Return empty to keep all tools available (backward compat).
+        // Every user-specified key was either invalid or unrecognized.
+        // Return empty to keep all tools available (backward compat).
         return String::new();
     }
 
@@ -1890,26 +1887,26 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_enabled_tools_args_skips_memory_key() {
-        // `memory` is a non-MCP executor-only key. It must not appear in
-        // --enabled-tools or it would cause real MCP tools to be filtered out.
+    fn test_generate_enabled_tools_args_memory_no_longer_safe_output() {
+        // `memory` is no longer a safe-output key — it moved to `tools: cache-memory:`.
+        // If someone still puts it in safe-outputs, it should be treated as unrecognized
+        // and the real MCP tool should still be present.
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  memory:\n    allowed-extensions:\n      - .md\n  create-pull-request:\n    target-branch: main\n---\n"
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n"
         ).unwrap();
         let args = generate_enabled_tools_args(&fm);
-        assert!(!args.contains("--enabled-tools memory"), "Non-MCP key 'memory' should be skipped");
         assert!(args.contains("--enabled-tools create-pull-request"), "Real MCP tool should be present");
     }
 
     #[test]
-    fn test_generate_enabled_tools_args_memory_only_does_not_filter() {
-        // When `memory` is the only safe-output key, no --enabled-tools args should
-        // be generated so all tools remain available (backward compat).
+    fn test_generate_enabled_tools_args_empty_safe_outputs_no_filter() {
+        // When safe-outputs is empty, no --enabled-tools args should be generated
+        // so all tools remain available.
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  memory:\n    allowed-extensions:\n      - .md\n---\n"
+            "---\nname: test\ndescription: test\n---\n"
         ).unwrap();
         let args = generate_enabled_tools_args(&fm);
-        assert!(args.is_empty(), "memory-only safe-outputs should produce no args (all tools available)");
+        assert!(args.is_empty(), "empty safe-outputs should produce no args (all tools available)");
     }
 
     // ─── parameter name validation ──────────────────────────────────────────

@@ -51,13 +51,15 @@ pub const WRITE_REQUIRING_SAFE_OUTPUTS: &[&str] = tool_names![
 /// Non-MCP safe-output keys handled by the compiler/executor, not the MCP server.
 /// These must not appear in `--enabled-tools` or they cause real MCP tools to be
 /// filtered out (the router has no route for them).
-pub const NON_MCP_SAFE_OUTPUT_KEYS: &[&str] = &["memory"];
+pub const NON_MCP_SAFE_OUTPUT_KEYS: &[&str] = &[];
 
 /// All recognised safe-output keys accepted in front matter `safe-outputs:`.
-/// This is the union of write-requiring tool types, diagnostic tool types, and
-/// non-MCP safe-output keys (like `memory`).
+/// This is the union of write-requiring tool types and diagnostic tool types.
 ///
 /// Derived at compile time from tool types — no hand-maintained string lists.
+///
+/// Note: `memory` was removed — it is now a first-class tool configured via
+/// `tools: cache-memory:` and is no longer a safe-output key.
 pub const ALL_KNOWN_SAFE_OUTPUTS: &[&str] = all_safe_output_names![
     // Write-requiring MCP tools
     CreateWorkItemResult,
@@ -82,8 +84,6 @@ pub const ALL_KNOWN_SAFE_OUTPUTS: &[&str] = all_safe_output_names![
     MissingDataResult,
     MissingToolResult,
     ReportIncompleteResult;
-    // Non-MCP safe-output keys
-    "memory"
 ];
 
 /// Resolve the effective branch for a wiki.

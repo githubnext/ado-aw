@@ -99,7 +99,11 @@ impl Compiler for StandaloneCompiler {
         // Generate hooks
         let setup_job = generate_setup_job(&front_matter.setup, &front_matter.name, &pool);
         let teardown_job = generate_teardown_job(&front_matter.teardown, &front_matter.name, &pool);
-        let has_memory = front_matter.safe_outputs.contains_key("memory");
+        let has_memory = front_matter
+            .tools
+            .as_ref()
+            .and_then(|t| t.cache_memory.as_ref())
+            .is_some_and(|cm| cm.is_enabled());
 
         // Build parameters list: user-defined + auto-injected clearMemory for memory
         let parameters = build_parameters(&front_matter.parameters, has_memory);
