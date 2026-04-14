@@ -1814,7 +1814,7 @@ fn filter_excluded_files_from_patch(patch_content: &str, excluded_patterns: &[St
 /// Patterns without a `/` are prefixed with `**/` so that e.g. `*.lock` matches
 /// `subdir/Cargo.lock`, not just root-level files.
 fn normalize_glob_pattern(pattern: &str) -> String {
-    if pattern.contains('/') || pattern.starts_with("**/") {
+    if pattern.contains('/') {
         pattern.to_string()
     } else {
         format!("**/{}", pattern)

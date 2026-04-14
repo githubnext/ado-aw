@@ -245,6 +245,13 @@ impl SafeOutputs {
                 anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git status: {}", e))
             })?;
 
+        if !status_output.status.success() {
+            return Err(anyhow_to_mcp_error(anyhow::anyhow!(
+                "git status failed: {}",
+                String::from_utf8_lossy(&status_output.stderr)
+            )));
+        }
+
         let has_uncommitted = !String::from_utf8_lossy(&status_output.stdout)
             .trim()
             .is_empty();
@@ -352,15 +359,6 @@ impl SafeOutputs {
                     String::from_utf8_lossy(&reset_output.stderr)
                 )));
             }
-
-            // Unstage everything so the index matches the pre-generate_patch state.
-            // `git reset --mixed` leaves previously-untracked files as staged new files;
-            // this reset restores them to untracked.
-            let _ = Command::new("git")
-                .args(["reset", "HEAD", "--quiet"])
-                .current_dir(&git_dir)
-                .output()
-                .await;
         }
 
         // Now check the format-patch result after cleanup
