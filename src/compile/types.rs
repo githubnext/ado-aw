@@ -2,7 +2,7 @@
 //!
 //! This module defines the front matter grammar that is shared across all compile targets.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Target platform for compiled pipeline
@@ -200,6 +200,41 @@ pub struct ToolsConfig {
     pub edit: Option<bool>,
 }
 
+/// Azure DevOps runtime parameter definition.
+///
+/// These are emitted as top-level `parameters:` in the generated pipeline YAML,
+/// surfaced in the ADO UI when manually queuing a run.
+///
+/// Example front matter:
+/// ```yaml
+/// parameters:
+///   - name: debugLevel
+///     displayName: "Debug verbosity"
+///     type: string
+///     default: "info"
+///     values:
+///       - info
+///       - debug
+///       - trace
+/// ```
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct PipelineParameter {
+    /// Parameter name (must be a valid ADO identifier)
+    pub name: String,
+    /// Human-readable label shown in the ADO UI
+    #[serde(rename = "displayName", skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// ADO parameter type: boolean, string, number, object, etc.
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub param_type: Option<String>,
+    /// Default value for the parameter
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<serde_yaml::Value>,
+    /// Allowed values (for string/number parameters)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub values: Option<Vec<serde_yaml::Value>>,
+}
+
 /// Front matter configuration from the input markdown file
 #[derive(Debug, Deserialize)]
 pub struct FrontMatter {
@@ -267,6 +302,9 @@ pub struct FrontMatter {
     /// Workflow-level environment variables
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// Runtime parameters for the pipeline (surfaced in ADO UI when queuing a run)
+    #[serde(default)]
+    pub parameters: Vec<PipelineParameter>,
 }
 
 fn default_model() -> String {
