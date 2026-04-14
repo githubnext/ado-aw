@@ -10,6 +10,7 @@ mod mcp;
 mod ndjson;
 mod proxy;
 pub mod sanitize;
+mod safeoutputs;
 mod tools;
 
 use anyhow::{Context, Result};
@@ -17,7 +18,7 @@ use clap::{Parser, Subcommand};
 use log::debug;
 use std::path::PathBuf;
 
-use crate::tools::ExecutionContext;
+use crate::safeoutputs::ExecutionContext;
 
 #[derive(Subcommand, Debug)]
 enum Commands {
@@ -224,25 +225,32 @@ async fn main() -> Result<()> {
 
                 let results = execute::execute_safe_outputs(&safe_output_dir, &ctx).await?;
 
-                // Process agent memory if memory config is present
-                if let Some(memory_value) = front_matter.safe_outputs.get("memory") {
-                    let memory_config: execute::MemoryConfig =
-                        serde_json::from_value(memory_value.clone()).unwrap_or_default();
-                    let memory_output = output_dir
-                        .as_ref()
-                        .cloned()
-                        .unwrap_or_else(|| safe_output_dir.clone());
-                    let memory_result = execute::process_agent_memory(
-                        &safe_output_dir,
-                        &memory_output,
-                        &memory_config,
-                    )
-                    .await?;
-                    println!(
-                        "Memory: {} - {}",
-                        if memory_result.success { "✓" } else { "✗" },
-                        memory_result.message
-                    );
+                // Process agent memory if cache-memory tool is enabled
+                let cache_memory = front_matter
+                    .tools
+                    .as_ref()
+                    .and_then(|t| t.cache_memory.as_ref());
+                if let Some(cm) = cache_memory {
+                    if cm.is_enabled() {
+                        let memory_config = execute::MemoryConfig {
+                            allowed_extensions: cm.allowed_extensions().to_vec(),
+                        };
+                        let memory_output = output_dir
+                            .as_ref()
+                            .cloned()
+                            .unwrap_or_else(|| safe_output_dir.clone());
+                        let memory_result = execute::process_agent_memory(
+                            &safe_output_dir,
+                            &memory_output,
+                            &memory_config,
+                        )
+                        .await?;
+                        println!(
+                            "Memory: {} - {}",
+                            if memory_result.success { "✓" } else { "✗" },
+                            memory_result.message
+                        );
+                    }
                 }
 
                 // Print summary

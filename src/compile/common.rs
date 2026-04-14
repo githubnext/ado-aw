@@ -625,8 +625,24 @@ pub fn generate_header_comment(input_path: &std::path::Path) -> String {
 /// See: https://github.com/github/gh-aw-mcpg/releases
 pub const MCPG_VERSION: &str = "0.2.18";
 
+/// Docker image for the MCPG container.
+pub const MCPG_IMAGE: &str = "ghcr.io/github/gh-aw-mcpg";
+
 /// Default port MCPG listens on inside the container (host network mode).
 pub const MCPG_PORT: u16 = 80;
+
+/// Docker image for the Azure DevOps MCP container.
+/// This is the container used when `tools: azure-devops:` is configured.
+pub const ADO_MCP_IMAGE: &str = "node:20-slim";
+
+/// Default entrypoint for the Azure DevOps MCP container.
+pub const ADO_MCP_ENTRYPOINT: &str = "npx";
+
+/// Default entrypoint args for the Azure DevOps MCP npm package.
+pub const ADO_MCP_PACKAGE: &str = "@azure-devops/mcp";
+
+/// Reserved MCPG server name for the auto-configured ADO MCP.
+pub const ADO_MCP_SERVER_NAME: &str = "azure-devops";
 
 /// Generate source path for the execute command.
 ///
@@ -805,14 +821,11 @@ fn is_safe_tool_name(name: &str) -> bool {
 /// diagnostic tools. If `safe-outputs:` is empty, returns an empty string
 /// (all tools enabled for backward compatibility).
 ///
-/// Non-MCP keys (like `memory`) are silently skipped — they are handled by the
-/// executor and have no corresponding MCP route.
-///
 /// Tool names are validated to contain only ASCII alphanumerics and hyphens
 /// to prevent shell injection when the args are embedded in bash commands.
 /// Unrecognized tool names emit a compile-time warning and are skipped.
 pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
-    use crate::tools::{ALL_KNOWN_SAFE_OUTPUTS, ALWAYS_ON_TOOLS, NON_MCP_SAFE_OUTPUT_KEYS};
+    use crate::safeoutputs::{ALL_KNOWN_SAFE_OUTPUTS, ALWAYS_ON_TOOLS, NON_MCP_SAFE_OUTPUT_KEYS};
     use std::collections::HashSet;
 
     if front_matter.safe_outputs.is_empty() {
@@ -835,6 +848,14 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
         if NON_MCP_SAFE_OUTPUT_KEYS.contains(&key.as_str()) {
             continue;
         }
+        if key == "memory" {
+            eprintln!(
+                "Warning: Agent '{}': 'safe-outputs: memory:' has moved to \
+                 'tools: cache-memory:'. Update your front matter to restore memory support.",
+                front_matter.name
+            );
+            continue;
+        }
         if !ALL_KNOWN_SAFE_OUTPUTS.contains(&key.as_str()) {
             eprintln!(
                 "Warning: unrecognized safe-output tool '{}' — skipping (no registered tool matches this name)",
@@ -849,8 +870,8 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
     }
 
     if effective_mcp_tool_count == 0 {
-        // Every user-specified key was either invalid, unrecognized, or non-MCP
-        // (e.g. memory-only). Return empty to keep all tools available (backward compat).
+        // Every user-specified key was either invalid or unrecognized.
+        // Return empty to keep all tools available (backward compat).
         return String::new();
     }
 
@@ -878,7 +899,7 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
 
 /// Validate that write-requiring safe-outputs have a write service connection configured.
 pub fn validate_write_permissions(front_matter: &FrontMatter) -> Result<()> {
-    use crate::tools::WRITE_REQUIRING_SAFE_OUTPUTS;
+    use crate::safeoutputs::WRITE_REQUIRING_SAFE_OUTPUTS;
 
     let has_write_sc = front_matter
         .permissions
@@ -1170,6 +1191,8 @@ mod tests {
         fm.tools = Some(crate::compile::types::ToolsConfig {
             bash: Some(vec![":*".to_string()]),
             edit: None,
+            cache_memory: None,
+            azure_devops: None,
         });
         let params = generate_copilot_params(&fm);
         assert!(params.contains("--allow-tool \"shell(:*)\""));
@@ -1181,6 +1204,8 @@ mod tests {
         fm.tools = Some(crate::compile::types::ToolsConfig {
             bash: Some(vec![]),
             edit: None,
+            cache_memory: None,
+            azure_devops: None,
         });
         let params = generate_copilot_params(&fm);
         assert!(!params.contains("shell("));
@@ -1886,26 +1911,26 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_enabled_tools_args_skips_memory_key() {
-        // `memory` is a non-MCP executor-only key. It must not appear in
-        // --enabled-tools or it would cause real MCP tools to be filtered out.
+    fn test_generate_enabled_tools_args_memory_no_longer_safe_output() {
+        // `memory` is no longer a safe-output key — it moved to `tools: cache-memory:`.
+        // If someone still puts it in safe-outputs, it should be treated as unrecognized
+        // and the real MCP tool should still be present.
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  memory:\n    allowed-extensions:\n      - .md\n  create-pull-request:\n    target-branch: main\n---\n"
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n"
         ).unwrap();
         let args = generate_enabled_tools_args(&fm);
-        assert!(!args.contains("--enabled-tools memory"), "Non-MCP key 'memory' should be skipped");
         assert!(args.contains("--enabled-tools create-pull-request"), "Real MCP tool should be present");
     }
 
     #[test]
-    fn test_generate_enabled_tools_args_memory_only_does_not_filter() {
-        // When `memory` is the only safe-output key, no --enabled-tools args should
-        // be generated so all tools remain available (backward compat).
+    fn test_generate_enabled_tools_args_empty_safe_outputs_no_filter() {
+        // When safe-outputs is empty, no --enabled-tools args should be generated
+        // so all tools remain available.
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  memory:\n    allowed-extensions:\n      - .md\n---\n"
+            "---\nname: test\ndescription: test\n---\n"
         ).unwrap();
         let args = generate_enabled_tools_args(&fm);
-        assert!(args.is_empty(), "memory-only safe-outputs should produce no args (all tools available)");
+        assert!(args.is_empty(), "empty safe-outputs should produce no args (all tools available)");
     }
 
     // ─── parameter name validation ──────────────────────────────────────────

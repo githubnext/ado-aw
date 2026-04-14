@@ -189,6 +189,18 @@ pub struct EngineOptions {
 ///
 /// Controls which tools are available and their settings.
 /// If not specified, defaults are used.
+///
+/// Examples:
+/// ```yaml
+/// tools:
+///   bash: ["cat", "ls", "grep"]
+///   edit: true
+///   cache-memory:
+///     allowed-extensions: [.md, .json]
+///   azure-devops:
+///     toolsets: [repos, wit]
+///     allowed: [wit_get_work_item]
+/// ```
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct ToolsConfig {
     /// Bash command allow-list. If empty/not set, defaults to safe commands.
@@ -198,6 +210,136 @@ pub struct ToolsConfig {
     /// Enable the file editing tool (default: true)
     #[serde(default)]
     pub edit: Option<bool>,
+    /// Persistent cache memory across agent runs.
+    /// Enables the agent to read/write files to a memory directory
+    /// that persists between pipeline executions.
+    #[serde(default, rename = "cache-memory")]
+    pub cache_memory: Option<CacheMemoryToolConfig>,
+    /// First-class Azure DevOps MCP integration.
+    /// Auto-configures the ADO MCP container, token mapping, MCPG entry,
+    /// and network allowlist domains.
+    #[serde(default, rename = "azure-devops")]
+    pub azure_devops: Option<AzureDevOpsToolConfig>,
+}
+
+/// Cache memory tool configuration — accepts both `true` and object formats
+///
+/// Examples:
+/// ```yaml
+/// # Simple enablement
+/// cache-memory: true
+///
+/// # With options
+/// cache-memory:
+///   allowed-extensions: [.md, .json, .txt]
+/// ```
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum CacheMemoryToolConfig {
+    /// Simple boolean enablement
+    Enabled(bool),
+    /// Full configuration with options
+    WithOptions(CacheMemoryOptions),
+}
+
+impl CacheMemoryToolConfig {
+    /// Whether cache memory is enabled
+    pub fn is_enabled(&self) -> bool {
+        match self {
+            CacheMemoryToolConfig::Enabled(enabled) => *enabled,
+            CacheMemoryToolConfig::WithOptions(_) => true,
+        }
+    }
+
+    /// Get the allowed file extensions (empty = all allowed)
+    pub fn allowed_extensions(&self) -> &[String] {
+        match self {
+            CacheMemoryToolConfig::Enabled(_) => &[],
+            CacheMemoryToolConfig::WithOptions(opts) => &opts.allowed_extensions,
+        }
+    }
+}
+
+/// Cache memory options
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct CacheMemoryOptions {
+    /// Allowed file extensions (e.g., [".md", ".json", ".txt"]).
+    /// Defaults to all extensions if empty or not specified.
+    #[serde(default, rename = "allowed-extensions")]
+    pub allowed_extensions: Vec<String>,
+}
+
+/// Azure DevOps MCP tool configuration — accepts both `true` and object formats
+///
+/// Examples:
+/// ```yaml
+/// # Simple enablement (auto-infers org from git remote)
+/// azure-devops: true
+///
+/// # With scoping options
+/// azure-devops:
+///   toolsets: [repos, wit, core]
+///   allowed: [wit_get_work_item, wit_my_work_items]
+///   org: myorg
+/// ```
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum AzureDevOpsToolConfig {
+    /// Simple boolean enablement
+    Enabled(bool),
+    /// Full configuration with options
+    WithOptions(AzureDevOpsOptions),
+}
+
+impl AzureDevOpsToolConfig {
+    /// Whether the ADO MCP is enabled
+    pub fn is_enabled(&self) -> bool {
+        match self {
+            AzureDevOpsToolConfig::Enabled(enabled) => *enabled,
+            AzureDevOpsToolConfig::WithOptions(_) => true,
+        }
+    }
+
+    /// Get the ADO API toolset groups to enable (e.g., repos, wit, core)
+    pub fn toolsets(&self) -> &[String] {
+        match self {
+            AzureDevOpsToolConfig::Enabled(_) => &[],
+            AzureDevOpsToolConfig::WithOptions(opts) => &opts.toolsets,
+        }
+    }
+
+    /// Get the explicit tool allow-list
+    pub fn allowed(&self) -> &[String] {
+        match self {
+            AzureDevOpsToolConfig::Enabled(_) => &[],
+            AzureDevOpsToolConfig::WithOptions(opts) => &opts.allowed,
+        }
+    }
+
+    /// Get the org override (None = auto-infer from git remote)
+    pub fn org(&self) -> Option<&str> {
+        match self {
+            AzureDevOpsToolConfig::Enabled(_) => None,
+            AzureDevOpsToolConfig::WithOptions(opts) => opts.org.as_deref(),
+        }
+    }
+}
+
+/// Azure DevOps MCP options
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct AzureDevOpsOptions {
+    /// ADO API toolset groups to enable (e.g., repos, wit, core, work-items)
+    /// Passed as `-d` flags to the ADO MCP entrypoint.
+    #[serde(default)]
+    pub toolsets: Vec<String>,
+    /// Explicit tool allow-list (e.g., wit_get_work_item, core_list_projects)
+    /// Passed to MCPG for tool-level filtering.
+    #[serde(default)]
+    pub allowed: Vec<String>,
+    /// Azure DevOps organization name override.
+    /// Auto-inferred from the git remote URL at compile time if not specified.
+    #[serde(default)]
+    pub org: Option<String>,
 }
 
 /// Azure DevOps runtime parameter definition.
@@ -653,5 +795,174 @@ Body
 "#;
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
         assert!(fm.permissions.is_none());
+    }
+
+    // ─── CacheMemoryToolConfig deserialization ──────────────────────────────
+
+    #[test]
+    fn test_cache_memory_bool_true() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+tools:
+  cache-memory: true
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let cm = fm.tools.as_ref().unwrap().cache_memory.as_ref().unwrap();
+        assert!(cm.is_enabled());
+        assert!(cm.allowed_extensions().is_empty());
+    }
+
+    #[test]
+    fn test_cache_memory_bool_false() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+tools:
+  cache-memory: false
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let cm = fm.tools.as_ref().unwrap().cache_memory.as_ref().unwrap();
+        assert!(!cm.is_enabled());
+    }
+
+    #[test]
+    fn test_cache_memory_with_options() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+tools:
+  cache-memory:
+    allowed-extensions:
+      - .md
+      - .json
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let cm = fm.tools.as_ref().unwrap().cache_memory.as_ref().unwrap();
+        assert!(cm.is_enabled());
+        assert_eq!(cm.allowed_extensions(), &[".md", ".json"]);
+    }
+
+    #[test]
+    fn test_cache_memory_not_set() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+tools:
+  edit: true
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        assert!(fm.tools.as_ref().unwrap().cache_memory.is_none());
+    }
+
+    // ─── AzureDevOpsToolConfig deserialization ──────────────────────────────
+
+    #[test]
+    fn test_azure_devops_bool_true() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+tools:
+  azure-devops: true
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let ado = fm.tools.as_ref().unwrap().azure_devops.as_ref().unwrap();
+        assert!(ado.is_enabled());
+        assert!(ado.toolsets().is_empty());
+        assert!(ado.allowed().is_empty());
+        assert!(ado.org().is_none());
+    }
+
+    #[test]
+    fn test_azure_devops_with_options() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+tools:
+  azure-devops:
+    toolsets: [repos, wit, core]
+    allowed: [wit_get_work_item, core_list_projects]
+    org: myorg
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let ado = fm.tools.as_ref().unwrap().azure_devops.as_ref().unwrap();
+        assert!(ado.is_enabled());
+        assert_eq!(ado.toolsets(), &["repos", "wit", "core"]);
+        assert_eq!(ado.allowed(), &["wit_get_work_item", "core_list_projects"]);
+        assert_eq!(ado.org(), Some("myorg"));
+    }
+
+    #[test]
+    fn test_azure_devops_partial_config() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+tools:
+  azure-devops:
+    toolsets: [wit]
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let ado = fm.tools.as_ref().unwrap().azure_devops.as_ref().unwrap();
+        assert!(ado.is_enabled());
+        assert_eq!(ado.toolsets(), &["wit"]);
+        assert!(ado.allowed().is_empty());
+        assert!(ado.org().is_none());
+    }
+
+    #[test]
+    fn test_azure_devops_not_set() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        assert!(fm.tools.is_none());
+    }
+
+    #[test]
+    fn test_both_tools_together() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+tools:
+  bash: ["cat", "ls"]
+  edit: true
+  cache-memory: true
+  azure-devops:
+    toolsets: [wit]
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let tools = fm.tools.as_ref().unwrap();
+        assert!(tools.cache_memory.as_ref().unwrap().is_enabled());
+        assert!(tools.azure_devops.as_ref().unwrap().is_enabled());
+        assert_eq!(tools.bash.as_ref().unwrap(), &["cat", "ls"]);
+        assert_eq!(tools.edit, Some(true));
     }
 }

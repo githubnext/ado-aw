@@ -62,7 +62,11 @@ impl Compiler for OneESCompiler {
         let checkout_steps = generate_checkout_steps(&front_matter.checkout);
         let checkout_self = generate_checkout_self();
         let copilot_params = generate_copilot_params(front_matter);
-        let has_memory = front_matter.safe_outputs.contains_key("memory");
+        let has_memory = front_matter
+            .tools
+            .as_ref()
+            .and_then(|t| t.cache_memory.as_ref())
+            .is_some_and(|cm| cm.is_enabled());
         let parameters = build_parameters(&front_matter.parameters, has_memory);
         let parameters_yaml = generate_parameters(&parameters)?;
 

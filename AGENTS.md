@@ -37,19 +37,33 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 │   ├── ndjson.rs         # NDJSON parsing utilities
 │   ├── proxy.rs          # Network proxy implementation
 │   ├── sanitize.rs       # Input sanitization for safe outputs
-│   └── tools/            # MCP tool implementations
+│   ├── safeoutputs/      # Safe-output MCP tool implementations (Stage 1 → NDJSON → Stage 2)
+│   │   ├── mod.rs
+│   │   ├── add_build_tag.rs
+│   │   ├── add_pr_comment.rs
+│   │   ├── comment_on_work_item.rs
+│   │   ├── create_branch.rs
+│   │   ├── create_git_tag.rs
+│   │   ├── create_pr.rs
+│   │   ├── create_wiki_page.rs
+│   │   ├── create_work_item.rs
+│   │   ├── link_work_items.rs
+│   │   ├── missing_data.rs
+│   │   ├── missing_tool.rs
+│   │   ├── noop.rs
+│   │   ├── queue_build.rs
+│   │   ├── reply_to_pr_comment.rs
+│   │   ├── report_incomplete.rs
+│   │   ├── resolve_pr_thread.rs
+│   │   ├── result.rs
+│   │   ├── submit_pr_review.rs
+│   │   ├── update_pr.rs
+│   │   ├── update_wiki_page.rs
+│   │   ├── update_work_item.rs
+│   │   └── upload_attachment.rs
+│   └── tools/            # First-class tool implementations (compiler auto-configures)
 │       ├── mod.rs
-│       ├── comment_on_work_item.rs
-│       ├── create_pr.rs
-│       ├── create_wiki_page.rs
-│       ├── create_work_item.rs
-│       ├── update_work_item.rs
-│       ├── update_wiki_page.rs
-│       ├── memory.rs
-│       ├── missing_data.rs
-│       ├── missing_tool.rs
-│       ├── noop.rs
-│       └── result.rs
+│       └── cache_memory.rs
 ├── templates/
 │   ├── base.yml          # Base pipeline template for standalone
 │   ├── 1es-base.yml      # Base pipeline template for 1ES target
@@ -125,6 +139,14 @@ checkout: # optional list of repository aliases for the agent to checkout and wo
 tools:                         # optional tool configuration
   bash: ["cat", "ls", "grep"]  # bash command allow-list (defaults to safe built-in list)
   edit: true                   # enable file editing tool (default: true)
+  cache-memory: true           # persistent memory across runs (see Cache Memory section)
+  # cache-memory:              # Alternative object format (with options)
+  #   allowed-extensions: [.md, .json]
+  azure-devops: true           # first-class ADO MCP integration (see Azure DevOps MCP section)
+  # azure-devops:              # Alternative object format (with scoping)
+  #   toolsets: [repos, wit]
+  #   allowed: [wit_get_work_item]
+  #   org: myorg
 # env:                          # RESERVED: workflow-level environment variables (not yet implemented)
 #   CUSTOM_VAR: "value"
 mcp-servers:
@@ -391,6 +413,53 @@ By default, the `edit` tool (file writing) is enabled. To disable it:
 tools:
   edit: false
 ```
+
+#### Cache Memory (`cache-memory:`)
+
+Persistent memory storage across agent runs. The agent reads/writes files to a memory directory that persists between pipeline executions via pipeline artifacts.
+
+```yaml
+# Simple enablement
+tools:
+  cache-memory: true
+
+# With options
+tools:
+  cache-memory:
+    allowed-extensions: [.md, .json, .txt]
+```
+
+When enabled, the compiler auto-generates pipeline steps to:
+- Download previous memory from the last successful run's artifact
+- Restore files to `/tmp/awf-tools/staging/agent_memory/`
+- Append a memory prompt to the agent instructions
+- Auto-inject a `clearMemory` pipeline parameter (allows clearing memory from the ADO UI)
+
+During Stage 2 execution, memory files are validated (path safety, extension filtering, `##vso[` injection detection, 5 MB size limit) and published as a pipeline artifact.
+
+#### Azure DevOps MCP (`azure-devops:`)
+
+First-class Azure DevOps MCP integration. Auto-configures the ADO MCP container, token mapping, MCPG entry, and network allowlist.
+
+```yaml
+# Simple enablement (auto-infers org from git remote)
+tools:
+  azure-devops: true
+
+# With scoping options
+tools:
+  azure-devops:
+    toolsets: [repos, wit, core]                    # ADO API toolset groups
+    allowed: [wit_get_work_item, core_list_projects] # Explicit tool allow-list
+    org: myorg                                       # Optional override (inferred from git remote)
+```
+
+When enabled, the compiler:
+- Generates a containerized stdio MCP entry (`node:20-slim` + `npx @azure-devops/mcp`) in the MCPG config
+- Auto-maps `AZURE_DEVOPS_EXT_PAT` token passthrough when `permissions.read` is configured
+- Adds ADO-specific hosts to the network allowlist
+- Auto-infers org from the git remote URL at compile time (overridable via `org:` field)
+- Fails compilation if org cannot be determined (no explicit override and no ADO git remote)
 
 ### Target Platforms
 
@@ -1066,35 +1135,8 @@ Reports that a tool or capability needed to complete the task is not available.
 - `tool_name` - Name of the tool that was expected but not found
 - `context` - Optional context about why the tool was needed
 
-#### memory
-Provides persistent memory across agent runs. When enabled, the agent can read and write files to a memory directory that persists between pipeline executions.
-
-**Configuration options (front matter):**
-```yaml
-safe-outputs:
-  memory:
-    allowed-extensions:    # Optional: restrict file types (defaults to all)
-      - .md
-      - .json
-      - .txt
-```
-
-**How it works:**
-1. During Stage 1 (agent execution), the agent can write files to `/tmp/awf-tools/staging/agent_memory/`
-2. A prompt is automatically appended to inform the agent about its memory location
-3. During Stage 2 execution, memory files are validated and sanitized:
-   - Path traversal attempts are blocked
-   - Files are checked for `##vso[` command injection
-   - Total size is limited to 5 MB
-   - File extensions can be restricted via configuration
-4. Sanitized memory files are published as a pipeline artifact
-5. On the next run, the previous memory is downloaded and restored to the staging directory
-
-**Security validations:**
-- Maximum total memory size: 5 MB
-- Path validation: no `..`, `.git`, absolute paths, or null bytes
-- Content validation: text files are scanned for `##vso[` commands
-- Extension filtering: can restrict to specific file types
+#### cache-memory (moved to `tools:`)
+Memory is now configured as a first-class tool under `tools: cache-memory:` instead of `safe-outputs: memory:`. See the [Cache Memory](#cache-memory-cache-memory) section under Tools Configuration for details.
 
 #### create-wiki-page
 Creates a new Azure DevOps wiki page. The page must **not** already exist; the tool enforces an atomic create-only operation (via `If-Match: ""`). Attempting to create a page that already exists results in an explicit failure.
@@ -1154,7 +1196,9 @@ When extending the compiler:
 2. **New compile targets**: Implement the `Compiler` trait in a new file under `src/compile/`
 3. **New front matter fields**: Add fields to `FrontMatter` in `src/compile/types.rs`
 4. **New template markers**: Handle replacements in the target-specific compiler (e.g., `standalone.rs` or `onees.rs`)
-5. **Validation**: Add compile-time validation for safe outputs and permissions
+5. **New safe-output tools**: Add to `src/safeoutputs/` — implement `ToolResult`, `Executor`, register in `mod.rs`, `mcp.rs`, `execute.rs`
+6. **New first-class tools**: Add to `src/tools/` — extend `ToolsConfig` in `types.rs`, wire in compilers
+7. **Validation**: Add compile-time validation for safe outputs and permissions
 
 ### Security Considerations
 

@@ -14,7 +14,8 @@ use std::path::Path;
 
 use super::Compiler;
 use super::common::{
-    self, AWF_VERSION, COPILOT_CLI_VERSION, DEFAULT_POOL, MCPG_PORT, MCPG_VERSION,
+    self, AWF_VERSION, COPILOT_CLI_VERSION, DEFAULT_POOL, MCPG_PORT, MCPG_VERSION, MCPG_IMAGE,
+    ADO_MCP_IMAGE, ADO_MCP_ENTRYPOINT, ADO_MCP_PACKAGE, ADO_MCP_SERVER_NAME,
     build_parameters, compute_effective_workspace, generate_acquire_ado_token,
     generate_cancel_previous_builds, generate_checkout_self, generate_checkout_steps,
     generate_ci_trigger, generate_copilot_ado_env, generate_copilot_params,
@@ -99,7 +100,11 @@ impl Compiler for StandaloneCompiler {
         // Generate hooks
         let setup_job = generate_setup_job(&front_matter.setup, &front_matter.name, &pool);
         let teardown_job = generate_teardown_job(&front_matter.teardown, &front_matter.name, &pool);
-        let has_memory = front_matter.safe_outputs.contains_key("memory");
+        let has_memory = front_matter
+            .tools
+            .as_ref()
+            .and_then(|t| t.cache_memory.as_ref())
+            .is_some_and(|cm| cm.is_enabled());
 
         // Build parameters list: user-defined + auto-injected clearMemory for memory
         let parameters = build_parameters(&front_matter.parameters, has_memory);
@@ -168,6 +173,7 @@ impl Compiler for StandaloneCompiler {
             ("{{ compiler_version }}", compiler_version),
             ("{{ firewall_version }}", AWF_VERSION),
             ("{{ mcpg_version }}", MCPG_VERSION),
+            ("{{ mcpg_image }}", MCPG_IMAGE),
             ("{{ copilot_version }}", COPILOT_CLI_VERSION),
             ("{{ pool }}", &pool),
             ("{{ setup_job }}", &setup_job),
@@ -207,9 +213,48 @@ impl Compiler for StandaloneCompiler {
                 replace_with_indent(&yaml, placeholder, replacement)
             });
 
+        // Infer ADO org from git remote at compile time (for tools.azure-devops)
+        let inferred_org = if front_matter
+            .tools
+            .as_ref()
+            .and_then(|t| t.azure_devops.as_ref())
+            .is_some_and(|ado| ado.is_enabled() && ado.org().is_none())
+        {
+            let input_dir = input_path.parent().unwrap_or(std::path::Path::new("."));
+            match crate::configure::get_git_remote_url(input_dir).await {
+                Ok(url) => match crate::configure::parse_ado_remote(&url) {
+                    Ok(ctx) => {
+                        let org = ctx
+                            .org_url
+                            .trim_end_matches('/')
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or("")
+                            .to_string();
+                        if org.is_empty() {
+                            None
+                        } else {
+                            info!("Inferred ADO org '{}' from git remote", org);
+                            Some(org)
+                        }
+                    }
+                    Err(_) => {
+                        log::debug!("Git remote is not an ADO URL — cannot infer org");
+                        None
+                    }
+                },
+                Err(_) => {
+                    log::debug!("No git remote found — cannot infer org");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Always generate MCPG config — safeoutputs is always required regardless
         // of whether additional mcp-servers are configured in front matter.
-        let config = generate_mcpg_config(front_matter);
+        let config = generate_mcpg_config(front_matter, inferred_org.as_deref())?;
         let mcpg_config_json =
             serde_json::to_string_pretty(&config).context("Failed to serialize MCPG config")?;
 
@@ -275,6 +320,18 @@ fn generate_allowed_domains(front_matter: &FrontMatter) -> String {
     // Add MCP-specific hosts
     for mcp in &enabled_mcps {
         for host in mcp_required_hosts(mcp) {
+            hosts.insert((*host).to_string());
+        }
+    }
+
+    // Add ADO-specific hosts when tools.azure-devops is enabled
+    if front_matter
+        .tools
+        .as_ref()
+        .and_then(|t| t.azure_devops.as_ref())
+        .is_some_and(|ado| ado.is_enabled())
+    {
+        for host in mcp_required_hosts("ado") {
             hosts.insert((*host).to_string());
         }
     }
@@ -443,7 +500,14 @@ pub struct McpgConfig {
 /// Converts the front matter `mcp-servers` definitions into MCPG-compatible JSON.
 /// SafeOutputs is always included as an HTTP backend. Custom MCPs with explicit
 /// `command:` are included as stdio servers.
-pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
+///
+/// `inferred_org` is the ADO organization name extracted from the git remote URL
+/// at compile time. Used as the default org for `tools.azure-devops` when no
+/// explicit `org:` override is provided.
+///
+/// Returns an error if `tools.azure-devops` is enabled but no org can be determined
+/// (neither explicit override nor git remote inference).
+pub fn generate_mcpg_config(front_matter: &FrontMatter, inferred_org: Option<&str>) -> Result<McpgConfig> {
     let mut mcp_servers = HashMap::new();
 
     // SafeOutputs is always included as an HTTP backend.
@@ -469,12 +533,104 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
         },
     );
 
+    // Auto-configure ADO MCP when tools.azure-devops is enabled.
+    // This generates a containerized stdio MCP entry using the ADO MCP npm package.
+    if let Some(ado_config) = front_matter
+        .tools
+        .as_ref()
+        .and_then(|t| t.azure_devops.as_ref())
+    {
+        if ado_config.is_enabled() {
+            // Warn if user also has a manual mcp-servers entry for azure-devops
+            if front_matter.mcp_servers.contains_key(ADO_MCP_SERVER_NAME) {
+                eprintln!(
+                    "Warning: Agent '{}' has both tools.azure-devops and mcp-servers.azure-devops configured. \
+                    The tools.azure-devops auto-configuration takes precedence. \
+                    Remove the mcp-servers entry to silence this warning.",
+                    front_matter.name
+                );
+            }
+
+            // Build entrypoint args: npx -y @azure-devops/mcp <org> [-d toolset1 toolset2 ...]
+            let mut entrypoint_args = vec!["-y".to_string(), ADO_MCP_PACKAGE.to_string()];
+
+            // Org: use explicit override, then compile-time inferred, then fail
+            let org = if let Some(explicit) = ado_config.org() {
+                explicit.to_string()
+            } else if let Some(inferred) = inferred_org {
+                inferred.to_string()
+            } else {
+                anyhow::bail!(
+                    "Agent '{}' has tools.azure-devops enabled but no ADO organization could be \
+                    determined. Either set tools.azure-devops.org explicitly, or compile from \
+                    within a git repository with an Azure DevOps remote URL.",
+                    front_matter.name
+                );
+            };
+            if !org.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                anyhow::bail!(
+                    "Invalid ADO org name '{}': must contain only alphanumerics and hyphens",
+                    org
+                );
+            }
+            entrypoint_args.push(org);
+
+            // Toolsets: passed as -d flag followed by space-separated toolset names
+            if !ado_config.toolsets().is_empty() {
+                entrypoint_args.push("-d".to_string());
+                for toolset in ado_config.toolsets() {
+                    if !toolset.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                        anyhow::bail!(
+                            "Invalid ADO toolset name '{}': must contain only alphanumerics and hyphens",
+                            toolset
+                        );
+                    }
+                    entrypoint_args.push(toolset.clone());
+                }
+            }
+
+            // Tool allow-list for MCPG filtering
+            let tools = if ado_config.allowed().is_empty() {
+                None
+            } else {
+                Some(ado_config.allowed().to_vec())
+            };
+
+            // ADO MCP needs the PAT token passed via environment
+            let env = Some(HashMap::from([(
+                "AZURE_DEVOPS_EXT_PAT".to_string(),
+                String::new(), // Passthrough from pipeline
+            )]));
+
+            mcp_servers.insert(
+                ADO_MCP_SERVER_NAME.to_string(),
+                McpgServerConfig {
+                    server_type: "stdio".to_string(),
+                    container: Some(ADO_MCP_IMAGE.to_string()),
+                    entrypoint: Some(ADO_MCP_ENTRYPOINT.to_string()),
+                    entrypoint_args: Some(entrypoint_args),
+                    mounts: None,
+                    args: None,
+                    url: None,
+                    headers: None,
+                    env,
+                    tools,
+                },
+            );
+        }
+    }
+
     for (name, config) in &front_matter.mcp_servers {
         // Prevent user-defined MCPs from overwriting the reserved safeoutputs backend
         if name.eq_ignore_ascii_case("safeoutputs") {
             log::warn!(
                 "MCP name 'safeoutputs' is reserved for the safe outputs HTTP backend — skipping"
             );
+            continue;
+        }
+
+        // Skip if already auto-configured by tools.azure-devops
+        if name == ADO_MCP_SERVER_NAME && mcp_servers.contains_key(ADO_MCP_SERVER_NAME) {
             continue;
         }
 
@@ -593,7 +749,7 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
         }
     }
 
-    McpgConfig {
+    Ok(McpgConfig {
         mcp_servers,
         gateway: McpgGatewayConfig {
             port: MCPG_PORT,
@@ -601,7 +757,7 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter) -> McpgConfig {
             api_key: "${MCP_GATEWAY_API_KEY}".to_string(),
             payload_dir: "/tmp/gh-aw/mcp-payloads".to_string(),
         },
-    }
+    })
 }
 
 /// Sensitive host path prefixes that should not be bind-mounted into MCP containers.
@@ -795,9 +951,16 @@ pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
                 && opts.env.contains_key("AZURE_DEVOPS_EXT_PAT"))
     });
 
+    // Also check if tools.azure-devops is enabled (auto-configured ADO MCP always needs token)
+    let ado_tool_needs_token = front_matter
+        .tools
+        .as_ref()
+        .and_then(|t| t.azure_devops.as_ref())
+        .is_some_and(|ado| ado.is_enabled());
+
     // Auto-map AZURE_DEVOPS_EXT_PAT from SC_READ_TOKEN when permissions.read is configured
-    // AND at least one container MCP requests it via env passthrough
-    if any_mcp_needs_ado_token {
+    // AND at least one container MCP requests it via env passthrough (or the ADO tool is enabled)
+    if any_mcp_needs_ado_token || ado_tool_needs_token {
         if front_matter.permissions.as_ref().and_then(|p| p.read.as_ref()).is_some() {
             env_flags.push(
                 "-e AZURE_DEVOPS_EXT_PAT=\"$(SC_READ_TOKEN)\"".to_string(),
@@ -949,7 +1112,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm);
+        let config = generate_mcpg_config(&fm, None).unwrap();
         let server = config.mcp_servers.get("my-tool").unwrap();
         assert_eq!(server.server_type, "stdio");
         assert_eq!(server.container.as_ref().unwrap(), "node:20-slim");
@@ -970,7 +1133,7 @@ mod tests {
         // An MCP with no container or url should be skipped
         fm.mcp_servers
             .insert("phantom".to_string(), McpConfig::Enabled(true));
-        let config = generate_mcpg_config(&fm);
+        let config = generate_mcpg_config(&fm, None).unwrap();
         assert!(!config.mcp_servers.contains_key("phantom"));
         // safeoutputs is always present
         assert!(config.mcp_servers.contains_key("safeoutputs"));
@@ -981,14 +1144,14 @@ mod tests {
         let mut fm = minimal_front_matter();
         fm.mcp_servers
             .insert("my-tool".to_string(), McpConfig::Enabled(false));
-        let config = generate_mcpg_config(&fm);
+        let config = generate_mcpg_config(&fm, None).unwrap();
         assert!(!config.mcp_servers.contains_key("my-tool"));
     }
 
     #[test]
     fn test_generate_mcpg_config_empty_mcp_servers() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(&fm);
+        let config = generate_mcpg_config(&fm, None).unwrap();
         // Only safeoutputs should be present
         assert_eq!(config.mcp_servers.len(), 1);
         assert!(config.mcp_servers.contains_key("safeoutputs"));
@@ -997,7 +1160,7 @@ mod tests {
     #[test]
     fn test_generate_mcpg_config_gateway_defaults() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(&fm);
+        let config = generate_mcpg_config(&fm, None).unwrap();
         assert_eq!(config.gateway.port, 80);
         assert_eq!(config.gateway.domain, "host.docker.internal");
         assert_eq!(config.gateway.api_key, "${MCP_GATEWAY_API_KEY}");
@@ -1017,7 +1180,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm);
+        let config = generate_mcpg_config(&fm, None).unwrap();
         let json = serde_json::to_string_pretty(&config).expect("Config should serialize to JSON");
         let parsed: serde_json::Value =
             serde_json::from_str(&json).expect("Serialized JSON should parse back");
@@ -1042,7 +1205,7 @@ mod tests {
     #[test]
     fn test_generate_mcpg_config_safeoutputs_variable_placeholders() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(&fm);
+        let config = generate_mcpg_config(&fm, None).unwrap();
         let so = config.mcp_servers.get("safeoutputs").unwrap();
 
         // URL should reference the runtime-substituted port
@@ -1064,7 +1227,7 @@ mod tests {
     #[test]
     fn test_generate_mcpg_config_safeoutputs_is_http_type() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(&fm);
+        let config = generate_mcpg_config(&fm, None).unwrap();
         let so = config.mcp_servers.get("safeoutputs").unwrap();
         assert_eq!(so.server_type, "http");
         assert!(
@@ -1088,7 +1251,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm);
+        let config = generate_mcpg_config(&fm, None).unwrap();
         let srv = config.mcp_servers.get("runner").unwrap();
         assert_eq!(srv.server_type, "stdio");
         assert!(
@@ -1111,7 +1274,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm);
+        let config = generate_mcpg_config(&fm, None).unwrap();
         let srv = config.mcp_servers.get("with-env").unwrap();
         let e = srv.env.as_ref().unwrap();
         assert_eq!(e.get("TOKEN").unwrap(), "secret");
@@ -1127,7 +1290,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm);
+        let config = generate_mcpg_config(&fm, None).unwrap();
         // The reserved entry should still be the HTTP backend, not the user's container
         let so = config.mcp_servers.get("safeoutputs").unwrap();
         assert_eq!(
@@ -1153,7 +1316,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm);
+        let config = generate_mcpg_config(&fm, None).unwrap();
         // The user-defined "SafeOutputs" must not overwrite the built-in entry
         let so = config.mcp_servers.get("safeoutputs").unwrap();
         assert_eq!(so.server_type, "http");
@@ -1178,7 +1341,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm);
+        let config = generate_mcpg_config(&fm, None).unwrap();
         let srv = config.mcp_servers.get("remote").unwrap();
         assert_eq!(srv.server_type, "http");
         assert_eq!(
@@ -1204,7 +1367,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm);
+        let config = generate_mcpg_config(&fm, None).unwrap();
         let srv = config.mcp_servers.get("ado").unwrap();
         assert_eq!(srv.server_type, "stdio");
         assert_eq!(srv.container.as_ref().unwrap(), "node:20-slim");
@@ -1226,7 +1389,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm);
+        let config = generate_mcpg_config(&fm, None).unwrap();
         let srv = config.mcp_servers.get("data-tool").unwrap();
         assert_eq!(
             srv.mounts.as_ref().unwrap(),
@@ -1245,7 +1408,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm);
+        let config = generate_mcpg_config(&fm, None).unwrap();
         assert!(!config.mcp_servers.contains_key("no-transport"));
     }
 
@@ -1402,5 +1565,170 @@ mod tests {
         assert!(!is_valid_env_var_name("MY VAR"));
         assert!(!is_valid_env_var_name("X --privileged"));
         assert!(!is_valid_env_var_name("X -v /etc:/etc:rw"));
+    }
+
+    // ─── tools.azure-devops MCPG integration ────────────────────────────────
+
+    #[test]
+    fn test_ado_tool_generates_mcpg_entry() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\n---\n",
+        )
+        .unwrap();
+        // Pass inferred org since no explicit org is set
+        let config = generate_mcpg_config(&fm, Some("inferred-org")).unwrap();
+        let ado = config.mcp_servers.get("azure-devops").unwrap();
+        assert_eq!(ado.server_type, "stdio");
+        assert_eq!(ado.container.as_deref(), Some(ADO_MCP_IMAGE));
+        assert_eq!(ado.entrypoint.as_deref(), Some(ADO_MCP_ENTRYPOINT));
+        let args = ado.entrypoint_args.as_ref().unwrap();
+        assert!(args.contains(&"-y".to_string()));
+        assert!(args.contains(&ADO_MCP_PACKAGE.to_string()));
+        assert!(args.contains(&"inferred-org".to_string()));
+        // Should have AZURE_DEVOPS_EXT_PAT in env
+        let env = ado.env.as_ref().unwrap();
+        assert!(env.contains_key("AZURE_DEVOPS_EXT_PAT"));
+    }
+
+    #[test]
+    fn test_ado_tool_with_toolsets() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    toolsets: [repos, wit, core]\n---\n",
+        )
+        .unwrap();
+        let config = generate_mcpg_config(&fm, Some("myorg")).unwrap();
+        let ado = config.mcp_servers.get("azure-devops").unwrap();
+        let args = ado.entrypoint_args.as_ref().unwrap();
+        assert!(args.contains(&"-d".to_string()));
+        assert!(args.contains(&"repos".to_string()));
+        assert!(args.contains(&"wit".to_string()));
+        assert!(args.contains(&"core".to_string()));
+    }
+
+    #[test]
+    fn test_ado_tool_with_org_override() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: myorg\n---\n",
+        )
+        .unwrap();
+        // Explicit org should be used even when inferred_org is None
+        let config = generate_mcpg_config(&fm, None).unwrap();
+        let ado = config.mcp_servers.get("azure-devops").unwrap();
+        let args = ado.entrypoint_args.as_ref().unwrap();
+        assert!(args.contains(&"myorg".to_string()));
+    }
+
+    #[test]
+    fn test_ado_tool_explicit_org_overrides_inferred() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: explicit-org\n---\n",
+        )
+        .unwrap();
+        let config = generate_mcpg_config(&fm, Some("inferred-org")).unwrap();
+        let ado = config.mcp_servers.get("azure-devops").unwrap();
+        let args = ado.entrypoint_args.as_ref().unwrap();
+        assert!(args.contains(&"explicit-org".to_string()));
+        assert!(!args.contains(&"inferred-org".to_string()));
+    }
+
+    #[test]
+    fn test_ado_tool_no_org_fails() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\n---\n",
+        )
+        .unwrap();
+        // No explicit org and no inferred org — should fail
+        let result = generate_mcpg_config(&fm, None);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("no ADO organization"),
+            "Error should mention missing org"
+        );
+    }
+
+    #[test]
+    fn test_ado_tool_invalid_org_fails() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: \"my org/bad\"\n---\n",
+        )
+        .unwrap();
+        let result = generate_mcpg_config(&fm, None);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("Invalid ADO org name"),
+            "Error should mention invalid org"
+        );
+    }
+
+    #[test]
+    fn test_ado_tool_invalid_toolset_fails() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: myorg\n    toolsets: [\"repos\", \"bad toolset\"]\n---\n",
+        )
+        .unwrap();
+        let result = generate_mcpg_config(&fm, None);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("Invalid ADO toolset name"),
+            "Error should mention invalid toolset"
+        );
+    }
+
+    #[test]
+    fn test_ado_tool_with_allowed_tools() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: myorg\n    allowed:\n      - wit_get_work_item\n      - core_list_projects\n---\n",
+        )
+        .unwrap();
+        let config = generate_mcpg_config(&fm, None).unwrap();
+        let ado = config.mcp_servers.get("azure-devops").unwrap();
+        let tools = ado.tools.as_ref().unwrap();
+        assert_eq!(tools, &["wit_get_work_item", "core_list_projects"]);
+    }
+
+    #[test]
+    fn test_ado_tool_disabled_not_generated() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops: false\n---\n",
+        )
+        .unwrap();
+        let config = generate_mcpg_config(&fm, None).unwrap();
+        assert!(!config.mcp_servers.contains_key("azure-devops"));
+    }
+
+    #[test]
+    fn test_ado_tool_not_set_not_generated() {
+        let fm = minimal_front_matter();
+        let config = generate_mcpg_config(&fm, None).unwrap();
+        assert!(!config.mcp_servers.contains_key("azure-devops"));
+    }
+
+    #[test]
+    fn test_ado_tool_skips_manual_mcp_entry() {
+        // When tools.azure-devops is enabled AND mcp-servers also has azure-devops,
+        // the tools config takes precedence and the manual entry is skipped.
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: auto-org\nmcp-servers:\n  azure-devops:\n    container: \"node:20-slim\"\n    entrypoint: \"npx\"\n    entrypoint-args: [\"-y\", \"@azure-devops/mcp\", \"manual-org\"]\n---\n",
+        )
+        .unwrap();
+        let config = generate_mcpg_config(&fm, None).unwrap();
+        let ado = config.mcp_servers.get("azure-devops").unwrap();
+        // Should use the auto-configured org, not the manual one
+        let args = ado.entrypoint_args.as_ref().unwrap();
+        assert!(args.contains(&"auto-org".to_string()));
+        assert!(!args.contains(&"manual-org".to_string()));
+    }
+
+    #[test]
+    fn test_ado_tool_docker_env_passthrough() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\npermissions:\n  read: my-read-sc\n---\n",
+        )
+        .unwrap();
+        let env = generate_mcpg_docker_env(&fm);
+        assert!(
+            env.contains("AZURE_DEVOPS_EXT_PAT"),
+            "Should include ADO token passthrough when permissions.read is set"
+        );
     }
 }
