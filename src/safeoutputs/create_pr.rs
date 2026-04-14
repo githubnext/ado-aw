@@ -538,6 +538,14 @@ impl Executor for CreatePrResult {
             self.title.clone()
         };
 
+        // ADO PR titles have a 400-character limit
+        if effective_title.len() > 400 {
+            return Ok(ExecutionResult::failure(format!(
+                "PR title too long after applying title-prefix ({} chars, max 400)",
+                effective_title.len()
+            )));
+        }
+
         // Validate repository against allowed list
         debug!(
             "Validating repository '{}' against allowed list",
@@ -1049,43 +1057,44 @@ impl Executor for CreatePrResult {
             target_branch, base_commit
         );
 
-        // Check if the source branch already exists (e.g. from a retry or previous run)
-        let check_ref_url = format!(
-            "{}{}/_apis/git/repositories/{}/refs?filter=heads/{}&api-version=7.1",
-            org_url, project, repo_id, source_branch
-        );
-        debug!("Checking if source branch exists: {}", check_ref_url);
+        // Check if the source branch already exists (e.g. from a retry or previous run).
+        // Retry with new random suffixes up to 3 times.
+        for attempt in 0..3 {
+            let check_ref_url = format!(
+                "{}{}/_apis/git/repositories/{}/refs?filter=heads/{}&api-version=7.1",
+                org_url, project, repo_id, source_branch
+            );
+            debug!("Checking if source branch exists (attempt {}): {}", attempt + 1, check_ref_url);
 
-        let check_ref_response = client
-            .get(&check_ref_url)
-            .basic_auth("", Some(token))
-            .send()
-            .await
-            .context("Failed to check source branch existence")?;
+            let check_ref_response = client
+                .get(&check_ref_url)
+                .basic_auth("", Some(token))
+                .send()
+                .await
+                .context("Failed to check source branch existence")?;
 
-        if check_ref_response.status().is_success() {
-            let check_data: serde_json::Value = check_ref_response.json().await?;
-            let refs = check_data["value"].as_array();
-            if refs.is_some_and(|r| !r.is_empty()) {
-                warn!(
-                    "Branch '{}' already exists, generating new suffix",
-                    source_branch
-                );
-                use rand::RngExt;
-                let new_suffix: u32 = rand::rng().random();
-                let new_hex = format!("{:08x}", new_suffix);
-                // Branch format is "agent/<slug>-<hex>"; replace the trailing hex
-                source_branch = if let Some(pos) = source_branch.rfind('-') {
-                    format!("{}-{}", &source_branch[..pos], new_hex)
-                } else {
-                    format!("{}-{}", source_branch, new_hex)
-                };
-                source_ref = format!("refs/heads/{}", source_branch);
-                info!(
-                    "Renamed source branch to '{}'",
-                    source_branch
-                );
+            if check_ref_response.status().is_success() {
+                let check_data: serde_json::Value = check_ref_response.json().await?;
+                let refs = check_data["value"].as_array();
+                if refs.is_some_and(|r| !r.is_empty()) {
+                    warn!(
+                        "Branch '{}' already exists, generating new suffix (attempt {})",
+                        source_branch, attempt + 1
+                    );
+                    use rand::RngExt;
+                    let new_suffix: u32 = rand::rng().random();
+                    let new_hex = format!("{:08x}", new_suffix);
+                    source_branch = if let Some(pos) = source_branch.rfind('-') {
+                        format!("{}-{}", &source_branch[..pos], new_hex)
+                    } else {
+                        format!("{}-{}", source_branch, new_hex)
+                    };
+                    source_ref = format!("refs/heads/{}", source_branch);
+                    info!("Renamed source branch to '{}'", source_branch);
+                    continue;
+                }
             }
+            break;
         }
 
         // Push changes via ADO API (this creates the branch and commits in one call)
@@ -1543,6 +1552,15 @@ async fn collect_changes_from_diff_tree(
             if status_code != "R100" && new_full_path.is_file() {
                 changes.push(read_file_change("edit", new_path, &new_full_path).await?);
             }
+        } else if status_code.starts_with('C') && parts.len() >= 3 {
+            // Copied file: C100\tsrc_path\tdest_path
+            let dest_path = parts[2];
+            validate_single_path(dest_path)?;
+
+            let dest_full_path = worktree_path.join(dest_path);
+            if dest_full_path.is_file() {
+                changes.push(read_file_change("add", dest_path, &dest_full_path).await?);
+            }
         } else {
             // Modified or other — read current content
             if full_path.is_file() {
@@ -1743,7 +1761,22 @@ fn validate_single_path(path: &str) -> anyhow::Result<()> {
 /// with spaces that break `diff --git` header parsing via split_whitespace).
 fn extract_paths_from_patch(patch_content: &str) -> Vec<String> {
     let mut paths = Vec::new();
+    let mut in_diff = false;
     for line in patch_content.lines() {
+        // Only extract paths after the first diff --git header to avoid
+        // false positives from commit messages that quote patch fragments
+        if line.starts_with("diff --git") {
+            in_diff = true;
+            continue;
+        }
+        if !in_diff {
+            continue;
+        }
+        // A new commit envelope resets — skip until next diff --git
+        if line.starts_with("From ") {
+            in_diff = false;
+            continue;
+        }
         if let Some(rest) = line.strip_prefix("--- a/") {
             let path = rest.trim().trim_matches('"');
             if !path.is_empty() {
@@ -1768,15 +1801,21 @@ fn extract_paths_from_patch(patch_content: &str) -> Vec<String> {
     paths
 }
 
-/// Count the number of distinct file changes in a patch.
-/// Uses `diff --git` headers as the canonical count — each header represents exactly
-/// one file change (add, edit, delete, or rename). This avoids double-counting renames,
-/// which produce both `--- a/old` and `+++ b/new` lines.
+/// Count the number of distinct files changed in a patch.
+/// In multi-commit format-patch output, the same file may appear in multiple commits.
+/// Deduplicates by extracting the `b/` path from each `diff --git a/... b/...` header.
 fn count_patch_files(patch_content: &str) -> usize {
+    use std::collections::HashSet;
     patch_content
         .lines()
-        .filter(|line| line.starts_with("diff --git"))
-        .count()
+        .filter_map(|line| {
+            // Extract "b/<path>" from "diff --git a/<path> b/<path>"
+            line.strip_prefix("diff --git a/")
+                .and_then(|rest| rest.rsplit_once(" b/"))
+                .map(|(_, b_path)| b_path)
+        })
+        .collect::<HashSet<_>>()
+        .len()
 }
 
 /// Check if any file paths in the patch are protected.

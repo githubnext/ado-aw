@@ -113,7 +113,7 @@ pub struct ExecutionResult {
     pub success: bool,
     /// Whether this is a warning (succeeded with issues).
     /// Invariant: warning == true implies success == true.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     warning: bool,
     /// Human-readable message describing the outcome
     pub message: String,

@@ -352,7 +352,11 @@ impl SafeOutputs {
                 .output()
                 .await
                 .map_err(|e| {
-                    anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git reset: {}", e))
+                    anyhow_to_mcp_error(anyhow::anyhow!(
+                        "Failed to run git reset (synthetic commit {} may remain): {}",
+                        head_sha,
+                        e
+                    ))
                 })?;
 
             if !reset_output.status.success() {
@@ -499,7 +503,8 @@ impl SafeOutputs {
 
         Err(anyhow_to_mcp_error(anyhow::anyhow!(
             "Cannot determine diff base: no remote tracking branch found. \
-             Push a tracking branch or ensure origin/HEAD is configured."
+             This can happen with shallow clones (fetchDepth: 1). \
+             Ensure the pipeline fetches full history or push a tracking branch."
         )))
     }
 
