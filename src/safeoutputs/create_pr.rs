@@ -53,6 +53,24 @@ const PROTECTED_MANIFEST_BASENAMES: &[&str] = &[
     // Rust
     "cargo.toml",
     "cargo.lock",
+    // Bun
+    "bun.lockb",
+    "bunfig.toml",
+    // Deno
+    "deno.json",
+    "deno.jsonc",
+    "deno.lock",
+    // Elixir
+    "mix.exs",
+    "mix.lock",
+    // Haskell
+    "stack.yaml",
+    "stack.yaml.lock",
+    // Python (uv)
+    "uv.lock",
+    // .NET (additional)
+    "nuget.config",
+    "directory.packages.props",
     // Docker / container
     "dockerfile",
     "docker-compose.yml",
@@ -256,6 +274,9 @@ pub struct CreatePrResult {
     /// Agent-provided labels (validated against allowed-labels at execution time)
     #[serde(default)]
     pub agent_labels: Vec<String>,
+    /// Base commit SHA from patch generation (for reliable Stage 2 application)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_commit: Option<String>,
 }
 
 impl crate::safeoutputs::ToolResult for CreatePrResult {
@@ -282,6 +303,7 @@ impl CreatePrResult {
         patch_file: String,
         repository: String,
         agent_labels: Vec<String>,
+        base_commit: Option<String>,
     ) -> Self {
         Self {
             name: Self::NAME.to_string(),
@@ -291,6 +313,7 @@ impl CreatePrResult {
             patch_file,
             repository,
             agent_labels,
+            base_commit,
         }
     }
 }
@@ -687,7 +710,8 @@ impl Executor for CreatePrResult {
 
         // Use target branch from config
         let target_branch = &config.target_branch;
-        let source_ref = format!("refs/heads/{}", self.source_branch);
+        let mut source_branch = self.source_branch.clone();
+        let mut source_ref = format!("refs/heads/{}", source_branch);
         let target_ref = format!("refs/heads/{}", target_branch);
         debug!("Source ref: {}, Target ref: {}", source_ref, target_ref);
 
@@ -774,9 +798,9 @@ impl Executor for CreatePrResult {
         };
 
         // Create and checkout the source branch in the worktree
-        debug!("Creating source branch: {}", self.source_branch);
+        debug!("Creating source branch: {}", source_branch);
         let checkout_output = Command::new("git")
-            .args(["checkout", "-b", &self.source_branch])
+            .args(["checkout", "-b", &source_branch])
             .current_dir(&worktree_path)
             .output()
             .await
@@ -957,33 +981,87 @@ impl Executor for CreatePrResult {
         );
         debug!("Refs URL: {}", refs_url);
 
-        let refs_response = client
-            .get(&refs_url)
-            .basic_auth("", Some(token))
-            .send()
-            .await
-            .context("Failed to get target branch ref")?;
+        // Resolve the base commit for the push.
+        // Prefer the merge-base SHA recorded at patch generation time (Stage 1) so the
+        // patch is applied against the exact commit it was created from.  Fall back to
+        // querying the ADO refs API when the field is absent (backward compat with old
+        // NDJSON entries).
+        let base_commit: String = if let Some(ref recorded) = self.base_commit {
+            info!(
+                "Using recorded base_commit from Stage 1: {}",
+                recorded
+            );
+            recorded.clone()
+        } else {
+            debug!("No recorded base_commit — resolving from ADO refs API");
+            let refs_response = client
+                .get(&refs_url)
+                .basic_auth("", Some(token))
+                .send()
+                .await
+                .context("Failed to get target branch ref")?;
 
-        if !refs_response.status().is_success() {
-            let status = refs_response.status();
-            let body = refs_response.text().await.unwrap_or_default();
-            warn!("Failed to get target branch ref: {} - {}", status, body);
-            return Ok(ExecutionResult::failure(format!(
-                "Failed to get target branch ref: {} - {}",
-                status, body
-            )));
-        }
+            if !refs_response.status().is_success() {
+                let status = refs_response.status();
+                let body = refs_response.text().await.unwrap_or_default();
+                warn!("Failed to get target branch ref: {} - {}", status, body);
+                return Ok(ExecutionResult::failure(format!(
+                    "Failed to get target branch ref: {} - {}",
+                    status, body
+                )));
+            }
 
-        let refs_data: serde_json::Value = refs_response.json().await?;
-        let base_commit = refs_data["value"][0]["objectId"]
-            .as_str()
-            .context("Could not find target branch commit")?;
+            let refs_data: serde_json::Value = refs_response.json().await?;
+            let resolved = refs_data["value"][0]["objectId"]
+                .as_str()
+                .context("Could not find target branch commit")?;
+            resolved.to_string()
+        };
         debug!("Base commit: {}", base_commit);
 
         info!(
             "Base commit for target branch '{}': {}",
             target_branch, base_commit
         );
+
+        // Check if the source branch already exists (e.g. from a retry or previous run)
+        let check_ref_url = format!(
+            "{}{}/_apis/git/repositories/{}/refs?filter=heads/{}&api-version=7.1",
+            org_url, project, repo_id, source_branch
+        );
+        debug!("Checking if source branch exists: {}", check_ref_url);
+
+        let check_ref_response = client
+            .get(&check_ref_url)
+            .basic_auth("", Some(token))
+            .send()
+            .await
+            .context("Failed to check source branch existence")?;
+
+        if check_ref_response.status().is_success() {
+            let check_data: serde_json::Value = check_ref_response.json().await?;
+            let refs = check_data["value"].as_array();
+            if refs.is_some_and(|r| !r.is_empty()) {
+                warn!(
+                    "Branch '{}' already exists, generating new suffix",
+                    source_branch
+                );
+                use rand::RngExt;
+                let new_suffix: u32 = rand::rng().random();
+                let new_hex = format!("{:08x}", new_suffix);
+                // Branch format is "agent/<slug>-<hex>"; replace the trailing hex
+                source_branch = if let Some(pos) = source_branch.rfind('-') {
+                    format!("{}-{}", &source_branch[..pos], new_hex)
+                } else {
+                    format!("{}-{}", source_branch, new_hex)
+                };
+                source_ref = format!("refs/heads/{}", source_branch);
+                info!(
+                    "Renamed source branch to '{}'",
+                    source_branch
+                );
+            }
+        }
 
         // Push changes via ADO API (this creates the branch and commits in one call)
         info!("Pushing changes to ADO");
@@ -1136,19 +1214,19 @@ impl Executor for CreatePrResult {
                     {}\n\n\
                     ---\n\
                     *To create the PR manually, merge branch `{}` into `{}`.*",
-                    self.source_branch, target_branch, self.repository,
+                    source_branch, target_branch, self.repository,
                     status, sanitize_text(truncate_error_body(&body, 500)),
                     sanitize_text(&self.description),
-                    self.source_branch, target_branch
+                    source_branch, target_branch
                 );
                 return Ok(ExecutionResult::failure_with_data(
                     format!(
                         "Failed to create pull request: {} - {}. Branch '{}' was pushed — create the PR manually.",
-                        status, body, self.source_branch,
+                        status, body, source_branch,
                     ),
                     serde_json::json!({
                         "fallback": "branch-recorded",
-                        "branch": self.source_branch,
+                        "branch": source_branch,
                         "target_branch": target_branch,
                         "repository": self.repository,
                         "description": fallback_description
@@ -1271,7 +1349,7 @@ impl Executor for CreatePrResult {
 
         info!(
             "PR #{} created successfully: {} -> {}{}",
-            pr_id, self.source_branch, target_branch,
+            pr_id, source_branch, target_branch,
             if config.draft { " (draft)" } else { "" }
         );
 
@@ -1280,7 +1358,7 @@ impl Executor for CreatePrResult {
             serde_json::json!({
                 "pull_request_id": pr_id,
                 "url": pr_web_url,
-                "source_branch": self.source_branch,
+                "source_branch": source_branch,
                 "target_branch": target_branch,
                 "draft": config.draft
             }),
@@ -1514,11 +1592,10 @@ fn validate_patch_paths(patch_content: &str) -> anyhow::Result<()> {
                     validate_single_path(clean_path)?;
                 }
             }
-        } else if line.starts_with("rename from ") || line.starts_with("rename to ") {
-            let path = line.split_whitespace().last().unwrap_or("");
-            validate_single_path(path)?;
-        } else if line.starts_with("copy from ") || line.starts_with("copy to ") {
-            let path = line.split_whitespace().last().unwrap_or("");
+        } else if line.starts_with("rename from ") || line.starts_with("rename to ")
+            || line.starts_with("copy from ") || line.starts_with("copy to ")
+        {
+            let path = line.splitn(3, ' ').nth(2).unwrap_or("").trim_matches('"');
             validate_single_path(path)?;
         }
     }
@@ -1931,6 +2008,28 @@ new file mode 100755
 +++ b//etc/passwd
 "#;
         assert!(validate_patch_paths(patch).is_err());
+    }
+
+    #[test]
+    fn test_validate_patch_paths_rename_with_spaces() {
+        // "rename from some dir/../.git/config" must be rejected.
+        // Previously split_whitespace().last() would only see "dir/../.git/config"
+        // (or just "config"), missing the traversal in the full path.
+        let patch = "diff --git a/old b/new\n\
+                     rename from some dir/../.git/config\n\
+                     rename to new name\n";
+        let result = validate_patch_paths(patch);
+        assert!(result.is_err(), "rename with spaces and traversal should be rejected");
+
+        // Also verify copy paths with spaces are validated correctly
+        let patch_copy = "diff --git a/old b/new\n\
+                          copy from some dir/../.git/config\n\
+                          copy to new name\n";
+        let result_copy = validate_patch_paths(patch_copy);
+        assert!(
+            result_copy.is_err(),
+            "copy with spaces and traversal should be rejected"
+        );
     }
 
     #[test]

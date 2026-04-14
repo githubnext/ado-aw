@@ -176,7 +176,7 @@ impl SafeOutputs {
     /// Generate a git diff patch from a specific directory
     /// If `repository` is Some, it's treated as a subdirectory of bounding_directory
     /// If `repository` is None or "self", use bounding_directory directly
-    async fn generate_patch(&self, repository: Option<&str>) -> Result<String, McpError> {
+    async fn generate_patch(&self, repository: Option<&str>) -> Result<(String, String), McpError> {
         use tokio::process::Command;
 
         // Determine the git directory based on repository
@@ -324,8 +324,10 @@ impl SafeOutputs {
             .await;
 
         // Always undo the temporary commit before propagating errors.
-        // We capture the original index state via `git stash` to restore it exactly,
-        // since `git reset --mixed` would leave previously-untracked files staged.
+        // Reset the synthetic commit, restoring changes to the working tree.
+        // `git reset --mixed HEAD~1` undoes the commit and resets the index
+        // to the parent tree, which leaves modified files as unstaged changes
+        // and previously-untracked files as untracked again.
         if made_synthetic_commit {
             // Capture the synthetic commit SHA for diagnostics
             let head_sha = Command::new("git")
@@ -375,7 +377,7 @@ impl SafeOutputs {
 
         let patch = String::from_utf8_lossy(&format_patch_output.stdout).to_string();
 
-        Ok(patch)
+        Ok((patch, merge_base))
     }
 
     /// Generate a unique patch filename
@@ -614,7 +616,7 @@ Use 'self' for the pipeline's own repository, or a repository alias from the che
 
         // Generate the patch from current git changes in the specified repository
         debug!("Generating patch for repository: {}", repository);
-        let patch_content = self.generate_patch(Some(repository)).await?;
+        let (patch_content, merge_base) = self.generate_patch(Some(repository)).await?;
 
         if patch_content.trim().is_empty() {
             warn!("No changes detected in repository '{}'", repository);
@@ -654,6 +656,7 @@ Use 'self' for the pipeline's own repository, or a repository alias from the che
             patch_filename,
             repository.to_string(),
             sanitized.labels,
+            Some(merge_base),
         );
 
         // Write to safe outputs
