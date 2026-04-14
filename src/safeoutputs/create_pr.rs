@@ -274,7 +274,16 @@ pub struct CreatePrResult {
     /// Agent-provided labels (validated against allowed-labels at execution time)
     #[serde(default)]
     pub agent_labels: Vec<String>,
-    /// Base commit SHA from patch generation (for reliable Stage 2 application)
+    /// Base commit SHA recorded at patch generation time (merge-base of HEAD and
+    /// the upstream branch). When present, Stage 2 uses this as the parent commit
+    /// for the ADO Push API, ensuring the patch applies cleanly even if the target
+    /// branch has advanced since the agent ran. Falls back to resolving the live
+    /// target branch HEAD via the ADO refs API when absent (backward compatibility).
+    ///
+    /// Note: this is the merge-base, not the target branch HEAD. The PR diff in ADO
+    /// compares file states and displays correctly regardless; however, the branch
+    /// history shows a parent older than current main. This is normal for topic
+    /// branches and is resolved when the PR is merged.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_commit: Option<String>,
 }
@@ -1222,7 +1231,7 @@ impl Executor for CreatePrResult {
                 return Ok(ExecutionResult::failure_with_data(
                     format!(
                         "Failed to create pull request: {} - {}. Branch '{}' was pushed — create the PR manually.",
-                        status, body, source_branch,
+                        status, truncate_error_body(&body, 500), source_branch,
                     ),
                     serde_json::json!({
                         "fallback": "branch-recorded",
