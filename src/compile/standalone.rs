@@ -18,14 +18,14 @@ use super::common::{
     compute_effective_workspace, generate_acquire_ado_token, generate_cancel_previous_builds,
     generate_checkout_self, generate_checkout_steps, generate_ci_trigger, generate_copilot_ado_env,
     generate_copilot_params, generate_enabled_tools_args, generate_executor_ado_env,
-    generate_header_comment, generate_job_timeout, generate_pipeline_path,
+    generate_header_comment, generate_job_timeout, generate_parameters, generate_pipeline_path,
     generate_pipeline_resources, generate_pr_trigger, generate_repositories, generate_schedule,
     generate_source_path, generate_working_directory, replace_with_indent, sanitize_filename,
     validate_comment_target, validate_resolve_pr_thread_statuses,
     validate_submit_pr_review_events, validate_update_pr_votes,
     validate_update_work_item_target, validate_write_permissions,
 };
-use super::types::{FrontMatter, McpConfig};
+use super::types::{FrontMatter, McpConfig, PipelineParameter};
 use crate::allowed_hosts::{CORE_ALLOWED_HOSTS, mcp_required_hosts};
 use serde::Serialize;
 use std::collections::HashSet;
@@ -100,6 +100,11 @@ impl Compiler for StandaloneCompiler {
         let setup_job = generate_setup_job(&front_matter.setup, &front_matter.name, &pool);
         let teardown_job = generate_teardown_job(&front_matter.teardown, &front_matter.name, &pool);
         let has_memory = front_matter.safe_outputs.contains_key("memory");
+
+        // Build parameters list: user-defined + auto-injected clearMemory for memory
+        let parameters = build_parameters(&front_matter.parameters, has_memory);
+        let parameters_yaml = generate_parameters(&parameters);
+
         let prepare_steps = generate_prepare_steps(&front_matter.steps, has_memory);
         let finalize_steps = generate_finalize_steps(&front_matter.post_steps);
         let agentic_depends_on = generate_agentic_depends_on(&front_matter.setup);
@@ -159,6 +164,7 @@ impl Compiler for StandaloneCompiler {
         // Replace template markers
         let compiler_version = env!("CARGO_PKG_VERSION");
         let replacements: Vec<(&str, &str)> = vec![
+            ("{{ parameters }}", &parameters_yaml),
             ("{{ compiler_version }}", compiler_version),
             ("{{ firewall_version }}", AWF_VERSION),
             ("{{ mcpg_version }}", MCPG_VERSION),
@@ -224,6 +230,29 @@ impl Compiler for StandaloneCompiler {
 }
 
 // ==================== Standalone-specific helpers ====================
+
+/// Build the final parameters list by combining user-defined parameters
+/// with auto-injected parameters (e.g., `clearMemory` when memory is enabled).
+fn build_parameters(user_params: &[PipelineParameter], has_memory: bool) -> Vec<PipelineParameter> {
+    let mut params = user_params.to_vec();
+
+    // Auto-inject clearMemory parameter when memory is configured,
+    // unless the user already defined one with the same name.
+    if has_memory && !params.iter().any(|p| p.name == "clearMemory") {
+        params.insert(
+            0,
+            PipelineParameter {
+                name: "clearMemory".to_string(),
+                display_name: Some("Clear agent memory".to_string()),
+                param_type: Some("boolean".to_string()),
+                default: Some(serde_yaml::Value::Bool(false)),
+                values: None,
+            },
+        );
+    }
+
+    params
+}
 
 /// Generate the allowed domains list for AWF network isolation.
 ///
@@ -857,9 +886,13 @@ pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
 
 /// Generate the steps to download agent memory from the previous successful run
 /// and restore it to the staging directory.
+///
+/// When the `clearMemory` parameter is true, the download step is skipped
+/// and only an empty memory directory is created.
 fn generate_memory_download() -> String {
     r#"- task: DownloadPipelineArtifact@2
   displayName: "Download previous agent memory"
+  condition: eq('${{ parameters.clearMemory }}', false)
   continueOnError: true
   inputs:
     source: "specific"
@@ -881,7 +914,14 @@ fn generate_memory_download() -> String {
       echo "No previous agent memory found - empty memory directory created"
     fi
   displayName: "Restore previous agent memory"
-  continueOnError: true"#
+  condition: eq('${{ parameters.clearMemory }}', false)
+  continueOnError: true
+
+- bash: |
+    mkdir -p /tmp/awf-tools/staging/agent_memory
+    echo "Memory cleared by pipeline parameter - starting fresh"
+  displayName: "Initialize empty agent memory (clearMemory=true)"
+  condition: eq('${{ parameters.clearMemory }}', true)"#
         .to_string()
 }
 

@@ -172,6 +172,11 @@ network:                       # optional network policy (standalone target only
 permissions:                   # optional ADO access token configuration
   read: my-read-arm-connection   # ARM service connection for read-only ADO access (Stage 1 agent)
   write: my-write-arm-connection # ARM service connection for write ADO access (Stage 2 executor only)
+parameters:                    # optional ADO runtime parameters (surfaced in UI when queuing a run)
+  - name: clearMemory
+    displayName: "Clear agent memory"
+    type: boolean
+    default: false
 ---
 
 
@@ -304,6 +309,48 @@ The `timeout-minutes` field sets a wall-clock limit (in minutes) for the entire 
 
 When omitted, Azure DevOps uses its default job timeout (60 minutes). When set, the compiler emits `timeoutInMinutes: <value>` on the agentic job.
 
+### Runtime Parameters
+
+The `parameters` field defines Azure DevOps [runtime parameters](https://learn.microsoft.com/en-us/azure/devops/pipelines/process/runtime-parameters) that are surfaced in the ADO UI when manually queuing a pipeline run. Parameters are emitted as a top-level `parameters:` block in the generated pipeline YAML.
+
+```yaml
+parameters:
+  - name: verbose
+    displayName: "Verbose output"
+    type: boolean
+    default: false
+  - name: region
+    displayName: "Target region"
+    type: string
+    default: "us-east"
+    values:
+      - us-east
+      - eu-west
+      - ap-south
+```
+
+#### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | Yes | Parameter identifier (valid ADO identifier) |
+| `displayName` | string | No | Human-readable label in the ADO UI |
+| `type` | string | No | ADO parameter type: `boolean`, `string`, `number`, `object` |
+| `default` | any | No | Default value when not specified at queue time |
+| `values` | list | No | Allowed values (for `string`/`number` parameters) |
+
+Parameters can be referenced in custom steps using `${{ parameters.paramName }}`.
+
+#### Auto-injected `clearMemory` Parameter
+
+When `safe-outputs.memory` is configured, the compiler automatically injects a `clearMemory` boolean parameter (default: `false`) at the beginning of the parameters list. This parameter:
+
+- Is surfaced in the ADO UI when manually queuing a run
+- When set to `true`, skips downloading the previous agent memory artifact
+- Creates an empty memory directory so the agent starts fresh
+
+If you define your own `clearMemory` parameter in the front matter, the auto-injected one is suppressed — your definition takes precedence.
+
 ### Tools Configuration
 
 The `tools` field controls which tools are available to the agent. Both sub-fields are optional and have sensible defaults.
@@ -386,6 +433,25 @@ The compiler transforms the input into valid Azure DevOps pipeline YAML based on
 - **1ES**: Uses `templates/1es-base.yml`
 
 Explicit markings are embedded in these templates that the compiler is allowed to replace e.g. `{{ copilot_params }}` denotes parameters which are passed to the copilot command line tool. The compiler should not replace sections denoted by `${{ some content }}`. What follows is a mapping of markings to responsibilities (primarily for the standalone template).
+
+## {{ parameters }}
+
+Should be replaced with the top-level `parameters:` block generated from the `parameters` front matter field. If no parameters are defined (and no auto-injected parameters apply), this marker is replaced with an empty string.
+
+When `safe-outputs.memory` is configured, the compiler auto-injects a `clearMemory` boolean parameter (default: `false`) unless one is already user-defined.
+
+Example output:
+```yaml
+parameters:
+- name: clearMemory
+  displayName: Clear agent memory
+  type: boolean
+  default: false
+- name: verbose
+  displayName: Verbose output
+  type: boolean
+  default: false
+```
 
 ## {{ repositories }}
 For each additional repository specified in the front matter append:

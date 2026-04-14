@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 
-use super::types::{FrontMatter, Repository, TriggerConfig};
+use super::types::{FrontMatter, PipelineParameter, Repository, TriggerConfig};
 use crate::compile::types::McpConfig;
 use crate::fuzzy_schedule;
 
@@ -82,6 +82,35 @@ pub fn replace_with_indent(template: &str, placeholder: &str, replacement: &str)
 
 /// Generate a schedule YAML block from a ScheduleConfig.
 /// When no explicit schedule branches are configured, defaults to `main`.
+/// Generate the top-level `parameters:` YAML block from front matter parameters.
+///
+/// Returns a YAML block like:
+/// ```yaml
+/// parameters:
+///   - name: clearMemory
+///     displayName: "Clear agent memory"
+///     type: boolean
+///     default: false
+/// ```
+///
+/// Returns an empty string if the parameters list is empty.
+pub fn generate_parameters(parameters: &[PipelineParameter]) -> String {
+    if parameters.is_empty() {
+        return String::new();
+    }
+
+    let yaml = serde_yaml::to_string(&serde_yaml::Value::Sequence(
+        parameters
+            .iter()
+            .map(|p| serde_yaml::to_value(p).expect("PipelineParameter should serialize"))
+            .collect(),
+    ))
+    .expect("parameters should serialize to YAML");
+
+    // serde_yaml outputs the sequence without a key; we need to wrap it under `parameters:`
+    format!("parameters:\n{}", yaml)
+}
+
 pub fn generate_schedule(name: &str, config: &super::types::ScheduleConfig) -> Result<String> {
     let branches = config.branches();
     let fallback;

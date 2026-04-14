@@ -21,7 +21,7 @@ use super::common::{
     generate_acquire_ado_token, generate_checkout_self, generate_checkout_steps,
     generate_ci_trigger, generate_copilot_ado_env, generate_copilot_params,
     generate_executor_ado_env, generate_header_comment, generate_job_timeout,
-    generate_pipeline_path, generate_pipeline_resources, generate_pr_trigger,
+    generate_parameters, generate_pipeline_path, generate_pipeline_resources, generate_pr_trigger,
     generate_repositories, generate_schedule, generate_source_path, generate_working_directory,
     is_custom_mcp, replace_with_indent, validate_comment_target,
     validate_resolve_pr_thread_statuses, validate_submit_pr_review_events,
@@ -61,6 +61,7 @@ impl Compiler for OneESCompiler {
         let checkout_steps = generate_checkout_steps(&front_matter.checkout);
         let checkout_self = generate_checkout_self();
         let copilot_params = generate_copilot_params(front_matter);
+        let parameters_yaml = generate_parameters(&front_matter.parameters);
 
         let effective_workspace = compute_effective_workspace(
             &front_matter.workspace,
@@ -168,6 +169,7 @@ displayName: "Finalize""#,
         // Replace all template markers
         let compiler_version = env!("CARGO_PKG_VERSION");
         let replacements: Vec<(&str, &str)> = vec![
+            ("{{ parameters }}", &parameters_yaml),
             ("{{ compiler_version }}", compiler_version),
             // No-op for 1ES (template doesn't use AWF), but included for forward-compatibility
             ("{{ firewall_version }}", AWF_VERSION),

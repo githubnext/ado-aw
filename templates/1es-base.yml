@@ -3,7 +3,7 @@
 # for the main agent task, while adding custom jobs for safe output analysis and processing.
 
 name: {{ agent_name }}-$(BuildID)
-
+{{ parameters }}
 {{ schedule }}
 {{ pr_trigger }}
 {{ ci_trigger }}

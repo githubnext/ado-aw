@@ -2297,3 +2297,228 @@ fn test_mcpg_docker_env_passthrough() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+/// Test that user-defined parameters are emitted in the compiled pipeline YAML
+#[test]
+fn test_parameters_in_compiled_output() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-params-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = r#"---
+name: "Params Agent"
+description: "Tests parameters feature"
+parameters:
+  - name: verbose
+    displayName: "Verbose output"
+    type: boolean
+    default: false
+  - name: region
+    displayName: "Target region"
+    type: string
+    default: "us-east"
+    values:
+      - us-east
+      - eu-west
+---
+
+## Test
+
+Do the thing.
+"#;
+
+    let input_path = temp_dir.join("params-agent.md");
+    let output_path = temp_dir.join("params-agent.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args(["compile", input_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(output.status.success(), "Compiler should succeed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let compiled = fs::read_to_string(&output_path).unwrap();
+
+    // Verify parameters block is present
+    assert!(compiled.contains("parameters:"), "Should contain parameters: block");
+    assert!(compiled.contains("name: verbose"), "Should contain verbose parameter");
+    assert!(compiled.contains("name: region"), "Should contain region parameter");
+    assert!(compiled.contains("displayName: Verbose output"), "Should contain displayName");
+    assert!(compiled.contains("default: false"), "Should contain default for verbose");
+    assert!(compiled.contains("default: us-east"), "Should contain default for region");
+    assert!(compiled.contains("- us-east"), "Should contain values for region");
+    assert!(compiled.contains("- eu-west"), "Should contain values for region");
+
+    // No clearMemory should be injected (no memory configured)
+    assert!(!compiled.contains("clearMemory"), "Should NOT contain clearMemory without memory");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that clearMemory is auto-injected when memory is enabled
+#[test]
+fn test_parameters_clear_memory_auto_injected() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-clear-memory-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = r#"---
+name: "Memory Agent"
+description: "Tests clearMemory auto-injection"
+safe-outputs:
+  memory:
+    allowed-extensions:
+      - .md
+---
+
+## Test
+
+Do the thing.
+"#;
+
+    let input_path = temp_dir.join("memory-agent.md");
+    let output_path = temp_dir.join("memory-agent.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args(["compile", input_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(output.status.success(), "Compiler should succeed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let compiled = fs::read_to_string(&output_path).unwrap();
+
+    // Verify clearMemory parameter is auto-injected
+    assert!(compiled.contains("name: clearMemory"), "Should auto-inject clearMemory parameter");
+    assert!(compiled.contains("displayName: Clear agent memory"), "Should have displayName");
+    assert!(compiled.contains("type: boolean"), "Should be boolean type");
+
+    // Verify memory download has condition
+    assert!(
+        compiled.contains("condition: eq('${{ parameters.clearMemory }}', false)"),
+        "Memory download should be conditional on clearMemory=false"
+    );
+    assert!(
+        compiled.contains("condition: eq('${{ parameters.clearMemory }}', true)"),
+        "Clear memory step should run when clearMemory=true"
+    );
+    assert!(
+        compiled.contains("Initialize empty agent memory (clearMemory=true)"),
+        "Should have the clear memory initialization step"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that user-defined clearMemory is not duplicated
+#[test]
+fn test_parameters_user_defined_clear_memory_not_duplicated() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-user-clear-memory-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = r#"---
+name: "Custom Memory Agent"
+description: "Tests user-defined clearMemory not duplicated"
+parameters:
+  - name: clearMemory
+    displayName: "Reset memory"
+    type: boolean
+    default: true
+safe-outputs:
+  memory:
+    allowed-extensions:
+      - .md
+---
+
+## Test
+
+Do the thing.
+"#;
+
+    let input_path = temp_dir.join("custom-memory.md");
+    let output_path = temp_dir.join("custom-memory.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args(["compile", input_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(output.status.success(), "Compiler should succeed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let compiled = fs::read_to_string(&output_path).unwrap();
+
+    // Verify user's clearMemory is present (with their custom displayName and default)
+    assert!(compiled.contains("displayName: Reset memory"), "Should use user's displayName");
+    assert!(compiled.contains("default: true"), "Should use user's default value");
+
+    // Verify clearMemory only appears once (not duplicated)
+    let count = compiled.matches("name: clearMemory").count();
+    assert_eq!(count, 1, "clearMemory should appear exactly once, not duplicated");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Test that parameters block has no unreplaced markers
+#[test]
+fn test_parameters_no_unreplaced_markers() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-params-markers-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = r#"---
+name: "Markers Agent"
+description: "Tests no unreplaced markers with parameters"
+parameters:
+  - name: myParam
+    type: string
+    default: "hello"
+safe-outputs:
+  memory:
+    allowed-extensions:
+      - .md
+---
+
+## Test
+"#;
+
+    let input_path = temp_dir.join("markers-agent.md");
+    let output_path = temp_dir.join("markers-agent.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args(["compile", input_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(output.status.success(), "Compiler should succeed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let compiled = fs::read_to_string(&output_path).unwrap();
+
+    // Verify no unreplaced {{ markers }} remain (excluding ${{ }} which are ADO expressions)
+    for line in compiled.lines() {
+        let stripped = line.replace("${{", "");
+        assert!(
+            !stripped.contains("{{ "),
+            "Should not contain unreplaced marker: {}",
+            line.trim()
+        );
+    }
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}

@@ -1,5 +1,6 @@
 
 name: {{ agent_name }}-$(BuildID)
+{{ parameters }}
 resources:
   repositories:
     - repository: self
