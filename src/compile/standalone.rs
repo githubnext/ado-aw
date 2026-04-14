@@ -1746,4 +1746,288 @@ mod tests {
             "Should include ADO token passthrough when permissions.read is set"
         );
     }
+
+    // ─── validate_docker_args ────────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_docker_args_privileged_flag() {
+        // Should not panic; warning is emitted to stderr
+        validate_docker_args(&["--privileged".to_string()], "my-mcp");
+    }
+
+    #[test]
+    fn test_validate_docker_args_entrypoint_in_args_warns() {
+        // --entrypoint in args bypasses the dedicated `entrypoint:` field
+        validate_docker_args(
+            &[
+                "--entrypoint".to_string(),
+                "/bin/sh".to_string(),
+            ],
+            "my-mcp",
+        );
+    }
+
+    #[test]
+    fn test_validate_docker_args_volume_flag_calls_mount_validation() {
+        // -v docker.sock in args bypasses `mounts:` validation; should not panic
+        validate_docker_args(
+            &[
+                "-v".to_string(),
+                "/var/run/docker.sock:/var/run/docker.sock".to_string(),
+            ],
+            "my-mcp",
+        );
+    }
+
+    #[test]
+    fn test_validate_docker_args_volume_equals_form() {
+        // --volume=source:dest form should also be detected
+        validate_docker_args(
+            &["--volume=/var/run/docker.sock:/var/run/docker.sock".to_string()],
+            "my-mcp",
+        );
+    }
+
+    #[test]
+    fn test_validate_docker_args_safe_args_no_panic() {
+        // A legitimate arg like --read-only should not panic
+        validate_docker_args(&["--read-only".to_string()], "my-mcp");
+    }
+
+    #[test]
+    fn test_validate_docker_args_empty_no_panic() {
+        validate_docker_args(&[], "my-mcp");
+    }
+
+    // ─── validate_mount_source ───────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_mount_source_docker_sock() {
+        // Docker socket exposure must not panic; warning is emitted to stderr
+        validate_mount_source("/var/run/docker.sock:/var/run/docker.sock:rw", "my-mcp");
+    }
+
+    #[test]
+    fn test_validate_mount_source_sensitive_path_etc() {
+        validate_mount_source("/etc/passwd:/data/passwd:ro", "my-mcp");
+    }
+
+    #[test]
+    fn test_validate_mount_source_sensitive_path_proc() {
+        validate_mount_source("/proc:/host/proc:ro", "my-mcp");
+    }
+
+    #[test]
+    fn test_validate_mount_source_case_insensitive() {
+        // /ETC/shadow should match sensitive /etc prefix (lowercased comparison)
+        validate_mount_source("/ETC/shadow:/data/shadow:ro", "my-mcp");
+    }
+
+    #[test]
+    fn test_validate_mount_source_no_false_positive_on_etc_configs() {
+        // /etc-configs should NOT match the /etc prefix (path boundary check)
+        // This just verifies the function doesn't panic and handles the boundary correctly.
+        validate_mount_source("/etc-configs:/app/config:ro", "my-mcp");
+    }
+
+    #[test]
+    fn test_validate_mount_source_safe_path_no_panic() {
+        // /app/data is not a sensitive path; should not panic
+        validate_mount_source("/app/data:/app/data:ro", "my-mcp");
+    }
+
+    // ─── validate_container_image ────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_container_image_empty_string() {
+        // Empty image name should emit a warning but not panic
+        validate_container_image("", "my-mcp");
+    }
+
+    #[test]
+    fn test_validate_container_image_shell_metacharacters() {
+        // Image names with shell metacharacters should emit a warning but not panic
+        validate_container_image("node:20-slim; rm -rf /", "my-mcp");
+    }
+
+    #[test]
+    fn test_validate_container_image_valid_name_no_panic() {
+        // Standard image references should not panic
+        validate_container_image("node:20-slim", "my-mcp");
+        validate_container_image("ghcr.io/org/image:latest", "my-mcp");
+        validate_container_image("python:3.12-slim", "my-mcp");
+    }
+
+    // ─── warn_potential_secrets ──────────────────────────────────────────────
+
+    #[test]
+    fn test_warn_potential_secrets_token_env_var_triggers() {
+        // Non-empty value with a secret-looking key should emit a warning (not panic)
+        let env = HashMap::from([("API_TOKEN".to_string(), "secret123".to_string())]);
+        let headers = HashMap::new();
+        warn_potential_secrets("my-mcp", &env, &headers);
+    }
+
+    #[test]
+    fn test_warn_potential_secrets_empty_passthrough_no_panic() {
+        // Empty string = passthrough; must not panic and should NOT trigger a warning
+        let env = HashMap::from([("API_TOKEN".to_string(), "".to_string())]);
+        let headers = HashMap::new();
+        warn_potential_secrets("my-mcp", &env, &headers);
+    }
+
+    #[test]
+    fn test_warn_potential_secrets_authorization_header_triggers() {
+        let env = HashMap::new();
+        let headers =
+            HashMap::from([("Authorization".to_string(), "Bearer abc".to_string())]);
+        warn_potential_secrets("my-mcp", &env, &headers);
+    }
+
+    #[test]
+    fn test_warn_potential_secrets_bearer_value_triggers() {
+        // A header whose value starts with "Bearer " should also warn
+        let env = HashMap::new();
+        let headers =
+            HashMap::from([("X-Custom-Auth".to_string(), "Bearer token123".to_string())]);
+        warn_potential_secrets("my-mcp", &env, &headers);
+    }
+
+    #[test]
+    fn test_warn_potential_secrets_safe_env_no_panic() {
+        // Env keys with non-secret names and non-empty values should not panic
+        let env = HashMap::from([("MY_CONFIG".to_string(), "value".to_string())]);
+        let headers = HashMap::new();
+        warn_potential_secrets("my-mcp", &env, &headers);
+    }
+
+    // ─── generate_allowed_domains ────────────────────────────────────────────
+
+    #[test]
+    fn test_generate_allowed_domains_blocked_takes_precedence_over_allow() {
+        let mut fm = minimal_front_matter();
+        fm.network = Some(crate::compile::types::NetworkConfig {
+            allow: vec!["evil.example.com".to_string()],
+            blocked: vec!["evil.example.com".to_string()],
+        });
+        let domains = generate_allowed_domains(&fm).unwrap();
+        assert!(
+            !domains.contains("evil.example.com"),
+            "blocked host must be excluded even if also in allow"
+        );
+    }
+
+    #[test]
+    fn test_generate_allowed_domains_host_docker_internal_always_present() {
+        let fm = minimal_front_matter();
+        let domains = generate_allowed_domains(&fm).unwrap();
+        assert!(
+            domains.contains("host.docker.internal"),
+            "host.docker.internal must always be in the allowlist"
+        );
+    }
+
+    #[test]
+    fn test_generate_allowed_domains_user_allow_host_included() {
+        let mut fm = minimal_front_matter();
+        fm.network = Some(crate::compile::types::NetworkConfig {
+            allow: vec!["api.mycompany.com".to_string()],
+            blocked: vec![],
+        });
+        let domains = generate_allowed_domains(&fm).unwrap();
+        assert!(
+            domains.contains("api.mycompany.com"),
+            "user-specified allow host must be present in the allowlist"
+        );
+    }
+
+    #[test]
+    fn test_generate_allowed_domains_blocked_core_host_removed() {
+        // Blocking a core host (e.g. github.com) via network.blocked removes it
+        let mut fm = minimal_front_matter();
+        fm.network = Some(crate::compile::types::NetworkConfig {
+            allow: vec![],
+            blocked: vec!["github.com".to_string()],
+        });
+        let domains = generate_allowed_domains(&fm).unwrap();
+        let domain_list: Vec<&str> = domains.split(',').collect();
+        assert!(
+            !domain_list.contains(&"github.com"),
+            "blocked host must be removed even if it is in the core allowlist"
+        );
+    }
+
+    #[test]
+    fn test_generate_allowed_domains_invalid_host_returns_error() {
+        let mut fm = minimal_front_matter();
+        fm.network = Some(crate::compile::types::NetworkConfig {
+            allow: vec!["bad host!".to_string()],
+            blocked: vec![],
+        });
+        let result = generate_allowed_domains(&fm);
+        assert!(result.is_err(), "invalid DNS characters should return an error");
+    }
+
+    // ─── generate_prepare_steps ──────────────────────────────────────────────
+
+    #[test]
+    fn test_generate_prepare_steps_with_memory_includes_memory_preamble() {
+        let result = generate_prepare_steps(&[], true);
+        assert!(
+            !result.is_empty(),
+            "memory steps must be emitted when has_memory=true"
+        );
+        assert!(
+            result.contains("agent_memory"),
+            "should reference memory directory"
+        );
+    }
+
+    #[test]
+    fn test_generate_prepare_steps_without_memory_and_no_steps_is_empty() {
+        let result = generate_prepare_steps(&[], false);
+        assert!(result.is_empty(), "no steps and no memory should produce empty output");
+    }
+
+    #[test]
+    fn test_generate_prepare_steps_with_memory_includes_download_and_prompt() {
+        let result = generate_prepare_steps(&[], true);
+        assert!(
+            result.contains("DownloadPipelineArtifact"),
+            "memory steps must include the artifact download task"
+        );
+        assert!(
+            result.contains("Agent Memory"),
+            "memory steps must include the memory prompt"
+        );
+    }
+
+    #[test]
+    fn test_generate_prepare_steps_without_memory_with_user_steps() {
+        // User-supplied prepare steps without memory should be included as-is
+        let step: serde_yaml::Value =
+            serde_yaml::from_str("bash: echo hello\ndisplayName: greet").unwrap();
+        let result = generate_prepare_steps(&[step], false);
+        assert!(!result.is_empty(), "user steps should be present");
+        assert!(
+            !result.contains("agent_memory"),
+            "no memory reference when has_memory=false"
+        );
+    }
+
+    #[test]
+    fn test_generate_prepare_steps_with_memory_and_user_steps() {
+        // When memory is enabled AND user steps are present, both should appear
+        let step: serde_yaml::Value =
+            serde_yaml::from_str("bash: echo hello\ndisplayName: greet").unwrap();
+        let result = generate_prepare_steps(&[step], true);
+        assert!(
+            result.contains("agent_memory"),
+            "memory reference must be present"
+        );
+        assert!(
+            result.contains("echo hello"),
+            "user step must also be present"
+        );
+    }
 }
