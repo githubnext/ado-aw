@@ -271,6 +271,12 @@ impl SafeOutputs {
                 })?;
 
             if !add_output.status.success() {
+                // Reset index to clean state on failure
+                let _ = Command::new("git")
+                    .args(["reset", "HEAD", "--quiet"])
+                    .current_dir(&git_dir)
+                    .output()
+                    .await;
                 return Err(anyhow_to_mcp_error(anyhow::anyhow!(
                     "git add -A failed: {}",
                     String::from_utf8_lossy(&add_output.stderr)

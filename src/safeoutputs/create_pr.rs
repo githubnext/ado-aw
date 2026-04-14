@@ -92,7 +92,7 @@ const PROTECTED_PATH_PREFIXES: &[&str] = &[
 ];
 
 /// Exact filenames (at repo root) that are protected by default.
-const PROTECTED_EXACT_PATHS: &[&str] = &["CODEOWNERS"];
+const PROTECTED_EXACT_PATHS: &[&str] = &["CODEOWNERS", "docs/CODEOWNERS"];
 
 /// Resolve a reviewer identifier (email, display name, or ID) to an Azure DevOps identity ID.
 ///
@@ -524,6 +524,12 @@ impl Executor for CreatePrResult {
         debug!("Draft: {}", config.draft);
         debug!("Auto-complete: {}", config.auto_complete);
         debug!("Squash merge: {}", config.squash_merge);
+
+        if config.draft && config.auto_complete {
+            warn!(
+                "auto-complete cannot be set on a draft PR; set draft: false to enable auto-complete"
+            );
+        }
 
         // Apply title prefix if configured
         let effective_title = if let Some(ref prefix) = config.title_prefix {
@@ -1005,6 +1011,13 @@ impl Executor for CreatePrResult {
         // querying the ADO refs API when the field is absent (backward compat with old
         // NDJSON entries).
         let base_commit: String = if let Some(ref recorded) = self.base_commit {
+            // Validate SHA format before trusting Stage 1 data
+            if recorded.len() != 40 || !recorded.chars().all(|c| c.is_ascii_hexdigit()) {
+                anyhow::bail!(
+                    "Invalid base_commit SHA from Stage 1 NDJSON: {:?}",
+                    recorded
+                );
+            }
             info!(
                 "Using recorded base_commit from Stage 1: {}",
                 recorded
