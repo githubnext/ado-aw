@@ -3,13 +3,9 @@ name: "ADO Work Item Triage"
 description: "Triages work items using the Azure DevOps MCP"
 schedule: daily around 9:00
 engine: claude-sonnet-4.5
-mcp-servers:
+tools:
   azure-devops:
-    container: "node:20-slim"
-    entrypoint: "npx"
-    entrypoint-args: ["-y", "@azure-devops/mcp", "myorg", "-d", "core", "work", "work-items"]
-    env:
-      AZURE_DEVOPS_EXT_PAT: ""
+    toolsets: [core, work, work-items]
     allowed:
       - core_list_projects
       - wit_my_work_items
@@ -31,11 +27,6 @@ safe-outputs:
   comment-on-work-item:
     max: 10
     target: "*"
-network:
-  allow:
-    - "dev.azure.com"
-    - "*.dev.azure.com"
-    - "*.visualstudio.com"
 ---
 
 ## ADO Work Item Triage Agent

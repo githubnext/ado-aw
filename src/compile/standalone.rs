@@ -14,7 +14,7 @@ use std::path::Path;
 
 use super::Compiler;
 use super::common::{
-    self, AWF_VERSION, COPILOT_CLI_VERSION, DEFAULT_POOL, MCPG_PORT, MCPG_VERSION, MCPG_IMAGE,
+    self, AWF_VERSION, COPILOT_CLI_VERSION, DEFAULT_POOL, MCPG_PORT, MCPG_VERSION,
     ADO_MCP_IMAGE, ADO_MCP_ENTRYPOINT, ADO_MCP_PACKAGE, ADO_MCP_SERVER_NAME,
     build_parameters, compute_effective_workspace, generate_acquire_ado_token,
     generate_cancel_previous_builds, generate_checkout_self, generate_checkout_steps,
