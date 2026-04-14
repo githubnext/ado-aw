@@ -1146,6 +1146,10 @@ impl Executor for CreatePrResult {
         );
         debug!("Push URL: {}", push_url);
 
+        // Track the effective base commit — may be updated on retry if the
+        // recorded Stage 1 merge-base becomes unreachable (e.g. force-push).
+        let mut effective_base_commit = base_commit;
+
         // For creating a new branch with a commit:
         // - refUpdates.oldObjectId = zeros (new ref)
         // - commits[0].parents = [base_commit] (parent of new commit)
@@ -1158,7 +1162,7 @@ impl Executor for CreatePrResult {
             "commits": [{
                 "comment": effective_title,
                 "changes": changes,
-                "parents": [base_commit]
+                "parents": [effective_base_commit]
             }]
         });
 
@@ -1207,7 +1211,7 @@ impl Executor for CreatePrResult {
                     "commits": [{
                         "comment": effective_title,
                         "changes": changes,
-                        "parents": [base_commit]
+                        "parents": [effective_base_commit]
                     }]
                 });
 
@@ -1225,6 +1229,75 @@ impl Executor for CreatePrResult {
                     warn!("Retry push also failed: {} - {}", retry_status, retry_body_text);
                     return Ok(ExecutionResult::failure(format!(
                         "Failed to push changes after retry: {} - {}",
+                        retry_status, retry_body_text
+                    )));
+                }
+            } else if status.as_u16() == 400 && self.base_commit.is_some() {
+                // The recorded base_commit from Stage 1 may have become unreachable
+                // (e.g. the target branch was force-pushed between Stage 1 and Stage 2).
+                // Fall back to resolving the live target branch HEAD.
+                warn!(
+                    "Push failed with 400 using recorded base_commit — target branch may have been \
+                     force-pushed. Falling back to live refs API resolution. Error: {}",
+                    body
+                );
+
+                let fallback_response = client
+                    .get(&refs_url)
+                    .basic_auth("", Some(token))
+                    .send()
+                    .await
+                    .context("Failed to get target branch ref for base_commit fallback")?;
+
+                if !fallback_response.status().is_success() {
+                    let fb_status = fallback_response.status();
+                    let fb_body = fallback_response.text().await.unwrap_or_default();
+                    return Ok(ExecutionResult::failure(format!(
+                        "Failed to resolve target branch ref for fallback: {} - {}",
+                        fb_status, fb_body
+                    )));
+                }
+
+                let fallback_data: serde_json::Value = fallback_response.json().await?;
+                effective_base_commit = fallback_data["value"][0]["objectId"]
+                    .as_str()
+                    .context("Could not resolve target branch commit for fallback")?
+                    .to_string();
+
+                info!(
+                    "Retrying push with live base_commit: {}",
+                    effective_base_commit
+                );
+
+                let retry_body = serde_json::json!({
+                    "refUpdates": [{
+                        "name": source_ref,
+                        "oldObjectId": "0000000000000000000000000000000000000000"
+                    }],
+                    "commits": [{
+                        "comment": effective_title,
+                        "changes": changes,
+                        "parents": [effective_base_commit]
+                    }]
+                });
+
+                let retry_response = client
+                    .post(&push_url)
+                    .basic_auth("", Some(token))
+                    .json(&retry_body)
+                    .send()
+                    .await
+                    .context("Failed to push changes (base_commit fallback)")?;
+
+                if !retry_response.status().is_success() {
+                    let retry_status = retry_response.status();
+                    let retry_body_text = retry_response.text().await.unwrap_or_default();
+                    warn!(
+                        "Fallback push also failed: {} - {}",
+                        retry_status, retry_body_text
+                    );
+                    return Ok(ExecutionResult::failure(format!(
+                        "Failed to push changes after base_commit fallback: {} - {}",
                         retry_status, retry_body_text
                     )));
                 }
