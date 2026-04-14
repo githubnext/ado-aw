@@ -635,47 +635,24 @@ impl Executor for CreatePrResult {
             .context("Failed to read patch file")?;
         debug!("Patch content size: {} bytes", patch_content.len());
 
-        // Filter excluded files from patch content if configured.
-        // Note: Exclusion runs before the protection check. If a protected file matches
-        // an excluded-files pattern, it is silently dropped from the patch rather than
-        // triggering a protection error. This is intentional — exclusion removes the file
-        // from the PR entirely, so there is no security-relevant modification to block.
-        let patch_content = if !config.excluded_files.is_empty() {
-            debug!("Filtering {} excluded-files patterns from patch", config.excluded_files.len());
-            let filtered = filter_excluded_files_from_patch(&patch_content, &config.excluded_files);
-            debug!("Patch size after exclusion: {} bytes (was {} bytes)", filtered.len(), patch_content.len());
-            // Check if any actual diff blocks remain. For format-patch output the commit
-            // envelope (From <SHA>, Subject:, etc.) persists even when all diffs are
-            // excluded, so we count diff --git headers rather than checking for empty string.
-            if count_patch_files(&filtered) == 0 {
-                // All files were excluded
-                match config.if_no_changes {
-                    IfNoChanges::Error => {
-                        return Ok(ExecutionResult::failure(
-                            "All files in patch were excluded by excluded-files patterns".to_string(),
-                        ));
-                    }
-                    IfNoChanges::Ignore => {
-                        return Ok(ExecutionResult::success(
-                            "All files in patch were excluded — nothing to do".to_string(),
-                        ));
-                    }
-                    IfNoChanges::Warn => {
-                        warn!("All files in patch were excluded by excluded-files patterns (if-no-changes: warn)");
-                        return Ok(ExecutionResult::warning(
-                            "All files in patch were excluded by excluded-files patterns".to_string(),
-                        ));
-                    }
-                }
-            }
-            // Rewrite the filtered patch to the patch file
-            tokio::fs::write(&patch_path, &filtered)
-                .await
-                .context("Failed to write filtered patch file")?;
-            filtered
-        } else {
-            patch_content
-        };
+        // Excluded files are handled via --exclude flags on git am / git apply,
+        // which filters them at the git level rather than post-processing patch content.
+        // This is the same approach used by gh-aw (via :(exclude) pathspecs).
+        // Note: Exclusion happens during patch application (before the protection check).
+        // If a protected file matches an excluded-files pattern, it is silently dropped
+        // from the patch rather than triggering a protection error.
+        let exclude_args: Vec<String> = config
+            .excluded_files
+            .iter()
+            .map(|p| format!("--exclude={}", p))
+            .collect();
+        if !exclude_args.is_empty() {
+            debug!(
+                "Will apply {} excluded-files patterns via --exclude flags",
+                exclude_args.len()
+            );
+        }
+        let patch_content = patch_content;
 
         // Security: Validate patch paths before applying
         debug!("Validating patch paths for security");
@@ -851,9 +828,13 @@ impl Executor for CreatePrResult {
         // Apply the format-patch using git am --3way for proper conflict handling.
         // git am handles the email-style patch format from git format-patch and
         // --3way enables three-way merge for better conflict resolution.
+        // Excluded files are filtered via --exclude flags at the git level.
         debug!("Applying patch with git am --3way");
+        let mut am_args: Vec<String> =
+            vec!["am".into(), "--3way".into(), patch_path.to_string_lossy().into_owned()];
+        am_args.extend(exclude_args.iter().cloned());
         let am_output = Command::new("git")
-            .args(["am", "--3way", &patch_path.to_string_lossy()])
+            .args(&am_args)
             .current_dir(&worktree_path)
             .output()
             .await
@@ -875,8 +856,11 @@ impl Executor for CreatePrResult {
 
             // Fallback: try git apply (handles plain diff format for backward compatibility)
             debug!("Falling back to git apply --3way");
+            let mut apply_args: Vec<String> =
+                vec!["apply".into(), "--3way".into(), patch_path.to_string_lossy().into_owned()];
+            apply_args.extend(exclude_args.iter().cloned());
             let apply_output = Command::new("git")
-                .args(["apply", "--3way", &patch_path.to_string_lossy()])
+                .args(&apply_args)
                 .current_dir(&worktree_path)
                 .output()
                 .await
@@ -1787,147 +1771,6 @@ fn generate_pr_footer() -> String {
     )
 }
 
-/// Filter out diff entries for files matching excluded-files glob patterns.
-/// Splits the patch into per-file diff blocks and removes those matching any pattern.
-/// Uses `+++ b/` lines for path extraction (robust with quoted/space-containing paths).
-///
-/// Patterns without a `/` are automatically prefixed with `**/` so that e.g. `*.lock`
-/// matches `subdir/Cargo.lock` (not just root-level lockfiles).
-///
-/// For multi-commit format-patch output, commit envelopes and diff blocks are tracked
-/// separately. Envelopes whose diffs are all excluded are stripped entirely to avoid
-/// confusing `git am` with empty patch emails on some git versions.
-fn filter_excluded_files_from_patch(patch_content: &str, excluded_patterns: &[String]) -> String {
-    if excluded_patterns.is_empty() {
-        return patch_content.to_string();
-    }
-
-    let normalized: Vec<String> = excluded_patterns
-        .iter()
-        .map(|p| normalize_glob_pattern(p))
-        .collect();
-
-    // Parse the patch into a sequence of segments: either commit envelopes or diff blocks.
-    // A commit envelope starts with "From " and includes everything up to the first
-    // "diff --git" line. A diff block starts with "diff --git" and continues until the
-    // next "diff --git" or "From " line.
-    struct Segment {
-        content: String,
-        kind: SegmentKind,
-        path: Option<String>,
-    }
-    enum SegmentKind {
-        Envelope,
-        Diff,
-    }
-
-    let mut segments: Vec<Segment> = Vec::new();
-    let mut current = String::new();
-    let mut current_kind = SegmentKind::Envelope;
-    let mut current_path: Option<String> = None;
-
-    for line in patch_content.lines() {
-        if line.starts_with("diff --git") {
-            // Flush the previous segment
-            if !current.is_empty() {
-                segments.push(Segment {
-                    content: std::mem::take(&mut current),
-                    kind: current_kind,
-                    path: current_path.take(),
-                });
-            }
-            current_kind = SegmentKind::Diff;
-            current_path = None;
-            current.push_str(line);
-            current.push('\n');
-        } else if line.starts_with("From ") && matches!(current_kind, SegmentKind::Diff) {
-            // A new commit envelope after a diff block
-            if !current.is_empty() {
-                segments.push(Segment {
-                    content: std::mem::take(&mut current),
-                    kind: current_kind,
-                    path: current_path.take(),
-                });
-            }
-            current_kind = SegmentKind::Envelope;
-            current_path = None;
-            current.push_str(line);
-            current.push('\n');
-        } else {
-            if matches!(current_kind, SegmentKind::Diff) {
-                if let Some(rest) = line.strip_prefix("+++ b/") {
-                    current_path = Some(rest.trim().trim_matches('"').to_string());
-                } else if current_path.is_none() {
-                    // For deleted files, +++ is /dev/null; use --- a/<path> as fallback
-                    if let Some(rest) = line.strip_prefix("--- a/") {
-                        current_path = Some(rest.trim().trim_matches('"').to_string());
-                    }
-                }
-            }
-            current.push_str(line);
-            current.push('\n');
-        }
-    }
-    if !current.is_empty() {
-        segments.push(Segment {
-            content: current,
-            kind: current_kind,
-            path: current_path,
-        });
-    }
-
-    // Now filter: mark excluded diff blocks, then strip envelopes with no surviving diffs.
-    let mut keep: Vec<bool> = segments
-        .iter()
-        .map(|seg| match seg.kind {
-            SegmentKind::Envelope => true, // tentatively keep
-            SegmentKind::Diff => {
-                if let Some(ref p) = seg.path {
-                    if normalized.iter().any(|pat| glob_match::glob_match(pat, p)) {
-                        debug!("Excluding file from patch: {}", p);
-                        return false;
-                    }
-                }
-                true
-            }
-        })
-        .collect();
-
-    // Strip envelopes whose subsequent diffs are all excluded.
-    // Walk backwards: an envelope is empty if no diff block before the next envelope is kept.
-    let mut i = segments.len();
-    while i > 0 {
-        i -= 1;
-        if matches!(segments[i].kind, SegmentKind::Envelope) {
-            // Check if any diff block between this envelope and the next envelope is kept
-            let has_surviving_diff = (i + 1..segments.len())
-                .take_while(|&j| matches!(segments[j].kind, SegmentKind::Diff))
-                .any(|j| keep[j]);
-            if !has_surviving_diff {
-                keep[i] = false;
-            }
-        }
-    }
-
-    let mut result = String::with_capacity(patch_content.len());
-    for (seg, &kept) in segments.iter().zip(keep.iter()) {
-        if kept {
-            result.push_str(&seg.content);
-        }
-    }
-    result
-}
-
-/// Normalize a glob pattern for cross-directory matching.
-/// Patterns without a `/` are prefixed with `**/` so that e.g. `*.lock` matches
-/// `subdir/Cargo.lock`, not just root-level files.
-fn normalize_glob_pattern(pattern: &str) -> String {
-    if pattern.contains('/') {
-        pattern.to_string()
-    } else {
-        format!("**/{}", pattern)
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -2170,107 +2013,6 @@ new file mode 100755
         ];
         let protected = find_protected_files(&paths);
         assert_eq!(protected.len(), 7);
-    }
-
-    // ─── Excluded files filtering ───────────────────────────────────────────
-
-    #[test]
-    fn test_filter_excluded_files_basic() {
-        let patch = "diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/Cargo.lock b/Cargo.lock\n--- a/Cargo.lock\n+++ b/Cargo.lock\n@@ -1 +1 @@\n-old\n+new\n";
-        let result = filter_excluded_files_from_patch(patch, &["*.lock".to_string()]);
-        assert!(result.contains("src/main.rs"));
-        assert!(!result.contains("Cargo.lock"));
-    }
-
-    #[test]
-    fn test_filter_excluded_files_nested_glob() {
-        // *.lock should match subdir/Cargo.lock thanks to auto-prepended **/
-        let patch = "diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/services/api/package-lock.json b/services/api/package-lock.json\n--- a/services/api/package-lock.json\n+++ b/services/api/package-lock.json\n@@ -1 +1 @@\n-old\n+new\n";
-        let result =
-            filter_excluded_files_from_patch(patch, &["package-lock.json".to_string()]);
-        assert!(result.contains("src/main.rs"));
-        assert!(!result.contains("package-lock.json"));
-    }
-
-    #[test]
-    fn test_filter_excluded_files_multi_commit_preserves_envelopes() {
-        // Multi-commit format-patch: commit envelopes must be preserved even
-        // when a diff block between them is excluded.
-        let patch = "\
-From abc123 Mon Sep 17 00:00:00 2001\n\
-Subject: [PATCH 1/2] First commit\n\
----\n\
-diff --git a/file1.rs b/file1.rs\n\
---- a/file1.rs\n\
-+++ b/file1.rs\n\
-@@ -1 +1 @@\n\
--old\n\
-+new\n\
-\n\
-From def456 Mon Sep 17 00:00:00 2001\n\
-Subject: [PATCH 2/2] Second commit\n\
----\n\
-diff --git a/file2.rs b/file2.rs\n\
---- a/file2.rs\n\
-+++ b/file2.rs\n\
-@@ -1 +1 @@\n\
--old\n\
-+new\n";
-        // Exclude file1.rs — commit 2 envelope and file2 diff must survive.
-        // Commit 1 envelope is stripped since all its diffs were excluded.
-        let result = filter_excluded_files_from_patch(patch, &["file1.rs".to_string()]);
-        assert!(!result.contains("file1.rs"), "file1.rs should be excluded");
-        assert!(result.contains("From def456"), "commit 2 envelope must survive");
-        assert!(result.contains("file2.rs"), "file2.rs should remain");
-        assert!(!result.contains("From abc123"), "commit 1 envelope should be stripped (no surviving diffs)");
-    }
-
-    #[test]
-    fn test_filter_excluded_files_multi_commit_all_excluded() {
-        // When all diffs across all commits are excluded, the result should be empty
-        let patch = "\
-From abc123 Mon Sep 17 00:00:00 2001\n\
-Subject: [PATCH 1/2] First commit\n\
----\n\
-diff --git a/file1.lock b/file1.lock\n\
---- a/file1.lock\n\
-+++ b/file1.lock\n\
-@@ -1 +1 @@\n\
--old\n\
-+new\n\
-\n\
-From def456 Mon Sep 17 00:00:00 2001\n\
-Subject: [PATCH 2/2] Second commit\n\
----\n\
-diff --git a/file2.lock b/file2.lock\n\
---- a/file2.lock\n\
-+++ b/file2.lock\n\
-@@ -1 +1 @@\n\
--old\n\
-+new\n";
-        let result = filter_excluded_files_from_patch(patch, &["*.lock".to_string()]);
-        // Both envelopes and their diffs should be stripped
-        assert!(!result.contains("From abc123"));
-        assert!(!result.contains("From def456"));
-        assert_eq!(count_patch_files(&result), 0);
-    }
-
-    #[test]
-    fn test_normalize_glob_pattern() {
-        // Patterns without / get **/ prefix
-        assert_eq!(normalize_glob_pattern("*.lock"), "**/*.lock");
-        assert_eq!(normalize_glob_pattern("Cargo.toml"), "**/Cargo.toml");
-        // Patterns with / stay as-is
-        assert_eq!(normalize_glob_pattern("src/*.rs"), "src/*.rs");
-        // Already-prefixed patterns stay as-is
-        assert_eq!(normalize_glob_pattern("**/*.lock"), "**/*.lock");
-    }
-
-    #[test]
-    fn test_filter_excluded_files_empty_patterns() {
-        let patch = "diff --git a/file.txt b/file.txt\n+content\n";
-        let result = filter_excluded_files_from_patch(patch, &[]);
-        assert_eq!(result, patch);
     }
 
     // ─── Extract paths from patch ───────────────────────────────────────────

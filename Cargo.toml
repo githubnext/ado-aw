@@ -31,7 +31,6 @@ url = "2.5.8"
 axum = { version = "0.8.8", features = ["tokio"] }
 subtle = "2.6.1"
 rand = "0.10.1"
-glob-match = "0.2.1"
 base64 = "0.22.1"
 
 [dev-dependencies]
