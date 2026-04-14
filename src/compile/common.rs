@@ -2348,11 +2348,12 @@ mod tests {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build's Pipeline".to_string(),
                 project: Some("My'Project".to_string()),
-                branches: vec!["main".to_string()],
+                branches: vec!["main".to_string(), "it's-branch".to_string()],
             }),
         });
         let result = generate_pipeline_resources(&triggers).unwrap();
         assert!(result.contains("source: 'Build''s Pipeline'"));
         assert!(result.contains("project: 'My''Project'"));
+        assert!(result.contains("- 'it''s-branch'"));
     }
 }
