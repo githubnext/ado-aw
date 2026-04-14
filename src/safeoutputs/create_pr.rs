@@ -652,7 +652,6 @@ impl Executor for CreatePrResult {
                 exclude_args.len()
             );
         }
-        let patch_content = patch_content;
 
         // Security: Validate patch paths before applying
         debug!("Validating patch paths for security");
@@ -1641,23 +1640,39 @@ fn truncate_error_body(body: &str, max_len: usize) -> &str {
 /// (match any directory prefix). Patterns without `/` are treated as basename
 /// matches (e.g., `*.lock` matches `subdir/Cargo.lock`).
 fn glob_match_simple(pattern: &str, path: &str) -> bool {
-    let (pattern, path) = if !pattern.contains('/') {
+    if !pattern.contains('/') {
         // Basename-only pattern: match against the last path component
         let basename = path.rsplit('/').next().unwrap_or(path);
-        (pattern.to_string(), basename.to_string())
-    } else if let Some(rest) = pattern.strip_prefix("**/") {
-        // **/foo matches foo at any depth
-        (rest.to_string(), path.to_string())
-    } else {
-        (pattern.to_string(), path.to_string())
-    };
+        return wildcard_match(pattern, basename);
+    }
 
-    // Simple wildcard matching: * matches any sequence of non-/ characters
+    if let Some(rest) = pattern.strip_prefix("**/") {
+        // **/foo matches foo at any depth: try matching against the full path
+        // and every directory suffix (e.g., "a/b/c" → "a/b/c", "b/c", "c")
+        if wildcard_match(rest, path) {
+            return true;
+        }
+        let mut search = path;
+        while let Some(pos) = search.find('/') {
+            search = &search[pos + 1..];
+            if wildcard_match(rest, search) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    wildcard_match(pattern, path)
+}
+
+/// Match a pattern containing `*` wildcards against a string.
+/// `*` matches any sequence of characters (including empty).
+fn wildcard_match(pattern: &str, text: &str) -> bool {
     let parts: Vec<&str> = pattern.split('*').collect();
     if parts.len() == 1 {
-        return path == pattern;
+        return text == pattern;
     }
-    let mut remaining = path.as_str();
+    let mut remaining = text;
     for (i, part) in parts.iter().enumerate() {
         if part.is_empty() {
             continue;
