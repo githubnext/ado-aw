@@ -185,16 +185,34 @@ pub fn validate_front_matter_identity(front_matter: &FrontMatter) -> Result<()> 
         }
     }
 
-    // Validate trigger.pipeline fields for newlines
+    // Validate trigger.pipeline fields for newlines and ADO expressions
     if let Some(trigger_config) = &front_matter.triggers {
         if let Some(pipeline) = &trigger_config.pipeline {
-            if pipeline.name.contains('\n') || pipeline.name.contains('\r') {
-                anyhow::bail!(
-                    "Front matter 'triggers.pipeline.name' must be a single line (no newlines). \
-                     Multi-line values could inject YAML structure into the generated pipeline.",
-                );
+            for (field, value) in [("triggers.pipeline.name", pipeline.name.as_str())] {
+                if value.contains("${{") || value.contains("$(") || value.contains("$[") {
+                    anyhow::bail!(
+                        "Front matter '{}' contains an ADO expression ('${{{{', '$(', or '$[') which is not allowed. \
+                         Use literal values only. Found: '{}'",
+                        field,
+                        value,
+                    );
+                }
+                if value.contains('\n') || value.contains('\r') {
+                    anyhow::bail!(
+                        "Front matter '{}' must be a single line (no newlines). \
+                         Multi-line values could inject YAML structure into the generated pipeline.",
+                        field,
+                    );
+                }
             }
             if let Some(project) = &pipeline.project {
+                if project.contains("${{") || project.contains("$(") || project.contains("$[") {
+                    anyhow::bail!(
+                        "Front matter 'triggers.pipeline.project' contains an ADO expression ('${{{{', '$(', or '$[') which is not allowed. \
+                         Use literal values only. Found: '{}'",
+                        project,
+                    );
+                }
                 if project.contains('\n') || project.contains('\r') {
                     anyhow::bail!(
                         "Front matter 'triggers.pipeline.project' must be a single line (no newlines). \
@@ -203,10 +221,18 @@ pub fn validate_front_matter_identity(front_matter: &FrontMatter) -> Result<()> 
                 }
             }
             for branch in &pipeline.branches {
+                if branch.contains("${{") || branch.contains("$(") || branch.contains("$[") {
+                    anyhow::bail!(
+                        "Front matter 'triggers.pipeline.branches' entry {:?} contains an ADO expression ('${{{{', '$(', or '$[') \
+                         which is not allowed. Use literal values only.",
+                        branch,
+                    );
+                }
                 if branch.contains('\n') || branch.contains('\r') {
                     anyhow::bail!(
-                        "Front matter 'triggers.pipeline.branches' entries must be single line (no newlines). \
+                        "Front matter 'triggers.pipeline.branches' entry {:?} must be single line (no newlines). \
                          Multi-line values could inject YAML structure into the generated pipeline.",
+                        branch,
                     );
                 }
             }
@@ -2425,6 +2451,51 @@ mod tests {
     fn test_validate_front_matter_identity_rejects_runtime_expression() {
         let mut fm = minimal_front_matter();
         fm.name = "Agent $[variables['System.AccessToken']]".to_string();
+        let result = validate_front_matter_identity(&fm);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("ADO expression"));
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_ado_expression_in_trigger_pipeline_name() {
+        let mut fm = minimal_front_matter();
+        fm.triggers = Some(TriggerConfig {
+            pipeline: Some(crate::compile::types::PipelineTrigger {
+                name: "Build $(System.AccessToken)".to_string(),
+                project: None,
+                branches: vec![],
+            }),
+        });
+        let result = validate_front_matter_identity(&fm);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("ADO expression"));
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_ado_expression_in_trigger_pipeline_project() {
+        let mut fm = minimal_front_matter();
+        fm.triggers = Some(TriggerConfig {
+            pipeline: Some(crate::compile::types::PipelineTrigger {
+                name: "Build Pipeline".to_string(),
+                project: Some("$(System.AccessToken)".to_string()),
+                branches: vec![],
+            }),
+        });
+        let result = validate_front_matter_identity(&fm);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("ADO expression"));
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_ado_expression_in_trigger_pipeline_branch() {
+        let mut fm = minimal_front_matter();
+        fm.triggers = Some(TriggerConfig {
+            pipeline: Some(crate::compile::types::PipelineTrigger {
+                name: "Build Pipeline".to_string(),
+                project: None,
+                branches: vec!["$[variables['token']]".to_string()],
+            }),
+        });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("ADO expression"));
