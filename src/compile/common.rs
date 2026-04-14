@@ -184,6 +184,35 @@ pub fn validate_front_matter_identity(front_matter: &FrontMatter) -> Result<()> 
             );
         }
     }
+
+    // Validate trigger.pipeline fields for newlines
+    if let Some(trigger_config) = &front_matter.triggers {
+        if let Some(pipeline) = &trigger_config.pipeline {
+            if pipeline.name.contains('\n') || pipeline.name.contains('\r') {
+                anyhow::bail!(
+                    "Front matter 'triggers.pipeline.name' must be a single line (no newlines). \
+                     Multi-line values could inject YAML structure into the generated pipeline.",
+                );
+            }
+            if let Some(project) = &pipeline.project {
+                if project.contains('\n') || project.contains('\r') {
+                    anyhow::bail!(
+                        "Front matter 'triggers.pipeline.project' must be a single line (no newlines). \
+                         Multi-line values could inject YAML structure into the generated pipeline.",
+                    );
+                }
+            }
+            for branch in &pipeline.branches {
+                if branch.contains('\n') || branch.contains('\r') {
+                    anyhow::bail!(
+                        "Front matter 'triggers.pipeline.branches' entries must be single line (no newlines). \
+                         Multi-line values could inject YAML structure into the generated pipeline.",
+                    );
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -2325,10 +2354,69 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_front_matter_identity_allows_valid_values() {
+    fn test_validate_front_matter_identity_rejects_newline_in_trigger_pipeline_name() {
+        let mut fm = minimal_front_matter();
+        fm.triggers = Some(TriggerConfig {
+            pipeline: Some(crate::compile::types::PipelineTrigger {
+                name: "Build\ninjected: true".to_string(),
+                project: None,
+                branches: vec![],
+            }),
+        });
+        let result = validate_front_matter_identity(&fm);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("triggers.pipeline.name"));
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_newline_in_trigger_pipeline_project() {
+        let mut fm = minimal_front_matter();
+        fm.triggers = Some(TriggerConfig {
+            pipeline: Some(crate::compile::types::PipelineTrigger {
+                name: "Build Pipeline".to_string(),
+                project: Some("OtherProject\ninjected: true".to_string()),
+                branches: vec![],
+            }),
+        });
+        let result = validate_front_matter_identity(&fm);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("triggers.pipeline.project"));
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_newline_in_trigger_pipeline_branch() {
+        let mut fm = minimal_front_matter();
+        fm.triggers = Some(TriggerConfig {
+            pipeline: Some(crate::compile::types::PipelineTrigger {
+                name: "Build Pipeline".to_string(),
+                project: None,
+                branches: vec!["main\ninjected: true".to_string()],
+            }),
+        });
+        let result = validate_front_matter_identity(&fm);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("triggers.pipeline.branches"));
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_allows_valid_name_and_description() {
         let mut fm = minimal_front_matter();
         fm.name = "Daily Code Review Agent".to_string();
         fm.description = "Reviews code daily for quality issues".to_string();
+        let result = validate_front_matter_identity(&fm);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_allows_valid_trigger_pipeline_fields() {
+        let mut fm = minimal_front_matter();
+        fm.triggers = Some(TriggerConfig {
+            pipeline: Some(crate::compile::types::PipelineTrigger {
+                name: "Build Pipeline".to_string(),
+                project: Some("OtherProject".to_string()),
+                branches: vec!["main".to_string(), "release/*".to_string()],
+            }),
+        });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_ok());
     }
