@@ -334,7 +334,6 @@ actions, and the executor processes them after threat analysis.
 | `create-branch` | Creates a new branch from an existing ref |
 | `add-build-tag` | Adds a tag to an ADO build |
 | `upload-attachment` | Uploads a workspace file as an attachment to a work item |
-| `memory` | Persists files across agent runs |
 | `report-incomplete` | Reports that a task could not be completed |
 | `noop` | Reports no action was needed |
 | `missing-data` | Reports required data was unavailable |
