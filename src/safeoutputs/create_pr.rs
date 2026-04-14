@@ -1391,8 +1391,9 @@ impl Executor for CreatePrResult {
                 }
             });
 
-            // Only set autoCompleteSetBy if auto_complete is enabled
-            if config.auto_complete {
+            // Only set autoCompleteSetBy if auto_complete is enabled and PR is not a draft
+            // (ADO silently ignores auto-complete on draft PRs, so skip the API call)
+            if config.auto_complete && !config.draft {
                 update_body["autoCompleteSetBy"] = serde_json::json!({
                     "id": pr_data["createdBy"]["id"]
                 });
@@ -2251,6 +2252,25 @@ new file mode 100755
         assert!(paths.contains(&"new.txt".to_string()));
         // /dev/null from --- should not be included (no a/ prefix)
         assert!(!paths.contains(&"/dev/null".to_string()));
+    }
+
+    #[test]
+    fn test_default_config_draft_true_autocomplete_false() {
+        let config = CreatePrConfig::default();
+        assert!(config.draft, "draft should default to true");
+        assert!(!config.auto_complete, "auto_complete should default to false");
+    }
+
+    #[test]
+    fn test_config_deserialize_draft_false_autocomplete_true() {
+        let yaml = r#"
+            target-branch: main
+            draft: false
+            auto-complete: true
+        "#;
+        let config: CreatePrConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(!config.draft);
+        assert!(config.auto_complete);
     }
 
 }
