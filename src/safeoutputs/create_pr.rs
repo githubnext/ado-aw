@@ -665,8 +665,19 @@ impl Executor for CreatePrResult {
         }
         debug!("Patch path validation passed");
 
-        // Extract file paths from patch for validation
-        let patch_paths = extract_paths_from_patch(&patch_content);
+        // Extract file paths from patch for validation.
+        // Filter out excluded files before the protection check — if a protected file
+        // matches an excluded-files pattern, it will be excluded from the patch by
+        // git am/apply --exclude and should not trigger a protection error.
+        let patch_paths: Vec<String> = extract_paths_from_patch(&patch_content)
+            .into_iter()
+            .filter(|p| {
+                !config.excluded_files.iter().any(|pat| {
+                    // Match the same way git --exclude does: pattern matches path suffix
+                    p.ends_with(pat) || glob_match_simple(pat, p)
+                })
+            })
+            .collect();
 
         // Security: File protection check
         if config.protected_files != ProtectedFiles::Allowed {
@@ -830,9 +841,9 @@ impl Executor for CreatePrResult {
         // --3way enables three-way merge for better conflict resolution.
         // Excluded files are filtered via --exclude flags at the git level.
         debug!("Applying patch with git am --3way");
-        let mut am_args: Vec<String> =
-            vec!["am".into(), "--3way".into(), patch_path.to_string_lossy().into_owned()];
+        let mut am_args: Vec<String> = vec!["am".into(), "--3way".into()];
         am_args.extend(exclude_args.iter().cloned());
+        am_args.push(patch_path.to_string_lossy().into_owned());
         let am_output = Command::new("git")
             .args(&am_args)
             .current_dir(&worktree_path)
@@ -856,9 +867,9 @@ impl Executor for CreatePrResult {
 
             // Fallback: try git apply (handles plain diff format for backward compatibility)
             debug!("Falling back to git apply --3way");
-            let mut apply_args: Vec<String> =
-                vec!["apply".into(), "--3way".into(), patch_path.to_string_lossy().into_owned()];
+            let mut apply_args: Vec<String> = vec!["apply".into(), "--3way".into()];
             apply_args.extend(exclude_args.iter().cloned());
+            apply_args.push(patch_path.to_string_lossy().into_owned());
             let apply_output = Command::new("git")
                 .args(&apply_args)
                 .current_dir(&worktree_path)
@@ -1623,6 +1634,48 @@ fn truncate_error_body(body: &str, max_len: usize) -> &str {
         Some((idx, _)) => &body[..idx],
         None => body,
     }
+}
+
+/// Simple glob matching for excluded-files patterns.
+/// Supports `*` (match any sequence within a path segment) and leading `**/`
+/// (match any directory prefix). Patterns without `/` are treated as basename
+/// matches (e.g., `*.lock` matches `subdir/Cargo.lock`).
+fn glob_match_simple(pattern: &str, path: &str) -> bool {
+    let (pattern, path) = if !pattern.contains('/') {
+        // Basename-only pattern: match against the last path component
+        let basename = path.rsplit('/').next().unwrap_or(path);
+        (pattern.to_string(), basename.to_string())
+    } else if let Some(rest) = pattern.strip_prefix("**/") {
+        // **/foo matches foo at any depth
+        (rest.to_string(), path.to_string())
+    } else {
+        (pattern.to_string(), path.to_string())
+    };
+
+    // Simple wildcard matching: * matches any sequence of non-/ characters
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        return path == pattern;
+    }
+    let mut remaining = path.as_str();
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        if i == 0 {
+            if !remaining.starts_with(part) {
+                return false;
+            }
+            remaining = &remaining[part.len()..];
+        } else if i == parts.len() - 1 {
+            return remaining.ends_with(part);
+        } else if let Some(pos) = remaining.find(part) {
+            remaining = &remaining[pos + part.len()..];
+        } else {
+            return false;
+        }
+    }
+    true
 }
 
 /// Validate a single file path for security issues
