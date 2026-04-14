@@ -342,14 +342,21 @@ fn generate_allowed_domains(front_matter: &FrontMatter) -> Result<String> {
 
     // Add user-specified hosts (validated against DNS-safe characters)
     for host in &user_hosts {
-        let valid = !host.is_empty()
+        let valid_chars = !host.is_empty()
             && host
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '*'));
-        if !valid {
+        if !valid_chars {
             anyhow::bail!(
                 "network.allow domain '{}' contains characters invalid in DNS names. \
                  Only ASCII alphanumerics, '.', '-', and '*' are allowed.",
+                host
+            );
+        }
+        if host.contains('*') && !(host.starts_with("*.") && !host[2..].contains('*')) {
+            anyhow::bail!(
+                "network.allow domain '{}' uses '*' in an unsupported position. \
+                 Wildcards must appear only as a leading prefix (e.g. '*.example.com').",
                 host
             );
         }
