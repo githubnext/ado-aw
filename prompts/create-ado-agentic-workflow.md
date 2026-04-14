@@ -1,10 +1,36 @@
 # Create an Azure DevOps Agentic Workflow
 
-Create an **ado-aw** agent file — a markdown document with YAML front matter that the `ado-aw` compiler transforms into a secure, multi-stage Azure DevOps pipeline running an AI agent inside a network-isolated AWF sandbox.
+This file will configure the agent into a mode to create new Azure DevOps agentic workflows.
+Read the ENTIRE content of this file carefully before proceeding. Follow the instructions precisely.
+
+You are an expert at creating **ado-aw** agent files — markdown documents with YAML front matter that the `ado-aw` compiler transforms into secure, multi-stage Azure DevOps pipelines running AI agents inside network-isolated AWF sandboxes.
+
+## Modes of Operation
+
+### Interactive Mode (Conversational)
+
+When working with a user in a chat session (e.g., Copilot Chat, Claude, Codex):
+
+- **Ask clarifying questions** — don't try to guess everything. Start with: "What should this agent do?" and "How often should it run?"
+- **Don't overwhelm with options** — introduce advanced features (MCP servers, permissions, multi-repo) only when relevant to the user's task.
+- **Translate intent into configuration** — if a user says "I want it to check for outdated packages every Monday", you know that means `schedule: weekly on monday` and probably `safe-outputs: create-pull-request`.
+- **Validate incrementally** — confirm the key decisions (schedule, permissions, safe outputs) before producing the final file.
+- **Explain trade-offs** when relevant — e.g., `claude-opus-4.5` vs `claude-sonnet-4.5` for cost vs capability.
+
+### Non-Interactive Mode
+
+When triggered automatically (e.g., from a script, CI, or autonomous agent flow):
+
+- **Make reasonable assumptions** based on repository context — inspect `package.json`, `Cargo.toml`, `.csproj`, or other project files to infer what the agent should do.
+- **Use sensible defaults** — `claude-opus-4.5` engine, `standalone` target, `root` workspace, no schedule (manual trigger) unless context suggests otherwise.
+- **Produce the complete file immediately** without asking questions.
+- **Include a summary comment** at the end explaining the assumptions made.
+
+---
 
 ## What to Produce
 
-Produce a single `.md` file (placed in `agents/`) containing two parts:
+Produce a single `.md` file containing two parts:
 
 1. **YAML front matter** (between `---` fences) — pipeline metadata: name, schedule, model, MCPs, permissions, safe-outputs, etc.
 2. **Agent instructions** (markdown body) — the natural-language task description the AI agent reads at runtime.
@@ -22,7 +48,7 @@ The agent in Stage 1 never has direct write access. All mutations (PRs, work ite
 
 ## How to Create a Workflow
 
-Gather the requirements below, then produce the complete `.md` file. Follow the order used by `ado-aw create`.
+Gather the requirements below, then produce the complete `.md` file.
 
 ### Step 1 — Name & Description
 
@@ -394,17 +420,34 @@ If all dependencies are already up to date, use `noop` with a brief message: "Al
 When generating the agent file:
 
 1. **Produce exactly one `.md` file.** Do not create separate documentation, architecture notes, or runbooks.
-2. **Place it in `agents/`** at the root of the repository (e.g., `agents/dependency-updater.md`).
+2. **Respect existing repository conventions** for file placement. Look at where existing pipeline YAML files or agent markdown files are located in the repo. If no convention exists, ask the user where they'd like the file placed.
 3. **Omit optional fields when they match defaults** — no `engine:` for `claude-opus-4.5`, no `workspace:` for `root`, no `target:` for `standalone`.
 4. **Always validate** that write-requiring safe-outputs (`create-pull-request`, `create-work-item`) have `permissions.write` set.
-5. **After writing the file**, tell the user the next steps:
+
+## Compilation
+
+After creating the agent file, compile it into an Azure DevOps pipeline:
+
+```bash
+# Simple form — generates the .yml pipeline alongside the .md source
+ado-aw compile <path/to/agent.md>
+
+# Or specify a custom output location
+ado-aw compile <path/to/agent.md> -o <path/to/pipeline.yml>
+```
+
+This generates a `.yml` pipeline file. Both the source `.md` and generated `.yml` must be committed together.
+
+If the `ado-aw` CLI is not installed or not available on `PATH`, guide the user to download it from:
+https://github.com/githubnext/ado-aw/releases
+
+**After compilation**, tell the user the next steps:
 
 ```
 Next steps:
-  1. Review and customize the agent instructions in agents/<filename>.md
-  2. Compile: ado-aw compile agents/<filename>.md -o .pipelines/<filename>.yml
-  3. Commit both the .md source and the generated .yml pipeline
-  4. Register the .yml as a pipeline in Azure DevOps
+  1. Review and customize the agent instructions in <filename>.md
+  2. Commit both the .md source and the generated .yml pipeline
+  3. Register the .yml as a pipeline in Azure DevOps
 ```
 
 ---

@@ -6,7 +6,7 @@ pipelines that run AI agents in network-isolated sandboxes.
 
 Inspired by [GitHub Agentic Workflows (gh-aw)](https://github.com/githubnext/gh-aw).
 
-> **If you are an AI agent** tasked with creating an ado-aw workflow, read [`prompts/create-ado-agentic-workflow.md`](prompts/create-ado-agentic-workflow.md) for step-by-step instructions on authoring a workflow file.
+> **If you are an AI agent**, use the specialized prompts in [`prompts/`](prompts/) for step-by-step guidance: [create](prompts/create-ado-agentic-workflow.md) · [update](prompts/update-ado-agentic-workflow.md) · [debug](prompts/debug-ado-agentic-workflow.md)
 
 ---
 
@@ -47,25 +47,32 @@ or build from source:
 cargo build --release
 ```
 
-### 2. Create an Agent
-
-Use the interactive wizard to scaffold a new agent file:
+### 2. Initialize Your Repository
 
 ```bash
-ado-aw create -o agents/
+ado-aw init
 ```
 
-The wizard walks you through:
+This creates a Copilot agent at `.github/agents/ado-aw.agent.md` that helps you create, update, and debug agentic pipelines. The agent automatically downloads the ado-aw compiler and handles compilation.
 
-- **Name & description** — human-readable identity for the agent
-- **Model** — AI engine (`claude-opus-4.5`, `claude-sonnet-4.5`, `gpt-5.2-codex`, `gemini-3-pro-preview`, etc.)
-- **Schedule** — when the agent runs, using [fuzzy schedule syntax](#schedule-syntax)
-- **Workspace** — `root` or `repo` working directory
-- **Repositories** — additional repos the agent can access
-- **MCP servers** — tool integrations (ADO, Kusto, IcM, etc.)
-- **Permissions** — ARM service connections for ADO access
+### 3. Create an Agent with AI
 
-This generates a markdown file like:
+Ask your coding agent (Copilot, Claude, Codex) to create a workflow:
+
+```
+Create an ADO agentic workflow using
+https://raw.githubusercontent.com/githubnext/ado-aw/main/prompts/create-ado-agentic-workflow.md
+
+The purpose of the workflow is to check for outdated dependencies weekly
+and open PRs to update them.
+```
+
+Or if you've run `ado-aw init`, simply ask your AI agent:
+```
+Create an agentic pipeline that checks for outdated dependencies and opens PRs
+```
+
+The AI will generate a markdown file like:
 
 ```markdown
 ---
@@ -95,22 +102,25 @@ dependency, update it to the latest stable version and create a pull
 request with a clear description of what changed and why.
 ```
 
-### 3. Compile to a Pipeline
+### 4. Compile to a Pipeline
 
 ```bash
-ado-aw compile agents/dependency-updater.md -o .pipelines/dependency-updater.yml
+# Simple form — generates the .yml alongside the source .md
+ado-aw compile dependency-updater.md
+
+# Or specify a custom output location
+ado-aw compile dependency-updater.md -o path/to/dependency-updater.yml
 ```
 
 This generates a complete Azure DevOps pipeline YAML file. The compiler also
-copies the agent markdown body into `agents/dependency-updater.md` in the output
-tree so it's available at runtime.
+copies the agent markdown body into the output tree so it's available at runtime.
 
-### 4. Verify (CI Check)
+### 5. Verify (CI Check)
 
 Ensure pipelines stay in sync with their source:
 
 ```bash
-ado-aw check agents/dependency-updater.md .pipelines/dependency-updater.yml
+ado-aw check dependency-updater.yml
 ```
 
 This is useful as a CI gate — if someone edits the markdown but forgets to
@@ -122,15 +132,8 @@ recompile, the check will fail.
 
 ### Step 1: Commit both files
 
-Your repo should contain:
-
-```
-your-repo/
-├── agents/
-│   └── dependency-updater.md          # Agent source (instructions + config)
-└── .pipelines/
-    └── dependency-updater.yml         # Compiled pipeline
-```
+Your repo should contain the agent source `.md` and the compiled pipeline `.yml`.
+Place them wherever your team's conventions dictate — there is no required directory structure.
 
 Push both files to your Azure DevOps repository.
 
@@ -139,7 +142,7 @@ Push both files to your Azure DevOps repository.
 1. Go to **Pipelines → New Pipeline**
 2. Select your repository
 3. Choose **Existing Azure Pipelines YAML file**
-4. Point to `.pipelines/dependency-updater.yml`
+4. Point to the compiled `.yml` pipeline file
 5. Save (or Save & Run)
 
 ### Step 3: Set Up ARM Service Connections for Permissions
@@ -397,7 +400,7 @@ network:
 ado-aw [OPTIONS] <COMMAND>
 
 Commands:
-  create        Create a new agent markdown file interactively
+  init          Initialize a repository for AI-first agentic pipeline authoring
   compile       Compile markdown to pipeline definition
   check         Verify a compiled pipeline matches its source
   mcp           Run as an MCP server (safe outputs)
@@ -410,6 +413,31 @@ Options:
   -v, --verbose  Enable info-level logging
   -d, --debug    Enable debug-level logging
 ```
+
+---
+
+## Prompts & Skill Files
+
+ado-aw provides specialized prompt files that guide AI agents through common tasks. Use these with any coding agent (Copilot, Claude, Codex, etc.):
+
+| Task | Prompt URL | Description |
+|------|-----------|-------------|
+| Create a workflow | [create-ado-agentic-workflow.md](prompts/create-ado-agentic-workflow.md) | Step-by-step guide for creating a new agentic pipeline from scratch |
+| Update a workflow | [update-ado-agentic-workflow.md](prompts/update-ado-agentic-workflow.md) | Guide for modifying existing agent workflows |
+| Debug a pipeline | [debug-ado-agentic-workflow.md](prompts/debug-ado-agentic-workflow.md) | Troubleshoot failing agentic pipelines |
+
+### Using Prompts with Your AI Agent
+
+Paste the raw URL into your coding agent's chat:
+
+```text
+Create an ADO agentic workflow using
+https://raw.githubusercontent.com/githubnext/ado-aw/main/prompts/create-ado-agentic-workflow.md
+
+The purpose of the workflow is to <describe what you want>
+```
+
+The AI agent will fetch the prompt, follow its instructions, and create a complete workflow file for you.
 
 ---
 
