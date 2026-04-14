@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::PATH_SEGMENT;
 use crate::sanitize::{Sanitize, sanitize as sanitize_text};
 use crate::tool_result;
-use crate::tools::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use anyhow::{Context, ensure};
 
 // ── Stage 1: Params (agent-provided) ──────────────────────────────────────
@@ -225,7 +225,7 @@ impl Executor for AddBuildTagResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::ToolResult;
+    use crate::safeoutputs::ToolResult;
 
     #[test]
     fn test_result_has_correct_name() {

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
 use crate::tool_result;
-use crate::tools::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{Sanitize, sanitize as sanitize_text};
 use anyhow::{Context, ensure};
 
@@ -491,7 +491,7 @@ impl Executor for UpdateWorkItemResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::ToolResult;
+    use crate::safeoutputs::ToolResult;
 
     #[test]
     fn test_result_has_correct_name() {
@@ -689,7 +689,7 @@ target: 42
 
     #[tokio::test]
     async fn test_execute_requires_ado_context() {
-        use crate::tools::Executor;
+        use crate::safeoutputs::Executor;
         use std::collections::HashMap;
         use std::path::PathBuf;
 

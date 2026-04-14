@@ -812,7 +812,7 @@ fn is_safe_tool_name(name: &str) -> bool {
 /// to prevent shell injection when the args are embedded in bash commands.
 /// Unrecognized tool names emit a compile-time warning and are skipped.
 pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
-    use crate::tools::{ALL_KNOWN_SAFE_OUTPUTS, ALWAYS_ON_TOOLS, NON_MCP_SAFE_OUTPUT_KEYS};
+    use crate::safeoutputs::{ALL_KNOWN_SAFE_OUTPUTS, ALWAYS_ON_TOOLS, NON_MCP_SAFE_OUTPUT_KEYS};
     use std::collections::HashSet;
 
     if front_matter.safe_outputs.is_empty() {
@@ -878,7 +878,7 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
 
 /// Validate that write-requiring safe-outputs have a write service connection configured.
 pub fn validate_write_permissions(front_matter: &FrontMatter) -> Result<()> {
-    use crate::tools::WRITE_REQUIRING_SAFE_OUTPUTS;
+    use crate::safeoutputs::WRITE_REQUIRING_SAFE_OUTPUTS;
 
     let has_write_sc = front_matter
         .permissions
@@ -1170,6 +1170,8 @@ mod tests {
         fm.tools = Some(crate::compile::types::ToolsConfig {
             bash: Some(vec![":*".to_string()]),
             edit: None,
+            cache_memory: None,
+            azure_devops: None,
         });
         let params = generate_copilot_params(&fm);
         assert!(params.contains("--allow-tool \"shell(:*)\""));
@@ -1181,6 +1183,8 @@ mod tests {
         fm.tools = Some(crate::compile::types::ToolsConfig {
             bash: Some(vec![]),
             edit: None,
+            cache_memory: None,
+            azure_devops: None,
         });
         let params = generate_copilot_params(&fm);
         assert!(!params.contains("shell("));

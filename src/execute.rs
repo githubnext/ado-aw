@@ -11,7 +11,7 @@ use std::path::Path;
 
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
 use crate::sanitize::Sanitize;
-use crate::tools::{
+use crate::safeoutputs::{
     AddBuildTagResult, AddPrCommentResult, CreateBranchResult, CreateGitTagResult,
     CreatePrResult, CreateWikiPageResult, CreateWorkItemResult, CommentOnWorkItemResult,
     ExecutionContext, ExecutionResult, Executor, LinkWorkItemsResult, QueueBuildResult,
@@ -21,7 +21,7 @@ use crate::tools::{
 };
 
 // Re-export memory types for use by main.rs
-pub use crate::tools::memory::{MemoryConfig, process_agent_memory};
+pub use crate::tools::cache_memory::{MemoryConfig, process_agent_memory};
 
 /// Execute all safe outputs from the NDJSON file in the specified directory
 pub async fn execute_safe_outputs(

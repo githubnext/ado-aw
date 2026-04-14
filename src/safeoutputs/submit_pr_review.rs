@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::{PATH_SEGMENT, resolve_repo_name};
 use crate::sanitize::{Sanitize, sanitize as sanitize_text};
 use crate::tool_result;
-use crate::tools::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use anyhow::{Context, ensure};
 
 /// Valid event values for submit-pr-review
@@ -427,7 +427,7 @@ impl Executor for SubmitPrReviewResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::ToolResult;
+    use crate::safeoutputs::ToolResult;
 
     #[test]
     fn test_result_has_correct_name() {

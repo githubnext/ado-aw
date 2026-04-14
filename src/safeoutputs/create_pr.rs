@@ -5,7 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
-use crate::tools::{ExecutionContext, ExecutionResult, Executor, ToolResult, Validate};
+use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, ToolResult, Validate};
 use crate::sanitize::{Sanitize, sanitize as sanitize_text};
 use anyhow::{Context, ensure};
 
@@ -186,7 +186,7 @@ pub struct CreatePrResult {
     pub repository: String,
 }
 
-impl crate::tools::ToolResult for CreatePrResult {
+impl crate::safeoutputs::ToolResult for CreatePrResult {
     const NAME: &'static str = "create-pull-request";
     const REQUIRES_WRITE: bool = true;
 }

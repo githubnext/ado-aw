@@ -7,7 +7,7 @@ use std::path::Path;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 
-use crate::tools::ToolResult;
+use crate::safeoutputs::ToolResult;
 
 /// The standard filename for safe outputs
 pub const SAFE_OUTPUT_FILENAME: &str = "safe_outputs.ndjson";

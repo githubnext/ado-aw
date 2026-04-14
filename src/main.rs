@@ -10,6 +10,7 @@ mod mcp;
 mod ndjson;
 mod proxy;
 pub mod sanitize;
+mod safeoutputs;
 mod tools;
 
 use anyhow::{Context, Result};
@@ -17,7 +18,7 @@ use clap::{Parser, Subcommand};
 use log::debug;
 use std::path::PathBuf;
 
-use crate::tools::ExecutionContext;
+use crate::safeoutputs::ExecutionContext;
 
 #[derive(Subcommand, Debug)]
 enum Commands {
