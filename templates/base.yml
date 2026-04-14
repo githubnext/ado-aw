@@ -246,11 +246,15 @@ jobs:
 
       # Start MCP Gateway (MCPG) on host
       - bash: |
+          # Extract ADO org name from collection URI for MCP config
+          ADO_ORG_NAME=$(echo "$(System.TeamFoundationCollectionUri)" | sed 's|/$||' | awk -F'/' '{print $NF}')
+
           # Substitute runtime values into MCPG config
           MCPG_CONFIG=$(cat /tmp/awf-tools/staging/mcpg-config.json \
             | sed "s|\${SAFE_OUTPUTS_PORT}|$(SAFE_OUTPUTS_PORT)|g" \
             | sed "s|\${SAFE_OUTPUTS_API_KEY}|$(SAFE_OUTPUTS_API_KEY)|g" \
-            | sed "s|\${MCP_GATEWAY_API_KEY}|$(MCP_GATEWAY_API_KEY)|g")
+            | sed "s|\${MCP_GATEWAY_API_KEY}|$(MCP_GATEWAY_API_KEY)|g" \
+            | sed "s|\$(ADO_ORG_NAME)|$ADO_ORG_NAME|g")
 
           # Log the template config (before API key substitution) for debugging.
           echo "Starting MCPG with config template:"

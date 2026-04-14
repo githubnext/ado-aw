@@ -625,8 +625,24 @@ pub fn generate_header_comment(input_path: &std::path::Path) -> String {
 /// See: https://github.com/github/gh-aw-mcpg/releases
 pub const MCPG_VERSION: &str = "0.2.18";
 
+/// Docker image for the MCPG container.
+pub const MCPG_IMAGE: &str = "ghcr.io/github/gh-aw-mcpg";
+
 /// Default port MCPG listens on inside the container (host network mode).
 pub const MCPG_PORT: u16 = 80;
+
+/// Docker image for the Azure DevOps MCP container.
+/// This is the container used when `tools: azure-devops:` is configured.
+pub const ADO_MCP_IMAGE: &str = "node:20-slim";
+
+/// Default entrypoint for the Azure DevOps MCP container.
+pub const ADO_MCP_ENTRYPOINT: &str = "npx";
+
+/// Default entrypoint args for the Azure DevOps MCP npm package.
+pub const ADO_MCP_PACKAGE: &str = "@azure-devops/mcp";
+
+/// Reserved MCPG server name for the auto-configured ADO MCP.
+pub const ADO_MCP_SERVER_NAME: &str = "azure-devops";
 
 /// Generate source path for the execute command.
 ///
