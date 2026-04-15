@@ -99,8 +99,6 @@ pub struct CompileContext<'a> {
     /// ADO context inferred from the git remote (org URL, project, repo name).
     /// `None` if the compile directory has no ADO remote.
     pub ado_context: Option<AdoContext>,
-    /// Directory containing the input file (for relative path resolution).
-    pub compile_dir: &'a Path,
 }
 
 impl<'a> CompileContext<'a> {
@@ -108,25 +106,21 @@ impl<'a> CompileContext<'a> {
     ///
     /// Infers ADO context from the git remote in `compile_dir`. This is
     /// async because it shells out to `git remote get-url origin`.
-    pub async fn new(front_matter: &'a FrontMatter, compile_dir: &'a Path) -> Self {
+    pub async fn new(front_matter: &'a FrontMatter, compile_dir: &Path) -> Self {
         let ado_context = Self::infer_ado_context(compile_dir).await;
         Self {
             agent_name: &front_matter.name,
             front_matter,
             ado_context,
-            compile_dir,
         }
     }
 
     /// Convenience accessor: extract the ADO org name from the inferred context.
     pub fn ado_org(&self) -> Option<&str> {
-        self.ado_context.as_ref().map(|ctx| {
-            ctx.org_url
-                .trim_end_matches('/')
-                .rsplit('/')
-                .next()
-                .unwrap_or("")
-        }).filter(|org| !org.is_empty())
+        self.ado_context.as_ref().and_then(|ctx| {
+            let org = ctx.org_url.trim_end_matches('/').rsplit('/').next()?;
+            if org.is_empty() { None } else { Some(org) }
+        })
     }
 
     async fn infer_ado_context(dir: &Path) -> Option<AdoContext> {
@@ -162,7 +156,6 @@ impl<'a> CompileContext<'a> {
             agent_name: &front_matter.name,
             front_matter,
             ado_context: None,
-            compile_dir: Path::new("."),
         }
     }
 
@@ -177,7 +170,6 @@ impl<'a> CompileContext<'a> {
                 project: "test-project".to_string(),
                 repo_name: "test-repo".to_string(),
             }),
-            compile_dir: Path::new("."),
         }
     }
 }
