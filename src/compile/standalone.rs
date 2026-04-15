@@ -262,7 +262,7 @@ impl Compiler for StandaloneCompiler {
 /// `--allow-domains` flag. The list includes:
 /// 1. Core Azure DevOps/GitHub endpoints
 /// 2. MCP-specific endpoints for each enabled MCP
-/// 3. User-specified additional hosts from network.allow
+/// 3. User-specified additional hosts from network.allowed
 fn generate_allowed_domains(
     front_matter: &FrontMatter,
     extensions: &[super::extensions::Extension],
@@ -330,7 +330,7 @@ fn generate_allowed_domains(
             let domains = get_ecosystem_domains(host);
             if domains.is_empty() && !is_known_ecosystem(host) {
                 eprintln!(
-                    "warning: network.allow contains unknown ecosystem identifier '{}'. \
+                    "warning: network.allowed contains unknown ecosystem identifier '{}'. \
                      Known ecosystems: python, rust, node, go, java, etc. \
                      If this is a domain name, it should contain a dot.",
                     host
@@ -346,14 +346,14 @@ fn generate_allowed_domains(
                     .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '*'));
             if !valid_chars {
                 anyhow::bail!(
-                    "network.allow domain '{}' contains characters invalid in DNS names. \
+                    "network.allowed domain '{}' contains characters invalid in DNS names. \
                      Only ASCII alphanumerics, '.', '-', and '*' are allowed.",
                     host
                 );
             }
             if host.contains('*') && !(host.starts_with("*.") && !host[2..].contains('*')) {
                 anyhow::bail!(
-                    "network.allow domain '{}' uses '*' in an unsupported position. \
+                    "network.allowed domain '{}' uses '*' in an unsupported position. \
                      Wildcards must appear only as a leading prefix (e.g. '*.example.com').",
                     host
                 );

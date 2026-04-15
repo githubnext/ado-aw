@@ -2523,7 +2523,7 @@ tools:
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
-/// Test that network.allow with a valid leading wildcard (*.example.com) compiles successfully
+/// Test that network.allowed with a valid leading wildcard (*.example.com) compiles successfully
 #[test]
 fn test_network_allow_valid_wildcard_compiles() {
     let temp_dir = std::env::temp_dir().join(format!(
@@ -2534,7 +2534,7 @@ fn test_network_allow_valid_wildcard_compiles() {
 
     let input = r#"---
 name: "Network Wildcard Agent"
-description: "Agent with valid leading wildcard in network.allow"
+description: "Agent with valid leading wildcard in network.allowed"
 network:
   allowed:
     - "*.mycompany.com"
@@ -2563,7 +2563,7 @@ network:
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
-/// Test that network.allow with a trailing wildcard (example.*) fails compilation
+/// Test that network.allowed with a trailing wildcard (example.*) fails compilation
 #[test]
 fn test_network_allow_trailing_wildcard_fails() {
     let temp_dir = std::env::temp_dir().join(format!(
@@ -2574,7 +2574,7 @@ fn test_network_allow_trailing_wildcard_fails() {
 
     let input = r#"---
 name: "Network Trailing Wildcard Agent"
-description: "Agent with trailing wildcard in network.allow"
+description: "Agent with trailing wildcard in network.allowed"
 network:
   allowed:
     - "example.*"
@@ -2607,7 +2607,7 @@ network:
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
-/// Test that network.allow with a mid-string wildcard (ex*ample.com) fails compilation
+/// Test that network.allowed with a mid-string wildcard (ex*ample.com) fails compilation
 #[test]
 fn test_network_allow_mid_wildcard_fails() {
     let temp_dir = std::env::temp_dir().join(format!(
@@ -2618,7 +2618,7 @@ fn test_network_allow_mid_wildcard_fails() {
 
     let input = r#"---
 name: "Network Mid Wildcard Agent"
-description: "Agent with mid-string wildcard in network.allow"
+description: "Agent with mid-string wildcard in network.allowed"
 network:
   allowed:
     - "ex*ample.com"
@@ -2651,7 +2651,7 @@ network:
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
-/// Test that network.allow with a double wildcard (*.*.com) fails compilation
+/// Test that network.allowed with a double wildcard (*.*.com) fails compilation
 #[test]
 fn test_network_allow_double_wildcard_fails() {
     let temp_dir = std::env::temp_dir().join(format!(
@@ -2662,7 +2662,7 @@ fn test_network_allow_double_wildcard_fails() {
 
     let input = r#"---
 name: "Network Double Wildcard Agent"
-description: "Agent with double wildcard in network.allow"
+description: "Agent with double wildcard in network.allowed"
 network:
   allowed:
     - "*.*.com"
@@ -2695,7 +2695,7 @@ network:
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
-/// Test that network.allow with a bare '*' fails compilation
+/// Test that network.allowed with a bare '*' fails compilation
 #[test]
 fn test_network_allow_bare_wildcard_fails() {
     let temp_dir = std::env::temp_dir().join(format!(
@@ -2706,7 +2706,7 @@ fn test_network_allow_bare_wildcard_fails() {
 
     let input = r#"---
 name: "Network Bare Wildcard Agent"
-description: "Agent with bare wildcard in network.allow"
+description: "Agent with bare wildcard in network.allowed"
 network:
   allowed:
     - "*"
