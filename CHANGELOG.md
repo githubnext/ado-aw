@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.0](https://github.com/githubnext/ado-aw/compare/v0.12.0...v0.13.0) (2026-04-15)
+
+
+### Features
+
+* capture agent statistics via OTel and surface in safe outputs ([#219](https://github.com/githubnext/ado-aw/issues/219)) ([6f8d0f7](https://github.com/githubnext/ado-aw/commit/6f8d0f7069907b093a024b0f89b45846b292cb7b))
+
 ## [0.12.0](https://github.com/githubnext/ado-aw/compare/v0.11.0...v0.12.0) (2026-04-15)
 
 
