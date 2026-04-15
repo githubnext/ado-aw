@@ -64,6 +64,15 @@ impl PoolConfig {
     }
 }
 
+impl SanitizeConfigTrait for PoolConfig {
+    fn sanitize_config_fields(&mut self) {
+        match self {
+            PoolConfig::Name(name) => *name = crate::sanitize::sanitize_config(name),
+            PoolConfig::Full(full) => full.sanitize_config_fields(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone, SanitizeConfig)]
 pub struct PoolConfigFull {
     pub name: String,
@@ -108,6 +117,15 @@ impl ScheduleConfig {
         match self {
             ScheduleConfig::Simple(_) => &[],
             ScheduleConfig::WithOptions(opts) => &opts.branches,
+        }
+    }
+}
+
+impl SanitizeConfigTrait for ScheduleConfig {
+    fn sanitize_config_fields(&mut self) {
+        match self {
+            ScheduleConfig::Simple(s) => *s = crate::sanitize::sanitize_config(s),
+            ScheduleConfig::WithOptions(opts) => opts.sanitize_config_fields(),
         }
     }
 }
@@ -174,6 +192,15 @@ impl EngineConfig {
     }
 }
 
+impl SanitizeConfigTrait for EngineConfig {
+    fn sanitize_config_fields(&mut self) {
+        match self {
+            EngineConfig::Simple(s) => *s = crate::sanitize::sanitize_config(s),
+            EngineConfig::Full(opts) => opts.sanitize_config_fields(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct EngineOptions {
     /// AI model to use (defaults to claude-opus-4.5)
@@ -209,7 +236,7 @@ impl SanitizeConfigTrait for EngineOptions {
 ///     toolsets: [repos, wit]
 ///     allowed: [wit_get_work_item]
 /// ```
-#[derive(Debug, Deserialize, Clone, Default, SanitizeConfig)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct ToolsConfig {
     /// Bash command allow-list. If empty/not set, defaults to safe commands.
     /// Use [":*"] for unrestricted access.
@@ -228,6 +255,20 @@ pub struct ToolsConfig {
     /// and network allowlist domains.
     #[serde(default, rename = "azure-devops")]
     pub azure_devops: Option<AzureDevOpsToolConfig>,
+}
+
+impl SanitizeConfigTrait for ToolsConfig {
+    fn sanitize_config_fields(&mut self) {
+        self.bash = self.bash.as_ref().map(|v| {
+            v.iter().map(|s| crate::sanitize::sanitize_config(s)).collect()
+        });
+        if let Some(ref mut cm) = self.cache_memory {
+            cm.sanitize_config_fields();
+        }
+        if let Some(ref mut ado) = self.azure_devops {
+            ado.sanitize_config_fields();
+        }
+    }
 }
 
 /// Cache memory tool configuration — accepts both `true` and object formats
@@ -264,6 +305,15 @@ impl CacheMemoryToolConfig {
         match self {
             CacheMemoryToolConfig::Enabled(_) => &[],
             CacheMemoryToolConfig::WithOptions(opts) => &opts.allowed_extensions,
+        }
+    }
+}
+
+impl SanitizeConfigTrait for CacheMemoryToolConfig {
+    fn sanitize_config_fields(&mut self) {
+        match self {
+            CacheMemoryToolConfig::Enabled(_) => {}
+            CacheMemoryToolConfig::WithOptions(opts) => opts.sanitize_config_fields(),
         }
     }
 }
@@ -329,6 +379,15 @@ impl AzureDevOpsToolConfig {
         match self {
             AzureDevOpsToolConfig::Enabled(_) => None,
             AzureDevOpsToolConfig::WithOptions(opts) => opts.org.as_deref(),
+        }
+    }
+}
+
+impl SanitizeConfigTrait for AzureDevOpsToolConfig {
+    fn sanitize_config_fields(&mut self) {
+        match self {
+            AzureDevOpsToolConfig::Enabled(_) => {}
+            AzureDevOpsToolConfig::WithOptions(opts) => opts.sanitize_config_fields(),
         }
     }
 }
@@ -457,6 +516,50 @@ pub struct FrontMatter {
     pub parameters: Vec<PipelineParameter>,
 }
 
+impl SanitizeConfigTrait for FrontMatter {
+    fn sanitize_config_fields(&mut self) {
+        self.name = crate::sanitize::sanitize_config(&self.name);
+        self.description = crate::sanitize::sanitize_config(&self.description);
+        if let Some(ref mut s) = self.schedule {
+            s.sanitize_config_fields();
+        }
+        self.workspace = self.workspace.as_deref().map(crate::sanitize::sanitize_config);
+        if let Some(ref mut p) = self.pool {
+            p.sanitize_config_fields();
+        }
+        self.engine.sanitize_config_fields();
+        if let Some(ref mut t) = self.tools {
+            t.sanitize_config_fields();
+        }
+        for repo in &mut self.repositories {
+            repo.sanitize_config_fields();
+        }
+        self.checkout = self.checkout.iter().map(|s| crate::sanitize::sanitize_config(s)).collect();
+        for mcp in self.mcp_servers.values_mut() {
+            mcp.sanitize_config_fields();
+        }
+        // safe_outputs: HashMap<String, serde_json::Value> — opaque JSON, sanitized at
+        // Stage 2 execution via get_tool_config() when deserialized into typed configs.
+        if let Some(ref mut t) = self.triggers {
+            t.sanitize_config_fields();
+        }
+        if let Some(ref mut n) = self.network {
+            n.sanitize_config_fields();
+        }
+        // steps, post_steps, setup, teardown: Vec<serde_yaml::Value> — opaque YAML
+        // passed through to the pipeline, validated by ADO at parse time.
+        if let Some(ref mut p) = self.permissions {
+            p.sanitize_config_fields();
+        }
+        for v in self.env.values_mut() {
+            *v = crate::sanitize::sanitize_config(v);
+        }
+        for p in &mut self.parameters {
+            p.sanitize_config_fields();
+        }
+    }
+}
+
 fn default_model() -> String {
     "claude-opus-4.5".to_string()
 }
@@ -537,6 +640,15 @@ pub enum McpConfig {
     WithOptions(McpOptions),
 }
 
+impl SanitizeConfigTrait for McpConfig {
+    fn sanitize_config_fields(&mut self) {
+        match self {
+            McpConfig::Enabled(_) => {}
+            McpConfig::WithOptions(opts) => opts.sanitize_config_fields(),
+        }
+    }
+}
+
 /// Detailed MCP options
 #[derive(Debug, Deserialize, Clone, Default, SanitizeConfig)]
 pub struct McpOptions {
@@ -576,11 +688,19 @@ pub struct McpOptions {
 }
 
 /// Trigger configuration for the pipeline
-#[derive(Debug, Deserialize, Clone, Default, SanitizeConfig)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct TriggerConfig {
     /// Pipeline completion trigger
     #[serde(default)]
     pub pipeline: Option<PipelineTrigger>,
+}
+
+impl SanitizeConfigTrait for TriggerConfig {
+    fn sanitize_config_fields(&mut self) {
+        if let Some(ref mut p) = self.pipeline {
+            p.sanitize_config_fields();
+        }
+    }
 }
 
 /// Pipeline completion trigger configuration

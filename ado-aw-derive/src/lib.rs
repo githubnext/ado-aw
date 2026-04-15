@@ -309,6 +309,12 @@ pub fn derive_sanitize_content(input: TokenStream) -> TokenStream {
             stmts.push(quote! {
                 self.#field_name = self.#field_name.as_deref().map(#sanitize_fn);
             });
+        } else if is_option_vec_string(ty) {
+            stmts.push(quote! {
+                self.#field_name = self.#field_name.as_ref().map(|v| {
+                    v.iter().map(|s| #sanitize_fn(s)).collect()
+                });
+            });
         } else if is_vec_string(ty) {
             stmts.push(quote! {
                 self.#field_name = self.#field_name.iter().map(|s| #sanitize_fn(s)).collect();

@@ -5,7 +5,7 @@ use rmcp::model::ErrorCode;
 use serde::Serialize;
 use std::collections::HashMap;
 
-use crate::sanitize::SanitizeContent;
+use crate::sanitize::{SanitizeConfig, SanitizeContent};
 
 /// Trait for tool results that include a name field
 pub trait ToolResult: Serialize {
@@ -59,12 +59,19 @@ pub struct ExecutionContext {
 }
 
 impl ExecutionContext {
-    /// Get typed configuration for a specific tool
-    pub fn get_tool_config<T: serde::de::DeserializeOwned + Default>(&self, tool_name: &str) -> T {
-        self.tool_configs
+    /// Get typed configuration for a specific tool.
+    ///
+    /// Deserializes the tool's JSON config from front matter and applies
+    /// [`SanitizeConfig`] to all textual fields before returning. The
+    /// `SanitizeConfig` bound acts as a compile-time forcing function:
+    /// adding a new config struct without implementing the trait won't compile.
+    pub fn get_tool_config<T: serde::de::DeserializeOwned + Default + SanitizeConfig>(&self, tool_name: &str) -> T {
+        let mut config: T = self.tool_configs
             .get(tool_name)
             .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        config.sanitize_config_fields();
+        config
     }
 }
 

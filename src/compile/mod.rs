@@ -53,7 +53,14 @@ pub async fn compile_pipeline(input_path: &str, output_path: Option<&str>) -> Re
         .with_context(|| format!("Failed to read input file: {}", input_path.display()))?;
     debug!("Input file size: {} bytes", content.len());
 
-    let (front_matter, markdown_body) = parse_markdown(&content)?;
+    let (mut front_matter, markdown_body) = parse_markdown(&content)?;
+
+    // Sanitize all front matter text fields before any further processing.
+    // This neutralizes pipeline command injection (##vso[), strips control
+    // characters, and enforces content limits across all config values.
+    use crate::sanitize::SanitizeConfig;
+    front_matter.sanitize_config_fields();
+
     info!("Parsed agent: '{}'", front_matter.name);
     debug!("Description: {}", front_matter.description);
     debug!("Target: {:?}", front_matter.target);
@@ -243,7 +250,10 @@ pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
             )
         })?;
 
-    let (front_matter, markdown_body) = parse_markdown(&content)?;
+    let (mut front_matter, markdown_body) = parse_markdown(&content)?;
+
+    use crate::sanitize::SanitizeConfig;
+    front_matter.sanitize_config_fields();
 
     common::validate_checkout_list(&front_matter.repositories, &front_matter.checkout)?;
 
