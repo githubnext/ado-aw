@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.12.0](https://github.com/githubnext/ado-aw/compare/v0.11.0...v0.12.0) (2026-04-15)
+
+
+### Features
+
+* add ecosystem domain allowlists from gh-aw ([#213](https://github.com/githubnext/ado-aw/issues/213)) ([22a2069](https://github.com/githubnext/ado-aw/commit/22a2069d49b96774acbd1ec42323cb7c7092e4b0))
+* add Lean 4 runtime support with runtimes: front matter ([#208](https://github.com/githubnext/ado-aw/issues/208)) ([16fc9be](https://github.com/githubnext/ado-aw/commit/16fc9be54519f0371422afc0d6d59e6f93463f09))
+* standardise front matter sanitization via SanitizeConfig/SanitizeContent traits ([#210](https://github.com/githubnext/ado-aw/issues/210)) ([85ac3ab](https://github.com/githubnext/ado-aw/commit/85ac3ab38ec8d696cf28a558ed3e0a9473e405b7))
+
+
+### Bug Fixes
+
+* **create-pr:** skip auto-complete API call on draft PRs ([#194](https://github.com/githubnext/ado-aw/issues/194)) ([#200](https://github.com/githubnext/ado-aw/issues/200)) ([d58dbeb](https://github.com/githubnext/ado-aw/commit/d58dbeb8337e4d11ddf6fb39a87511bcb3df327c))
+* improve trigger.pipeline validation with expression checks and better errors ([#189](https://github.com/githubnext/ado-aw/issues/189), [#188](https://github.com/githubnext/ado-aw/issues/188)) ([#196](https://github.com/githubnext/ado-aw/issues/196)) ([b0ae590](https://github.com/githubnext/ado-aw/commit/b0ae590bc4f39bcb9efaa7db5c340c86b15043e5))
+
 ## [0.11.0](https://github.com/githubnext/ado-aw/compare/v0.10.0...v0.11.0) (2026-04-14)
 
 
