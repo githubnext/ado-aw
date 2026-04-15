@@ -21,6 +21,9 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 ├── src/
 │   ├── main.rs           # Entry point with clap CLI
 │   ├── allowed_hosts.rs  # Core network allowlist definitions
+│   ├── ecosystem_domains.rs # Ecosystem domain lookups (python, rust, node, etc.)
+│   ├── data/
+│   │   └── ecosystem_domains.json # Ecosystem domain lists (synced from gh-aw)
 │   ├── compile/          # Pipeline compilation module
 │   │   ├── mod.rs        # Module entry point and Compiler trait
 │   │   ├── common.rs     # Shared helpers across targets
@@ -190,9 +193,10 @@ teardown:                      # separate job AFTER safe outputs processing
   - bash: echo "Teardown job step"
     displayName: "Teardown step"
 network:                       # optional network policy (standalone target only)
-  allow:                       # additional allowed host patterns
-    - "*.mycompany.com"
-  blocked:                     # blocked host patterns (removes exact entries from the allow list)
+  allow:                       # allowed host patterns and/or ecosystem identifiers
+    - python                   # ecosystem identifier — expands to Python/PyPI domains
+    - "*.mycompany.com"        # raw domain pattern
+  blocked:                     # blocked host patterns or ecosystems (removes from allow list)
     - "evil.example.com"
 permissions:                   # optional ADO access token configuration
   read: my-read-arm-connection   # ARM service connection for read-only ADO access (Stage 1 agent)
@@ -784,7 +788,8 @@ If no passthrough env vars are needed, this marker is replaced with an empty str
 Should be replaced with the comma-separated domain list for AWF's `--allow-domains` flag. The list includes:
 1. Core Azure DevOps/GitHub endpoints (from `allowed_hosts.rs`)
 2. MCP-specific endpoints for each enabled MCP
-3. User-specified additional hosts from `network.allow:` front matter
+3. Ecosystem identifier expansions from `network.allow:` (e.g., `python` → PyPI/pip domains)
+4. User-specified additional hosts from `network.allow:` front matter
 
 The output is formatted as a comma-separated string (e.g., `github.com,*.dev.azure.com,api.github.com`).
 
@@ -1664,26 +1669,60 @@ The following domains are always allowed (defined in `allowed_hosts.rs`):
 
 ### Adding Additional Hosts
 
-Agents can specify additional allowed hosts in their front matter:
+Agents can specify additional allowed hosts in their front matter using either ecosystem identifiers or raw domain patterns:
 
 ```yaml
 network:
   allow:
-    - "*.mycompany.com"
-    - "api.external-service.com"
+    - python                     # Ecosystem identifier — expands to Python/PyPI domains
+    - rust                       # Ecosystem identifier — expands to Rust/crates.io domains
+    - "*.mycompany.com"          # Raw domain pattern
+    - "api.external-service.com" # Raw domain
 ```
 
-All hosts (core + MCP-specific + user-specified) are combined into a comma-separated domain list passed to AWF's `--allow-domains` flag.
+#### Ecosystem Identifiers
+
+Ecosystem identifiers are shorthand names that expand to curated domain lists for common language ecosystems and services. The domain lists are sourced from [gh-aw](https://github.com/github/gh-aw) and kept up to date via an automated workflow.
+
+Available ecosystem identifiers include:
+
+| Identifier | Includes |
+|------------|----------|
+| `defaults` | Certificate infrastructure, Ubuntu mirrors, common package registries |
+| `github` | GitHub domains (`github.com`, `*.githubusercontent.com`, etc.) |
+| `local` | Loopback addresses (`localhost`, `127.0.0.1`, `::1`) |
+| `containers` | Docker Hub, GHCR, Quay, Kubernetes |
+| `linux-distros` | Debian, Alpine, Fedora, CentOS, Arch Linux package repositories |
+| `dev-tools` | CI/CD and developer tool services (Codecov, Shields.io, Snyk, etc.) |
+| `python` | PyPI, pip, Conda, Anaconda |
+| `rust` | crates.io, rustup, static.rust-lang.org |
+| `node` | npm, Yarn, pnpm, Bun, Deno, Node.js |
+| `go` | proxy.golang.org, pkg.go.dev, Go module proxy |
+| `java` | Maven Central, Gradle, JDK downloads |
+| `dotnet` | NuGet, .NET SDK |
+| `ruby` | RubyGems, Bundler |
+| `swift` | Swift.org, CocoaPods |
+| `terraform` | HashiCorp releases, Terraform registry |
+
+Additional ecosystems: `bazel`, `chrome`, `clojure`, `dart`, `deno`, `elixir`, `fonts`, `github-actions`, `haskell`, `julia`, `kotlin`, `lua`, `node-cdns`, `ocaml`, `perl`, `php`, `playwright`, `powershell`, `r`, `scala`, `zig`.
+
+The full domain lists are defined in `src/data/ecosystem_domains.json`.
+
+All hosts (core + MCP-specific + ecosystem expansions + user-specified) are combined into a comma-separated domain list passed to AWF's `--allow-domains` flag.
 
 #### Blocking Hosts
 
-The `network.blocked` field removes hosts from the combined allowlist using **exact-string matching**. Blocking `"github.com"` removes only that exact entry — it does **not** remove wildcard variants like `"*.github.com"`. To fully block a domain and its subdomains, list both the exact host and the wildcard pattern:
+The `network.blocked` field removes hosts from the combined allowlist. Both ecosystem identifiers and raw domain strings are supported. Blocking an ecosystem identifier removes all of its domains. Blocking a raw domain uses exact-string matching — blocking `"github.com"` does **not** also remove `"*.github.com"`.
 
 ```yaml
 network:
+  allow:
+    - python
+    - node
   blocked:
-    - "github.com"
-    - "*.github.com"
+    - python                 # Remove all Python ecosystem domains
+    - "github.com"           # Remove exact domain
+    - "*.github.com"         # Remove wildcard variant too
 ```
 
 ### Permissions (ADO Access Tokens)
