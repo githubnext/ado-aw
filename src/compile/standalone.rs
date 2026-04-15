@@ -1168,6 +1168,15 @@ fn generate_lean_install(config: &super::types::LeanToolConfig) -> String {
          \x20\x20\x20\x20export PATH=\"$HOME/.elan/bin:$PATH\"\n\
          \x20\x20\x20\x20lean --version || echo \"Lean installed via elan\"\n\
          \x20\x20\x20\x20lake --version || echo \"Lake installed via elan\"\n\
+         \x20\x20\x20\x20# Symlink lean tools into /tmp/awf-tools/ so they are accessible\n\
+         \x20\x20\x20\x20# inside the AWF chroot (AWF mounts /tmp but reconstructs PATH\n\
+         \x20\x20\x20\x20# from standard system locations, excluding $HOME/.elan/bin).\n\
+         \x20\x20\x20\x20for cmd in lean lake elan; do\n\
+         \x20\x20\x20\x20\x20\x20if command -v \"$cmd\" >/dev/null 2>&1; then\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20ln -sf \"$(command -v \"$cmd\")\" \"/tmp/awf-tools/$cmd\"\n\
+         \x20\x20\x20\x20\x20\x20fi\n\
+         \x20\x20\x20\x20done\n\
+         \x20\x20\x20\x20echo \"Lean tools symlinked to /tmp/awf-tools/\"\n\
          \x20\x20displayName: \"Install Lean 4 (elan)\"",
         toolchain
     )
@@ -2229,6 +2238,7 @@ mod tests {
         assert!(result.contains("elan-init.sh"), "should include elan installer");
         assert!(result.contains("Lean 4"), "should include Lean prompt");
         assert!(result.contains("--default-toolchain stable"), "should default to stable");
+        assert!(result.contains("/tmp/awf-tools/"), "should symlink into awf-tools for AWF chroot");
     }
 
     #[test]
