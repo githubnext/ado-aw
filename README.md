@@ -337,7 +337,7 @@ mcp-servers:
 ```
 
 Custom MCP containers run inside the AWF network sandbox. Add any required
-external domains to `network.allow`.
+external domains to `network.allowed`.
 
 ---
 
@@ -410,12 +410,12 @@ reachable. The allowlist is built from:
 
 1. **Core domains** — Azure DevOps, GitHub, Microsoft auth, Azure storage
 2. **MCP domains** — automatically added per enabled MCP
-3. **User domains** — from `network.allow` in front matter
+3. **User domains** — from `network.allowed` in front matter
 4. **Minus blocked** — `network.blocked` entries are removed by exact match (wildcard patterns like `*.example.com` are not affected by blocking a specific subdomain)
 
 ```yaml
 network:
-  allow:
+  allowed:
     - "*.mycompany.com"
     - "api.external-service.com"
   blocked:

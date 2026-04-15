@@ -193,7 +193,7 @@ teardown:                      # separate job AFTER safe outputs processing
   - bash: echo "Teardown job step"
     displayName: "Teardown step"
 network:                       # optional network policy (standalone target only)
-  allow:                       # allowed host patterns and/or ecosystem identifiers
+  allowed:                       # allowed host patterns and/or ecosystem identifiers
     - python                   # ecosystem identifier — expands to Python/PyPI domains
     - "*.mycompany.com"        # raw domain pattern
   blocked:                     # blocked host patterns or ecosystems (removes from allow list)
@@ -788,8 +788,8 @@ If no passthrough env vars are needed, this marker is replaced with an empty str
 Should be replaced with the comma-separated domain list for AWF's `--allow-domains` flag. The list includes:
 1. Core Azure DevOps/GitHub endpoints (from `allowed_hosts.rs`)
 2. MCP-specific endpoints for each enabled MCP
-3. Ecosystem identifier expansions from `network.allow:` (e.g., `python` → PyPI/pip domains)
-4. User-specified additional hosts from `network.allow:` front matter
+3. Ecosystem identifier expansions from `network.allowed:` (e.g., `python` → PyPI/pip domains)
+4. User-specified additional hosts from `network.allowed:` front matter
 
 The output is formatted as a comma-separated string (e.g., `github.com,*.dev.azure.com,api.github.com`).
 
@@ -1608,7 +1608,7 @@ mcp-servers:
 permissions:
   read: my-read-arm-connection
 network:
-  allow:
+  allowed:
     - "dev.azure.com"
     - "*.dev.azure.com"
 ```
@@ -1619,7 +1619,7 @@ network:
 2. **Containerization**: Stdio MCP servers run as isolated Docker containers (per MCPG spec §3.2.1)
 3. **Environment Isolation**: MCP containers are spawned by MCPG with only the configured environment variables
 4. **MCPG Gateway**: All MCP traffic flows through the MCP Gateway which enforces tool-level filtering
-5. **Network Isolation**: MCP containers run within the same AWF-isolated network. Users must explicitly allow external domains via `network.allow`
+5. **Network Isolation**: MCP containers run within the same AWF-isolated network. Users must explicitly allow external domains via `network.allowed`
 
 ## Network Isolation (AWF)
 
@@ -1673,7 +1673,7 @@ Agents can specify additional allowed hosts in their front matter using either e
 
 ```yaml
 network:
-  allow:
+  allowed:
     - python                     # Ecosystem identifier — expands to Python/PyPI domains
     - rust                       # Ecosystem identifier — expands to Rust/crates.io domains
     - "*.mycompany.com"          # Raw domain pattern
@@ -1716,7 +1716,7 @@ The `network.blocked` field removes hosts from the combined allowlist. Both ecos
 
 ```yaml
 network:
-  allow:
+  allowed:
     - python
     - node
   blocked:

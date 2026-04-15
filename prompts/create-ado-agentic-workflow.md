@@ -328,7 +328,7 @@ teardown:          # Separate job AFTER ProcessSafeOutputs
 Additional allowed domains beyond the built-in allowlist:
 ```yaml
 network:
-  allow:
+  allowed:
     - "*.mycompany.com"
     - "api.external-service.com"
   blocked:

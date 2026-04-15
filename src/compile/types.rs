@@ -600,8 +600,8 @@ pub struct NetworkConfig {
     /// Additional allowed host patterns (supports wildcards like *.example.com)
     /// Core Azure DevOps and GitHub hosts are always allowed.
     #[serde(default)]
-    pub allow: Vec<String>,
-    /// Blocked host patterns (takes precedence over allow)
+    pub allowed: Vec<String>,
+    /// Blocked host patterns (takes precedence over allowed)
     #[serde(default)]
     pub blocked: Vec<String>,
 }

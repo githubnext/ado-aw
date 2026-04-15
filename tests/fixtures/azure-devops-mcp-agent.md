@@ -20,7 +20,7 @@ safe-outputs:
   create-work-item:
     work-item-type: Task
 network:
-  allow:
+  allowed:
     - "dev.azure.com"
     - "*.dev.azure.com"
 ---

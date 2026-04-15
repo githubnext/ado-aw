@@ -159,7 +159,7 @@ If the merged result differs from the current local file:
 
   This sync preserves any ado-aw-specific entries (keys not present upstream) while updating all shared entries to match the upstream source.
 
-  This file defines the domain allowlists for ecosystem identifiers (e.g., `python`, `rust`, `node`) used in the `network.allow` front matter field.
+  This file defines the domain allowlists for ecosystem identifiers (e.g., `python`, `rust`, `node`) used in the `network.allowed` front matter field.
 
   ---
   *This PR was opened automatically by the dependency version updater workflow.*

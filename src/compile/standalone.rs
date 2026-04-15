@@ -262,7 +262,7 @@ impl Compiler for StandaloneCompiler {
 /// `--allow-domains` flag. The list includes:
 /// 1. Core Azure DevOps/GitHub endpoints
 /// 2. MCP-specific endpoints for each enabled MCP
-/// 3. User-specified additional hosts from network.allow
+/// 3. User-specified additional hosts from network.allowed
 fn generate_allowed_domains(
     front_matter: &FrontMatter,
     extensions: &[super::extensions::Extension],
@@ -284,7 +284,7 @@ fn generate_allowed_domains(
     let user_hosts: Vec<String> = front_matter
         .network
         .as_ref()
-        .map(|n| n.allow.clone())
+        .map(|n| n.allowed.clone())
         .unwrap_or_default();
 
     // Generate the allowlist by combining core + MCP + extension + user hosts
@@ -330,7 +330,7 @@ fn generate_allowed_domains(
             let domains = get_ecosystem_domains(host);
             if domains.is_empty() && !is_known_ecosystem(host) {
                 eprintln!(
-                    "warning: network.allow contains unknown ecosystem identifier '{}'. \
+                    "warning: network.allowed contains unknown ecosystem identifier '{}'. \
                      Known ecosystems: python, rust, node, go, java, etc. \
                      If this is a domain name, it should contain a dot.",
                     host
@@ -348,14 +348,14 @@ fn generate_allowed_domains(
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '*'));
         if !valid_chars {
             anyhow::bail!(
-                "network.allow domain '{}' contains characters invalid in DNS names. \
+                "network.allowed domain '{}' contains characters invalid in DNS names. \
                  Only ASCII alphanumerics, '.', '-', and '*' are allowed.",
                 host
             );
         }
         if host.contains('*') && !(host.starts_with("*.") && !host[2..].contains('*')) {
             anyhow::bail!(
-                "network.allow domain '{}' uses '*' in an unsupported position. \
+                "network.allowed domain '{}' uses '*' in an unsupported position. \
                  Wildcards must appear only as a leading prefix (e.g. '*.example.com').",
                 host
             );
@@ -1815,7 +1815,7 @@ mod tests {
     fn test_generate_allowed_domains_blocked_takes_precedence_over_allow() {
         let mut fm = minimal_front_matter();
         fm.network = Some(crate::compile::types::NetworkConfig {
-            allow: vec!["evil.example.com".to_string()],
+            allowed: vec!["evil.example.com".to_string()],
             blocked: vec!["evil.example.com".to_string()],
         });
         let exts = super::super::extensions::collect_extensions(&fm);
@@ -1841,7 +1841,7 @@ mod tests {
     fn test_generate_allowed_domains_user_allow_host_included() {
         let mut fm = minimal_front_matter();
         fm.network = Some(crate::compile::types::NetworkConfig {
-            allow: vec!["api.mycompany.com".to_string()],
+            allowed: vec!["api.mycompany.com".to_string()],
             blocked: vec![],
         });
         let exts = super::super::extensions::collect_extensions(&fm);
@@ -1859,7 +1859,7 @@ mod tests {
         // also remove wildcard variants like "*.github.com". This is intentional.
         let mut fm = minimal_front_matter();
         fm.network = Some(crate::compile::types::NetworkConfig {
-            allow: vec![],
+            allowed: vec![],
             blocked: vec!["github.com".to_string()],
         });
         let exts = super::super::extensions::collect_extensions(&fm);
@@ -1875,7 +1875,7 @@ mod tests {
     fn test_generate_allowed_domains_invalid_host_returns_error() {
         let mut fm = minimal_front_matter();
         fm.network = Some(crate::compile::types::NetworkConfig {
-            allow: vec!["bad host!".to_string()],
+            allowed: vec!["bad host!".to_string()],
             blocked: vec![],
         });
         let exts = super::super::extensions::collect_extensions(&fm);
@@ -1913,7 +1913,7 @@ mod tests {
     fn test_generate_allowed_domains_ecosystem_python_expands() {
         let mut fm = minimal_front_matter();
         fm.network = Some(crate::compile::types::NetworkConfig {
-            allow: vec!["python".to_string()],
+            allowed: vec!["python".to_string()],
             blocked: vec![],
         });
         let exts = super::super::extensions::collect_extensions(&fm);
@@ -1926,7 +1926,7 @@ mod tests {
     fn test_generate_allowed_domains_ecosystem_rust_expands() {
         let mut fm = minimal_front_matter();
         fm.network = Some(crate::compile::types::NetworkConfig {
-            allow: vec!["rust".to_string()],
+            allowed: vec!["rust".to_string()],
             blocked: vec![],
         });
         let exts = super::super::extensions::collect_extensions(&fm);
@@ -1939,7 +1939,7 @@ mod tests {
     fn test_generate_allowed_domains_ecosystem_mixed_with_raw_domains() {
         let mut fm = minimal_front_matter();
         fm.network = Some(crate::compile::types::NetworkConfig {
-            allow: vec!["python".to_string(), "api.custom.com".to_string()],
+            allowed: vec!["python".to_string(), "api.custom.com".to_string()],
             blocked: vec![],
         });
         let exts = super::super::extensions::collect_extensions(&fm);
@@ -1952,7 +1952,7 @@ mod tests {
     fn test_generate_allowed_domains_ecosystem_blocked_removes_all_ecosystem_domains() {
         let mut fm = minimal_front_matter();
         fm.network = Some(crate::compile::types::NetworkConfig {
-            allow: vec!["python".to_string()],
+            allowed: vec!["python".to_string()],
             blocked: vec!["python".to_string()],
         });
         let exts = super::super::extensions::collect_extensions(&fm);
@@ -1965,7 +1965,7 @@ mod tests {
     fn test_generate_allowed_domains_multiple_ecosystems() {
         let mut fm = minimal_front_matter();
         fm.network = Some(crate::compile::types::NetworkConfig {
-            allow: vec!["python".to_string(), "node".to_string(), "rust".to_string()],
+            allowed: vec!["python".to_string(), "node".to_string(), "rust".to_string()],
             blocked: vec![],
         });
         let exts = super::super::extensions::collect_extensions(&fm);

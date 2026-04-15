@@ -175,7 +175,7 @@ mcp-servers:
       - get_status
 ```
 
-Custom MCPs **must** have an explicit `allowed:` list. Add any required external domains to `network.allow`.
+Custom MCPs **must** have an explicit `allowed:` list. Add any required external domains to `network.allowed`.
 
 ### Adding Permissions
 
@@ -248,7 +248,7 @@ Before finalizing any update, verify:
 
 5. **Workspace consistency**: If `workspace: repo` is set, ensure `checkout:` has additional repositories. If only `self` is checked out, `workspace: repo` is unnecessary (the compiler warns about this).
 
-6. **Network domains**: If new MCPs or external services are added, ensure required domains are in `network.allow`.
+6. **Network domains**: If new MCPs or external services are added, ensure required domains are in `network.allowed`.
 
 7. **Target compatibility**: If `target: 1es`, custom MCPs (with `container:`) are not supported — only built-in MCPs with service connections.
 
