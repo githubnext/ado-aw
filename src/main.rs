@@ -2,6 +2,7 @@ mod allowed_hosts;
 mod compile;
 mod configure;
 mod detect;
+mod ecosystem_domains;
 mod execute;
 mod fuzzy_schedule;
 mod init;

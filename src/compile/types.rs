@@ -594,14 +594,15 @@ fn default_model() -> String {
 /// The domain allowlist is dynamically generated based on:
 /// - Core Azure DevOps/GitHub endpoints (always included)
 /// - MCP-specific endpoints for each enabled MCP
-/// - User-specified additional hosts from `allow` field
+/// - User-specified additional hosts from `allowed` field
 #[derive(Debug, Deserialize, Clone, Default, SanitizeConfig)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkConfig {
     /// Additional allowed host patterns (supports wildcards like *.example.com)
     /// Core Azure DevOps and GitHub hosts are always allowed.
     #[serde(default)]
-    pub allow: Vec<String>,
-    /// Blocked host patterns (takes precedence over allow)
+    pub allowed: Vec<String>,
+    /// Blocked host patterns (takes precedence over allowed)
     #[serde(default)]
     pub blocked: Vec<String>,
 }
@@ -1227,5 +1228,62 @@ Body
         assert_eq!(tools.edit, Some(true));
         let runtimes = fm.runtimes.as_ref().unwrap();
         assert!(runtimes.lean.as_ref().unwrap().is_enabled());
+    }
+
+    // ─── NetworkConfig deny_unknown_fields ──────────────────────────────────
+
+    #[test]
+    fn test_network_config_rejects_old_allow_field() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+network:
+  allow:
+    - "*.mycompany.com"
+---
+
+Body
+"#;
+        let result = super::super::common::parse_markdown(content);
+        assert!(result.is_err(), "network.allow (old field name) should be rejected");
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(
+            err.contains("unknown field `allow`"),
+            "error should mention unknown field `allow`, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_network_config_accepts_allowed_field() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+network:
+  allowed:
+    - "*.mycompany.com"
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let net = fm.network.unwrap();
+        assert_eq!(net.allowed, vec!["*.mycompany.com"]);
+        assert!(net.blocked.is_empty());
+    }
+
+    #[test]
+    fn test_network_config_rejects_arbitrary_unknown_field() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+network:
+  typo-field: true
+---
+
+Body
+"#;
+        let result = super::super::common::parse_markdown(content);
+        assert!(result.is_err(), "unknown fields in network should be rejected");
     }
 }

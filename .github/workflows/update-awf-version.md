@@ -1,7 +1,7 @@
 ---
 on:
   schedule: daily
-description: Checks for new releases of gh-aw-firewall, copilot-cli, and gh-aw-mcpg, and opens PRs to update pinned version constants
+description: Checks for new releases of gh-aw-firewall, copilot-cli, and gh-aw-mcpg, and syncs ecosystem_domains.json from gh-aw. Opens PRs for any updates found.
 permissions:
   contents: read
   issues: read
@@ -13,7 +13,7 @@ network:
   allowed: [defaults]
 safe-outputs:
   create-pull-request:
-    max: 3
+    max: 4
 ---
 
 # Dependency Version Updater
@@ -22,21 +22,22 @@ You are a dependency maintenance bot for the **ado-aw** project — a Rust CLI c
 
 ## Your Task
 
-Check whether pinned version constants in `src/compile/common.rs` are up to date with the latest releases of their upstream dependencies. For each outdated constant, open a PR to update it.
+Check whether pinned version constants in `src/compile/common.rs` are up to date with the latest releases of their upstream dependencies, and whether `src/data/ecosystem_domains.json` matches the upstream source. For each outdated item, open a PR to update it.
 
-There are three dependencies to check:
+There are four items to check:
 
-| Constant | Upstream Repository | Example value |
-|----------|-------------------|---------------|
-| `AWF_VERSION` | [github/gh-aw-firewall](https://github.com/github/gh-aw-firewall) | `0.25.14` |
-| `COPILOT_CLI_VERSION` | [github/copilot-cli](https://github.com/github/copilot-cli) | `1.0.6` |
-| `MCPG_VERSION` | [github/gh-aw-mcpg](https://github.com/github/gh-aw-mcpg) | `0.1.9` |
+| Item | Upstream Source | Local Path |
+|------|---------------|------------|
+| `AWF_VERSION` | [github/gh-aw-firewall](https://github.com/github/gh-aw-firewall) latest release | `src/compile/common.rs` |
+| `COPILOT_CLI_VERSION` | [github/copilot-cli](https://github.com/github/copilot-cli) latest release | `src/compile/common.rs` |
+| `MCPG_VERSION` | [github/gh-aw-mcpg](https://github.com/github/gh-aw-mcpg) latest release | `src/compile/common.rs` |
+| `ecosystem_domains.json` | [github/gh-aw](https://github.com/github/gh-aw) `pkg/workflow/data/ecosystem_domains.json` on `main` | `src/data/ecosystem_domains.json` |
 
-Run the following steps **independently for each dependency**. One may be up to date while the other is not.
+Run the following steps **independently for each item**. One may be up to date while another is not.
 
 ---
 
-## For each dependency:
+## For AWF_VERSION, COPILOT_CLI_VERSION, MCPG_VERSION:
 
 ### Step 1: Get the Latest Release
 
@@ -109,6 +110,56 @@ If the latest version is newer than the current constant:
   ### Release
 
   See the [gh-aw-mcpg release notes](https://github.com/github/gh-aw-mcpg/releases/tag/v<latest-version>) for details.
+
+  ---
+  *This PR was opened automatically by the dependency version updater workflow.*
+  ```
+
+- **Base branch**: `main`
+
+---
+
+## For ecosystem_domains.json:
+
+### Step 1: Fetch the Upstream File
+
+Read the file `pkg/workflow/data/ecosystem_domains.json` from the `main` branch of [github/gh-aw](https://github.com/github/gh-aw).
+
+### Step 2: Read the Local File
+
+Read `src/data/ecosystem_domains.json` in this repository.
+
+### Step 3: Merge and Compare
+
+Our local file may contain **additional entries** that do not exist upstream (e.g., `"lean"`). These are ado-aw-specific additions and must be preserved.
+
+Merge the two files as follows:
+- Start with all entries from the **upstream** file (updating any existing keys to match upstream values).
+- **Add back** any keys that exist in the local file but **not** in the upstream file. These are ado-aw-specific entries.
+- Maintain alphabetical key ordering in the final JSON.
+
+If the merged result is identical to the current local file, **skip** — everything is up to date.
+
+Before proceeding, also check whether a PR already exists with the title `chore: sync ecosystem_domains.json from gh-aw`. If one is already open, **skip** to avoid duplicates.
+
+### Step 4: Create a Sync PR
+
+If the merged result differs from the current local file:
+
+1. Write the merged JSON to `src/data/ecosystem_domains.json` (preserve 2-space indentation, one key per line, trailing newline).
+
+2. Create a pull request:
+
+- **Title**: `chore: sync ecosystem_domains.json from gh-aw`
+- **Body**:
+  ```markdown
+  ## Ecosystem Domains Sync
+
+  Merges upstream changes from [`github/gh-aw/pkg/workflow/data/ecosystem_domains.json`](https://github.com/github/gh-aw/blob/main/pkg/workflow/data/ecosystem_domains.json) into `src/data/ecosystem_domains.json`.
+
+  This sync preserves any ado-aw-specific entries (keys not present upstream) while updating all shared entries to match the upstream source.
+
+  This file defines the domain allowlists for ecosystem identifiers (e.g., `python`, `rust`, `node`) used in the `network.allowed` front matter field.
 
   ---
   *This PR was opened automatically by the dependency version updater workflow.*

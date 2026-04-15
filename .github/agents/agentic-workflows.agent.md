@@ -97,5 +97,5 @@ ado-aw check my-agent.yml
 
 - Agent files must be compiled with `ado-aw compile` after frontmatter changes
 - Markdown body changes don't require recompilation
-- Follow security best practices: minimal permissions, explicit `network.allow`, scoped service connections
+- Follow security best practices: minimal permissions, explicit `network.allowed`, scoped service connections
 - Reference full docs at the [AGENTS.md](../../AGENTS.md) in this repo

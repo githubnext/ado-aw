@@ -67,20 +67,20 @@ This is the most complex stage — it involves downloading binaries, starting Do
 
 | Error Pattern | Likely Cause | Fix |
 |---------------|-------------|-----|
-| `503 Service Unavailable` from Squid | Domain not in allowlist | Add domain to `network.allow` in front matter |
+| `503 Service Unavailable` from Squid | Domain not in allowlist | Add domain to `network.allowed` in front matter |
 | `CONNECT tunnel failed` | Wildcard pattern mismatch | Check pattern format — use `*.example.com` not `example.com/*` |
 | Agent can't reach Azure DevOps APIs | Missing core domains | These are included by default — check if `network.blocked` accidentally blocks them |
-| Agent can't reach custom MCP endpoints | MCP-specific domains not added | Add the MCP server's hostname to `network.allow` |
+| Agent can't reach custom MCP endpoints | MCP-specific domains not added | Add the MCP server's hostname to `network.allowed` |
 
 **Checking the allowlist**: The compiler merges three domain sources:
 1. Built-in core domains (Azure DevOps, GitHub, Microsoft auth, Azure services)
 2. MCP-specific domains (auto-added per enabled MCP)
-3. User-specified domains from `network.allow`
+3. User-specified domains from `network.allowed`
 
 If the agent needs to reach `api.myservice.com`, add it:
 ```yaml
 network:
-  allow:
+  allowed:
     - "api.myservice.com"
     - "*.myservice.com"   # if subdomains are also needed
 ```
@@ -362,7 +362,7 @@ Use this checklist to systematically rule out common issues:
 
 - [ ] **Compilation in sync**: `ado-aw check <pipeline.yml>` passes
 - [ ] **Correct stage identified**: Know which of the 3 jobs failed
-- [ ] **Network allowlist**: All required domains are in `network.allow` or built-in
+- [ ] **Network allowlist**: All required domains are in `network.allowed` or built-in
 - [ ] **MCP tools allowed**: Every tool the agent needs is in an `allowed:` list
 - [ ] **Permissions set**: `permissions.write` is present if write safe-outputs are configured
 - [ ] **Service connections authorized**: ARM connections are permitted for this pipeline
