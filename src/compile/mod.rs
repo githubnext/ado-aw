@@ -7,6 +7,7 @@
 //! - **1ES**: Integration with 1ES Pipeline Templates using the agencyJob type
 
 mod common;
+pub mod extensions;
 mod onees;
 mod standalone;
 mod types;

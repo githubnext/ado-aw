@@ -1447,9 +1447,27 @@ When extending the compiler:
 3. **New front matter fields**: Add fields to `FrontMatter` in `src/compile/types.rs`
 4. **New template markers**: Handle replacements in the target-specific compiler (e.g., `standalone.rs` or `onees.rs`)
 5. **New safe-output tools**: Add to `src/safeoutputs/` — implement `ToolResult`, `Executor`, register in `mod.rs`, `mcp.rs`, `execute.rs`
-6. **New first-class tools**: Add to `src/tools/` — extend `ToolsConfig` in `types.rs`, wire in compilers
-7. **New runtimes**: Add to `src/runtimes/` — extend `RuntimesConfig` in `types.rs`, wire in compilers
-7. **Validation**: Add compile-time validation for safe outputs and permissions
+6. **New first-class tools**: Add to `src/tools/` — extend `ToolsConfig` in `types.rs`, implement `CompilerExtension` trait in `src/compile/extensions.rs`, add collection in `collect_extensions()`
+7. **New runtimes**: Add to `src/runtimes/` — extend `RuntimesConfig` in `types.rs`, implement `CompilerExtension` trait in `src/compile/extensions.rs`, add collection in `collect_extensions()`
+8. **Validation**: Add compile-time validation for safe outputs and permissions
+
+#### `CompilerExtension` Trait
+
+Runtimes and first-party tools declare their compilation requirements via the `CompilerExtension` trait (`src/compile/extensions.rs`). Instead of scattering special-case `if` blocks across the compiler, each runtime/tool implements this trait and the compiler collects requirements generically:
+
+```rust
+pub trait CompilerExtension: Send {
+    fn name(&self) -> &str;                                    // Display name
+    fn required_hosts(&self) -> Vec<String>;                   // AWF network allowlist
+    fn required_bash_commands(&self) -> Vec<String>;           // Agent bash allow-list
+    fn prompt_supplement(&self) -> Option<String>;              // Agent prompt markdown
+    fn prepare_steps(&self) -> Vec<String>;                    // Pipeline steps (install, etc.)
+    fn mcpg_servers(&self, ctx) -> Result<Vec<(String, McpgServerConfig)>>; // MCPG entries
+    fn validate(&self, ctx) -> Result<Vec<String>>;            // Compile-time warnings
+}
+```
+
+To add a new runtime or tool: (1) create a struct implementing `CompilerExtension`, (2) add a collection check in `collect_extensions()`. No other files need modification.
 
 ### Security Considerations
 
