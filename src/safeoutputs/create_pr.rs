@@ -7,6 +7,7 @@ use tokio::process::Command;
 
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, ToolResult, Validate};
 use crate::sanitize::{Sanitize, sanitize as sanitize_text};
+use crate::tool_result;
 use anyhow::{Context, ensure};
 
 /// Maximum allowed patch file size (5 MB)
@@ -256,41 +257,56 @@ impl Validate for CreatePrParams {
     }
 }
 
-/// Result of creating a pull request - stored as safe output
-#[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct CreatePrResult {
-    /// Tool identifier
-    pub name: String,
-    /// Title for the pull request
-    pub title: String,
-    /// Description/body of the pull request (markdown)
-    pub description: String,
-    /// Source branch name (generated or provided)
-    pub source_branch: String,
-    /// Path to the patch file in the safe outputs directory
-    pub patch_file: String,
-    /// Repository alias ("self" or alias from checkout list)
-    pub repository: String,
-    /// Agent-provided labels (validated against allowed-labels at execution time)
+/// Internal params struct mirroring CreatePrResult fields for the tool_result! macro.
+/// The actual MCP parameters come from CreatePrParams; this struct enables the macro's
+/// TryFrom generation while CreatePrResult is constructed via CreatePrResult::new().
+#[derive(Deserialize, JsonSchema)]
+struct CreatePrResultFields {
+    title: String,
+    description: String,
+    source_branch: String,
+    patch_file: String,
+    repository: String,
     #[serde(default)]
-    pub agent_labels: Vec<String>,
-    /// Base commit SHA recorded at patch generation time (merge-base of HEAD and
-    /// the upstream branch). When present, Stage 2 uses this as the parent commit
-    /// for the ADO Push API, ensuring the patch applies cleanly even if the target
-    /// branch has advanced since the agent ran. Falls back to resolving the live
-    /// target branch HEAD via the ADO refs API when absent (backward compatibility).
-    ///
-    /// Note: this is the merge-base, not the target branch HEAD. The PR diff in ADO
-    /// compares file states and displays correctly regardless; however, the branch
-    /// history shows a parent older than current main. This is normal for topic
-    /// branches and is resolved when the PR is merged.
+    agent_labels: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub base_commit: Option<String>,
+    base_commit: Option<String>,
 }
 
-impl crate::safeoutputs::ToolResult for CreatePrResult {
-    const NAME: &'static str = "create-pull-request";
-    const REQUIRES_WRITE: bool = true;
+impl Validate for CreatePrResultFields {}
+
+tool_result! {
+    name = "create-pull-request",
+    write = true,
+    params = CreatePrResultFields,
+    /// Result of creating a pull request - stored as safe output
+    pub struct CreatePrResult {
+        /// Title for the pull request
+        title: String,
+        /// Description/body of the pull request (markdown)
+        description: String,
+        /// Source branch name (generated or provided)
+        source_branch: String,
+        /// Path to the patch file in the safe outputs directory
+        patch_file: String,
+        /// Repository alias ("self" or alias from checkout list)
+        repository: String,
+        /// Agent-provided labels (validated against allowed-labels at execution time)
+        #[serde(default)]
+        agent_labels: Vec<String>,
+        /// Base commit SHA recorded at patch generation time (merge-base of HEAD and
+        /// the upstream branch). When present, Stage 2 uses this as the parent commit
+        /// for the ADO Push API, ensuring the patch applies cleanly even if the target
+        /// branch has advanced since the agent ran. Falls back to resolving the live
+        /// target branch HEAD via the ADO refs API when absent (backward compatibility).
+        ///
+        /// Note: this is the merge-base, not the target branch HEAD. The PR diff in ADO
+        /// compares file states and displays correctly regardless; however, the branch
+        /// history shows a parent older than current main. This is normal for topic
+        /// branches and is resolved when the PR is merged.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        base_commit: Option<String>,
+    }
 }
 
 impl Sanitize for CreatePrResult {
@@ -1391,8 +1407,9 @@ impl Executor for CreatePrResult {
                 }
             });
 
-            // Only set autoCompleteSetBy if auto_complete is enabled
-            if config.auto_complete {
+            // Only set autoCompleteSetBy if auto_complete is enabled and PR is not a draft
+            // (ADO silently ignores auto-complete on draft PRs, so skip the API call)
+            if config.auto_complete && !config.draft {
                 update_body["autoCompleteSetBy"] = serde_json::json!({
                     "id": pr_data["createdBy"]["id"]
                 });
@@ -2251,6 +2268,25 @@ new file mode 100755
         assert!(paths.contains(&"new.txt".to_string()));
         // /dev/null from --- should not be included (no a/ prefix)
         assert!(!paths.contains(&"/dev/null".to_string()));
+    }
+
+    #[test]
+    fn test_default_config_draft_true_autocomplete_false() {
+        let config = CreatePrConfig::default();
+        assert!(config.draft, "draft should default to true");
+        assert!(!config.auto_complete, "auto_complete should default to false");
+    }
+
+    #[test]
+    fn test_config_deserialize_draft_false_autocomplete_true() {
+        let yaml = r#"
+            target-branch: main
+            draft: false
+            auto-complete: true
+        "#;
+        let config: CreatePrConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(!config.draft);
+        assert!(config.auto_complete);
     }
 
 }
