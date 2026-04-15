@@ -95,7 +95,7 @@ impl CommentTarget {
 ///     max: 5
 ///     target: "*"
 /// ```
-#[derive(Debug, Clone, SanitizeConfig, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
 pub struct CommentOnWorkItemConfig {
     /// Target scope — which work items can be commented on.
     /// `None` means no target was configured; execution must reject this.
@@ -104,6 +104,15 @@ pub struct CommentOnWorkItemConfig {
     /// Whether to include agent execution stats in the comment (default: true).
     #[serde(default = "default_include_stats", rename = "include-stats")]
     pub include_stats: bool,
+}
+
+impl Default for CommentOnWorkItemConfig {
+    fn default() -> Self {
+        Self {
+            target: None,
+            include_stats: true,
+        }
+    }
 }
 
 /// Fetch a work item's area path from the ADO API

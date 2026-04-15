@@ -33,9 +33,9 @@ pub const OTEL_FILENAME: &str = "otel.jsonl";
 
 /// Copilot CLI internal tool names excluded from the tool call count.
 /// These are administrative spans, not user-visible tool invocations.
+/// Names must include the "execute_tool " prefix as emitted in the OTel span name.
 const INTERNAL_TOOL_NAMES: &[&str] = &[
     "execute_tool report_intent",
-    "execute_tool permission",
 ];
 
 impl AgentStats {
@@ -147,17 +147,17 @@ impl AgentStats {
     }
 }
 
-/// Sanitize a string for safe embedding in markdown output.
+/// Sanitize a string for safe embedding in a single-line markdown format.
 ///
-/// Strips control characters and neutralizes ADO pipeline commands
-/// (`##vso[`) that could be injected via the OTel file.
+/// Strips control characters (including newlines — the stats line is
+/// single-line), neutralizes ADO pipeline commands (`##vso[`), and
+/// escapes pipe characters that break markdown tables.
 fn sanitize_for_markdown(s: &str) -> String {
     s.chars()
-        .filter(|c| !c.is_control() || *c == '\n')
+        .filter(|c| !c.is_control())
         .collect::<String>()
         .replace("##vso[", "[vso-filtered][")
         .replace("##[", "[filtered][")
-        // Strip pipe characters that could break markdown tables
         .replace('|', "\\|")
 }
 
@@ -350,11 +350,12 @@ mod tests {
     fn test_internal_tools_excluded_from_count() {
         let entries = vec![
             serde_json::json!({"type": "span", "name": "execute_tool report_intent"}),
-            serde_json::json!({"type": "span", "name": "execute_tool permission"}),
             serde_json::json!({"type": "span", "name": "execute_tool bash"}),
             serde_json::json!({"type": "span", "name": "execute_tool grep"}),
+            // "permission" span has no "execute_tool" prefix so is already excluded
+            serde_json::json!({"type": "span", "name": "permission"}),
         ];
         let stats = AgentStats::from_otel_entries(&entries, "test").unwrap();
-        assert_eq!(stats.tool_calls, 2); // bash + grep, not report_intent or permission
+        assert_eq!(stats.tool_calls, 2); // bash + grep only
     }
 }

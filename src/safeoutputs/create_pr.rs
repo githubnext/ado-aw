@@ -1260,13 +1260,14 @@ impl Executor for CreatePrResult {
         }
         debug!("Changes pushed successfully");
 
-        // Append provenance footer and agent stats to description
-        let description_with_footer = format!("{}{}", self.description, generate_pr_footer());
+        // Append agent stats then provenance footer to description.
+        // Footer goes last as the final unambiguous provenance marker.
         let description_with_stats = crate::agent_stats::append_stats_to_body(
-            &description_with_footer,
+            &self.description,
             ctx,
             config.include_stats,
         );
+        let description_final = format!("{}{}", description_with_stats, generate_pr_footer());
 
         // Create the pull request via REST API
         info!("Creating pull request");
@@ -1280,7 +1281,7 @@ impl Executor for CreatePrResult {
             "sourceRefName": source_ref,
             "targetRefName": target_ref,
             "title": effective_title,
-            "description": description_with_stats,
+            "description": description_final,
             "isDraft": config.draft,
         });
 

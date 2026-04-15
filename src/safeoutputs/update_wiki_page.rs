@@ -93,7 +93,7 @@ impl SanitizeContent for UpdateWikiPageResult {
 ///     title-prefix: "[Agent] "
 ///     comment: "Updated by agent"
 /// ```
-#[derive(Debug, Clone, SanitizeConfig, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
 pub struct UpdateWikiPageConfig {
     /// Wiki identifier (name or ID). Required — execution fails without this.
     ///
@@ -132,6 +132,20 @@ pub struct UpdateWikiPageConfig {
     /// Whether to include agent execution stats in the output (default: true).
     #[serde(default = "default_include_stats", rename = "include-stats")]
     pub include_stats: bool,
+}
+
+impl Default for UpdateWikiPageConfig {
+    fn default() -> Self {
+        Self {
+            wiki_name: None,
+            wiki_project: None,
+            branch: None,
+            path_prefix: None,
+            title_prefix: None,
+            comment: None,
+            include_stats: true,
+        }
+    }
 }
 
 // ============================================================================
