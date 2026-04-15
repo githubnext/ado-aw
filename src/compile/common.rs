@@ -479,11 +479,11 @@ pub fn generate_copilot_params(front_matter: &FrontMatter) -> Result<String> {
             }
         };
 
-    // Auto-add lean/lake/elan when tools.lean is enabled
+    // Auto-add lean/lake/elan when runtimes.lean is enabled
     let has_lean = front_matter
-        .tools
+        .runtimes
         .as_ref()
-        .and_then(|t| t.lean.as_ref())
+        .and_then(|r| r.lean.as_ref())
         .is_some_and(|l| l.is_enabled());
 
     let is_unrestricted_bash = front_matter
@@ -501,7 +501,7 @@ pub fn generate_copilot_params(front_matter: &FrontMatter) -> Result<String> {
 
         if bash_disabled {
             eprintln!(
-                "Warning: Agent '{}' has tools.lean enabled but tools.bash is empty. \
+                "Warning: Agent '{}' has runtimes.lean enabled but tools.bash is empty. \
                 Lean requires bash access (lean, lake, elan commands).",
                 front_matter.name
             );
@@ -1309,7 +1309,6 @@ mod tests {
             edit: None,
             cache_memory: None,
             azure_devops: None,
-            lean: None,
         });
         let params = generate_copilot_params(&fm).unwrap();
         assert!(params.contains("--allow-tool \"shell(:*)\""));
@@ -1323,7 +1322,6 @@ mod tests {
             edit: None,
             cache_memory: None,
             azure_devops: None,
-            lean: None,
         });
         let params = generate_copilot_params(&fm).unwrap();
         assert!(!params.contains("shell("));
@@ -1332,12 +1330,8 @@ mod tests {
     #[test]
     fn test_copilot_params_lean_adds_bash_commands() {
         let mut fm = minimal_front_matter();
-        fm.tools = Some(crate::compile::types::ToolsConfig {
-            bash: None,
-            edit: None,
-            cache_memory: None,
-            azure_devops: None,
-            lean: Some(crate::compile::types::LeanToolConfig::Enabled(true)),
+        fm.runtimes = Some(crate::compile::types::RuntimesConfig {
+            lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(true)),
         });
         let params = generate_copilot_params(&fm).unwrap();
         assert!(params.contains("shell(lean)"), "lean command should be allowed");
@@ -1355,7 +1349,9 @@ mod tests {
             edit: None,
             cache_memory: None,
             azure_devops: None,
-            lean: Some(crate::compile::types::LeanToolConfig::Enabled(true)),
+        });
+        fm.runtimes = Some(crate::compile::types::RuntimesConfig {
+            lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(true)),
         });
         let params = generate_copilot_params(&fm).unwrap();
         assert!(params.contains("shell(:*)"), "unrestricted should be preserved");
@@ -2393,7 +2389,6 @@ mod tests {
             edit: None,
             cache_memory: None,
             azure_devops: None,
-            lean: None,
         });
         let result = generate_copilot_params(&fm);
         assert!(result.is_err());

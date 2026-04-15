@@ -147,6 +147,10 @@ tools:                         # optional tool configuration
   #   toolsets: [repos, wit]
   #   allowed: [wit_get_work_item]
   #   org: myorg
+runtimes:                      # optional runtime configuration (language environments)
+  lean: true                   # Lean 4 theorem prover (see Runtimes section)
+  # lean:                      # Alternative object format (with toolchain pinning)
+  #   toolchain: "leanprover/lean4:v4.29.1"
 # env:                          # RESERVED: workflow-level environment variables (not yet implemented)
 #   CUSTOM_VAR: "value"
 mcp-servers:
@@ -461,17 +465,23 @@ When enabled, the compiler:
 - Auto-infers org from the git remote URL at compile time (overridable via `org:` field)
 - Fails compilation if org cannot be determined (no explicit override and no ADO git remote)
 
+### Runtimes Configuration
+
+The `runtimes` field configures language environments that are installed before the agent runs. Unlike tools (which are agent capabilities like edit, bash, memory), runtimes are execution environments that the compiler auto-installs via pipeline steps.
+
+Aligned with [gh-aw's `runtimes:` front matter field](https://github.github.com/gh-aw/reference/frontmatter/#runtimes-runtimes).
+
 #### Lean 4 (`lean:`)
 
-First-class Lean 4 theorem prover integration. Auto-installs the Lean toolchain via elan, extends the bash command allow-list, adds Lean-specific domains to the network allowlist, and appends a prompt supplement informing the agent that Lean is available.
+Lean 4 theorem prover runtime. Auto-installs the Lean toolchain via elan, extends the bash command allow-list, adds Lean-specific domains to the network allowlist, and appends a prompt supplement informing the agent that Lean is available.
 
 ```yaml
 # Simple enablement (installs latest stable toolchain)
-tools:
+runtimes:
   lean: true
 
 # With options (pin specific toolchain version)
-tools:
+runtimes:
   lean:
     toolchain: "leanprover/lean4:v4.29.1"
 ```
@@ -481,6 +491,7 @@ When enabled, the compiler:
 - Defaults to the `stable` toolchain; if a `lean-toolchain` file exists in the repo, elan overrides to that version automatically
 - Auto-adds `lean`, `lake`, and `elan` to the bash command allow-list
 - Adds Lean-specific domains to the network allowlist: `elan.lean-lang.org`, `leanprover.github.io`, `lean-lang.org`
+- Symlinks lean tools into `/tmp/awf-tools/` for AWF chroot compatibility
 - Appends a prompt supplement informing the agent about Lean 4 availability and basic commands
 - Emits a compile-time warning if `tools.bash` is empty (Lean requires bash access)
 
@@ -1224,6 +1235,7 @@ When extending the compiler:
 4. **New template markers**: Handle replacements in the target-specific compiler (e.g., `standalone.rs` or `onees.rs`)
 5. **New safe-output tools**: Add to `src/safeoutputs/` — implement `ToolResult`, `Executor`, register in `mod.rs`, `mcp.rs`, `execute.rs`
 6. **New first-class tools**: Add to `src/tools/` — extend `ToolsConfig` in `types.rs`, wire in compilers
+7. **New runtimes**: Add to `src/runtimes/` — extend `RuntimesConfig` in `types.rs`, wire in compilers
 7. **Validation**: Add compile-time validation for safe outputs and permissions
 
 ### Security Considerations

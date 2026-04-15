@@ -111,9 +111,9 @@ impl Compiler for StandaloneCompiler {
             .is_some_and(|cm| cm.is_enabled());
 
         let lean_config = front_matter
-            .tools
+            .runtimes
             .as_ref()
-            .and_then(|t| t.lean.as_ref())
+            .and_then(|r| r.lean.as_ref())
             .filter(|l| l.is_enabled());
 
         // Build parameters list: user-defined + auto-injected clearMemory for memory
@@ -346,11 +346,11 @@ fn generate_allowed_domains(front_matter: &FrontMatter) -> Result<String> {
         }
     }
 
-    // Add Lean-specific hosts when tools.lean is enabled
+    // Add Lean-specific hosts when runtimes.lean is enabled
     if front_matter
-        .tools
+        .runtimes
         .as_ref()
-        .and_then(|t| t.lean.as_ref())
+        .and_then(|r| r.lean.as_ref())
         .is_some_and(|l| l.is_enabled())
     {
         for host in mcp_required_hosts("lean") {
@@ -451,7 +451,7 @@ fn generate_teardown_job(
 fn generate_prepare_steps(
     prepare_steps: &[serde_yaml::Value],
     has_memory: bool,
-    lean_config: Option<&super::types::LeanToolConfig>,
+    lean_config: Option<&crate::runtimes::lean::LeanRuntimeConfig>,
 ) -> String {
     let mut parts = Vec::new();
 
@@ -463,8 +463,8 @@ fn generate_prepare_steps(
 
     // Lean install and prompt
     if let Some(lean) = lean_config {
-        parts.push(generate_lean_install(lean));
-        parts.push(generate_lean_prompt());
+        parts.push(crate::runtimes::lean::generate_lean_install(lean));
+        parts.push(crate::runtimes::lean::generate_lean_prompt());
     }
 
     if !prepare_steps.is_empty() {
@@ -1152,50 +1152,6 @@ fn generate_memory_prompt() -> String {
 
     echo "Agent memory prompt appended"
   displayName: "Append memory prompt""#
-        .to_string()
-}
-
-/// Generate the elan installation step for Lean 4.
-///
-/// Installs elan (Lean toolchain manager) and the specified toolchain.
-/// Defaults to "stable" if no toolchain is specified in the front matter.
-fn generate_lean_install(config: &super::types::LeanToolConfig) -> String {
-    let toolchain = config.toolchain().unwrap_or("stable");
-    format!(
-        "- bash: |\n\
-         \x20\x20\x20\x20curl https://elan.lean-lang.org/elan-init.sh -sSf | sh -s -- -y --default-toolchain {}\n\
-         \x20\x20\x20\x20echo \"##vso[task.prependpath]$HOME/.elan/bin\"\n\
-         \x20\x20\x20\x20export PATH=\"$HOME/.elan/bin:$PATH\"\n\
-         \x20\x20\x20\x20lean --version || echo \"Lean installed via elan\"\n\
-         \x20\x20\x20\x20lake --version || echo \"Lake installed via elan\"\n\
-         \x20\x20\x20\x20# Symlink lean tools into /tmp/awf-tools/ so they are accessible\n\
-         \x20\x20\x20\x20# inside the AWF chroot (AWF mounts /tmp but reconstructs PATH\n\
-         \x20\x20\x20\x20# from standard system locations, excluding $HOME/.elan/bin).\n\
-         \x20\x20\x20\x20for cmd in lean lake elan; do\n\
-         \x20\x20\x20\x20\x20\x20if command -v \"$cmd\" >/dev/null 2>&1; then\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20ln -sf \"$(command -v \"$cmd\")\" \"/tmp/awf-tools/$cmd\"\n\
-         \x20\x20\x20\x20\x20\x20fi\n\
-         \x20\x20\x20\x20done\n\
-         \x20\x20\x20\x20echo \"Lean tools symlinked to /tmp/awf-tools/\"\n\
-         \x20\x20displayName: \"Install Lean 4 (elan)\"",
-        toolchain
-    )
-}
-
-/// Generate the prompt append step to inform the agent that Lean 4 is available.
-fn generate_lean_prompt() -> String {
-    r#"- bash: |
-    cat >> "/tmp/awf-tools/agent-prompt.md" << 'LEAN_PROMPT_EOF'
-
-    ---
-
-    ## Lean 4 Formal Verification
-
-    Lean 4 is installed and available. Use `lean` to typecheck `.lean` files, `lake build` to build Lake projects, and `lake env printPaths` to inspect the toolchain. Lean files use the `.lean` extension.
-    LEAN_PROMPT_EOF
-
-    echo "Lean prompt appended"
-  displayName: "Append Lean 4 prompt""#
         .to_string()
 }
 
@@ -2140,12 +2096,8 @@ mod tests {
     #[test]
     fn test_generate_allowed_domains_lean_adds_lean_hosts() {
         let mut fm = minimal_front_matter();
-        fm.tools = Some(crate::compile::types::ToolsConfig {
-            bash: None,
-            edit: None,
-            cache_memory: None,
-            azure_devops: None,
-            lean: Some(crate::compile::types::LeanToolConfig::Enabled(true)),
+        fm.runtimes = Some(crate::compile::types::RuntimesConfig {
+            lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(true)),
         });
         let domains = generate_allowed_domains(&fm).unwrap();
         assert!(domains.contains("elan.lean-lang.org"), "should include elan domain");
@@ -2156,12 +2108,8 @@ mod tests {
     #[test]
     fn test_generate_allowed_domains_lean_disabled_no_lean_hosts() {
         let mut fm = minimal_front_matter();
-        fm.tools = Some(crate::compile::types::ToolsConfig {
-            bash: None,
-            edit: None,
-            cache_memory: None,
-            azure_devops: None,
-            lean: Some(crate::compile::types::LeanToolConfig::Enabled(false)),
+        fm.runtimes = Some(crate::compile::types::RuntimesConfig {
+            lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(false)),
         });
         let domains = generate_allowed_domains(&fm).unwrap();
         assert!(!domains.contains("elan.lean-lang.org"), "lean disabled should not add lean hosts");
@@ -2232,8 +2180,8 @@ mod tests {
 
     #[test]
     fn test_generate_prepare_steps_with_lean() {
-        use crate::compile::types::LeanToolConfig;
-        let lean = LeanToolConfig::Enabled(true);
+        use crate::runtimes::lean::LeanRuntimeConfig;
+        let lean = LeanRuntimeConfig::Enabled(true);
         let result = generate_prepare_steps(&[], false, Some(&lean));
         assert!(result.contains("elan-init.sh"), "should include elan installer");
         assert!(result.contains("Lean 4"), "should include Lean prompt");
@@ -2243,8 +2191,8 @@ mod tests {
 
     #[test]
     fn test_generate_prepare_steps_with_lean_custom_toolchain() {
-        use crate::compile::types::{LeanToolConfig, LeanOptions};
-        let lean = LeanToolConfig::WithOptions(LeanOptions {
+        use crate::runtimes::lean::{LeanRuntimeConfig, LeanOptions};
+        let lean = LeanRuntimeConfig::WithOptions(LeanOptions {
             toolchain: Some("leanprover/lean4:v4.29.1".to_string()),
         });
         let result = generate_prepare_steps(&[], false, Some(&lean));
@@ -2256,8 +2204,8 @@ mod tests {
 
     #[test]
     fn test_generate_prepare_steps_with_lean_and_memory() {
-        use crate::compile::types::LeanToolConfig;
-        let lean = LeanToolConfig::Enabled(true);
+        use crate::runtimes::lean::LeanRuntimeConfig;
+        let lean = LeanRuntimeConfig::Enabled(true);
         let result = generate_prepare_steps(&[], true, Some(&lean));
         assert!(result.contains("agent_memory"), "memory steps present");
         assert!(result.contains("elan-init.sh"), "lean install present");

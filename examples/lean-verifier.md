@@ -4,8 +4,9 @@ description: "Analyzes code and builds formal Lean 4 proofs of critical invarian
 engine: claude-opus-4.5
 schedule: weekly on friday around 17:00
 tools:
-  lean: true
   cache-memory: true
+runtimes:
+  lean: true
 safe-outputs:
   create-pull-request:
     target-branch: main

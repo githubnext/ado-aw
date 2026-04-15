@@ -9,6 +9,7 @@ mod logging;
 mod mcp;
 mod ndjson;
 mod proxy;
+pub mod runtimes;
 pub mod sanitize;
 mod safeoutputs;
 mod tools;

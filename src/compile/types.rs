@@ -220,11 +220,6 @@ pub struct ToolsConfig {
     /// and network allowlist domains.
     #[serde(default, rename = "azure-devops")]
     pub azure_devops: Option<AzureDevOpsToolConfig>,
-    /// First-class Lean 4 theorem prover integration.
-    /// Auto-installs elan/lean/lake, adds Lean domains to the network allowlist,
-    /// extends the bash command allow-list, and appends a prompt supplement.
-    #[serde(default)]
-    pub lean: Option<LeanToolConfig>,
 }
 
 /// Cache memory tool configuration — accepts both `true` and object formats
@@ -347,52 +342,20 @@ pub struct AzureDevOpsOptions {
     pub org: Option<String>,
 }
 
-/// Lean 4 tool configuration — accepts both `true` and object formats
+/// Runtime configuration for language environments.
 ///
-/// Examples:
-/// ```yaml
-/// # Simple enablement
-/// lean: true
+/// Runtimes are language toolchains installed before the agent runs.
+/// Unlike tools (which are agent capabilities like edit, bash, memory),
+/// runtimes are execution environments (Lean, Python, Node, etc.).
 ///
-/// # With options
-/// lean:
-///   toolchain: "leanprover/lean4:v4.29.1"
-/// ```
-#[derive(Debug, Deserialize, Clone)]
-#[serde(untagged)]
-pub enum LeanToolConfig {
-    /// Simple boolean enablement
-    Enabled(bool),
-    /// Full configuration with options
-    WithOptions(LeanOptions),
-}
-
-impl LeanToolConfig {
-    /// Whether Lean is enabled
-    pub fn is_enabled(&self) -> bool {
-        match self {
-            LeanToolConfig::Enabled(enabled) => *enabled,
-            LeanToolConfig::WithOptions(_) => true,
-        }
-    }
-
-    /// Get the toolchain override (None = use "stable" default)
-    pub fn toolchain(&self) -> Option<&str> {
-        match self {
-            LeanToolConfig::Enabled(_) => None,
-            LeanToolConfig::WithOptions(opts) => opts.toolchain.as_deref(),
-        }
-    }
-}
-
-/// Lean 4 options
+/// Aligned with gh-aw's `runtimes:` front matter field.
 #[derive(Debug, Deserialize, Clone, Default)]
-pub struct LeanOptions {
-    /// Lean toolchain to install (e.g., "stable", "leanprover/lean4:v4.29.1").
-    /// Defaults to "stable" if not specified. If a `lean-toolchain` file exists
-    /// in the repository, elan will override to that version automatically.
+pub struct RuntimesConfig {
+    /// Lean 4 theorem prover runtime.
+    /// Auto-installs elan/lean/lake, adds Lean domains to the network allowlist,
+    /// extends the bash command allow-list, and appends a prompt supplement.
     #[serde(default)]
-    pub toolchain: Option<String>,
+    pub lean: Option<crate::runtimes::lean::LeanRuntimeConfig>,
 }
 
 /// Azure DevOps runtime parameter definition.
@@ -455,6 +418,9 @@ pub struct FrontMatter {
     /// Tools configuration
     #[serde(default)]
     pub tools: Option<ToolsConfig>,
+    /// Runtime configuration for language environments (e.g., Lean 4)
+    #[serde(default)]
+    pub runtimes: Option<RuntimesConfig>,
     /// Additional repository resources
     #[serde(default)]
     pub repositories: Vec<Repository>,
@@ -1019,21 +985,21 @@ Body
         assert_eq!(tools.edit, Some(true));
     }
 
-    // ─── LeanToolConfig deserialization ──────────────────────────────────
+    // ─── LeanRuntimeConfig deserialization ──────────────────────────────
 
     #[test]
     fn test_lean_bool_true() {
         let content = r#"---
 name: "Test"
 description: "Test"
-tools:
+runtimes:
   lean: true
 ---
 
 Body
 "#;
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
-        let lean = fm.tools.as_ref().unwrap().lean.as_ref().unwrap();
+        let lean = fm.runtimes.as_ref().unwrap().lean.as_ref().unwrap();
         assert!(lean.is_enabled());
         assert!(lean.toolchain().is_none());
     }
@@ -1043,14 +1009,14 @@ Body
         let content = r#"---
 name: "Test"
 description: "Test"
-tools:
+runtimes:
   lean: false
 ---
 
 Body
 "#;
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
-        let lean = fm.tools.as_ref().unwrap().lean.as_ref().unwrap();
+        let lean = fm.runtimes.as_ref().unwrap().lean.as_ref().unwrap();
         assert!(!lean.is_enabled());
     }
 
@@ -1059,7 +1025,7 @@ Body
         let content = r#"---
 name: "Test"
 description: "Test"
-tools:
+runtimes:
   lean:
     toolchain: "leanprover/lean4:v4.29.1"
 ---
@@ -1067,7 +1033,7 @@ tools:
 Body
 "#;
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
-        let lean = fm.tools.as_ref().unwrap().lean.as_ref().unwrap();
+        let lean = fm.runtimes.as_ref().unwrap().lean.as_ref().unwrap();
         assert!(lean.is_enabled());
         assert_eq!(lean.toolchain(), Some("leanprover/lean4:v4.29.1"));
     }
@@ -1077,14 +1043,14 @@ Body
         let content = r#"---
 name: "Test"
 description: "Test"
-tools:
+runtimes:
   lean: {}
 ---
 
 Body
 "#;
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
-        let lean = fm.tools.as_ref().unwrap().lean.as_ref().unwrap();
+        let lean = fm.runtimes.as_ref().unwrap().lean.as_ref().unwrap();
         assert!(lean.is_enabled());
         assert!(lean.toolchain().is_none());
     }
@@ -1094,18 +1060,17 @@ Body
         let content = r#"---
 name: "Test"
 description: "Test"
-tools:
-  edit: true
+runtimes: {}
 ---
 
 Body
 "#;
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
-        assert!(fm.tools.as_ref().unwrap().lean.is_none());
+        assert!(fm.runtimes.as_ref().unwrap().lean.is_none());
     }
 
     #[test]
-    fn test_all_tools_together() {
+    fn test_all_tools_and_runtimes_together() {
         let content = r#"---
 name: "Test"
 description: "Test"
@@ -1115,6 +1080,7 @@ tools:
   cache-memory: true
   azure-devops:
     toolsets: [wit]
+runtimes:
   lean: true
 ---
 
@@ -1124,8 +1090,9 @@ Body
         let tools = fm.tools.as_ref().unwrap();
         assert!(tools.cache_memory.as_ref().unwrap().is_enabled());
         assert!(tools.azure_devops.as_ref().unwrap().is_enabled());
-        assert!(tools.lean.as_ref().unwrap().is_enabled());
         assert_eq!(tools.bash.as_ref().unwrap(), &["cat", "ls"]);
         assert_eq!(tools.edit, Some(true));
+        let runtimes = fm.runtimes.as_ref().unwrap();
+        assert!(runtimes.lean.as_ref().unwrap().is_enabled());
     }
 }
