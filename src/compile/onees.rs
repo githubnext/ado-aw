@@ -28,6 +28,7 @@ use super::common::{
     validate_resolve_pr_thread_statuses, validate_submit_pr_review_events,
     validate_update_pr_votes, validate_update_work_item_target, validate_write_permissions,
 };
+use super::extensions::CompilerExtension;
 use super::types::{FrontMatter, McpConfig};
 
 /// 1ES Pipeline Template compiler.
@@ -65,6 +66,21 @@ impl Compiler for OneESCompiler {
         let checkout_steps = generate_checkout_steps(&front_matter.checkout);
         let checkout_self = generate_checkout_self();
         let extensions = super::extensions::collect_extensions(front_matter);
+
+        // Run extension validations (warnings + errors)
+        {
+            let validation_ctx = super::extensions::CompileContext {
+                agent_name: &front_matter.name,
+                front_matter,
+                inferred_org: None,
+            };
+            for ext in &extensions {
+                for warning in ext.validate(&validation_ctx)? {
+                    eprintln!("Warning: {}", warning);
+                }
+            }
+        }
+
         let copilot_params = generate_copilot_params(front_matter, &extensions)?;
         let has_memory = front_matter
             .tools

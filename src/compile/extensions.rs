@@ -426,6 +426,9 @@ use super::types::CacheMemoryToolConfig;
 /// Injects: prepare steps (download/restore previous memory), and a
 /// prompt supplement informing the agent about its memory directory.
 pub struct CacheMemoryExtension {
+    /// Config options (e.g., `allowed-extensions`) are consumed at Stage 2
+    /// execution time, not at compile time. Retained here for potential
+    /// future compile-time validation.
     #[allow(dead_code)]
     config: CacheMemoryToolConfig,
 }
@@ -551,6 +554,18 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
 /// prompt supplements to the agent prompt file. Each line of content is
 /// indented by 4 spaces to match the YAML block scalar indentation.
 pub fn wrap_prompt_append(content: &str, display_name: &str) -> String {
+    // Guard against names that would break bash echo or YAML displayName.
+    // All current extension names are hardcoded alphanumeric strings, but
+    // this catches future extensions whose name() might contain shell
+    // metacharacters.
+    debug_assert!(
+        display_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_')),
+        "Extension display_name '{}' contains characters unsafe for bash/YAML embedding",
+        display_name
+    );
+
     // Generate a unique heredoc delimiter from the display name
     let delimiter = display_name
         .to_uppercase()
