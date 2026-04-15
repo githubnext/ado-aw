@@ -1,3 +1,4 @@
+mod agent_stats;
 mod allowed_hosts;
 mod compile;
 mod configure;
