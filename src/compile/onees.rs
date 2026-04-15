@@ -64,7 +64,8 @@ impl Compiler for OneESCompiler {
         let repositories = generate_repositories(&front_matter.repositories);
         let checkout_steps = generate_checkout_steps(&front_matter.checkout);
         let checkout_self = generate_checkout_self();
-        let copilot_params = generate_copilot_params(front_matter)?;
+        let extensions = super::extensions::collect_extensions(front_matter);
+        let copilot_params = generate_copilot_params(front_matter, &extensions)?;
         let has_memory = front_matter
             .tools
             .as_ref()

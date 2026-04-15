@@ -15,7 +15,6 @@ use std::path::Path;
 use super::Compiler;
 use super::common::{
     self, AWF_VERSION, COPILOT_CLI_VERSION, DEFAULT_POOL, MCPG_PORT, MCPG_VERSION, MCPG_IMAGE,
-    ADO_MCP_IMAGE, ADO_MCP_ENTRYPOINT, ADO_MCP_PACKAGE, ADO_MCP_SERVER_NAME,
     build_parameters, compute_effective_workspace, generate_acquire_ado_token,
     generate_cancel_previous_builds, generate_checkout_self, generate_checkout_steps,
     generate_ci_trigger, generate_copilot_ado_env, generate_copilot_params,
@@ -27,9 +26,9 @@ use super::common::{
     validate_submit_pr_review_events, validate_update_pr_votes, validate_update_work_item_target,
     validate_write_permissions,
 };
+use super::extensions::{CompilerExtension, McpgServerConfig, McpgGatewayConfig, McpgConfig};
 use super::types::{FrontMatter, McpConfig};
 use crate::allowed_hosts::{CORE_ALLOWED_HOSTS, mcp_required_hosts};
-use serde::Serialize;
 use std::collections::HashSet;
 
 /// Standalone pipeline compiler.
@@ -66,8 +65,26 @@ impl Compiler for StandaloneCompiler {
         let repositories = generate_repositories(&front_matter.repositories);
         let checkout_steps = generate_checkout_steps(&front_matter.checkout);
         let checkout_self = generate_checkout_self();
-        let copilot_params = generate_copilot_params(front_matter)?;
         let agent_name = sanitize_filename(&front_matter.name);
+
+        // Collect compiler extensions (runtimes + first-party tools)
+        let extensions = super::extensions::collect_extensions(front_matter);
+
+        // Run extension validations (warnings + errors)
+        {
+            let validation_ctx = super::extensions::CompileContext {
+                agent_name: &front_matter.name,
+                front_matter,
+                inferred_org: None, // Not yet available; ADO org validation happens in mcpg_servers()
+            };
+            for ext in &extensions {
+                for warning in ext.validate(&validation_ctx)? {
+                    eprintln!("Warning: {}", warning);
+                }
+            }
+        }
+
+        let copilot_params = generate_copilot_params(front_matter, &extensions)?;
 
         // Compute effective workspace
         let effective_workspace = compute_effective_workspace(
@@ -89,7 +106,7 @@ impl Compiler for StandaloneCompiler {
         let pipeline_path = generate_pipeline_path(output_path);
 
         // Generate comma-separated domain list for AWF
-        let allowed_domains = generate_allowed_domains(front_matter)?;
+        let allowed_domains = generate_allowed_domains(front_matter, &extensions)?;
 
         // Generate --enabled-tools args for SafeOutputs tool filtering
         let enabled_tools_args = generate_enabled_tools_args(front_matter);
@@ -110,17 +127,11 @@ impl Compiler for StandaloneCompiler {
             .and_then(|t| t.cache_memory.as_ref())
             .is_some_and(|cm| cm.is_enabled());
 
-        let lean_config = front_matter
-            .runtimes
-            .as_ref()
-            .and_then(|r| r.lean.as_ref())
-            .filter(|l| l.is_enabled());
-
         // Build parameters list: user-defined + auto-injected clearMemory for memory
         let parameters = build_parameters(&front_matter.parameters, has_memory);
         let parameters_yaml = generate_parameters(&parameters)?;
 
-        let prepare_steps = generate_prepare_steps(&front_matter.steps, has_memory, lean_config);
+        let prepare_steps = generate_prepare_steps(&front_matter.steps, &extensions);
         let finalize_steps = generate_finalize_steps(&front_matter.post_steps);
         let agentic_depends_on = generate_agentic_depends_on(&front_matter.setup);
         let job_timeout = generate_job_timeout(front_matter);
@@ -264,7 +275,7 @@ impl Compiler for StandaloneCompiler {
 
         // Always generate MCPG config — safeoutputs is always required regardless
         // of whether additional mcp-servers are configured in front matter.
-        let config = generate_mcpg_config(front_matter, inferred_org.as_deref())?;
+        let config = generate_mcpg_config(front_matter, inferred_org.as_deref(), &extensions)?;
         let mcpg_config_json =
             serde_json::to_string_pretty(&config).context("Failed to serialize MCPG config")?;
 
@@ -293,8 +304,11 @@ impl Compiler for StandaloneCompiler {
 /// 1. Core Azure DevOps/GitHub endpoints
 /// 2. MCP-specific endpoints for each enabled MCP
 /// 3. User-specified additional hosts from network.allow
-fn generate_allowed_domains(front_matter: &FrontMatter) -> Result<String> {
-    // Collect enabled MCP names
+fn generate_allowed_domains(
+    front_matter: &FrontMatter,
+    extensions: &[super::extensions::Extension],
+) -> Result<String> {
+    // Collect enabled MCP names (user-defined MCPs, not first-party tools)
     let enabled_mcps: Vec<String> = front_matter
         .mcp_servers
         .iter()
@@ -314,7 +328,7 @@ fn generate_allowed_domains(front_matter: &FrontMatter) -> Result<String> {
         .map(|n| n.allow.clone())
         .unwrap_or_default();
 
-    // Generate the allowlist by combining core + MCP + user hosts
+    // Generate the allowlist by combining core + MCP + extension + user hosts
     let mut hosts: HashSet<String> = HashSet::new();
 
     // Add core hosts
@@ -327,34 +341,17 @@ fn generate_allowed_domains(front_matter: &FrontMatter) -> Result<String> {
     // that always use MCPG.
     hosts.insert("host.docker.internal".to_string());
 
-    // Add MCP-specific hosts
+    // Add MCP-specific hosts (user-defined MCPs via mcp_required_hosts lookup)
     for mcp in &enabled_mcps {
         for host in mcp_required_hosts(mcp) {
             hosts.insert((*host).to_string());
         }
     }
 
-    // Add ADO-specific hosts when tools.azure-devops is enabled
-    if front_matter
-        .tools
-        .as_ref()
-        .and_then(|t| t.azure_devops.as_ref())
-        .is_some_and(|ado| ado.is_enabled())
-    {
-        for host in mcp_required_hosts("ado") {
-            hosts.insert((*host).to_string());
-        }
-    }
-
-    // Add Lean-specific hosts when runtimes.lean is enabled
-    if front_matter
-        .runtimes
-        .as_ref()
-        .and_then(|r| r.lean.as_ref())
-        .is_some_and(|l| l.is_enabled())
-    {
-        for host in crate::runtimes::lean::LEAN_REQUIRED_HOSTS {
-            hosts.insert((*host).to_string());
+    // Add extension-declared hosts (runtimes + first-party tools)
+    for ext in extensions {
+        for host in ext.required_hosts() {
+            hosts.insert(host);
         }
     }
 
@@ -446,25 +443,21 @@ fn generate_teardown_job(
     )
 }
 
-/// Generate prepare steps (inline), including memory download/restore/prompt if enabled
-/// and Lean 4 installation if enabled
+/// Generate prepare steps (inline), including extension steps and user-defined steps.
 fn generate_prepare_steps(
     prepare_steps: &[serde_yaml::Value],
-    has_memory: bool,
-    lean_config: Option<&crate::runtimes::lean::LeanRuntimeConfig>,
+    extensions: &[super::extensions::Extension],
 ) -> String {
     let mut parts = Vec::new();
 
-    // Memory steps run before user prepare steps
-    if has_memory {
-        parts.push(generate_memory_download());
-        parts.push(generate_memory_prompt());
-    }
-
-    // Lean install and prompt
-    if let Some(lean) = lean_config {
-        parts.push(crate::runtimes::lean::generate_lean_install(lean));
-        parts.push(crate::runtimes::lean::generate_lean_prompt());
+    // Extension prepare steps and prompt supplements (runtimes + first-party tools)
+    for ext in extensions {
+        for step in ext.prepare_steps() {
+            parts.push(step);
+        }
+        if let Some(prompt) = ext.prompt_supplement() {
+            parts.push(super::extensions::wrap_prompt_append(&prompt, ext.name()));
+        }
     }
 
     if !prepare_steps.is_empty() {
@@ -492,60 +485,6 @@ fn generate_agentic_depends_on(setup_steps: &[serde_yaml::Value]) -> String {
     }
 }
 
-/// MCPG server configuration for a single MCP upstream.
-#[derive(Debug, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct McpgServerConfig {
-    /// Server type: "stdio" for container-based, "http" for HTTP backends
-    #[serde(rename = "type")]
-    pub server_type: String,
-    /// Docker container image (for stdio type, per MCPG spec §4.1.2)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub container: Option<String>,
-    /// Container entrypoint override (for stdio type)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub entrypoint: Option<String>,
-    /// Arguments passed to the container entrypoint (for stdio type)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub entrypoint_args: Option<Vec<String>>,
-    /// Volume mounts for containerized servers (format: "source:dest:mode")
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mounts: Option<Vec<String>>,
-    /// Additional Docker runtime arguments (inserted before image in `docker run`)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub args: Option<Vec<String>>,
-    /// URL for HTTP backends
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    /// HTTP headers (e.g., Authorization)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub headers: Option<HashMap<String, String>>,
-    /// Environment variables for the server process
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub env: Option<HashMap<String, String>>,
-    /// Tool allow-list (if empty or absent, all tools are allowed)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tools: Option<Vec<String>>,
-}
-
-/// MCPG gateway configuration.
-#[derive(Debug, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct McpgGatewayConfig {
-    pub port: u16,
-    pub domain: String,
-    pub api_key: String,
-    pub payload_dir: String,
-}
-
-/// Top-level MCPG configuration.
-#[derive(Debug, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct McpgConfig {
-    pub mcp_servers: HashMap<String, McpgServerConfig>,
-    pub gateway: McpgGatewayConfig,
-}
-
 /// Generate MCPG configuration from front matter.
 ///
 /// Converts the front matter `mcp-servers` definitions into MCPG-compatible JSON.
@@ -558,7 +497,11 @@ pub struct McpgConfig {
 ///
 /// Returns an error if `tools.azure-devops` is enabled but no org can be determined
 /// (neither explicit override nor git remote inference).
-pub fn generate_mcpg_config(front_matter: &FrontMatter, inferred_org: Option<&str>) -> Result<McpgConfig> {
+pub fn generate_mcpg_config(
+    front_matter: &FrontMatter,
+    inferred_org: Option<&str>,
+    extensions: &[super::extensions::Extension],
+) -> Result<McpgConfig> {
     let mut mcp_servers = HashMap::new();
 
     // SafeOutputs is always included as an HTTP backend.
@@ -584,90 +527,15 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter, inferred_org: Option<&st
         },
     );
 
-    // Auto-configure ADO MCP when tools.azure-devops is enabled.
-    // This generates a containerized stdio MCP entry using the ADO MCP npm package.
-    if let Some(ado_config) = front_matter
-        .tools
-        .as_ref()
-        .and_then(|t| t.azure_devops.as_ref())
-    {
-        if ado_config.is_enabled() {
-            // Warn if user also has a manual mcp-servers entry for azure-devops
-            if front_matter.mcp_servers.contains_key(ADO_MCP_SERVER_NAME) {
-                eprintln!(
-                    "Warning: Agent '{}' has both tools.azure-devops and mcp-servers.azure-devops configured. \
-                    The tools.azure-devops auto-configuration takes precedence. \
-                    Remove the mcp-servers entry to silence this warning.",
-                    front_matter.name
-                );
-            }
-
-            // Build entrypoint args: npx -y @azure-devops/mcp <org> [-d toolset1 toolset2 ...]
-            let mut entrypoint_args = vec!["-y".to_string(), ADO_MCP_PACKAGE.to_string()];
-
-            // Org: use explicit override, then compile-time inferred, then fail
-            let org = if let Some(explicit) = ado_config.org() {
-                explicit.to_string()
-            } else if let Some(inferred) = inferred_org {
-                inferred.to_string()
-            } else {
-                anyhow::bail!(
-                    "Agent '{}' has tools.azure-devops enabled but no ADO organization could be \
-                    determined. Either set tools.azure-devops.org explicitly, or compile from \
-                    within a git repository with an Azure DevOps remote URL.",
-                    front_matter.name
-                );
-            };
-            if !org.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-                anyhow::bail!(
-                    "Invalid ADO org name '{}': must contain only alphanumerics and hyphens",
-                    org
-                );
-            }
-            entrypoint_args.push(org);
-
-            // Toolsets: passed as -d flag followed by space-separated toolset names
-            if !ado_config.toolsets().is_empty() {
-                entrypoint_args.push("-d".to_string());
-                for toolset in ado_config.toolsets() {
-                    if !toolset.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-                        anyhow::bail!(
-                            "Invalid ADO toolset name '{}': must contain only alphanumerics and hyphens",
-                            toolset
-                        );
-                    }
-                    entrypoint_args.push(toolset.clone());
-                }
-            }
-
-            // Tool allow-list for MCPG filtering
-            let tools = if ado_config.allowed().is_empty() {
-                None
-            } else {
-                Some(ado_config.allowed().to_vec())
-            };
-
-            // ADO MCP needs the PAT token passed via environment
-            let env = Some(HashMap::from([(
-                "AZURE_DEVOPS_EXT_PAT".to_string(),
-                String::new(), // Passthrough from pipeline
-            )]));
-
-            mcp_servers.insert(
-                ADO_MCP_SERVER_NAME.to_string(),
-                McpgServerConfig {
-                    server_type: "stdio".to_string(),
-                    container: Some(ADO_MCP_IMAGE.to_string()),
-                    entrypoint: Some(ADO_MCP_ENTRYPOINT.to_string()),
-                    entrypoint_args: Some(entrypoint_args),
-                    mounts: None,
-                    args: None,
-                    url: None,
-                    headers: None,
-                    env,
-                    tools,
-                },
-            );
+    // Add extension-contributed MCPG server entries (e.g., azure-devops)
+    let ctx = super::extensions::CompileContext {
+        agent_name: &front_matter.name,
+        front_matter,
+        inferred_org,
+    };
+    for ext in extensions {
+        for (name, config) in ext.mcpg_servers(&ctx)? {
+            mcp_servers.insert(name, config);
         }
     }
 
@@ -680,8 +548,8 @@ pub fn generate_mcpg_config(front_matter: &FrontMatter, inferred_org: Option<&st
             continue;
         }
 
-        // Skip if already auto-configured by tools.azure-devops
-        if name == ADO_MCP_SERVER_NAME && mcp_servers.contains_key(ADO_MCP_SERVER_NAME) {
+        // Skip if already auto-configured by an extension (e.g., tools.azure-devops)
+        if mcp_servers.contains_key(name) {
             continue;
         }
 
@@ -1091,74 +959,12 @@ pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
     }
 }
 
-/// Generate the steps to download agent memory from the previous successful run
-/// and restore it to the staging directory.
-///
-/// When the `clearMemory` parameter is true, the download step is skipped
-/// and only an empty memory directory is created.
-fn generate_memory_download() -> String {
-    r#"- task: DownloadPipelineArtifact@2
-  displayName: "Download previous agent memory"
-  condition: eq(${{ parameters.clearMemory }}, false)
-  continueOnError: true
-  inputs:
-    source: "specific"
-    project: "$(System.TeamProject)"
-    pipeline: "$(System.DefinitionId)"
-    runVersion: "latestFromBranch"
-    branchName: "$(Build.SourceBranch)"
-    artifact: "safe_outputs"
-    targetPath: "$(Agent.TempDirectory)/previous_memory"
-    allowPartiallySucceededBuilds: true
-
-- bash: |
-    mkdir -p /tmp/awf-tools/staging/agent_memory
-    if [ -d "$(Agent.TempDirectory)/previous_memory/agent_memory" ]; then
-      cp -a "$(Agent.TempDirectory)/previous_memory/agent_memory/." /tmp/awf-tools/staging/agent_memory/ 2>/dev/null || true
-      echo "Previous agent memory restored to /tmp/awf-tools/staging/agent_memory"
-      ls -laR /tmp/awf-tools/staging/agent_memory
-    else
-      echo "No previous agent memory found - empty memory directory created"
-    fi
-  displayName: "Restore previous agent memory"
-  condition: eq(${{ parameters.clearMemory }}, false)
-  continueOnError: true
-
-- bash: |
-    mkdir -p /tmp/awf-tools/staging/agent_memory
-    echo "Memory cleared by pipeline parameter - starting fresh"
-  displayName: "Initialize empty agent memory (clearMemory=true)"
-  condition: eq(${{ parameters.clearMemory }}, true)"#
-        .to_string()
-}
-
-/// Generate the prompt append step to inform the agent about its memory location.
-fn generate_memory_prompt() -> String {
-    r#"- bash: |
-    cat >> "/tmp/awf-tools/agent-prompt.md" << 'MEMORY_PROMPT_EOF'
-
-    ---
-
-    ## Agent Memory
-
-    You have persistent memory across runs. Your memory directory is located at `/tmp/awf-tools/staging/agent_memory/`.
-
-    - **Read** previous memory files from this directory to recall context from prior runs.
-    - **Write** new files or update existing ones in this directory to persist knowledge for future runs.
-    - Use this memory to track patterns, accumulate findings, remember decisions, and improve over time.
-    - The memory directory is yours to organize as you see fit (files, subdirectories, any structure).
-    - Memory files are sanitized between runs for security; avoid including pipeline commands or secrets.
-    MEMORY_PROMPT_EOF
-
-    echo "Agent memory prompt appended"
-  displayName: "Append memory prompt""#
-        .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compile::common::parse_markdown;
+    use crate::compile::common::{
+        parse_markdown, ADO_MCP_IMAGE, ADO_MCP_ENTRYPOINT, ADO_MCP_PACKAGE, ADO_MCP_SERVER_NAME,
+    };
     use crate::compile::types::{McpConfig, McpOptions};
 
     fn minimal_front_matter() -> FrontMatter {
@@ -1179,7 +985,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm, None).unwrap();
+        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
         let server = config.mcp_servers.get("my-tool").unwrap();
         assert_eq!(server.server_type, "stdio");
         assert_eq!(server.container.as_ref().unwrap(), "node:20-slim");
@@ -1200,7 +1006,7 @@ mod tests {
         // An MCP with no container or url should be skipped
         fm.mcp_servers
             .insert("phantom".to_string(), McpConfig::Enabled(true));
-        let config = generate_mcpg_config(&fm, None).unwrap();
+        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
         assert!(!config.mcp_servers.contains_key("phantom"));
         // safeoutputs is always present
         assert!(config.mcp_servers.contains_key("safeoutputs"));
@@ -1211,14 +1017,14 @@ mod tests {
         let mut fm = minimal_front_matter();
         fm.mcp_servers
             .insert("my-tool".to_string(), McpConfig::Enabled(false));
-        let config = generate_mcpg_config(&fm, None).unwrap();
+        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
         assert!(!config.mcp_servers.contains_key("my-tool"));
     }
 
     #[test]
     fn test_generate_mcpg_config_empty_mcp_servers() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(&fm, None).unwrap();
+        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
         // Only safeoutputs should be present
         assert_eq!(config.mcp_servers.len(), 1);
         assert!(config.mcp_servers.contains_key("safeoutputs"));
@@ -1227,7 +1033,7 @@ mod tests {
     #[test]
     fn test_generate_mcpg_config_gateway_defaults() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(&fm, None).unwrap();
+        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
         assert_eq!(config.gateway.port, 80);
         assert_eq!(config.gateway.domain, "host.docker.internal");
         assert_eq!(config.gateway.api_key, "${MCP_GATEWAY_API_KEY}");
@@ -1247,7 +1053,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm, None).unwrap();
+        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
         let json = serde_json::to_string_pretty(&config).expect("Config should serialize to JSON");
         let parsed: serde_json::Value =
             serde_json::from_str(&json).expect("Serialized JSON should parse back");
@@ -1272,7 +1078,7 @@ mod tests {
     #[test]
     fn test_generate_mcpg_config_safeoutputs_variable_placeholders() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(&fm, None).unwrap();
+        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
         let so = config.mcp_servers.get("safeoutputs").unwrap();
 
         // URL should reference the runtime-substituted port
@@ -1294,7 +1100,7 @@ mod tests {
     #[test]
     fn test_generate_mcpg_config_safeoutputs_is_http_type() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(&fm, None).unwrap();
+        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
         let so = config.mcp_servers.get("safeoutputs").unwrap();
         assert_eq!(so.server_type, "http");
         assert!(
@@ -1318,7 +1124,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm, None).unwrap();
+        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
         let srv = config.mcp_servers.get("runner").unwrap();
         assert_eq!(srv.server_type, "stdio");
         assert!(
@@ -1341,7 +1147,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm, None).unwrap();
+        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
         let srv = config.mcp_servers.get("with-env").unwrap();
         let e = srv.env.as_ref().unwrap();
         assert_eq!(e.get("TOKEN").unwrap(), "secret");
@@ -1357,7 +1163,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm, None).unwrap();
+        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
         // The reserved entry should still be the HTTP backend, not the user's container
         let so = config.mcp_servers.get("safeoutputs").unwrap();
         assert_eq!(
@@ -1383,7 +1189,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm, None).unwrap();
+        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
         // The user-defined "SafeOutputs" must not overwrite the built-in entry
         let so = config.mcp_servers.get("safeoutputs").unwrap();
         assert_eq!(so.server_type, "http");
@@ -1408,7 +1214,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm, None).unwrap();
+        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
         let srv = config.mcp_servers.get("remote").unwrap();
         assert_eq!(srv.server_type, "http");
         assert_eq!(
@@ -1434,7 +1240,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm, None).unwrap();
+        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
         let srv = config.mcp_servers.get("ado").unwrap();
         assert_eq!(srv.server_type, "stdio");
         assert_eq!(srv.container.as_ref().unwrap(), "node:20-slim");
@@ -1456,7 +1262,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm, None).unwrap();
+        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
         let srv = config.mcp_servers.get("data-tool").unwrap();
         assert_eq!(
             srv.mounts.as_ref().unwrap(),
@@ -1475,7 +1281,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm, None).unwrap();
+        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
         assert!(!config.mcp_servers.contains_key("no-transport"));
     }
 
@@ -1643,7 +1449,7 @@ mod tests {
         )
         .unwrap();
         // Pass inferred org since no explicit org is set
-        let config = generate_mcpg_config(&fm, Some("inferred-org")).unwrap();
+        let config = generate_mcpg_config(&fm, Some("inferred-org"), &super::super::extensions::collect_extensions(&fm)).unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         assert_eq!(ado.server_type, "stdio");
         assert_eq!(ado.container.as_deref(), Some(ADO_MCP_IMAGE));
@@ -1663,7 +1469,7 @@ mod tests {
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    toolsets: [repos, wit, core]\n---\n",
         )
         .unwrap();
-        let config = generate_mcpg_config(&fm, Some("myorg")).unwrap();
+        let config = generate_mcpg_config(&fm, Some("myorg"), &super::super::extensions::collect_extensions(&fm)).unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         let args = ado.entrypoint_args.as_ref().unwrap();
         assert!(args.contains(&"-d".to_string()));
@@ -1679,7 +1485,7 @@ mod tests {
         )
         .unwrap();
         // Explicit org should be used even when inferred_org is None
-        let config = generate_mcpg_config(&fm, None).unwrap();
+        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         let args = ado.entrypoint_args.as_ref().unwrap();
         assert!(args.contains(&"myorg".to_string()));
@@ -1691,7 +1497,7 @@ mod tests {
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: explicit-org\n---\n",
         )
         .unwrap();
-        let config = generate_mcpg_config(&fm, Some("inferred-org")).unwrap();
+        let config = generate_mcpg_config(&fm, Some("inferred-org"), &super::super::extensions::collect_extensions(&fm)).unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         let args = ado.entrypoint_args.as_ref().unwrap();
         assert!(args.contains(&"explicit-org".to_string()));
@@ -1705,7 +1511,7 @@ mod tests {
         )
         .unwrap();
         // No explicit org and no inferred org — should fail
-        let result = generate_mcpg_config(&fm, None);
+        let result = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm));
         assert!(result.is_err());
         assert!(
             result.unwrap_err().to_string().contains("no ADO organization"),
@@ -1719,7 +1525,7 @@ mod tests {
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: \"my org/bad\"\n---\n",
         )
         .unwrap();
-        let result = generate_mcpg_config(&fm, None);
+        let result = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm));
         assert!(result.is_err());
         assert!(
             result.unwrap_err().to_string().contains("Invalid ADO org name"),
@@ -1733,7 +1539,7 @@ mod tests {
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: myorg\n    toolsets: [\"repos\", \"bad toolset\"]\n---\n",
         )
         .unwrap();
-        let result = generate_mcpg_config(&fm, None);
+        let result = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm));
         assert!(result.is_err());
         assert!(
             result.unwrap_err().to_string().contains("Invalid ADO toolset name"),
@@ -1747,7 +1553,7 @@ mod tests {
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: myorg\n    allowed:\n      - wit_get_work_item\n      - core_list_projects\n---\n",
         )
         .unwrap();
-        let config = generate_mcpg_config(&fm, None).unwrap();
+        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         let tools = ado.tools.as_ref().unwrap();
         assert_eq!(tools, &["wit_get_work_item", "core_list_projects"]);
@@ -1759,14 +1565,14 @@ mod tests {
             "---\nname: test\ndescription: test\ntools:\n  azure-devops: false\n---\n",
         )
         .unwrap();
-        let config = generate_mcpg_config(&fm, None).unwrap();
+        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
         assert!(!config.mcp_servers.contains_key("azure-devops"));
     }
 
     #[test]
     fn test_ado_tool_not_set_not_generated() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(&fm, None).unwrap();
+        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
         assert!(!config.mcp_servers.contains_key("azure-devops"));
     }
 
@@ -1778,7 +1584,7 @@ mod tests {
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: auto-org\nmcp-servers:\n  azure-devops:\n    container: \"node:20-slim\"\n    entrypoint: \"npx\"\n    entrypoint-args: [\"-y\", \"@azure-devops/mcp\", \"manual-org\"]\n---\n",
         )
         .unwrap();
-        let config = generate_mcpg_config(&fm, None).unwrap();
+        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         // Should use the auto-configured org, not the manual one
         let args = ado.entrypoint_args.as_ref().unwrap();
@@ -2033,7 +1839,8 @@ mod tests {
             allow: vec!["evil.example.com".to_string()],
             blocked: vec!["evil.example.com".to_string()],
         });
-        let domains = generate_allowed_domains(&fm).unwrap();
+        let exts = super::super::extensions::collect_extensions(&fm);
+        let domains = generate_allowed_domains(&fm, &exts).unwrap();
         assert!(
             !domains.contains("evil.example.com"),
             "blocked host must be excluded even if also in allow"
@@ -2043,7 +1850,8 @@ mod tests {
     #[test]
     fn test_generate_allowed_domains_host_docker_internal_always_present() {
         let fm = minimal_front_matter();
-        let domains = generate_allowed_domains(&fm).unwrap();
+        let exts = super::super::extensions::collect_extensions(&fm);
+        let domains = generate_allowed_domains(&fm, &exts).unwrap();
         assert!(
             domains.contains("host.docker.internal"),
             "host.docker.internal must always be in the allowlist"
@@ -2057,7 +1865,8 @@ mod tests {
             allow: vec!["api.mycompany.com".to_string()],
             blocked: vec![],
         });
-        let domains = generate_allowed_domains(&fm).unwrap();
+        let exts = super::super::extensions::collect_extensions(&fm);
+        let domains = generate_allowed_domains(&fm, &exts).unwrap();
         assert!(
             domains.contains("api.mycompany.com"),
             "user-specified allow host must be present in the allowlist"
@@ -2074,7 +1883,8 @@ mod tests {
             allow: vec![],
             blocked: vec!["github.com".to_string()],
         });
-        let domains = generate_allowed_domains(&fm).unwrap();
+        let exts = super::super::extensions::collect_extensions(&fm);
+        let domains = generate_allowed_domains(&fm, &exts).unwrap();
         let domain_list: Vec<&str> = domains.split(',').collect();
         assert!(
             !domain_list.contains(&"github.com"),
@@ -2089,7 +1899,8 @@ mod tests {
             allow: vec!["bad host!".to_string()],
             blocked: vec![],
         });
-        let result = generate_allowed_domains(&fm);
+        let exts = super::super::extensions::collect_extensions(&fm);
+        let result = generate_allowed_domains(&fm, &exts);
         assert!(result.is_err(), "invalid DNS characters should return an error");
     }
 
@@ -2099,7 +1910,8 @@ mod tests {
         fm.runtimes = Some(crate::compile::types::RuntimesConfig {
             lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(true)),
         });
-        let domains = generate_allowed_domains(&fm).unwrap();
+        let exts = super::super::extensions::collect_extensions(&fm);
+        let domains = generate_allowed_domains(&fm, &exts).unwrap();
         assert!(domains.contains("elan.lean-lang.org"), "should include elan domain");
         assert!(domains.contains("leanprover.github.io"), "should include leanprover domain");
         assert!(domains.contains("lean-lang.org"), "should include lean-lang domain");
@@ -2111,7 +1923,8 @@ mod tests {
         fm.runtimes = Some(crate::compile::types::RuntimesConfig {
             lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(false)),
         });
-        let domains = generate_allowed_domains(&fm).unwrap();
+        let exts = super::super::extensions::collect_extensions(&fm);
+        let domains = generate_allowed_domains(&fm, &exts).unwrap();
         assert!(!domains.contains("elan.lean-lang.org"), "lean disabled should not add lean hosts");
     }
 
@@ -2119,10 +1932,14 @@ mod tests {
 
     #[test]
     fn test_generate_prepare_steps_with_memory_includes_memory_preamble() {
-        let result = generate_prepare_steps(&[], true, None);
+        let (fm, _) = crate::compile::common::parse_markdown(
+            "---\nname: test\ndescription: test\ntools:\n  cache-memory: true\n---\n",
+        ).unwrap();
+        let exts = super::super::extensions::collect_extensions(&fm);
+        let result = generate_prepare_steps(&[], &exts);
         assert!(
             !result.is_empty(),
-            "memory steps must be emitted when has_memory=true"
+            "memory steps must be emitted when cache-memory enabled"
         );
         assert!(
             result.contains("agent_memory"),
@@ -2132,13 +1949,19 @@ mod tests {
 
     #[test]
     fn test_generate_prepare_steps_without_memory_and_no_steps_is_empty() {
-        let result = generate_prepare_steps(&[], false, None);
+        let fm = minimal_front_matter();
+        let exts = super::super::extensions::collect_extensions(&fm);
+        let result = generate_prepare_steps(&[], &exts);
         assert!(result.is_empty(), "no steps and no memory should produce empty output");
     }
 
     #[test]
     fn test_generate_prepare_steps_with_memory_includes_download_and_prompt() {
-        let result = generate_prepare_steps(&[], true, None);
+        let (fm, _) = crate::compile::common::parse_markdown(
+            "---\nname: test\ndescription: test\ntools:\n  cache-memory: true\n---\n",
+        ).unwrap();
+        let exts = super::super::extensions::collect_extensions(&fm);
+        let result = generate_prepare_steps(&[], &exts);
         assert!(
             result.contains("DownloadPipelineArtifact"),
             "memory steps must include the artifact download task"
@@ -2151,23 +1974,27 @@ mod tests {
 
     #[test]
     fn test_generate_prepare_steps_without_memory_with_user_steps() {
-        // User-supplied prepare steps without memory should be included as-is
+        let fm = minimal_front_matter();
+        let exts = super::super::extensions::collect_extensions(&fm);
         let step: serde_yaml::Value =
             serde_yaml::from_str("bash: echo hello\ndisplayName: greet").unwrap();
-        let result = generate_prepare_steps(&[step], false, None);
+        let result = generate_prepare_steps(&[step], &exts);
         assert!(!result.is_empty(), "user steps should be present");
         assert!(
             !result.contains("agent_memory"),
-            "no memory reference when has_memory=false"
+            "no memory reference when cache-memory not enabled"
         );
     }
 
     #[test]
     fn test_generate_prepare_steps_with_memory_and_user_steps() {
-        // When memory is enabled AND user steps are present, both should appear
+        let (fm, _) = crate::compile::common::parse_markdown(
+            "---\nname: test\ndescription: test\ntools:\n  cache-memory: true\n---\n",
+        ).unwrap();
+        let exts = super::super::extensions::collect_extensions(&fm);
         let step: serde_yaml::Value =
             serde_yaml::from_str("bash: echo hello\ndisplayName: greet").unwrap();
-        let result = generate_prepare_steps(&[step], true, None);
+        let result = generate_prepare_steps(&[step], &exts);
         assert!(
             result.contains("agent_memory"),
             "memory reference must be present"
@@ -2180,9 +2007,11 @@ mod tests {
 
     #[test]
     fn test_generate_prepare_steps_with_lean() {
-        use crate::runtimes::lean::LeanRuntimeConfig;
-        let lean = LeanRuntimeConfig::Enabled(true);
-        let result = generate_prepare_steps(&[], false, Some(&lean));
+        let (fm, _) = crate::compile::common::parse_markdown(
+            "---\nname: test\ndescription: test\nruntimes:\n  lean: true\n---\n",
+        ).unwrap();
+        let exts = super::super::extensions::collect_extensions(&fm);
+        let result = generate_prepare_steps(&[], &exts);
         assert!(result.contains("elan-init.sh"), "should include elan installer");
         assert!(result.contains("Lean 4"), "should include Lean prompt");
         assert!(result.contains("--default-toolchain stable"), "should default to stable");
@@ -2191,11 +2020,11 @@ mod tests {
 
     #[test]
     fn test_generate_prepare_steps_with_lean_custom_toolchain() {
-        use crate::runtimes::lean::{LeanRuntimeConfig, LeanOptions};
-        let lean = LeanRuntimeConfig::WithOptions(LeanOptions {
-            toolchain: Some("leanprover/lean4:v4.29.1".to_string()),
-        });
-        let result = generate_prepare_steps(&[], false, Some(&lean));
+        let (fm, _) = crate::compile::common::parse_markdown(
+            "---\nname: test\ndescription: test\nruntimes:\n  lean:\n    toolchain: \"leanprover/lean4:v4.29.1\"\n---\n",
+        ).unwrap();
+        let exts = super::super::extensions::collect_extensions(&fm);
+        let result = generate_prepare_steps(&[], &exts);
         assert!(
             result.contains("--default-toolchain leanprover/lean4:v4.29.1"),
             "should use specified toolchain"
@@ -2204,9 +2033,11 @@ mod tests {
 
     #[test]
     fn test_generate_prepare_steps_with_lean_and_memory() {
-        use crate::runtimes::lean::LeanRuntimeConfig;
-        let lean = LeanRuntimeConfig::Enabled(true);
-        let result = generate_prepare_steps(&[], true, Some(&lean));
+        let (fm, _) = crate::compile::common::parse_markdown(
+            "---\nname: test\ndescription: test\nruntimes:\n  lean: true\ntools:\n  cache-memory: true\n---\n",
+        ).unwrap();
+        let exts = super::super::extensions::collect_extensions(&fm);
+        let result = generate_prepare_steps(&[], &exts);
         assert!(result.contains("agent_memory"), "memory steps present");
         assert!(result.contains("elan-init.sh"), "lean install present");
         assert!(result.contains("Lean 4"), "lean prompt present");
