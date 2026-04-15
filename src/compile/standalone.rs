@@ -262,7 +262,7 @@ impl Compiler for StandaloneCompiler {
 /// `--allow-domains` flag. The list includes:
 /// 1. Core Azure DevOps/GitHub endpoints
 /// 2. MCP-specific endpoints for each enabled MCP
-/// 3. User-specified additional hosts from network.allowed
+/// 3. User-specified additional hosts from network.allow
 fn generate_allowed_domains(
     front_matter: &FrontMatter,
     extensions: &[super::extensions::Extension],
@@ -330,7 +330,7 @@ fn generate_allowed_domains(
             let domains = get_ecosystem_domains(host);
             if domains.is_empty() && !is_known_ecosystem(host) {
                 eprintln!(
-                    "warning: network.allowed contains unknown ecosystem identifier '{}'. \
+                    "warning: network.allow contains unknown ecosystem identifier '{}'. \
                      Known ecosystems: python, rust, node, go, java, etc. \
                      If this is a domain name, it should contain a dot.",
                     host
@@ -339,28 +339,27 @@ fn generate_allowed_domains(
             for domain in domains {
                 hosts.insert(domain);
             }
-            continue;
+        } else {
+            let valid_chars = !host.is_empty()
+                && host
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '*'));
+            if !valid_chars {
+                anyhow::bail!(
+                    "network.allow domain '{}' contains characters invalid in DNS names. \
+                     Only ASCII alphanumerics, '.', '-', and '*' are allowed.",
+                    host
+                );
+            }
+            if host.contains('*') && !(host.starts_with("*.") && !host[2..].contains('*')) {
+                anyhow::bail!(
+                    "network.allow domain '{}' uses '*' in an unsupported position. \
+                     Wildcards must appear only as a leading prefix (e.g. '*.example.com').",
+                    host
+                );
+            }
+            hosts.insert(host.clone());
         }
-
-        let valid_chars = !host.is_empty()
-            && host
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '*'));
-        if !valid_chars {
-            anyhow::bail!(
-                "network.allowed domain '{}' contains characters invalid in DNS names. \
-                 Only ASCII alphanumerics, '.', '-', and '*' are allowed.",
-                host
-            );
-        }
-        if host.contains('*') && !(host.starts_with("*.") && !host[2..].contains('*')) {
-            anyhow::bail!(
-                "network.allowed domain '{}' uses '*' in an unsupported position. \
-                 Wildcards must appear only as a leading prefix (e.g. '*.example.com').",
-                host
-            );
-        }
-        hosts.insert(host.clone());
     }
 
     // Remove blocked hosts (supports both ecosystem identifiers and raw domains)
