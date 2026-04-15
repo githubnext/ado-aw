@@ -2,6 +2,15 @@
 //!
 //! Provides `#[derive(SanitizeConfig)]` and `#[derive(SanitizeContent)]` for automatic
 //! implementation of field-level sanitization on structs.
+//!
+//! # Internal crate coupling
+//!
+//! The generated code references symbols via `crate::sanitize::` paths (e.g.,
+//! `crate::sanitize::sanitize_config`, `crate::sanitize::SanitizeConfig`). This
+//! hard-codes the consumer crate's module layout. The coupling is intentional —
+//! this proc macro is designed exclusively for the `ado-aw` crate and is not
+//! intended for external use. If the `sanitize` module is ever renamed or
+//! restructured, the generated paths in this crate must be updated to match.
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -273,12 +282,6 @@ pub fn derive_sanitize_content(input: TokenStream) -> TokenStream {
 
     for field in fields {
         let field_name = field.ident.as_ref().unwrap();
-
-        // The `name` field on tool result structs is a tool identifier, not content.
-        if field_name == "name" {
-            continue;
-        }
-
         let attrs = parse_field_attrs(field, "sanitize_content");
 
         if attrs.skip {

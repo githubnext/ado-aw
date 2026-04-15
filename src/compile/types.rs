@@ -201,7 +201,7 @@ impl SanitizeConfigTrait for EngineConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, SanitizeConfig)]
 pub struct EngineOptions {
     /// AI model to use (defaults to claude-opus-4.5)
     #[serde(default)]
@@ -212,12 +212,6 @@ pub struct EngineOptions {
     /// Workflow timeout in minutes
     #[serde(default, rename = "timeout-minutes")]
     pub timeout_minutes: Option<u32>,
-}
-
-impl SanitizeConfigTrait for EngineOptions {
-    fn sanitize_config_fields(&mut self) {
-        self.model = self.model.as_deref().map(crate::sanitize::sanitize_config);
-    }
 }
 
 /// Tools configuration for the agent
