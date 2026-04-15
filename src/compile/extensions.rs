@@ -169,6 +169,12 @@ pub trait CompilerExtension {
     /// Compile-time warnings to emit. Errors in the `Result` abort
     /// compilation; the inner `Vec<String>` contains non-fatal warnings
     /// printed to stderr.
+    ///
+    /// **Note:** `validate` is called early in compilation before
+    /// `inferred_org` is available (it requires an async git remote
+    /// lookup). Org-dependent validation (e.g., verifying an ADO org
+    /// can be resolved) should go in [`mcpg_servers`](Self::mcpg_servers)
+    /// instead, which receives the fully populated [`CompileContext`].
     fn validate(&self, _ctx: &CompileContext) -> Result<Vec<String>> {
         Ok(vec![])
     }
@@ -606,16 +612,19 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
 /// This is the generic wrapper used by the compiler to append extension
 /// prompt supplements to the agent prompt file. Each line of content is
 /// indented by 4 spaces to match the YAML block scalar indentation.
-pub fn wrap_prompt_append(content: &str, display_name: &str) -> String {
-    // Guard against names that would break bash echo or YAML displayName.
-    // All current extension names are hardcoded alphanumeric strings, but
-    // this catches future extensions whose name() might contain shell
-    // metacharacters.
-    debug_assert!(
+///
+/// Returns an error if `display_name` contains characters unsafe for
+/// embedding in bash `echo` or YAML `displayName` fields.
+pub fn wrap_prompt_append(content: &str, display_name: &str) -> Result<String> {
+    // Reject names that would break bash echo or YAML displayName.
+    // This is a runtime guard (not debug_assert) because wrap_prompt_append
+    // is pub and callable from future extension implementations.
+    anyhow::ensure!(
         display_name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_')),
-        "Extension display_name '{}' contains characters unsafe for bash/YAML embedding",
+        "Extension display_name '{}' contains characters unsafe for bash/YAML embedding. \
+         Only ASCII alphanumerics, spaces, hyphens, and underscores are allowed.",
         display_name
     );
 
@@ -640,7 +649,7 @@ pub fn wrap_prompt_append(content: &str, display_name: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n");
 
-    format!(
+    Ok(format!(
         r#"- bash: |
     cat >> "/tmp/awf-tools/agent-prompt.md" << '{delimiter}'
 {indented_content}
@@ -651,7 +660,7 @@ pub fn wrap_prompt_append(content: &str, display_name: &str) -> String {
         delimiter = delimiter,
         indented_content = indented_content,
         display_name = display_name,
-    )
+    ))
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -910,10 +919,19 @@ mod tests {
     #[test]
     fn test_wrap_prompt_append_generates_valid_yaml_step() {
         let content = "## Test\n\nSome instructions.";
-        let step = wrap_prompt_append(content, "Test Feature");
+        let step = wrap_prompt_append(content, "Test Feature").unwrap();
         assert!(step.contains("cat >>"));
         assert!(step.contains("agent-prompt.md"));
         assert!(step.contains("TEST_FEATURE_EOF"));
         assert!(step.contains("Test Feature"));
+    }
+
+    #[test]
+    fn test_wrap_prompt_append_rejects_unsafe_display_name() {
+        let result = wrap_prompt_append("content", "My \"Ext\"");
+        assert!(result.is_err());
+
+        let result = wrap_prompt_append("content", "ext$(rm -rf)");
+        assert!(result.is_err());
     }
 }

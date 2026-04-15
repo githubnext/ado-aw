@@ -131,7 +131,7 @@ impl Compiler for StandaloneCompiler {
         let parameters = build_parameters(&front_matter.parameters, has_memory);
         let parameters_yaml = generate_parameters(&parameters)?;
 
-        let prepare_steps = generate_prepare_steps(&front_matter.steps, &extensions);
+        let prepare_steps = generate_prepare_steps(&front_matter.steps, &extensions)?;
         let finalize_steps = generate_finalize_steps(&front_matter.post_steps);
         let agentic_depends_on = generate_agentic_depends_on(&front_matter.setup);
         let job_timeout = generate_job_timeout(front_matter);
@@ -447,7 +447,7 @@ fn generate_teardown_job(
 fn generate_prepare_steps(
     prepare_steps: &[serde_yaml::Value],
     extensions: &[super::extensions::Extension],
-) -> String {
+) -> Result<String> {
     let mut parts = Vec::new();
 
     // Extension prepare steps and prompt supplements (runtimes + first-party tools)
@@ -456,7 +456,7 @@ fn generate_prepare_steps(
             parts.push(step);
         }
         if let Some(prompt) = ext.prompt_supplement() {
-            parts.push(super::extensions::wrap_prompt_append(&prompt, ext.name()));
+            parts.push(super::extensions::wrap_prompt_append(&prompt, ext.name())?);
         }
     }
 
@@ -464,7 +464,7 @@ fn generate_prepare_steps(
         parts.push(common::format_steps_yaml_indented(prepare_steps, 0));
     }
 
-    parts.join("\n\n")
+    Ok(parts.join("\n\n"))
 }
 
 /// Generate finalize steps (inline)
@@ -1936,7 +1936,7 @@ mod tests {
             "---\nname: test\ndescription: test\ntools:\n  cache-memory: true\n---\n",
         ).unwrap();
         let exts = super::super::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts);
+        let result = generate_prepare_steps(&[], &exts).unwrap();
         assert!(
             !result.is_empty(),
             "memory steps must be emitted when cache-memory enabled"
@@ -1951,7 +1951,7 @@ mod tests {
     fn test_generate_prepare_steps_without_memory_and_no_steps_is_empty() {
         let fm = minimal_front_matter();
         let exts = super::super::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts);
+        let result = generate_prepare_steps(&[], &exts).unwrap();
         assert!(result.is_empty(), "no steps and no memory should produce empty output");
     }
 
@@ -1961,7 +1961,7 @@ mod tests {
             "---\nname: test\ndescription: test\ntools:\n  cache-memory: true\n---\n",
         ).unwrap();
         let exts = super::super::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts);
+        let result = generate_prepare_steps(&[], &exts).unwrap();
         assert!(
             result.contains("DownloadPipelineArtifact"),
             "memory steps must include the artifact download task"
@@ -1978,7 +1978,7 @@ mod tests {
         let exts = super::super::extensions::collect_extensions(&fm);
         let step: serde_yaml::Value =
             serde_yaml::from_str("bash: echo hello\ndisplayName: greet").unwrap();
-        let result = generate_prepare_steps(&[step], &exts);
+        let result = generate_prepare_steps(&[step], &exts).unwrap();
         assert!(!result.is_empty(), "user steps should be present");
         assert!(
             !result.contains("agent_memory"),
@@ -1994,7 +1994,7 @@ mod tests {
         let exts = super::super::extensions::collect_extensions(&fm);
         let step: serde_yaml::Value =
             serde_yaml::from_str("bash: echo hello\ndisplayName: greet").unwrap();
-        let result = generate_prepare_steps(&[step], &exts);
+        let result = generate_prepare_steps(&[step], &exts).unwrap();
         assert!(
             result.contains("agent_memory"),
             "memory reference must be present"
@@ -2011,7 +2011,7 @@ mod tests {
             "---\nname: test\ndescription: test\nruntimes:\n  lean: true\n---\n",
         ).unwrap();
         let exts = super::super::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts);
+        let result = generate_prepare_steps(&[], &exts).unwrap();
         assert!(result.contains("elan-init.sh"), "should include elan installer");
         assert!(result.contains("Lean 4"), "should include Lean prompt");
         assert!(result.contains("--default-toolchain stable"), "should default to stable");
@@ -2024,7 +2024,7 @@ mod tests {
             "---\nname: test\ndescription: test\nruntimes:\n  lean:\n    toolchain: \"leanprover/lean4:v4.29.1\"\n---\n",
         ).unwrap();
         let exts = super::super::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts);
+        let result = generate_prepare_steps(&[], &exts).unwrap();
         assert!(
             result.contains("--default-toolchain leanprover/lean4:v4.29.1"),
             "should use specified toolchain"
@@ -2037,7 +2037,7 @@ mod tests {
             "---\nname: test\ndescription: test\nruntimes:\n  lean: true\ntools:\n  cache-memory: true\n---\n",
         ).unwrap();
         let exts = super::super::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts);
+        let result = generate_prepare_steps(&[], &exts).unwrap();
         assert!(result.contains("agent_memory"), "memory steps present");
         assert!(result.contains("elan-init.sh"), "lean install present");
         assert!(result.contains("Lean 4"), "lean prompt present");
