@@ -313,7 +313,16 @@ fn generate_allowed_domains(
     for ext in extensions {
         for host in ext.required_hosts() {
             if is_ecosystem_identifier(&host) {
-                for domain in get_ecosystem_domains(&host) {
+                let domains = get_ecosystem_domains(&host);
+                if domains.is_empty() {
+                    eprintln!(
+                        "warning: extension '{}' requires unknown ecosystem '{}'; \
+                         no domains added",
+                        ext.name(),
+                        host
+                    );
+                }
+                for domain in domains {
                     hosts.insert(domain);
                 }
             } else {

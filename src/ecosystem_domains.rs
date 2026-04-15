@@ -45,11 +45,26 @@ static COMPOUND_ECOSYSTEMS: LazyLock<HashMap<&'static str, Vec<&'static str>>> =
 ///
 /// Returns an empty `Vec` if the identifier is unknown.
 pub fn get_ecosystem_domains(identifier: &str) -> Vec<String> {
+    get_ecosystem_domains_inner(identifier, 0)
+}
+
+/// Recursive inner function with a depth guard to prevent stack overflow
+/// from circular compound ecosystem references.
+fn get_ecosystem_domains_inner(identifier: &str, depth: u8) -> Vec<String> {
+    if depth > 8 {
+        eprintln!(
+            "warning: ecosystem expansion exceeded max depth for '{}'; \
+             possible cycle in compound ecosystems",
+            identifier
+        );
+        return vec![];
+    }
+
     // Check compound ecosystems first
     if let Some(components) = COMPOUND_ECOSYSTEMS.get(identifier) {
         let mut domains: HashSet<String> = HashSet::new();
         for component in components {
-            for d in get_ecosystem_domains(component) {
+            for d in get_ecosystem_domains_inner(component, depth + 1) {
                 domains.insert(d);
             }
         }
@@ -229,5 +244,19 @@ mod tests {
         let result: Result<HashMap<String, Vec<String>>, _> =
             serde_json::from_str(invalid_json);
         assert!(result.is_err(), "invalid JSON syntax should produce an error");
+    }
+
+    #[test]
+    fn test_depth_guard_prevents_deep_recursion() {
+        // get_ecosystem_domains_inner with depth > 8 returns empty
+        let result = get_ecosystem_domains_inner("python", 9);
+        assert!(result.is_empty(), "depth > 8 should short-circuit to empty");
+    }
+
+    #[test]
+    fn test_depth_guard_allows_normal_depth() {
+        // Normal calls (depth 0) should work fine
+        let result = get_ecosystem_domains_inner("python", 0);
+        assert!(!result.is_empty(), "depth 0 should return normal results");
     }
 }
