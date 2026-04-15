@@ -70,25 +70,30 @@ pub const LEAN_BASH_COMMANDS: &[&str] = &["lean", "lake", "elan"];
 /// Symlinks lean tools into `/tmp/awf-tools/` for AWF chroot compatibility.
 pub fn generate_lean_install(config: &LeanRuntimeConfig) -> String {
     let toolchain = config.toolchain().unwrap_or("stable");
-    format!(
-        "- bash: |\n\
-         \x20\x20\x20\x20curl https://elan.lean-lang.org/elan-init.sh -sSf | sh -s -- -y --default-toolchain {}\n\
-         \x20\x20\x20\x20echo \"##vso[task.prependpath]$HOME/.elan/bin\"\n\
-         \x20\x20\x20\x20export PATH=\"$HOME/.elan/bin:$PATH\"\n\
-         \x20\x20\x20\x20lean --version || echo \"Lean installed via elan\"\n\
-         \x20\x20\x20\x20lake --version || echo \"Lake installed via elan\"\n\
-         \x20\x20\x20\x20# Symlink lean tools into /tmp/awf-tools/ so they are accessible\n\
-         \x20\x20\x20\x20# inside the AWF chroot (AWF mounts /tmp but reconstructs PATH\n\
-         \x20\x20\x20\x20# from standard system locations, excluding $HOME/.elan/bin).\n\
-         \x20\x20\x20\x20for cmd in lean lake elan; do\n\
-         \x20\x20\x20\x20\x20\x20if command -v \"$cmd\" >/dev/null 2>&1; then\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20ln -sf \"$(command -v \"$cmd\")\" \"/tmp/awf-tools/$cmd\"\n\
-         \x20\x20\x20\x20\x20\x20fi\n\
-         \x20\x20\x20\x20done\n\
-         \x20\x20\x20\x20echo \"Lean tools symlinked to /tmp/awf-tools/\"\n\
-         \x20\x20displayName: \"Install Lean 4 (elan)\"",
-        toolchain
-    )
+    let script = format!(
+        "\
+curl https://elan.lean-lang.org/elan-init.sh -sSf | sh -s -- -y --default-toolchain {toolchain}
+echo \"##vso[task.prependpath]$HOME/.elan/bin\"
+export PATH=\"$HOME/.elan/bin:$PATH\"
+lean --version || echo \"Lean installed via elan\"
+lake --version || echo \"Lake installed via elan\"
+# Symlink lean tools into /tmp/awf-tools/ so they are accessible
+# inside the AWF chroot (AWF mounts /tmp but reconstructs PATH
+# from standard system locations, excluding $HOME/.elan/bin).
+for cmd in lean lake elan; do
+  if command -v \"$cmd\" >/dev/null 2>&1; then
+    ln -sf \"$(command -v \"$cmd\")\" \"/tmp/awf-tools/$cmd\"
+  fi
+done
+echo \"Lean tools symlinked to /tmp/awf-tools/\""
+    );
+    // Indent each line of the script body by 4 spaces for YAML block scalar
+    let indented: String = script
+        .lines()
+        .map(|line| format!("    {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("- bash: |\n{indented}\n  displayName: \"Install Lean 4 (elan)\"")
 }
 
 /// Generate the prompt append step to inform the agent that Lean 4 is available.
