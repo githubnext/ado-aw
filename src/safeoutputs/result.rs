@@ -537,13 +537,14 @@ mod tests {
 
     // ── ExecutionContext::get_tool_config sanitization tests ──────────────
 
-    /// Test config struct that can be used with get_tool_config.
+    /// Test config struct used to verify that `get_tool_config` applies
+    /// `sanitize_config_fields()` before returning the deserialized value.
     #[derive(Default, serde::Deserialize)]
-    struct TestToolConfig {
+    struct TestConfigForSanitization {
         value: String,
     }
 
-    impl crate::sanitize::SanitizeConfig for TestToolConfig {
+    impl crate::sanitize::SanitizeConfig for TestConfigForSanitization {
         fn sanitize_config_fields(&mut self) {
             self.value = crate::sanitize::sanitize_config(&self.value);
         }
@@ -556,7 +557,7 @@ mod tests {
             "my-tool".to_string(),
             serde_json::json!({ "value": "##vso[task.setvariable variable=secret]injected" }),
         );
-        let config: TestToolConfig = ctx.get_tool_config("my-tool");
+        let config: TestConfigForSanitization = ctx.get_tool_config("my-tool");
         assert!(
             !config.value.contains("##vso[task."),
             "Injected ##vso[ command should be neutralized; got: {}",
