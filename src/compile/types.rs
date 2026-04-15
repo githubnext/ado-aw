@@ -425,6 +425,14 @@ pub struct RuntimesConfig {
     pub lean: Option<crate::runtimes::lean::LeanRuntimeConfig>,
 }
 
+impl SanitizeConfigTrait for RuntimesConfig {
+    fn sanitize_config_fields(&mut self) {
+        if let Some(ref mut lean) = self.lean {
+            lean.sanitize_config_fields();
+        }
+    }
+}
+
 /// Azure DevOps runtime parameter definition.
 ///
 /// These are emitted as top-level `parameters:` in the generated pipeline YAML,
@@ -549,6 +557,9 @@ impl SanitizeConfigTrait for FrontMatter {
         self.engine.sanitize_config_fields();
         if let Some(ref mut t) = self.tools {
             t.sanitize_config_fields();
+        }
+        if let Some(ref mut r) = self.runtimes {
+            r.sanitize_config_fields();
         }
         for repo in &mut self.repositories {
             repo.sanitize_config_fields();
