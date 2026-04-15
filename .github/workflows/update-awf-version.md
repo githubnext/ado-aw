@@ -129,17 +129,24 @@ Read the file `pkg/workflow/data/ecosystem_domains.json` from the `main` branch 
 
 Read `src/data/ecosystem_domains.json` in this repository.
 
-### Step 3: Compare Content
+### Step 3: Merge and Compare
 
-Compare the upstream and local files. If they are identical, **skip** — the file is up to date.
+Our local file may contain **additional entries** that do not exist upstream (e.g., `"lean"`). These are ado-aw-specific additions and must be preserved.
+
+Merge the two files as follows:
+- Start with all entries from the **upstream** file (updating any existing keys to match upstream values).
+- **Add back** any keys that exist in the local file but **not** in the upstream file. These are ado-aw-specific entries.
+- Maintain alphabetical key ordering in the final JSON.
+
+If the merged result is identical to the current local file, **skip** — everything is up to date.
 
 Before proceeding, also check whether a PR already exists with the title `chore: sync ecosystem_domains.json from gh-aw`. If one is already open, **skip** to avoid duplicates.
 
 ### Step 4: Create a Sync PR
 
-If the files differ:
+If the merged result differs from the current local file:
 
-1. Replace the contents of `src/data/ecosystem_domains.json` with the upstream version exactly as-is (preserve formatting).
+1. Write the merged JSON to `src/data/ecosystem_domains.json` (preserve 2-space indentation, one key per line, trailing newline).
 
 2. Create a pull request:
 
@@ -148,7 +155,9 @@ If the files differ:
   ```markdown
   ## Ecosystem Domains Sync
 
-  Updates `src/data/ecosystem_domains.json` to match the upstream source at [`github/gh-aw/pkg/workflow/data/ecosystem_domains.json`](https://github.com/github/gh-aw/blob/main/pkg/workflow/data/ecosystem_domains.json).
+  Merges upstream changes from [`github/gh-aw/pkg/workflow/data/ecosystem_domains.json`](https://github.com/github/gh-aw/blob/main/pkg/workflow/data/ecosystem_domains.json) into `src/data/ecosystem_domains.json`.
+
+  This sync preserves any ado-aw-specific entries (keys not present upstream) while updating all shared entries to match the upstream source.
 
   This file defines the domain allowlists for ecosystem identifiers (e.g., `python`, `rust`, `node`) used in the `network.allow` front matter field.
 
