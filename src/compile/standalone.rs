@@ -307,10 +307,18 @@ fn generate_allowed_domains(
         }
     }
 
-    // Add extension-declared hosts (runtimes + first-party tools)
+    // Add extension-declared hosts (runtimes + first-party tools).
+    // Extensions may return ecosystem identifiers (e.g., "lean") which are
+    // expanded to their domain lists, or raw domain names.
     for ext in extensions {
         for host in ext.required_hosts() {
-            hosts.insert(host);
+            if is_ecosystem_identifier(&host) {
+                for domain in get_ecosystem_domains(&host) {
+                    hosts.insert(domain);
+                }
+            } else {
+                hosts.insert(host);
+            }
         }
     }
 

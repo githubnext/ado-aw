@@ -142,9 +142,10 @@ mod tests {
 
     #[test]
     fn test_lean_hosts() {
-        use crate::runtimes::lean::LEAN_REQUIRED_HOSTS;
-        assert!(LEAN_REQUIRED_HOSTS.contains(&"elan.lean-lang.org"));
-        assert!(LEAN_REQUIRED_HOSTS.contains(&"leanprover.github.io"));
-        assert!(LEAN_REQUIRED_HOSTS.contains(&"lean-lang.org"));
+        use crate::ecosystem_domains::get_ecosystem_domains;
+        let lean_hosts = get_ecosystem_domains("lean");
+        assert!(lean_hosts.contains(&"elan.lean-lang.org".to_string()));
+        assert!(lean_hosts.contains(&"leanprover.github.io".to_string()));
+        assert!(lean_hosts.contains(&"lean-lang.org".to_string()));
     }
 }

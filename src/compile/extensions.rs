@@ -332,7 +332,7 @@ extension_enum! {
 // ─── Lean 4 ──────────────────────────────────────────────────────────
 
 use crate::runtimes::lean::{
-    self, LeanRuntimeConfig, LEAN_BASH_COMMANDS, LEAN_REQUIRED_HOSTS,
+    self, LeanRuntimeConfig, LEAN_BASH_COMMANDS,
 };
 
 /// Lean 4 runtime extension.
@@ -359,7 +359,7 @@ impl CompilerExtension for LeanExtension {
     }
 
     fn required_hosts(&self) -> Vec<String> {
-        LEAN_REQUIRED_HOSTS.iter().map(|h| (*h).to_string()).collect()
+        vec!["lean".to_string()]
     }
 
     fn required_bash_commands(&self) -> Vec<String> {
@@ -857,9 +857,9 @@ mod tests {
     fn test_lean_required_hosts() {
         let ext = LeanExtension::new(LeanRuntimeConfig::Enabled(true));
         let hosts = ext.required_hosts();
-        assert!(hosts.contains(&"elan.lean-lang.org".to_string()));
-        assert!(hosts.contains(&"leanprover.github.io".to_string()));
-        assert!(hosts.contains(&"lean-lang.org".to_string()));
+        // Lean extension returns the ecosystem identifier; domain expansion
+        // happens in generate_allowed_domains().
+        assert_eq!(hosts, vec!["lean".to_string()]);
     }
 
     #[test]
