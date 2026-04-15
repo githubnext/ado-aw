@@ -126,7 +126,10 @@ impl AgentStats {
         self.input_tokens + self.output_tokens
     }
 
-    /// Render as a collapsible markdown stats block.
+    /// Render as a markdown stats block.
+    ///
+    /// Uses a horizontal rule and heading (not `<details>/<summary>`)
+    /// because Azure DevOps does not render HTML collapsible sections.
     ///
     /// `agent_name` and `model` are sanitized to remove control characters
     /// and pipeline commands (`##vso[`), since the OTel file is writable
@@ -135,8 +138,6 @@ impl AgentStats {
         let duration = format_duration(self.duration_seconds);
 
         // Sanitize agent-controlled values before embedding in markdown.
-        // The OTel file lives in the AWF staging directory which the agent
-        // can write to, so model could be manipulated.
         let model = sanitize_for_markdown(
             self.model.as_deref().unwrap_or("unknown"),
         );
@@ -144,8 +145,7 @@ impl AgentStats {
 
         format!(
             "\n---\n\
-             <details>\n\
-             <summary>\u{1F916} Agent Stats ({name})</summary>\n\
+             _\u{1F916} Agent Stats ({name})_\n\
              \n\
              | Metric | Value |\n\
              |--------|-------|\n\
@@ -153,9 +153,7 @@ impl AgentStats {
              | Tokens | {input} input / {output} output ({total} total) |\n\
              | Duration | {duration} |\n\
              | Tool calls | {tools} |\n\
-             | Turns | {turns} |\n\
-             \n\
-             </details>\n",
+             | Turns | {turns} |\n",
             name = name,
             model = model,
             input = format_number(self.input_tokens),
@@ -323,7 +321,6 @@ mod tests {
             turns: 8,
         };
         let md = stats.to_markdown();
-        assert!(md.contains("<details>"));
         assert!(md.contains("Daily Code Review"));
         assert!(md.contains("claude-opus-4.5"));
         assert!(md.contains("45,230"));
@@ -332,6 +329,7 @@ mod tests {
         assert!(md.contains("4m 32s"));
         assert!(md.contains("23"));
         assert!(md.contains("8"));
+        assert!(!md.contains("<details>"), "ADO does not support <details> tags");
     }
 
     #[test]
