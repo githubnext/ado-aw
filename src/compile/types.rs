@@ -2,8 +2,10 @@
 //!
 //! This module defines the front matter grammar that is shared across all compile targets.
 
+use ado_aw_derive::SanitizeConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use crate::sanitize::SanitizeConfig as SanitizeConfigTrait;
 
 /// Target platform for compiled pipeline
 #[derive(Debug, Deserialize, Clone, Default, PartialEq)]
@@ -62,7 +64,7 @@ impl PoolConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, SanitizeConfig)]
 pub struct PoolConfigFull {
     pub name: String,
     #[serde(default)]
@@ -110,7 +112,7 @@ impl ScheduleConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, SanitizeConfig)]
 pub struct ScheduleOptions {
     /// Fuzzy schedule expression (e.g., "daily around 14:00")
     pub run: String,
@@ -185,6 +187,12 @@ pub struct EngineOptions {
     pub timeout_minutes: Option<u32>,
 }
 
+impl SanitizeConfigTrait for EngineOptions {
+    fn sanitize_config_fields(&mut self) {
+        self.model = self.model.as_deref().map(crate::sanitize::sanitize_config);
+    }
+}
+
 /// Tools configuration for the agent
 ///
 /// Controls which tools are available and their settings.
@@ -201,7 +209,7 @@ pub struct EngineOptions {
 ///     toolsets: [repos, wit]
 ///     allowed: [wit_get_work_item]
 /// ```
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone, Default, SanitizeConfig)]
 pub struct ToolsConfig {
     /// Bash command allow-list. If empty/not set, defaults to safe commands.
     /// Use [":*"] for unrestricted access.
@@ -261,7 +269,7 @@ impl CacheMemoryToolConfig {
 }
 
 /// Cache memory options
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone, Default, SanitizeConfig)]
 pub struct CacheMemoryOptions {
     /// Allowed file extensions (e.g., [".md", ".json", ".txt"]).
     /// Defaults to all extensions if empty or not specified.
@@ -326,7 +334,7 @@ impl AzureDevOpsToolConfig {
 }
 
 /// Azure DevOps MCP options
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone, Default, SanitizeConfig)]
 pub struct AzureDevOpsOptions {
     /// ADO API toolset groups to enable (e.g., repos, wit, core, work-items)
     /// Passed as `-d` flags to the ADO MCP entrypoint.
@@ -359,7 +367,7 @@ pub struct AzureDevOpsOptions {
 ///       - debug
 ///       - trace
 /// ```
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, SanitizeConfig)]
 pub struct PipelineParameter {
     /// Parameter name (must be a valid ADO identifier)
     pub name: String,
@@ -460,7 +468,7 @@ fn default_model() -> String {
 /// - Core Azure DevOps/GitHub endpoints (always included)
 /// - MCP-specific endpoints for each enabled MCP
 /// - User-specified additional hosts from `allow` field
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone, Default, SanitizeConfig)]
 pub struct NetworkConfig {
     /// Additional allowed host patterns (supports wildcards like *.example.com)
     /// Core Azure DevOps and GitHub hosts are always allowed.
@@ -492,7 +500,7 @@ pub struct NetworkConfig {
 /// permissions:
 ///   write: my-write-arm-connection
 /// ```
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone, Default, SanitizeConfig)]
 pub struct PermissionsConfig {
     /// ARM service connection for read-only ADO access.
     /// Token is minted and given to the agent in Stage 1 (inside AWF sandbox).
@@ -506,7 +514,7 @@ pub struct PermissionsConfig {
 }
 
 /// Repository resource definition
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, SanitizeConfig)]
 pub struct Repository {
     pub repository: String,
     #[serde(rename = "type")]
@@ -530,7 +538,7 @@ pub enum McpConfig {
 }
 
 /// Detailed MCP options
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone, Default, SanitizeConfig)]
 pub struct McpOptions {
     /// Whether this MCP is enabled (default: true)
     #[serde(default)]
@@ -568,7 +576,7 @@ pub struct McpOptions {
 }
 
 /// Trigger configuration for the pipeline
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone, Default, SanitizeConfig)]
 pub struct TriggerConfig {
     /// Pipeline completion trigger
     #[serde(default)]
@@ -576,7 +584,7 @@ pub struct TriggerConfig {
 }
 
 /// Pipeline completion trigger configuration
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, SanitizeConfig)]
 pub struct PipelineTrigger {
     /// The name of the source pipeline that triggers this one
     pub name: String,

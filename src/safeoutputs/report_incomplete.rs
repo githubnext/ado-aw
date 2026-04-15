@@ -3,7 +3,7 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::sanitize::{Sanitize, sanitize as sanitize_text};
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
 use crate::safeoutputs::Validate;
 use anyhow::ensure;
@@ -40,8 +40,8 @@ tool_result! {
     }
 }
 
-impl Sanitize for ReportIncompleteResult {
-    fn sanitize_fields(&mut self) {
+impl SanitizeContent for ReportIncompleteResult {
+    fn sanitize_content_fields(&mut self) {
         self.reason = sanitize_text(&self.reason);
         if let Some(ref ctx) = self.context {
             self.context = Some(sanitize_text(ctx));

@@ -4,16 +4,42 @@
 //! against template injection and prompt injection in Azure DevOps contexts.
 //! This module is shared across Stage 1 (safe output creation), threat analysis
 //! ingestion, and Stage 2 (safe output execution).
+//!
+//! Two traits cover different trust boundaries:
+//!
+//! - [`SanitizeContent`] — for agent-generated content (safe-output results).
+//!   Applies the full sanitization pipeline including HTML escaping, @mention
+//!   wrapping, bot trigger neutralization, etc.
+//! - [`SanitizeConfig`] — for operator-controlled configuration values (front
+//!   matter and safe-output configs). Applies a lighter pipeline that protects
+//!   against pipeline command injection and control characters without corrupting
+//!   identifiers like area paths, wiki names, or assignee emails.
 
 use log::debug;
 
-/// Trait for types that contain untrusted text fields requiring sanitization.
+/// Trait for types that contain untrusted agent-generated text fields.
 ///
 /// Implement this on safe output result structs so Stage 2 execution can
-/// call `sanitize_fields()` before dispatching to Azure DevOps APIs.
-pub trait Sanitize {
-    /// Apply the sanitization pipeline to all untrusted text fields in-place.
-    fn sanitize_fields(&mut self);
+/// call `sanitize_content_fields()` before dispatching to Azure DevOps APIs.
+///
+/// Use `#[derive(SanitizeContent)]` from the `ado-aw-derive` crate for automatic
+/// implementation on structs with named fields.
+pub trait SanitizeContent {
+    /// Apply the full sanitization pipeline to all untrusted content fields in-place.
+    fn sanitize_content_fields(&mut self);
+}
+
+/// Trait for types that contain operator-controlled configuration text fields.
+///
+/// Implement this on front matter structs and safe-output config structs so
+/// that all textual values are sanitized before use in template substitution
+/// or API calls.
+///
+/// Use `#[derive(SanitizeConfig)]` from the `ado-aw-derive` crate for automatic
+/// implementation on structs with named fields.
+pub trait SanitizeConfig {
+    /// Apply the config-appropriate sanitization pipeline to all text fields in-place.
+    fn sanitize_config_fields(&mut self);
 }
 
 /// Maximum content size in bytes (IS-08)
@@ -47,6 +73,39 @@ pub fn sanitize(input: &str) -> String {
         s.len()
     );
     s
+}
+
+/// Sanitize operator-controlled configuration values.
+///
+/// Applies a subset of the full pipeline appropriate for config identifiers:
+/// 1. Remove ANSI escape sequences and control characters (IS-09)
+/// 2. Neutralize pipeline commands (`##vso[`, `##[`)
+/// 3. Apply content size limits (IS-08)
+///
+/// Skips HTML escaping, @mention wrapping, bot trigger neutralization, XML
+/// comment removal, and URL protocol sanitization — these are content-rendering
+/// concerns that would corrupt identifiers like area paths, wiki names, or emails.
+pub fn sanitize_config(input: &str) -> String {
+    let mut s = remove_control_characters(input);
+    s = neutralize_pipeline_commands(&s);
+    s = enforce_content_limits(&s);
+    debug!(
+        "Sanitized config value: {} -> {} bytes",
+        input.len(),
+        s.len()
+    );
+    s
+}
+
+/// Light sanitization: only remove control characters.
+///
+/// Used for structural identifiers (e.g., wiki page paths) that must not have
+/// their content altered beyond stripping unsafe control sequences.
+pub fn sanitize_light(input: &str) -> String {
+    input
+        .chars()
+        .filter(|c| !c.is_control() || *c == '\n' || *c == '\t' || *c == '\r')
+        .collect()
 }
 
 // ── IS-09: Control character & ANSI escape removal ─────────────────────────
@@ -541,5 +600,66 @@ mod tests {
         assert!(result.contains("# Heading"));
         assert!(result.contains("## Sub-heading"));
         assert!(result.contains("#123"));
+    }
+
+    // ── sanitize_config tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_sanitize_config_neutralizes_pipeline_commands() {
+        let input = "##vso[task.setvariable variable=secret]value";
+        let result = sanitize_config(input);
+        assert!(result.contains("`##vso[`"));
+        assert!(!result.contains("##vso[task."));
+    }
+
+    #[test]
+    fn test_sanitize_config_removes_control_chars() {
+        let input = "hello\x00world\x07!";
+        assert_eq!(sanitize_config(input), "helloworld!");
+    }
+
+    #[test]
+    fn test_sanitize_config_preserves_html_tags() {
+        let input = "area-path: <MyProject>\\Team";
+        let result = sanitize_config(input);
+        assert!(result.contains("<MyProject>"), "Config sanitize should NOT escape HTML tags");
+    }
+
+    #[test]
+    fn test_sanitize_config_preserves_at_mentions() {
+        let input = "user@example.com";
+        assert_eq!(sanitize_config(input), input, "Config sanitize should NOT wrap @mentions");
+    }
+
+    #[test]
+    fn test_sanitize_config_preserves_bot_triggers() {
+        let input = "fixes #123";
+        assert_eq!(sanitize_config(input), input, "Config sanitize should NOT neutralize bot triggers");
+    }
+
+    #[test]
+    fn test_sanitize_config_preserves_normal_text() {
+        let input = "MyProject\\Team\\Sprint 1";
+        assert_eq!(sanitize_config(input), input);
+    }
+
+    // ── sanitize_light tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_sanitize_light_removes_control_chars() {
+        let input = "/Overview/\x01Page";
+        assert_eq!(sanitize_light(input), "/Overview/Page");
+    }
+
+    #[test]
+    fn test_sanitize_light_preserves_whitespace() {
+        let input = "path/with\ttab\nand\nnewlines";
+        assert_eq!(sanitize_light(input), input);
+    }
+
+    #[test]
+    fn test_sanitize_light_preserves_everything_else() {
+        let input = "<html> @user ##vso[cmd] fixes #42";
+        assert_eq!(sanitize_light(input), input, "Light sanitize should only remove control chars");
     }
 }

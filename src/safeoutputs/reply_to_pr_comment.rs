@@ -1,12 +1,13 @@
 //! Reply to PR review comment safe output tool
 
+use ado_aw_derive::SanitizeConfig;
 use log::{debug, info};
 use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
-use crate::sanitize::{Sanitize, sanitize as sanitize_text};
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use anyhow::{Context, ensure};
@@ -58,8 +59,8 @@ tool_result! {
     }
 }
 
-impl Sanitize for ReplyToPrCommentResult {
-    fn sanitize_fields(&mut self) {
+impl SanitizeContent for ReplyToPrCommentResult {
+    fn sanitize_content_fields(&mut self) {
         self.content = sanitize_text(&self.content);
     }
 }
@@ -75,7 +76,7 @@ impl Sanitize for ReplyToPrCommentResult {
 ///       - self
 ///       - other-repo
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
 pub struct ReplyToPrCommentConfig {
     /// Prefix prepended to all replies (e.g., "[Agent] ")
     #[serde(default, rename = "comment-prefix")]

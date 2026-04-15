@@ -6,6 +6,7 @@ version = 4
 name = "ado-aw"
 version = "0.11.0"
 dependencies = [
+ "ado-aw-derive",
  "anyhow",
  "async-trait",
  "axum",
@@ -30,6 +31,15 @@ dependencies = [
  "tempfile",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "ado-aw-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

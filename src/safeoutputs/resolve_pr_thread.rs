@@ -1,5 +1,6 @@
 //! Resolve PR review thread safe output tool
 
+use ado_aw_derive::SanitizeConfig;
 use log::{debug, info};
 use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
@@ -7,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::resolve_repo_name;
 use super::PATH_SEGMENT;
-use crate::sanitize::{Sanitize, sanitize as sanitize_text};
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use anyhow::{Context, ensure};
@@ -86,8 +87,8 @@ tool_result! {
     }
 }
 
-impl Sanitize for ResolvePrThreadResult {
-    fn sanitize_fields(&mut self) {
+impl SanitizeContent for ResolvePrThreadResult {
+    fn sanitize_content_fields(&mut self) {
         self.status = sanitize_text(&self.status);
         if let Some(ref repo) = self.repository {
             self.repository = Some(sanitize_text(repo));
@@ -108,7 +109,7 @@ impl Sanitize for ResolvePrThreadResult {
 ///       - fixed
 ///       - wont-fix
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
 pub struct ResolvePrThreadConfig {
     /// Restrict which repositories the agent can operate on.
     /// If empty, all repositories in the checkout list (plus "self") are allowed.

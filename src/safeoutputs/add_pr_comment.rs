@@ -6,7 +6,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
-use crate::sanitize::{Sanitize, sanitize as sanitize_text};
+use ado_aw_derive::SanitizeConfig;
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use anyhow::{Context, ensure};
@@ -108,8 +109,8 @@ tool_result! {
     }
 }
 
-impl Sanitize for AddPrCommentResult {
-    fn sanitize_fields(&mut self) {
+impl SanitizeContent for AddPrCommentResult {
+    fn sanitize_content_fields(&mut self) {
         self.content = sanitize_text(&self.content);
         // Strip control characters from structural fields for defense-in-depth
         self.repository = self.repository.chars().filter(|c| !c.is_control()).collect();
@@ -134,7 +135,7 @@ impl Sanitize for AddPrCommentResult {
 ///       - Active
 ///       - Closed
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
 pub struct AddPrCommentConfig {
     /// Prefix prepended to all comments (e.g., "[Agent Review] ")
     #[serde(default, rename = "comment-prefix")]

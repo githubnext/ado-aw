@@ -1,12 +1,13 @@
 //! Update pull request safe output tool
 
+use ado_aw_derive::SanitizeConfig;
 use log::{debug, info, warn};
 use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{PATH_SEGMENT, resolve_repo_name};
-use crate::sanitize::{Sanitize, sanitize as sanitize_text};
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use anyhow::{Context, ensure};
@@ -147,8 +148,8 @@ tool_result! {
     }
 }
 
-impl Sanitize for UpdatePrResult {
-    fn sanitize_fields(&mut self) {
+impl SanitizeContent for UpdatePrResult {
+    fn sanitize_content_fields(&mut self) {
         self.repository = self.repository.as_deref().map(sanitize_text);
         self.operation = sanitize_text(&self.operation);
         self.reviewers = self
@@ -184,7 +185,7 @@ impl Sanitize for UpdatePrResult {
 ///       - approve
 ///       - reject
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
 pub struct UpdatePrConfig {
     /// Which operations are permitted. Empty list means all operations are allowed.
     #[serde(default, rename = "allowed-operations")]

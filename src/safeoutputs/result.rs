@@ -5,7 +5,7 @@ use rmcp::model::ErrorCode;
 use serde::Serialize;
 use std::collections::HashMap;
 
-use crate::sanitize::Sanitize;
+use crate::sanitize::SanitizeContent;
 
 /// Trait for tool results that include a name field
 pub trait ToolResult: Serialize {
@@ -186,7 +186,7 @@ impl ExecutionResult {
 /// Stage 2 parses these outputs and calls `execute` on each to perform
 /// the actual action (e.g., create work items, update files, etc.)
 #[async_trait::async_trait]
-pub trait Executor: Sanitize + Send + Sync {
+pub trait Executor: SanitizeContent + Send + Sync {
     /// Internal execution logic. Implementors define this; callers should
     /// use `execute_sanitized()` instead to ensure inputs are sanitized.
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult>;
@@ -197,7 +197,7 @@ pub trait Executor: Sanitize + Send + Sync {
     /// `sanitize_fields()` is called before `execute_impl()`, making it impossible
     /// to accidentally skip sanitization.
     async fn execute_sanitized(&mut self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
-        self.sanitize_fields();
+        self.sanitize_content_fields();
         self.execute_impl(ctx).await
     }
 }

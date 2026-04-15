@@ -6,7 +6,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
-use crate::sanitize::{Sanitize, sanitize as sanitize_text};
+use ado_aw_derive::SanitizeConfig;
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::safeoutputs::comment_on_work_item::CommentTarget;
@@ -91,8 +92,8 @@ tool_result! {
     }
 }
 
-impl Sanitize for LinkWorkItemsResult {
-    fn sanitize_fields(&mut self) {
+impl SanitizeContent for LinkWorkItemsResult {
+    fn sanitize_content_fields(&mut self) {
         self.link_type = sanitize_text(&self.link_type);
         self.comment = self.comment.as_deref().map(sanitize_text);
     }
@@ -110,7 +111,7 @@ impl Sanitize for LinkWorkItemsResult {
 ///       - child
 ///       - related
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
 pub struct LinkWorkItemsConfig {
     /// Restrict which link types the agent may use.
     /// An empty list (the default) means all link types are allowed.
