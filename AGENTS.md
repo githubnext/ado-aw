@@ -29,6 +29,7 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 │   │   ├── common.rs     # Shared helpers across targets
 │   │   ├── standalone.rs # Standalone pipeline compiler
 │   │   ├── onees.rs      # 1ES Pipeline Template compiler
+│   │   ├── extensions.rs # CompilerExtension trait for runtimes/tools
 │   │   └── types.rs      # Front matter grammar and types
 │   ├── init.rs           # Repository initialization for AI-first authoring
 │   ├── execute.rs        # Stage 2 safe output execution
@@ -63,12 +64,16 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 │   │   ├── update_wiki_page.rs
 │   │   ├── update_work_item.rs
 │   │   └── upload_attachment.rs
+│   ├── runtimes/         # Runtime environment implementations
+│   │   ├── mod.rs        # Module entry point
+│   │   └── lean.rs       # Lean 4 theorem prover runtime
 │   └── tools/            # First-class tool implementations (compiler auto-configures)
 │       ├── mod.rs
 │       └── cache_memory.rs
 ├── templates/
 │   ├── base.yml          # Base pipeline template for standalone
 │   ├── 1es-base.yml      # Base pipeline template for 1ES target
+│   ├── init-agent.md     # Dispatcher agent template for `init` command
 │   └── threat-analysis.md # Threat detection analysis prompt template
 ├── examples/             # Example agent definitions
 ├── tests/                # Integration tests and fixtures
@@ -634,7 +639,7 @@ Additional params provided to copilot CLI. The compiler generates:
 - `--model <model>` - AI model from `engine` front matter field (default: claude-opus-4.5)
 - `--no-ask-user` - Prevents interactive prompts
 - `--allow-tool <tool>` - Explicitly allows specific tools (github, safeoutputs, write, shell commands like cat, date, echo, grep, head, ls, pwd, sort, tail, uniq, wc, yq)
-- `--disable-mcp-server <name>` - Disables specific Copilot CLI MCPs
+- `--disable-builtin-mcps` - Disables all built-in Copilot CLI MCPs (single flag, no argument)
 
 MCP servers are handled entirely by the MCP Gateway (MCPG) and are not passed as copilot CLI params.
 
