@@ -2695,6 +2695,184 @@ network:
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
+/// Integration test: `runtimes: lean: true` end-to-end compilation
+///
+/// Verifies that a pipeline compiled with `runtimes: lean: true` contains:
+/// - The elan installer step (`elan-init.sh`)
+/// - Lean ecosystem domains in the network allow-list (`elan.lean-lang.org`)
+/// - Lean tool shell allow-args (`shell(lean)`, `shell(lake)`, `shell(elan)`)
+/// - No unreplaced `{{ }}` template markers
+#[test]
+fn test_lean_runtime_compiled_output() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-lean-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = r#"---
+name: "Lean Agent"
+description: "Agent with Lean 4 runtime"
+runtimes:
+  lean: true
+---
+
+## Lean Agent
+
+Prove theorems and build Lean 4 projects.
+"#;
+
+    let input_path = temp_dir.join("lean-agent.md");
+    let output_path = temp_dir.join("lean-agent.yml");
+    fs::write(&input_path, input).expect("Failed to write test input");
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_path.exists(), "Compiled YAML should exist");
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+
+    // Lean runtime installs elan via the elan-init.sh script
+    assert!(
+        compiled.contains("elan-init.sh"),
+        "Compiled output should include elan-init.sh installer step"
+    );
+
+    // Lean ecosystem domains should appear in the AWF allow-domains list
+    assert!(
+        compiled.contains("elan.lean-lang.org"),
+        "Compiled output should include elan.lean-lang.org in allowed domains"
+    );
+
+    // Lean tools should appear as shell allow-args for the Copilot CLI
+    assert!(
+        compiled.contains("shell(lean)"),
+        "Compiled output should include shell(lean) in --allow-tool args"
+    );
+    assert!(
+        compiled.contains("shell(lake)"),
+        "Compiled output should include shell(lake) in --allow-tool args"
+    );
+    assert!(
+        compiled.contains("shell(elan)"),
+        "Compiled output should include shell(elan) in --allow-tool args"
+    );
+
+    // Verify no unreplaced {{ markers }} remain
+    for line in compiled.lines() {
+        let stripped = line.replace("${{", "");
+        assert!(
+            !stripped.contains("{{ "),
+            "Compiled output should not contain unreplaced marker: {}",
+            line.trim()
+        );
+    }
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Integration test: `schedule:` object form with `branches:` end-to-end compilation
+///
+/// Verifies that a pipeline compiled with the object-form schedule containing
+/// explicit branch filters generates a `branches.include` block in the output.
+#[test]
+fn test_schedule_object_form_with_branches_compiled_output() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-schedule-branches-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = r#"---
+name: "Scheduled Agent"
+description: "Agent with branch-filtered schedule"
+schedule:
+  run: daily around 14:00
+  branches:
+    - main
+    - release/*
+---
+
+## Scheduled Agent
+
+Run daily on specific branches.
+"#;
+
+    let input_path = temp_dir.join("scheduled-agent.md");
+    let output_path = temp_dir.join("scheduled-agent.yml");
+    fs::write(&input_path, input).expect("Failed to write test input");
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_path.exists(), "Compiled YAML should exist");
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+
+    // Should contain a schedules block
+    assert!(
+        compiled.contains("schedules:"),
+        "Compiled output should contain a schedules block"
+    );
+
+    // Should contain the branches.include block with both branches
+    assert!(
+        compiled.contains("branches:"),
+        "Compiled output should contain a branches filter"
+    );
+    assert!(
+        compiled.contains("include:"),
+        "Compiled output should contain an include list under branches"
+    );
+    assert!(
+        compiled.contains("- main"),
+        "Compiled output should include 'main' branch"
+    );
+    assert!(
+        compiled.contains("- release/*"),
+        "Compiled output should include 'release/*' branch"
+    );
+
+    // Verify no unreplaced {{ markers }} remain
+    for line in compiled.lines() {
+        let stripped = line.replace("${{", "");
+        assert!(
+            !stripped.contains("{{ "),
+            "Compiled output should not contain unreplaced marker: {}",
+            line.trim()
+        );
+    }
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
 /// Test that network.allowed with a bare '*' fails compilation
 #[test]
 fn test_network_allow_bare_wildcard_fails() {
