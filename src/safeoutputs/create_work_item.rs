@@ -98,6 +98,10 @@ pub struct CreateWorkItemConfig {
     #[serde(default, rename = "artifact-link")]
     #[sanitize_config(nested)]
     pub artifact_link: ArtifactLinkConfig,
+
+    /// Whether to include agent execution stats in the output (default: true).
+    #[serde(default = "crate::agent_stats::default_include_stats", rename = "include-stats")]
+    pub include_stats: bool,
 }
 
 /// Configuration for artifact links (repository linking for GitHub Copilot)
@@ -141,6 +145,7 @@ impl Default for CreateWorkItemConfig {
             tags: Vec::new(),
             custom_fields: std::collections::HashMap::new(),
             artifact_link: ArtifactLinkConfig::default(),
+            include_stats: true,
         }
     }
 }
@@ -269,9 +274,14 @@ impl Executor for CreateWorkItemResult {
         debug!("API URL: {}", url);
 
         // Build the patch document for work item creation
+        let description_with_stats = crate::agent_stats::append_stats_to_body(
+            &self.description,
+            ctx,
+            config.include_stats,
+        );
         let mut patch_doc = vec![
             field_op("System.Title", &self.title),
-            field_op("System.Description", &self.description),
+            field_op("System.Description", &description_with_stats),
             // Tell Azure DevOps the description is markdown
             serde_json::json!({
                 "op": "add",
@@ -524,3 +534,4 @@ tags:
         assert_eq!(config.tags, vec!["my-tag"]);
     }
 }
+

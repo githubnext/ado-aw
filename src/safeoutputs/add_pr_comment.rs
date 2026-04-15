@@ -150,6 +150,9 @@ pub struct AddPrCommentConfig {
     /// If empty, all valid statuses are allowed.
     #[serde(default, rename = "allowed-statuses")]
     pub allowed_statuses: Vec<String>,
+    /// Whether to include agent execution stats in the output (default: true).
+    #[serde(default = "crate::agent_stats::default_include_stats", rename = "include-stats")]
+    pub include_stats: bool,
 }
 
 impl Default for AddPrCommentConfig {
@@ -158,6 +161,7 @@ impl Default for AddPrCommentConfig {
             comment_prefix: None,
             allowed_repositories: Vec::new(),
             allowed_statuses: Vec::new(),
+            include_stats: true,
         }
     }
 }
@@ -286,6 +290,11 @@ impl Executor for AddPrCommentResult {
             Some(prefix) => format!("{}{}", prefix, self.content),
             None => self.content.clone(),
         };
+        let comment_body = crate::agent_stats::append_stats_to_body(
+            &comment_body,
+            ctx,
+            config.include_stats,
+        );
 
         // Build the API URL
         let url = format!(
@@ -578,6 +587,7 @@ allowed-statuses:
             comment_prefix: None,
             allowed_repositories: Vec::new(),
             allowed_statuses: vec!["Active".to_string(), "Closed".to_string()],
+            include_stats: true,
         };
         // Test the exact comparison logic extracted from execute_impl
         let status = "active";
@@ -598,6 +608,7 @@ allowed-statuses:
             comment_prefix: None,
             allowed_repositories: Vec::new(),
             allowed_statuses: vec!["active".to_string()],
+            include_stats: true,
         };
         let status = "Active";
         let matched = config
@@ -610,3 +621,4 @@ allowed-statuses:
         );
     }
 }
+

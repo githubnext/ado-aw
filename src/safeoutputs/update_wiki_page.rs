@@ -93,7 +93,7 @@ impl SanitizeContent for UpdateWikiPageResult {
 ///     title-prefix: "[Agent] "
 ///     comment: "Updated by agent"
 /// ```
-#[derive(Debug, Clone, SanitizeConfig, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
 pub struct UpdateWikiPageConfig {
     /// Wiki identifier (name or ID). Required — execution fails without this.
     ///
@@ -128,6 +128,24 @@ pub struct UpdateWikiPageConfig {
     /// Default commit comment used when the agent does not supply one.
     #[serde(default)]
     pub comment: Option<String>,
+
+    /// Whether to include agent execution stats in the output (default: true).
+    #[serde(default = "crate::agent_stats::default_include_stats", rename = "include-stats")]
+    pub include_stats: bool,
+}
+
+impl Default for UpdateWikiPageConfig {
+    fn default() -> Self {
+        Self {
+            wiki_name: None,
+            wiki_project: None,
+            branch: None,
+            path_prefix: None,
+            title_prefix: None,
+            comment: None,
+            include_stats: true,
+        }
+    }
 }
 
 // ============================================================================
@@ -316,7 +334,13 @@ impl Executor for UpdateWikiPageResult {
             .query(&put_query)
             .header("Content-Type", "application/json")
             .basic_auth("", Some(token))
-            .json(&serde_json::json!({ "content": self.content }));
+            .json(&serde_json::json!({
+                "content": crate::agent_stats::append_stats_to_body(
+                    &self.content,
+                    ctx,
+                    config.include_stats,
+                )
+            }));
 
         // Provide the ETag for optimistic concurrency when updating an existing page.
         if let Some(etag) = &etag {
@@ -638,6 +662,7 @@ wiki-name: "MyProject.wiki"
             repository_id: None,
             repository_name: None,
             allowed_repositories: std::collections::HashMap::new(),
+            agent_stats: None,
         };
 
         // wiki-name not in config → should return Err
@@ -701,6 +726,7 @@ wiki-name: "MyProject.wiki"
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            agent_stats: None,
         };
 
         let outcome = result.execute_impl(&ctx).await.unwrap();
@@ -739,6 +765,7 @@ wiki-name: "MyProject.wiki"
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            agent_stats: None,
         };
 
         let outcome = result.execute_impl(&ctx).await.unwrap();
@@ -777,6 +804,7 @@ wiki-name: "MyProject.wiki"
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            agent_stats: None,
         };
 
         // The GET will fail (network unreachable with a fake host), so the
@@ -849,3 +877,4 @@ wiki-name: "MyProject.wiki"
         assert_eq!(encoded, "MyProject.wiki");
     }
 }
+

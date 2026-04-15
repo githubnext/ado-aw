@@ -716,6 +716,7 @@ target: 42
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            agent_stats: None,
         };
 
         let exec_result = result.execute_sanitized(&ctx).await;
@@ -765,6 +766,7 @@ target: 42
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            agent_stats: None,
         };
 
         let exec_result = result.execute_sanitized(&ctx).await.unwrap();
@@ -810,6 +812,7 @@ target: 42
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            agent_stats: None,
         };
 
         let exec_result = result.execute_sanitized(&ctx).await.unwrap();
@@ -857,6 +860,7 @@ target: 42
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            agent_stats: None,
         };
 
         let exec_result = result.execute_sanitized(&ctx).await.unwrap();
