@@ -81,8 +81,8 @@ description: "Checks for outdated dependencies and opens PRs"
 engine: claude-sonnet-4.5
 schedule: weekly on monday around 9:00
 pool: AZS-1ES-L-MMS-ubuntu-22.04
-mcp-servers:
-  ado: true
+tools:
+  azure-devops: true
 permissions:
   read: my-read-arm-connection
   write: my-write-arm-connection
@@ -284,29 +284,60 @@ schedule:
 ## MCP Servers
 
 MCP (Model Context Protocol) servers give the agent access to external tools.
-Built-in MCPs are enabled by name; custom MCPs specify a `command`:
+
+### Built-in Tools (via `tools:`)
+
+First-class integrations are configured under the `tools:` front matter field —
+not under `mcp-servers:`. The compiler auto-generates all required pipeline steps
+and network allowlist entries.
+
+```yaml
+tools:
+  # Azure DevOps MCP — query work items, repos, PRs, etc.
+  azure-devops: true
+
+  # With scoping options
+  azure-devops:
+    toolsets: [repos, wit]
+    allowed: [wit_get_work_item, repo_list_repos_by_project]
+    org: myorg               # Optional — inferred from git remote by default
+
+  # Persistent memory across agent runs
+  cache-memory: true
+
+  # With options
+  cache-memory:
+    allowed-extensions: [.md, .json]
+```
+
+### Custom MCP Servers (via `mcp-servers:`)
+
+For external or third-party MCPs, use the `mcp-servers:` field. Each entry is
+either a **containerized stdio server** (Docker-based) or an **HTTP server**
+(remote endpoint). All traffic routes through the MCP Gateway (MCPG).
 
 ```yaml
 mcp-servers:
-  # Built-in — enable with true or restrict with allowed list
-  ado: true
-  kusto:
-    allowed:
-      - query
-
-  # Custom — must include command
+  # Docker container stdio MCP
   my-tool:
-    command: "node"
-    args: ["path/to/server.js"]
+    container: "node:20-slim"
+    entrypoint: "node"
+    entrypoint-args: ["path/to/mcp-server.js"]
     allowed:
       - search
       - analyze
+
+  # Remote HTTP MCP
+  remote-api:
+    url: "https://mcp.example.com/api"
+    headers:
+      X-MCP-Toolsets: "repos,wit"
+    allowed:
+      - wit_get_work_item
 ```
 
-Available built-in MCPs: `ado`, `ado-ext`, `asa`, `bluebird`, `calculator`,
-`es-chat`, `icm`, `kusto`, `msft-learn`, `stack`.
-
-Each MCP automatically adds its required domains to the network allowlist.
+Custom MCP containers run inside the AWF network sandbox. Add any required
+external domains to `network.allow`.
 
 ---
 
@@ -334,7 +365,6 @@ actions, and the executor processes them after threat analysis.
 | `create-branch` | Creates a new branch from an existing ref |
 | `add-build-tag` | Adds a tag to an ADO build |
 | `upload-attachment` | Uploads a workspace file as an attachment to a work item |
-| `memory` | Persists files across agent runs |
 | `report-incomplete` | Reports that a task could not be completed |
 | `noop` | Reports no action was needed |
 | `missing-data` | Reports required data was unavailable |
@@ -406,7 +436,6 @@ Commands:
   mcp           Run as an MCP server (safe outputs)
   mcp-http      Run as an HTTP MCP server (for MCPG integration)
   execute       Execute safe outputs (Stage 2)
-  proxy         Start an HTTP proxy for network filtering
   configure     Detect agentic pipelines and update GITHUB_TOKEN on ADO definitions
 
 Options:
