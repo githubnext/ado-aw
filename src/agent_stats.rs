@@ -147,7 +147,25 @@ impl AgentStats {
     }
 }
 
-/// Compute duration from OTel span startTime/endTime.
+/// Append agent stats markdown to a body string if stats are available
+/// and stats are not opted out.
+///
+/// Used by safe output executors after they read their typed config
+/// (which contains the `include_stats` field).
+pub fn append_stats_to_body(
+    body: &str,
+    ctx: &crate::safeoutputs::ExecutionContext,
+    include_stats: bool,
+) -> String {
+    if !include_stats {
+        return body.to_string();
+    }
+
+    match &ctx.agent_stats {
+        Some(stats) => format!("{}{}", body, stats.to_markdown()),
+        None => body.to_string(),
+    }
+}
 ///
 /// Times are `[seconds, nanoseconds]` arrays.
 fn compute_duration(span: &Value) -> f64 {

@@ -132,9 +132,11 @@ pub struct CreateWikiPageConfig {
     /// Default commit comment used when the agent does not supply one.
     #[serde(default)]
     pub comment: Option<String>,
-}
 
-// ============================================================================
+    /// Whether to include agent execution stats in the output (default: true).
+    #[serde(default = "default_include_stats", rename = "include-stats")]
+    pub include_stats: bool,
+}
 // Path helpers
 // ============================================================================
 
@@ -321,7 +323,13 @@ impl Executor for CreateWikiPageResult {
             .header("Content-Type", "application/json")
             .header("If-Match", "")
             .basic_auth("", Some(token))
-            .json(&serde_json::json!({ "content": self.content }))
+            .json(&serde_json::json!({
+                "content": crate::agent_stats::append_stats_to_body(
+                    &self.content,
+                    ctx,
+                    config.include_stats,
+                )
+            }))
             .send()
             .await
             .context("Failed to create wiki page")?;
@@ -895,4 +903,8 @@ wiki-name: "MyProject.wiki"
         let encoded = utf8_percent_encode("MyProject.wiki", PATH_SEGMENT).to_string();
         assert_eq!(encoded, "MyProject.wiki");
     }
+}
+
+fn default_include_stats() -> bool {
+    true
 }

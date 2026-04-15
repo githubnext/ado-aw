@@ -100,6 +100,10 @@ pub struct CommentOnWorkItemConfig {
     /// Target scope — which work items can be commented on.
     /// `None` means no target was configured; execution must reject this.
     pub target: Option<CommentTarget>,
+
+    /// Whether to include agent execution stats in the comment (default: true).
+    #[serde(default = "default_include_stats", rename = "include-stats")]
+    pub include_stats: bool,
 }
 
 /// Fetch a work item's area path from the ADO API
@@ -258,8 +262,13 @@ impl Executor for CommentOnWorkItemResult {
         );
         debug!("API URL: {}", url);
 
+        let body_with_stats = crate::agent_stats::append_stats_to_body(
+            &self.body,
+            ctx,
+            config.include_stats,
+        );
         let comment_body = serde_json::json!({
-            "text": self.body,
+            "text": body_with_stats,
         });
 
         info!("Sending comment to work item #{}", self.work_item_id);
@@ -471,4 +480,8 @@ target: "*"
         let config: CommentOnWorkItemConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.target.is_some());
     }
+}
+
+fn default_include_stats() -> bool {
+    true
 }

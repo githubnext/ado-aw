@@ -456,6 +456,10 @@ pub struct CreatePrConfig {
     /// so operators can manually create the PR. No work item is created automatically.
     #[serde(default = "default_true", rename = "fallback-record-branch")]
     pub fallback_record_branch: bool,
+
+    /// Whether to include agent execution stats in the PR description (default: true).
+    #[serde(default = "default_true", rename = "include-stats")]
+    pub include_stats: bool,
 }
 
 fn default_target_branch() -> String {
@@ -500,6 +504,7 @@ impl Default for CreatePrConfig {
             labels: Vec::new(),
             work_items: Vec::new(),
             fallback_record_branch: true,
+            include_stats: true,
         }
     }
 }
@@ -1255,8 +1260,13 @@ impl Executor for CreatePrResult {
         }
         debug!("Changes pushed successfully");
 
-        // Append provenance footer to description
+        // Append provenance footer and agent stats to description
         let description_with_footer = format!("{}{}", self.description, generate_pr_footer());
+        let description_with_stats = crate::agent_stats::append_stats_to_body(
+            &description_with_footer,
+            ctx,
+            config.include_stats,
+        );
 
         // Create the pull request via REST API
         info!("Creating pull request");
@@ -1270,7 +1280,7 @@ impl Executor for CreatePrResult {
             "sourceRefName": source_ref,
             "targetRefName": target_ref,
             "title": effective_title,
-            "description": description_with_footer,
+            "description": description_with_stats,
             "isDraft": config.draft,
         });
 
