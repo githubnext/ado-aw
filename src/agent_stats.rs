@@ -121,23 +121,12 @@ impl AgentStats {
         Ok(stats)
     }
 
-    /// Total tokens (input + output).
-    pub fn total_tokens(&self) -> u64 {
-        self.input_tokens + self.output_tokens
-    }
-
-    /// Render as a markdown stats block.
+    /// Render as a compact markdown stats line.
     ///
-    /// Uses a horizontal rule and heading (not `<details>/<summary>`)
-    /// because Azure DevOps does not render HTML collapsible sections.
-    ///
-    /// `agent_name` and `model` are sanitized to remove control characters
-    /// and pipeline commands (`##vso[`), since the OTel file is writable
-    /// by the agent inside the AWF container.
+    /// Uses middle-dot separators for a lightweight single-line format
+    /// that works across all ADO markdown surfaces.
     pub fn to_markdown(&self) -> String {
         let duration = format_duration(self.duration_seconds);
-
-        // Sanitize agent-controlled values before embedding in markdown.
         let model = sanitize_for_markdown(
             self.model.as_deref().unwrap_or("unknown"),
         );
@@ -145,23 +134,15 @@ impl AgentStats {
 
         format!(
             "\n---\n\
-             _\u{1F916} Agent Stats ({name})_\n\
-             \n\
-             | Metric | Value |\n\
-             |--------|-------|\n\
-             | Model | {model} |\n\
-             | Tokens | {input} input / {output} output ({total} total) |\n\
-             | Duration | {duration} |\n\
-             | Tool calls | {tools} |\n\
-             | Turns | {turns} |\n",
+             \u{1F916} _{name}_ \u{00B7} {model} \u{00B7} \
+             {input} in / {output} out \u{00B7} \
+             {tools} tool calls \u{00B7} {duration}\n",
             name = name,
             model = model,
             input = format_number(self.input_tokens),
             output = format_number(self.output_tokens),
-            total = format_number(self.total_tokens()),
-            duration = duration,
             tools = self.tool_calls,
-            turns = self.turns,
+            duration = duration,
         )
     }
 }
@@ -301,7 +282,7 @@ mod tests {
         assert_eq!(stats.model.as_deref(), Some("claude-sonnet-4.5"));
         assert_eq!(stats.input_tokens, 32949);
         assert_eq!(stats.output_tokens, 236);
-        assert_eq!(stats.total_tokens(), 33185);
+        assert_eq!(stats.input_tokens + stats.output_tokens, 33185);
         assert_eq!(stats.turns, 2);
         // execute_tool spans: bash only (report_intent is filtered as internal)
         assert_eq!(stats.tool_calls, 1);
@@ -323,13 +304,12 @@ mod tests {
         let md = stats.to_markdown();
         assert!(md.contains("Daily Code Review"));
         assert!(md.contains("claude-opus-4.5"));
-        assert!(md.contains("45,230"));
-        assert!(md.contains("12,450"));
-        assert!(md.contains("57,680"));
+        assert!(md.contains("45,230 in"));
+        assert!(md.contains("12,450 out"));
+        assert!(md.contains("23 tool calls"));
         assert!(md.contains("4m 32s"));
-        assert!(md.contains("23"));
-        assert!(md.contains("8"));
-        assert!(!md.contains("<details>"), "ADO does not support <details> tags");
+        assert!(md.contains("\u{00B7}"), "should use middle-dot separators");
+        assert!(!md.contains("turns"), "turns should not be in output");
     }
 
     #[test]
