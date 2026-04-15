@@ -638,6 +638,8 @@ wiki-name: "MyProject.wiki"
             repository_id: None,
             repository_name: None,
             allowed_repositories: std::collections::HashMap::new(),
+            agent_name: None,
+            agent_stats: None,
         };
 
         // wiki-name not in config → should return Err
@@ -701,6 +703,8 @@ wiki-name: "MyProject.wiki"
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            agent_name: None,
+            agent_stats: None,
         };
 
         let outcome = result.execute_impl(&ctx).await.unwrap();
@@ -739,6 +743,8 @@ wiki-name: "MyProject.wiki"
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            agent_name: None,
+            agent_stats: None,
         };
 
         let outcome = result.execute_impl(&ctx).await.unwrap();
@@ -777,6 +783,8 @@ wiki-name: "MyProject.wiki"
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            agent_name: None,
+            agent_stats: None,
         };
 
         // The GET will fail (network unreachable with a fake host), so the

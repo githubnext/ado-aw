@@ -216,6 +216,29 @@ async fn main() -> Result<()> {
                 ctx.working_directory = safe_output_dir.clone();
                 ctx.tool_configs = front_matter.safe_outputs.clone();
                 ctx.allowed_repositories = allowed_repositories;
+                ctx.agent_name = Some(front_matter.name.clone());
+
+                // Load agent stats from OTel JSONL if available
+                let otel_path = safe_output_dir.join(agent_stats::OTEL_FILENAME);
+                if otel_path.exists() {
+                    match agent_stats::AgentStats::from_otel_file(&otel_path, &front_matter.name)
+                        .await
+                    {
+                        Ok(stats) => {
+                            log::info!(
+                                "Agent stats: {} input / {} output tokens, {}s duration, {} tool calls, {} turns",
+                                stats.input_tokens, stats.output_tokens,
+                                stats.duration_seconds as u64, stats.tool_calls, stats.turns
+                            );
+                            ctx.agent_stats = Some(stats);
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to parse OTel stats file: {}", e);
+                        }
+                    }
+                } else {
+                    log::debug!("No OTel stats file found at {}", otel_path.display());
+                }
 
                 let results = execute::execute_safe_outputs(&safe_output_dir, &ctx).await?;
 

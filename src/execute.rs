@@ -514,6 +514,8 @@ mod tests {
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            agent_name: None,
+            agent_stats: None,
         };
 
         let result = execute_safe_output(&entry, &ctx).await;
@@ -546,6 +548,8 @@ mod tests {
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            agent_name: None,
+            agent_stats: None,
         };
 
         let result = execute_safe_output(&entry, &ctx).await;
@@ -694,6 +698,8 @@ mod tests {
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            agent_name: None,
+            agent_stats: None,
         };
 
         let result = execute_safe_output(&entry, &ctx).await;
@@ -736,6 +742,8 @@ mod tests {
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            agent_name: None,
+            agent_stats: None,
         };
 
         let result = execute_safe_output(&entry, &ctx).await;
@@ -778,6 +786,8 @@ mod tests {
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            agent_name: None,
+            agent_stats: None,
         };
 
         let result = execute_safe_output(&entry, &ctx).await;
@@ -825,6 +835,8 @@ mod tests {
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            agent_name: None,
+            agent_stats: None,
         };
 
         let results = execute_safe_outputs(temp_dir.path(), &ctx).await;
@@ -1031,6 +1043,8 @@ mod tests {
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            agent_name: None,
+            agent_stats: None,
         };
 
         let results = execute_safe_outputs(temp_dir.path(), &ctx).await;
@@ -1074,6 +1088,8 @@ mod tests {
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            agent_name: None,
+            agent_stats: None,
         };
 
         let results = execute_safe_outputs(temp_dir.path(), &ctx).await.unwrap();

@@ -56,6 +56,10 @@ pub struct ExecutionContext {
     /// Allowed repositories for PRs: "self" + checkout list aliases
     /// Maps alias to ADO repo name (e.g., "other-repo" -> "org/other-repo")
     pub allowed_repositories: HashMap<String, String>,
+    /// Agent name from front matter (for display in stats blocks)
+    pub agent_name: Option<String>,
+    /// Agent execution statistics parsed from OTel JSONL
+    pub agent_stats: Option<crate::agent_stats::AgentStats>,
 }
 
 impl ExecutionContext {
@@ -109,6 +113,8 @@ impl Default for ExecutionContext {
             repository_id: std::env::var("BUILD_REPOSITORY_ID").ok(),
             repository_name: std::env::var("BUILD_REPOSITORY_NAME").ok(),
             allowed_repositories: HashMap::new(),
+            agent_name: None,
+            agent_stats: None,
         }
     }
 }
