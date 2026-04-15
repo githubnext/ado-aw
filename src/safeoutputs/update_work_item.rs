@@ -716,7 +716,6 @@ target: 42
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
-            agent_name: None,
             agent_stats: None,
         };
 
@@ -767,7 +766,6 @@ target: 42
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
-            agent_name: None,
             agent_stats: None,
         };
 
@@ -814,7 +812,6 @@ target: 42
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
-            agent_name: None,
             agent_stats: None,
         };
 
@@ -863,7 +860,6 @@ target: 42
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
-            agent_name: None,
             agent_stats: None,
         };
 

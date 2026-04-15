@@ -216,7 +216,6 @@ async fn main() -> Result<()> {
                 ctx.working_directory = safe_output_dir.clone();
                 ctx.tool_configs = front_matter.safe_outputs.clone();
                 ctx.allowed_repositories = allowed_repositories;
-                ctx.agent_name = Some(front_matter.name.clone());
 
                 // Load agent stats from OTel JSONL if available
                 let otel_path = safe_output_dir.join(agent_stats::OTEL_FILENAME);

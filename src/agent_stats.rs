@@ -31,6 +31,13 @@ pub struct AgentStats {
 /// OTel JSONL filename written by Copilot CLI.
 pub const OTEL_FILENAME: &str = "otel.jsonl";
 
+/// Copilot CLI internal tool names excluded from the tool call count.
+/// These are administrative spans, not user-visible tool invocations.
+const INTERNAL_TOOL_NAMES: &[&str] = &[
+    "execute_tool report_intent",
+    "execute_tool permission",
+];
+
 impl AgentStats {
     /// Parse agent stats from an OTel JSONL file.
     ///
@@ -47,7 +54,7 @@ impl AgentStats {
     ///
     /// Looks for:
     /// - The last `invoke_agent` span for aggregated tokens, model, turns, duration
-    /// - `execute_tool` spans for tool call count
+    /// - `execute_tool` spans for tool call count (excluding internal tools)
     pub fn from_otel_entries(entries: &[Value], agent_name: &str) -> Result<Self> {
         let mut stats = AgentStats {
             agent_name: agent_name.to_string(),
@@ -97,14 +104,17 @@ impl AgentStats {
             stats.duration_seconds = compute_duration(span);
         }
 
-        // Count execute_tool spans
+        // Count execute_tool spans, excluding internal Copilot CLI tools
         stats.tool_calls = entries
             .iter()
             .filter(|e| {
                 e.get("type").and_then(|t| t.as_str()) == Some("span")
                     && e.get("name")
                         .and_then(|n| n.as_str())
-                        .is_some_and(|n| n.starts_with("execute_tool"))
+                        .is_some_and(|n| {
+                            n.starts_with("execute_tool")
+                                && !INTERNAL_TOOL_NAMES.contains(&n)
+                        })
             })
             .count() as u64;
 
@@ -117,9 +127,20 @@ impl AgentStats {
     }
 
     /// Render as a collapsible markdown stats block.
+    ///
+    /// `agent_name` and `model` are sanitized to remove control characters
+    /// and pipeline commands (`##vso[`), since the OTel file is writable
+    /// by the agent inside the AWF container.
     pub fn to_markdown(&self) -> String {
         let duration = format_duration(self.duration_seconds);
-        let model = self.model.as_deref().unwrap_or("unknown");
+
+        // Sanitize agent-controlled values before embedding in markdown.
+        // The OTel file lives in the AWF staging directory which the agent
+        // can write to, so model could be manipulated.
+        let model = sanitize_for_markdown(
+            self.model.as_deref().unwrap_or("unknown"),
+        );
+        let name = sanitize_for_markdown(&self.agent_name);
 
         format!(
             "\n---\n\
@@ -135,7 +156,7 @@ impl AgentStats {
              | Turns | {turns} |\n\
              \n\
              </details>\n",
-            name = self.agent_name,
+            name = name,
             model = model,
             input = format_number(self.input_tokens),
             output = format_number(self.output_tokens),
@@ -145,6 +166,20 @@ impl AgentStats {
             turns = self.turns,
         )
     }
+}
+
+/// Sanitize a string for safe embedding in markdown output.
+///
+/// Strips control characters and neutralizes ADO pipeline commands
+/// (`##vso[`) that could be injected via the OTel file.
+fn sanitize_for_markdown(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_control() || *c == '\n')
+        .collect::<String>()
+        .replace("##vso[", "[vso-filtered][")
+        .replace("##[", "[filtered][")
+        // Strip pipe characters that could break markdown tables
+        .replace('|', "\\|")
 }
 
 /// Append agent stats markdown to a body string if stats are available
@@ -270,8 +305,8 @@ mod tests {
         assert_eq!(stats.output_tokens, 236);
         assert_eq!(stats.total_tokens(), 33185);
         assert_eq!(stats.turns, 2);
-        // execute_tool spans: report_intent + bash = 2
-        assert_eq!(stats.tool_calls, 2);
+        // execute_tool spans: bash only (report_intent is filtered as internal)
+        assert_eq!(stats.tool_calls, 1);
         // Duration should be ~8 seconds (from the last invoke_agent span)
         assert!(stats.duration_seconds > 7.0 && stats.duration_seconds < 10.0);
     }
@@ -315,5 +350,33 @@ mod tests {
         });
         let d = compute_duration(&span);
         assert!((d - 8.282631).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_sanitize_for_markdown_strips_vso_commands() {
+        assert_eq!(
+            sanitize_for_markdown("normal text"),
+            "normal text"
+        );
+        assert_eq!(
+            sanitize_for_markdown("##vso[task.setvariable]evil"),
+            "[vso-filtered][task.setvariable]evil"
+        );
+        assert_eq!(
+            sanitize_for_markdown("model|name"),
+            "model\\|name"
+        );
+    }
+
+    #[test]
+    fn test_internal_tools_excluded_from_count() {
+        let entries = vec![
+            serde_json::json!({"type": "span", "name": "execute_tool report_intent"}),
+            serde_json::json!({"type": "span", "name": "execute_tool permission"}),
+            serde_json::json!({"type": "span", "name": "execute_tool bash"}),
+            serde_json::json!({"type": "span", "name": "execute_tool grep"}),
+        ];
+        let stats = AgentStats::from_otel_entries(&entries, "test").unwrap();
+        assert_eq!(stats.tool_calls, 2); // bash + grep, not report_intent or permission
     }
 }

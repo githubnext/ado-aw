@@ -648,7 +648,6 @@ wiki-name: "MyProject.wiki"
             repository_id: None,
             repository_name: None,
             allowed_repositories: std::collections::HashMap::new(),
-            agent_name: None,
             agent_stats: None,
         };
 
@@ -713,7 +712,6 @@ wiki-name: "MyProject.wiki"
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
-            agent_name: None,
             agent_stats: None,
         };
 
@@ -753,7 +751,6 @@ wiki-name: "MyProject.wiki"
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
-            agent_name: None,
             agent_stats: None,
         };
 
@@ -793,7 +790,6 @@ wiki-name: "MyProject.wiki"
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
-            agent_name: None,
             agent_stats: None,
         };
 

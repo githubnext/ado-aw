@@ -514,7 +514,6 @@ mod tests {
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
-            agent_name: None,
             agent_stats: None,
         };
 
@@ -548,7 +547,6 @@ mod tests {
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
-            agent_name: None,
             agent_stats: None,
         };
 
@@ -698,7 +696,6 @@ mod tests {
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
-            agent_name: None,
             agent_stats: None,
         };
 
@@ -742,7 +739,6 @@ mod tests {
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
-            agent_name: None,
             agent_stats: None,
         };
 
@@ -786,7 +782,6 @@ mod tests {
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
-            agent_name: None,
             agent_stats: None,
         };
 
@@ -835,7 +830,6 @@ mod tests {
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
-            agent_name: None,
             agent_stats: None,
         };
 
@@ -1043,7 +1037,6 @@ mod tests {
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
-            agent_name: None,
             agent_stats: None,
         };
 
@@ -1088,7 +1081,6 @@ mod tests {
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
-            agent_name: None,
             agent_stats: None,
         };
 

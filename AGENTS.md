@@ -1022,6 +1022,7 @@ Adds a comment to an existing Azure DevOps work item. This is the ADO equivalent
 
 **Configuration options (front matter):**
 - `max` - Maximum number of comments per run (default: 1)
+- `include-stats` - Whether to append agent execution stats to the comment body (default: true)
 - `target` - **Required** — scoping policy for which work items can be commented on:
   - `"*"` - Any work item in the project (unrestricted, must be explicit)
   - `12345` - A specific work item ID
@@ -1053,6 +1054,7 @@ Creates an Azure DevOps work item.
 - `tags` - List of tags to apply
 - `custom-fields` - Map of custom field reference names to values (e.g., `Custom.MyField: "value"`)
 - `max` - Maximum number of create-work-item outputs allowed per run (default: 1)
+- `include-stats` - Whether to append agent execution stats to the work item description (default: true)
 - `artifact-link` - Configuration for GitHub Copilot artifact linking:
   - `enabled` - Whether to add an artifact link (default: false)
   - `repository` - Repository name override (defaults to BUILD_REPOSITORY_NAME)
@@ -1151,6 +1153,7 @@ Note: The source branch name is auto-generated from a sanitized version of the P
 - `labels` - List of labels to apply
 - `work-items` - List of work item IDs to link
 - `max` - Maximum number of create-pull-request outputs allowed per run (default: 1)
+- `include-stats` - Whether to append agent execution stats (token usage, duration, model) to the PR description (default: true)
 
 **Multi-repository support:**
 When `workspace: root` and multiple repositories are checked out, agents can create PRs for any allowed repository:
@@ -1204,6 +1207,7 @@ safe-outputs:
     comment-prefix: "[Agent Review] "  # Optional — prepended to all comments
     allowed-repositories: []           # Optional — restrict which repos can be commented on
     max: 1                             # Maximum per run (default: 1)
+    include-stats: true                # Append agent stats to comment (default: true)
 ```
 
 #### reply-to-pr-comment
@@ -1417,6 +1421,7 @@ safe-outputs:
     title-prefix: "[Agent] "        # Optional — prepended to the last path segment (the page title)
     comment: "Created by agent"     # Optional — default commit comment when agent omits one
     max: 1                          # Maximum number of create-wiki-page outputs allowed per run (default: 1)
+    include-stats: true             # Append agent stats to wiki page content (default: true)
 ```
 
 Note: `wiki-name` is required. If it is not set, execution fails with an explicit error message.
@@ -1442,6 +1447,7 @@ safe-outputs:
     title-prefix: "[Agent] "        # Optional — prepended to the last path segment (the page title)
     comment: "Updated by agent"     # Optional — default commit comment when agent omits one
     max: 1                          # Maximum number of update-wiki-page outputs allowed per run (default: 1)
+    include-stats: true             # Append agent stats to wiki page content (default: true)
 ```
 
 Note: `wiki-name` is required. If it is not set, execution fails with an explicit error message.
