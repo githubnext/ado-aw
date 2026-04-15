@@ -8,6 +8,7 @@ mod init;
 mod logging;
 mod mcp;
 mod ndjson;
+pub mod runtimes;
 pub mod sanitize;
 mod safeoutputs;
 mod tools;

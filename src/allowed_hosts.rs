@@ -139,4 +139,12 @@ mod tests {
         let hosts = mcp_required_hosts("unknown-mcp");
         assert!(hosts.is_empty());
     }
+
+    #[test]
+    fn test_lean_hosts() {
+        use crate::runtimes::lean::LEAN_REQUIRED_HOSTS;
+        assert!(LEAN_REQUIRED_HOSTS.contains(&"elan.lean-lang.org"));
+        assert!(LEAN_REQUIRED_HOSTS.contains(&"leanprover.github.io"));
+        assert!(LEAN_REQUIRED_HOSTS.contains(&"lean-lang.org"));
+    }
 }
