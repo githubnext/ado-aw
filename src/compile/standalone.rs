@@ -110,11 +110,17 @@ impl Compiler for StandaloneCompiler {
             .and_then(|t| t.cache_memory.as_ref())
             .is_some_and(|cm| cm.is_enabled());
 
+        let lean_config = front_matter
+            .runtimes
+            .as_ref()
+            .and_then(|r| r.lean.as_ref())
+            .filter(|l| l.is_enabled());
+
         // Build parameters list: user-defined + auto-injected clearMemory for memory
         let parameters = build_parameters(&front_matter.parameters, has_memory);
         let parameters_yaml = generate_parameters(&parameters)?;
 
-        let prepare_steps = generate_prepare_steps(&front_matter.steps, has_memory);
+        let prepare_steps = generate_prepare_steps(&front_matter.steps, has_memory, lean_config);
         let finalize_steps = generate_finalize_steps(&front_matter.post_steps);
         let agentic_depends_on = generate_agentic_depends_on(&front_matter.setup);
         let job_timeout = generate_job_timeout(front_matter);
@@ -340,6 +346,18 @@ fn generate_allowed_domains(front_matter: &FrontMatter) -> Result<String> {
         }
     }
 
+    // Add Lean-specific hosts when runtimes.lean is enabled
+    if front_matter
+        .runtimes
+        .as_ref()
+        .and_then(|r| r.lean.as_ref())
+        .is_some_and(|l| l.is_enabled())
+    {
+        for host in crate::runtimes::lean::LEAN_REQUIRED_HOSTS {
+            hosts.insert((*host).to_string());
+        }
+    }
+
     // Add user-specified hosts (validated against DNS-safe characters)
     for host in &user_hosts {
         let valid_chars = !host.is_empty()
@@ -429,13 +447,24 @@ fn generate_teardown_job(
 }
 
 /// Generate prepare steps (inline), including memory download/restore/prompt if enabled
-fn generate_prepare_steps(prepare_steps: &[serde_yaml::Value], has_memory: bool) -> String {
+/// and Lean 4 installation if enabled
+fn generate_prepare_steps(
+    prepare_steps: &[serde_yaml::Value],
+    has_memory: bool,
+    lean_config: Option<&crate::runtimes::lean::LeanRuntimeConfig>,
+) -> String {
     let mut parts = Vec::new();
 
     // Memory steps run before user prepare steps
     if has_memory {
         parts.push(generate_memory_download());
         parts.push(generate_memory_prompt());
+    }
+
+    // Lean install and prompt
+    if let Some(lean) = lean_config {
+        parts.push(crate::runtimes::lean::generate_lean_install(lean));
+        parts.push(crate::runtimes::lean::generate_lean_prompt());
     }
 
     if !prepare_steps.is_empty() {
@@ -2064,11 +2093,33 @@ mod tests {
         assert!(result.is_err(), "invalid DNS characters should return an error");
     }
 
+    #[test]
+    fn test_generate_allowed_domains_lean_adds_lean_hosts() {
+        let mut fm = minimal_front_matter();
+        fm.runtimes = Some(crate::compile::types::RuntimesConfig {
+            lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(true)),
+        });
+        let domains = generate_allowed_domains(&fm).unwrap();
+        assert!(domains.contains("elan.lean-lang.org"), "should include elan domain");
+        assert!(domains.contains("leanprover.github.io"), "should include leanprover domain");
+        assert!(domains.contains("lean-lang.org"), "should include lean-lang domain");
+    }
+
+    #[test]
+    fn test_generate_allowed_domains_lean_disabled_no_lean_hosts() {
+        let mut fm = minimal_front_matter();
+        fm.runtimes = Some(crate::compile::types::RuntimesConfig {
+            lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(false)),
+        });
+        let domains = generate_allowed_domains(&fm).unwrap();
+        assert!(!domains.contains("elan.lean-lang.org"), "lean disabled should not add lean hosts");
+    }
+
     // ─── generate_prepare_steps ──────────────────────────────────────────────
 
     #[test]
     fn test_generate_prepare_steps_with_memory_includes_memory_preamble() {
-        let result = generate_prepare_steps(&[], true);
+        let result = generate_prepare_steps(&[], true, None);
         assert!(
             !result.is_empty(),
             "memory steps must be emitted when has_memory=true"
@@ -2081,13 +2132,13 @@ mod tests {
 
     #[test]
     fn test_generate_prepare_steps_without_memory_and_no_steps_is_empty() {
-        let result = generate_prepare_steps(&[], false);
+        let result = generate_prepare_steps(&[], false, None);
         assert!(result.is_empty(), "no steps and no memory should produce empty output");
     }
 
     #[test]
     fn test_generate_prepare_steps_with_memory_includes_download_and_prompt() {
-        let result = generate_prepare_steps(&[], true);
+        let result = generate_prepare_steps(&[], true, None);
         assert!(
             result.contains("DownloadPipelineArtifact"),
             "memory steps must include the artifact download task"
@@ -2103,7 +2154,7 @@ mod tests {
         // User-supplied prepare steps without memory should be included as-is
         let step: serde_yaml::Value =
             serde_yaml::from_str("bash: echo hello\ndisplayName: greet").unwrap();
-        let result = generate_prepare_steps(&[step], false);
+        let result = generate_prepare_steps(&[step], false, None);
         assert!(!result.is_empty(), "user steps should be present");
         assert!(
             !result.contains("agent_memory"),
@@ -2116,7 +2167,7 @@ mod tests {
         // When memory is enabled AND user steps are present, both should appear
         let step: serde_yaml::Value =
             serde_yaml::from_str("bash: echo hello\ndisplayName: greet").unwrap();
-        let result = generate_prepare_steps(&[step], true);
+        let result = generate_prepare_steps(&[step], true, None);
         assert!(
             result.contains("agent_memory"),
             "memory reference must be present"
@@ -2125,5 +2176,39 @@ mod tests {
             result.contains("echo hello"),
             "user step must also be present"
         );
+    }
+
+    #[test]
+    fn test_generate_prepare_steps_with_lean() {
+        use crate::runtimes::lean::LeanRuntimeConfig;
+        let lean = LeanRuntimeConfig::Enabled(true);
+        let result = generate_prepare_steps(&[], false, Some(&lean));
+        assert!(result.contains("elan-init.sh"), "should include elan installer");
+        assert!(result.contains("Lean 4"), "should include Lean prompt");
+        assert!(result.contains("--default-toolchain stable"), "should default to stable");
+        assert!(result.contains("/tmp/awf-tools/"), "should symlink into awf-tools for AWF chroot");
+    }
+
+    #[test]
+    fn test_generate_prepare_steps_with_lean_custom_toolchain() {
+        use crate::runtimes::lean::{LeanRuntimeConfig, LeanOptions};
+        let lean = LeanRuntimeConfig::WithOptions(LeanOptions {
+            toolchain: Some("leanprover/lean4:v4.29.1".to_string()),
+        });
+        let result = generate_prepare_steps(&[], false, Some(&lean));
+        assert!(
+            result.contains("--default-toolchain leanprover/lean4:v4.29.1"),
+            "should use specified toolchain"
+        );
+    }
+
+    #[test]
+    fn test_generate_prepare_steps_with_lean_and_memory() {
+        use crate::runtimes::lean::LeanRuntimeConfig;
+        let lean = LeanRuntimeConfig::Enabled(true);
+        let result = generate_prepare_steps(&[], true, Some(&lean));
+        assert!(result.contains("agent_memory"), "memory steps present");
+        assert!(result.contains("elan-init.sh"), "lean install present");
+        assert!(result.contains("Lean 4"), "lean prompt present");
     }
 }
