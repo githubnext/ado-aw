@@ -70,17 +70,14 @@ impl Compiler for StandaloneCompiler {
         // Collect compiler extensions (runtimes + first-party tools)
         let extensions = super::extensions::collect_extensions(front_matter);
 
+        // Build compile context with inferred metadata (ADO org from git remote, etc.)
+        let input_dir = input_path.parent().unwrap_or(std::path::Path::new("."));
+        let ctx = super::extensions::CompileContext::new(front_matter, input_dir).await;
+
         // Run extension validations (warnings + errors)
-        {
-            let validation_ctx = super::extensions::CompileContext {
-                agent_name: &front_matter.name,
-                front_matter,
-                inferred_org: None, // Not yet available; ADO org validation happens in mcpg_servers()
-            };
-            for ext in &extensions {
-                for warning in ext.validate(&validation_ctx)? {
-                    eprintln!("Warning: {}", warning);
-                }
+        for ext in &extensions {
+            for warning in ext.validate(&ctx)? {
+                eprintln!("Warning: {}", warning);
             }
         }
 
@@ -234,48 +231,9 @@ impl Compiler for StandaloneCompiler {
                 replace_with_indent(&yaml, placeholder, replacement)
             });
 
-        // Infer ADO org from git remote at compile time (for tools.azure-devops)
-        let inferred_org = if front_matter
-            .tools
-            .as_ref()
-            .and_then(|t| t.azure_devops.as_ref())
-            .is_some_and(|ado| ado.is_enabled() && ado.org().is_none())
-        {
-            let input_dir = input_path.parent().unwrap_or(std::path::Path::new("."));
-            match crate::configure::get_git_remote_url(input_dir).await {
-                Ok(url) => match crate::configure::parse_ado_remote(&url) {
-                    Ok(ctx) => {
-                        let org = ctx
-                            .org_url
-                            .trim_end_matches('/')
-                            .rsplit('/')
-                            .next()
-                            .unwrap_or("")
-                            .to_string();
-                        if org.is_empty() {
-                            None
-                        } else {
-                            info!("Inferred ADO org '{}' from git remote", org);
-                            Some(org)
-                        }
-                    }
-                    Err(_) => {
-                        log::debug!("Git remote is not an ADO URL — cannot infer org");
-                        None
-                    }
-                },
-                Err(_) => {
-                    log::debug!("No git remote found — cannot infer org");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
         // Always generate MCPG config — safeoutputs is always required regardless
         // of whether additional mcp-servers are configured in front matter.
-        let config = generate_mcpg_config(front_matter, inferred_org.as_deref(), &extensions)?;
+        let config = generate_mcpg_config(front_matter, &ctx, &extensions)?;
         let mcpg_config_json =
             serde_json::to_string_pretty(&config).context("Failed to serialize MCPG config")?;
 
@@ -488,18 +446,11 @@ fn generate_agentic_depends_on(setup_steps: &[serde_yaml::Value]) -> String {
 /// Generate MCPG configuration from front matter.
 ///
 /// Converts the front matter `mcp-servers` definitions into MCPG-compatible JSON.
-/// SafeOutputs is always included as an HTTP backend. Custom MCPs with explicit
-/// `command:` are included as stdio servers.
-///
-/// `inferred_org` is the ADO organization name extracted from the git remote URL
-/// at compile time. Used as the default org for `tools.azure-devops` when no
-/// explicit `org:` override is provided.
-///
-/// Returns an error if `tools.azure-devops` is enabled but no org can be determined
-/// (neither explicit override nor git remote inference).
+/// SafeOutputs is always included as an HTTP backend. Extension-contributed MCPG
+/// entries (e.g., azure-devops) are included via the `extensions` parameter.
 pub fn generate_mcpg_config(
     front_matter: &FrontMatter,
-    inferred_org: Option<&str>,
+    ctx: &super::extensions::CompileContext,
     extensions: &[super::extensions::Extension],
 ) -> Result<McpgConfig> {
     let mut mcp_servers = HashMap::new();
@@ -528,13 +479,8 @@ pub fn generate_mcpg_config(
     );
 
     // Add extension-contributed MCPG server entries (e.g., azure-devops)
-    let ctx = super::extensions::CompileContext {
-        agent_name: &front_matter.name,
-        front_matter,
-        inferred_org,
-    };
     for ext in extensions {
-        for (name, config) in ext.mcpg_servers(&ctx)? {
+        for (name, config) in ext.mcpg_servers(ctx)? {
             mcp_servers.insert(name, config);
         }
     }
@@ -985,7 +931,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(&fm, &super::super::extensions::CompileContext::for_test(&fm), &super::super::extensions::collect_extensions(&fm)).unwrap();
         let server = config.mcp_servers.get("my-tool").unwrap();
         assert_eq!(server.server_type, "stdio");
         assert_eq!(server.container.as_ref().unwrap(), "node:20-slim");
@@ -1006,7 +952,7 @@ mod tests {
         // An MCP with no container or url should be skipped
         fm.mcp_servers
             .insert("phantom".to_string(), McpConfig::Enabled(true));
-        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(&fm, &super::super::extensions::CompileContext::for_test(&fm), &super::super::extensions::collect_extensions(&fm)).unwrap();
         assert!(!config.mcp_servers.contains_key("phantom"));
         // safeoutputs is always present
         assert!(config.mcp_servers.contains_key("safeoutputs"));
@@ -1017,14 +963,14 @@ mod tests {
         let mut fm = minimal_front_matter();
         fm.mcp_servers
             .insert("my-tool".to_string(), McpConfig::Enabled(false));
-        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(&fm, &super::super::extensions::CompileContext::for_test(&fm), &super::super::extensions::collect_extensions(&fm)).unwrap();
         assert!(!config.mcp_servers.contains_key("my-tool"));
     }
 
     #[test]
     fn test_generate_mcpg_config_empty_mcp_servers() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(&fm, &super::super::extensions::CompileContext::for_test(&fm), &super::super::extensions::collect_extensions(&fm)).unwrap();
         // Only safeoutputs should be present
         assert_eq!(config.mcp_servers.len(), 1);
         assert!(config.mcp_servers.contains_key("safeoutputs"));
@@ -1033,7 +979,7 @@ mod tests {
     #[test]
     fn test_generate_mcpg_config_gateway_defaults() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(&fm, &super::super::extensions::CompileContext::for_test(&fm), &super::super::extensions::collect_extensions(&fm)).unwrap();
         assert_eq!(config.gateway.port, 80);
         assert_eq!(config.gateway.domain, "host.docker.internal");
         assert_eq!(config.gateway.api_key, "${MCP_GATEWAY_API_KEY}");
@@ -1053,7 +999,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(&fm, &super::super::extensions::CompileContext::for_test(&fm), &super::super::extensions::collect_extensions(&fm)).unwrap();
         let json = serde_json::to_string_pretty(&config).expect("Config should serialize to JSON");
         let parsed: serde_json::Value =
             serde_json::from_str(&json).expect("Serialized JSON should parse back");
@@ -1078,7 +1024,7 @@ mod tests {
     #[test]
     fn test_generate_mcpg_config_safeoutputs_variable_placeholders() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(&fm, &super::super::extensions::CompileContext::for_test(&fm), &super::super::extensions::collect_extensions(&fm)).unwrap();
         let so = config.mcp_servers.get("safeoutputs").unwrap();
 
         // URL should reference the runtime-substituted port
@@ -1100,7 +1046,7 @@ mod tests {
     #[test]
     fn test_generate_mcpg_config_safeoutputs_is_http_type() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(&fm, &super::super::extensions::CompileContext::for_test(&fm), &super::super::extensions::collect_extensions(&fm)).unwrap();
         let so = config.mcp_servers.get("safeoutputs").unwrap();
         assert_eq!(so.server_type, "http");
         assert!(
@@ -1124,7 +1070,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(&fm, &super::super::extensions::CompileContext::for_test(&fm), &super::super::extensions::collect_extensions(&fm)).unwrap();
         let srv = config.mcp_servers.get("runner").unwrap();
         assert_eq!(srv.server_type, "stdio");
         assert!(
@@ -1147,7 +1093,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(&fm, &super::super::extensions::CompileContext::for_test(&fm), &super::super::extensions::collect_extensions(&fm)).unwrap();
         let srv = config.mcp_servers.get("with-env").unwrap();
         let e = srv.env.as_ref().unwrap();
         assert_eq!(e.get("TOKEN").unwrap(), "secret");
@@ -1163,7 +1109,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(&fm, &super::super::extensions::CompileContext::for_test(&fm), &super::super::extensions::collect_extensions(&fm)).unwrap();
         // The reserved entry should still be the HTTP backend, not the user's container
         let so = config.mcp_servers.get("safeoutputs").unwrap();
         assert_eq!(
@@ -1189,7 +1135,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(&fm, &super::super::extensions::CompileContext::for_test(&fm), &super::super::extensions::collect_extensions(&fm)).unwrap();
         // The user-defined "SafeOutputs" must not overwrite the built-in entry
         let so = config.mcp_servers.get("safeoutputs").unwrap();
         assert_eq!(so.server_type, "http");
@@ -1214,7 +1160,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(&fm, &super::super::extensions::CompileContext::for_test(&fm), &super::super::extensions::collect_extensions(&fm)).unwrap();
         let srv = config.mcp_servers.get("remote").unwrap();
         assert_eq!(srv.server_type, "http");
         assert_eq!(
@@ -1240,7 +1186,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(&fm, &super::super::extensions::CompileContext::for_test(&fm), &super::super::extensions::collect_extensions(&fm)).unwrap();
         let srv = config.mcp_servers.get("ado").unwrap();
         assert_eq!(srv.server_type, "stdio");
         assert_eq!(srv.container.as_ref().unwrap(), "node:20-slim");
@@ -1262,7 +1208,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(&fm, &super::super::extensions::CompileContext::for_test(&fm), &super::super::extensions::collect_extensions(&fm)).unwrap();
         let srv = config.mcp_servers.get("data-tool").unwrap();
         assert_eq!(
             srv.mounts.as_ref().unwrap(),
@@ -1281,7 +1227,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(&fm, &super::super::extensions::CompileContext::for_test(&fm), &super::super::extensions::collect_extensions(&fm)).unwrap();
         assert!(!config.mcp_servers.contains_key("no-transport"));
     }
 
@@ -1449,7 +1395,7 @@ mod tests {
         )
         .unwrap();
         // Pass inferred org since no explicit org is set
-        let config = generate_mcpg_config(&fm, Some("inferred-org"), &super::super::extensions::collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(&fm, &super::super::extensions::CompileContext::for_test_with_org(&fm, "inferred-org"), &super::super::extensions::collect_extensions(&fm)).unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         assert_eq!(ado.server_type, "stdio");
         assert_eq!(ado.container.as_deref(), Some(ADO_MCP_IMAGE));
@@ -1469,7 +1415,7 @@ mod tests {
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    toolsets: [repos, wit, core]\n---\n",
         )
         .unwrap();
-        let config = generate_mcpg_config(&fm, Some("myorg"), &super::super::extensions::collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(&fm, &super::super::extensions::CompileContext::for_test_with_org(&fm, "myorg"), &super::super::extensions::collect_extensions(&fm)).unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         let args = ado.entrypoint_args.as_ref().unwrap();
         assert!(args.contains(&"-d".to_string()));
@@ -1485,7 +1431,7 @@ mod tests {
         )
         .unwrap();
         // Explicit org should be used even when inferred_org is None
-        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(&fm, &super::super::extensions::CompileContext::for_test(&fm), &super::super::extensions::collect_extensions(&fm)).unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         let args = ado.entrypoint_args.as_ref().unwrap();
         assert!(args.contains(&"myorg".to_string()));
@@ -1497,7 +1443,7 @@ mod tests {
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: explicit-org\n---\n",
         )
         .unwrap();
-        let config = generate_mcpg_config(&fm, Some("inferred-org"), &super::super::extensions::collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(&fm, &super::super::extensions::CompileContext::for_test_with_org(&fm, "inferred-org"), &super::super::extensions::collect_extensions(&fm)).unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         let args = ado.entrypoint_args.as_ref().unwrap();
         assert!(args.contains(&"explicit-org".to_string()));
@@ -1511,7 +1457,7 @@ mod tests {
         )
         .unwrap();
         // No explicit org and no inferred org — should fail
-        let result = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm));
+        let result = generate_mcpg_config(&fm, &super::super::extensions::CompileContext::for_test(&fm), &super::super::extensions::collect_extensions(&fm));
         assert!(result.is_err());
         assert!(
             result.unwrap_err().to_string().contains("no ADO organization"),
@@ -1525,7 +1471,7 @@ mod tests {
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: \"my org/bad\"\n---\n",
         )
         .unwrap();
-        let result = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm));
+        let result = generate_mcpg_config(&fm, &super::super::extensions::CompileContext::for_test(&fm), &super::super::extensions::collect_extensions(&fm));
         assert!(result.is_err());
         assert!(
             result.unwrap_err().to_string().contains("Invalid ADO org name"),
@@ -1539,7 +1485,7 @@ mod tests {
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: myorg\n    toolsets: [\"repos\", \"bad toolset\"]\n---\n",
         )
         .unwrap();
-        let result = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm));
+        let result = generate_mcpg_config(&fm, &super::super::extensions::CompileContext::for_test(&fm), &super::super::extensions::collect_extensions(&fm));
         assert!(result.is_err());
         assert!(
             result.unwrap_err().to_string().contains("Invalid ADO toolset name"),
@@ -1553,7 +1499,7 @@ mod tests {
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: myorg\n    allowed:\n      - wit_get_work_item\n      - core_list_projects\n---\n",
         )
         .unwrap();
-        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(&fm, &super::super::extensions::CompileContext::for_test(&fm), &super::super::extensions::collect_extensions(&fm)).unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         let tools = ado.tools.as_ref().unwrap();
         assert_eq!(tools, &["wit_get_work_item", "core_list_projects"]);
@@ -1565,14 +1511,14 @@ mod tests {
             "---\nname: test\ndescription: test\ntools:\n  azure-devops: false\n---\n",
         )
         .unwrap();
-        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(&fm, &super::super::extensions::CompileContext::for_test(&fm), &super::super::extensions::collect_extensions(&fm)).unwrap();
         assert!(!config.mcp_servers.contains_key("azure-devops"));
     }
 
     #[test]
     fn test_ado_tool_not_set_not_generated() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(&fm, &super::super::extensions::CompileContext::for_test(&fm), &super::super::extensions::collect_extensions(&fm)).unwrap();
         assert!(!config.mcp_servers.contains_key("azure-devops"));
     }
 
@@ -1584,7 +1530,7 @@ mod tests {
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: auto-org\nmcp-servers:\n  azure-devops:\n    container: \"node:20-slim\"\n    entrypoint: \"npx\"\n    entrypoint-args: [\"-y\", \"@azure-devops/mcp\", \"manual-org\"]\n---\n",
         )
         .unwrap();
-        let config = generate_mcpg_config(&fm, None, &super::super::extensions::collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(&fm, &super::super::extensions::CompileContext::for_test(&fm), &super::super::extensions::collect_extensions(&fm)).unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         // Should use the auto-configured org, not the manual one
         let args = ado.entrypoint_args.as_ref().unwrap();

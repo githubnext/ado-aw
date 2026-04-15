@@ -82,15 +82,104 @@ pub struct McpgConfig {
 // Compile context
 // ──────────────────────────────────────────────────────────────────────
 
-/// Shared context passed to extension methods that need cross-cutting information.
+use crate::configure::AdoContext;
+use std::path::Path;
+
+/// Metadata resolved at compile time from the local environment.
+///
+/// Built once via [`CompileContext::new`] and passed to all extension
+/// methods. Follows the same pattern as
+/// [`ExecutionContext`](crate::safeoutputs::result::ExecutionContext)
+/// for Stage 2 — a single context struct with all resolved metadata.
 pub struct CompileContext<'a> {
     /// The agent name from front matter.
     pub agent_name: &'a str,
     /// The full front matter (for cross-cutting checks like bash access level).
     pub front_matter: &'a FrontMatter,
-    /// ADO org inferred from the git remote at compile time. Used by
-    /// `AzureDevOpsExtension` when no explicit `org:` is provided.
-    pub inferred_org: Option<&'a str>,
+    /// ADO context inferred from the git remote (org URL, project, repo name).
+    /// `None` if the compile directory has no ADO remote.
+    pub ado_context: Option<AdoContext>,
+    /// Directory containing the input file (for relative path resolution).
+    pub compile_dir: &'a Path,
+}
+
+impl<'a> CompileContext<'a> {
+    /// Build a fully-resolved compile context.
+    ///
+    /// Infers ADO context from the git remote in `compile_dir`. This is
+    /// async because it shells out to `git remote get-url origin`.
+    pub async fn new(front_matter: &'a FrontMatter, compile_dir: &'a Path) -> Self {
+        let ado_context = Self::infer_ado_context(compile_dir).await;
+        Self {
+            agent_name: &front_matter.name,
+            front_matter,
+            ado_context,
+            compile_dir,
+        }
+    }
+
+    /// Convenience accessor: extract the ADO org name from the inferred context.
+    pub fn ado_org(&self) -> Option<&str> {
+        self.ado_context.as_ref().map(|ctx| {
+            ctx.org_url
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or("")
+        }).filter(|org| !org.is_empty())
+    }
+
+    async fn infer_ado_context(dir: &Path) -> Option<AdoContext> {
+        match crate::configure::get_git_remote_url(dir).await {
+            Ok(url) => match crate::configure::parse_ado_remote(&url) {
+                Ok(ctx) => {
+                    log::info!(
+                        "Inferred ADO org from git remote: {}",
+                        ctx.org_url
+                            .trim_end_matches('/')
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or("?")
+                    );
+                    Some(ctx)
+                }
+                Err(_) => {
+                    log::debug!("Git remote is not an ADO URL — cannot infer org");
+                    None
+                }
+            },
+            Err(_) => {
+                log::debug!("No git remote found — cannot infer ADO context");
+                None
+            }
+        }
+    }
+
+    /// Create a context for tests (no async, no git remote inference).
+    #[cfg(test)]
+    pub fn for_test(front_matter: &'a FrontMatter) -> Self {
+        Self {
+            agent_name: &front_matter.name,
+            front_matter,
+            ado_context: None,
+            compile_dir: Path::new("."),
+        }
+    }
+
+    /// Create a context for tests with a specific ADO org.
+    #[cfg(test)]
+    pub fn for_test_with_org(front_matter: &'a FrontMatter, org: &str) -> Self {
+        Self {
+            agent_name: &front_matter.name,
+            front_matter,
+            ado_context: Some(AdoContext {
+                org_url: format!("https://dev.azure.com/{}", org),
+                project: "test-project".to_string(),
+                repo_name: "test-repo".to_string(),
+            }),
+            compile_dir: Path::new("."),
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -169,12 +258,6 @@ pub trait CompilerExtension {
     /// Compile-time warnings to emit. Errors in the `Result` abort
     /// compilation; the inner `Vec<String>` contains non-fatal warnings
     /// printed to stderr.
-    ///
-    /// **Note:** `validate` is called early in compilation before
-    /// `inferred_org` is available (it requires an async git remote
-    /// lookup). Org-dependent validation (e.g., verifying an ADO org
-    /// can be resolved) should go in [`mcpg_servers`](Self::mcpg_servers)
-    /// instead, which receives the fully populated [`CompileContext`].
     fn validate(&self, _ctx: &CompileContext) -> Result<Vec<String>> {
         Ok(vec![])
     }
@@ -371,19 +454,20 @@ impl CompilerExtension for AzureDevOpsExtension {
         // Build entrypoint args: npx -y @azure-devops/mcp <org> [-d toolset1 toolset2 ...]
         let mut entrypoint_args = vec!["-y".to_string(), ADO_MCP_PACKAGE.to_string()];
 
-        // Org: use explicit override, then compile-time inferred, then fail
-        let org = if let Some(explicit) = self.config.org() {
-            explicit.to_string()
-        } else if let Some(inferred) = ctx.inferred_org {
-            inferred.to_string()
-        } else {
-            anyhow::bail!(
-                "Agent '{}' has tools.azure-devops enabled but no ADO organization could be \
-                 determined. Either set tools.azure-devops.org explicitly, or compile from \
-                 within a git repository with an Azure DevOps remote URL.",
-                ctx.agent_name
-            );
-        };
+        // Org: use explicit override, then inferred from git remote, then fail
+        let org = self
+            .config
+            .org()
+            .map(|s| s.to_string())
+            .or_else(|| ctx.ado_org().map(|s| s.to_string()))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Agent '{}' has tools.azure-devops enabled but no ADO organization could be \
+                     determined. Either set tools.azure-devops.org explicitly, or compile from \
+                     within a git repository with an Azure DevOps remote URL.",
+                    ctx.agent_name
+                )
+            })?;
         if !org.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
             anyhow::bail!(
                 "Invalid ADO org name '{}': must contain only alphanumerics and hyphens",
@@ -678,11 +762,7 @@ mod tests {
     }
 
     fn ctx_from(fm: &FrontMatter) -> CompileContext<'_> {
-        CompileContext {
-            agent_name: &fm.name,
-            front_matter: fm,
-            inferred_org: None,
-        }
+        CompileContext::for_test(fm)
     }
 
     // ── collect_extensions ──────────────────────────────────────────
@@ -849,11 +929,7 @@ mod tests {
     #[test]
     fn test_ado_mcpg_servers_with_inferred_org() {
         let fm = minimal_front_matter();
-        let ctx = CompileContext {
-            agent_name: &fm.name,
-            front_matter: &fm,
-            inferred_org: Some("myorg"),
-        };
+        let ctx = CompileContext::for_test_with_org(&fm, "myorg");
         let ext = AzureDevOpsExtension::new(AzureDevOpsToolConfig::Enabled(true));
         let servers = ext.mcpg_servers(&ctx).unwrap();
         assert_eq!(servers.len(), 1);
@@ -870,11 +946,7 @@ mod tests {
     #[test]
     fn test_ado_mcpg_servers_no_org_fails() {
         let fm = minimal_front_matter();
-        let ctx = CompileContext {
-            agent_name: &fm.name,
-            front_matter: &fm,
-            inferred_org: None,
-        };
+        let ctx = CompileContext::for_test(&fm);
         let ext = AzureDevOpsExtension::new(AzureDevOpsToolConfig::Enabled(true));
         assert!(ext.mcpg_servers(&ctx).is_err());
     }
