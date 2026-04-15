@@ -613,6 +613,22 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_config_neutralizes_shorthand_pipeline_command() {
+        let input = "##[error]bad";
+        let result = sanitize_config(input);
+        assert!(
+            result.contains("`##[`"),
+            "##[ shorthand should be wrapped in backticks; got: {}",
+            result
+        );
+        assert!(
+            !result.contains("##[error]"),
+            "##[error] should be neutralized; got: {}",
+            result
+        );
+    }
+
+    #[test]
     fn test_sanitize_config_removes_control_chars() {
         let input = "hello\x00world\x07!";
         assert_eq!(sanitize_config(input), "helloworld!");

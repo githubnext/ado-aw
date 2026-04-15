@@ -511,4 +511,62 @@ mod tests {
         let mcp_err = anyhow_to_mcp_error(err);
         assert_eq!(mcp_err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
     }
+
+    // ── ExecutionResult::warning / is_warning tests ───────────────────────
+
+    #[test]
+    fn test_execution_result_warning_sets_success_and_warning() {
+        let r = ExecutionResult::warning("PR created but auto-complete failed");
+        assert!(r.success, "warning result should have success=true");
+        assert!(r.is_warning(), "warning result should have warning=true");
+        assert_eq!(r.message, "PR created but auto-complete failed");
+        assert!(r.data.is_none());
+    }
+
+    #[test]
+    fn test_execution_result_success_is_not_warning() {
+        let r = ExecutionResult::success("all good");
+        assert!(!r.is_warning(), "success result should not be a warning");
+    }
+
+    #[test]
+    fn test_execution_result_failure_is_not_warning() {
+        let r = ExecutionResult::failure("something broke");
+        assert!(!r.is_warning(), "failure result should not be a warning");
+    }
+
+    // ── ExecutionContext::get_tool_config sanitization tests ──────────────
+
+    /// Test config struct used to verify that `get_tool_config` applies
+    /// `sanitize_config_fields()` before returning the deserialized value.
+    #[derive(Default, serde::Deserialize)]
+    struct TestConfigForSanitization {
+        value: String,
+    }
+
+    impl crate::sanitize::SanitizeConfig for TestConfigForSanitization {
+        fn sanitize_config_fields(&mut self) {
+            self.value = crate::sanitize::sanitize_config(&self.value);
+        }
+    }
+
+    #[test]
+    fn test_get_tool_config_sanitizes_vso_pipeline_command() {
+        let mut ctx = ExecutionContext::default();
+        ctx.tool_configs.insert(
+            "my-tool".to_string(),
+            serde_json::json!({ "value": "##vso[task.setvariable variable=secret]injected" }),
+        );
+        let config: TestConfigForSanitization = ctx.get_tool_config("my-tool");
+        assert!(
+            !config.value.contains("##vso[task."),
+            "Injected ##vso[ command should be neutralized; got: {}",
+            config.value
+        );
+        assert!(
+            config.value.contains("`##vso[`"),
+            "Pipeline command should be wrapped in backticks; got: {}",
+            config.value
+        );
+    }
 }
