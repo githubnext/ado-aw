@@ -217,6 +217,8 @@ mcp-servers:
 > **Security**: Custom MCPs must have an explicit `allowed:` list. Built-in MCPs default to all tools when set to `true`.
 >
 > **1ES target**: Custom containerized MCPs are not supported — only built-ins with service connections.
+>
+> **Standalone target** (the default): Built-in MCPs (entries without a `container:` or `url:` field) are silently skipped at compile time — they have no effect and will not be available to the agent. For the standalone target, use only **custom** containerized MCPs with a `container:` field.
 
 ### Step 9 — Safe Outputs
 
