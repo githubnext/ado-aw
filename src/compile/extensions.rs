@@ -97,15 +97,41 @@ pub struct CompileContext<'a> {
 // CompilerExtension trait
 // ──────────────────────────────────────────────────────────────────────
 
+/// Execution phase for extension ordering.
+///
+/// Extensions are collected and processed in phase order. Runtimes run
+/// before tools because tools may depend on runtimes (e.g., `uv` requires
+/// a Python runtime to already be installed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ExtensionPhase {
+    /// Language runtimes (Lean, Python, Node, etc.) — installed first.
+    Runtime = 0,
+    /// First-party tools (azure-devops, cache-memory, etc.) — may depend
+    /// on runtimes being available.
+    Tool = 1,
+}
+
 /// Unified interface for runtimes and first-party tools to declare
 /// compilation requirements.
 ///
 /// The compiler calls [`collect_extensions`] to gather all enabled
-/// extensions, then iterates over them to merge requirements into the
-/// generated pipeline.
+/// extensions, then iterates over them **in phase order** to merge
+/// requirements into the generated pipeline.
+///
+/// ## Ordering policy
+///
+/// Extensions declare their [`phase`](CompilerExtension::phase) which
+/// controls the order in which `prepare_steps` and `prompt_supplement`
+/// are emitted. Runtimes ([`ExtensionPhase::Runtime`]) always run
+/// before tools ([`ExtensionPhase::Tool`]) because tools may depend on
+/// runtimes being installed (e.g., a Python-based tool needs the Python
+/// runtime first).
 pub trait CompilerExtension {
     /// Human-readable name for logging and diagnostics (e.g., "Lean 4").
     fn name(&self) -> &str;
+
+    /// The execution phase of this extension, controlling ordering.
+    fn phase(&self) -> ExtensionPhase;
 
     /// Network hosts this extension requires (added to AWF allowlist).
     fn required_hosts(&self) -> Vec<String> {
@@ -181,6 +207,9 @@ macro_rules! extension_enum {
             fn name(&self) -> &str {
                 match self { $( $Enum::$Variant(e) => e.name(), )+ }
             }
+            fn phase(&self) -> ExtensionPhase {
+                match self { $( $Enum::$Variant(e) => e.phase(), )+ }
+            }
             fn required_hosts(&self) -> Vec<String> {
                 match self { $( $Enum::$Variant(e) => e.required_hosts(), )+ }
             }
@@ -242,6 +271,10 @@ impl LeanExtension {
 impl CompilerExtension for LeanExtension {
     fn name(&self) -> &str {
         "Lean 4"
+    }
+
+    fn phase(&self) -> ExtensionPhase {
+        ExtensionPhase::Runtime
     }
 
     fn required_hosts(&self) -> Vec<String> {
@@ -315,6 +348,10 @@ impl AzureDevOpsExtension {
 impl CompilerExtension for AzureDevOpsExtension {
     fn name(&self) -> &str {
         "Azure DevOps MCP"
+    }
+
+    fn phase(&self) -> ExtensionPhase {
+        ExtensionPhase::Tool
     }
 
     fn required_hosts(&self) -> Vec<String> {
@@ -444,6 +481,10 @@ impl CompilerExtension for CacheMemoryExtension {
         "Cache Memory"
     }
 
+    fn phase(&self) -> ExtensionPhase {
+        ExtensionPhase::Tool
+    }
+
     fn prepare_steps(&self) -> Vec<String> {
         vec![generate_memory_download()]
     }
@@ -511,12 +552,20 @@ fn generate_memory_download() -> String {
 
 /// Collect all enabled compiler extensions from front matter.
 ///
-/// Runtimes are collected first, then first-party tools. The order
-/// determines the merge order for prepare steps and prompt supplements.
+/// ## Ordering policy
+///
+/// Extensions are sorted by [`ExtensionPhase`] before being returned:
+/// runtimes run before tools. This guarantees that runtime install steps
+/// execute before tool steps — critical when a tool depends on a runtime
+/// (e.g., a Python-based tool like `uv` needs the Python runtime first).
+///
+/// Within the same phase, extensions preserve definition order
+/// (runtimes in `RuntimesConfig` field order, tools in `ToolsConfig`
+/// field order).
 pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
     let mut extensions = Vec::new();
 
-    // ── Runtimes ──
+    // ── Runtimes (ExtensionPhase::Runtime) ──
     if let Some(lean) = front_matter
         .runtimes
         .as_ref()
@@ -527,7 +576,7 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
         }
     }
 
-    // ── First-party tools ──
+    // ── First-party tools (ExtensionPhase::Tool) ──
     if let Some(tools) = front_matter.tools.as_ref() {
         if let Some(ado) = tools.azure_devops.as_ref() {
             if ado.is_enabled() {
@@ -544,6 +593,10 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
             }
         }
     }
+
+    // Enforce phase ordering: runtimes before tools.
+    // sort_by_key is stable, preserving definition order within the same phase.
+    extensions.sort_by_key(|ext| ext.phase());
 
     extensions
 }
@@ -686,6 +739,35 @@ mod tests {
         assert_eq!(exts[0].name(), "Lean 4");
         assert_eq!(exts[1].name(), "Azure DevOps MCP");
         assert_eq!(exts[2].name(), "Cache Memory");
+    }
+
+    #[test]
+    fn test_collect_extensions_runtimes_always_before_tools() {
+        // Verify the phase ordering policy: all Runtime-phase extensions
+        // must appear before any Tool-phase extensions, regardless of
+        // front matter field order.
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\n  cache-memory: true\nruntimes:\n  lean: true\n---\n",
+        )
+        .unwrap();
+        let exts = collect_extensions(&fm);
+        assert_eq!(exts.len(), 3);
+
+        // Find the boundary: last Runtime and first Tool
+        let last_runtime_idx = exts
+            .iter()
+            .rposition(|e| e.phase() == ExtensionPhase::Runtime);
+        let first_tool_idx = exts
+            .iter()
+            .position(|e| e.phase() == ExtensionPhase::Tool);
+
+        if let (Some(last_rt), Some(first_tool)) = (last_runtime_idx, first_tool_idx) {
+            assert!(
+                last_rt < first_tool,
+                "Runtime extensions must come before Tool extensions. \
+                 Last runtime at index {last_rt}, first tool at index {first_tool}"
+            );
+        }
     }
 
     // ── LeanExtension ──────────────────────────────────────────────
