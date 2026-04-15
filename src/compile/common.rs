@@ -532,7 +532,7 @@ pub fn generate_copilot_params(front_matter: &FrontMatter) -> Result<String> {
                 front_matter.name
             );
         } else {
-            for cmd in &["lean", "lake", "elan"] {
+            for cmd in crate::runtimes::lean::LEAN_BASH_COMMANDS {
                 if !bash_commands.contains(cmd) {
                     bash_commands.push(cmd);
                 }

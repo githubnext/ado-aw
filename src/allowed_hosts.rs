@@ -112,9 +112,6 @@ pub fn mcp_required_hosts(mcp_name: &str) -> &'static [&'static str] {
         // GitHub MCP (for non-Copilot GitHub access)
         "github" => &["api.github.com", "github.com", "*.githubusercontent.com"],
 
-        // Lean 4 theorem prover (elan toolchain installer + package resolution)
-        "lean" => &["elan.lean-lang.org", "leanprover.github.io", "lean-lang.org"],
-
         // Unknown MCP - return empty, user must specify hosts
         _ => &[],
     }
@@ -145,9 +142,9 @@ mod tests {
 
     #[test]
     fn test_lean_hosts() {
-        let hosts = mcp_required_hosts("lean");
-        assert!(hosts.contains(&"elan.lean-lang.org"));
-        assert!(hosts.contains(&"leanprover.github.io"));
-        assert!(hosts.contains(&"lean-lang.org"));
+        use crate::runtimes::lean::LEAN_REQUIRED_HOSTS;
+        assert!(LEAN_REQUIRED_HOSTS.contains(&"elan.lean-lang.org"));
+        assert!(LEAN_REQUIRED_HOSTS.contains(&"leanprover.github.io"));
+        assert!(LEAN_REQUIRED_HOSTS.contains(&"lean-lang.org"));
     }
 }

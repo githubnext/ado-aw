@@ -353,7 +353,7 @@ fn generate_allowed_domains(front_matter: &FrontMatter) -> Result<String> {
         .and_then(|r| r.lean.as_ref())
         .is_some_and(|l| l.is_enabled())
     {
-        for host in mcp_required_hosts("lean") {
+        for host in crate::runtimes::lean::LEAN_REQUIRED_HOSTS {
             hosts.insert((*host).to_string());
         }
     }
