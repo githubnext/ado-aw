@@ -67,17 +67,14 @@ impl Compiler for OneESCompiler {
         let checkout_self = generate_checkout_self();
         let extensions = super::extensions::collect_extensions(front_matter);
 
+        // Build compile context with inferred metadata
+        let input_dir = input_path.parent().unwrap_or(std::path::Path::new("."));
+        let ctx = super::extensions::CompileContext::new(front_matter, input_dir).await;
+
         // Run extension validations (warnings + errors)
-        {
-            let validation_ctx = super::extensions::CompileContext {
-                agent_name: &front_matter.name,
-                front_matter,
-                inferred_org: None,
-            };
-            for ext in &extensions {
-                for warning in ext.validate(&validation_ctx)? {
-                    eprintln!("Warning: {}", warning);
-                }
+        for ext in &extensions {
+            for warning in ext.validate(&ctx)? {
+                eprintln!("Warning: {}", warning);
             }
         }
 
