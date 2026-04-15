@@ -100,7 +100,7 @@ pub struct CreateWorkItemConfig {
     pub artifact_link: ArtifactLinkConfig,
 
     /// Whether to include agent execution stats in the output (default: true).
-    #[serde(default = "default_include_stats", rename = "include-stats")]
+    #[serde(default = "crate::agent_stats::default_include_stats", rename = "include-stats")]
     pub include_stats: bool,
 }
 
@@ -535,6 +535,3 @@ tags:
     }
 }
 
-fn default_include_stats() -> bool {
-    true
-}

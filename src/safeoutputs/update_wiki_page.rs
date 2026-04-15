@@ -130,7 +130,7 @@ pub struct UpdateWikiPageConfig {
     pub comment: Option<String>,
 
     /// Whether to include agent execution stats in the output (default: true).
-    #[serde(default = "default_include_stats", rename = "include-stats")]
+    #[serde(default = "crate::agent_stats::default_include_stats", rename = "include-stats")]
     pub include_stats: bool,
 }
 
@@ -878,6 +878,3 @@ wiki-name: "MyProject.wiki"
     }
 }
 
-fn default_include_stats() -> bool {
-    true
-}

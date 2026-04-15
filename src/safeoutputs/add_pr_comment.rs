@@ -151,7 +151,7 @@ pub struct AddPrCommentConfig {
     #[serde(default, rename = "allowed-statuses")]
     pub allowed_statuses: Vec<String>,
     /// Whether to include agent execution stats in the output (default: true).
-    #[serde(default = "default_include_stats", rename = "include-stats")]
+    #[serde(default = "crate::agent_stats::default_include_stats", rename = "include-stats")]
     pub include_stats: bool,
 }
 
@@ -622,6 +622,3 @@ allowed-statuses:
     }
 }
 
-fn default_include_stats() -> bool {
-    true
-}

@@ -102,7 +102,7 @@ pub struct CommentOnWorkItemConfig {
     pub target: Option<CommentTarget>,
 
     /// Whether to include agent execution stats in the comment (default: true).
-    #[serde(default = "default_include_stats", rename = "include-stats")]
+    #[serde(default = "crate::agent_stats::default_include_stats", rename = "include-stats")]
     pub include_stats: bool,
 }
 
@@ -491,6 +491,3 @@ target: "*"
     }
 }
 
-fn default_include_stats() -> bool {
-    true
-}

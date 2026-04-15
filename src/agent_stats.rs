@@ -134,7 +134,7 @@ impl AgentStats {
 
         format!(
             "\n---\n\
-             \u{1F916} _{name}_ \u{00B7} {model} \u{00B7} \
+             \u{1F916} {name} \u{00B7} {model} \u{00B7} \
              {input} in / {output} out \u{00B7} \
              {tools} tool calls \u{00B7} {duration}\n",
             name = name,
@@ -145,6 +145,13 @@ impl AgentStats {
             duration = duration,
         )
     }
+}
+
+/// Default value for `include_stats` serde fields (true).
+///
+/// Used by safe output config structs via `#[serde(default = "...")]`.
+pub(crate) fn default_include_stats() -> bool {
+    true
 }
 
 /// Sanitize a string for safe embedding in a single-line markdown format.
@@ -180,6 +187,8 @@ pub fn append_stats_to_body(
         None => body.to_string(),
     }
 }
+
+/// Compute the wall-clock duration of a span in seconds.
 ///
 /// Times are `[seconds, nanoseconds]` arrays.
 fn compute_duration(span: &Value) -> f64 {
@@ -357,5 +366,44 @@ mod tests {
         ];
         let stats = AgentStats::from_otel_entries(&entries, "test").unwrap();
         assert_eq!(stats.tool_calls, 2); // bash + grep only
+    }
+
+    #[test]
+    fn test_append_stats_to_body_opt_out() {
+        let mut ctx = crate::safeoutputs::ExecutionContext::default();
+        ctx.agent_stats = Some(AgentStats {
+            agent_name: "test".to_string(),
+            model: Some("model".to_string()),
+            input_tokens: 100,
+            output_tokens: 50,
+            duration_seconds: 10.0,
+            tool_calls: 1,
+            turns: 1,
+        });
+        assert_eq!(append_stats_to_body("body", &ctx, false), "body");
+    }
+
+    #[test]
+    fn test_append_stats_to_body_no_stats() {
+        let ctx = crate::safeoutputs::ExecutionContext::default(); // agent_stats: None
+        assert_eq!(append_stats_to_body("body", &ctx, true), "body");
+    }
+
+    #[test]
+    fn test_append_stats_to_body_with_stats() {
+        let mut ctx = crate::safeoutputs::ExecutionContext::default();
+        ctx.agent_stats = Some(AgentStats {
+            agent_name: "test".to_string(),
+            model: Some("model".to_string()),
+            input_tokens: 100,
+            output_tokens: 50,
+            duration_seconds: 10.0,
+            tool_calls: 1,
+            turns: 1,
+        });
+        let result = append_stats_to_body("body", &ctx, true);
+        assert!(result.starts_with("body"));
+        assert!(result.contains("test"));
+        assert!(result.contains("model"));
     }
 }
