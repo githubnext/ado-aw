@@ -6,7 +6,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
-use crate::sanitize::{Sanitize, sanitize as sanitize_text};
+use ado_aw_derive::SanitizeConfig;
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use anyhow::{Context, ensure};
@@ -64,8 +65,8 @@ tool_result! {
     }
 }
 
-impl Sanitize for QueueBuildResult {
-    fn sanitize_fields(&mut self) {
+impl SanitizeContent for QueueBuildResult {
+    fn sanitize_content_fields(&mut self) {
         if let Some(reason) = &self.reason {
             self.reason = Some(sanitize_text(reason));
         }
@@ -100,7 +101,7 @@ impl Sanitize for QueueBuildResult {
 ///       - version
 ///     default-branch: main
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
 pub struct QueueBuildConfig {
     /// Pipeline definition IDs that are allowed to be triggered (REQUIRED — empty rejects all)
     #[serde(default, rename = "allowed-pipelines")]

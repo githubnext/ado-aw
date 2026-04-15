@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
-use crate::sanitize::Sanitize;
+use crate::sanitize::SanitizeContent;
 use crate::safeoutputs::{
     AddBuildTagResult, AddPrCommentResult, CreateBranchResult, CreateGitTagResult,
     CreatePrResult, CreateWikiPageResult, CreateWorkItemResult, CommentOnWorkItemResult,
@@ -395,7 +395,7 @@ pub async fn execute_safe_output(
         "report-incomplete" => {
             let mut output: ReportIncompleteResult = serde_json::from_value(entry.clone())
                 .map_err(|e| anyhow::anyhow!("Failed to parse report-incomplete: {}", e))?;
-            output.sanitize_fields();
+            output.sanitize_content_fields();
             debug!("report-incomplete: {}", output.reason);
             ExecutionResult::failure(format!("Agent reported task incomplete: {}", output.reason))
         }

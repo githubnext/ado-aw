@@ -1,12 +1,13 @@
 //! Add build tag safe output tool
 
+use ado_aw_derive::SanitizeConfig;
 use log::{debug, info};
 use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
-use crate::sanitize::{Sanitize, sanitize as sanitize_text};
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use anyhow::{Context, ensure};
@@ -55,8 +56,8 @@ tool_result! {
 
 // ── Stage 2: Sanitization ─────────────────────────────────────────────────
 
-impl Sanitize for AddBuildTagResult {
-    fn sanitize_fields(&mut self) {
+impl SanitizeContent for AddBuildTagResult {
+    fn sanitize_content_fields(&mut self) {
         self.tag = sanitize_text(&self.tag);
     }
 }
@@ -74,7 +75,7 @@ impl Sanitize for AddBuildTagResult {
 ///     tag-prefix: "agent-"
 ///     allow-any-build: false
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
 pub struct AddBuildTagConfig {
     /// Restrict which tags can be applied. Empty means any tag is allowed.
     /// Supports simple wildcard patterns: entries ending with `*` match by prefix.

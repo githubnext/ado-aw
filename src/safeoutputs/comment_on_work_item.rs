@@ -6,7 +6,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
-use crate::sanitize::{Sanitize, sanitize as sanitize_text};
+use ado_aw_derive::SanitizeConfig;
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use anyhow::{Context, ensure};
@@ -40,8 +41,8 @@ tool_result! {
     }
 }
 
-impl Sanitize for CommentOnWorkItemResult {
-    fn sanitize_fields(&mut self) {
+impl SanitizeContent for CommentOnWorkItemResult {
+    fn sanitize_content_fields(&mut self) {
         self.body = sanitize_text(&self.body);
     }
 }
@@ -94,7 +95,7 @@ impl CommentTarget {
 ///     max: 5
 ///     target: "*"
 /// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, SanitizeConfig, Default, Serialize, Deserialize)]
 pub struct CommentOnWorkItemConfig {
     /// Target scope — which work items can be commented on.
     /// `None` means no target was configured; execution must reject this.

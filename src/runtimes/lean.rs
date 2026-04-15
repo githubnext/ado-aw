@@ -8,7 +8,10 @@
 //! Lean is installed via elan (the Lean toolchain manager) into `$HOME/.elan/bin`,
 //! then symlinked into `/tmp/awf-tools/` for AWF chroot compatibility.
 
+use ado_aw_derive::SanitizeConfig;
 use serde::Deserialize;
+
+use crate::sanitize::SanitizeConfig as SanitizeConfigTrait;
 
 /// Lean 4 runtime configuration — accepts both `true` and object formats
 ///
@@ -50,8 +53,17 @@ impl LeanRuntimeConfig {
     }
 }
 
+impl SanitizeConfigTrait for LeanRuntimeConfig {
+    fn sanitize_config_fields(&mut self) {
+        match self {
+            LeanRuntimeConfig::Enabled(_) => {}
+            LeanRuntimeConfig::WithOptions(opts) => opts.sanitize_config_fields(),
+        }
+    }
+}
+
 /// Lean 4 options
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone, Default, SanitizeConfig)]
 pub struct LeanOptions {
     /// Lean toolchain to install (e.g., "stable", "leanprover/lean4:v4.29.1").
     /// Defaults to "stable" if not specified. If a `lean-toolchain` file exists

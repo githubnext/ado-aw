@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use super::PATH_SEGMENT;
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
-use crate::sanitize::{Sanitize, sanitize as sanitize_text};
+use ado_aw_derive::SanitizeConfig;
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use anyhow::{Context, ensure};
 
 /// Parameters for updating a work item
@@ -87,8 +88,8 @@ tool_result! {
     }
 }
 
-impl Sanitize for UpdateWorkItemResult {
-    fn sanitize_fields(&mut self) {
+impl SanitizeContent for UpdateWorkItemResult {
+    fn sanitize_content_fields(&mut self) {
         self.title = self.title.as_deref().map(sanitize_text);
         self.body = self.body.as_deref().map(sanitize_text);
         self.state = self.state.as_deref().map(sanitize_text);
@@ -131,7 +132,7 @@ pub enum TargetConfig {
 ///     assignee: true            # enable assignee updates
 ///     tags: true                # enable tag updates
 /// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, SanitizeConfig, Default, Serialize, Deserialize)]
 pub struct UpdateWorkItemConfig {
     /// Enable state/status updates via the `state` agent parameter (default: false).
     /// The YAML key for this option is `status`.
@@ -880,7 +881,7 @@ target: 42
             tags: Some(vec!["tag-one".to_string(), "tag @two".to_string()]),
         };
         let mut result: UpdateWorkItemResult = params.try_into().unwrap();
-        result.sanitize_fields();
+        result.sanitize_content_fields();
 
         // @mentions should be neutralized
         assert!(result.title.as_deref().unwrap().contains("`@user`"));

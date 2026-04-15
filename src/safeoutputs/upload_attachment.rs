@@ -1,12 +1,13 @@
 //! Upload attachment safe output tool
 
+use ado_aw_derive::SanitizeConfig;
 use log::{debug, info, warn};
 use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
-use crate::sanitize::{Sanitize, sanitize as sanitize_text};
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use anyhow::{Context, ensure};
@@ -73,8 +74,8 @@ tool_result! {
     }
 }
 
-impl Sanitize for UploadAttachmentResult {
-    fn sanitize_fields(&mut self) {
+impl SanitizeContent for UploadAttachmentResult {
+    fn sanitize_content_fields(&mut self) {
         if let Some(comment) = &self.comment {
             self.comment = Some(sanitize_text(comment));
         }
@@ -96,7 +97,7 @@ const DEFAULT_MAX_FILE_SIZE: u64 = 5 * 1024 * 1024; // 5 MB
 ///       - .log
 ///     comment-prefix: "[Agent] "
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
 pub struct UploadAttachmentConfig {
     /// Maximum file size in bytes (default: 5 MB)
     #[serde(default = "default_max_file_size", rename = "max-file-size")]

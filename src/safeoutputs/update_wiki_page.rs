@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
 use super::resolve_wiki_branch;
-use crate::sanitize::{Sanitize, sanitize as sanitize_text};
+use ado_aw_derive::SanitizeConfig;
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 
@@ -63,8 +64,8 @@ tool_result! {
     }
 }
 
-impl Sanitize for UpdateWikiPageResult {
-    fn sanitize_fields(&mut self) {
+impl SanitizeContent for UpdateWikiPageResult {
+    fn sanitize_content_fields(&mut self) {
         // Path is a structural identifier — sanitize lightly (remove control chars)
         // but do not escape HTML or neutralize patterns that are valid in wiki paths.
         self.path = self
@@ -92,7 +93,7 @@ impl Sanitize for UpdateWikiPageResult {
 ///     title-prefix: "[Agent] "
 ///     comment: "Updated by agent"
 /// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, SanitizeConfig, Default, Serialize, Deserialize)]
 pub struct UpdateWikiPageConfig {
     /// Wiki identifier (name or ID). Required — execution fails without this.
     ///
@@ -598,7 +599,7 @@ wiki-name: "MyProject.wiki"
             comment: None,
         };
         let mut result: UpdateWikiPageResult = params.try_into().unwrap();
-        result.sanitize_fields();
+        result.sanitize_content_fields();
         assert!(!result.path.contains('\x01'));
     }
 
@@ -610,7 +611,7 @@ wiki-name: "MyProject.wiki"
             comment: None,
         };
         let mut result: UpdateWikiPageResult = params.try_into().unwrap();
-        result.sanitize_fields();
+        result.sanitize_content_fields();
         assert_eq!(result.path, "/Folder/My Page");
     }
 
@@ -624,7 +625,7 @@ wiki-name: "MyProject.wiki"
             comment: None,
         };
         let mut result: UpdateWikiPageResult = params.try_into().unwrap();
-        result.sanitize_fields();
+        result.sanitize_content_fields();
 
         let ctx = crate::safeoutputs::ExecutionContext {
             ado_org_url: Some("https://dev.azure.com/myorg".to_string()),
@@ -653,7 +654,7 @@ wiki-name: "MyProject.wiki"
             comment: None,
         };
         let mut result: UpdateWikiPageResult = params.try_into().unwrap();
-        result.sanitize_fields();
+        result.sanitize_content_fields();
 
         let ctx = crate::safeoutputs::ExecutionContext {
             ado_org_url: None,

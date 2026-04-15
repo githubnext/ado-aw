@@ -1,12 +1,13 @@
 //! Submit PR review safe output tool
 
+use ado_aw_derive::SanitizeConfig;
 use log::{debug, info};
 use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{PATH_SEGMENT, resolve_repo_name};
-use crate::sanitize::{Sanitize, sanitize as sanitize_text};
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use anyhow::{Context, ensure};
@@ -94,8 +95,8 @@ tool_result! {
     }
 }
 
-impl Sanitize for SubmitPrReviewResult {
-    fn sanitize_fields(&mut self) {
+impl SanitizeContent for SubmitPrReviewResult {
+    fn sanitize_content_fields(&mut self) {
         self.event = sanitize_text(&self.event);
         self.body = self.body.as_deref().map(sanitize_text);
         self.repository = self.repository.as_deref().map(sanitize_text);
@@ -114,7 +115,7 @@ impl Sanitize for SubmitPrReviewResult {
 ///     allowed-repositories:
 ///       - self
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
 pub struct SubmitPrReviewConfig {
     /// Which events are permitted. REQUIRED — empty list rejects all.
     #[serde(default, rename = "allowed-events")]

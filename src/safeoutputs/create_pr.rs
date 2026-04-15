@@ -5,8 +5,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
+use ado_aw_derive::SanitizeConfig;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, ToolResult, Validate};
-use crate::sanitize::{Sanitize, sanitize as sanitize_text};
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
 use anyhow::{Context, ensure};
 
@@ -309,8 +310,8 @@ tool_result! {
     }
 }
 
-impl Sanitize for CreatePrResult {
-    fn sanitize_fields(&mut self) {
+impl SanitizeContent for CreatePrResult {
+    fn sanitize_content_fields(&mut self) {
         self.title = sanitize_text(&self.title);
         self.description = sanitize_text(&self.description);
         for label in &mut self.agent_labels {
@@ -390,7 +391,7 @@ pub enum ProtectedFiles {
 ///       - "automated"
 ///       - "agent-created"
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
 pub struct CreatePrConfig {
     /// Target branch to merge into (default: "main")
     #[serde(default = "default_target_branch", rename = "target-branch")]

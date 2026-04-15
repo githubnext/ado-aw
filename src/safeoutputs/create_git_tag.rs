@@ -1,12 +1,13 @@
 //! Create git tag safe output tool
 
+use ado_aw_derive::SanitizeConfig;
 use log::{debug, info};
 use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{PATH_SEGMENT, validate_git_ref_name};
-use crate::sanitize::{Sanitize, sanitize as sanitize_text};
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use anyhow::{Context, ensure};
@@ -92,8 +93,8 @@ tool_result! {
     }
 }
 
-impl Sanitize for CreateGitTagResult {
-    fn sanitize_fields(&mut self) {
+impl SanitizeContent for CreateGitTagResult {
+    fn sanitize_content_fields(&mut self) {
         // tag_name is a structural identifier — only strip control characters
         self.tag_name = self
             .tag_name
@@ -123,7 +124,7 @@ impl Sanitize for CreateGitTagResult {
 ///       - my-lib
 ///     message-prefix: "[release] "
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
 pub struct CreateGitTagConfig {
     /// Regex pattern that tag names must match (if configured)
     #[serde(default, rename = "tag-pattern")]

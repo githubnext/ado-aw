@@ -4,6 +4,7 @@ version = "0.11.0"
 edition = "2024"
 
 [dependencies]
+ado-aw-derive = { path = "ado-aw-derive" }
 clap = { features = ["derive", "env"], version = "4.5.40" }
 anyhow = "1.0.100"
 async-trait = "0.1"

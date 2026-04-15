@@ -1,12 +1,13 @@
 //! Create branch safe output tool
 
+use ado_aw_derive::SanitizeConfig;
 use log::{debug, info};
 use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{PATH_SEGMENT, validate_git_ref_name};
-use crate::sanitize::{Sanitize, sanitize as sanitize_text};
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use anyhow::{Context, ensure};
@@ -88,8 +89,8 @@ tool_result! {
     }
 }
 
-impl Sanitize for CreateBranchResult {
-    fn sanitize_fields(&mut self) {
+impl SanitizeContent for CreateBranchResult {
+    fn sanitize_content_fields(&mut self) {
         self.branch_name = sanitize_text(&self.branch_name);
     }
 }
@@ -108,7 +109,7 @@ impl Sanitize for CreateBranchResult {
 ///       - main
 ///       - develop
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
 pub struct CreateBranchConfig {
     /// Regex pattern that branch names must match
     #[serde(default, rename = "branch-pattern")]

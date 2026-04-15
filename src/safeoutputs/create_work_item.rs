@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use super::PATH_SEGMENT;
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
-use crate::sanitize::{Sanitize, sanitize as sanitize_text};
+use ado_aw_derive::SanitizeConfig;
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use anyhow::{Context, ensure};
 
 /// Parameters for creating a work item
@@ -40,8 +41,8 @@ tool_result! {
     }
 }
 
-impl Sanitize for CreateWorkItemResult {
-    fn sanitize_fields(&mut self) {
+impl SanitizeContent for CreateWorkItemResult {
+    fn sanitize_content_fields(&mut self) {
         self.title = sanitize_text(&self.title);
         self.description = sanitize_text(&self.description);
     }
@@ -65,7 +66,7 @@ impl Sanitize for CreateWorkItemResult {
 ///       repository: "my-repo-name"  # optional, defaults to current repo
 ///       branch: "main"              # optional, defaults to "main"
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
 pub struct CreateWorkItemConfig {
     /// Work item type (default: "Task")
     #[serde(default = "default_work_item_type", rename = "work-item-type")]
@@ -90,15 +91,17 @@ pub struct CreateWorkItemConfig {
     /// Additional custom fields as key-value pairs
     /// Keys should be the full field reference name (e.g., "Custom.MyField")
     #[serde(default, rename = "custom-fields")]
+    #[sanitize_config(sanitize_keys)]
     pub custom_fields: std::collections::HashMap<String, String>,
 
     /// Artifact link configuration for GitHub Copilot integration
     #[serde(default, rename = "artifact-link")]
+    #[sanitize_config(nested)]
     pub artifact_link: ArtifactLinkConfig,
 }
 
 /// Configuration for artifact links (repository linking for GitHub Copilot)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
 pub struct ArtifactLinkConfig {
     /// Whether to add an artifact link to the work item (default: false)
     #[serde(default)]
