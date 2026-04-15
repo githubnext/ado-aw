@@ -5,7 +5,7 @@
 //! identifiers (e.g., `"python"`, `"rust"`, `"node"`) to arrays of domains that
 //! those ecosystems require for package management, registry access, etc.
 //!
-//! Users reference these identifiers in the `network.allow` front matter field
+//! Users reference these identifiers in the `network.allowed` front matter field
 //! instead of listing individual domains:
 //!
 //! ```yaml
