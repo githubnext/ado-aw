@@ -75,19 +75,6 @@ pub struct LeanOptions {
 /// Bash commands that the Lean runtime adds to the allow-list.
 pub const LEAN_BASH_COMMANDS: &[&str] = &["lean", "lake", "elan"];
 
-/// Network domains required by the Lean runtime (elan installer + toolchain downloads).
-/// github.com and *.githubusercontent.com are already in CORE_ALLOWED_HOSTS.
-/// NOTE: The canonical list is now in `src/data/ecosystem_domains.json` under the "lean" key.
-/// The LeanExtension returns "lean" as an ecosystem identifier, so this constant is
-/// kept only for reference. Update ecosystem_domains.json instead.
-pub const LEAN_REQUIRED_HOSTS: &[&str] = &[
-    "elan.lean-lang.org",
-    "leanprover.github.io",
-    "lean-lang.org",
-    "reservoir.lean-lang.org",
-    "static.lean-lang.org",
-];
-
 /// Generate the elan installation step for Lean 4.
 ///
 /// Installs elan (Lean toolchain manager) and the specified toolchain.
