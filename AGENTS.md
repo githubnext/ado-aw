@@ -523,20 +523,17 @@ This is the recommended target for maximum flexibility and security controls.
 #### `1es`
 
 Generates a pipeline that extends the 1ES Unofficial Pipeline Template:
-- Uses `templateContext.type: agencyJob` for the main agent job
+- Uses `templateContext.type: buildJob` with Copilot CLI + AWF + MCPG (same execution model as standalone)
 - Integrates with 1ES SDL scanning and compliance tools
-- Custom jobs for threat analysis and safe output processing
-- **Limitations:**
-  - MCP servers use service connections (no custom `command:` support)
-  - Network isolation is handled by OneBranch (no custom proxy allow-lists)
-  - Requires 1ES Pipeline Templates repository access
+- Full 3-job pipeline: PerformAgenticTask → AnalyzeSafeOutputs → ProcessSafeOutputs
+- Requires 1ES Pipeline Templates repository access
 
 Example:
 ```yaml
 target: 1es
 ```
 
-When using `target: 1es`, the pipeline will extend `1es/1ES.Unofficial.PipelineTemplate.yml@1ESPipelinesTemplates` and MCPs will require corresponding service connections (naming convention: `mcp-<name>-service-connection`).
+When using `target: 1es`, the pipeline will extend `1es/1ES.Unofficial.PipelineTemplate.yml@1ESPipelinesTemplates`.
 
 ### Output Format (Azure DevOps YAML)
 
@@ -919,34 +916,9 @@ https://pkgs.dev.azure.com/msazuresphere/_packaging/Guardian1ESPTUpstreamOrgFeed
 
 ### 1ES-Specific Template Markers
 
-The following markers are specific to the 1ES target (`target: 1es`) and are not used in standalone pipelines:
+The 1ES target uses the same template markers as standalone, plus the 1ES-specific `extends:` / `stages:` / `templateContext` wrapping. The 1ES template includes `templateContext.type: buildJob` for all jobs, and the pool is specified at the top-level `parameters.pool` rather than per-job.
 
-## {{ agent_context_root }}
-
-Should be replaced with the agent context root for 1ES Agency jobs. This determines the working directory context for the agent:
-- `repo`: `$(Build.Repository.Name)` - the repository subfolder
-- `root`: `.` - the checkout root
-
-## {{ mcp_configuration }}
-
-Should be replaced with the MCP server configuration for 1ES templates. For each `mcp-servers:` entry without a `command:` field, generates a service connection reference using the entry name:
-
-```yaml
-my-mcp:
-  serviceConnection: mcp-my-mcp-service-connection
-other-mcp:
-  serviceConnection: mcp-other-mcp-service-connection
-```
-
-Custom MCP servers (with `command:` field) are not supported in 1ES target. Only entries without a `command:` (which have a corresponding service connection) are supported.
-
-## {{ global_options }}
-
-Reserved for future use. Currently replaced with an empty string.
-
-## {{ log_level }}
-
-Reserved for future use. Currently replaced with an empty string.
+Both targets share the same execution model (Copilot CLI + AWF + MCPG) and the same set of template markers.
 
 ### CLI Commands
 
@@ -1675,7 +1647,7 @@ The following domains are always allowed (defined in `allowed_hosts.rs`):
 | `*.in.applicationinsights.azure.com` | Application Insights ingestion |
 | `dc.services.visualstudio.com` | Visual Studio telemetry |
 | `rt.services.visualstudio.com` | Visual Studio runtime telemetry |
-| `config.edge.skype.com` | Agency configuration |
+| `config.edge.skype.com` | Configuration |
 | `host.docker.internal` | MCP Gateway (MCPG) on host |
 
 ### Adding Additional Hosts

@@ -1,10 +1,10 @@
 //! Pipeline compilation module.
 //!
 //! This module provides compilation of agent markdown files into Azure DevOps pipeline YAML.
-//! Two targets are supported:
+//! Two targets are supported, both sharing the same execution model (Copilot CLI + AWF + MCPG):
 //!
-//! - **Standalone**: Full-featured pipeline with custom network proxy, MCP firewall, and safe outputs
-//! - **1ES**: Integration with 1ES Pipeline Templates using the agencyJob type
+//! - **Standalone**: Self-contained pipeline with AWF network isolation
+//! - **1ES**: Integration with 1ES Pipeline Templates for SDL compliance
 
 mod common;
 pub mod extensions;
