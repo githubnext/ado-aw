@@ -1033,17 +1033,17 @@ Provide the PR ID, thread ID, and reply content. The reply will be posted during
     }
 
     #[tool(
-        name = "resolve-pr-review-thread",
+        name = "resolve-pr-thread",
         description = "Resolve or change the status of a review thread on an Azure DevOps pull request. \
 Valid statuses: fixed, wont-fix, closed, by-design, active. \
 The status change will be applied during safe output processing."
     )]
-    async fn resolve_pr_review_thread(
+    async fn resolve_pr_thread(
         &self,
         params: Parameters<ResolvePrThreadParams>,
     ) -> Result<CallToolResult, McpError> {
         info!(
-            "Tool called: resolve-pr-review-thread - PR #{} thread #{} → '{}'",
+            "Tool called: resolve-pr-thread - PR #{} thread #{} → '{}'",
             params.0.pull_request_id, params.0.thread_id, params.0.status
         );
         let result: ResolvePrThreadResult = params.0.try_into()?;

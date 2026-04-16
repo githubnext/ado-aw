@@ -1176,13 +1176,13 @@ pub fn validate_update_pr_votes(front_matter: &FrontMatter) -> Result<()> {
     Ok(())
 }
 
-/// Validate that resolve-pr-review-thread has a required `allowed-statuses` field when configured.
+/// Validate that resolve-pr-thread has a required `allowed-statuses` field when configured.
 ///
 /// An empty or missing `allowed-statuses` list would let agents set any thread status,
 /// including "fixed" or "wontFix" on security-critical review threads. Operators must
 /// explicitly opt in to each allowed status transition.
 pub fn validate_resolve_pr_thread_statuses(front_matter: &FrontMatter) -> Result<()> {
-    if let Some(config_value) = front_matter.safe_outputs.get("resolve-pr-review-thread") {
+    if let Some(config_value) = front_matter.safe_outputs.get("resolve-pr-thread") {
         if let Some(obj) = config_value.as_object() {
             let allowed_statuses = obj.get("allowed-statuses");
             let is_empty = match allowed_statuses {
@@ -1191,19 +1191,19 @@ pub fn validate_resolve_pr_thread_statuses(front_matter: &FrontMatter) -> Result
             };
             if is_empty {
                 anyhow::bail!(
-                    "safe-outputs.resolve-pr-review-thread requires a non-empty \
+                    "safe-outputs.resolve-pr-thread requires a non-empty \
                      'allowed-statuses' list to prevent agents from manipulating thread \
                      statuses without explicit operator consent. Example:\n\n  \
-                     safe-outputs:\n    resolve-pr-review-thread:\n      allowed-statuses:\n\
+                     safe-outputs:\n    resolve-pr-thread:\n      allowed-statuses:\n\
                      \x20       - fixed\n\n\
                      Valid statuses: active, fixed, wont-fix, closed, by-design\n"
                 );
             }
         } else {
             anyhow::bail!(
-                "safe-outputs.resolve-pr-review-thread must be a configuration object \
+                "safe-outputs.resolve-pr-thread must be a configuration object \
                  with an 'allowed-statuses' list. Example:\n\n  \
-                 safe-outputs:\n    resolve-pr-review-thread:\n      allowed-statuses:\n\
+                 safe-outputs:\n    resolve-pr-thread:\n      allowed-statuses:\n\
                  \x20       - fixed\n"
             );
         }
@@ -2854,7 +2854,7 @@ mod tests {
     #[test]
     fn test_resolve_pr_thread_fails_when_allowed_statuses_missing() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pr-review-thread:\n    allowed-repositories:\n      - self\n---\n"
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pr-thread:\n    allowed-repositories:\n      - self\n---\n"
         ).unwrap();
         let result = validate_resolve_pr_thread_statuses(&fm);
         assert!(result.is_err());
@@ -2865,7 +2865,7 @@ mod tests {
     #[test]
     fn test_resolve_pr_thread_fails_when_allowed_statuses_empty() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pr-review-thread:\n    allowed-statuses: []\n---\n"
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pr-thread:\n    allowed-statuses: []\n---\n"
         ).unwrap();
         let result = validate_resolve_pr_thread_statuses(&fm);
         assert!(result.is_err());
@@ -2876,7 +2876,7 @@ mod tests {
     #[test]
     fn test_resolve_pr_thread_fails_when_value_is_scalar() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pr-review-thread: true\n---\n"
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pr-thread: true\n---\n"
         ).unwrap();
         let result = validate_resolve_pr_thread_statuses(&fm);
         assert!(result.is_err());
@@ -2885,7 +2885,7 @@ mod tests {
     #[test]
     fn test_resolve_pr_thread_passes_when_statuses_provided() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pr-review-thread:\n    allowed-statuses:\n      - fixed\n      - wont-fix\n---\n"
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pr-thread:\n    allowed-statuses:\n      - fixed\n      - wont-fix\n---\n"
         ).unwrap();
         assert!(validate_resolve_pr_thread_statuses(&fm).is_ok());
     }
