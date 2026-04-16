@@ -7,7 +7,6 @@ on:
     paths:
       - "src/**"
       - "tests/**"
-      - "templates/**"
       - "Cargo.toml"
       - "Cargo.lock"
 description: Reviews Rust code changes for quality, error handling, security, and project conventions

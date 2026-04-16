@@ -75,8 +75,8 @@ Compare the `FrontMatter` struct in `src/compile/types.rs` against the documente
 Scan template files for markers:
 
 ```bash
-grep -oP '\{\{[^}]+\}\}' templates/base.yml
-grep -oP '\{\{[^}]+\}\}' templates/1es-base.yml
+grep -oP '\{\{[^}]+\}\}' src/data/base.yml
+grep -oP '\{\{[^}]+\}\}' src/data/1es-base.yml
 ```
 
 Compare against documented markers in `AGENTS.md`. Check for:

@@ -63,7 +63,7 @@ impl Compiler for OneESCompiler {
         let teardown_job = generate_teardown_job(&front_matter.teardown, &front_matter.name);
 
         let config = CompileConfig {
-            template: include_str!("../../templates/1es-base.yml").to_string(),
+            template: include_str!("../data/1es-base.yml").to_string(),
             extra_replacements: vec![
                 ("{{ firewall_version }}".into(), AWF_VERSION.into()),
                 ("{{ mcpg_version }}".into(), MCPG_VERSION.into()),

@@ -48,7 +48,7 @@ Use a **round-robin approach** across these categories. Pick up where the last r
 
 ### Category A: Input Sanitization & Injection
 
-Audit `src/sanitize.rs`, `src/compile/types.rs`, `src/compile/common.rs`, and `src/compile/standalone.rs` for:
+Audit `src/sanitize.rs`, `src/compile/types.rs`, `src/compile/common.rs`, `src/compile/standalone.rs`, and `src/compile/onees.rs` for:
 
 - **Template injection**: Can a malicious `name`, `description`, or other front matter field inject ADO template expressions (dollar-double-brace syntax) into generated YAML that Azure DevOps evaluates?
 - **YAML deserialization**: Can crafted front matter trigger unexpected serde_yaml behavior (anchors, aliases, merge keys, billion-laughs)?
@@ -61,8 +61,9 @@ Focus files:
 cat src/sanitize.rs
 cat src/compile/common.rs
 cat src/compile/standalone.rs
-grep -n 'format!' src/compile/standalone.rs | head -40
-grep -n 'replace\|replace_with_indent' src/compile/standalone.rs
+cat src/compile/onees.rs
+grep -n 'format!' src/compile/standalone.rs src/compile/onees.rs | head -40
+grep -n 'replace\|replace_with_indent' src/compile/standalone.rs src/compile/onees.rs
 ```
 
 ### Category B: Path Traversal & File System
@@ -101,7 +102,7 @@ grep -rn 'allow\|block\|domain\|host' src/compile/common.rs | head -30
 
 ### Category D: Credential & Secret Exposure
 
-Audit `src/compile/standalone.rs`, `src/compile/common.rs`, and `templates/base.yml` for:
+Audit `src/compile/standalone.rs`, `src/compile/onees.rs`, `src/compile/common.rs`, `src/data/base.yml`, and `src/data/1es-base.yml` for:
 
 - **Token leakage**: Are ADO tokens (`SC_READ_TOKEN`, `SC_WRITE_TOKEN`, `SYSTEM_ACCESSTOKEN`) ever logged, printed, or embedded in non-secret pipeline variables?
 - **MCP env passthrough**: Can the `env:` field in MCP configs leak host environment variables that shouldn't be accessible inside the AWF sandbox?
@@ -111,8 +112,9 @@ Audit `src/compile/standalone.rs`, `src/compile/common.rs`, and `templates/base.
 Focus files:
 ```bash
 grep -rn 'SECRET\|TOKEN\|API_KEY\|secret\|password' src/compile/
-grep -rn 'SC_READ_TOKEN\|SC_WRITE_TOKEN' src/compile/ templates/
-cat templates/base.yml | grep -A2 -B2 'TOKEN\|SECRET\|env:'
+grep -rn 'SC_READ_TOKEN\|SC_WRITE_TOKEN' src/compile/ src/data/
+cat src/data/base.yml | grep -A2 -B2 'TOKEN\|SECRET\|env:'
+cat src/data/1es-base.yml | grep -A2 -B2 'TOKEN\|SECRET\|env:'
 ```
 
 ### Category E: Logic & Authorization Flaws
@@ -135,7 +137,7 @@ grep -rn 'allowed_repos\|repository' src/tools/create_pr.rs
 
 ### Category F: Supply Chain & Dependency Integrity
 
-Audit `src/compile/common.rs`, `Cargo.toml`, and `templates/base.yml` for:
+Audit `src/compile/common.rs`, `Cargo.toml`, `src/data/base.yml`, and `src/data/1es-base.yml` for:
 
 - **Binary integrity**: Are the `ado-aw`, AWF, and MCPG binaries downloaded with proper checksum verification? Can the checksums file itself be tampered with?
 - **Docker image pinning**: Is the MCPG Docker image pinned by digest, or only by tag? Tag-only pinning allows image replacement attacks.
@@ -146,7 +148,7 @@ Focus files:
 ```bash
 cat Cargo.toml
 grep -n 'VERSION\|version\|checksum\|sha256\|digest' src/compile/common.rs
-grep -n 'docker\|image\|tag\|digest' src/compile/common.rs src/compile/standalone.rs
+grep -n 'docker\|image\|tag\|digest' src/compile/common.rs src/compile/standalone.rs src/compile/onees.rs
 ```
 
 ## Step 3: Deep Dive

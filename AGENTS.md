@@ -68,14 +68,15 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 │   ├── runtimes/         # Runtime environment implementations
 │   │   ├── mod.rs        # Module entry point
 │   │   └── lean.rs       # Lean 4 theorem prover runtime
+│   ├── data/
+│   │   ├── base.yml          # Base pipeline template for standalone
+│   │   ├── 1es-base.yml      # Base pipeline template for 1ES target
+│   │   ├── ecosystem_domains.json # Network allowlists per ecosystem
+│   │   ├── init-agent.md     # Dispatcher agent template for `init` command
+│   │   └── threat-analysis.md # Threat detection analysis prompt template
 │   └── tools/            # First-class tool implementations (compiler auto-configures)
 │       ├── mod.rs
 │       └── cache_memory.rs
-├── templates/
-│   ├── base.yml          # Base pipeline template for standalone
-│   ├── 1es-base.yml      # Base pipeline template for 1ES target
-│   ├── init-agent.md     # Dispatcher agent template for `init` command
-│   └── threat-analysis.md # Threat detection analysis prompt template
 ├── examples/             # Example agent definitions
 ├── tests/                # Integration tests and fixtures
 ├── Cargo.toml            # Rust dependencies
@@ -540,8 +541,8 @@ When using `target: 1es`, the pipeline will extend `1es/1ES.Unofficial.PipelineT
 
 The compiler transforms the input into valid Azure DevOps pipeline YAML based on the target platform:
 
-- **Standalone**: Uses `templates/base.yml`
-- **1ES**: Uses `templates/1es-base.yml`
+- **Standalone**: Uses `src/data/base.yml`
+- **1ES**: Uses `src/data/1es-base.yml`
 
 Explicit markings are embedded in these templates that the compiler is allowed to replace e.g. `{{ copilot_params }}` denotes parameters which are passed to the copilot command line tool. The compiler should not replace sections denoted by `${{ some content }}`. What follows is a mapping of markings to responsibilities (primarily for the standalone template).
 
@@ -831,7 +832,7 @@ Example output:
 
 ## {{ threat_analysis_prompt }}
 
-Should be replaced with the embedded threat detection analysis prompt from `templates/threat-analysis.md`. This prompt template includes markers for `{{ source_path }}`, `{{ agent_name }}`, `{{ agent_description }}`, and `{{ working_directory }}` which are replaced during compilation.
+Should be replaced with the embedded threat detection analysis prompt from `src/data/threat-analysis.md`. This prompt template includes markers for `{{ source_path }}`, `{{ agent_name }}`, `{{ agent_description }}`, and `{{ working_directory }}` which are replaced during compilation.
 
 The threat analysis prompt instructs the security analysis agent to check for:
 - Prompt injection attempts
