@@ -66,7 +66,8 @@ fn test_compiled_yaml_structure() {
     // Since we need the actual compilation to happen, we'll verify the template structure
 
     let template_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("templates")
+        .join("src")
+        .join("data")
         .join("base.yml");
 
     assert!(template_path.exists(), "Base template should exist");

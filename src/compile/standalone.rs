@@ -58,7 +58,7 @@ impl Compiler for StandaloneCompiler {
         let mcpg_docker_env = generate_mcpg_docker_env(front_matter);
 
         let config = CompileConfig {
-            template: include_str!("../../templates/base.yml").to_string(),
+            template: include_str!("../data/base.yml").to_string(),
             extra_replacements: vec![
                 ("{{ firewall_version }}".into(), AWF_VERSION.into()),
                 ("{{ mcpg_version }}".into(), MCPG_VERSION.into()),

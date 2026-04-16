@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
-// The agent template is embedded from templates/init-agent.md
-const AGENT_TEMPLATE: &str = include_str!("../templates/init-agent.md");
+// The agent template is embedded from src/data/init-agent.md
+const AGENT_TEMPLATE: &str = include_str!("data/init-agent.md");
 
 const AGENT_DIR: &str = ".github/agents";
 const AGENT_FILENAME: &str = "ado-aw.agent.md";

@@ -2036,7 +2036,7 @@ pub async fn compile_shared(
     validate_resolve_pr_thread_statuses(front_matter)?;
 
     // 11. Threat analysis prompt
-    let threat_analysis_prompt = include_str!("../../templates/threat-analysis.md");
+    let threat_analysis_prompt = include_str!("../data/threat-analysis.md");
     let template = replace_with_indent(
         &config.template,
         "{{ threat_analysis_prompt }}",
