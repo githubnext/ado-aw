@@ -378,12 +378,12 @@ pub async fn execute_safe_output(
             );
             output.execute_sanitized(ctx).await?
         }
-        "resolve-pr-review-thread" => {
-            debug!("Parsing resolve-pr-review-thread payload");
+        "resolve-pr-thread" => {
+            debug!("Parsing resolve-pr-thread payload");
             let mut output: ResolvePrThreadResult = serde_json::from_value(entry.clone())
-                .map_err(|e| anyhow::anyhow!("Failed to parse resolve-pr-review-thread: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to parse resolve-pr-thread: {}", e))?;
             debug!(
-                "resolve-pr-review-thread: pr_id={}, thread_id={}, status='{}'",
+                "resolve-pr-thread: pr_id={}, thread_id={}, status='{}'",
                 output.pull_request_id, output.thread_id, output.status
             );
             output.execute_sanitized(ctx).await?
