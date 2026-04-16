@@ -79,7 +79,6 @@ pub fn replace_with_indent(template: &str, placeholder: &str, replacement: &str)
 }
 
 /// Generate a schedule YAML block from a ScheduleConfig.
-/// When no explicit schedule branches are configured, defaults to `main`.
 /// Generate the top-level `parameters:` YAML block from front matter parameters.
 ///
 /// Returns a YAML block like:
@@ -892,7 +891,7 @@ pub fn generate_acquire_ado_token(service_connection: Option<&str>, variable_nam
                 r#"  displayName: "Acquire ADO token ({variable_name})""#
             ));
             lines.push("  inputs:".to_string());
-            lines.push(format!("    azureSubscription: '{}'", sc));
+            lines.push(format!("    azureSubscription: '{}'", sc.replace('\'', "''")));
             lines.push("    scriptType: 'bash'".to_string());
             lines.push("    scriptLocation: 'inlineScript'".to_string());
             lines.push("    addSpnToEnvironment: true".to_string());
