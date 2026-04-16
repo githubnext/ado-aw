@@ -2996,6 +2996,7 @@ fn test_1es_compiled_output_is_valid_yaml() {
         .join("\n");
     let doc: serde_yaml::Value = serde_yaml::from_str(&yaml_content).unwrap();
 
+    // Verify 1ES wrapping structure
     assert!(
         doc.get("extends").is_some(),
         "1ES YAML should have 'extends' key"
@@ -3003,6 +3004,62 @@ fn test_1es_compiled_output_is_valid_yaml() {
     assert!(
         doc.get("resources").is_some(),
         "1ES YAML should have 'resources' key"
+    );
+
+    // Verify key pipeline content was substituted (catches placeholder regressions)
+    assert!(
+        compiled.contains("Copilot.CLI.linux-x64"),
+        "1ES output should contain Copilot CLI install"
+    );
+    assert!(
+        compiled.contains("awf"),
+        "1ES output should contain AWF references"
+    );
+    assert!(
+        compiled.contains("mcpg"),
+        "1ES output should contain MCPG references"
+    );
+    assert!(
+        compiled.contains("SafeOutputs"),
+        "1ES output should contain SafeOutputs references"
+    );
+    assert!(
+        compiled.contains("copilot --prompt"),
+        "1ES output should contain copilot invocation (copilot_params substituted)"
+    );
+    assert!(
+        compiled.contains("threat-analysis"),
+        "1ES output should contain threat analysis step"
+    );
+    assert!(
+        compiled.contains("ado-aw execute"),
+        "1ES output should contain safe output executor step"
+    );
+    assert!(
+        compiled.contains("PerformAgenticTask"),
+        "1ES output should contain PerformAgenticTask job"
+    );
+    assert!(
+        compiled.contains("AnalyzeSafeOutputs"),
+        "1ES output should contain AnalyzeSafeOutputs job"
+    );
+    assert!(
+        compiled.contains("ProcessSafeOutputs"),
+        "1ES output should contain ProcessSafeOutputs job"
+    );
+
+    // Verify no Agency remnants
+    assert!(
+        !compiled.contains("agencyJob"),
+        "1ES output should not contain agencyJob"
+    );
+    assert!(
+        !compiled.contains("AgencyArtifact"),
+        "1ES output should not contain AgencyArtifact"
+    );
+    assert!(
+        !compiled.contains("commandOptions"),
+        "1ES output should not contain commandOptions"
     );
 }
 
