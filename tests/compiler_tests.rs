@@ -2916,3 +2916,182 @@ network:
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+// ─── YAML validation tests ──────────────────────────────────────────────────
+
+/// Helper: compile a fixture and return the compiled YAML string.
+fn compile_fixture(fixture_name: &str) -> String {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-yaml-validation-{}-{}",
+        fixture_name.replace('.', "-"),
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join(fixture_name);
+
+    let output_path = temp_dir.join(fixture_name.replace(".md", ".yml"));
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            fixture_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compilation of {} should succeed: {}",
+        fixture_name,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+    let _ = fs::remove_dir_all(&temp_dir);
+    compiled
+}
+
+/// Validate that compiled YAML is parseable as valid YAML.
+/// Strips the leading `# @ado-aw` header comment before parsing.
+fn assert_valid_yaml(compiled: &str, fixture_name: &str) {
+    let yaml_content: String = compiled
+        .lines()
+        .skip_while(|line| line.starts_with('#') || line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let parsed: Result<serde_yaml::Value, _> = serde_yaml::from_str(&yaml_content);
+    assert!(
+        parsed.is_ok(),
+        "Compiled YAML for {} should be valid YAML, got parse error: {}",
+        fixture_name,
+        parsed.err().unwrap()
+    );
+
+    let doc = parsed.unwrap();
+    assert!(
+        doc.is_mapping(),
+        "Compiled YAML for {} should be a YAML mapping at top level",
+        fixture_name
+    );
+}
+
+/// Test that the 1ES fixture produces valid YAML with correct structure
+#[test]
+fn test_1es_compiled_output_is_valid_yaml() {
+    let compiled = compile_fixture("1es-test-agent.md");
+    assert_valid_yaml(&compiled, "1es-test-agent.md");
+
+    let yaml_content: String = compiled
+        .lines()
+        .skip_while(|line| line.starts_with('#') || line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let doc: serde_yaml::Value = serde_yaml::from_str(&yaml_content).unwrap();
+
+    // Verify 1ES wrapping structure
+    assert!(
+        doc.get("extends").is_some(),
+        "1ES YAML should have 'extends' key"
+    );
+    assert!(
+        doc.get("resources").is_some(),
+        "1ES YAML should have 'resources' key"
+    );
+
+    // Verify key pipeline content was substituted (catches placeholder regressions)
+    assert!(
+        compiled.contains("Copilot.CLI.linux-x64"),
+        "1ES output should contain Copilot CLI install"
+    );
+    assert!(
+        compiled.contains("awf"),
+        "1ES output should contain AWF references"
+    );
+    assert!(
+        compiled.contains("mcpg"),
+        "1ES output should contain MCPG references"
+    );
+    assert!(
+        compiled.contains("SafeOutputs"),
+        "1ES output should contain SafeOutputs references"
+    );
+    assert!(
+        compiled.contains("copilot --prompt"),
+        "1ES output should contain copilot invocation (copilot_params substituted)"
+    );
+    assert!(
+        compiled.contains("threat-analysis"),
+        "1ES output should contain threat analysis step"
+    );
+    assert!(
+        compiled.contains("ado-aw execute"),
+        "1ES output should contain safe output executor step"
+    );
+    assert!(
+        compiled.contains("PerformAgenticTask"),
+        "1ES output should contain PerformAgenticTask job"
+    );
+    assert!(
+        compiled.contains("AnalyzeSafeOutputs"),
+        "1ES output should contain AnalyzeSafeOutputs job"
+    );
+    assert!(
+        compiled.contains("ProcessSafeOutputs"),
+        "1ES output should contain ProcessSafeOutputs job"
+    );
+
+    // Verify no Agency remnants
+    assert!(
+        !compiled.contains("agencyJob"),
+        "1ES output should not contain agencyJob"
+    );
+    assert!(
+        !compiled.contains("AgencyArtifact"),
+        "1ES output should not contain AgencyArtifact"
+    );
+    assert!(
+        !compiled.contains("commandOptions"),
+        "1ES output should not contain commandOptions"
+    );
+}
+
+/// Test that the minimal standalone fixture produces valid YAML with correct structure
+#[test]
+fn test_standalone_minimal_compiled_output_is_valid_yaml() {
+    let compiled = compile_fixture("minimal-agent.md");
+    assert_valid_yaml(&compiled, "minimal-agent.md");
+
+    let yaml_content: String = compiled
+        .lines()
+        .skip_while(|line| line.starts_with('#') || line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let doc: serde_yaml::Value = serde_yaml::from_str(&yaml_content).unwrap();
+
+    assert!(
+        doc.get("jobs").is_some(),
+        "Standalone YAML should have 'jobs' key"
+    );
+}
+
+/// Test that the complete standalone fixture produces valid YAML
+#[test]
+fn test_standalone_complete_compiled_output_is_valid_yaml() {
+    let compiled = compile_fixture("complete-agent.md");
+    assert_valid_yaml(&compiled, "complete-agent.md");
+}
+
+/// Test that the pipeline-trigger fixture produces valid YAML
+#[test]
+fn test_standalone_pipeline_trigger_compiled_output_is_valid_yaml() {
+    let compiled = compile_fixture("pipeline-trigger-agent.md");
+    assert_valid_yaml(&compiled, "pipeline-trigger-agent.md");
+}

@@ -1,6 +1,6 @@
 # 1ES Pipeline Template for Agentic Pipelines
-# This template extends the 1ES Unofficial Pipeline Template and uses the Agency job type
-# for the main agent task, while adding custom jobs for safe output analysis and processing.
+# This template extends the 1ES Unofficial Pipeline Template with Copilot CLI,
+# AWF network isolation, and MCP Gateway — matching the standalone pipeline model.
 
 name: {{ agent_name }}-$(BuildID)
 {{ parameters }}
@@ -31,7 +31,7 @@ extends:
         name: AZS-1ES-W-MMS2022
         os: windows
     featureFlags:
-      disableNetworkIsolation: true  # Agency requires network access for AI services
+      disableNetworkIsolation: true  # AWF handles network isolation at application layer
       runPrerequisitesOnImage: false # Pool image has 1ES prerequisites preinstalled
     stages:
       - stage: AgentStage
@@ -39,104 +39,376 @@ extends:
         jobs:
           {{ setup_job }}
 
-          # Main agentic task using the 1ES Agency job type
           - job: PerformAgenticTask
-            displayName: "{{ agent_name }} (Agent)"
+            displayName: "{{ agent_name }} (Agent Automations)"
             {{ agentic_depends_on }}
             {{ job_timeout }}
             templateContext:
-              type: agencyJob
-              arguments:
-                agentContextRoot: {{ agent_context_root }}
-                skipSourceSync: false
-                preAgentSteps:
+              type: buildJob
+              outputs:
+                - output: pipelineArtifact
+                  path: $(Agent.TempDirectory)/staging
+                  artifact: agent_outputs_$(Build.BuildId)
+                  condition: always()
+              steps:
+                {{ checkout_self }}
+                {{ checkout_repositories }}
 
-                  {{ checkout_repositories }}
+                {{ acquire_ado_token }}
 
-                  {{ prepare_steps }}
+                {{ cancel_previous_builds }}
 
-                  - bash: |
-                      COMPILER_VERSION="{{ compiler_version }}"
-                      DOWNLOAD_DIR="$(Pipeline.Workspace)/agentic-pipeline-compiler"
-                      DOWNLOAD_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/ado-aw-linux-x64"
-                      CHECKSUM_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/checksums.txt"
+                - task: NuGetAuthenticate@1
+                  displayName: "Authenticate NuGet Feed"
 
-                      mkdir -p "$DOWNLOAD_DIR"
-                      echo "Downloading ado-aw v${COMPILER_VERSION} from GitHub Releases..."
-                      curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64" "$DOWNLOAD_URL"
-                      curl -fsSL -o "$DOWNLOAD_DIR/checksums.txt" "$CHECKSUM_URL"
+                - task: NuGetCommand@2
+                  displayName: "Install Copilot CLI"
+                  inputs:
+                    command: 'custom'
+                    arguments: 'install Microsoft.Copilot.CLI.linux-x64 -Source "https://pkgs.dev.azure.com/msazuresphere/_packaging/Guardian1ESPTUpstreamOrgFeed/nuget/v3/index.json" -Version {{ copilot_version }} -OutputDirectory $(Agent.TempDirectory)/tools -ExcludeVersion -NonInteractive'
 
-                      echo "Verifying checksum..."
-                      cd "$DOWNLOAD_DIR"
-                      grep "ado-aw-linux-x64" checksums.txt | sha256sum -c -
-                      mv ado-aw-linux-x64 ado-aw
-                      chmod +x ado-aw
-                    displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
+                - bash: |
+                    ls -la "$(Agent.TempDirectory)/tools"
+                    echo "##vso[task.prependpath]$(Agent.TempDirectory)/tools/Microsoft.Copilot.CLI.linux-x64"
 
-                  - bash: |
-                      AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
-                      chmod +x "$AGENTIC_PIPELINES_PATH"
-                      $AGENTIC_PIPELINES_PATH check "{{ pipeline_path }}"
-                    displayName: "Verify pipeline integrity"
+                    # Copy copilot binary to /tmp so it's accessible inside AWF container
+                    # (AWF auto-mounts /tmp:/tmp:rw but not Agent.TempDirectory)
+                    mkdir -p /tmp/awf-tools
+                    cp "$(Agent.TempDirectory)/tools/Microsoft.Copilot.CLI.linux-x64/copilot" /tmp/awf-tools/copilot
+                    chmod +x /tmp/awf-tools/copilot
+                  displayName: "Add copilot to PATH"
 
-                  - bash: |
-                      mkdir -p "$HOME/.copilot"
-                      mkdir -p "$(Agent.TempDirectory)/staging"
+                - bash: |
+                    copilot --version
+                    copilot -h
+                  displayName: "Output copilot version"
 
-                      AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
-                      chmod +x "$AGENTIC_PIPELINES_PATH"
+                - bash: |
+                    COMPILER_VERSION="{{ compiler_version }}"
+                    DOWNLOAD_DIR="$(Pipeline.Workspace)/agentic-pipeline-compiler"
+                    DOWNLOAD_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/ado-aw-linux-x64"
+                    CHECKSUM_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/checksums.txt"
 
-                      # Generate MCP config for safeoutputs
-                      cat > "$HOME/.copilot/mcp-config.json" << EOF
-                      {
-                        "mcpServers": {
-                          "safeoutputs": {
-                            "type": "stdio",
-                            "tools": ["*"],
-                            "command": "$AGENTIC_PIPELINES_PATH",
-                            "args": ["mcp", "$(Agent.TempDirectory)/staging", "{{ working_directory }}"]
+                    mkdir -p "$DOWNLOAD_DIR"
+                    echo "Downloading ado-aw v${COMPILER_VERSION} from GitHub Releases..."
+                    curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64" "$DOWNLOAD_URL"
+                    curl -fsSL -o "$DOWNLOAD_DIR/checksums.txt" "$CHECKSUM_URL"
+
+                    echo "Verifying checksum..."
+                    cd "$DOWNLOAD_DIR"
+                    grep "ado-aw-linux-x64" checksums.txt | sha256sum -c -
+                    mv ado-aw-linux-x64 ado-aw
+                    chmod +x ado-aw
+                  displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
+
+                - bash: |
+                    AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
+                    chmod +x "$AGENTIC_PIPELINES_PATH"
+                    $AGENTIC_PIPELINES_PATH check "{{ pipeline_path }}"
+                  displayName: "Verify pipeline integrity"
+
+                - bash: |
+                    mkdir -p "$(Agent.TempDirectory)/staging"
+
+                    # Generate MCPG API key early so it's available as an ADO secret variable
+                    # for both the MCPG config and the agent's mcp-config.json
+                    MCP_GATEWAY_API_KEY=$(openssl rand -base64 45 | tr -d '/+=')
+                    echo "##vso[task.setvariable variable=MCP_GATEWAY_API_KEY;issecret=true]$MCP_GATEWAY_API_KEY"
+
+                    # Write MCPG (MCP Gateway) configuration to a file
+                    cat > "$(Agent.TempDirectory)/staging/mcpg-config.json" << 'MCPG_CONFIG_EOF'
+                    {{ mcpg_config }}
+                    MCPG_CONFIG_EOF
+
+                    echo "MCPG config:"
+                    cat "$(Agent.TempDirectory)/staging/mcpg-config.json"
+
+                    # Validate JSON
+                    python3 -m json.tool "$(Agent.TempDirectory)/staging/mcpg-config.json" > /dev/null && echo "JSON is valid"
+                  displayName: "Prepare MCPG config"
+
+                - bash: |
+                    mkdir -p "$HOME/.copilot"
+                    mkdir -p /tmp/awf-tools/staging
+
+                    echo "HOME: $HOME"
+
+                    # Use absolute path since MCP subprocess may not inherit PATH
+                    AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
+
+                    # Verify the binary exists and is executable
+                    ls -la "$AGENTIC_PIPELINES_PATH"
+                    chmod +x "$AGENTIC_PIPELINES_PATH"
+
+                    $AGENTIC_PIPELINES_PATH -h
+
+                    # Copy compiler binary to /tmp so it's accessible inside AWF container
+                    cp "$AGENTIC_PIPELINES_PATH" /tmp/awf-tools/ado-aw
+                    chmod +x /tmp/awf-tools/ado-aw
+
+                    # Copy MCPG config to /tmp
+                    cp "$(Agent.TempDirectory)/staging/mcpg-config.json" /tmp/awf-tools/staging/mcpg-config.json
+
+                    # Generate MCP config for copilot CLI pointing to MCPG gateway on host.
+                    # The agent inside AWF reaches MCPG via host.docker.internal.
+                    # MCPG enforces client auth via the gateway API key.
+                    cat > /tmp/awf-tools/mcp-config.json << EOF
+                    {
+                      "mcpServers": {
+                        "mcpg": {
+                          "type": "http",
+                          "url": "http://host.docker.internal:80/mcp",
+                          "headers": {
+                            "Authorization": "Bearer $(MCP_GATEWAY_API_KEY)"
                           }
                         }
                       }
-                      EOF
+                    }
+                    EOF
 
-                      echo "Generated MCP config:"
-                      cat "$HOME/.copilot/mcp-config.json"
-                      python3 -m json.tool "$HOME/.copilot/mcp-config.json" > /dev/null && echo "JSON is valid"
-                    displayName: "Configure safeoutputs MCP"
+                    # Also write to $HOME/.copilot for host-side use
+                    cp /tmp/awf-tools/mcp-config.json "$HOME/.copilot/mcp-config.json"
 
-                  - bash: |
-                      # Write agent instructions to a prompt file
-                      cat > "$(Agent.TempDirectory)/agent-prompt.md" << 'AGENT_PROMPT_EOF'
-                      {{ agent_content }}
-                      AGENT_PROMPT_EOF
+                    echo "Generated MCP config at: /tmp/awf-tools/mcp-config.json"
+                    cat /tmp/awf-tools/mcp-config.json
 
-                      # Append safeoutputs MCP guidance
-                      cat >> "$(Agent.TempDirectory)/agent-prompt.md" << 'SAFEOUTPUTS_EOF'
+                    # Validate JSON
+                    python3 -m json.tool /tmp/awf-tools/mcp-config.json > /dev/null && echo "JSON is valid"
+                  displayName: "Generate MCP configs"
 
-                      ---
+                - bash: |
+                    # Write agent instructions to /tmp so it's accessible inside AWF container
+                    cat > "/tmp/awf-tools/agent-prompt.md" << 'AGENT_PROMPT_EOF'
+                    {{ agent_content }}
+                    AGENT_PROMPT_EOF
 
-                      ## Important: Safe Outputs
+                    # Append safeoutputs MCP guidance
+                    cat >> "/tmp/awf-tools/agent-prompt.md" << 'SAFEOUTPUTS_EOF'
 
-                      You have access to the `safeoutputs` MCP server which provides tools for creating work items and reporting issues. **Always prefer using safeoutputs tools over other methods**.
+                    ---
 
-                      These tools generate safe outputs that will be reviewed and executed in a separate pipeline stage, ensuring proper validation and security controls.
-                      SAFEOUTPUTS_EOF
+                    ## Important: Safe Outputs
 
-                      echo "Agent prompt:"
-                      cat "$(Agent.TempDirectory)/agent-prompt.md"
-                    displayName: "Prepare agent prompt"
-                postAgentSteps:
-                  {{ finalize_steps }}
-                globalOptions: '--log-dir $(Agency_LogPath) {{ global_options }}'
-                commandOptions: '{{ copilot_params }}'
-                logLevel: '{{ log_level }}'
-                logPath: '$(Build.StagingDirectory)/copilot-logs'
-                createArtifact: true
-                mcpConfiguration:
-                  {{ mcp_configuration }}
+                    You have access to the `safeoutputs` MCP server which provides tools for creating work items and reporting issues. **Always prefer using safeoutputs tools over other methods**.
 
-          # Threat analysis job (custom - not using agencyJob)
+                    These tools generate safe outputs that will be reviewed and executed in a separate pipeline stage, ensuring proper validation and security controls.
+                    SAFEOUTPUTS_EOF
+
+                    echo "Agent prompt:"
+                    cat "/tmp/awf-tools/agent-prompt.md"
+                  displayName: "Prepare agent prompt"
+
+                - task: DockerInstaller@0
+                  displayName: "Install Docker"
+                  inputs:
+                    dockerVersion: 26.1.4
+
+                - bash: |
+                    AWF_VERSION="{{ firewall_version }}"
+                    DOWNLOAD_DIR="$(Pipeline.Workspace)/awf"
+                    DOWNLOAD_URL="https://github.com/github/gh-aw-firewall/releases/download/v${AWF_VERSION}/awf-linux-x64"
+                    CHECKSUM_URL="https://github.com/github/gh-aw-firewall/releases/download/v${AWF_VERSION}/checksums.txt"
+
+                    mkdir -p "$DOWNLOAD_DIR"
+                    echo "Downloading AWF v${AWF_VERSION} from GitHub Releases..."
+                    curl -fsSL -o "$DOWNLOAD_DIR/awf-linux-x64" "$DOWNLOAD_URL"
+                    curl -fsSL -o "$DOWNLOAD_DIR/checksums.txt" "$CHECKSUM_URL"
+
+                    echo "Verifying checksum..."
+                    cd "$DOWNLOAD_DIR"
+                    grep "awf-linux-x64" checksums.txt | sha256sum -c -
+                    mv awf-linux-x64 awf
+                    chmod +x awf
+                    echo "##vso[task.prependpath]$(Pipeline.Workspace)/awf"
+                    ./awf --version || echo "AWF binary ready"
+                  displayName: "Download AWF (Agentic Workflow Firewall) v{{ firewall_version }}"
+
+                - bash: |
+                    docker pull ghcr.io/github/gh-aw-firewall/squid:{{ firewall_version }}
+                    docker pull ghcr.io/github/gh-aw-firewall/agent:{{ firewall_version }}
+                    docker tag ghcr.io/github/gh-aw-firewall/squid:{{ firewall_version }} ghcr.io/github/gh-aw-firewall/squid:latest
+                    docker tag ghcr.io/github/gh-aw-firewall/agent:{{ firewall_version }} ghcr.io/github/gh-aw-firewall/agent:latest
+                    docker pull {{ mcpg_image }}:v{{ mcpg_version }}
+                  displayName: "Pre-pull AWF and MCPG container images (v{{ firewall_version }})"
+
+                {{ prepare_steps }}
+
+                # Start SafeOutputs HTTP server on host (MCPG proxies to it)
+                - bash: |
+                    SAFE_OUTPUTS_PORT=8100
+                    SAFE_OUTPUTS_API_KEY=$(openssl rand -base64 45 | tr -d '/+=')
+                    echo "##vso[task.setvariable variable=SAFE_OUTPUTS_PORT]$SAFE_OUTPUTS_PORT"
+                    echo "##vso[task.setvariable variable=SAFE_OUTPUTS_API_KEY;issecret=true]$SAFE_OUTPUTS_API_KEY"
+
+                    mkdir -p "$(Agent.TempDirectory)/staging/logs"
+
+                    # Start SafeOutputs as HTTP server in the background
+                    # NOTE: {{ enabled_tools_args }} expands to either "" or "--enabled-tools X ... "
+                    # (with trailing space). The value MUST be newline-free; is_safe_tool_name enforces this.
+                    # Positional args (output_directory, bounding_directory) MUST come after all named
+                    # options — clap parses them positionally and reordering would break the command.
+                    nohup /tmp/awf-tools/ado-aw mcp-http \
+                      --port "$SAFE_OUTPUTS_PORT" \
+                      --api-key "$SAFE_OUTPUTS_API_KEY" \
+                      {{ enabled_tools_args }}"/tmp/awf-tools/staging" \
+                      "{{ working_directory }}" \
+                      > "$(Agent.TempDirectory)/staging/logs/safeoutputs.log" 2>&1 &
+                    SAFE_OUTPUTS_PID=$!
+                    echo "##vso[task.setvariable variable=SAFE_OUTPUTS_PID]$SAFE_OUTPUTS_PID"
+                    echo "SafeOutputs HTTP server started on port $SAFE_OUTPUTS_PORT (PID: $SAFE_OUTPUTS_PID)"
+
+                    # Wait for server to be ready
+                    READY=false
+                    for i in $(seq 1 30); do
+                      if curl -sf "http://localhost:$SAFE_OUTPUTS_PORT/health" > /dev/null 2>&1; then
+                        echo "SafeOutputs HTTP server is ready"
+                        READY=true
+                        break
+                      fi
+                      sleep 1
+                    done
+                    if [ "$READY" != "true" ]; then
+                      echo "##vso[task.complete result=Failed]SafeOutputs HTTP server did not become ready within 30s"
+                      exit 1
+                    fi
+                  displayName: "Start SafeOutputs HTTP server"
+
+                # Start MCP Gateway (MCPG) on host
+                - bash: |
+                    # Substitute runtime values into MCPG config
+                    MCPG_CONFIG=$(cat /tmp/awf-tools/staging/mcpg-config.json \
+                      | sed "s|\${SAFE_OUTPUTS_PORT}|$(SAFE_OUTPUTS_PORT)|g" \
+                      | sed "s|\${SAFE_OUTPUTS_API_KEY}|$(SAFE_OUTPUTS_API_KEY)|g" \
+                      | sed "s|\${MCP_GATEWAY_API_KEY}|$(MCP_GATEWAY_API_KEY)|g")
+
+                    # Log the template config (before API key substitution) for debugging.
+                    echo "Starting MCPG with config template:"
+                    cat /tmp/awf-tools/staging/mcpg-config.json | python3 -m json.tool
+
+                    # Remove any leftover container from a previous interrupted run
+                    # (--rm only cleans up on clean exit; OOM/SIGKILL may leave it behind)
+                    docker rm -f mcpg 2>/dev/null || true
+
+                    # Start MCPG Docker container on host network.
+                    # The Docker socket mount is required because MCPG spawns stdio-based MCP
+                    # servers as sibling containers. This grants significant host access — acceptable
+                    # here because the pipeline agent is already trusted and network-isolated by AWF.
+                    echo "$MCPG_CONFIG" | docker run -i --rm \
+                      --name mcpg \
+                      --network host \
+                      -v /var/run/docker.sock:/var/run/docker.sock \
+                      -e MCP_GATEWAY_API_KEY="$(MCP_GATEWAY_API_KEY)" \
+                      {{ mcpg_docker_env }}
+                      {{ mcpg_image }}:v{{ mcpg_version }} &
+                    MCPG_PID=$!
+                    echo "MCPG started (PID: $MCPG_PID)"
+
+                    # Wait for MCPG to be ready
+                    READY=false
+                    for i in $(seq 1 30); do
+                      if curl -sf "http://localhost:80/health" > /dev/null 2>&1; then
+                        echo "MCPG is ready"
+                        READY=true
+                        break
+                      fi
+                      sleep 1
+                    done
+                    if [ "$READY" != "true" ]; then
+                      echo "##vso[task.complete result=Failed]MCPG did not become ready within 30s"
+                      exit 1
+                    fi
+                  displayName: "Start MCP Gateway (MCPG)"
+
+                # Network isolation via AWF (Agentic Workflow Firewall)
+                - bash: |
+                    set -o pipefail
+
+                    AGENT_OUTPUT_FILE="$(Agent.TempDirectory)/staging/logs/agent-output.txt"
+                    mkdir -p "$(Agent.TempDirectory)/staging/logs"
+
+                    echo "=== Running AI agent with AWF network isolation ==="
+                    echo "Allowed domains: {{ allowed_domains }}"
+
+                    # AWF provides L7 domain whitelisting via Squid proxy + Docker containers.
+                    # --enable-host-access allows the AWF container to reach host services
+                    # (MCPG and SafeOutputs) via host.docker.internal.
+                    # AWF auto-mounts /tmp:/tmp:rw into the container, so copilot binary,
+                    # agent prompt, and MCP config are placed under /tmp/awf-tools/.
+                    # Stream agent output in real-time while filtering VSO commands.
+                    # sed -u = unbuffered (line-by-line) so output appears immediately.
+                    # tee writes to both stdout (ADO pipeline log) and the artifact file.
+                    # pipefail (set above) ensures AWF's exit code propagates through the pipe.
+                    sudo -E "$(Pipeline.Workspace)/awf/awf" \
+                      --allow-domains "{{ allowed_domains }}" \
+                      --skip-pull \
+                      --env-all \
+                      --enable-host-access \
+                      --container-workdir "{{ working_directory }}" \
+                      --log-level info \
+                      --proxy-logs-dir "$(Agent.TempDirectory)/staging/logs/firewall" \
+                      -- '/tmp/awf-tools/copilot --prompt "$(cat /tmp/awf-tools/agent-prompt.md)" --additional-mcp-config @/tmp/awf-tools/mcp-config.json {{ copilot_params }}' \
+                      2>&1 \
+                      | sed -u 's/##vso\[/[VSO-FILTERED] vso[/g; s/##\[/[VSO-FILTERED] [/g' \
+                      | tee "$AGENT_OUTPUT_FILE" \
+                      && AGENT_EXIT_CODE=0 || AGENT_EXIT_CODE=$?
+
+                    # Print firewall summary if available
+                    if [ -x "$(Pipeline.Workspace)/awf/awf" ]; then
+                      echo "=== Firewall Summary ==="
+                      "$(Pipeline.Workspace)/awf/awf" logs summary --source "$(Agent.TempDirectory)/staging/logs/firewall" 2>/dev/null || true
+                    fi
+
+                    exit $AGENT_EXIT_CODE
+                  displayName: "Run copilot (AWF network isolated)"
+                  workingDirectory: {{ working_directory }}
+                  env:
+                    {{ copilot_ado_env }}
+                    GITHUB_TOKEN: $(GITHUB_TOKEN)
+                    GITHUB_READ_ONLY: 1
+                    COPILOT_OTEL_ENABLED: "true"
+                    COPILOT_OTEL_EXPORTER_TYPE: "file"
+                    COPILOT_OTEL_FILE_EXPORTER_PATH: "/tmp/awf-tools/staging/otel.jsonl"
+
+                - bash: |
+                    # Copy safe outputs from /tmp back to staging for artifact publish
+                    mkdir -p "$(Agent.TempDirectory)/staging"
+                    cp -r /tmp/awf-tools/staging/* "$(Agent.TempDirectory)/staging/" 2>/dev/null || true
+                    echo "Safe outputs copied to $(Agent.TempDirectory)/staging"
+                    ls -la "$(Agent.TempDirectory)/staging" 2>/dev/null || echo "No safe outputs found"
+                  displayName: "Collect safe outputs from AWF container"
+                  condition: always()
+
+                - bash: |
+                    # Stop MCPG container
+                    echo "Stopping MCPG..."
+                    docker stop mcpg 2>/dev/null || true
+                    echo "MCPG stopped"
+
+                    # Stop SafeOutputs HTTP server
+                    if [ -n "$(SAFE_OUTPUTS_PID)" ]; then
+                      echo "Stopping SafeOutputs (PID: $(SAFE_OUTPUTS_PID))..."
+                      kill "$(SAFE_OUTPUTS_PID)" 2>/dev/null || true
+                      echo "SafeOutputs stopped"
+                    fi
+                  displayName: "Stop MCPG and SafeOutputs"
+                  condition: always()
+
+                {{ finalize_steps }}
+
+                - bash: |
+                    # Copy all logs to output directory for artifact upload
+                    mkdir -p "$(Agent.TempDirectory)/staging/logs"
+                    if [ -d ~/.copilot/logs ]; then
+                      cp -r ~/.copilot/logs/* "$(Agent.TempDirectory)/staging/logs/" 2>/dev/null || true
+                    fi
+                    if [ -d ~/.ado-aw/logs ]; then
+                      cp -r ~/.ado-aw/logs/* "$(Agent.TempDirectory)/staging/logs/" 2>/dev/null || true
+                    fi
+                    echo "Logs copied to $(Agent.TempDirectory)/staging/logs"
+                    ls -la "$(Agent.TempDirectory)/staging/logs" 2>/dev/null || echo "No logs found"
+                  displayName: "Copy logs to output directory"
+                  condition: always()
+
           - job: AnalyzeSafeOutputs
             displayName: "Analyze safe outputs for threats"
             dependsOn: PerformAgenticTask
@@ -146,155 +418,214 @@ extends:
               outputs:
                 - output: pipelineArtifact
                   path: $(Agent.TempDirectory)/analyzed_outputs
-                  artifact: analyzed_outputs
-            steps:
-              {{ checkout_self }}
-              {{ checkout_repositories }}
+                  artifact: analyzed_outputs_$(Build.BuildId)
+                  condition: always()
+              steps:
+                {{ checkout_self }}
+                {{ checkout_repositories }}
 
-              {{ acquire_ado_token }}
+                - download: current
+                  artifact: agent_outputs_$(Build.BuildId)
 
-              - download: current
-                artifact: AgencyArtifact
+                - task: NuGetAuthenticate@1
+                  displayName: "Authenticate NuGet Feed"
 
-              - task: NuGetAuthenticate@1
-                displayName: "Authenticate NuGet Feed"
+                - task: NuGetCommand@2
+                  displayName: "Install Copilot CLI"
+                  inputs:
+                    command: 'custom'
+                    arguments: 'install Microsoft.Copilot.CLI.linux-x64 -Source "https://pkgs.dev.azure.com/msazuresphere/_packaging/Guardian1ESPTUpstreamOrgFeed/nuget/v3/index.json" -Version {{ copilot_version }} -OutputDirectory $(Agent.TempDirectory)/tools -ExcludeVersion -NonInteractive'
 
-              - task: NuGetCommand@2
-                displayName: "Install Copilot CLI"
-                inputs:
-                  command: 'custom'
-                  arguments: 'install Microsoft.Copilot.CLI.linux-x64 -Source "https://pkgs.dev.azure.com/msazuresphere/_packaging/Guardian1ESPTUpstreamOrgFeed/nuget/v3/index.json" -Version {{ copilot_version }} -OutputDirectory $(Agent.TempDirectory)/tools -ExcludeVersion -NonInteractive'
+                - bash: |
+                    ls -la "$(Agent.TempDirectory)/tools"
+                    echo "##vso[task.prependpath]$(Agent.TempDirectory)/tools/Microsoft.Copilot.CLI.linux-x64"
 
-              - bash: |
-                  ls -la "$(Agent.TempDirectory)/tools"
-                  echo "##vso[task.prependpath]$(Agent.TempDirectory)/tools/Microsoft.Copilot.CLI.linux-x64"
-                displayName: Add copilot to PATH
+                    # Copy copilot binary to /tmp so it's accessible inside AWF container
+                    mkdir -p /tmp/awf-tools
+                    cp "$(Agent.TempDirectory)/tools/Microsoft.Copilot.CLI.linux-x64/copilot" /tmp/awf-tools/copilot
+                    chmod +x /tmp/awf-tools/copilot
+                  displayName: "Add copilot to PATH"
 
-              - bash: |
-                  COMPILER_VERSION="{{ compiler_version }}"
-                  DOWNLOAD_DIR="$(Pipeline.Workspace)/agentic-pipeline-compiler"
-                  DOWNLOAD_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/ado-aw-linux-x64"
-                  CHECKSUM_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/checksums.txt"
+                - bash: |
+                    copilot --version
+                    copilot -h
+                  displayName: "Output copilot version"
 
-                  mkdir -p "$DOWNLOAD_DIR"
-                  echo "Downloading ado-aw v${COMPILER_VERSION} from GitHub Releases..."
-                  curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64" "$DOWNLOAD_URL"
-                  curl -fsSL -o "$DOWNLOAD_DIR/checksums.txt" "$CHECKSUM_URL"
+                - bash: |
+                    COMPILER_VERSION="{{ compiler_version }}"
+                    DOWNLOAD_DIR="$(Pipeline.Workspace)/agentic-pipeline-compiler"
+                    DOWNLOAD_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/ado-aw-linux-x64"
+                    CHECKSUM_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/checksums.txt"
 
-                  echo "Verifying checksum..."
-                  cd "$DOWNLOAD_DIR"
-                  grep "ado-aw-linux-x64" checksums.txt | sha256sum -c -
-                  mv ado-aw-linux-x64 ado-aw
-                  chmod +x ado-aw
-                displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
+                    mkdir -p "$DOWNLOAD_DIR"
+                    echo "Downloading ado-aw v${COMPILER_VERSION} from GitHub Releases..."
+                    curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64" "$DOWNLOAD_URL"
+                    curl -fsSL -o "$DOWNLOAD_DIR/checksums.txt" "$CHECKSUM_URL"
 
-              - bash: |
-                  mkdir -p {{ working_directory }}/safe_outputs
-                  # Copy safe outputs from AgencyArtifact if they exist
-                  if [ -f "$(Pipeline.Workspace)/AgencyArtifact/safe_outputs.ndjson" ]; then
-                    cp "$(Pipeline.Workspace)/AgencyArtifact/safe_outputs.ndjson" {{ working_directory }}/safe_outputs/
-                  fi
-                displayName: "Prepare safe outputs for analysis"
+                    echo "Verifying checksum..."
+                    cd "$DOWNLOAD_DIR"
+                    grep "ado-aw-linux-x64" checksums.txt | sha256sum -c -
+                    mv ado-aw-linux-x64 ado-aw
+                    chmod +x ado-aw
+                  displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
 
-              - bash: |
-                  # Write threat analysis prompt to a file
-                  cat > "$(Agent.TempDirectory)/threat-analysis-prompt.md" << 'THREAT_ANALYSIS_EOF'
-                  {{ threat_analysis_prompt }}
-                  THREAT_ANALYSIS_EOF
+                - task: DockerInstaller@0
+                  displayName: "Install Docker"
+                  inputs:
+                    dockerVersion: 26.1.4
 
-                  echo "Threat analysis prompt:"
-                  cat "$(Agent.TempDirectory)/threat-analysis-prompt.md"
-                displayName: "Prepare threat analysis prompt"
+                - bash: |
+                    AWF_VERSION="{{ firewall_version }}"
+                    DOWNLOAD_DIR="$(Pipeline.Workspace)/awf"
+                    DOWNLOAD_URL="https://github.com/github/gh-aw-firewall/releases/download/v${AWF_VERSION}/awf-linux-x64"
+                    CHECKSUM_URL="https://github.com/github/gh-aw-firewall/releases/download/v${AWF_VERSION}/checksums.txt"
 
-              - bash: |
-                  AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
-                  chmod +x "$AGENTIC_PIPELINES_PATH"
+                    mkdir -p "$DOWNLOAD_DIR"
+                    echo "Downloading AWF v${AWF_VERSION} from GitHub Releases..."
+                    curl -fsSL -o "$DOWNLOAD_DIR/awf-linux-x64" "$DOWNLOAD_URL"
+                    curl -fsSL -o "$DOWNLOAD_DIR/checksums.txt" "$CHECKSUM_URL"
 
-                  # Start the network proxy in background
-                  $AGENTIC_PIPELINES_PATH proxy > /tmp/proxy_output.txt 2>&1 &
-                  PROXY_PID=$!
-                  echo $PROXY_PID > /tmp/proxy.pid
+                    echo "Verifying checksum..."
+                    cd "$DOWNLOAD_DIR"
+                    grep "awf-linux-x64" checksums.txt | sha256sum -c -
+                    mv awf-linux-x64 awf
+                    chmod +x awf
+                    echo "##vso[task.prependpath]$(Pipeline.Workspace)/awf"
+                    ./awf --version || echo "AWF binary ready"
+                  displayName: "Download AWF (Agentic Workflow Firewall) v{{ firewall_version }}"
 
-                  sleep 1
-                  PROXY_PORT=$(head -n1 /tmp/proxy_output.txt)
+                - bash: |
+                    docker pull ghcr.io/github/gh-aw-firewall/squid:{{ firewall_version }}
+                    docker pull ghcr.io/github/gh-aw-firewall/agent:{{ firewall_version }}
+                    docker tag ghcr.io/github/gh-aw-firewall/squid:{{ firewall_version }} ghcr.io/github/gh-aw-firewall/squid:latest
+                    docker tag ghcr.io/github/gh-aw-firewall/agent:{{ firewall_version }} ghcr.io/github/gh-aw-firewall/agent:latest
+                  displayName: "Pre-pull AWF container images (v{{ firewall_version }})"
 
-                  if [[ -z "$PROXY_PORT" || ! "$PROXY_PORT" =~ ^[0-9]+$ ]]; then
-                    echo "##vso[task.logissue type=error]Failed to start network proxy"
-                    exit 1
-                  fi
+                - bash: |
+                    mkdir -p {{ working_directory }}/safe_outputs
+                    cp -a "$(Pipeline.Workspace)/agent_outputs_$(Build.BuildId)/."  {{ working_directory }}/safe_outputs
+                  displayName: "Prepare safe outputs for analysis"
 
-                  echo "Network proxy started on port $PROXY_PORT (PID: $PROXY_PID)"
-                  echo "##vso[task.setvariable variable=PROXY_PORT]$PROXY_PORT"
-                displayName: "Start network proxy"
+                - bash: |
+                    # Write threat analysis prompt to /tmp (accessible inside AWF container)
+                    cat > "/tmp/awf-tools/threat-analysis-prompt.md" << 'THREAT_ANALYSIS_EOF'
+                    {{ threat_analysis_prompt }}
+                    THREAT_ANALYSIS_EOF
 
-              - bash: |
-                  set -o pipefail
+                    echo "Threat analysis prompt:"
+                    cat "/tmp/awf-tools/threat-analysis-prompt.md"
+                  displayName: "Prepare threat analysis prompt"
 
-                  THREAT_OUTPUT_FILE="$(Agent.TempDirectory)/threat-analysis-output.txt"
+                - bash: |
+                    AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
+                    chmod +x "$AGENTIC_PIPELINES_PATH"
+                  displayName: "Setup agentic pipeline compiler"
 
-                  # Stream threat analysis output in real-time with VSO command filtering
-                  copilot --prompt "$(cat $(Agent.TempDirectory)/threat-analysis-prompt.md)" {{ copilot_params }} \
-                    2>&1 \
-                    | sed -u 's/##vso\[/[VSO-FILTERED] vso[/g; s/##\[/[VSO-FILTERED] [/g' \
-                    | tee "$THREAT_OUTPUT_FILE" \
-                    && AGENT_EXIT_CODE=0 || AGENT_EXIT_CODE=$?
+                - bash: |
+                    set -o pipefail
 
-                  exit $AGENT_EXIT_CODE
-                displayName: "Run threat analysis"
-                workingDirectory: {{ working_directory }}
-                env:
-                  {{ copilot_ado_env }}
-                  GITHUB_TOKEN: $(GITHUB_TOKEN)
-                  GITHUB_READ_ONLY: 1
-                  HTTP_PROXY: "http://127.0.0.1:$(PROXY_PORT)"
-                  HTTPS_PROXY: "http://127.0.0.1:$(PROXY_PORT)"
-                  NO_PROXY: "localhost,127.0.0.1"
+                    # Run threat analysis with AWF network isolation
+                    THREAT_OUTPUT_FILE="$(Agent.TempDirectory)/threat-analysis-output.txt"
 
-              - bash: |
-                  if [ -f /tmp/proxy.pid ]; then
-                    PROXY_PID=$(cat /tmp/proxy.pid)
-                    kill $PROXY_PID 2>/dev/null || true
-                    rm -f /tmp/proxy.pid
-                  fi
-                displayName: "Stop network proxy"
-                condition: always()
+                    # Stream threat analysis output in real-time with VSO command filtering
+                    sudo -E "$(Pipeline.Workspace)/awf/awf" \
+                      --allow-domains "{{ allowed_domains }}" \
+                      --skip-pull \
+                      --env-all \
+                      --container-workdir "{{ working_directory }}" \
+                      --log-level info \
+                      --proxy-logs-dir "$(Agent.TempDirectory)/threat-analysis-logs/firewall" \
+                      -- '/tmp/awf-tools/copilot --prompt "$(cat /tmp/awf-tools/threat-analysis-prompt.md)" {{ copilot_params }}' \
+                      2>&1 \
+                      | sed -u 's/##vso\[/[VSO-FILTERED] vso[/g; s/##\[/[VSO-FILTERED] [/g' \
+                      | tee "$THREAT_OUTPUT_FILE" \
+                      && AGENT_EXIT_CODE=0 || AGENT_EXIT_CODE=$?
 
-              - bash: |
-                  mkdir -p "$(Agent.TempDirectory)/analyzed_outputs"
-                  cp -r "$(Pipeline.Workspace)/AgencyArtifact/"* "$(Agent.TempDirectory)/analyzed_outputs/" 2>/dev/null || true
+                    exit $AGENT_EXIT_CODE
+                  displayName: "Run threat analysis (AWF network isolated)"
+                  workingDirectory: {{ working_directory }}
+                  env:
+                    GITHUB_TOKEN: $(GITHUB_TOKEN)
+                    GITHUB_READ_ONLY: 1
 
-                  if [ -f "$(Agent.TempDirectory)/threat-analysis-output.txt" ]; then
-                    cp "$(Agent.TempDirectory)/threat-analysis-output.txt" "$(Agent.TempDirectory)/analyzed_outputs/"
-                    RESULT_LINE=$(grep "THREAT_DETECTION_RESULT:" "$(Agent.TempDirectory)/threat-analysis-output.txt" | tail -1)
-                    if [ -n "$RESULT_LINE" ]; then
-                      JSON_CONTENT=$(echo "$RESULT_LINE" | sed 's/.*THREAT_DETECTION_RESULT://')
-                      echo "$JSON_CONTENT" > "$(Agent.TempDirectory)/analyzed_outputs/threat-analysis.json"
+                - bash: |
+                    # Create analyzed outputs directory with original safe outputs and analysis
+                    mkdir -p "$(Agent.TempDirectory)/analyzed_outputs"
+
+                    # Copy original safe outputs
+                    cp -a "$(Pipeline.Workspace)/agent_outputs_$(Build.BuildId)/." "$(Agent.TempDirectory)/analyzed_outputs/"
+
+                    # Copy threat analysis output
+                    if [ -f "$(Agent.TempDirectory)/threat-analysis-output.txt" ]; then
+                      cp "$(Agent.TempDirectory)/threat-analysis-output.txt" "$(Agent.TempDirectory)/analyzed_outputs/"
                     fi
-                  fi
-                displayName: "Prepare analyzed outputs"
-                condition: always()
 
-              - bash: |
-                  SAFE_TO_PROCESS="false"
-                  JSON_FILE="$(Agent.TempDirectory)/analyzed_outputs/threat-analysis.json"
-
-                  if [ -f "$JSON_FILE" ]; then
-                    if jq -e . "$JSON_FILE" > /dev/null 2>&1; then
-                      if jq -e '.prompt_injection or .secret_leak or .malicious_patch' "$JSON_FILE" > /dev/null 2>&1; then
-                        echo "##vso[task.logissue type=warning]Threats detected - safe outputs will NOT be processed"
+                    # Extract JSON from THREAT_DETECTION_RESULT line in threat analysis output
+                    if [ -f "$(Agent.TempDirectory)/threat-analysis-output.txt" ]; then
+                      RESULT_LINE=$(grep "THREAT_DETECTION_RESULT:" "$(Agent.TempDirectory)/threat-analysis-output.txt" | tail -1)
+                      if [ -n "$RESULT_LINE" ]; then
+                        # Extract JSON after the prefix
+                        JSON_CONTENT=$(echo "$RESULT_LINE" | sed 's/.*THREAT_DETECTION_RESULT://')
+                        echo "$JSON_CONTENT" > "$(Agent.TempDirectory)/analyzed_outputs/threat-analysis.json"
+                        echo "Extracted threat analysis JSON:"
+                        cat "$(Agent.TempDirectory)/analyzed_outputs/threat-analysis.json"
                       else
-                        echo "No threats detected - safe outputs will be processed"
-                        SAFE_TO_PROCESS="true"
+                        echo "Warning: No THREAT_DETECTION_RESULT found in threat analysis output"
                       fi
+                    else
+                      echo "Warning: No threat analysis output file found"
                     fi
-                  fi
 
-                  echo "##vso[task.setvariable variable=SafeToProcess;isOutput=true]$SAFE_TO_PROCESS"
-                displayName: "Evaluate threat analysis"
-                name: threatAnalysis
-                condition: always()
+                    echo "Analyzed outputs directory contents:"
+                    ls -laR "$(Agent.TempDirectory)/analyzed_outputs"
+                  displayName: "Prepare analyzed outputs"
+                  condition: always()
 
-          # Stage 2: Process safe outputs (custom job)
+                - bash: |
+                    SAFE_TO_PROCESS="false"
+                    JSON_FILE="$(Agent.TempDirectory)/analyzed_outputs/threat-analysis.json"
+
+                    if [ -f "$JSON_FILE" ]; then
+                      if jq -e . "$JSON_FILE" > /dev/null 2>&1; then
+                        echo "JSON is valid"
+
+                        # Check if any threat field is true
+                        if jq -e '.prompt_injection or .secret_leak or .malicious_patch' "$JSON_FILE" > /dev/null 2>&1; then
+                          echo "##vso[task.logissue type=warning]Threats detected - safe outputs will NOT be processed"
+                          jq -r '.reasons[]? // empty' "$JSON_FILE" | sed 's/^/  - /'
+                        else
+                          echo "No threats detected - safe outputs will be processed"
+                          SAFE_TO_PROCESS="true"
+                        fi
+                      else
+                        echo "##vso[task.logissue type=warning]Invalid JSON in threat analysis - defaulting to unsafe"
+                      fi
+                    else
+                      echo "##vso[task.logissue type=warning]No threat analysis JSON found - defaulting to unsafe"
+                    fi
+
+                    echo "##vso[task.setvariable variable=SafeToProcess;isOutput=true]$SAFE_TO_PROCESS"
+                    echo "SafeToProcess set to: $SAFE_TO_PROCESS"
+                  displayName: "Evaluate threat analysis"
+                  name: threatAnalysis
+                  condition: always()
+
+                - bash: |
+                    # Copy all logs to analyzed outputs for artifact upload
+                    mkdir -p "$(Agent.TempDirectory)/analyzed_outputs/logs"
+                    if [ -d ~/.copilot/logs ]; then
+                      mkdir -p "$(Agent.TempDirectory)/analyzed_outputs/logs/copilot"
+                      cp -r ~/.copilot/logs/* "$(Agent.TempDirectory)/analyzed_outputs/logs/copilot/" 2>/dev/null || true
+                    fi
+                    if [ -d ~/.ado-aw/logs ]; then
+                      mkdir -p "$(Agent.TempDirectory)/analyzed_outputs/logs/ado-aw"
+                      cp -r ~/.ado-aw/logs/* "$(Agent.TempDirectory)/analyzed_outputs/logs/ado-aw/" 2>/dev/null || true
+                    fi
+                    echo "Logs copied to $(Agent.TempDirectory)/analyzed_outputs/logs"
+                    ls -laR "$(Agent.TempDirectory)/analyzed_outputs/logs" 2>/dev/null || echo "No logs found"
+                  displayName: "Copy logs to output directory"
+                  condition: always()
+
           - job: ProcessSafeOutputs
             displayName: "Process safe outputs"
             dependsOn:
@@ -306,43 +637,75 @@ extends:
               outputs:
                 - output: pipelineArtifact
                   path: $(Agent.TempDirectory)/staging
-                  artifact: execute_outputs
-            steps:
-              {{ checkout_self }}
-              {{ checkout_repositories }}
+                  artifact: safe_outputs
+                  condition: always()
+              steps:
+                {{ checkout_self }}
+                {{ checkout_repositories }}
 
-              {{ acquire_write_token }}
+                {{ acquire_write_token }}
 
-              - download: current
-                artifact: analyzed_outputs
+                - download: current
+                  artifact: analyzed_outputs_$(Build.BuildId)
 
-              - bash: |
-                  COMPILER_VERSION="{{ compiler_version }}"
-                  DOWNLOAD_DIR="$(Pipeline.Workspace)/agentic-pipeline-compiler"
-                  DOWNLOAD_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/ado-aw-linux-x64"
-                  CHECKSUM_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/checksums.txt"
+                - bash: |
+                    COMPILER_VERSION="{{ compiler_version }}"
+                    DOWNLOAD_DIR="$(Pipeline.Workspace)/agentic-pipeline-compiler"
+                    DOWNLOAD_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/ado-aw-linux-x64"
+                    CHECKSUM_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/checksums.txt"
 
-                  mkdir -p "$DOWNLOAD_DIR"
-                  echo "Downloading ado-aw v${COMPILER_VERSION} from GitHub Releases..."
-                  curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64" "$DOWNLOAD_URL"
-                  curl -fsSL -o "$DOWNLOAD_DIR/checksums.txt" "$CHECKSUM_URL"
+                    mkdir -p "$DOWNLOAD_DIR"
+                    echo "Downloading ado-aw v${COMPILER_VERSION} from GitHub Releases..."
+                    curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64" "$DOWNLOAD_URL"
+                    curl -fsSL -o "$DOWNLOAD_DIR/checksums.txt" "$CHECKSUM_URL"
 
-                  echo "Verifying checksum..."
-                  cd "$DOWNLOAD_DIR"
-                  grep "ado-aw-linux-x64" checksums.txt | sha256sum -c -
-                  mv ado-aw-linux-x64 ado-aw
-                  chmod +x ado-aw
-                displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
+                    echo "Verifying checksum..."
+                    cd "$DOWNLOAD_DIR"
+                    grep "ado-aw-linux-x64" checksums.txt | sha256sum -c -
+                    mv ado-aw-linux-x64 ado-aw
+                    chmod +x ado-aw
+                  displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
 
-              - bash: |
-                  chmod +x "$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
-                  echo "##vso[task.prependpath]$(Pipeline.Workspace)/agentic-pipeline-compiler"
-                displayName: Add agentic compiler to path
+                - bash: |
+                    ls -la "$(Pipeline.Workspace)/agentic-pipeline-compiler"
+                    chmod +x "$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
+                    echo "##vso[task.prependpath]$(Pipeline.Workspace)/agentic-pipeline-compiler"
+                  displayName: Add agentic compiler to path
 
-              - bash: ado-aw execute --source "{{ source_path }}" --safe-output-dir "$(Pipeline.Workspace)/analyzed_outputs"
-                displayName: Process safe outputs
-                workingDirectory: {{ working_directory }}
-                env:
-                  {{ executor_ado_env }}
+                - bash: |
+                    mkdir -p "$(Agent.TempDirectory)/staging"
+                  displayName: "Prepare output directory"
+
+                - bash: |
+                    ado-aw execute --source "{{ source_path }}" --safe-output-dir "$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)" --output-dir "$(Agent.TempDirectory)/staging"
+                    EXIT_CODE=$?
+                    if [ $EXIT_CODE -eq 2 ]; then
+                      echo "##vso[task.complete result=SucceededWithIssues;]Executor completed with warnings"
+                      exit 0
+                    fi
+                    exit $EXIT_CODE
+                  displayName: Execute safe outputs (Stage 2)
+                  workingDirectory: {{ working_directory }}
+                  env:
+                    {{ executor_ado_env }}
+
+                - bash: |
+                    # Copy all logs to output directory for artifact upload
+                    mkdir -p "$(Agent.TempDirectory)/staging/logs"
+                    # Copy agent output log from analyzed_outputs for optimisation use
+                    cp "$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)/logs/agent-output.txt" \
+                      "$(Agent.TempDirectory)/staging/logs/agent-output.txt" 2>/dev/null || true
+                    if [ -d ~/.copilot/logs ]; then
+                      mkdir -p "$(Agent.TempDirectory)/staging/logs/copilot"
+                      cp -r ~/.copilot/logs/* "$(Agent.TempDirectory)/staging/logs/copilot/" 2>/dev/null || true
+                    fi
+                    if [ -d ~/.ado-aw/logs ]; then
+                      mkdir -p "$(Agent.TempDirectory)/staging/logs/ado-aw"
+                      cp -r ~/.ado-aw/logs/* "$(Agent.TempDirectory)/staging/logs/ado-aw/" 2>/dev/null || true
+                    fi
+                    echo "Logs copied to $(Agent.TempDirectory)/staging/logs"
+                    ls -laR "$(Agent.TempDirectory)/staging/logs" 2>/dev/null || echo "No logs found"
+                  displayName: "Copy logs to output directory"
+                  condition: always()
 
           {{ teardown_job }}
