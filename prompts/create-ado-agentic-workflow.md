@@ -174,7 +174,7 @@ target: 1es
 | Value | Generates |
 |---|---|
 | `standalone` | Full 3-job pipeline with AWF network sandbox and Squid proxy |
-| `1es` | Pipeline extending `1ES.Unofficial.PipelineTemplate.yml`; no custom proxy; MCPs via service connections |
+| `1es` | Pipeline extending `1ES.Unofficial.PipelineTemplate.yml`; no custom proxy; MCPs via MCPG |
 
 ### Step 8 — MCP Servers
 
@@ -217,9 +217,7 @@ mcp-servers:
 
 > **Security**: All `mcp-servers:` entries must have an explicit `allowed:` list.
 >
-> **Standalone target** (default): Only `mcp-servers:` entries with a `container:` or `url:` field are used. Entries without either field are silently skipped.
->
-> **1ES target**: Custom containerized MCPs are mapped to service connections. Use `tools: azure-devops:` for ADO integration on both targets.
+> **Standalone target** (the default): Built-in MCPs (entries without a `container:` or `url:` field) are silently skipped at compile time — they have no effect and will not be available to the agent. For the standalone target, use only **custom** containerized MCPs with a `container:` field.
 
 ### Step 9 — Safe Outputs
 
@@ -592,4 +590,3 @@ safe-outputs:
 - **No direct writes**: All mutations go through safe outputs — the agent cannot push code or call write APIs directly.
 - **Compile before committing**: Always compile with `ado-aw compile` and commit both the `.md` source and generated `.yml` together.
 - **Check validation**: The compiler will error if write safe-outputs are configured without `permissions.write`.
-- **1ES target limits**: No custom MCPs, no custom network allow-lists — these are handled by OneBranch infrastructure.

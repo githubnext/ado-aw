@@ -707,9 +707,6 @@ pub struct McpOptions {
     /// Environment variables for the MCP server process
     #[serde(default)]
     pub env: HashMap<String, String>,
-    /// Service connection name (1ES only, auto-generated if not specified)
-    #[serde(default, rename = "service-connection")]
-    pub service_connection: Option<String>,
 }
 
 /// Trigger configuration for the pipeline

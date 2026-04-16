@@ -1564,7 +1564,6 @@ mcp-servers:
 **Common (both types):**
 - `allowed:` - Array of tool names the agent is permitted to call (required for security)
 - `env:` - Environment variables for the MCP server process. Use `""` (empty string) for passthrough from the pipeline environment.
-- `service-connection:` - (1ES target only) Override the service connection name. Defaults to `mcp-<name>-service-connection`
 
 ### Environment Variable Passthrough
 
