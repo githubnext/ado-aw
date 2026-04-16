@@ -15,15 +15,12 @@ use super::Compiler;
 use super::common::{
     AWF_VERSION, MCPG_VERSION, MCPG_IMAGE,
     CompileConfig, compile_shared,
+    generate_allowed_domains,
     generate_cancel_previous_builds,
     generate_enabled_tools_args,
     generate_mcpg_config, generate_mcpg_docker_env,
 };
-use super::extensions::CompilerExtension;
-use super::types::{FrontMatter, McpConfig};
-use crate::allowed_hosts::{CORE_ALLOWED_HOSTS, mcp_required_hosts};
-use crate::ecosystem_domains::{get_ecosystem_domains, is_ecosystem_identifier, is_known_ecosystem};
-use std::collections::HashSet;
+use super::types::FrontMatter;
 
 /// Standalone pipeline compiler.
 pub struct StandaloneCompiler;
@@ -76,147 +73,6 @@ impl Compiler for StandaloneCompiler {
 
         compile_shared(input_path, output_path, front_matter, markdown_body, &extensions, config).await
     }
-}
-
-// ==================== Standalone-specific helpers ====================
-
-/// Generate the allowed domains list for AWF network isolation.
-///
-/// This generates a comma-separated list of domain patterns for AWF's
-/// `--allow-domains` flag. The list includes:
-/// 1. Core Azure DevOps/GitHub endpoints
-/// 2. MCP-specific endpoints for each enabled MCP
-/// 3. User-specified additional hosts from network.allowed
-fn generate_allowed_domains(
-    front_matter: &FrontMatter,
-    extensions: &[super::extensions::Extension],
-) -> Result<String> {
-    // Collect enabled MCP names (user-defined MCPs, not first-party tools)
-    let enabled_mcps: Vec<String> = front_matter
-        .mcp_servers
-        .iter()
-        .filter_map(|(name, config)| {
-            let is_enabled = match config {
-                McpConfig::Enabled(enabled) => *enabled,
-                McpConfig::WithOptions(_) => true,
-            };
-            if is_enabled { Some(name.clone()) } else { None }
-        })
-        .collect();
-
-    // Get user-specified hosts
-    let user_hosts: Vec<String> = front_matter
-        .network
-        .as_ref()
-        .map(|n| n.allowed.clone())
-        .unwrap_or_default();
-
-    // Generate the allowlist by combining core + MCP + extension + user hosts
-    let mut hosts: HashSet<String> = HashSet::new();
-
-    // Add core hosts
-    for host in CORE_ALLOWED_HOSTS {
-        hosts.insert((*host).to_string());
-    }
-
-    // Add host.docker.internal — required for the AWF container to reach
-    // MCPG and SafeOutputs on the host. Only added for standalone pipelines
-    // that always use MCPG.
-    hosts.insert("host.docker.internal".to_string());
-
-    // Add MCP-specific hosts (user-defined MCPs via mcp_required_hosts lookup)
-    for mcp in &enabled_mcps {
-        for host in mcp_required_hosts(mcp) {
-            hosts.insert((*host).to_string());
-        }
-    }
-
-    // Add extension-declared hosts (runtimes + first-party tools).
-    // Extensions may return ecosystem identifiers (e.g., "lean") which are
-    // expanded to their domain lists, or raw domain names.
-    for ext in extensions {
-        for host in ext.required_hosts() {
-            if is_ecosystem_identifier(&host) {
-                let domains = get_ecosystem_domains(&host);
-                if domains.is_empty() {
-                    eprintln!(
-                        "warning: extension '{}' requires unknown ecosystem '{}'; \
-                         no domains added",
-                        ext.name(),
-                        host
-                    );
-                }
-                for domain in domains {
-                    hosts.insert(domain);
-                }
-            } else {
-                hosts.insert(host);
-            }
-        }
-    }
-
-    // Add user-specified hosts (validated against DNS-safe characters)
-    // Entries may be ecosystem identifiers (e.g., "python", "rust") which
-    // expand to their domain lists, or raw domain names.
-    for host in &user_hosts {
-        if is_ecosystem_identifier(host) {
-            let domains = get_ecosystem_domains(host);
-            if domains.is_empty() && !is_known_ecosystem(host) {
-                eprintln!(
-                    "warning: network.allowed contains unknown ecosystem identifier '{}'. \
-                     Known ecosystems: python, rust, node, go, java, etc. \
-                     If this is a domain name, it should contain a dot.",
-                    host
-                );
-            }
-            for domain in domains {
-                hosts.insert(domain);
-            }
-        } else {
-            let valid_chars = !host.is_empty()
-                && host
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '*'));
-            if !valid_chars {
-                anyhow::bail!(
-                    "network.allowed domain '{}' contains characters invalid in DNS names. \
-                     Only ASCII alphanumerics, '.', '-', and '*' are allowed.",
-                    host
-                );
-            }
-            if host.contains('*') && !(host.starts_with("*.") && !host[2..].contains('*')) {
-                anyhow::bail!(
-                    "network.allowed domain '{}' uses '*' in an unsupported position. \
-                     Wildcards must appear only as a leading prefix (e.g. '*.example.com').",
-                    host
-                );
-            }
-            hosts.insert(host.clone());
-        }
-    }
-
-    // Remove blocked hosts (supports both ecosystem identifiers and raw domains)
-    let blocked_hosts: Vec<String> = front_matter
-        .network
-        .as_ref()
-        .map(|n| n.blocked.clone())
-        .unwrap_or_default();
-    for blocked in &blocked_hosts {
-        if is_ecosystem_identifier(blocked) {
-            for domain in get_ecosystem_domains(blocked) {
-                hosts.remove(&domain);
-            }
-        } else {
-            hosts.remove(blocked);
-        }
-    }
-
-    // Sort for deterministic output
-    let mut allowlist: Vec<String> = hosts.into_iter().collect();
-    allowlist.sort();
-
-    // Format as comma-separated list for AWF --allow-domains
-    Ok(allowlist.join(","))
 }
 
 #[cfg(test)]
