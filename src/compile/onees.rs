@@ -93,7 +93,7 @@ fn generate_setup_job(setup_steps: &[serde_yaml::Value], agent_name: &str) -> St
         return String::new();
     }
 
-    let steps_yaml = format_steps_yaml_indented(setup_steps, 4);
+    let steps_yaml = format_steps_yaml_indented(setup_steps, 6);
 
     format!(
         r#"- job: SetupJob
@@ -115,7 +115,7 @@ fn generate_teardown_job(teardown_steps: &[serde_yaml::Value], agent_name: &str)
         return String::new();
     }
 
-    let steps_yaml = format_steps_yaml_indented(teardown_steps, 4);
+    let steps_yaml = format_steps_yaml_indented(teardown_steps, 6);
 
     format!(
         r#"- job: TeardownJob

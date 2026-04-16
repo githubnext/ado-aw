@@ -3026,13 +3026,10 @@ fn test_standalone_minimal_compiled_output_is_valid_yaml() {
 }
 
 /// Test that the complete standalone fixture produces valid YAML
-/// Note: complete-agent.md has a known pre-existing indentation issue in
-/// multi-repository output (generate_repositories), so we skip strict
-/// YAML validation for now and just verify it compiles without error.
 #[test]
-fn test_standalone_complete_compiled_output_compiles() {
-    // Verifies compilation succeeds (compile_fixture asserts success)
-    let _compiled = compile_fixture("complete-agent.md");
+fn test_standalone_complete_compiled_output_is_valid_yaml() {
+    let compiled = compile_fixture("complete-agent.md");
+    assert_valid_yaml(&compiled, "complete-agent.md");
 }
 
 /// Test that the pipeline-trigger fixture produces valid YAML

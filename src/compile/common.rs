@@ -411,15 +411,12 @@ pub fn generate_repositories(repositories: &[Repository]) -> String {
         .iter()
         .map(|repo| {
             format!(
-                r#"- repository: {}
-      type: {}
-      name: {}
-      ref: {}"#,
+                "- repository: {}\n  type: {}\n  name: {}\n  ref: {}",
                 repo.repository, repo.repo_type, repo.name, repo.repo_ref
             )
         })
         .collect::<Vec<_>>()
-        .join("\n    ")
+        .join("\n")
 }
 
 /// Generate checkout steps YAML
@@ -432,7 +429,7 @@ pub fn generate_checkout_steps(checkout: &[String]) -> String {
         .iter()
         .map(|name| format!("- checkout: {}", name))
         .collect::<Vec<_>>()
-        .join("\n              ")
+        .join("\n")
 }
 
 /// Generate `checkout: self` step.
@@ -1246,16 +1243,16 @@ pub fn generate_teardown_job(
         return String::new();
     }
 
-    let steps_yaml = format_steps_yaml(teardown_steps);
+    let steps_yaml = format_steps_yaml_indented(teardown_steps, 4);
 
     format!(
-        r#"  - job: TeardownJob
-    displayName: "{} - Teardown"
-    dependsOn: ProcessSafeOutputs
-    pool:
-      name: {}
-    steps:
-      - checkout: self
+        r#"- job: TeardownJob
+  displayName: "{} - Teardown"
+  dependsOn: ProcessSafeOutputs
+  pool:
+    name: {}
+  steps:
+    - checkout: self
 {}
 "#,
         agent_name, pool, steps_yaml
