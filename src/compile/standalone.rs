@@ -71,7 +71,7 @@ impl Compiler for StandaloneCompiler {
             ],
         };
 
-        compile_shared(input_path, output_path, front_matter, markdown_body, &extensions, config).await
+        compile_shared(input_path, output_path, front_matter, markdown_body, &extensions, &ctx, config).await
     }
 }
 

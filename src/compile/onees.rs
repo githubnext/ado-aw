@@ -12,7 +12,7 @@ use std::path::Path;
 use super::Compiler;
 use super::common::{
     AWF_VERSION, MCPG_VERSION, MCPG_IMAGE,
-    CompileConfig, compile_shared, replace_with_indent,
+    CompileConfig, compile_shared,
     generate_allowed_domains,
     generate_cancel_previous_builds,
     generate_enabled_tools_args,
@@ -56,17 +56,14 @@ impl Compiler for OneESCompiler {
             .context("Failed to serialize MCPG config")?;
         let mcpg_docker_env = generate_mcpg_docker_env(front_matter);
 
-        // Generate 1ES-specific setup/teardown jobs (no per-job pool, uses templateContext)
-        // Pre-replace these in the template before compile_shared, which would otherwise
-        // use the standalone versions (with pool: per job).
+        // Generate 1ES-specific setup/teardown jobs (no per-job pool, uses templateContext).
+        // These override the shared {{ setup_job }} / {{ teardown_job }} markers via
+        // extra_replacements, which are applied before the shared replacements.
         let setup_job = generate_setup_job(&front_matter.setup, &front_matter.name);
         let teardown_job = generate_teardown_job(&front_matter.teardown, &front_matter.name);
-        let mut template = include_str!("../../templates/1es-base.yml").to_string();
-        template = replace_with_indent(&template, "{{ setup_job }}", &setup_job);
-        template = replace_with_indent(&template, "{{ teardown_job }}", &teardown_job);
 
         let config = CompileConfig {
-            template,
+            template: include_str!("../../templates/1es-base.yml").to_string(),
             extra_replacements: vec![
                 ("{{ firewall_version }}".into(), AWF_VERSION.into()),
                 ("{{ mcpg_version }}".into(), MCPG_VERSION.into()),
@@ -76,10 +73,12 @@ impl Compiler for OneESCompiler {
                 ("{{ cancel_previous_builds }}".into(), cancel_previous_builds),
                 ("{{ mcpg_config }}".into(), mcpg_config_json),
                 ("{{ mcpg_docker_env }}".into(), mcpg_docker_env),
+                ("{{ setup_job }}".into(), setup_job),
+                ("{{ teardown_job }}".into(), teardown_job),
             ],
         };
 
-        compile_shared(input_path, output_path, front_matter, markdown_body, &extensions, config).await
+        compile_shared(input_path, output_path, front_matter, markdown_body, &extensions, &ctx, config).await
     }
 }
 

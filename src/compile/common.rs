@@ -1910,7 +1910,9 @@ pub struct CompileConfig {
     /// The base YAML template content (the template string itself).
     pub template: String,
     /// Additional placeholder→value replacements beyond the shared set.
-    /// These are applied after the shared replacements.
+    /// These are applied **before** the shared replacements, allowing
+    /// target-specific overrides of shared markers (e.g., 1ES-specific
+    /// setup/teardown jobs that differ from the standalone defaults).
     pub extra_replacements: Vec<(String, String)>,
 }
 
@@ -1923,13 +1925,16 @@ pub struct CompileConfig {
 /// 4. Applies replacements to the template
 /// 5. Prepends the header comment
 ///
-/// Target-specific values are provided via `CompileConfig.extra_replacements`.
+/// Target-specific values are provided via `CompileConfig.extra_replacements`,
+/// which are applied before the shared replacements so that targets can
+/// override shared markers (e.g., `{{ setup_job }}`, `{{ teardown_job }}`).
 pub async fn compile_shared(
     input_path: &Path,
     output_path: &Path,
     front_matter: &FrontMatter,
     markdown_body: &str,
     extensions: &[Extension],
+    ctx: &CompileContext<'_>,
     config: CompileConfig,
 ) -> Result<String> {
     // 1. Validate
@@ -1947,12 +1952,9 @@ pub async fn compile_shared(
     let checkout_self = generate_checkout_self();
     let agent_name = sanitize_filename(&front_matter.name);
 
-    // 3. Build compile context and run extension validations
-    let input_dir = input_path.parent().unwrap_or(Path::new("."));
-    let ctx = CompileContext::new(front_matter, input_dir).await;
-
+    // 3. Run extension validations
     for ext in extensions {
-        for warning in ext.validate(&ctx)? {
+        for warning in ext.validate(ctx)? {
             eprintln!("Warning: {}", warning);
         }
     }
@@ -2042,7 +2044,15 @@ pub async fn compile_shared(
         threat_analysis_prompt,
     );
 
-    // 12. Shared replacements
+    // 12. Apply extra replacements first (target-specific overrides)
+    // These run before shared replacements so targets can override shared
+    // markers like {{ setup_job }} and {{ teardown_job }}.
+    let mut template = template;
+    for (placeholder, replacement) in &config.extra_replacements {
+        template = replace_with_indent(&template, placeholder, replacement);
+    }
+
+    // 13. Shared replacements
     let compiler_version = env!("CARGO_PKG_VERSION");
     let replacements: Vec<(&str, &str)> = vec![
         ("{{ parameters }}", &parameters_yaml),
@@ -2082,11 +2092,6 @@ pub async fn compile_shared(
         .fold(template, |yaml, (placeholder, replacement)| {
             replace_with_indent(&yaml, placeholder, replacement)
         });
-
-    // 13. Apply extra replacements (target-specific)
-    for (placeholder, replacement) in &config.extra_replacements {
-        pipeline_yaml = replace_with_indent(&pipeline_yaml, placeholder, replacement);
-    }
 
     // 14. Prepend header
     let header = generate_header_comment(input_path);
