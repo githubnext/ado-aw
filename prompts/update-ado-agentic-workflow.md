@@ -250,7 +250,7 @@ Before finalizing any update, verify:
 
 6. **Network domains**: If new MCPs or external services are added, ensure required domains are in `network.allowed`.
 
-7. **Target compatibility**: If `target: 1es`, custom MCPs (with `container:`) are not supported — only built-in MCPs with service connections.
+7. **Target compatibility**: If `target: 1es`, custom containerized MCPs (with `container:`) are not supported — use `mcp-servers:` entries mapped to service connections instead.
 
 8. **Safe output `target` fields**: `comment-on-work-item` requires an explicit `target` field. `update-work-item` fields require explicit opt-in (`status: true`, `title: true`, etc.).
 

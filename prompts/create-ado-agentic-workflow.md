@@ -178,29 +178,19 @@ target: 1es
 
 ### Step 8 — MCP Servers
 
-MCP servers give the agent tools at runtime. Two kinds:
+MCP servers give the agent additional tools at runtime via the MCP Gateway (MCPG). Configure them under `mcp-servers:` with either a `container:` field (containerized stdio) or a `url:` field (HTTP).
 
-**Built-in** (no `container:` field):
+**Azure DevOps integration** — use `tools: azure-devops:` (first-class, not an MCP server):
 ```yaml
-mcp-servers:
-  ado: true                  # All ADO tools
-  ado-ext: true              # Extended ADO functionality
-  kusto:
-    allowed:
-      - query                # Restrict to specific tools
-  icm:
-    allowed:
-      - create_incident
-      - get_incident
-  bluebird: true
-  es-chat: true
-  msft-learn: true
-  stack: true
-  asa: true
-  calculator: true
+tools:
+  azure-devops: true                 # Auto-configures ADO MCP container + token mapping
+  # azure-devops:                    # Or with scoping options:
+  #   toolsets: [repos, wit, core]
+  #   allowed: [wit_get_work_item]
+  #   org: myorg
 ```
 
-**Custom** (containerized MCP with `container:` field):
+**Custom containerized MCP** (standalone target — requires `container:` field):
 ```yaml
 mcp-servers:
   my-tool:
@@ -214,11 +204,22 @@ mcp-servers:
       - get_status
 ```
 
-> **Security**: Custom MCPs must have an explicit `allowed:` list. Built-in MCPs default to all tools when set to `true`.
+**Custom HTTP MCP** (remote endpoint — requires `url:` field):
+```yaml
+mcp-servers:
+  remote-service:
+    url: "https://mcp.example.com"
+    headers:
+      Authorization: "Bearer $(TOKEN)"
+    allowed:
+      - query_data
+```
+
+> **Security**: All `mcp-servers:` entries must have an explicit `allowed:` list.
 >
-> **1ES target**: Custom containerized MCPs are not supported — only built-ins with service connections.
+> **Standalone target** (default): Only `mcp-servers:` entries with a `container:` or `url:` field are used. Entries without either field are silently skipped.
 >
-> **Standalone target** (the default): Built-in MCPs (entries without a `container:` or `url:` field) are silently skipped at compile time — they have no effect and will not be available to the agent. For the standalone target, use only **custom** containerized MCPs with a `container:` field.
+> **1ES target**: Custom containerized MCPs are mapped to service connections. Use `tools: azure-devops:` for ADO integration on both targets.
 
 ### Step 9 — Safe Outputs
 
@@ -264,9 +265,60 @@ tools:
       - .txt
 ```
 
-Other safe output tools (no configuration needed): `noop`, `missing-data`, `missing-tool`, `report-incomplete`.
+**All configurable safe output tools:**
 
-> **Validation**: The compiler enforces that if `create-pull-request` or `create-work-item` are configured, `permissions.write` must be set.
+| Tool | Description | `permissions.write` |
+|------|-------------|:-------------------:|
+| **Work Items** | | |
+| `create-work-item` | Create ADO work items | ✅ |
+| `update-work-item` | Update fields on existing work items (each field requires opt-in) | ✅ |
+| `comment-on-work-item` | Add comments to work items (requires `target` scoping) | ✅ |
+| `link-work-items` | Link two work items (parent/child, related, etc.) | ✅ |
+| `upload-attachment` | Upload a workspace file to a work item | ✅ |
+| **Pull Requests** | | |
+| `create-pull-request` | Create PRs from agent code changes | ✅ |
+| `add-pr-comment` | Add a comment thread to a PR | ✅ |
+| `reply-to-pr-comment` | Reply to an existing PR review thread | ✅ |
+| `resolve-pr-thread` | Resolve or update status of a PR thread | ✅ |
+| `submit-pr-review` | Submit a review vote on a PR | ✅ |
+| `update-pr` | Update PR metadata (reviewers, labels, auto-complete, vote) | ✅ |
+| **Builds & Branches** | | |
+| `queue-build` | Queue an ADO pipeline build by definition ID | ✅ |
+| `create-branch` | Create a new branch from an existing ref | ✅ |
+| `create-git-tag` | Create a git tag on a repository ref | ✅ |
+| `add-build-tag` | Add a tag to an ADO build | ✅ |
+| **Wiki** | | |
+| `create-wiki-page` | Create a new ADO wiki page (requires `wiki-name`) | ✅ |
+| `update-wiki-page` | Update an existing ADO wiki page (requires `wiki-name`) | ✅ |
+| **Diagnostics** | | |
+| `noop` | Report no action needed | — |
+| `missing-data` | Report missing data/information | — |
+| `missing-tool` | Report a missing tool or capability | — |
+| `report-incomplete` | Report that a task could not be completed | — |
+
+Example configuration for additional tools:
+```yaml
+safe-outputs:
+  comment-on-work-item:
+    target: "TeamProject\\AreaPath"   # Required — scopes which work items can be commented on
+    max: 3
+  update-work-item:
+    status: true                      # Each updatable field requires explicit opt-in
+    title: true
+    max: 5
+    target: "*"
+  add-pr-comment:
+    max: 10
+  queue-build:
+    allowed-pipelines: [42, 99]       # Required — pipeline definition IDs that can be triggered
+    max: 1
+```
+
+> See `AGENTS.md` → "Available Safe Output Tools" for full configuration reference of every tool.
+
+Diagnostic tools (`noop`, `missing-data`, `missing-tool`, `report-incomplete`) are always available and require no configuration.
+
+> **Validation**: The compiler enforces that if write-requiring safe outputs are configured, `permissions.write` must be set.
 
 ### Step 10 — Permissions
 
@@ -378,8 +430,8 @@ name: "Dependency Updater"
 description: "Checks for outdated npm dependencies and opens PRs to update them"
 engine: claude-sonnet-4.5
 schedule: weekly on monday around 9:00
-mcp-servers:
-  ado: true
+tools:
+  azure-devops: true
 permissions:
   read: my-read-arm-sc
   write: my-write-arm-sc
@@ -402,7 +454,7 @@ Scan this repository for outdated npm dependencies and open a pull request to up
 ### Analysis
 
 1. Run `npm outdated --json` to identify packages with newer versions available.
-2. For each outdated package, check whether the new version introduces any breaking changes by reviewing its changelog or release notes (use `msft-learn` if relevant documentation is available).
+2. For each outdated package, check whether the new version introduces any breaking changes by reviewing its changelog or release notes.
 3. Focus on patch and minor updates first; flag major version bumps separately.
 
 ### Action
@@ -463,10 +515,8 @@ Agent reads data (Kusto, ADO) and files a work item if action is needed.
 
 ```yaml
 schedule: daily around 10:00
-mcp-servers:
-  ado: true
-  kusto:
-    allowed: [query]
+tools:
+  azure-devops: true
 permissions:
   read: my-read-sc
   write: my-write-sc
@@ -485,8 +535,8 @@ triggers:
   pipeline:
     name: "CI Build"
     branches: [main, feature/*]
-mcp-servers:
-  ado: true
+tools:
+  azure-devops: true
 permissions:
   read: my-read-sc
   write: my-write-sc
@@ -501,8 +551,8 @@ Agent makes code changes and proposes them via PR.
 
 ```yaml
 schedule: weekly on sunday
-mcp-servers:
-  ado: true
+tools:
+  azure-devops: true
 permissions:
   read: my-read-sc
   write: my-write-sc
