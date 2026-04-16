@@ -1,9 +1,37 @@
 {
-  "bazel": ["releases.bazel.build", "mirror.bazel.build", "bcr.bazel.build", "blog.bazel.build"],
-  "chrome": ["*.google.com", "*.googleapis.com", "*.gvt1.com"],
-  "clojure": ["repo.clojars.org", "clojars.org"],
-  "containers": ["ghcr.io", "registry.hub.docker.com", "*.docker.io", "*.docker.com", "production.cloudflare.docker.com", "dl.k8s.io", "pkgs.k8s.io", "quay.io", "mcr.microsoft.com", "gcr.io", "auth.docker.io"],
-  "dart": ["pub.dev", "pub.dartlang.org", "storage.googleapis.com"],
+  "bazel": [
+    "releases.bazel.build",
+    "mirror.bazel.build",
+    "bcr.bazel.build",
+    "blog.bazel.build"
+  ],
+  "chrome": [
+    "*.google.com",
+    "*.googleapis.com",
+    "*.gvt1.com"
+  ],
+  "clojure": [
+    "repo.clojars.org",
+    "clojars.org"
+  ],
+  "containers": [
+    "ghcr.io",
+    "registry.hub.docker.com",
+    "*.docker.io",
+    "*.docker.com",
+    "production.cloudflare.docker.com",
+    "dl.k8s.io",
+    "pkgs.k8s.io",
+    "quay.io",
+    "mcr.microsoft.com",
+    "gcr.io",
+    "auth.docker.io"
+  ],
+  "dart": [
+    "pub.dev",
+    "pub.dartlang.org",
+    "storage.googleapis.com"
+  ],
   "defaults": [
     "crl3.digicert.com",
     "crl4.digicert.com",
@@ -41,7 +69,12 @@
     "packages.microsoft.com",
     "www.googleapis.com"
   ],
-  "deno": ["deno.land", "jsr.io", "googleapis.deno.dev", "fresh.deno.dev"],
+  "deno": [
+    "deno.land",
+    "jsr.io",
+    "googleapis.deno.dev",
+    "fresh.deno.dev"
+  ],
   "dev-tools": [
     "app.renovatebot.com",
     "appveyor.com",
@@ -83,8 +116,17 @@
     "oneocsp.microsoft.com",
     "*.vsblob.vsassets.io"
   ],
-  "elixir": ["hex.pm", "repo.hex.pm", "builds.hex.pm", "cdn.hex.pm", "fastly.hex.pm"],
-  "fonts": ["fonts.googleapis.com", "fonts.gstatic.com"],
+  "elixir": [
+    "hex.pm",
+    "repo.hex.pm",
+    "builds.hex.pm",
+    "cdn.hex.pm",
+    "fastly.hex.pm"
+  ],
+  "fonts": [
+    "fonts.googleapis.com",
+    "fonts.gstatic.com"
+  ],
   "github": [
     "*.githubusercontent.com",
     "codeload.github.com",
@@ -120,8 +162,21 @@
     "productionresultssa18.blob.core.windows.net",
     "productionresultssa19.blob.core.windows.net"
   ],
-  "go": ["go.dev", "golang.org", "proxy.golang.org", "sum.golang.org", "pkg.go.dev", "goproxy.io", "storage.googleapis.com"],
-  "haskell": ["haskell.org", "*.hackage.haskell.org", "get-ghcup.haskell.org", "downloads.haskell.org"],
+  "go": [
+    "go.dev",
+    "golang.org",
+    "proxy.golang.org",
+    "sum.golang.org",
+    "pkg.go.dev",
+    "goproxy.io",
+    "storage.googleapis.com"
+  ],
+  "haskell": [
+    "haskell.org",
+    "*.hackage.haskell.org",
+    "get-ghcup.haskell.org",
+    "downloads.haskell.org"
+  ],
   "java": [
     "www.java.com",
     "jdk.java.net",
@@ -158,9 +213,27 @@
     "maven-central.storage-download.googleapis.com",
     "repository.apache.org"
   ],
-  "julia": ["pkg.julialang.org", "*.pkg.julialang.org", "julialang.org", "julialang-s3.julialang.org", "storage.julialang.net"],
-  "kotlin": ["download.jetbrains.com", "ge.jetbrains.com", "packages.jetbrains.team", "kotlin.bintray.com", "maven.pkg.jetbrains.space"],
-  "lean": ["elan.lean-lang.org", "leanprover.github.io", "lean-lang.org", "reservoir.lean-lang.org", "static.lean-lang.org"],
+  "julia": [
+    "pkg.julialang.org",
+    "*.pkg.julialang.org",
+    "julialang.org",
+    "julialang-s3.julialang.org",
+    "storage.julialang.net"
+  ],
+  "kotlin": [
+    "download.jetbrains.com",
+    "ge.jetbrains.com",
+    "packages.jetbrains.team",
+    "kotlin.bintray.com",
+    "maven.pkg.jetbrains.space"
+  ],
+  "lean": [
+    "elan.lean-lang.org",
+    "lean-lang.org",
+    "leanprover.github.io",
+    "reservoir.lean-lang.org",
+    "static.lean-lang.org"
+  ],
   "linux-distros": [
     "deb.debian.org",
     "security.debian.org",
@@ -180,8 +253,15 @@
     "download.opensuse.org",
     "cdn.redhat.com"
   ],
-  "local": ["127.0.0.1", "::1", "localhost"],
-  "lua": ["luarocks.org", "www.luarocks.org"],
+  "local": [
+    "127.0.0.1",
+    "::1",
+    "localhost"
+  ],
+  "lua": [
+    "luarocks.org",
+    "www.luarocks.org"
+  ],
   "node": [
     "npmjs.org",
     "npmjs.com",
@@ -209,13 +289,52 @@
     "cdn.jsdelivr.net",
     "telemetry.vercel.com"
   ],
-  "node-cdns": ["cdn.jsdelivr.net", "data.jsdelivr.com", "code.jquery.com", "cdn.sheetjs.com"],
-  "ocaml": ["opam.ocaml.org", "ocaml.org", "erratique.ch"],
-  "perl": ["cpan.org", "www.cpan.org", "metacpan.org", "cpan.metacpan.org"],
-  "php": ["repo.packagist.org", "packagist.org", "getcomposer.org", "bitbucket.org"],
-  "playwright": ["playwright.download.prss.microsoft.com", "cdn.playwright.dev"],
-  "powershell": ["powershellgallery.com", "www.powershellgallery.com"],
+  "node-cdns": [
+    "cdn.jsdelivr.net",
+    "data.jsdelivr.com",
+    "code.jquery.com",
+    "cdn.sheetjs.com"
+  ],
+  "ocaml": [
+    "opam.ocaml.org",
+    "ocaml.org",
+    "erratique.ch"
+  ],
+  "perl": [
+    "cpan.org",
+    "www.cpan.org",
+    "metacpan.org",
+    "cpan.metacpan.org"
+  ],
+  "php": [
+    "repo.packagist.org",
+    "packagist.org",
+    "getcomposer.org",
+    "bitbucket.org"
+  ],
+  "playwright": [
+    "playwright.download.prss.microsoft.com",
+    "cdn.playwright.dev"
+  ],
+  "powershell": [
+    "powershellgallery.com",
+    "www.powershellgallery.com"
+  ],
   "python": [
+    "pypi.python.org",
+    "pypi.org",
+    "pip.pypa.io",
+    "*.pythonhosted.org",
+    "files.pythonhosted.org",
+    "bootstrap.pypa.io",
+    "conda.binstar.org",
+    "conda.anaconda.org",
+    "binstar.org",
+    "anaconda.org",
+    "repo.continuum.io",
+    "repo.anaconda.com"
+  ],
+  "python-native": [
     "pypi.python.org",
     "pypi.org",
     "pip.pypa.io",
@@ -232,12 +351,50 @@
     "index.crates.io",
     "static.crates.io"
   ],
-  "r": ["cloud.r-project.org", "cran.r-project.org", "cran.rstudio.com", "r-project.org"],
-  "ruby": ["rubygems.org", "api.rubygems.org", "rubygems.pkg.github.com", "bundler.rubygems.org", "gems.rubyforge.org", "gems.rubyonrails.org", "index.rubygems.org", "cache.ruby-lang.org", "*.rvm.io"],
-  "rust": ["crates.io", "index.crates.io", "static.crates.io", "sh.rustup.rs", "static.rust-lang.org"],
-  "scala": ["repo.scala-sbt.org", "scala-ci.typesafe.com", "repo.typesafe.com", "jitpack.io", "dl.bintray.com", "scala.jfrog.io"],
-  "swift": ["download.swift.org", "swift.org", "cocoapods.org", "cdn.cocoapods.org"],
-  "terraform": ["releases.hashicorp.com", "apt.releases.hashicorp.com", "yum.releases.hashicorp.com", "registry.terraform.io"],
+  "r": [
+    "cloud.r-project.org",
+    "cran.r-project.org",
+    "cran.rstudio.com",
+    "r-project.org"
+  ],
+  "ruby": [
+    "rubygems.org",
+    "api.rubygems.org",
+    "rubygems.pkg.github.com",
+    "bundler.rubygems.org",
+    "gems.rubyforge.org",
+    "gems.rubyonrails.org",
+    "index.rubygems.org",
+    "cache.ruby-lang.org",
+    "*.rvm.io"
+  ],
+  "rust": [
+    "crates.io",
+    "index.crates.io",
+    "static.crates.io",
+    "sh.rustup.rs",
+    "static.rust-lang.org"
+  ],
+  "scala": [
+    "repo.scala-sbt.org",
+    "scala-ci.typesafe.com",
+    "repo.typesafe.com",
+    "jitpack.io",
+    "dl.bintray.com",
+    "scala.jfrog.io"
+  ],
+  "swift": [
+    "download.swift.org",
+    "swift.org",
+    "cocoapods.org",
+    "cdn.cocoapods.org"
+  ],
+  "terraform": [
+    "releases.hashicorp.com",
+    "apt.releases.hashicorp.com",
+    "yum.releases.hashicorp.com",
+    "registry.terraform.io"
+  ],
   "threat-detection": [
     "api.business.githubcopilot.com",
     "api.enterprise.githubcopilot.com",
@@ -248,5 +405,9 @@
     "host.docker.internal",
     "telemetry.enterprise.githubcopilot.com"
   ],
-  "zig": ["ziglang.org", "pkg.machengine.org", "deps.files.ghostty.org"]
+  "zig": [
+    "ziglang.org",
+    "pkg.machengine.org",
+    "deps.files.ghostty.org"
+  ]
 }
