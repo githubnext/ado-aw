@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.14.0](https://github.com/githubnext/ado-aw/compare/v0.13.0...v0.14.0) (2026-04-16)
+
+
+### Features
+
+* unify standalone and 1ES compilers ([#226](https://github.com/githubnext/ado-aw/issues/226)) ([1e396a0](https://github.com/githubnext/ado-aw/commit/1e396a0d9c9c0d8f2e9e2b87c8de613c10dc0822))
+
+
+### Bug Fixes
+
+* remove legacy service-connection MCP field ([#233](https://github.com/githubnext/ado-aw/issues/233)) ([#234](https://github.com/githubnext/ado-aw/issues/234)) ([baf5fe9](https://github.com/githubnext/ado-aw/commit/baf5fe9d95aea452a342620027cda7c861c8e346))
+* rename resolve-pr-review-thread to resolve-pr-thread ([#228](https://github.com/githubnext/ado-aw/issues/228)) ([#231](https://github.com/githubnext/ado-aw/issues/231)) ([e1d3735](https://github.com/githubnext/ado-aw/commit/e1d37350b191791dbb02615a93b5431c722499ee))
+
 ## [0.13.0](https://github.com/githubnext/ado-aw/compare/v0.12.0...v0.13.0) (2026-04-15)
 
 
