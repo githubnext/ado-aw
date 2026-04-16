@@ -40,6 +40,7 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 │   ├── detect.rs         # Agentic pipeline detection (helper for `configure`)
 │   ├── ndjson.rs         # NDJSON parsing utilities
 │   ├── sanitize.rs       # Input sanitization for safe outputs
+│   ├── agent_stats.rs    # OTel-based agent statistics parsing (token usage, duration, turns)
 │   ├── safeoutputs/      # Safe-output MCP tool implementations (Stage 1 → NDJSON → Stage 2)
 │   │   ├── mod.rs
 │   │   ├── add_build_tag.rs
@@ -936,9 +937,11 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - The source markdown path is auto-detected from the `@ado-aw` header in the pipeline file
   - Useful for CI checks to ensure pipelines are regenerated after source changes
 - `mcp <output_directory> <bounding_directory>` - Run SafeOutputs as a stdio MCP server
+  - `--enabled-tools <name>` - Restrict available tools to those named (repeatable)
 - `mcp-http <output_directory> <bounding_directory>` - Run SafeOutputs as an HTTP MCP server (for MCPG integration)
   - `--port <port>` - Port to listen on (default: 8100)
   - `--api-key <key>` - API key for authentication (auto-generated if not provided)
+  - `--enabled-tools <name>` - Restrict available tools to those named (repeatable)
 - `execute` - Execute safe outputs from Stage 1 (Stage 2 of pipeline)
   - `--source, -s <path>` - Path to source markdown file
   - `--safe-output-dir <path>` - Directory containing safe output NDJSON (default: current directory)
