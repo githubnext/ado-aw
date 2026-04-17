@@ -13,12 +13,13 @@ use std::path::Path;
 
 use super::Compiler;
 use super::common::{
-    AWF_VERSION, MCPG_VERSION, MCPG_IMAGE,
+    AWF_VERSION, MCPG_VERSION, MCPG_IMAGE, MCPG_PORT, MCPG_DOMAIN,
     CompileConfig, compile_shared,
     generate_allowed_domains,
     generate_cancel_previous_builds,
     generate_enabled_tools_args,
     generate_mcpg_config, generate_mcpg_docker_env,
+    generate_mcp_client_config,
 };
 use super::types::FrontMatter;
 
@@ -57,6 +58,7 @@ impl Compiler for StandaloneCompiler {
         let mcpg_config_json =
             serde_json::to_string_pretty(&config_obj).context("Failed to serialize MCPG config")?;
         let mcpg_docker_env = generate_mcpg_docker_env(front_matter);
+        let mcp_client_config = generate_mcp_client_config(&config_obj)?;
 
         let config = CompileConfig {
             template: include_str!("../data/base.yml").to_string(),
@@ -64,11 +66,14 @@ impl Compiler for StandaloneCompiler {
                 ("{{ firewall_version }}".into(), AWF_VERSION.into()),
                 ("{{ mcpg_version }}".into(), MCPG_VERSION.into()),
                 ("{{ mcpg_image }}".into(), MCPG_IMAGE.into()),
+                ("{{ mcpg_port }}".into(), MCPG_PORT.to_string()),
+                ("{{ mcpg_domain }}".into(), MCPG_DOMAIN.into()),
                 ("{{ allowed_domains }}".into(), allowed_domains),
                 ("{{ enabled_tools_args }}".into(), enabled_tools_args),
                 ("{{ cancel_previous_builds }}".into(), cancel_previous_builds),
                 ("{{ mcpg_config }}".into(), mcpg_config_json),
                 ("{{ mcpg_docker_env }}".into(), mcpg_docker_env),
+                ("{{ mcp_client_config }}".into(), mcp_client_config),
             ],
             skip_integrity,
         };

@@ -793,6 +793,42 @@ Environment variable names are validated against `[A-Za-z_][A-Za-z0-9_]*` to pre
 
 If no passthrough env vars are needed, this marker is replaced with an empty string.
 
+## {{ mcp_client_config }}
+
+Should be replaced with the Copilot CLI `mcp-config.json` content, generated at compile time from the MCPG server configuration. This follows gh-aw's pattern where `convert_gateway_config_copilot.cjs` produces per-server routed URLs.
+
+MCPG runs in routed mode by default, exposing each backend at `/mcp/{serverID}`. The generated JSON lists one entry per MCPG-managed server with:
+- `type: "http"` — Copilot CLI HTTP transport
+- `url` — routed endpoint (`http://host.docker.internal:{port}/mcp/{name}`)
+- `headers` — Bearer auth with the gateway API key (ADO variable `$(MCP_GATEWAY_API_KEY)`)
+- `tools: ["*"]` — allow all tools (Copilot CLI requirement)
+
+Server names are validated for URL path safety (no `/`, `#`, `?`, `%`, or spaces). Server entries are sorted alphabetically for deterministic output.
+
+Example output:
+```json
+{
+  "mcpServers": {
+    "azure-devops": {
+      "type": "http",
+      "url": "http://host.docker.internal:80/mcp/azure-devops",
+      "headers": {
+        "Authorization": "Bearer $(MCP_GATEWAY_API_KEY)"
+      },
+      "tools": ["*"]
+    },
+    "safeoutputs": {
+      "type": "http",
+      "url": "http://host.docker.internal:80/mcp/safeoutputs",
+      "headers": {
+        "Authorization": "Bearer $(MCP_GATEWAY_API_KEY)"
+      },
+      "tools": ["*"]
+    }
+  }
+}
+```
+
 ## {{ allowed_domains }}
 
 Should be replaced with the comma-separated domain list for AWF's `--allow-domains` flag. The list includes:
@@ -912,6 +948,14 @@ Should be replaced with the pinned version of the MCP Gateway (defined as `MCPG_
 ## {{ mcpg_image }}
 
 Should be replaced with the MCPG Docker image name (defined as `MCPG_IMAGE` constant in `src/compile/common.rs`). Currently `ghcr.io/github/gh-aw-mcpg`.
+
+## {{ mcpg_port }}
+
+Should be replaced with the MCPG listening port (defined as `MCPG_PORT` constant in `src/compile/common.rs`, currently `80`). Used in the pipeline to set the `MCP_GATEWAY_PORT` ADO variable and in the MCPG health-check URL.
+
+## {{ mcpg_domain }}
+
+Should be replaced with the domain the AWF-sandboxed agent uses to reach MCPG on the host (defined as `MCPG_DOMAIN` constant in `src/compile/common.rs`, currently `host.docker.internal`). Used in the pipeline to set the `MCP_GATEWAY_DOMAIN` ADO variable. Docker's `host.docker.internal` resolves to the host loopback from inside containers.
 
 ## {{ copilot_version }}
 
