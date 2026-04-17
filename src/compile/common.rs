@@ -1792,13 +1792,11 @@ pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
 /// - `headers` — Bearer auth with the gateway API key (ADO variable reference)
 /// - `tools: ["*"]` — allow all tools (Copilot CLI requirement)
 pub fn generate_mcp_client_config(mcpg_config: &McpgConfig) -> Result<String> {
+    // serde_json::Map is BTreeMap-backed, so keys are sorted on insert.
+    // Server names are validated in generate_mcpg_config (allowlist: [a-zA-Z0-9_.-]).
     let mut servers = serde_json::Map::new();
 
-    // Collect into BTreeMap for deterministic output regardless of serde_json's
-    // internal map type (which depends on the `preserve_order` feature flag).
-    // Server names are validated in generate_mcpg_config (allowlist: [a-zA-Z0-9_.-]).
-    let sorted: std::collections::BTreeMap<_, _> = mcpg_config.mcp_servers.iter().collect();
-    for (name, _) in &sorted {
+    for (name, _) in &mcpg_config.mcp_servers {
         let mut entry = serde_json::Map::new();
         entry.insert("type".to_string(), serde_json::Value::String("http".to_string()));
         entry.insert(
