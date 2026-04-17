@@ -479,22 +479,27 @@ pub fn generate_copilot_params(
         }
     }
 
-    // Collect tool permissions from user-defined MCP servers (sorted for deterministic output)
+    // Collect tool permissions from user-defined MCP servers (sorted for deterministic output).
+    // Only add --allow-tool for MCPs that will actually produce an MCPG entry (i.e.,
+    // WithOptions that have a container or url). McpConfig::Enabled(true) has no backing
+    // server in MCPG, so granting the permission would cause confusing runtime errors.
     let mut sorted_mcps: Vec<_> = front_matter.mcp_servers.iter().collect();
-    sorted_mcps.sort_by_key(|(name, _)| name.clone());
+    sorted_mcps.sort_by(|(a, _), (b, _)| a.cmp(b));
     for (name, config) in sorted_mcps {
-        // Skip servers already provided by extensions (e.g., azure-devops)
-        if allowed_tools.contains(name) {
+        // Skip servers already provided by extensions (case-insensitive to match
+        // generate_mcpg_config's eq_ignore_ascii_case guard for reserved names)
+        if allowed_tools.iter().any(|t| t.eq_ignore_ascii_case(name)) {
             continue;
         }
-        // Skip disabled MCPs
-        let is_enabled = match config {
-            crate::compile::types::McpConfig::Enabled(b) => *b,
+        // Only add MCPs that have a backing server (container or url)
+        let has_backing_server = match config {
+            crate::compile::types::McpConfig::Enabled(_) => false,
             crate::compile::types::McpConfig::WithOptions(opts) => {
                 opts.enabled.unwrap_or(true)
+                    && (opts.container.is_some() || opts.url.is_some())
             }
         };
-        if !is_enabled {
+        if !has_backing_server {
             continue;
         }
         allowed_tools.push(name.clone());
