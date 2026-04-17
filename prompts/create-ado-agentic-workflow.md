@@ -38,7 +38,7 @@ Produce a single `.md` file containing two parts:
 The `ado-aw` compiler turns this into a three-job Azure DevOps pipeline:
 
 ```
-PerformAgenticTask  →  AnalyzeSafeOutputs  →  ProcessSafeOutputs
+Agent  →  Detection  →  Execution
 (Stage 1: Agent)       (Threat analysis)       (Stage 2: Executor)
 ```
 
@@ -352,7 +352,7 @@ When `triggers.pipeline` is set: `trigger: none` and `pr: none` are generated au
 
 ### Step 12 — Inline Steps (optional)
 
-Steps that run inside the `PerformAgenticTask` job:
+Steps that run inside the `Agent` job:
 
 ```yaml
 steps:             # BEFORE agent runs (same job)
@@ -366,11 +366,11 @@ post-steps:        # AFTER agent completes (same job)
 
 Separate jobs:
 ```yaml
-setup:             # Separate job BEFORE PerformAgenticTask
+setup:             # Separate job BEFORE Agent
   - bash: echo "Provisioning resources..."
     displayName: "Setup"
 
-teardown:          # Separate job AFTER ProcessSafeOutputs
+teardown:          # Separate job AFTER Execution
   - bash: echo "Cleanup..."
     displayName: "Teardown"
 ```

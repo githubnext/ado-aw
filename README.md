@@ -19,14 +19,14 @@ DevOps pipeline with three jobs:
 
 ```
 ┌────────────────────────┐     ┌──────────────────────┐     ┌───────────────────────┐
-│  PerformAgenticTask    │────▶│  AnalyzeSafeOutputs  │────▶│  ProcessSafeOutputs   │
+│  Agent                 │────▶│  Detection           │────▶│  Execution            │
 │  (Stage 1 — Agent)     │     │  (Threat Analysis)   │     │  (Stage 2 — Executor) │
 │                        │     │                      │     │                       │
-│  • Runs inside AWF     │     │  • Reviews proposed   │     │  • Creates PRs        │
-│    network sandbox     │     │    actions for safety │     │  • Creates work items │
-│  • Read-only ADO token │     │  • Checks for prompt  │     │  • Write ADO token    │
-│  • Produces safe       │     │    injection, leaks   │     │  • Never exposed to   │
-│    output proposals    │     │                      │     │    the agent           │
+│  • Runs inside AWF     │     │  • Reviews proposed  │     │  • Creates PRs        │
+│    network sandbox     │     │    actions for safety│     │  • Creates work items │
+│  • Read-only ADO token │     │  • Checks for prompt │     │  • Write ADO token    │
+│  • Produces safe       │     │    injection, leaks  │     │  • Never exposed to   │
+│    output proposals    │     │                      │     │    the agent          │
 └────────────────────────┘     └──────────────────────┘     └───────────────────────┘
 ```
 
@@ -164,7 +164,7 @@ project. To maintain security isolation between the agent and the executor,
 
 The agent runs in a network-isolated sandbox (AWF) with only the read token.
 Even if the agent were compromised or prompt-injected, it cannot perform write
-operations. Write actions are only executed in Stage 2 (`ProcessSafeOutputs`)
+operations. Write actions are only executed in Stage 2 (`Execution`)
 after threat analysis, using a completely separate token that the agent never
 sees.
 

@@ -9,19 +9,19 @@ You are now in **debug mode** for an `ado-aw` agentic pipeline. Your job is to h
 Every `ado-aw` pipeline compiles into a three-job Azure DevOps pipeline:
 
 ```
-PerformAgenticTask  →  AnalyzeSafeOutputs  →  ProcessSafeOutputs
+Agent  →  Detection  →  Execution
 (Stage 1: Agent)       (Threat Analysis)       (Stage 2: Executor)
 ```
 
 | Job | Purpose | Token | Environment |
 |-----|---------|-------|-------------|
-| **PerformAgenticTask** | Runs the AI agent inside an AWF network sandbox (Squid proxy + Docker). Agent proposes actions via safe-output MCP tools. | Read-only (`permissions.read`) | Network-isolated via AWF |
-| **AnalyzeSafeOutputs** | Threat analysis on proposed safe outputs — checks for prompt injection, secret leaks, malicious patches. | None | Standard ADO agent |
-| **ProcessSafeOutputs** | Executes approved safe outputs (create PRs, work items, wiki pages, etc.) | Write (`permissions.write`) | Standard ADO agent |
+| **Agent** | Runs the AI agent inside an AWF network sandbox (Squid proxy + Docker). Agent proposes actions via safe-output MCP tools. | Read-only (`permissions.read`) | Network-isolated via AWF |
+| **Detection** | Threat analysis on proposed safe outputs — checks for prompt injection, secret leaks, malicious patches. | None | Standard ADO agent |
+| **Execution** | Executes approved safe outputs (create PRs, work items, wiki pages, etc.) | Write (`permissions.write`) | Standard ADO agent |
 
 Additional optional jobs:
-- **SetupJob** — runs before `PerformAgenticTask` (from `setup:` front matter)
-- **TeardownJob** — runs after `ProcessSafeOutputs` (from `teardown:` front matter)
+- **Setup** — runs before `Agent` (from `setup:` front matter)
+- **Teardown** — runs after `Execution` (from `teardown:` front matter)
 
 ---
 
@@ -36,10 +36,10 @@ Follow this sequence for every debugging session:
    - The compiled pipeline YAML
 
 2. **Identify which job failed** — check the job name in logs or the pipeline run summary:
-   - `PerformAgenticTask` → see [Stage 1 Failures](#stage-1-performagentictask-failures)
-   - `AnalyzeSafeOutputs` → see [Stage 2 Failures](#stage-2-analyzesafeoutputs-failures)
-   - `ProcessSafeOutputs` → see [Stage 3 Failures](#stage-3-processsafeoutputs-failures)
-   - `SetupJob` / `TeardownJob` → see [Setup/Teardown Failures](#setupteardown-failures)
+   - `Agent` → see [Stage 1 Failures](#stage-1-agent-failures)
+   - `Detection` → see [Stage 2 Failures](#stage-2-detection-failures)
+   - `Execution` → see [Stage 3 Failures](#stage-3-execution-failures)
+   - `Setup` / `Teardown` → see [Setup/Teardown Failures](#setupteardown-failures)
 
 3. **Check for compilation drift** — before deep-diving into runtime errors, verify the pipeline YAML is in sync with its source markdown:
    ```bash
@@ -55,7 +55,7 @@ Follow this sequence for every debugging session:
 
 ---
 
-## Stage 1: PerformAgenticTask Failures
+## Stage 1: Agent Failures
 
 This is the most complex stage — it involves downloading binaries, starting Docker containers, configuring the network sandbox, launching the MCP Gateway, and running the AI agent.
 
@@ -182,7 +182,7 @@ ado-aw compile <agent.md> -o <pipeline.yml>
 
 ---
 
-## Stage 2: AnalyzeSafeOutputs Failures
+## Stage 2: Detection Failures
 
 This job runs threat analysis on the agent's proposed safe outputs.
 
@@ -202,7 +202,7 @@ This job runs threat analysis on the agent's proposed safe outputs.
 
 ### No Safe Outputs Produced
 
-**Symptoms**: `AnalyzeSafeOutputs` succeeds but `ProcessSafeOutputs` has nothing to do. The agent completed without producing any mutations.
+**Symptoms**: `Detection` succeeds but `Execution` has nothing to do. The agent completed without producing any mutations.
 
 **Common causes**:
 
@@ -213,7 +213,7 @@ This job runs threat analysis on the agent's proposed safe outputs.
 
 ---
 
-## Stage 3: ProcessSafeOutputs Failures
+## Stage 3: Execution Failures
 
 This job executes the approved safe outputs using the write token. Failures here are usually ADO API errors or validation issues.
 
@@ -283,12 +283,12 @@ This job executes the approved safe outputs using the write token. Failures here
 
 ## Setup/Teardown Failures
 
-**SetupJob** runs before `PerformAgenticTask`; **TeardownJob** runs after `ProcessSafeOutputs`.
+**Setup** runs before `Agent`; **Teardown** runs after `Execution`.
 
 - These use the same pool as the main agentic task — check `pool:` configuration
 - They include a `checkout: self` step — check that the repository is accessible
 - Custom steps run with standard ADO agent permissions (not inside the AWF sandbox)
-- If SetupJob fails, `PerformAgenticTask` never starts (it has `dependsOn: SetupJob`)
+- If Setup fails, `Agent` never starts (it has `dependsOn: Setup`)
 
 ---
 

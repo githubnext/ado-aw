@@ -197,7 +197,7 @@ If adding write-requiring safe outputs (`create-pull-request`, `create-work-item
 
 ### Adding Pre/Post Steps
 
-**Inline steps** run inside the `PerformAgenticTask` job:
+**Inline steps** run inside the `Agent` job:
 
 ```yaml
 steps:               # BEFORE agent runs
@@ -212,11 +212,11 @@ post-steps:          # AFTER agent completes
 **Separate jobs** run before/after the entire pipeline:
 
 ```yaml
-setup:               # Separate job BEFORE PerformAgenticTask
+setup:               # Separate job BEFORE Agent
   - bash: echo "Provisioning..."
     displayName: "Setup"
 
-teardown:            # Separate job AFTER ProcessSafeOutputs
+teardown:            # Separate job AFTER Execution
   - bash: echo "Cleanup..."
     displayName: "Teardown"
 ```

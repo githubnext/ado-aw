@@ -331,13 +331,13 @@ engine:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `model` | string | `claude-opus-4.5` | AI model to use. Options include `claude-sonnet-4.5`, `gpt-5.2-codex`, `gemini-3-pro-preview`, etc. |
-| `timeout-minutes` | integer | *(none)* | Maximum time in minutes the agent job is allowed to run. Sets `timeoutInMinutes` on the `PerformAgenticTask` job in the generated pipeline. |
+| `timeout-minutes` | integer | *(none)* | Maximum time in minutes the agent job is allowed to run. Sets `timeoutInMinutes` on the `Agent` job in the generated pipeline. |
 
 > **Deprecated:** `max-turns` is still accepted in front matter for backwards compatibility but is ignored at compile time (a warning is emitted). It was specific to Claude Code and is not supported by Copilot CLI.
 
 #### `timeout-minutes`
 
-The `timeout-minutes` field sets a wall-clock limit (in minutes) for the entire agent job. It maps to the Azure DevOps `timeoutInMinutes` job property on `PerformAgenticTask`. This is useful for:
+The `timeout-minutes` field sets a wall-clock limit (in minutes) for the entire agent job. It maps to the Azure DevOps `timeoutInMinutes` job property on `Agent`. This is useful for:
 
 - **Budget enforcement** — hard-capping the total runtime of an agent to control compute costs.
 - **Pipeline hygiene** — preventing agents from occupying a runner indefinitely if they stall or enter long retry loops.
@@ -514,7 +514,7 @@ The `target` field in the front matter determines the output format and executio
 #### `standalone` (default)
 
 Generates a self-contained Azure DevOps pipeline with:
-- Full 3-job pipeline: `PerformAgenticTask` → `AnalyzeSafeOutputs` → `ProcessSafeOutputs`
+- Full 3-job pipeline: `Agent` → `Detection` → `Execution`
 - AWF (Agentic Workflow Firewall) L7 domain whitelisting via Squid proxy + Docker
 - MCP Gateway (MCPG) for MCP routing with SafeOutputs HTTP backend
 - Setup/teardown job support
@@ -527,7 +527,7 @@ This is the recommended target for maximum flexibility and security controls.
 Generates a pipeline that extends the 1ES Unofficial Pipeline Template:
 - Uses `templateContext.type: buildJob` with Copilot CLI + AWF + MCPG (same execution model as standalone)
 - Integrates with 1ES SDL scanning and compliance tools
-- Full 3-job pipeline: PerformAgenticTask → AnalyzeSafeOutputs → ProcessSafeOutputs
+- Full 3-job pipeline: Agent → Detection → Execution
 - Requires 1ES Pipeline Templates repository access
 
 Example:
@@ -614,7 +614,7 @@ Examples of fuzzy schedule → cron conversion:
 
 Should be replaced with the `checkout: self` step. This generates a simple checkout of the triggering branch.
 
-All checkout steps across all jobs (PerformAgenticTask, AnalyzeSafeOutputs, ProcessSafeOutputs, SetupJob, TeardownJob) use this marker.
+All checkout steps across all jobs (Agent, Detection, Execution, Setup, Teardown) use this marker.
 
 ## {{ checkout_repositories }}
 Should be replaced with checkout steps for additional repositories the agent will work with. The behavior depends on the `checkout:` front matter:
@@ -655,26 +655,26 @@ The `os` field (defaults to "linux") is primarily used for 1ES target compatibil
 ## {{ setup_job }}
 
 Generates a separate setup job YAML if `setup` contains steps. The job:
-- Runs before `PerformAgenticTask`
+- Runs before `Agent`
 - Uses the same pool as the main agentic task
 - Includes a checkout of self
-- Display name: `<agent_name> - Setup`
+- Display name: `Setup`
 
 If `setup` is empty, this is replaced with an empty string.
 
 ## {{ teardown_job }}
 
 Generates a separate teardown job YAML if `teardown` contains steps. The job:
-- Runs after `ProcessSafeOutputs` (depends on it)
+- Runs after `Execution` (depends on it)
 - Uses the same pool as the main agentic task
 - Includes a checkout of self
-- Display name: `<agent_name> - Teardown`
+- Display name: `Teardown`
 
 If `teardown` is empty, this is replaced with an empty string.
 
 ## {{ prepare_steps }}
 
-Generates inline steps that run inside the `PerformAgenticTask` job, **before** the agent runs. These steps can generate context files, fetch secrets, or prepare the workspace for the agent.
+Generates inline steps that run inside the `Agent` job, **before** the agent runs. These steps can generate context files, fetch secrets, or prepare the workspace for the agent.
 
 Steps are inserted after the agent prompt is prepared but before AWF network isolation starts.
 
@@ -682,7 +682,7 @@ If `steps` is empty, this is replaced with an empty string.
 
 ## {{ finalize_steps }}
 
-Generates inline steps that run inside the `PerformAgenticTask` job, **after** the agent completes. These steps can validate outputs, process workspace artifacts, or perform cleanup.
+Generates inline steps that run inside the `Agent` job, **after** the agent completes. These steps can validate outputs, process workspace artifacts, or perform cleanup.
 
 Steps are inserted after the AWF-isolated agent completes but before logs are collected.
 
@@ -690,13 +690,13 @@ If `post-steps` is empty, this is replaced with an empty string.
 
 ## {{ agentic_depends_on }}
 
-Generates a `dependsOn: SetupJob` clause for `PerformAgenticTask` if a setup job is configured. The setup job is identified by the job name `SetupJob`, ensuring the agentic task waits for the setup job to complete.
+Generates a `dependsOn: Setup` clause for `Agent` if a setup job is configured. The setup job is identified by the job name `Setup`, ensuring the agentic task waits for the setup job to complete.
 
 If no setup job is configured, this is replaced with an empty string.
 
 ## {{ job_timeout }}
 
-Generates a `timeoutInMinutes: <value>` job property for `PerformAgenticTask` when `engine.timeout-minutes` is configured. This sets the Azure DevOps job-level timeout for the agentic task.
+Generates a `timeoutInMinutes: <value>` job property for `Agent` when `engine.timeout-minutes` is configured. This sets the Azure DevOps job-level timeout for the agentic task.
 
 If `timeout-minutes` is not configured, this is replaced with an empty string.
 
@@ -862,7 +862,7 @@ If `permissions.read` is not configured, this marker is replaced with an empty s
 
 ## {{ acquire_write_token }}
 
-Generates an `AzureCLI@2` step that acquires a write-capable ADO-scoped access token from the ARM service connection specified in `permissions.write`. This token is used only by the executor in Stage 2 (`ProcessSafeOutputs` job) and is never exposed to the agent.
+Generates an `AzureCLI@2` step that acquires a write-capable ADO-scoped access token from the ARM service connection specified in `permissions.write`. This token is used only by the executor in Stage 2 (`Execution` job) and is never exposed to the agent.
 
 The step:
 - Uses the ARM service connection from `permissions.write`
@@ -1724,7 +1724,7 @@ permissions:
 #### Security Model
 
 - **`permissions.read`**: Mints a read-only ADO-scoped token given to the agent inside the AWF sandbox (Stage 1). The agent can query ADO APIs but cannot write.
-- **`permissions.write`**: Mints a write-capable ADO-scoped token used **only** by the executor in Stage 2 (`ProcessSafeOutputs` job). This token is never exposed to the agent.
+- **`permissions.write`**: Mints a write-capable ADO-scoped token used **only** by the executor in Stage 2 (`Execution` job). This token is never exposed to the agent.
 - **Both omitted**: No ADO tokens are passed anywhere. The agent has no ADO API access.
 
 #### Compile-Time Validation
