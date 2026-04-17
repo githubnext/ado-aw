@@ -943,6 +943,14 @@ Should be replaced with the pinned version of the MCP Gateway (defined as `MCPG_
 
 Should be replaced with the MCPG Docker image name (defined as `MCPG_IMAGE` constant in `src/compile/common.rs`). Currently `ghcr.io/github/gh-aw-mcpg`.
 
+## {{ mcpg_port }}
+
+Should be replaced with the MCPG listening port (defined as `MCPG_PORT` constant in `src/compile/common.rs`, currently `80`). Used in the pipeline to set the `MCP_GATEWAY_PORT` ADO variable and in the MCPG health-check URL.
+
+## {{ mcpg_domain }}
+
+Should be replaced with the domain the AWF-sandboxed agent uses to reach MCPG on the host (defined as `MCPG_DOMAIN` constant in `src/compile/common.rs`, currently `host.docker.internal`). Used in the pipeline to set the `MCP_GATEWAY_DOMAIN` ADO variable. Docker's `host.docker.internal` resolves to the host loopback from inside containers.
+
 ## {{ copilot_version }}
 
 Should be replaced with the pinned version of the `Microsoft.Copilot.CLI.linux-x64` NuGet package (defined as `COPILOT_CLI_VERSION` constant in `src/compile/common.rs`). This version is used in the pipeline step that installs the Copilot CLI tool from Azure Artifacts.
