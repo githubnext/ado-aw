@@ -247,6 +247,14 @@ pub trait CompilerExtension {
         Ok(vec![])
     }
 
+    /// Copilot CLI `--allow-tool` values this extension requires.
+    ///
+    /// Returns tool names (e.g., `"github"`, `"safeoutputs"`, `"azure-devops"`)
+    /// that are emitted as `--allow-tool <name>` in the Copilot CLI invocation.
+    fn allowed_copilot_tools(&self) -> Vec<String> {
+        vec![]
+    }
+
     /// Compile-time warnings to emit. Errors in the `Result` abort
     /// compilation; the inner `Vec<String>` contains non-fatal warnings
     /// printed to stderr.
@@ -306,6 +314,9 @@ macro_rules! extension_enum {
             fn mcpg_servers(&self, ctx: &CompileContext) -> Result<Vec<(String, McpgServerConfig)>> {
                 match self { $( $Enum::$Variant(e) => e.mcpg_servers(ctx), )+ }
             }
+            fn allowed_copilot_tools(&self) -> Vec<String> {
+                match self { $( $Enum::$Variant(e) => e.allowed_copilot_tools(), )+ }
+            }
             fn validate(&self, ctx: &CompileContext) -> Result<Vec<String>> {
                 match self { $( $Enum::$Variant(e) => e.validate(ctx), )+ }
             }
@@ -319,6 +330,8 @@ extension_enum! {
     /// Uses static dispatch (no `Box<dyn>`) — each variant delegates to
     /// the inner type's [`CompilerExtension`] implementation.
     pub enum Extension {
+        GitHub(GitHubExtension),
+        SafeOutputs(SafeOutputsExtension),
         Lean(LeanExtension),
         AzureDevOps(AzureDevOpsExtension),
         CacheMemory(CacheMemoryExtension),
@@ -440,6 +453,10 @@ impl CompilerExtension for AzureDevOpsExtension {
             .iter()
             .map(|h| (*h).to_string())
             .collect()
+    }
+
+    fn allowed_copilot_tools(&self) -> Vec<String> {
+        vec![ADO_MCP_SERVER_NAME.to_string()]
     }
 
     fn mcpg_servers(&self, ctx: &CompileContext) -> Result<Vec<(String, McpgServerConfig)>> {
@@ -628,6 +645,88 @@ fn generate_memory_download() -> String {
         .to_string()
 }
 
+// ─── GitHub (always-on, internal) ────────────────────────────────────
+
+/// GitHub MCP extension.
+///
+/// Always-on internal extension that grants the agent access to the
+/// Copilot CLI built-in GitHub MCP server via `--allow-tool github`.
+/// The GitHub MCP uses `GITHUB_TOKEN` from the pipeline environment.
+pub struct GitHubExtension;
+
+impl CompilerExtension for GitHubExtension {
+    fn name(&self) -> &str {
+        "GitHub"
+    }
+
+    fn phase(&self) -> ExtensionPhase {
+        ExtensionPhase::Tool
+    }
+
+    fn allowed_copilot_tools(&self) -> Vec<String> {
+        vec!["github".to_string()]
+    }
+}
+
+// ─── SafeOutputs (always-on, internal) ───────────────────────────────
+
+/// SafeOutputs MCP extension.
+///
+/// Always-on internal extension that configures the SafeOutputs HTTP
+/// backend in MCPG and appends prompt guidance for the agent.
+pub struct SafeOutputsExtension;
+
+impl CompilerExtension for SafeOutputsExtension {
+    fn name(&self) -> &str {
+        "SafeOutputs"
+    }
+
+    fn phase(&self) -> ExtensionPhase {
+        ExtensionPhase::Tool
+    }
+
+    fn allowed_copilot_tools(&self) -> Vec<String> {
+        vec!["safeoutputs".to_string()]
+    }
+
+    fn mcpg_servers(&self, _ctx: &CompileContext) -> Result<Vec<(String, McpgServerConfig)>> {
+        Ok(vec![(
+            "safeoutputs".to_string(),
+            McpgServerConfig {
+                server_type: "http".to_string(),
+                container: None,
+                entrypoint: None,
+                entrypoint_args: None,
+                mounts: None,
+                args: None,
+                url: Some("http://localhost:${SAFE_OUTPUTS_PORT}/mcp".to_string()),
+                headers: Some(HashMap::from([(
+                    "Authorization".to_string(),
+                    "Bearer ${SAFE_OUTPUTS_API_KEY}".to_string(),
+                )])),
+                env: None,
+                tools: None,
+            },
+        )])
+    }
+
+    fn prompt_supplement(&self) -> Option<String> {
+        Some(
+            "\n\
+---\n\
+\n\
+## Important: Safe Outputs\n\
+\n\
+You have access to the `safeoutputs` MCP server which provides tools for creating work items \
+and reporting issues. **Always prefer using safeoutputs tools over other methods**.\n\
+\n\
+These tools generate safe outputs that will be reviewed and executed in a separate pipeline stage, \
+ensuring proper validation and security controls.\n"
+                .to_string(),
+        )
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // Collection
 // ──────────────────────────────────────────────────────────────────────
@@ -646,6 +745,10 @@ fn generate_memory_download() -> String {
 /// field order).
 pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
     let mut extensions = Vec::new();
+
+    // ── Always-on internal extensions ──
+    extensions.push(Extension::GitHub(GitHubExtension));
+    extensions.push(Extension::SafeOutputs(SafeOutputsExtension));
 
     // ── Runtimes (ExtensionPhase::Runtime) ──
     if let Some(lean) = front_matter
@@ -763,7 +866,10 @@ mod tests {
     fn test_collect_extensions_empty_front_matter() {
         let fm = minimal_front_matter();
         let exts = collect_extensions(&fm);
-        assert!(exts.is_empty());
+        // Always-on: GitHub + SafeOutputs
+        assert_eq!(exts.len(), 2);
+        assert!(exts.iter().any(|e| e.name() == "GitHub"));
+        assert!(exts.iter().any(|e| e.name() == "SafeOutputs"));
     }
 
     #[test]
@@ -773,8 +879,8 @@ mod tests {
         )
         .unwrap();
         let exts = collect_extensions(&fm);
-        assert_eq!(exts.len(), 1);
-        assert_eq!(exts[0].name(), "Lean 4");
+        assert_eq!(exts.len(), 3); // GitHub + SafeOutputs + Lean
+        assert_eq!(exts[0].name(), "Lean 4"); // Runtime phase sorts first
     }
 
     #[test]
@@ -784,7 +890,7 @@ mod tests {
         )
         .unwrap();
         let exts = collect_extensions(&fm);
-        assert!(exts.is_empty());
+        assert_eq!(exts.len(), 2); // Just always-on
     }
 
     #[test]
@@ -794,8 +900,8 @@ mod tests {
         )
         .unwrap();
         let exts = collect_extensions(&fm);
-        assert_eq!(exts.len(), 1);
-        assert_eq!(exts[0].name(), "Azure DevOps MCP");
+        assert_eq!(exts.len(), 3); // GitHub + SafeOutputs + AzureDevOps
+        assert!(exts.iter().any(|e| e.name() == "Azure DevOps MCP"));
     }
 
     #[test]
@@ -805,8 +911,8 @@ mod tests {
         )
         .unwrap();
         let exts = collect_extensions(&fm);
-        assert_eq!(exts.len(), 1);
-        assert_eq!(exts[0].name(), "Cache Memory");
+        assert_eq!(exts.len(), 3); // GitHub + SafeOutputs + CacheMemory
+        assert!(exts.iter().any(|e| e.name() == "Cache Memory"));
     }
 
     #[test]
@@ -816,10 +922,10 @@ mod tests {
         )
         .unwrap();
         let exts = collect_extensions(&fm);
-        assert_eq!(exts.len(), 3);
-        assert_eq!(exts[0].name(), "Lean 4");
-        assert_eq!(exts[1].name(), "Azure DevOps MCP");
-        assert_eq!(exts[2].name(), "Cache Memory");
+        assert_eq!(exts.len(), 5); // GitHub + SafeOutputs + Lean + AzureDevOps + CacheMemory
+        assert_eq!(exts[0].name(), "Lean 4"); // Runtime phase first
+        // All tool-phase extensions follow
+        assert!(exts[1..].iter().all(|e| e.phase() == ExtensionPhase::Tool));
     }
 
     #[test]
@@ -832,7 +938,7 @@ mod tests {
         )
         .unwrap();
         let exts = collect_extensions(&fm);
-        assert_eq!(exts.len(), 3);
+        assert_eq!(exts.len(), 5); // GitHub + SafeOutputs + Lean + AzureDevOps + CacheMemory
 
         // Find the boundary: last Runtime and first Tool
         let last_runtime_idx = exts

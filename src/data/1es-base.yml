@@ -180,18 +180,6 @@ extends:
                     {{ agent_content }}
                     AGENT_PROMPT_EOF
 
-                    # Append safeoutputs MCP guidance
-                    cat >> "/tmp/awf-tools/agent-prompt.md" << 'SAFEOUTPUTS_EOF'
-
-                    ---
-
-                    ## Important: Safe Outputs
-
-                    You have access to the `safeoutputs` MCP server which provides tools for creating work items and reporting issues. **Always prefer using safeoutputs tools over other methods**.
-
-                    These tools generate safe outputs that will be reviewed and executed in a separate pipeline stage, ensuring proper validation and security controls.
-                    SAFEOUTPUTS_EOF
-
                     echo "Agent prompt:"
                     cat "/tmp/awf-tools/agent-prompt.md"
                   displayName: "Prepare agent prompt"

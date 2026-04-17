@@ -468,7 +468,35 @@ pub fn generate_copilot_params(
     front_matter: &FrontMatter,
     extensions: &[super::extensions::Extension],
 ) -> Result<String> {
-    let mut allowed_tools: Vec<String> = vec!["github".to_string(), "safeoutputs".to_string()];
+    let mut allowed_tools: Vec<String> = Vec::new();
+
+    // Collect tool permissions from extensions (github, safeoutputs, azure-devops, etc.)
+    for ext in extensions {
+        for tool in ext.allowed_copilot_tools() {
+            if !allowed_tools.contains(&tool) {
+                allowed_tools.push(tool);
+            }
+        }
+    }
+
+    // Collect tool permissions from user-defined MCP servers
+    for (name, config) in &front_matter.mcp_servers {
+        // Skip servers already provided by extensions (e.g., azure-devops)
+        if allowed_tools.contains(name) {
+            continue;
+        }
+        // Skip disabled MCPs
+        let is_enabled = match config {
+            crate::compile::types::McpConfig::Enabled(b) => *b,
+            crate::compile::types::McpConfig::WithOptions(opts) => {
+                opts.enabled.unwrap_or(true)
+            }
+        };
+        if !is_enabled {
+            continue;
+        }
+        allowed_tools.push(name.clone());
+    }
 
     // Edit tool: enabled by default, can be disabled with `edit: false`
     let edit_enabled = front_matter
@@ -1520,30 +1548,7 @@ pub fn generate_mcpg_config(
 ) -> Result<McpgConfig> {
     let mut mcp_servers = HashMap::new();
 
-    // SafeOutputs is always included as an HTTP backend.
-    // MCPG runs with --network host, so it reaches SafeOutputs via localhost
-    // (not host.docker.internal, which requires Docker DNS and isn't available
-    // in host network mode on Linux).
-    mcp_servers.insert(
-        "safeoutputs".to_string(),
-        McpgServerConfig {
-            server_type: "http".to_string(),
-            container: None,
-            entrypoint: None,
-            entrypoint_args: None,
-            mounts: None,
-            args: None,
-            url: Some("http://localhost:${SAFE_OUTPUTS_PORT}/mcp".to_string()),
-            headers: Some(HashMap::from([(
-                "Authorization".to_string(),
-                "Bearer ${SAFE_OUTPUTS_API_KEY}".to_string(),
-            )])),
-            env: None,
-            tools: None,
-        },
-    );
-
-    // Add extension-contributed MCPG server entries (e.g., azure-devops)
+    // Add extension-contributed MCPG server entries (safeoutputs, azure-devops, etc.)
     for ext in extensions {
         for (name, config) in ext.mcpg_servers(ctx)? {
             mcp_servers.insert(name, config);
@@ -3606,11 +3611,15 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_prepare_steps_without_memory_and_no_steps_is_empty() {
+    fn test_generate_prepare_steps_without_memory_and_no_steps_has_safeoutputs_prompt() {
         let fm = minimal_front_matter();
         let exts = crate::compile::extensions::collect_extensions(&fm);
         let result = generate_prepare_steps(&[], &exts).unwrap();
-        assert!(result.is_empty(), "no steps and no memory should produce empty output");
+        // SafeOutputs always contributes a prompt supplement
+        assert!(
+            result.contains("Safe Outputs"),
+            "should include SafeOutputs prompt supplement"
+        );
     }
 
     #[test]
