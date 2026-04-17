@@ -86,6 +86,10 @@ jobs:
           MCP_GATEWAY_API_KEY=$(openssl rand -base64 45 | tr -d '/+=')
           echo "##vso[task.setvariable variable=MCP_GATEWAY_API_KEY;issecret=true]$MCP_GATEWAY_API_KEY"
 
+          # Export gateway port and domain as pipeline variables (matching gh-aw pattern)
+          echo "##vso[task.setvariable variable=MCP_GATEWAY_PORT]80"
+          echo "##vso[task.setvariable variable=MCP_GATEWAY_DOMAIN]host.docker.internal"
+
           # Write MCPG (MCP Gateway) configuration to a file
           cat > "$(Agent.TempDirectory)/staging/mcpg-config.json" << 'MCPG_CONFIG_EOF'
           {{ mcpg_config }}
@@ -121,21 +125,11 @@ jobs:
           cp "$(Agent.TempDirectory)/staging/mcpg-config.json" /tmp/awf-tools/staging/mcpg-config.json
 
           # Generate MCP config for copilot CLI pointing to MCPG gateway on host.
-          # The agent inside AWF reaches MCPG via host.docker.internal.
-          # MCPG enforces client auth via the gateway API key.
-          cat > /tmp/awf-tools/mcp-config.json << EOF
-          {
-            "mcpServers": {
-              "mcpg": {
-                "type": "http",
-                "url": "http://host.docker.internal:80/mcp",
-                "headers": {
-                  "Authorization": "Bearer $(MCP_GATEWAY_API_KEY)"
-                }
-              }
-            }
-          }
-          EOF
+          # The agent inside AWF reaches MCPG via host.docker.internal using routed
+          # endpoints (/mcp/{serverID}). Each server has its own entry with auth headers.
+          cat > /tmp/awf-tools/mcp-config.json << 'MCP_CLIENT_CONFIG_EOF'
+          {{ mcp_client_config }}
+          MCP_CLIENT_CONFIG_EOF
 
           # Also write to $HOME/.copilot for host-side use
           cp /tmp/awf-tools/mcp-config.json "$HOME/.copilot/mcp-config.json"
@@ -268,6 +262,8 @@ jobs:
             --name mcpg \
             --network host \
             -v /var/run/docker.sock:/var/run/docker.sock \
+            -e MCP_GATEWAY_PORT="$(MCP_GATEWAY_PORT)" \
+            -e MCP_GATEWAY_DOMAIN="$(MCP_GATEWAY_DOMAIN)" \
             -e MCP_GATEWAY_API_KEY="$(MCP_GATEWAY_API_KEY)" \
             {{ mcpg_docker_env }}
             {{ mcpg_image }}:v{{ mcpg_version }} &

@@ -1657,7 +1657,7 @@ pub fn generate_mcpg_config(
         mcp_servers,
         gateway: McpgGatewayConfig {
             port: MCPG_PORT,
-            domain: "host.docker.internal".to_string(),
+            domain: "${MCP_GATEWAY_DOMAIN}".to_string(),
             api_key: "${MCP_GATEWAY_API_KEY}".to_string(),
             payload_dir: "/tmp/gh-aw/mcp-payloads".to_string(),
         },
@@ -1760,6 +1760,58 @@ pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
         let flags = env_flags.join(" \\\n");
         format!("{} \\", flags)
     }
+}
+
+/// Generate the Copilot CLI `mcp-config.json` with per-server routed URLs.
+///
+/// MCPG runs in routed mode by default, exposing each backend at `/mcp/{serverID}`.
+/// This function generates the client-side config that the Copilot CLI uses to
+/// reach each MCPG-managed server. Follows the same pattern as gh-aw's
+/// `convert_gateway_config_copilot.cjs`.
+///
+/// The generated JSON lists one entry per MCPG server with:
+/// - `type: "http"` — Copilot CLI HTTP transport
+/// - `url` — routed endpoint `http://host.docker.internal:{port}/mcp/{name}`
+/// - `headers` — Bearer auth with the gateway API key (ADO variable reference)
+/// - `tools: ["*"]` — allow all tools (Copilot CLI requirement)
+pub fn generate_mcp_client_config(mcpg_config: &McpgConfig) -> String {
+    let mut servers = serde_json::Map::new();
+
+    // Sort server names for deterministic output
+    let mut names: Vec<&String> = mcpg_config.mcp_servers.keys().collect();
+    names.sort();
+
+    for name in names {
+        let mut entry = serde_json::Map::new();
+        entry.insert("type".to_string(), serde_json::Value::String("http".to_string()));
+        entry.insert(
+            "url".to_string(),
+            serde_json::Value::String(format!(
+                "http://host.docker.internal:{}/mcp/{}",
+                mcpg_config.gateway.port, name
+            )),
+        );
+
+        let mut headers = serde_json::Map::new();
+        headers.insert(
+            "Authorization".to_string(),
+            serde_json::Value::String("Bearer $(MCP_GATEWAY_API_KEY)".to_string()),
+        );
+        entry.insert("headers".to_string(), serde_json::Value::Object(headers));
+
+        entry.insert(
+            "tools".to_string(),
+            serde_json::Value::Array(vec![serde_json::Value::String("*".to_string())]),
+        );
+
+        servers.insert(name.clone(), serde_json::Value::Object(entry));
+    }
+
+    let mut root = serde_json::Map::new();
+    root.insert("mcpServers".to_string(), serde_json::Value::Object(servers));
+
+    serde_json::to_string_pretty(&serde_json::Value::Object(root))
+        .unwrap_or_else(|_| "{}".to_string())
 }
 
 // ==================== Domain allowlist ====================
@@ -3634,7 +3686,7 @@ mod tests {
         let fm = minimal_front_matter();
         let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
         assert_eq!(config.gateway.port, 80);
-        assert_eq!(config.gateway.domain, "host.docker.internal");
+        assert_eq!(config.gateway.domain, "${MCP_GATEWAY_DOMAIN}");
         assert_eq!(config.gateway.api_key, "${MCP_GATEWAY_API_KEY}");
         assert_eq!(config.gateway.payload_dir, "/tmp/gh-aw/mcp-payloads");
     }
@@ -4037,6 +4089,61 @@ mod tests {
         assert!(!is_valid_env_var_name("MY VAR"));
         assert!(!is_valid_env_var_name("X --privileged"));
         assert!(!is_valid_env_var_name("X -v /etc:/etc:rw"));
+    }
+
+    // ─── generate_mcp_client_config ────────────────────────────────────────
+
+    #[test]
+    fn test_generate_mcp_client_config_default() {
+        let fm = minimal_front_matter();
+        let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
+        let json = generate_mcp_client_config(&config);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let servers = parsed["mcpServers"].as_object().unwrap();
+
+        // Default config has only safeoutputs
+        assert!(servers.contains_key("safeoutputs"), "Should have safeoutputs entry");
+        assert_eq!(servers.len(), 1, "Should have exactly one server by default");
+
+        let so = &servers["safeoutputs"];
+        assert_eq!(so["type"], "http");
+        assert!(so["url"].as_str().unwrap().contains("/mcp/safeoutputs"), "Should have routed URL");
+        assert_eq!(so["tools"], serde_json::json!(["*"]));
+        assert!(so["headers"]["Authorization"].as_str().unwrap().contains("MCP_GATEWAY_API_KEY"));
+    }
+
+    #[test]
+    fn test_generate_mcp_client_config_multiple_servers() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers.insert(
+            "my-tool".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                container: Some("python:3.12-slim".to_string()),
+                ..Default::default()
+            }),
+        );
+        let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
+        let json = generate_mcp_client_config(&config);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let servers = parsed["mcpServers"].as_object().unwrap();
+
+        assert_eq!(servers.len(), 2, "Should have safeoutputs + my-tool");
+        assert!(servers.contains_key("safeoutputs"));
+        assert!(servers.contains_key("my-tool"));
+
+        // Verify routed URLs
+        assert!(servers["safeoutputs"]["url"].as_str().unwrap().ends_with("/mcp/safeoutputs"));
+        assert!(servers["my-tool"]["url"].as_str().unwrap().ends_with("/mcp/my-tool"));
+    }
+
+    #[test]
+    fn test_generate_mcp_client_config_uses_correct_port() {
+        let fm = minimal_front_matter();
+        let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
+        let json = generate_mcp_client_config(&config);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let url = parsed["mcpServers"]["safeoutputs"]["url"].as_str().unwrap();
+        assert!(url.contains(":80/"), "URL should use MCPG port 80");
     }
 
     // ─── tools.azure-devops MCPG integration ────────────────────────────────
