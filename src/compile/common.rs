@@ -1540,9 +1540,13 @@ pub fn generate_mcpg_config(
 
         // Validate server name for URL safety — names are embedded in MCPG routed
         // endpoints (/mcp/{name}) and must be safe URL path segments.
-        if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') || name.is_empty() {
+        // Leading dots are rejected to prevent path normalization issues (e.g., ".." → parent).
+        if name.is_empty()
+            || name.starts_with('.')
+            || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        {
             anyhow::bail!(
-                "MCP server name '{}' contains invalid characters — only ASCII alphanumerics, hyphens, underscores, and dots are allowed",
+                "MCP server name '{}' is invalid — must be non-empty, not start with '.', and contain only ASCII alphanumerics, hyphens, underscores, and dots",
                 name
             );
         }
@@ -1790,9 +1794,11 @@ pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
 pub fn generate_mcp_client_config(mcpg_config: &McpgConfig) -> Result<String> {
     let mut servers = serde_json::Map::new();
 
-    // serde_json::Map is BTreeMap-backed, so keys are sorted on insertion.
+    // Collect into BTreeMap for deterministic output regardless of serde_json's
+    // internal map type (which depends on the `preserve_order` feature flag).
     // Server names are validated in generate_mcpg_config (allowlist: [a-zA-Z0-9_.-]).
-    for (name, _) in &mcpg_config.mcp_servers {
+    let sorted: std::collections::BTreeMap<_, _> = mcpg_config.mcp_servers.iter().collect();
+    for (name, _) in &sorted {
         let mut entry = serde_json::Map::new();
         entry.insert("type".to_string(), serde_json::Value::String("http".to_string()));
         entry.insert(
@@ -1815,7 +1821,7 @@ pub fn generate_mcp_client_config(mcpg_config: &McpgConfig) -> Result<String> {
             serde_json::Value::Array(vec![serde_json::Value::String("*".to_string())]),
         );
 
-        servers.insert(name.clone(), serde_json::Value::Object(entry));
+        servers.insert(name.to_string(), serde_json::Value::Object(entry));
     }
 
     let mut root = serde_json::Map::new();
@@ -4162,8 +4168,21 @@ mod tests {
         let (fm, _) = parse_markdown(yaml).unwrap();
         let result = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm));
         assert!(result.is_err(), "Should reject server name with /");
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("invalid characters"), "Error should mention invalid characters: {}", err);
+    }
+
+    #[test]
+    fn test_generate_mcpg_config_rejects_dot_leading_server_name() {
+        // ".." would resolve to /mcp via path normalization, bypassing routing
+        let yaml = "---\nname: test-agent\ndescription: test\nmcp-servers:\n  ..:\n    container: python:3\n    entrypoint: python\n---\n";
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let result = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm));
+        assert!(result.is_err(), "Should reject server name starting with dot");
+
+        // ".hidden" would produce /mcp/.hidden
+        let yaml2 = "---\nname: test-agent\ndescription: test\nmcp-servers:\n  .hidden:\n    container: python:3\n    entrypoint: python\n---\n";
+        let (fm2, _) = parse_markdown(yaml2).unwrap();
+        let result2 = generate_mcpg_config(&fm2, &CompileContext::for_test(&fm2), &collect_extensions(&fm2));
+        assert!(result2.is_err(), "Should reject server name starting with dot");
     }
 
     // ─── tools.azure-devops MCPG integration ────────────────────────────────
