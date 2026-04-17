@@ -1798,6 +1798,9 @@ pub fn generate_mcp_client_config(mcpg_config: &McpgConfig) -> Result<String> {
 
         let mut entry = serde_json::Map::new();
         entry.insert("type".to_string(), serde_json::Value::String("http".to_string()));
+        // Use MCPG_DOMAIN constant — gateway.domain is a MCPG-internal variable
+        // expression ("${MCP_GATEWAY_DOMAIN}") for MCPG's own config, not a
+        // resolvable hostname for the Copilot CLI client.
         entry.insert(
             "url".to_string(),
             serde_json::Value::String(format!(
