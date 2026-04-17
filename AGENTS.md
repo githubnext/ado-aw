@@ -787,6 +787,42 @@ Environment variable names are validated against `[A-Za-z_][A-Za-z0-9_]*` to pre
 
 If no passthrough env vars are needed, this marker is replaced with an empty string.
 
+## {{ mcp_client_config }}
+
+Should be replaced with the Copilot CLI `mcp-config.json` content, generated at compile time from the MCPG server configuration. This follows gh-aw's pattern where `convert_gateway_config_copilot.cjs` produces per-server routed URLs.
+
+MCPG runs in routed mode by default, exposing each backend at `/mcp/{serverID}`. The generated JSON lists one entry per MCPG-managed server with:
+- `type: "http"` — Copilot CLI HTTP transport
+- `url` — routed endpoint (`http://host.docker.internal:{port}/mcp/{name}`)
+- `headers` — Bearer auth with the gateway API key (ADO variable `$(MCP_GATEWAY_API_KEY)`)
+- `tools: ["*"]` — allow all tools (Copilot CLI requirement)
+
+Server names are validated for URL path safety (no `/`, `#`, `?`, `%`, or spaces). Server entries are sorted alphabetically for deterministic output.
+
+Example output:
+```json
+{
+  "mcpServers": {
+    "azure-devops": {
+      "type": "http",
+      "url": "http://host.docker.internal:80/mcp/azure-devops",
+      "headers": {
+        "Authorization": "Bearer $(MCP_GATEWAY_API_KEY)"
+      },
+      "tools": ["*"]
+    },
+    "safeoutputs": {
+      "type": "http",
+      "url": "http://host.docker.internal:80/mcp/safeoutputs",
+      "headers": {
+        "Authorization": "Bearer $(MCP_GATEWAY_API_KEY)"
+      },
+      "tools": ["*"]
+    }
+  }
+}
+```
+
 ## {{ allowed_domains }}
 
 Should be replaced with the comma-separated domain list for AWF's `--allow-domains` flag. The list includes:

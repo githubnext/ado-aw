@@ -1774,7 +1774,7 @@ pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
 /// - `url` — routed endpoint `http://host.docker.internal:{port}/mcp/{name}`
 /// - `headers` — Bearer auth with the gateway API key (ADO variable reference)
 /// - `tools: ["*"]` — allow all tools (Copilot CLI requirement)
-pub fn generate_mcp_client_config(mcpg_config: &McpgConfig) -> String {
+pub fn generate_mcp_client_config(mcpg_config: &McpgConfig) -> Result<String> {
     let mut servers = serde_json::Map::new();
 
     // Sort server names for deterministic output
@@ -1782,6 +1782,15 @@ pub fn generate_mcp_client_config(mcpg_config: &McpgConfig) -> String {
     names.sort();
 
     for name in names {
+        // Validate server name for URL safety — reject names with path separators
+        // or URL-special characters that would break MCPG routed endpoints
+        if name.contains('/') || name.contains('#') || name.contains('?') || name.contains('%') || name.contains(' ') {
+            anyhow::bail!(
+                "MCP server name '{}' contains characters invalid for URL path segments (/, #, ?, %, space)",
+                name
+            );
+        }
+
         let mut entry = serde_json::Map::new();
         entry.insert("type".to_string(), serde_json::Value::String("http".to_string()));
         entry.insert(
@@ -1811,7 +1820,7 @@ pub fn generate_mcp_client_config(mcpg_config: &McpgConfig) -> String {
     root.insert("mcpServers".to_string(), serde_json::Value::Object(servers));
 
     serde_json::to_string_pretty(&serde_json::Value::Object(root))
-        .unwrap_or_else(|_| "{}".to_string())
+        .context("Failed to serialize MCP client config")
 }
 
 // ==================== Domain allowlist ====================
@@ -4097,7 +4106,7 @@ mod tests {
     fn test_generate_mcp_client_config_default() {
         let fm = minimal_front_matter();
         let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
-        let json = generate_mcp_client_config(&config);
+        let json = generate_mcp_client_config(&config).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         let servers = parsed["mcpServers"].as_object().unwrap();
 
@@ -4123,7 +4132,7 @@ mod tests {
             }),
         );
         let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
-        let json = generate_mcp_client_config(&config);
+        let json = generate_mcp_client_config(&config).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         let servers = parsed["mcpServers"].as_object().unwrap();
 
@@ -4140,10 +4149,34 @@ mod tests {
     fn test_generate_mcp_client_config_uses_correct_port() {
         let fm = minimal_front_matter();
         let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
-        let json = generate_mcp_client_config(&config);
+        let json = generate_mcp_client_config(&config).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         let url = parsed["mcpServers"]["safeoutputs"]["url"].as_str().unwrap();
         assert!(url.contains(":80/"), "URL should use MCPG port 80");
+    }
+
+    #[test]
+    fn test_generate_mcp_client_config_rejects_invalid_server_name() {
+        let fm = minimal_front_matter();
+        let mut config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
+        // Inject a server with an invalid name
+        config.mcp_servers.insert(
+            "bad/name".to_string(),
+            super::super::extensions::McpgServerConfig {
+                server_type: "http".to_string(),
+                container: None,
+                entrypoint: None,
+                entrypoint_args: None,
+                mounts: None,
+                args: None,
+                url: Some("http://example.com".to_string()),
+                headers: None,
+                env: None,
+                tools: None,
+            },
+        );
+        let result = generate_mcp_client_config(&config);
+        assert!(result.is_err(), "Should reject server name with /");
     }
 
     // ─── tools.azure-devops MCPG integration ────────────────────────────────

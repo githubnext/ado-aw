@@ -20,7 +20,8 @@ use super::common::{
     generate_enabled_tools_args,
     generate_mcpg_config, generate_mcpg_docker_env,
     generate_mcp_client_config,
-};use super::types::FrontMatter;
+};
+use super::types::FrontMatter;
 
 /// Standalone pipeline compiler.
 pub struct StandaloneCompiler;
@@ -56,7 +57,7 @@ impl Compiler for StandaloneCompiler {
         let mcpg_config_json =
             serde_json::to_string_pretty(&config_obj).context("Failed to serialize MCPG config")?;
         let mcpg_docker_env = generate_mcpg_docker_env(front_matter);
-        let mcp_client_config = generate_mcp_client_config(&config_obj);
+        let mcp_client_config = generate_mcp_client_config(&config_obj)?;
 
         let config = CompileConfig {
             template: include_str!("../data/base.yml").to_string(),

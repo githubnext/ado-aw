@@ -56,7 +56,7 @@ impl Compiler for OneESCompiler {
         let mcpg_config_json = serde_json::to_string_pretty(&mcpg_config)
             .context("Failed to serialize MCPG config")?;
         let mcpg_docker_env = generate_mcpg_docker_env(front_matter);
-        let mcp_client_config = generate_mcp_client_config(&mcpg_config);
+        let mcp_client_config = generate_mcp_client_config(&mcpg_config)?;
 
         // Generate 1ES-specific setup/teardown jobs (no per-job pool, uses templateContext).
         // These override the shared {{ setup_job }} / {{ teardown_job }} markers via
