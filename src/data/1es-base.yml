@@ -115,7 +115,10 @@ extends:
                     MCP_GATEWAY_API_KEY=$(openssl rand -base64 45 | tr -d '/+=')
                     echo "##vso[task.setvariable variable=MCP_GATEWAY_API_KEY;issecret=true]$MCP_GATEWAY_API_KEY"
 
-                    # Export gateway port and domain as pipeline variables (matching gh-aw pattern)
+                    # Export gateway port and domain as pipeline variables (matching gh-aw pattern).
+                    # These duplicate the compile-time values baked into the YAML, but MCPG's
+                    # Docker container requires MCP_GATEWAY_PORT and MCP_GATEWAY_DOMAIN env vars
+                    # to start — the ADO variable indirection satisfies that contract.
                     echo "##vso[task.setvariable variable=MCP_GATEWAY_PORT]{{ mcpg_port }}"
                     echo "##vso[task.setvariable variable=MCP_GATEWAY_DOMAIN]{{ mcpg_domain }}"
 

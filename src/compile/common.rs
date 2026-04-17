@@ -1791,6 +1791,12 @@ pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
 /// - `url` — routed endpoint `http://{MCPG_DOMAIN}:{port}/mcp/{name}`
 /// - `headers` — Bearer auth with the gateway API key (ADO variable reference)
 /// - `tools: ["*"]` — allow all tools (Copilot CLI requirement)
+///
+/// # Pre-conditions
+///
+/// All server names in `mcpg_config.mcp_servers` must be URL-safe path segments
+/// (validated by [`generate_mcpg_config`]). Names are embedded directly in URL
+/// paths without encoding.
 pub fn generate_mcp_client_config(mcpg_config: &McpgConfig) -> Result<String> {
     // serde_json::Map is BTreeMap-backed, so keys are sorted on insert.
     // Server names are validated in generate_mcpg_config (allowlist: [a-zA-Z0-9_.-]).
