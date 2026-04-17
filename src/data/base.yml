@@ -324,20 +324,22 @@ jobs:
           for server in $(jq -r '.mcpServers | keys[]' /tmp/awf-tools/mcp-config.json); do
             echo ""
             echo "--- Probing: $server ---"
-            RESPONSE=$(curl -sf --max-time 120 -X POST \
+            HTTP_CODE=$(curl -s -o /tmp/probe-response.json -w "%{http_code}" --max-time 120 -X POST \
               -H "Authorization: Bearer $(MCP_GATEWAY_API_KEY)" \
               -H "Content-Type: application/json" \
               -H "Accept: application/json, text/event-stream" \
               -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
               "http://localhost:{{ mcpg_port }}/mcp/$server" 2>&1)
             CURL_EXIT=$?
-            if [ $CURL_EXIT -ne 0 ]; then
-              echo "##vso[task.logissue type=warning]MCP backend '$server' failed to respond (exit code $CURL_EXIT)"
-              echo "Response: $RESPONSE"
-              PROBE_FAILED=true
-            else
-              TOOL_COUNT=$(echo "$RESPONSE" | jq -r '.result.tools | length' 2>/dev/null || echo "?")
+            BODY=$(cat /tmp/probe-response.json 2>/dev/null || echo "(empty)")
+            echo "HTTP $HTTP_CODE (curl exit: $CURL_EXIT)"
+            echo "Response: $BODY"
+            if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ] && [ $CURL_EXIT -eq 0 ]; then
+              TOOL_COUNT=$(echo "$BODY" | jq -r '.result.tools | length' 2>/dev/null || echo "?")
               echo "✓ $server: $TOOL_COUNT tools available"
+            else
+              echo "##vso[task.logissue type=warning]MCP backend '$server' returned HTTP $HTTP_CODE"
+              PROBE_FAILED=true
             fi
           done
 
