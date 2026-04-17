@@ -112,6 +112,10 @@ fn test_compiled_yaml_structure() {
         template_content.contains("{{ compiler_version }}"),
         "Template should contain compiler_version marker"
     );
+    assert!(
+        template_content.contains("{{ integrity_check }}"),
+        "Template should contain integrity_check marker"
+    );
 
     // Verify template doesn't accidentally use ${{ }} where {{ }} should be used
     // (The ${{ }} syntax is for Azure DevOps pipeline expressions and should be preserved)

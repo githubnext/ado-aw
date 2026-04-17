@@ -799,13 +799,16 @@ pub fn generate_source_path(input_path: &std::path::Path) -> String {
 /// returns an empty string and the step is omitted from the pipeline.
 pub fn generate_integrity_check(skip: bool) -> String {
     if skip {
-        eprintln!("Warning: pipeline integrity check step omitted (--skip-integrity)");
         return String::new();
     }
 
-    // The step content that was previously hardcoded in the templates.
     // Indentation is handled by replace_with_indent at the call site.
-    "- bash: |\n    AGENTIC_PIPELINES_PATH=\"$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw\"\n    chmod +x \"$AGENTIC_PIPELINES_PATH\"\n    $AGENTIC_PIPELINES_PATH check \"{{ pipeline_path }}\"\n  displayName: \"Verify pipeline integrity\"".to_string()
+    r#"- bash: |
+    AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
+    chmod +x "$AGENTIC_PIPELINES_PATH"
+    $AGENTIC_PIPELINES_PATH check "{{ pipeline_path }}"
+  displayName: "Verify pipeline integrity""#
+        .to_string()
 }
 
 /// Generate the pipeline YAML path for integrity checking at ADO runtime.
@@ -2751,6 +2754,34 @@ mod tests {
         let abs_path = agents_dir.join("ctf.yml");
         let result = generate_pipeline_path(&abs_path);
         assert_eq!(result, "{{ workspace }}/agents/ctf.yml");
+    }
+
+    // ─── generate_integrity_check ────────────────────────────────────────────
+
+    #[test]
+    fn test_generate_integrity_check_default_produces_step() {
+        let result = generate_integrity_check(false);
+        assert!(
+            result.contains("Verify pipeline integrity"),
+            "Should contain the displayName"
+        );
+        assert!(
+            result.contains("ado-aw"),
+            "Should reference the ado-aw binary"
+        );
+        assert!(
+            result.contains("{{ pipeline_path }}"),
+            "Should contain the pipeline_path placeholder for later resolution"
+        );
+    }
+
+    #[test]
+    fn test_generate_integrity_check_skip_produces_empty() {
+        let result = generate_integrity_check(true);
+        assert!(
+            result.is_empty(),
+            "Should produce empty string when skipping"
+        );
     }
 
     // ─── validate_submit_pr_review_events ────────────────────────────────────

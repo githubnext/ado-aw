@@ -164,6 +164,10 @@ async fn main() -> Result<()> {
                 #[cfg(not(debug_assertions))]
                 let skip_integrity = false;
 
+                if skip_integrity {
+                    eprintln!("Warning: pipeline integrity check step omitted (--skip-integrity)");
+                }
+
                 match path {
                     Some(p) => compile::compile_pipeline(&p, output.as_deref(), skip_integrity).await?,
                     None => {
