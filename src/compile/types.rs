@@ -635,7 +635,7 @@ pub struct PermissionsConfig {
     #[serde(default)]
     pub read: Option<String>,
     /// ARM service connection for write ADO access.
-    /// Token is minted and used only by the executor in Stage 2 (ProcessSafeOutputs).
+    /// Token is minted and used only by the executor in Stage 2 (Execution).
     /// This token is never exposed to the agent.
     #[serde(default)]
     pub write: Option<String>,

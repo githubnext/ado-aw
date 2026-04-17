@@ -919,7 +919,7 @@ pub fn generate_copilot_ado_env(read_service_connection: Option<&str>) -> String
     }
 }
 
-/// Generate the env block entries for the executor step (Stage 2 ProcessSafeOutputs).
+/// Generate the env block entries for the executor step (Stage 2 Execution).
 /// Uses the write token from the write service connection.
 /// When not configured, omits ADO access tokens entirely.
 pub fn generate_executor_ado_env(write_service_connection: Option<&str>) -> String {
@@ -1212,7 +1212,7 @@ pub fn validate_resolve_pr_thread_statuses(front_matter: &FrontMatter) -> Result
 }
 
 /// Generate the setup job YAML
-pub fn generate_setup_job(setup_steps: &[serde_yaml::Value], agent_name: &str, pool: &str) -> String {
+pub fn generate_setup_job(setup_steps: &[serde_yaml::Value], pool: &str) -> String {
     if setup_steps.is_empty() {
         return String::new();
     }
@@ -1220,22 +1220,21 @@ pub fn generate_setup_job(setup_steps: &[serde_yaml::Value], agent_name: &str, p
     let steps_yaml = format_steps_yaml_indented(setup_steps, 4);
 
     format!(
-        r#"- job: SetupJob
-  displayName: "{} - Setup"
+        r#"- job: Setup
+  displayName: "Setup"
   pool:
     name: {}
   steps:
     - checkout: self
 {}
 "#,
-        agent_name, pool, steps_yaml
+        pool, steps_yaml
     )
 }
 
 /// Generate the teardown job YAML
 pub fn generate_teardown_job(
     teardown_steps: &[serde_yaml::Value],
-    agent_name: &str,
     pool: &str,
 ) -> String {
     if teardown_steps.is_empty() {
@@ -1245,16 +1244,16 @@ pub fn generate_teardown_job(
     let steps_yaml = format_steps_yaml_indented(teardown_steps, 4);
 
     format!(
-        r#"- job: TeardownJob
-  displayName: "{} - Teardown"
-  dependsOn: ProcessSafeOutputs
+        r#"- job: Teardown
+  displayName: "Teardown"
+  dependsOn: Execution
   pool:
     name: {}
   steps:
     - checkout: self
 {}
 "#,
-        agent_name, pool, steps_yaml
+        pool, steps_yaml
     )
 }
 
@@ -1294,7 +1293,7 @@ pub fn generate_finalize_steps(finalize_steps: &[serde_yaml::Value]) -> String {
 /// Generate dependsOn clause for setup job
 pub fn generate_agentic_depends_on(setup_steps: &[serde_yaml::Value]) -> String {
     if !setup_steps.is_empty() {
-        "dependsOn: SetupJob".to_string()
+        "dependsOn: Setup".to_string()
     } else {
         String::new()
     }
@@ -1985,8 +1984,8 @@ pub async fn compile_shared(
         .unwrap_or_else(|| DEFAULT_POOL.to_string());
 
     // 8. Setup/teardown jobs, parameters, prepare/finalize steps
-    let setup_job = generate_setup_job(&front_matter.setup, &front_matter.name, &pool);
-    let teardown_job = generate_teardown_job(&front_matter.teardown, &front_matter.name, &pool);
+    let setup_job = generate_setup_job(&front_matter.setup, &pool);
+    let teardown_job = generate_teardown_job(&front_matter.teardown, &pool);
     let has_memory = front_matter
         .tools
         .as_ref()

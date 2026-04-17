@@ -3,7 +3,7 @@
 //! This module provides the definitive list of hosts required for Azure DevOps
 //! agents, GitHub Copilot, and related services. This list is shared between:
 //! - AWF domain allowlists (standalone pipeline compiler)
-//! - The network proxy (runtime HTTP filtering, used by AnalyzeSafeOutputs in legacy mode)
+//! - The network proxy (runtime HTTP filtering, used by Detection in legacy mode)
 
 /// Core hosts required for Azure DevOps agent operation.
 /// These are always included in any network allowlist.
