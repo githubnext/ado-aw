@@ -479,8 +479,10 @@ pub fn generate_copilot_params(
         }
     }
 
-    // Collect tool permissions from user-defined MCP servers
-    for (name, config) in &front_matter.mcp_servers {
+    // Collect tool permissions from user-defined MCP servers (sorted for deterministic output)
+    let mut sorted_mcps: Vec<_> = front_matter.mcp_servers.iter().collect();
+    sorted_mcps.sort_by_key(|(name, _)| name.clone());
+    for (name, config) in sorted_mcps {
         // Skip servers already provided by extensions (e.g., azure-devops)
         if allowed_tools.contains(name) {
             continue;
