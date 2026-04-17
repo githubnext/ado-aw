@@ -468,7 +468,42 @@ pub fn generate_copilot_params(
     front_matter: &FrontMatter,
     extensions: &[super::extensions::Extension],
 ) -> Result<String> {
-    let mut allowed_tools: Vec<String> = vec!["github".to_string(), "safeoutputs".to_string()];
+    let mut allowed_tools: Vec<String> = Vec::new();
+
+    // Collect tool permissions from extensions (github, safeoutputs, azure-devops, etc.)
+    for ext in extensions {
+        for tool in ext.allowed_copilot_tools() {
+            if !allowed_tools.contains(&tool) {
+                allowed_tools.push(tool);
+            }
+        }
+    }
+
+    // Collect tool permissions from user-defined MCP servers (sorted for deterministic output).
+    // Only add --allow-tool for MCPs that will actually produce an MCPG entry (i.e.,
+    // WithOptions that have a container or url). McpConfig::Enabled(true) has no backing
+    // server in MCPG, so granting the permission would cause confusing runtime errors.
+    let mut sorted_mcps: Vec<_> = front_matter.mcp_servers.iter().collect();
+    sorted_mcps.sort_by(|(a, _), (b, _)| a.cmp(b));
+    for (name, config) in sorted_mcps {
+        // Skip servers already provided by extensions (case-insensitive to match
+        // generate_mcpg_config's eq_ignore_ascii_case guard for reserved names)
+        if allowed_tools.iter().any(|t| t.eq_ignore_ascii_case(name)) {
+            continue;
+        }
+        // Only add MCPs that have a backing server (container or url)
+        let has_backing_server = match config {
+            crate::compile::types::McpConfig::Enabled(_) => false,
+            crate::compile::types::McpConfig::WithOptions(opts) => {
+                opts.enabled.unwrap_or(true)
+                    && (opts.container.is_some() || opts.url.is_some())
+            }
+        };
+        if !has_backing_server {
+            continue;
+        }
+        allowed_tools.push(name.clone());
+    }
 
     // Edit tool: enabled by default, can be disabled with `edit: false`
     let edit_enabled = front_matter
@@ -1520,30 +1555,7 @@ pub fn generate_mcpg_config(
 ) -> Result<McpgConfig> {
     let mut mcp_servers = HashMap::new();
 
-    // SafeOutputs is always included as an HTTP backend.
-    // MCPG runs with --network host, so it reaches SafeOutputs via localhost
-    // (not host.docker.internal, which requires Docker DNS and isn't available
-    // in host network mode on Linux).
-    mcp_servers.insert(
-        "safeoutputs".to_string(),
-        McpgServerConfig {
-            server_type: "http".to_string(),
-            container: None,
-            entrypoint: None,
-            entrypoint_args: None,
-            mounts: None,
-            args: None,
-            url: Some("http://localhost:${SAFE_OUTPUTS_PORT}/mcp".to_string()),
-            headers: Some(HashMap::from([(
-                "Authorization".to_string(),
-                "Bearer ${SAFE_OUTPUTS_API_KEY}".to_string(),
-            )])),
-            env: None,
-            tools: None,
-        },
-    );
-
-    // Add extension-contributed MCPG server entries (e.g., azure-devops)
+    // Add extension-contributed MCPG server entries (safeoutputs, azure-devops, etc.)
     for ext in extensions {
         for (name, config) in ext.mcpg_servers(ctx)? {
             mcp_servers.insert(name, config);
@@ -2370,6 +2382,68 @@ mod tests {
         );
         let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("--mcp my-tool"));
+    }
+
+    #[test]
+    fn test_copilot_params_allow_tool_for_container_mcp() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers.insert(
+            "my-tool".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                container: Some("node:20-slim".to_string()),
+                ..Default::default()
+            }),
+        );
+        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        assert!(params.contains("--allow-tool my-tool"), "container MCP should get --allow-tool");
+    }
+
+    #[test]
+    fn test_copilot_params_allow_tool_for_url_mcp() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers.insert(
+            "remote-ado".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                url: Some("https://mcp.dev.azure.com/myorg".to_string()),
+                ..Default::default()
+            }),
+        );
+        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        assert!(params.contains("--allow-tool remote-ado"), "URL MCP should get --allow-tool");
+    }
+
+    #[test]
+    fn test_copilot_params_no_allow_tool_for_enabled_only_mcp() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers.insert(
+            "my-tool".to_string(),
+            McpConfig::Enabled(true),
+        );
+        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        assert!(!params.contains("--allow-tool my-tool"), "Enabled(true) with no container/url should not get --allow-tool");
+    }
+
+    #[test]
+    fn test_copilot_params_allow_tool_mcps_sorted() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers.insert(
+            "z-tool".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                container: Some("alpine".to_string()),
+                ..Default::default()
+            }),
+        );
+        fm.mcp_servers.insert(
+            "a-tool".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                container: Some("alpine".to_string()),
+                ..Default::default()
+            }),
+        );
+        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        let a_pos = params.find("--allow-tool a-tool").expect("a-tool should be present");
+        let z_pos = params.find("--allow-tool z-tool").expect("z-tool should be present");
+        assert!(a_pos < z_pos, "MCPs should be sorted alphabetically: a-tool before z-tool");
     }
 
     #[test]
@@ -3606,11 +3680,15 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_prepare_steps_without_memory_and_no_steps_is_empty() {
+    fn test_generate_prepare_steps_without_memory_and_no_steps_has_safeoutputs_prompt() {
         let fm = minimal_front_matter();
         let exts = crate::compile::extensions::collect_extensions(&fm);
         let result = generate_prepare_steps(&[], &exts).unwrap();
-        assert!(result.is_empty(), "no steps and no memory should produce empty output");
+        // SafeOutputs always contributes a prompt supplement
+        assert!(
+            result.contains("Safe Outputs"),
+            "should include SafeOutputs prompt supplement"
+        );
     }
 
     #[test]
