@@ -354,7 +354,7 @@ extends:
                       echo ""
                       echo "--- Probing: $server ---"
                       HTTP_CODE=$(curl -s -o /tmp/probe-response.json -w "%{http_code}" --max-time 120 -X POST \
-                        -H "Authorization: Bearer $MCPG_API_KEY" \
+                        -H "Authorization: $MCPG_API_KEY" \
                         -H "Content-Type: application/json" \
                         -H "Accept: application/json, text/event-stream" \
                         -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
