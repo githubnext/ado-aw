@@ -36,6 +36,7 @@ impl Compiler for OneESCompiler {
         output_path: &Path,
         front_matter: &FrontMatter,
         markdown_body: &str,
+        skip_integrity: bool,
     ) -> Result<String> {
         info!("Compiling for 1ES target");
 
@@ -76,6 +77,7 @@ impl Compiler for OneESCompiler {
                 ("{{ setup_job }}".into(), setup_job),
                 ("{{ teardown_job }}".into(), teardown_job),
             ],
+            skip_integrity,
         };
 
         compile_shared(input_path, output_path, front_matter, markdown_body, &extensions, &ctx, config).await

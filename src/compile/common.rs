@@ -789,6 +789,28 @@ pub fn generate_source_path(input_path: &std::path::Path) -> String {
     format!("{{{{ workspace }}}}/{}", relative)
 }
 
+/// Generate the "Verify pipeline integrity" step for the pipeline YAML.
+///
+/// When `skip` is `false` (the default), returns the full bash step that
+/// downloads the ado-aw compiler and runs `ado-aw check` against the
+/// pipeline path.
+///
+/// When `skip` is `true` (developer builds with `--skip-integrity`),
+/// returns an empty string and the step is omitted from the pipeline.
+pub fn generate_integrity_check(skip: bool) -> String {
+    if skip {
+        return String::new();
+    }
+
+    // Indentation is handled by replace_with_indent at the call site.
+    r#"- bash: |
+    AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
+    chmod +x "$AGENTIC_PIPELINES_PATH"
+    $AGENTIC_PIPELINES_PATH check "{{ pipeline_path }}"
+  displayName: "Verify pipeline integrity""#
+        .to_string()
+}
+
 /// Generate the pipeline YAML path for integrity checking at ADO runtime.
 ///
 /// Returns a path using `{{ workspace }}` as the base, derived from the
@@ -1912,6 +1934,10 @@ pub struct CompileConfig {
     /// target-specific overrides of shared markers (e.g., 1ES-specific
     /// setup/teardown jobs that differ from the standalone defaults).
     pub extra_replacements: Vec<(String, String)>,
+    /// When true, the "Verify pipeline integrity" step is omitted from the
+    /// generated pipeline. This is a developer-only option gated behind
+    /// `cfg(debug_assertions)` at the CLI level.
+    pub skip_integrity: bool,
 }
 
 /// Shared compilation flow used by both standalone and 1ES compilers.
@@ -2052,6 +2078,7 @@ pub async fn compile_shared(
 
     // 13. Shared replacements
     let compiler_version = env!("CARGO_PKG_VERSION");
+    let integrity_check = generate_integrity_check(config.skip_integrity);
     let replacements: Vec<(&str, &str)> = vec![
         ("{{ parameters }}", &parameters_yaml),
         ("{{ compiler_version }}", compiler_version),
@@ -2075,6 +2102,9 @@ pub async fn compile_shared(
         ("{{ agent_description }}", &front_matter.description),
         ("{{ copilot_params }}", &copilot_params),
         ("{{ source_path }}", &source_path),
+        // integrity_check must come before pipeline_path because the
+        // integrity step content itself contains {{ pipeline_path }}.
+        ("{{ integrity_check }}", &integrity_check),
         ("{{ pipeline_path }}", &pipeline_path),
         ("{{ working_directory }}", &working_directory),
         ("{{ workspace }}", &working_directory),
@@ -2724,6 +2754,34 @@ mod tests {
         let abs_path = agents_dir.join("ctf.yml");
         let result = generate_pipeline_path(&abs_path);
         assert_eq!(result, "{{ workspace }}/agents/ctf.yml");
+    }
+
+    // ─── generate_integrity_check ────────────────────────────────────────────
+
+    #[test]
+    fn test_generate_integrity_check_default_produces_step() {
+        let result = generate_integrity_check(false);
+        assert!(
+            result.contains("Verify pipeline integrity"),
+            "Should contain the displayName"
+        );
+        assert!(
+            result.contains("ado-aw"),
+            "Should reference the ado-aw binary"
+        );
+        assert!(
+            result.contains("{{ pipeline_path }}"),
+            "Should contain the pipeline_path placeholder for later resolution"
+        );
+    }
+
+    #[test]
+    fn test_generate_integrity_check_skip_produces_empty() {
+        let result = generate_integrity_check(true);
+        assert!(
+            result.is_empty(),
+            "Should produce empty string when skipping"
+        );
     }
 
     // ─── validate_submit_pr_review_events ────────────────────────────────────

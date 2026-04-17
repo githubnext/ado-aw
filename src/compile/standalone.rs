@@ -37,6 +37,7 @@ impl Compiler for StandaloneCompiler {
         output_path: &Path,
         front_matter: &FrontMatter,
         markdown_body: &str,
+        skip_integrity: bool,
     ) -> Result<String> {
         info!("Compiling for standalone target");
 
@@ -69,6 +70,7 @@ impl Compiler for StandaloneCompiler {
                 ("{{ mcpg_config }}".into(), mcpg_config_json),
                 ("{{ mcpg_docker_env }}".into(), mcpg_docker_env),
             ],
+            skip_integrity,
         };
 
         compile_shared(input_path, output_path, front_matter, markdown_body, &extensions, &ctx, config).await

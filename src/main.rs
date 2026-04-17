@@ -31,6 +31,11 @@ enum Commands {
         /// Optional output path for the generated YAML file
         #[arg(short, long)]
         output: Option<String>,
+        /// Omit the "Verify pipeline integrity" step from the generated pipeline.
+        /// Only available in debug builds.
+        #[cfg(debug_assertions)]
+        #[arg(long)]
+        skip_integrity: bool,
     },
     /// Check that a compiled pipeline matches its source markdown
     Check {
@@ -150,18 +155,32 @@ async fn main() -> Result<()> {
 
     if let Some(command) = args.command {
         match command {
-            Commands::Compile { path, output } => match path {
-                Some(p) => compile::compile_pipeline(&p, output.as_deref()).await?,
-                None => {
-                    if output.is_some() {
-                        anyhow::bail!(
-                            "--output cannot be used with auto-discovery mode. \
-                             Specify a path to compile a single file with a custom output."
-                        );
-                    }
-                    compile::compile_all_pipelines().await?
+            Commands::Compile {
+                path,
+                output,
+                #[cfg(debug_assertions)]
+                skip_integrity,
+            } => {
+                #[cfg(not(debug_assertions))]
+                let skip_integrity = false;
+
+                if skip_integrity {
+                    eprintln!("Warning: pipeline integrity check step omitted (--skip-integrity)");
                 }
-            },
+
+                match path {
+                    Some(p) => compile::compile_pipeline(&p, output.as_deref(), skip_integrity).await?,
+                    None => {
+                        if output.is_some() {
+                            anyhow::bail!(
+                                "--output cannot be used with auto-discovery mode. \
+                                 Specify a path to compile a single file with a custom output."
+                            );
+                        }
+                        compile::compile_all_pipelines(skip_integrity).await?
+                    }
+                }
+            }
             Commands::Check { pipeline } => {
                 compile::check_pipeline(&pipeline).await?;
             }
