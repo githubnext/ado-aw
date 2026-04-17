@@ -792,9 +792,12 @@ pub const MCPG_PORT: u16 = 80;
 /// inside containers running with `--network host` or via Docker DNS.
 pub const MCPG_DOMAIN: &str = "host.docker.internal";
 
-/// Docker image for the Azure DevOps MCP container.
-/// This is the container used when `tools: azure-devops:` is configured.
+/// Docker base image for the Azure DevOps MCP container.
 pub const ADO_MCP_IMAGE: &str = "node:20-slim";
+
+/// Local pre-warmed image name with @azure-devops/mcp pre-installed.
+/// Built at pipeline runtime via a prepare step to avoid MCPG startup timeout.
+pub const ADO_MCP_CACHED_IMAGE: &str = "ado-mcp-cached:latest";
 
 /// Default entrypoint for the Azure DevOps MCP container.
 pub const ADO_MCP_ENTRYPOINT: &str = "npx";
@@ -4227,11 +4230,11 @@ mod tests {
         let config = generate_mcpg_config(&fm, &CompileContext::for_test_with_org(&fm, "inferred-org"), &collect_extensions(&fm)).unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         assert_eq!(ado.server_type, "stdio");
-        assert_eq!(ado.container.as_deref(), Some(ADO_MCP_IMAGE));
+        assert_eq!(ado.container.as_deref(), Some(ADO_MCP_CACHED_IMAGE));
         assert_eq!(ado.entrypoint.as_deref(), Some(ADO_MCP_ENTRYPOINT));
         let args = ado.entrypoint_args.as_ref().unwrap();
-        assert!(args.contains(&"-y".to_string()));
         assert!(args.contains(&ADO_MCP_PACKAGE.to_string()));
+        assert!(!args.contains(&"-y".to_string()), "cached image should not use npx -y");
         assert!(args.contains(&"inferred-org".to_string()));
         // Should have AZURE_DEVOPS_EXT_PAT in env
         let env = ado.env.as_ref().unwrap();
