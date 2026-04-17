@@ -101,11 +101,7 @@ extends:
                     chmod +x ado-aw
                   displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
 
-                - bash: |
-                    AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
-                    chmod +x "$AGENTIC_PIPELINES_PATH"
-                    $AGENTIC_PIPELINES_PATH check "{{ pipeline_path }}"
-                  displayName: "Verify pipeline integrity"
+                {{ integrity_check }}
 
                 - bash: |
                     mkdir -p "$(Agent.TempDirectory)/staging"

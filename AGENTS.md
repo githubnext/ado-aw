@@ -733,6 +733,12 @@ Should be replaced with the path to the compiled pipeline YAML file for runtime 
 
 Used by the pipeline's integrity check step to verify the pipeline hasn't been modified outside the compilation process.
 
+## {{ integrity_check }}
+
+Generates the "Verify pipeline integrity" pipeline step that downloads the released ado-aw compiler and runs `ado-aw check` against the compiled pipeline YAML. This step ensures the pipeline file hasn't been modified outside the compilation process.
+
+When the compiler is built with `--skip-integrity` (debug builds only), this placeholder is replaced with an empty string and the integrity step is omitted from the generated pipeline.
+
 ## {{ pr_trigger }}
 
 Generates PR trigger configuration. When a schedule or pipeline trigger is configured, this generates `pr: none` to disable PR triggers. Otherwise, it generates an empty string, allowing the default PR trigger behavior.
@@ -933,6 +939,7 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - The agent auto-downloads the ado-aw compiler and handles the full lifecycle (create → compile → check)
 - `compile [<path>]` - Compile a markdown file to Azure DevOps pipeline YAML. If no path is given, auto-discovers and recompiles all detected agentic pipelines in the current directory.
   - `--output, -o <path>` - Optional output path for generated YAML (only valid when a path is provided)
+  - `--skip-integrity` - *(debug builds only)* Omit the "Verify pipeline integrity" step from the generated pipeline. Useful during local development when the compiled output won't match a released compiler version. This flag is not available in release builds.
 - `check <pipeline>` - Verify that a compiled pipeline matches its source markdown
   - `<pipeline>` - Path to the pipeline YAML file to verify
   - The source markdown path is auto-detected from the `@ado-aw` header in the pipeline file

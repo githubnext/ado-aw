@@ -34,6 +34,7 @@ pub trait Compiler: Send + Sync {
         output_path: &Path,
         front_matter: &FrontMatter,
         markdown_body: &str,
+        skip_integrity: bool,
     ) -> Result<String>;
 
     /// Get the target name for logging.
@@ -43,7 +44,11 @@ pub trait Compiler: Send + Sync {
 /// Main compilation function - entry point for the CLI.
 ///
 /// Parses the input markdown file, determines the target, and delegates to the appropriate compiler.
-pub async fn compile_pipeline(input_path: &str, output_path: Option<&str>) -> Result<()> {
+pub async fn compile_pipeline(
+    input_path: &str,
+    output_path: Option<&str>,
+    skip_integrity: bool,
+) -> Result<()> {
     let input_path = Path::new(input_path);
     info!("Compiling pipeline from: {}", input_path.display());
 
@@ -89,7 +94,7 @@ pub async fn compile_pipeline(input_path: &str, output_path: Option<&str>) -> Re
 
     // Compile
     let pipeline_yaml = compiler
-        .compile(input_path, &yaml_output_path, &front_matter, &markdown_body)
+        .compile(input_path, &yaml_output_path, &front_matter, &markdown_body, skip_integrity)
         .await?;
 
     // Clean up spacing artifacts from empty placeholder replacements
@@ -119,7 +124,7 @@ pub async fn compile_pipeline(input_path: &str, output_path: Option<&str>) -> Re
 /// Scans for compiled YAML files containing the `# @ado-aw source=...` header,
 /// resolves each source markdown path, and recompiles. Pipelines whose source
 /// files are missing are reported but don't abort the batch.
-pub async fn compile_all_pipelines() -> Result<()> {
+pub async fn compile_all_pipelines(skip_integrity: bool) -> Result<()> {
     let root = Path::new(".");
     info!("Auto-discovering agentic pipelines for recompilation");
 
@@ -163,7 +168,7 @@ pub async fn compile_all_pipelines() -> Result<()> {
         let source_str = source_path.to_string_lossy();
         let output_str = yaml_output_path.to_string_lossy();
 
-        match compile_pipeline(&source_str, Some(&output_str)).await {
+        match compile_pipeline(&source_str, Some(&output_str), skip_integrity).await {
             Ok(()) => success_count += 1,
             Err(e) => {
                 eprintln!(
@@ -271,6 +276,7 @@ pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
             pipeline_path,
             &front_matter,
             &markdown_body,
+            false,
         )
         .await?;
     let pipeline_yaml = clean_generated_yaml(&pipeline_yaml);
