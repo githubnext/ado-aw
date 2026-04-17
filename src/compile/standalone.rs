@@ -13,7 +13,7 @@ use std::path::Path;
 
 use super::Compiler;
 use super::common::{
-    AWF_VERSION, MCPG_VERSION, MCPG_IMAGE,
+    AWF_VERSION, MCPG_VERSION, MCPG_IMAGE, MCPG_PORT, MCPG_DOMAIN,
     CompileConfig, compile_shared,
     generate_allowed_domains,
     generate_cancel_previous_builds,
@@ -65,6 +65,8 @@ impl Compiler for StandaloneCompiler {
                 ("{{ firewall_version }}".into(), AWF_VERSION.into()),
                 ("{{ mcpg_version }}".into(), MCPG_VERSION.into()),
                 ("{{ mcpg_image }}".into(), MCPG_IMAGE.into()),
+                ("{{ mcpg_port }}".into(), MCPG_PORT.to_string()),
+                ("{{ mcpg_domain }}".into(), MCPG_DOMAIN.into()),
                 ("{{ allowed_domains }}".into(), allowed_domains),
                 ("{{ enabled_tools_args }}".into(), enabled_tools_args),
                 ("{{ cancel_previous_builds }}".into(), cancel_previous_builds),

@@ -752,6 +752,11 @@ pub const MCPG_IMAGE: &str = "ghcr.io/github/gh-aw-mcpg";
 /// Default port MCPG listens on inside the container (host network mode).
 pub const MCPG_PORT: u16 = 80;
 
+/// Domain that the AWF-sandboxed agent uses to reach MCPG on the host.
+/// Docker's `host.docker.internal` resolves to the host loopback from
+/// inside containers running with `--network host` or via Docker DNS.
+pub const MCPG_DOMAIN: &str = "host.docker.internal";
+
 /// Docker image for the Azure DevOps MCP container.
 /// This is the container used when `tools: azure-devops:` is configured.
 pub const ADO_MCP_IMAGE: &str = "node:20-slim";
@@ -1771,7 +1776,7 @@ pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
 ///
 /// The generated JSON lists one entry per MCPG server with:
 /// - `type: "http"` — Copilot CLI HTTP transport
-/// - `url` — routed endpoint `http://host.docker.internal:{port}/mcp/{name}`
+/// - `url` — routed endpoint `http://{MCPG_DOMAIN}:{port}/mcp/{name}`
 /// - `headers` — Bearer auth with the gateway API key (ADO variable reference)
 /// - `tools: ["*"]` — allow all tools (Copilot CLI requirement)
 pub fn generate_mcp_client_config(mcpg_config: &McpgConfig) -> Result<String> {
@@ -1796,8 +1801,8 @@ pub fn generate_mcp_client_config(mcpg_config: &McpgConfig) -> Result<String> {
         entry.insert(
             "url".to_string(),
             serde_json::Value::String(format!(
-                "http://host.docker.internal:{}/mcp/{}",
-                mcpg_config.gateway.port, name
+                "http://{}:{}/mcp/{}",
+                MCPG_DOMAIN, mcpg_config.gateway.port, name
             )),
         );
 
