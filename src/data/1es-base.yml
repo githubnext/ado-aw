@@ -427,6 +427,10 @@ extends:
                     if [ -d ~/.ado-aw/logs ]; then
                       cp -r ~/.ado-aw/logs/* "$(Agent.TempDirectory)/staging/logs/" 2>/dev/null || true
                     fi
+                    if [ -d /tmp/gh-aw/mcp-logs ]; then
+                      mkdir -p "$(Agent.TempDirectory)/staging/logs/mcpg"
+                      cp -r /tmp/gh-aw/mcp-logs/* "$(Agent.TempDirectory)/staging/logs/mcpg/" 2>/dev/null || true
+                    fi
                     echo "Logs copied to $(Agent.TempDirectory)/staging/logs"
                     ls -la "$(Agent.TempDirectory)/staging/logs" 2>/dev/null || echo "No logs found"
                   displayName: "Copy logs to output directory"
