@@ -1538,6 +1538,15 @@ pub fn generate_mcpg_config(
             continue;
         }
 
+        // Validate server name for URL safety — names are embedded in MCPG routed
+        // endpoints (/mcp/{name}) and must be safe URL path segments.
+        if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') || name.is_empty() {
+            anyhow::bail!(
+                "MCP server name '{}' contains invalid characters — only ASCII alphanumerics, hyphens, underscores, and dots are allowed",
+                name
+            );
+        }
+
         // Skip if already auto-configured by an extension (e.g., tools.azure-devops)
         if mcp_servers.contains_key(name) {
             continue;
@@ -1781,20 +1790,9 @@ pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
 pub fn generate_mcp_client_config(mcpg_config: &McpgConfig) -> Result<String> {
     let mut servers = serde_json::Map::new();
 
-    // Sort server names for deterministic output
-    let mut names: Vec<&String> = mcpg_config.mcp_servers.keys().collect();
-    names.sort();
-
-    for name in names {
-        // Validate server name for URL safety — reject names with path separators
-        // or URL-special characters that would break MCPG routed endpoints
-        if name.contains('/') || name.contains('#') || name.contains('?') || name.contains('%') || name.contains(' ') {
-            anyhow::bail!(
-                "MCP server name '{}' contains characters invalid for URL path segments (/, #, ?, %, space)",
-                name
-            );
-        }
-
+    // serde_json::Map is BTreeMap-backed, so keys are sorted on insertion.
+    // Server names are validated in generate_mcpg_config (allowlist: [a-zA-Z0-9_.-]).
+    for (name, _) in &mcpg_config.mcp_servers {
         let mut entry = serde_json::Map::new();
         entry.insert("type".to_string(), serde_json::Value::String("http".to_string()));
         entry.insert(
@@ -4159,27 +4157,13 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_mcp_client_config_rejects_invalid_server_name() {
-        let fm = minimal_front_matter();
-        let mut config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
-        // Inject a server with an invalid name
-        config.mcp_servers.insert(
-            "bad/name".to_string(),
-            super::super::extensions::McpgServerConfig {
-                server_type: "http".to_string(),
-                container: None,
-                entrypoint: None,
-                entrypoint_args: None,
-                mounts: None,
-                args: None,
-                url: Some("http://example.com".to_string()),
-                headers: None,
-                env: None,
-                tools: None,
-            },
-        );
-        let result = generate_mcp_client_config(&config);
+    fn test_generate_mcpg_config_rejects_invalid_server_name() {
+        let yaml = "---\nname: test-agent\ndescription: test\nmcp-servers:\n  bad/name:\n    container: python:3\n    entrypoint: python\n---\n";
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let result = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm));
         assert!(result.is_err(), "Should reject server name with /");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("invalid characters"), "Error should mention invalid characters: {}", err);
     }
 
     // ─── tools.azure-devops MCPG integration ────────────────────────────────
