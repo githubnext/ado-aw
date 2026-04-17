@@ -262,15 +262,23 @@ jobs:
           # The Docker socket mount is required because MCPG spawns stdio-based MCP
           # servers as sibling containers. This grants significant host access — acceptable
           # here because the pipeline agent is already trusted and network-isolated by AWF.
+          #
+          # WORKAROUND: Override entrypoint to bypass run_containerized.sh which has a
+          # validate_port_mapping() bug — it calls `docker inspect .NetworkSettings.Ports`
+          # which is empty with --network host (by design), causing a spurious error:
+          #   [ERROR] Port 80 is not exposed from the container
+          # Upstream fix: https://github.com/github/gh-aw-mcpg/issues/TBD
           echo "$MCPG_CONFIG" | docker run -i --rm \
             --name mcpg \
             --network host \
+            --entrypoint /app/awmg \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -e MCP_GATEWAY_PORT="$(MCP_GATEWAY_PORT)" \
             -e MCP_GATEWAY_DOMAIN="$(MCP_GATEWAY_DOMAIN)" \
             -e MCP_GATEWAY_API_KEY="$(MCP_GATEWAY_API_KEY)" \
             {{ mcpg_docker_env }}
-            {{ mcpg_image }}:v{{ mcpg_version }} &
+            {{ mcpg_image }}:v{{ mcpg_version }} \
+            --routed --listen 0.0.0.0:{{ mcpg_port }} --config-stdin --log-dir /tmp/gh-aw/mcp-logs &
           MCPG_PID=$!
           echo "MCPG started (PID: $MCPG_PID)"
 
