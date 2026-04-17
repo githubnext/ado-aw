@@ -634,7 +634,7 @@ fields you want to update."
     ) -> Result<CallToolResult, McpError> {
         info!("Tool called: update-work-item - id={}", params.0.id);
         let mut result: UpdateWorkItemResult = params.0.try_into()?;
-        // Sanitize before persisting to NDJSON (defense-in-depth; Stage 2 sanitizes again)
+        // Sanitize before persisting to NDJSON (defense-in-depth; Stage 3 sanitizes again)
         result.sanitize_content_fields();
         self.write_safe_output_file(&result).await
             .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;

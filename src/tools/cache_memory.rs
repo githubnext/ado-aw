@@ -2,7 +2,7 @@
 //!
 //! Handles sanitization and persistence of the agent_memory folder across runs.
 //! The agent writes files directly to the staging directory via shell commands.
-//! During Stage 2 execution, this module validates and copies sanitized files
+//! During Stage 3 execution, this module validates and copies sanitized files
 //! to the final safe_outputs artifact for pickup by the next run.
 
 use anyhow::{Result, ensure};

@@ -1421,7 +1421,7 @@ fn test_fixture_comment_on_work_item_compiled_output() {
         "Compiled output should allow the safeoutputs MCP tool"
     );
 
-    // Should contain the write service connection for Stage 2
+    // Should contain the write service connection for Stage 3
     assert!(
         compiled.contains("my-write-sc"),
         "Compiled output should contain the write service connection"

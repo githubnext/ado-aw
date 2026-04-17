@@ -919,7 +919,7 @@ pub fn generate_copilot_ado_env(read_service_connection: Option<&str>) -> String
     }
 }
 
-/// Generate the env block entries for the executor step (Stage 2 Execution).
+/// Generate the env block entries for the executor step (Stage 3 Execution).
 /// Uses the write token from the write service connection.
 /// When not configured, omits ADO access tokens entirely.
 pub fn generate_executor_ado_env(write_service_connection: Option<&str>) -> String {
@@ -1135,7 +1135,7 @@ pub fn validate_submit_pr_review_events(front_matter: &FrontMatter) -> Result<()
 /// is enabled (i.e., `allowed-operations` is empty — meaning all ops — or explicitly contains
 /// "vote").
 ///
-/// An empty `allowed-votes` list when vote is enabled would always fail at Stage 2 with a
+/// An empty `allowed-votes` list when vote is enabled would always fail at Stage 3 with a
 /// runtime error. Catching this at compile time is consistent with how
 /// `validate_submit_pr_review_events` handles the analogous case.
 pub fn validate_update_pr_votes(front_matter: &FrontMatter) -> Result<()> {
@@ -1159,7 +1159,7 @@ pub fn validate_update_pr_votes(front_matter: &FrontMatter) -> Result<()> {
                 if allowed_votes_empty {
                     anyhow::bail!(
                         "safe-outputs.update-pr enables the 'vote' operation but has no \
-                         'allowed-votes' list. This would reject all votes at Stage 2. \
+                         'allowed-votes' list. This would reject all votes at Stage 3. \
                          Either restrict 'allowed-operations' to exclude 'vote', or add an \
                          explicit 'allowed-votes' list:\n\n  \
                          safe-outputs:\n    update-pr:\n      allowed-votes:\n        \

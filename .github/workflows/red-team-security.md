@@ -27,9 +27,9 @@ This compiler processes **untrusted markdown input** (YAML front matter + markdo
 - Azure DevOps pipeline YAML executed on CI runners
 - Shell commands (`bash:` steps) run inside AWF-sandboxed containers
 - MCP Gateway configuration controlling tool access
-- Safe output NDJSON consumed by a Stage 2 executor with write permissions
+- Safe output NDJSON consumed by a Stage 3 executor with write permissions
 
-The security boundary is critical: Stage 1 (agent) has read-only access inside a network sandbox. Stage 2 (executor) has write access to Azure DevOps. Any confusion between these stages is a vulnerability.
+The security boundary is critical: Stage 1 (agent) has read-only access inside a network sandbox. Stage 3 (executor) has write access to Azure DevOps. Any confusion between these stages is a vulnerability.
 
 ## Step 1: Check Previous Findings
 
@@ -123,7 +123,7 @@ Audit `src/execute.rs`, `src/mcp.rs`, `src/tools/mod.rs` for:
 
 - **Budget bypass**: Can the `max` limit on safe outputs be circumvented by sending multiple tool calls in a single MCP request, or by exploiting NDJSON parsing?
 - **Repository allowlist bypass**: Can `create_pr.rs` be tricked into targeting a repository not in the `checkout:` list?
-- **Permission escalation**: Can a Stage 1 agent (read-only) somehow influence Stage 2 execution beyond safe output NDJSON? Could it modify the pipeline YAML checked at runtime?
+- **Permission escalation**: Can a Stage 1 agent (read-only) somehow influence Stage 3 execution beyond safe output NDJSON? Could it modify the pipeline YAML checked at runtime?
 - **Tool name confusion**: Can an attacker register a safe output with a name that collides with or shadows a built-in tool?
 - **NDJSON parsing**: Can malformed NDJSON in `src/ndjson.rs` cause the executor to skip validation or process unintended data?
 

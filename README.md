@@ -20,7 +20,7 @@ DevOps pipeline with three jobs:
 ```
 ┌────────────────────────┐     ┌──────────────────────┐     ┌───────────────────────┐
 │  Agent                 │────▶│  Detection           │────▶│  Execution            │
-│  (Stage 1 — Agent)     │     │  (Threat Analysis)   │     │  (Stage 2 — Executor) │
+│  (Stage 1 — Agent)     │     │  (Stage 2 — Threats) │     │  (Stage 3 — Executor) │
 │                        │     │                      │     │                       │
 │  • Runs inside AWF     │     │  • Reviews proposed  │     │  • Creates PRs        │
 │    network sandbox     │     │    actions for safety│     │  • Creates work items │
@@ -156,7 +156,7 @@ project. To maintain security isolation between the agent and the executor,
 
 | | Read Connection | Write Connection |
 |---|---|---|
-| **Used by** | Stage 1 — the AI agent | Stage 2 — the safe outputs executor |
+| **Used by** | Stage 1 — the AI agent | Stage 3 — the safe outputs executor |
 | **Purpose** | Query ADO APIs (work items, repos, PRs) | Create PRs, work items, link artifacts |
 | **Exposed to agent?** | ✅ Yes (inside network sandbox) | ❌ Never |
 | **Token variable** | `SC_READ_TOKEN` | `SC_WRITE_TOKEN` |
@@ -164,7 +164,7 @@ project. To maintain security isolation between the agent and the executor,
 
 The agent runs in a network-isolated sandbox (AWF) with only the read token.
 Even if the agent were compromised or prompt-injected, it cannot perform write
-operations. Write actions are only executed in Stage 2 (`Execution`)
+operations. Write actions are only executed in Stage 3 (`Execution`)
 after threat analysis, using a completely separate token that the agent never
 sees.
 
@@ -438,7 +438,7 @@ Commands:
   check         Verify a compiled pipeline matches its source
   mcp           Run as an MCP server (safe outputs)
   mcp-http      Run as an HTTP MCP server (for MCPG integration)
-  execute       Execute safe outputs (Stage 2)
+  execute       Execute safe outputs (Stage 3)
   configure     Detect agentic pipelines and update GITHUB_TOKEN on ADO definitions
 
 Options:

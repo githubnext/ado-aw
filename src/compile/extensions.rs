@@ -90,7 +90,7 @@ use std::path::Path;
 /// Built once via [`CompileContext::new`] and passed to all extension
 /// methods. Follows the same pattern as
 /// [`ExecutionContext`](crate::safeoutputs::result::ExecutionContext)
-/// for Stage 2 — a single context struct with all resolved metadata.
+/// for Stage 3 — a single context struct with all resolved metadata.
 pub struct CompileContext<'a> {
     /// The agent name from front matter.
     pub agent_name: &'a str,
@@ -545,7 +545,7 @@ use super::types::CacheMemoryToolConfig;
 /// Injects: prepare steps (download/restore previous memory), and a
 /// prompt supplement informing the agent about its memory directory.
 pub struct CacheMemoryExtension {
-    /// Config options (e.g., `allowed-extensions`) are consumed at Stage 2
+    /// Config options (e.g., `allowed-extensions`) are consumed at Stage 3
     /// execution time, not at compile time. Retained here for potential
     /// future compile-time validation.
     #[allow(dead_code)]

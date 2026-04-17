@@ -54,7 +54,7 @@ tool_result! {
     }
 }
 
-// ── Stage 2: Sanitization ─────────────────────────────────────────────────
+// ── Stage 3: Sanitization ─────────────────────────────────────────────────
 
 impl SanitizeContent for AddBuildTagResult {
     fn sanitize_content_fields(&mut self) {
@@ -62,7 +62,7 @@ impl SanitizeContent for AddBuildTagResult {
     }
 }
 
-// ── Stage 2: Configuration (from front matter) ────────────────────────────
+// ── Stage 3: Configuration (from front matter) ────────────────────────────
 
 /// Configuration for the add-build-tag tool
 /// Example front matter:
@@ -102,7 +102,7 @@ impl Default for AddBuildTagConfig {
     }
 }
 
-// ── Stage 2: Execution ────────────────────────────────────────────────────
+// ── Stage 3: Execution ────────────────────────────────────────────────────
 
 #[async_trait::async_trait]
 impl Executor for AddBuildTagResult {

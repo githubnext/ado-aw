@@ -526,7 +526,7 @@ pub struct FrontMatter {
     /// Tokens are minted from ARM service connections — System.AccessToken is never used.
     ///
     /// - `read`: MI for Stage 1 (agent) — read-only ADO access
-    /// - `write`: MI for Stage 2 (executor) — write access for safe-outputs, never given to agent
+    /// - `write`: MI for Stage 3 (executor) — write access for safe-outputs, never given to agent
     #[serde(default)]
     pub permissions: Option<PermissionsConfig>,
     /// Workflow-level environment variables
@@ -563,7 +563,7 @@ impl SanitizeConfigTrait for FrontMatter {
             mcp.sanitize_config_fields();
         }
         // safe_outputs: HashMap<String, serde_json::Value> — opaque JSON, sanitized at
-        // Stage 2 execution via get_tool_config() when deserialized into typed configs.
+        // Stage 3 execution via get_tool_config() when deserialized into typed configs.
         if let Some(ref mut t) = self.triggers {
             t.sanitize_config_fields();
         }
@@ -635,7 +635,7 @@ pub struct PermissionsConfig {
     #[serde(default)]
     pub read: Option<String>,
     /// ARM service connection for write ADO access.
-    /// Token is minted and used only by the executor in Stage 2 (Execution).
+    /// Token is minted and used only by the executor in Stage 3 (Execution).
     /// This token is never exposed to the agent.
     #[serde(default)]
     pub write: Option<String>,

@@ -9,8 +9,9 @@ You are now in **debug mode** for an `ado-aw` agentic pipeline. Your job is to h
 Every `ado-aw` pipeline compiles into a three-job Azure DevOps pipeline:
 
 ```
-Agent  →  Detection  →  Execution
-(Stage 1: Agent)       (Threat Analysis)       (Stage 2: Executor)
+Agent             →  Detection          →  Execution
+(Stage 1: Agent)     (Stage 2: Threat       (Stage 3: Executor)
+                      Analysis)
 ```
 
 | Job | Purpose | Token | Environment |
@@ -270,7 +271,7 @@ This job executes the approved safe outputs using the write token. Failures here
 
 ### Agent Memory Failures
 
-**Symptoms**: Memory files fail validation during Stage 2 execution.
+**Symptoms**: Memory files fail validation during Stage 3 execution.
 
 | Error | Cause | Fix |
 |-------|-------|-----|

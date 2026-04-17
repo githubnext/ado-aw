@@ -652,7 +652,7 @@ jobs:
             exit 0
           fi
           exit $EXIT_CODE
-        displayName: Execute safe outputs (Stage 2)
+        displayName: Execute safe outputs (Stage 3)
         workingDirectory: {{ working_directory }}
         env:
           {{ executor_ado_env }}
