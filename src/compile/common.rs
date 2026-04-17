@@ -2385,6 +2385,68 @@ mod tests {
     }
 
     #[test]
+    fn test_copilot_params_allow_tool_for_container_mcp() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers.insert(
+            "my-tool".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                container: Some("node:20-slim".to_string()),
+                ..Default::default()
+            }),
+        );
+        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        assert!(params.contains("--allow-tool my-tool"), "container MCP should get --allow-tool");
+    }
+
+    #[test]
+    fn test_copilot_params_allow_tool_for_url_mcp() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers.insert(
+            "remote-ado".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                url: Some("https://mcp.dev.azure.com/myorg".to_string()),
+                ..Default::default()
+            }),
+        );
+        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        assert!(params.contains("--allow-tool remote-ado"), "URL MCP should get --allow-tool");
+    }
+
+    #[test]
+    fn test_copilot_params_no_allow_tool_for_enabled_only_mcp() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers.insert(
+            "my-tool".to_string(),
+            McpConfig::Enabled(true),
+        );
+        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        assert!(!params.contains("--allow-tool my-tool"), "Enabled(true) with no container/url should not get --allow-tool");
+    }
+
+    #[test]
+    fn test_copilot_params_allow_tool_mcps_sorted() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers.insert(
+            "z-tool".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                container: Some("alpine".to_string()),
+                ..Default::default()
+            }),
+        );
+        fm.mcp_servers.insert(
+            "a-tool".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                container: Some("alpine".to_string()),
+                ..Default::default()
+            }),
+        );
+        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        let a_pos = params.find("--allow-tool a-tool").expect("a-tool should be present");
+        let z_pos = params.find("--allow-tool z-tool").expect("z-tool should be present");
+        assert!(a_pos < z_pos, "MCPs should be sorted alphabetically: a-tool before z-tool");
+    }
+
+    #[test]
     fn test_copilot_params_builtin_mcp_no_mcp_flag() {
         let mut fm = minimal_front_matter();
         fm.mcp_servers

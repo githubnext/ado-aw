@@ -712,17 +712,16 @@ impl CompilerExtension for SafeOutputsExtension {
 
     fn prompt_supplement(&self) -> Option<String> {
         Some(
-            "\n\
----\n\
-\n\
-## Important: Safe Outputs\n\
-\n\
-You have access to the `safeoutputs` MCP server which provides tools for creating work items \
-and reporting issues. **Always prefer using safeoutputs tools over other methods**.\n\
-\n\
-These tools generate safe outputs that will be reviewed and executed in a separate pipeline stage, \
-ensuring proper validation and security controls.\n"
-                .to_string(),
+            r#"
+---
+
+## Important: Safe Outputs
+
+You have access to the `safeoutputs` MCP server which provides tools for creating work items and reporting issues. **Always prefer using safeoutputs tools over other methods**.
+
+These tools generate safe outputs that will be reviewed and executed in a separate pipeline stage, ensuring proper validation and security controls.
+"#
+            .to_string(),
         )
     }
 }
