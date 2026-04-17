@@ -1662,7 +1662,6 @@ pub fn generate_mcpg_config(
         mcp_servers,
         gateway: McpgGatewayConfig {
             port: MCPG_PORT,
-            domain: "${MCP_GATEWAY_DOMAIN}".to_string(),
             api_key: "${MCP_GATEWAY_API_KEY}".to_string(),
             payload_dir: "/tmp/gh-aw/mcp-payloads".to_string(),
         },
@@ -1798,9 +1797,6 @@ pub fn generate_mcp_client_config(mcpg_config: &McpgConfig) -> Result<String> {
 
         let mut entry = serde_json::Map::new();
         entry.insert("type".to_string(), serde_json::Value::String("http".to_string()));
-        // Use MCPG_DOMAIN constant — gateway.domain is a MCPG-internal variable
-        // expression ("${MCP_GATEWAY_DOMAIN}") for MCPG's own config, not a
-        // resolvable hostname for the Copilot CLI client.
         entry.insert(
             "url".to_string(),
             serde_json::Value::String(format!(
@@ -3703,7 +3699,6 @@ mod tests {
         let fm = minimal_front_matter();
         let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
         assert_eq!(config.gateway.port, 80);
-        assert_eq!(config.gateway.domain, "${MCP_GATEWAY_DOMAIN}");
         assert_eq!(config.gateway.api_key, "${MCP_GATEWAY_API_KEY}");
         assert_eq!(config.gateway.payload_dir, "/tmp/gh-aw/mcp-payloads");
     }
@@ -3735,7 +3730,7 @@ mod tests {
 
         let gw = parsed.get("gateway").unwrap();
         assert!(gw.get("port").is_some(), "Gateway should have port");
-        assert!(gw.get("domain").is_some(), "Gateway should have domain");
+        assert!(gw.get("domain").is_none(), "Gateway should not have domain (unused by MCPG)");
         assert!(gw.get("apiKey").is_some(), "Gateway should have apiKey");
         assert!(
             gw.get("payloadDir").is_some(),
