@@ -254,7 +254,7 @@ extends:
                     # (--rm only cleans up on clean exit; OOM/SIGKILL may leave it behind)
                     docker rm -f mcpg 2>/dev/null || true
                     GATEWAY_OUTPUT="/tmp/gh-aw/mcp-config/gateway-output.json"
-                    mkdir -p "$(dirname "$GATEWAY_OUTPUT")"
+                    mkdir -p "$(dirname "$GATEWAY_OUTPUT")" /tmp/gh-aw/mcp-logs
                     rm -f "$GATEWAY_OUTPUT"
 
                     # Start MCPG Docker container on host network.
