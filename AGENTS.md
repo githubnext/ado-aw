@@ -803,6 +803,8 @@ MCPG runs in routed mode by default, exposing each backend at `/mcp/{serverID}`.
 - `headers` — Bearer auth with the gateway API key (ADO variable `$(MCP_GATEWAY_API_KEY)`)
 - `tools: ["*"]` — allow all tools (Copilot CLI requirement)
 
+**Variable expansion note:** The `$(MCP_GATEWAY_API_KEY)` token in the generated JSON uses ADO macro syntax. Although the JSON is written to disk via a quoted bash heredoc (`<< 'EOF'`), which prevents bash `$(...)` command substitution, ADO macro expansion processes the entire script body *before* bash executes it. The real API key value is therefore substituted by ADO at pipeline runtime, and the file on disk contains the actual secret — Copilot CLI does not need to perform any variable expansion.
+
 Server names are validated for URL path safety (no `/`, `#`, `?`, `%`, or spaces). Server entries are sorted alphabetically for deterministic output.
 
 Example output:

@@ -1834,6 +1834,9 @@ pub fn generate_mcp_client_config(mcpg_config: &McpgConfig) -> Result<String> {
             )),
         );
 
+        // $(MCP_GATEWAY_API_KEY) uses ADO macro syntax. The generated JSON is embedded
+        // in a bash heredoc; ADO expands $(VARNAME) in script bodies before bash runs,
+        // so the real API key value is substituted at pipeline runtime.
         let mut headers = serde_json::Map::new();
         headers.insert(
             "Authorization".to_string(),

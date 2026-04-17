@@ -126,6 +126,11 @@ jobs:
           # Generate MCP config for copilot CLI pointing to MCPG gateway on host.
           # The agent inside AWF reaches MCPG via host.docker.internal using routed
           # endpoints (/mcp/{serverID}). Each server has its own entry with auth headers.
+          #
+          # NOTE: The quoted heredoc (<< 'EOF') prevents bash from expanding $(...)
+          # as command substitution. However, $(MCP_GATEWAY_API_KEY) in the JSON is
+          # still expanded by ADO macro expansion, which processes the entire script
+          # body *before* bash executes it. The real API key value ends up in the file.
           cat > /tmp/awf-tools/mcp-config.json << 'MCP_CLIENT_CONFIG_EOF'
           {{ mcp_client_config }}
           MCP_CLIENT_CONFIG_EOF
