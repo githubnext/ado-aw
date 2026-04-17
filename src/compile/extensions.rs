@@ -422,7 +422,7 @@ the toolchain. Lean files use the `.lean` extension.\n"
 // ─── Azure DevOps MCP ────────────────────────────────────────────────
 
 use crate::allowed_hosts::mcp_required_hosts;
-use super::common::{ADO_MCP_IMAGE, ADO_MCP_CACHED_IMAGE, ADO_MCP_ENTRYPOINT, ADO_MCP_PACKAGE, ADO_MCP_SERVER_NAME};
+use super::common::{ADO_MCP_IMAGE, ADO_MCP_ENTRYPOINT, ADO_MCP_PACKAGE, ADO_MCP_SERVER_NAME};
 use super::types::AzureDevOpsToolConfig;
 
 /// Azure DevOps first-party tool extension.
@@ -449,41 +449,23 @@ impl CompilerExtension for AzureDevOpsExtension {
     }
 
     fn required_hosts(&self) -> Vec<String> {
-        mcp_required_hosts("ado")
+        let mut hosts: Vec<String> = mcp_required_hosts("ado")
             .iter()
             .map(|h| (*h).to_string())
-            .collect()
+            .collect();
+        // The ADO MCP runs in a container via `npx -y @azure-devops/mcp`.
+        // npx needs npm registry access to resolve and install the package.
+        hosts.push("node".to_string());
+        hosts
     }
 
     fn allowed_copilot_tools(&self) -> Vec<String> {
         vec![ADO_MCP_SERVER_NAME.to_string()]
     }
 
-    fn prepare_steps(&self) -> Vec<String> {
-        // Pre-build a local Docker image with @azure-devops/mcp pre-installed.
-        // Without this, MCPG's 30s startup timeout is exceeded because `npx -y`
-        // needs to download and install the package at container launch time.
-        vec![format!(
-            r#"- bash: |
-    echo "Pre-building Azure DevOps MCP container image..."
-    docker pull {base_image}
-    CONTAINER_ID=$(docker create {base_image} sh -c "npm install -g {package}")
-    docker start -a "$CONTAINER_ID"
-    docker commit "$CONTAINER_ID" {cached_image}
-    docker rm "$CONTAINER_ID"
-    echo "Azure DevOps MCP container image ready: {cached_image}"
-    docker images {cached_image}
-  displayName: "Pre-install Azure DevOps MCP""#,
-            base_image = ADO_MCP_IMAGE,
-            package = ADO_MCP_PACKAGE,
-            cached_image = ADO_MCP_CACHED_IMAGE,
-        )]
-    }
-
     fn mcpg_servers(&self, ctx: &CompileContext) -> Result<Vec<(String, McpgServerConfig)>> {
-        // Build entrypoint args: @azure-devops/mcp <org> [-d toolset1 toolset2 ...]
-        // Uses the pre-installed package from the cached image (no npx -y download needed).
-        let mut entrypoint_args = vec![ADO_MCP_PACKAGE.to_string()];
+        // Build entrypoint args: npx -y @azure-devops/mcp <org> [-d toolset1 toolset2 ...]
+        let mut entrypoint_args = vec!["-y".to_string(), ADO_MCP_PACKAGE.to_string()];
 
         // Org: use explicit override, then inferred from git remote, then fail
         let org = self
@@ -541,7 +523,7 @@ impl CompilerExtension for AzureDevOpsExtension {
             ADO_MCP_SERVER_NAME.to_string(),
             McpgServerConfig {
                 server_type: "stdio".to_string(),
-                container: Some(ADO_MCP_CACHED_IMAGE.to_string()),
+                container: Some(ADO_MCP_IMAGE.to_string()),
                 entrypoint: Some(ADO_MCP_ENTRYPOINT.to_string()),
                 entrypoint_args: Some(entrypoint_args),
                 mounts: None,
@@ -1043,6 +1025,8 @@ mod tests {
         let ext = AzureDevOpsExtension::new(AzureDevOpsToolConfig::Enabled(true));
         let hosts = ext.required_hosts();
         assert!(hosts.contains(&"dev.azure.com".to_string()));
+        // Node ecosystem is required for npx to resolve @azure-devops/mcp
+        assert!(hosts.contains(&"node".to_string()));
     }
 
     #[test]
@@ -1085,27 +1069,6 @@ mod tests {
         let warnings = ext.validate(&ctx).unwrap();
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("both tools.azure-devops and mcp-servers"));
-    }
-
-    #[test]
-    fn test_ado_prepare_steps_builds_cached_image() {
-        let ext = AzureDevOpsExtension::new(AzureDevOpsToolConfig::Enabled(true));
-        let steps = ext.prepare_steps();
-        assert_eq!(steps.len(), 1);
-        assert!(steps[0].contains(ADO_MCP_IMAGE), "should pull base image");
-        assert!(steps[0].contains(ADO_MCP_PACKAGE), "should install package");
-        assert!(steps[0].contains(ADO_MCP_CACHED_IMAGE), "should commit as cached image");
-    }
-
-    #[test]
-    fn test_ado_mcpg_servers_uses_cached_image() {
-        let fm = minimal_front_matter();
-        let ctx = CompileContext::for_test_with_org(&fm, "myorg");
-        let ext = AzureDevOpsExtension::new(AzureDevOpsToolConfig::Enabled(true));
-        let servers = ext.mcpg_servers(&ctx).unwrap();
-        assert_eq!(servers[0].1.container.as_deref(), Some(ADO_MCP_CACHED_IMAGE));
-        let args = servers[0].1.entrypoint_args.as_ref().unwrap();
-        assert!(!args.contains(&"-y".to_string()), "cached image should not use -y flag");
     }
 
     // ── CacheMemoryExtension ───────────────────────────────────────
