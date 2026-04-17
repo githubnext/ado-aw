@@ -795,41 +795,18 @@ If no passthrough env vars are needed, this marker is replaced with an empty str
 
 ## {{ mcp_client_config }}
 
-Should be replaced with the Copilot CLI `mcp-config.json` content, generated at compile time from the MCPG server configuration. This follows gh-aw's pattern where `convert_gateway_config_copilot.cjs` produces per-server routed URLs.
+**Removed.** The Copilot CLI `mcp-config.json` is no longer generated at compile time. Instead, it is derived at **pipeline runtime** from MCPG's actual gateway output, matching gh-aw's `convert_gateway_config_copilot.cjs` pattern.
 
-MCPG runs in routed mode by default, exposing each backend at `/mcp/{serverID}`. The generated JSON lists one entry per MCPG-managed server with:
-- `type: "http"` — Copilot CLI HTTP transport
-- `url` — routed endpoint (`http://host.docker.internal:{port}/mcp/{name}`)
-- `headers` — Bearer auth with the gateway API key (ADO variable `$(MCP_GATEWAY_API_KEY)`)
-- `tools: ["*"]` — allow all tools (Copilot CLI requirement)
+The "Start MCP Gateway (MCPG)" pipeline step:
+1. Redirects MCPG's stdout to `gateway-output.json`
+2. Waits for the health check and for valid JSON output
+3. Transforms the output with a Python script that:
+   - Rewrites URLs from `127.0.0.1` → `host.docker.internal` (AWF container loopback vs host)
+   - Ensures `tools: ["*"]` on each server entry (Copilot CLI requirement)
+   - Preserves all other fields (headers, type, etc.)
+4. Writes the result to `/tmp/awf-tools/mcp-config.json` and `$HOME/.copilot/mcp-config.json`
 
-**Variable expansion note:** The `$(MCP_GATEWAY_API_KEY)` token in the generated JSON uses ADO macro syntax. Although the JSON is written to disk via a quoted bash heredoc (`<< 'EOF'`), which prevents bash `$(...)` command substitution, ADO macro expansion processes the entire script body *before* bash executes it. The real API key value is therefore substituted by ADO at pipeline runtime, and the file on disk contains the actual secret — Copilot CLI does not need to perform any variable expansion.
-
-Server names are validated for URL path safety (no `/`, `#`, `?`, `%`, or spaces). Server entries are sorted alphabetically for deterministic output.
-
-Example output:
-```json
-{
-  "mcpServers": {
-    "azure-devops": {
-      "type": "http",
-      "url": "http://host.docker.internal:80/mcp/azure-devops",
-      "headers": {
-        "Authorization": "Bearer $(MCP_GATEWAY_API_KEY)"
-      },
-      "tools": ["*"]
-    },
-    "safeoutputs": {
-      "type": "http",
-      "url": "http://host.docker.internal:80/mcp/safeoutputs",
-      "headers": {
-        "Authorization": "Bearer $(MCP_GATEWAY_API_KEY)"
-      },
-      "tools": ["*"]
-    }
-  }
-}
-```
+This ensures the Copilot CLI config reflects MCPG's actual runtime state rather than a compile-time prediction.
 
 ## {{ allowed_domains }}
 
