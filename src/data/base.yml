@@ -249,6 +249,7 @@ jobs:
             -e MCP_GATEWAY_PORT="$(MCP_GATEWAY_PORT)" \
             -e MCP_GATEWAY_DOMAIN="$(MCP_GATEWAY_DOMAIN)" \
             -e MCP_GATEWAY_API_KEY="$(MCP_GATEWAY_API_KEY)" \
+            -e DEBUG="*" \
             {{ mcpg_docker_env }}
             {{ mcpg_image }}:v{{ mcpg_version }} \
             --routed --listen 0.0.0.0:{{ mcpg_port }} --config-stdin --log-dir /tmp/gh-aw/mcp-logs \
@@ -312,6 +313,42 @@ jobs:
           echo "Generated MCP config at: /tmp/awf-tools/mcp-config.json"
           cat /tmp/awf-tools/mcp-config.json
         displayName: "Start MCP Gateway (MCPG)"
+
+      # Probe all MCPG backends to force eager launch and surface failures.
+      # MCPG lazily starts stdio backends on first tool call — without this
+      # step, a broken backend (e.g., npx timeout) only surfaces as a silent
+      # missing-tool error during the agent run.
+      - bash: |
+          echo "=== Probing MCP backends ==="
+          PROBE_FAILED=false
+          for server in $(jq -r '.mcpServers | keys[]' /tmp/awf-tools/mcp-config.json); do
+            echo ""
+            echo "--- Probing: $server ---"
+            RESPONSE=$(curl -sf --max-time 120 -X POST \
+              -H "Authorization: Bearer $(MCP_GATEWAY_API_KEY)" \
+              -H "Content-Type: application/json" \
+              -H "Accept: application/json, text/event-stream" \
+              -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+              "http://localhost:{{ mcpg_port }}/mcp/$server" 2>&1)
+            CURL_EXIT=$?
+            if [ $CURL_EXIT -ne 0 ]; then
+              echo "##vso[task.logissue type=warning]MCP backend '$server' failed to respond (exit code $CURL_EXIT)"
+              echo "Response: $RESPONSE"
+              PROBE_FAILED=true
+            else
+              TOOL_COUNT=$(echo "$RESPONSE" | jq -r '.result.tools | length' 2>/dev/null || echo "?")
+              echo "✓ $server: $TOOL_COUNT tools available"
+            fi
+          done
+
+          echo ""
+          echo "=== MCPG health after probes ==="
+          curl -sf "http://localhost:{{ mcpg_port }}/health" | jq . || true
+
+          if [ "$PROBE_FAILED" = "true" ]; then
+            echo "##vso[task.logissue type=warning]One or more MCP backends failed to initialize — check logs above"
+          fi
+        displayName: "Verify MCP backends"
 
       # Network isolation via AWF (Agentic Workflow Firewall)
       - bash: |
