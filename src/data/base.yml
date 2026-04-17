@@ -325,7 +325,7 @@ jobs:
             echo ""
             echo "--- Probing: $server ---"
             HTTP_CODE=$(curl -s -o /tmp/probe-response.json -w "%{http_code}" --max-time 120 -X POST \
-              -H "Authorization: Bearer $(MCP_GATEWAY_API_KEY)" \
+              -H "Authorization: Bearer $MCPG_API_KEY" \
               -H "Content-Type: application/json" \
               -H "Accept: application/json, text/event-stream" \
               -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
@@ -351,6 +351,8 @@ jobs:
             echo "##vso[task.logissue type=warning]One or more MCP backends failed to initialize — check logs above"
           fi
         displayName: "Verify MCP backends"
+        env:
+          MCPG_API_KEY: $(MCP_GATEWAY_API_KEY)
 
       # Network isolation via AWF (Agentic Workflow Firewall)
       - bash: |
