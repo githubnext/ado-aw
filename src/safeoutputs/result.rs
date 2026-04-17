@@ -32,7 +32,7 @@ pub trait Validate {
     }
 }
 
-/// Context provided to executors during Stage 2 execution
+/// Context provided to executors during Stage 3 execution
 #[derive(Debug, Clone)]
 pub struct ExecutionContext {
     /// Azure DevOps organization URL (e.g., "https://dev.azure.com/myorg")
@@ -116,7 +116,7 @@ impl Default for ExecutionContext {
     }
 }
 
-/// Result of executing a tool action in Stage 2
+/// Result of executing a tool action in Stage 3
 #[derive(Debug, Serialize)]
 pub struct ExecutionResult {
     /// Whether the execution succeeded
@@ -190,10 +190,10 @@ impl ExecutionResult {
     }
 }
 
-/// Trait for executing tool results in Stage 2 of the pipeline.
+/// Trait for executing tool results in Stage 3 of the pipeline.
 ///
 /// After the agent generates safe outputs (serialized ToolResult structs),
-/// Stage 2 parses these outputs and calls `execute` on each to perform
+/// Stage 3 parses these outputs and calls `execute` on each to perform
 /// the actual action (e.g., create work items, update files, etc.)
 #[async_trait::async_trait]
 pub trait Executor: SanitizeContent + Send + Sync {
@@ -203,7 +203,7 @@ pub trait Executor: SanitizeContent + Send + Sync {
 
     /// Sanitize all untrusted fields then execute.
     ///
-    /// This is the primary entry point for Stage 2 execution. It guarantees
+    /// This is the primary entry point for Stage 3 execution. It guarantees
     /// `sanitize_fields()` is called before `execute_impl()`, making it impossible
     /// to accidentally skip sanitization.
     async fn execute_sanitized(&mut self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
@@ -224,7 +224,7 @@ pub fn anyhow_to_mcp_error(err: anyhow::Error) -> McpError {
 /// Macro to generate a tool result struct with automatic `name` field and TryFrom<Params> conversion
 ///
 /// The generated struct derives `Serialize`, `Deserialize`, and `JsonSchema`, making it suitable
-/// for both Stage 1 (serialization to safe outputs) and Stage 2 (deserialization for execution).
+/// for both Stage 1 (serialization to safe outputs) and Stage 3 (deserialization for execution).
 ///
 /// # Usage
 ///

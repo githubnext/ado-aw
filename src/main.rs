@@ -47,7 +47,7 @@ enum Commands {
         #[arg(long = "enabled-tools")]
         enabled_tools: Vec<String>,
     },
-    /// Execute safe outputs from Stage 1 (Stage 2 of the pipeline)
+    /// Execute safe outputs from Stage 1 (Stage 3 of the pipeline)
     Execute {
         /// Path to the source markdown file (used to read tool configs from front matter)
         #[arg(short, long)]

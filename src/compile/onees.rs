@@ -59,8 +59,8 @@ impl Compiler for OneESCompiler {
         // Generate 1ES-specific setup/teardown jobs (no per-job pool, uses templateContext).
         // These override the shared {{ setup_job }} / {{ teardown_job }} markers via
         // extra_replacements, which are applied before the shared replacements.
-        let setup_job = generate_setup_job(&front_matter.setup, &front_matter.name);
-        let teardown_job = generate_teardown_job(&front_matter.teardown, &front_matter.name);
+        let setup_job = generate_setup_job(&front_matter.setup);
+        let teardown_job = generate_teardown_job(&front_matter.teardown);
 
         let config = CompileConfig {
             template: include_str!("../data/1es-base.yml").to_string(),
@@ -87,7 +87,7 @@ impl Compiler for OneESCompiler {
 /// Generate setup job for 1ES template.
 /// Unlike standalone, 1ES jobs don't have per-job `pool:` — the pool is at
 /// the top-level `parameters.pool`. Jobs use `templateContext: type: buildJob`.
-fn generate_setup_job(setup_steps: &[serde_yaml::Value], agent_name: &str) -> String {
+fn generate_setup_job(setup_steps: &[serde_yaml::Value]) -> String {
     if setup_steps.is_empty() {
         return String::new();
     }
@@ -95,21 +95,21 @@ fn generate_setup_job(setup_steps: &[serde_yaml::Value], agent_name: &str) -> St
     let steps_yaml = format_steps_yaml_indented(setup_steps, 6);
 
     format!(
-        r#"- job: SetupJob
-  displayName: "{} - Setup"
+        r#"- job: Setup
+  displayName: "Setup"
   templateContext:
     type: buildJob
     steps:
       - checkout: self
 {}
 "#,
-        agent_name, steps_yaml
+        steps_yaml
     )
 }
 
 /// Generate teardown job for 1ES template.
 /// Unlike standalone, 1ES jobs don't have per-job `pool:`.
-fn generate_teardown_job(teardown_steps: &[serde_yaml::Value], agent_name: &str) -> String {
+fn generate_teardown_job(teardown_steps: &[serde_yaml::Value]) -> String {
     if teardown_steps.is_empty() {
         return String::new();
     }
@@ -117,16 +117,16 @@ fn generate_teardown_job(teardown_steps: &[serde_yaml::Value], agent_name: &str)
     let steps_yaml = format_steps_yaml_indented(teardown_steps, 6);
 
     format!(
-        r#"- job: TeardownJob
-  displayName: "{} - Teardown"
-  dependsOn: ProcessSafeOutputs
+        r#"- job: Teardown
+  displayName: "Teardown"
+  dependsOn: Execution
   templateContext:
     type: buildJob
     steps:
       - checkout: self
 {}
 "#,
-        agent_name, steps_yaml
+        steps_yaml
     )
 }
 
@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn test_generate_setup_job_empty_steps() {
-        let result = generate_setup_job(&[], "My Agent");
+        let result = generate_setup_job(&[]);
         assert!(result.is_empty(), "Empty setup steps should return empty string");
     }
 
@@ -146,12 +146,9 @@ mod tests {
     fn test_generate_setup_job_with_steps() {
         let step: serde_yaml::Value =
             serde_yaml::from_str("bash: echo setup").expect("valid yaml");
-        let result = generate_setup_job(&[step], "My Agent");
-        assert!(result.contains("SetupJob"), "Should define a SetupJob");
-        assert!(
-            result.contains("My Agent - Setup"),
-            "Should include agent name in display name"
-        );
+        let result = generate_setup_job(&[step]);
+        assert!(result.contains("Setup"), "Should define a Setup job");
+        assert!(result.contains("displayName: \"Setup\""), "Should use simple display name");
         assert!(result.contains("checkout: self"), "Should include self checkout");
         assert!(result.contains("echo setup"), "Should include the step content");
         assert!(result.contains("templateContext"), "Should include templateContext");
@@ -163,7 +160,7 @@ mod tests {
 
     #[test]
     fn test_generate_teardown_job_empty_steps() {
-        let result = generate_teardown_job(&[], "My Agent");
+        let result = generate_teardown_job(&[]);
         assert!(result.is_empty(), "Empty teardown steps should return empty string");
     }
 
@@ -171,15 +168,15 @@ mod tests {
     fn test_generate_teardown_job_with_steps() {
         let step: serde_yaml::Value =
             serde_yaml::from_str("bash: echo teardown").expect("valid yaml");
-        let result = generate_teardown_job(&[step], "My Agent");
-        assert!(result.contains("TeardownJob"), "Should define a TeardownJob");
+        let result = generate_teardown_job(&[step]);
+        assert!(result.contains("Teardown"), "Should define a Teardown job");
         assert!(
-            result.contains("My Agent - Teardown"),
-            "Should include agent name in display name"
+            result.contains("displayName: \"Teardown\""),
+            "Should use simple display name"
         );
         assert!(
-            result.contains("ProcessSafeOutputs"),
-            "Should depend on ProcessSafeOutputs"
+            result.contains("dependsOn: Execution"),
+            "Should depend on Execution"
         );
         assert!(result.contains("checkout: self"), "Should include self checkout");
         assert!(result.contains("echo teardown"), "Should include the step content");

@@ -296,7 +296,7 @@ tool_result! {
         #[serde(default)]
         agent_labels: Vec<String>,
         /// Base commit SHA recorded at patch generation time (merge-base of HEAD and
-        /// the upstream branch). When present, Stage 2 uses this as the parent commit
+        /// the upstream branch). When present, Stage 3 uses this as the parent commit
         /// for the ADO Push API, ensuring the patch applies cleanly even if the target
         /// branch has advanced since the agent ran. Falls back to resolving the live
         /// target branch HEAD via the ADO refs API when absent (backward compatibility).

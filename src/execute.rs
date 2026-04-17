@@ -1,7 +1,7 @@
-//! Stage 2 execution: Parse safe outputs and execute actions
+//! Stage 3 execution: Parse safe outputs and execute actions
 //!
 //! After the agent (Stage 1) generates safe outputs as an NDJSON file,
-//! Stage 2 parses this file and executes the corresponding actions.
+//! Stage 3 parses this file and executes the corresponding actions.
 
 use anyhow::{Result, bail};
 use log::{debug, error, info, warn};
@@ -30,7 +30,7 @@ pub async fn execute_safe_outputs(
 ) -> Result<Vec<ExecutionResult>> {
     let safe_output_path = safe_output_dir.join(SAFE_OUTPUT_FILENAME);
 
-    info!("Stage 2 execution starting");
+    info!("Stage 3 execution starting");
     debug!("Safe output directory: {}", safe_output_dir.display());
     debug!("Source directory: {}", ctx.source_directory.display());
     debug!(
@@ -206,7 +206,7 @@ pub async fn execute_safe_outputs(
     let warning_count = results.iter().filter(|r| r.is_warning()).count();
     let failure_count = results.iter().filter(|r| !r.success).count();
     info!(
-        "Stage 2 execution complete: {} succeeded, {} warnings, {} failed",
+        "Stage 3 execution complete: {} succeeded, {} warnings, {} failed",
         success_count, warning_count, failure_count
     );
 

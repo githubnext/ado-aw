@@ -15,8 +15,8 @@ resources:
 
 jobs:
   {{ setup_job }}
-  - job: PerformAgenticTask
-    displayName: "{{ agent_name }} (Agent Automations)"
+  - job: Agent
+    displayName: "Agent"
     {{ agentic_depends_on }}
     {{ job_timeout }}
     pool:
@@ -384,9 +384,9 @@ jobs:
         artifact: agent_outputs_$(Build.BuildId)
         condition: always()
 
-  - job: AnalyzeSafeOutputs
-    displayName: "Analyze safe outputs for threats"
-    dependsOn: PerformAgenticTask
+  - job: Detection
+    displayName: "Detection"
+    dependsOn: Agent
     pool:
       name: {{ pool }}
     steps:
@@ -599,12 +599,12 @@ jobs:
         artifact: analyzed_outputs_$(Build.BuildId)
         condition: always()
 
-  - job: ProcessSafeOutputs
-    displayName: "Process safe outputs"
+  - job: Execution
+    displayName: "Execution"
     dependsOn:
-      - PerformAgenticTask
-      - AnalyzeSafeOutputs
-    condition: and(succeeded(), eq(dependencies.AnalyzeSafeOutputs.outputs['threatAnalysis.SafeToProcess'], 'true'))
+      - Agent
+      - Detection
+    condition: and(succeeded(), eq(dependencies.Detection.outputs['threatAnalysis.SafeToProcess'], 'true'))
     pool:
       name: {{ pool }}
     steps:
@@ -652,7 +652,7 @@ jobs:
             exit 0
           fi
           exit $EXIT_CODE
-        displayName: Execute safe outputs (Stage 2)
+        displayName: Execute safe outputs (Stage 3)
         workingDirectory: {{ working_directory }}
         env:
           {{ executor_ado_env }}

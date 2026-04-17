@@ -122,7 +122,7 @@ fn test_compiled_yaml_structure() {
     );
 
     // Verify that {{ pool }} marker is used for all jobs, not hardcoded pool names
-    // This ensures consistency across PerformAgenticTask, AnalyzeSafeOutputs, and ProcessSafeOutputs jobs
+    // This ensures consistency across Agent, Detection, and Execution jobs.
     let pool_marker_count = template_content.matches("name: {{ pool }}").count();
     assert_eq!(
         pool_marker_count, 3,
@@ -1421,7 +1421,7 @@ fn test_fixture_comment_on_work_item_compiled_output() {
         "Compiled output should allow the safeoutputs MCP tool"
     );
 
-    // Should contain the write service connection for Stage 2
+    // Should contain the write service connection for Stage 3
     assert!(
         compiled.contains("my-write-sc"),
         "Compiled output should contain the write service connection"
@@ -3036,17 +3036,14 @@ fn test_1es_compiled_output_is_valid_yaml() {
         compiled.contains("ado-aw execute"),
         "1ES output should contain safe output executor step"
     );
+    assert!(compiled.contains("job: Agent"), "1ES output should contain Agent job");
     assert!(
-        compiled.contains("PerformAgenticTask"),
-        "1ES output should contain PerformAgenticTask job"
+        compiled.contains("job: Detection"),
+        "1ES output should contain Detection job"
     );
     assert!(
-        compiled.contains("AnalyzeSafeOutputs"),
-        "1ES output should contain AnalyzeSafeOutputs job"
-    );
-    assert!(
-        compiled.contains("ProcessSafeOutputs"),
-        "1ES output should contain ProcessSafeOutputs job"
+        compiled.contains("job: Execution"),
+        "1ES output should contain Execution job"
     );
 
     // Verify no Agency remnants

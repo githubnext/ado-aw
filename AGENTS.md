@@ -32,7 +32,7 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 │   │   ├── extensions.rs # CompilerExtension trait for runtimes/tools
 │   │   └── types.rs      # Front matter grammar and types
 │   ├── init.rs           # Repository initialization for AI-first authoring
-│   ├── execute.rs        # Stage 2 safe output execution
+│   ├── execute.rs        # Stage 3 safe output execution
 │   ├── fuzzy_schedule.rs # Fuzzy schedule parsing
 │   ├── logging.rs        # File-based logging infrastructure
 │   ├── mcp.rs            # SafeOutputs MCP server (stdio + HTTP)
@@ -41,7 +41,7 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 │   ├── ndjson.rs         # NDJSON parsing utilities
 │   ├── sanitize.rs       # Input sanitization for safe outputs
 │   ├── agent_stats.rs    # OTel-based agent statistics parsing (token usage, duration, turns)
-│   ├── safeoutputs/      # Safe-output MCP tool implementations (Stage 1 → NDJSON → Stage 2)
+│   ├── safeoutputs/      # Safe-output MCP tool implementations (Stage 1 → NDJSON → Stage 3)
 │   │   ├── mod.rs
 │   │   ├── add_build_tag.rs
 │   │   ├── add_pr_comment.rs
@@ -207,7 +207,7 @@ network:                       # optional network policy (standalone target only
     - "evil.example.com"
 permissions:                   # optional ADO access token configuration
   read: my-read-arm-connection   # ARM service connection for read-only ADO access (Stage 1 agent)
-  write: my-write-arm-connection # ARM service connection for write ADO access (Stage 2 executor only)
+  write: my-write-arm-connection # ARM service connection for write ADO access (Stage 3 executor only)
 parameters:                    # optional ADO runtime parameters (surfaced in UI when queuing a run)
   - name: clearMemory
     displayName: "Clear agent memory"
@@ -331,13 +331,13 @@ engine:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `model` | string | `claude-opus-4.5` | AI model to use. Options include `claude-sonnet-4.5`, `gpt-5.2-codex`, `gemini-3-pro-preview`, etc. |
-| `timeout-minutes` | integer | *(none)* | Maximum time in minutes the agent job is allowed to run. Sets `timeoutInMinutes` on the `PerformAgenticTask` job in the generated pipeline. |
+| `timeout-minutes` | integer | *(none)* | Maximum time in minutes the agent job is allowed to run. Sets `timeoutInMinutes` on the `Agent` job in the generated pipeline. |
 
 > **Deprecated:** `max-turns` is still accepted in front matter for backwards compatibility but is ignored at compile time (a warning is emitted). It was specific to Claude Code and is not supported by Copilot CLI.
 
 #### `timeout-minutes`
 
-The `timeout-minutes` field sets a wall-clock limit (in minutes) for the entire agent job. It maps to the Azure DevOps `timeoutInMinutes` job property on `PerformAgenticTask`. This is useful for:
+The `timeout-minutes` field sets a wall-clock limit (in minutes) for the entire agent job. It maps to the Azure DevOps `timeoutInMinutes` job property on `Agent`. This is useful for:
 
 - **Budget enforcement** — hard-capping the total runtime of an agent to control compute costs.
 - **Pipeline hygiene** — preventing agents from occupying a runner indefinitely if they stall or enter long retry loops.
@@ -449,7 +449,7 @@ When enabled, the compiler auto-generates pipeline steps to:
 - Append a memory prompt to the agent instructions
 - Auto-inject a `clearMemory` pipeline parameter (allows clearing memory from the ADO UI)
 
-During Stage 2 execution, memory files are validated (path safety, extension filtering, `##vso[` injection detection, 5 MB size limit) and published as a pipeline artifact.
+During Stage 3 execution, memory files are validated (path safety, extension filtering, `##vso[` injection detection, 5 MB size limit) and published as a pipeline artifact.
 
 #### Azure DevOps MCP (`azure-devops:`)
 
@@ -514,7 +514,7 @@ The `target` field in the front matter determines the output format and executio
 #### `standalone` (default)
 
 Generates a self-contained Azure DevOps pipeline with:
-- Full 3-job pipeline: `PerformAgenticTask` → `AnalyzeSafeOutputs` → `ProcessSafeOutputs`
+- Full 3-job pipeline: `Agent` → `Detection` → `Execution`
 - AWF (Agentic Workflow Firewall) L7 domain whitelisting via Squid proxy + Docker
 - MCP Gateway (MCPG) for MCP routing with SafeOutputs HTTP backend
 - Setup/teardown job support
@@ -527,7 +527,7 @@ This is the recommended target for maximum flexibility and security controls.
 Generates a pipeline that extends the 1ES Unofficial Pipeline Template:
 - Uses `templateContext.type: buildJob` with Copilot CLI + AWF + MCPG (same execution model as standalone)
 - Integrates with 1ES SDL scanning and compliance tools
-- Full 3-job pipeline: PerformAgenticTask → AnalyzeSafeOutputs → ProcessSafeOutputs
+- Full 3-job pipeline: Agent → Detection → Execution
 - Requires 1ES Pipeline Templates repository access
 
 Example:
@@ -614,7 +614,7 @@ Examples of fuzzy schedule → cron conversion:
 
 Should be replaced with the `checkout: self` step. This generates a simple checkout of the triggering branch.
 
-All checkout steps across all jobs (PerformAgenticTask, AnalyzeSafeOutputs, ProcessSafeOutputs, SetupJob, TeardownJob) use this marker.
+All checkout steps across all jobs (Agent, Detection, Execution, Setup, Teardown) use this marker.
 
 ## {{ checkout_repositories }}
 Should be replaced with checkout steps for additional repositories the agent will work with. The behavior depends on the `checkout:` front matter:
@@ -655,26 +655,26 @@ The `os` field (defaults to "linux") is primarily used for 1ES target compatibil
 ## {{ setup_job }}
 
 Generates a separate setup job YAML if `setup` contains steps. The job:
-- Runs before `PerformAgenticTask`
+- Runs before `Agent`
 - Uses the same pool as the main agentic task
 - Includes a checkout of self
-- Display name: `<agent_name> - Setup`
+- Display name: `Setup`
 
 If `setup` is empty, this is replaced with an empty string.
 
 ## {{ teardown_job }}
 
 Generates a separate teardown job YAML if `teardown` contains steps. The job:
-- Runs after `ProcessSafeOutputs` (depends on it)
+- Runs after `Execution` (depends on it)
 - Uses the same pool as the main agentic task
 - Includes a checkout of self
-- Display name: `<agent_name> - Teardown`
+- Display name: `Teardown`
 
 If `teardown` is empty, this is replaced with an empty string.
 
 ## {{ prepare_steps }}
 
-Generates inline steps that run inside the `PerformAgenticTask` job, **before** the agent runs. These steps can generate context files, fetch secrets, or prepare the workspace for the agent.
+Generates inline steps that run inside the `Agent` job, **before** the agent runs. These steps can generate context files, fetch secrets, or prepare the workspace for the agent.
 
 Steps are inserted after the agent prompt is prepared but before AWF network isolation starts.
 
@@ -682,7 +682,7 @@ If `steps` is empty, this is replaced with an empty string.
 
 ## {{ finalize_steps }}
 
-Generates inline steps that run inside the `PerformAgenticTask` job, **after** the agent completes. These steps can validate outputs, process workspace artifacts, or perform cleanup.
+Generates inline steps that run inside the `Agent` job, **after** the agent completes. These steps can validate outputs, process workspace artifacts, or perform cleanup.
 
 Steps are inserted after the AWF-isolated agent completes but before logs are collected.
 
@@ -690,13 +690,13 @@ If `post-steps` is empty, this is replaced with an empty string.
 
 ## {{ agentic_depends_on }}
 
-Generates a `dependsOn: SetupJob` clause for `PerformAgenticTask` if a setup job is configured. The setup job is identified by the job name `SetupJob`, ensuring the agentic task waits for the setup job to complete.
+Generates a `dependsOn: Setup` clause for `Agent` if a setup job is configured. The setup job is identified by the job name `Setup`, ensuring the agentic task waits for the setup job to complete.
 
 If no setup job is configured, this is replaced with an empty string.
 
 ## {{ job_timeout }}
 
-Generates a `timeoutInMinutes: <value>` job property for `PerformAgenticTask` when `engine.timeout-minutes` is configured. This sets the Azure DevOps job-level timeout for the agentic task.
+Generates a `timeoutInMinutes: <value>` job property for `Agent` when `engine.timeout-minutes` is configured. This sets the Azure DevOps job-level timeout for the agentic task.
 
 If `timeout-minutes` is not configured, this is replaced with an empty string.
 
@@ -719,7 +719,7 @@ This is used for the `workingDirectory` property of the copilot task.
 
 ## {{ source_path }}
 
-Should be replaced with the path to the agent markdown source file for Stage 2 execution. The path is relative to the workspace and depends on the effective workspace setting (see `{{ working_directory }}` for resolution logic):
+Should be replaced with the path to the agent markdown source file for Stage 3 execution. The path is relative to the workspace and depends on the effective workspace setting (see `{{ working_directory }}` for resolution logic):
 - `root`: `$(Build.SourcesDirectory)/agents/<filename>.md`
 - `repo`: `$(Build.SourcesDirectory)/$(Build.Repository.Name)/agents/<filename>.md`
 
@@ -862,7 +862,7 @@ If `permissions.read` is not configured, this marker is replaced with an empty s
 
 ## {{ acquire_write_token }}
 
-Generates an `AzureCLI@2` step that acquires a write-capable ADO-scoped access token from the ARM service connection specified in `permissions.write`. This token is used only by the executor in Stage 2 (`ProcessSafeOutputs` job) and is never exposed to the agent.
+Generates an `AzureCLI@2` step that acquires a write-capable ADO-scoped access token from the ARM service connection specified in `permissions.write`. This token is used only by the executor in Stage 3 (`Execution` job) and is never exposed to the agent.
 
 The step:
 - Uses the ARM service connection from `permissions.write`
@@ -873,7 +873,7 @@ If `permissions.write` is not configured, this marker is replaced with an empty 
 
 ## {{ executor_ado_env }}
 
-Generates environment variable entries for the Stage 2 executor step when `permissions.write` is configured. Sets `SYSTEM_ACCESSTOKEN` to the write service connection token (`SC_WRITE_TOKEN`).
+Generates environment variable entries for the Stage 3 executor step when `permissions.write` is configured. Sets `SYSTEM_ACCESSTOKEN` to the write service connection token (`SC_WRITE_TOKEN`).
 
 If `permissions.write` is not configured, this marker is replaced with an empty string. Note: `System.AccessToken` is never used directly — all ADO tokens come from explicitly configured service connections.
 
@@ -943,7 +943,7 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - `--port <port>` - Port to listen on (default: 8100)
   - `--api-key <key>` - API key for authentication (auto-generated if not provided)
   - `--enabled-tools <name>` - Restrict available tools to those named (repeatable)
-- `execute` - Execute safe outputs from Stage 1 (Stage 2 of pipeline)
+- `execute` - Execute safe outputs from Stage 1 (Stage 3 of pipeline)
   - `--source, -s <path>` - Path to source markdown file
   - `--safe-output-dir <path>` - Directory containing safe output NDJSON (default: current directory)
   - `--output-dir <path>` - Output directory for processed artifacts (e.g., agent memory)
@@ -985,7 +985,7 @@ safe-outputs:
       - 12345
 ```
 
-Safe output configurations are passed to Stage 2 execution and used when processing safe outputs.
+Safe output configurations are passed to Stage 3 execution and used when processing safe outputs.
 
 ### Available Safe Output Tools
 
@@ -1003,7 +1003,7 @@ Adds a comment to an existing Azure DevOps work item. This is the ADO equivalent
   - `"*"` - Any work item in the project (unrestricted, must be explicit)
   - `12345` - A specific work item ID
   - `[12345, 67890]` - A list of allowed work item IDs
-  - `"Some\\Path"` - Work items under the specified area path prefix (any string that isn't `"*"`, validated via ADO API at Stage 2)
+  - `"Some\\Path"` - Work items under the specified area path prefix (any string that isn't `"*"`, validated via ADO API at Stage 3)
 
 **Example configuration:**
 ```yaml
@@ -1077,13 +1077,13 @@ Creates a pull request with code changes made by the agent. When invoked:
 2. Saves the patch to the safe outputs directory
 3. Creates a JSON record with PR metadata (title, description, source branch, repository)
 
-During Stage 2 execution, the repository is validated against the allowed list (from `checkout:` + "self"), then the patch is applied and a PR is created in Azure DevOps.
+During Stage 3 execution, the repository is validated against the allowed list (from `checkout:` + "self"), then the patch is applied and a PR is created in Azure DevOps.
 
-**Stage 2 Execution Architecture (Hybrid Git + ADO API):**
+**Stage 3 Execution Architecture (Hybrid Git + ADO API):**
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        Stage 2 Execution                        │
+│                        Stage 3 Execution                        │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  1. Security Validation                                         │
@@ -1718,13 +1718,13 @@ ADO does not support fine-grained permissions — there are two access levels: b
 ```yaml
 permissions:
   read: my-read-arm-connection    # Stage 1 agent — read-only ADO access
-  write: my-write-arm-connection  # Stage 2 executor — write access for safe-outputs
+  write: my-write-arm-connection  # Stage 3 executor — write access for safe-outputs
 ```
 
 #### Security Model
 
 - **`permissions.read`**: Mints a read-only ADO-scoped token given to the agent inside the AWF sandbox (Stage 1). The agent can query ADO APIs but cannot write.
-- **`permissions.write`**: Mints a write-capable ADO-scoped token used **only** by the executor in Stage 2 (`ProcessSafeOutputs` job). This token is never exposed to the agent.
+- **`permissions.write`**: Mints a write-capable ADO-scoped token used **only** by the executor in Stage 3 (`Execution` job). This token is never exposed to the agent.
 - **Both omitted**: No ADO tokens are passed anywhere. The agent has no ADO API access.
 
 #### Compile-Time Validation

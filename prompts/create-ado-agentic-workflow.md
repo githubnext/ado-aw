@@ -38,11 +38,12 @@ Produce a single `.md` file containing two parts:
 The `ado-aw` compiler turns this into a three-job Azure DevOps pipeline:
 
 ```
-PerformAgenticTask  →  AnalyzeSafeOutputs  →  ProcessSafeOutputs
-(Stage 1: Agent)       (Threat analysis)       (Stage 2: Executor)
+Agent             →  Detection          →  Execution
+(Stage 1: Agent)     (Stage 2: Threat       (Stage 3: Executor)
+                      analysis)
 ```
 
-The agent in Stage 1 never has direct write access. All mutations (PRs, work items) are proposed as **safe outputs**, threat-analyzed, then executed by the Stage 2 executor using a separate write token.
+The agent in Stage 1 never has direct write access. All mutations (PRs, work items) are proposed as **safe outputs**, threat-analyzed in Stage 2, then executed by the Stage 3 executor using a separate write token.
 
 ---
 
@@ -325,7 +326,7 @@ ADO access tokens are minted from ARM service connections. `System.AccessToken` 
 ```yaml
 permissions:
   read: my-read-arm-connection    # Stage 1 agent — read-only ADO access
-  write: my-write-arm-connection  # Stage 2 executor only — write access
+  write: my-write-arm-connection  # Stage 3 executor only — write access
 ```
 
 | Config | Effect |
@@ -352,7 +353,7 @@ When `triggers.pipeline` is set: `trigger: none` and `pr: none` are generated au
 
 ### Step 12 — Inline Steps (optional)
 
-Steps that run inside the `PerformAgenticTask` job:
+Steps that run inside the `Agent` job:
 
 ```yaml
 steps:             # BEFORE agent runs (same job)
@@ -366,11 +367,11 @@ post-steps:        # AFTER agent completes (same job)
 
 Separate jobs:
 ```yaml
-setup:             # Separate job BEFORE PerformAgenticTask
+setup:             # Separate job BEFORE Agent
   - bash: echo "Provisioning resources..."
     displayName: "Setup"
 
-teardown:          # Separate job AFTER ProcessSafeOutputs
+teardown:          # Separate job AFTER Execution
   - bash: echo "Cleanup..."
     displayName: "Teardown"
 ```

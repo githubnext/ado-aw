@@ -3,7 +3,7 @@
 //! Implements the sanitization pipeline defined in `sanitize-spec.md` to protect
 //! against template injection and prompt injection in Azure DevOps contexts.
 //! This module is shared across Stage 1 (safe output creation), threat analysis
-//! ingestion, and Stage 2 (safe output execution).
+//! ingestion, and Stage 3 (safe output execution).
 //!
 //! Two traits cover different trust boundaries:
 //!
@@ -19,7 +19,7 @@ use log::debug;
 
 /// Trait for types that contain untrusted agent-generated text fields.
 ///
-/// Implement this on safe output result structs so Stage 2 execution can
+/// Implement this on safe output result structs so Stage 3 execution can
 /// call `sanitize_content_fields()` before dispatching to Azure DevOps APIs.
 ///
 /// Use `#[derive(SanitizeContent)]` from the `ado-aw-derive` crate for automatic

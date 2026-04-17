@@ -1,7 +1,7 @@
 //! Standalone pipeline compiler.
 //!
 //! This compiler generates a self-contained Azure DevOps pipeline with:
-//! - Full 3-job pipeline: PerformAgenticTask → AnalyzeSafeOutputs → ProcessSafeOutputs
+//! - Full 3-job pipeline: Agent → Detection → Execution
 //! - AWF (Agentic Workflow Firewall) L7 domain whitelisting via Squid proxy + Docker
 //! - MCP firewall with tool-level filtering and custom MCP server support
 //! - Setup/teardown job support
