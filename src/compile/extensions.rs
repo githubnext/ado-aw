@@ -65,6 +65,7 @@ pub struct McpgServerConfig {
 #[serde(rename_all = "camelCase")]
 pub struct McpgGatewayConfig {
     pub port: u16,
+    pub domain: String,
     pub api_key: String,
     pub payload_dir: String,
 }
