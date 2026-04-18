@@ -3255,8 +3255,33 @@ fn test_skip_integrity_and_debug_pipeline_combined() {
     );
 }
 
-/// Test that debug probe step indentation is correct in standalone output
+/// Test that debug probe step has no unresolved template markers
 #[test]
+fn test_debug_pipeline_no_unresolved_markers() {
+    let compiled = compile_fixture_with_flags("minimal-agent.md", &["--debug-pipeline"]);
+
+    // Extract lines around the probe step
+    let probe_section: Vec<&str> = compiled
+        .lines()
+        .skip_while(|l| !l.contains("Verify MCP backends"))
+        .take(5)
+        .collect();
+    assert!(!probe_section.is_empty(), "Should find probe step");
+
+    // The probe step should NOT contain unresolved {{ mcpg_port }} markers
+    assert!(
+        !compiled.contains("{{ mcpg_port }}"),
+        "Compiled output should not contain unresolved {{ mcpg_port }} marker"
+    );
+    assert!(
+        !compiled.contains("{{ mcpg_debug_flags }}"),
+        "Compiled output should not contain unresolved {{ mcpg_debug_flags }} marker"
+    );
+    assert!(
+        !compiled.contains("{{ verify_mcp_backends }}"),
+        "Compiled output should not contain unresolved {{ verify_mcp_backends }} marker"
+    );
+}
 fn test_debug_pipeline_probe_step_indentation_standalone() {
     let compiled = compile_fixture_with_flags("minimal-agent.md", &["--debug-pipeline"]);
 

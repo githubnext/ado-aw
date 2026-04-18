@@ -2192,16 +2192,19 @@ pub async fn compile_shared(
 
     // 12. Apply extra replacements first (target-specific overrides)
     // These run before shared replacements so targets can override shared
-    // markers like {{ setup_job }} and {{ teardown_job }}.
+    // 12. Debug pipeline replacements (MUST run before extra_replacements
+    //     because the probe step content contains {{ mcpg_port }} which is
+    //     resolved by extra_replacements).
+    let debug_replacements = generate_debug_pipeline_replacements(config.debug_pipeline);
     let mut template = template;
-    for (placeholder, replacement) in &config.extra_replacements {
+    for (placeholder, replacement) in &debug_replacements {
         template = replace_with_indent(&template, placeholder, replacement);
     }
 
-    // 13. Debug pipeline replacements (before shared replacements since the
-    //     probe step content itself contains {{ mcpg_port }}).
-    let debug_replacements = generate_debug_pipeline_replacements(config.debug_pipeline);
-    for (placeholder, replacement) in &debug_replacements {
+    // 13. Apply extra replacements (target-specific overrides like {{ mcpg_port }})
+    // These run before shared replacements so targets can override shared
+    // markers like {{ setup_job }} and {{ teardown_job }}.
+    for (placeholder, replacement) in &config.extra_replacements {
         template = replace_with_indent(&template, placeholder, replacement);
     }
 
