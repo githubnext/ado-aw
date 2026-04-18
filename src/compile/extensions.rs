@@ -261,6 +261,30 @@ pub trait CompilerExtension {
     fn validate(&self, _ctx: &CompileContext) -> Result<Vec<String>> {
         Ok(vec![])
     }
+
+    /// Pipeline variable mappings needed by this extension's MCP containers.
+    ///
+    /// Each mapping declares that a container env var (e.g., `AZURE_DEVOPS_EXT_PAT`)
+    /// should be populated from a pipeline variable (e.g., `SC_READ_TOKEN`).
+    /// The compiler uses these to generate:
+    /// 1. `env:` block on the MCPG step (maps ADO secret → bash var)
+    /// 2. `-e` flags on the MCPG docker run (passes bash var → MCPG process)
+    /// 3. MCPG config keeps `""` (MCPG passthrough from its env → child container)
+    fn required_pipeline_vars(&self) -> Vec<PipelineEnvMapping> {
+        vec![]
+    }
+}
+
+/// Maps a container environment variable to a pipeline variable.
+///
+/// Used by extensions to declare that an MCP container needs a specific
+/// pipeline variable (typically a secret) injected into its environment.
+#[derive(Debug, Clone)]
+pub struct PipelineEnvMapping {
+    /// The env var name inside the MCP container (e.g., `AZURE_DEVOPS_EXT_PAT`).
+    pub container_var: String,
+    /// The ADO pipeline variable name (e.g., `SC_READ_TOKEN`).
+    pub pipeline_var: String,
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -319,6 +343,9 @@ macro_rules! extension_enum {
             }
             fn validate(&self, ctx: &CompileContext) -> Result<Vec<String>> {
                 match self { $( $Enum::$Variant(e) => e.validate(ctx), )+ }
+            }
+            fn required_pipeline_vars(&self) -> Vec<PipelineEnvMapping> {
+                match self { $( $Enum::$Variant(e) => e.required_pipeline_vars(), )+ }
             }
         }
     };
@@ -567,9 +594,13 @@ impl CompilerExtension for AzureDevOpsExtension {
 
         Ok(warnings)
     }
+    fn required_pipeline_vars(&self) -> Vec<PipelineEnvMapping> {
+        vec![PipelineEnvMapping {
+            container_var: "AZURE_DEVOPS_EXT_PAT".to_string(),
+            pipeline_var: "SC_READ_TOKEN".to_string(),
+        }]
+    }
 }
-
-// ─── Cache Memory ────────────────────────────────────────────────────
 
 use super::types::CacheMemoryToolConfig;
 

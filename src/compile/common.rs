@@ -1805,68 +1805,48 @@ pub fn generate_mcpg_config(
 
 /// Generate additional `-e` flags for the MCPG Docker run command.
 ///
-/// MCP containers spawned by MCPG may need environment variables that flow from
-/// the pipeline through the MCPG container (passthrough). This function:
-/// 1. Auto-maps `AZURE_DEVOPS_EXT_PAT` from `SC_READ_TOKEN` when `permissions.read` is configured
-/// 2. Collects passthrough env vars (value is `""`) from container-based MCP configs
-///
-/// Only container-based MCPs are considered — HTTP MCPs don't have child containers
-/// that need env passthrough.
+/// Two sources of env flags:
+/// 1. **Extension pipeline var mappings** — extensions declare `required_pipeline_vars()`
+///    which map container env vars to pipeline variables (typically secrets).
+///    These become `-e CONTAINER_VAR="$PIPELINE_VAR"` flags referencing bash vars
+///    (the companion `generate_mcpg_step_env` provides the ADO `env:` mapping).
+/// 2. **User-configured MCP passthrough** — front matter `mcp-servers:` entries with
+///    `env: { VAR: "" }` become bare `-e VAR` flags (MCPG passthrough from host env).
 ///
 /// Returns flags formatted for inline insertion in the `docker run` command.
-/// The marker sits after the last hardcoded `-e` flag, so the output must
-/// include leading `\\\n` for line continuation when non-empty.
-pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
+pub fn generate_mcpg_docker_env(
+    front_matter: &FrontMatter,
+    extensions: &[super::extensions::Extension],
+) -> String {
     let mut env_flags: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
-    // Check if any container MCP requests AZURE_DEVOPS_EXT_PAT passthrough
-    let any_mcp_needs_ado_token = front_matter.mcp_servers.values().any(|config| {
-        matches!(config, McpConfig::WithOptions(opts)
-            if opts.enabled.unwrap_or(true)
-                && opts.container.is_some()
-                && opts.env.contains_key("AZURE_DEVOPS_EXT_PAT"))
-    });
-
-    // Also check if tools.azure-devops is enabled (auto-configured ADO MCP always needs token)
-    let ado_tool_needs_token = front_matter
-        .tools
-        .as_ref()
-        .and_then(|t| t.azure_devops.as_ref())
-        .is_some_and(|ado| ado.is_enabled());
-
-    // Auto-map AZURE_DEVOPS_EXT_PAT from SC_READ_TOKEN when permissions.read is configured
-    // AND at least one container MCP requests it via env passthrough (or the ADO tool is enabled)
-    if any_mcp_needs_ado_token || ado_tool_needs_token {
-        if front_matter.permissions.as_ref().and_then(|p| p.read.as_ref()).is_some() {
-            env_flags.push(
-                "-e AZURE_DEVOPS_EXT_PAT=\"$(SC_READ_TOKEN)\"".to_string(),
-            );
-            seen.insert("AZURE_DEVOPS_EXT_PAT".to_string());
-        } else {
-            eprintln!(
-                "Warning: one or more container MCPs request AZURE_DEVOPS_EXT_PAT passthrough \
-                but permissions.read is not configured. The token will be empty at runtime. \
-                Add `permissions: {{ read: <service-connection> }}` to enable auto-mapping."
-            );
+    // 1. Extension pipeline var mappings (e.g., AZURE_DEVOPS_EXT_PAT -> SC_READ_TOKEN)
+    for ext in extensions {
+        for mapping in ext.required_pipeline_vars() {
+            if seen.contains(&mapping.container_var) {
+                continue;
+            }
+            env_flags.push(format!(
+                "-e {}=\"${}\"",
+                mapping.container_var, mapping.pipeline_var
+            ));
+            seen.insert(mapping.container_var.clone());
         }
     }
 
-    // Collect passthrough env vars from container-based MCP configs only.
-    // HTTP MCPs don't have child containers — env passthrough doesn't apply.
+    // 2. User-configured MCP passthrough env vars (empty value = passthrough from host)
     for (mcp_name, config) in &front_matter.mcp_servers {
         let opts = match config {
             McpConfig::WithOptions(opts) if opts.enabled.unwrap_or(true) => opts,
             _ => continue,
         };
 
-        // Only container-based MCPs need env passthrough on the MCPG Docker run
         if opts.container.is_none() {
             continue;
         }
 
         for (var_name, var_value) in &opts.env {
-            // Validate env var name to prevent Docker flag injection (e.g. "X --privileged")
             if !is_valid_env_var_name(var_name) {
                 log::warn!(
                     "MCP '{}': skipping invalid env var name '{}' — must match [A-Za-z_][A-Za-z0-9_]*",
@@ -1877,7 +1857,6 @@ pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
             if seen.contains(var_name) {
                 continue;
             }
-            // Passthrough: empty string means forward from host/pipeline environment
             if var_value.is_empty() {
                 env_flags.push(format!("-e {}", var_name));
                 seen.insert(var_name.clone());
@@ -1887,18 +1866,42 @@ pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
 
     env_flags.sort();
     if env_flags.is_empty() {
-        // No extra flags — emit a lone `\` so the bash line continuation from the
-        // preceding `-e MCP_GATEWAY_API_KEY=...` flag connects to the image name on
-        // the next line. This is valid bash: a backslash at end-of-line continues
-        // the command. replace_with_indent preserves this on its own indented line.
         "\\".to_string()
     } else {
-        // Emit each flag on its own line with `\` continuation.
-        // replace_with_indent handles indentation from the template (base.yml),
-        // so we only emit the content without hardcoded spaces.
         let flags = env_flags.join(" \\\n");
         format!("{} \\", flags)
     }
+}
+
+/// Generate the ADO step-level `env:` block for the MCPG start step.
+///
+/// ADO secret variables (set via `##vso[task.setvariable;issecret=true]`) must
+/// be explicitly mapped via the step's `env:` block to be available as bash
+/// environment variables. This function collects all pipeline variable mappings
+/// from extensions and generates the corresponding `env:` entries.
+///
+/// Returns YAML `env:` entries (e.g., `SC_READ_TOKEN: $(SC_READ_TOKEN)`),
+/// or an empty string if no mappings are needed.
+pub fn generate_mcpg_step_env(
+    extensions: &[super::extensions::Extension],
+) -> String {
+    let mut entries: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for ext in extensions {
+        for mapping in ext.required_pipeline_vars() {
+            if seen.contains(&mapping.pipeline_var) {
+                continue;
+            }
+            entries.push(format!(
+                "{}: $({})",
+                mapping.pipeline_var, mapping.pipeline_var
+            ));
+            seen.insert(mapping.pipeline_var.clone());
+        }
+    }
+
+    entries.join("\n")
 }
 
 // ==================== Domain allowlist ====================
@@ -4174,62 +4177,38 @@ mod tests {
 
     #[test]
     fn test_generate_mcpg_docker_env_with_permissions_read() {
-        let mut fm = minimal_front_matter();
-        fm.permissions = Some(crate::compile::types::PermissionsConfig {
-            read: Some("my-read-sc".to_string()),
-            write: None,
-        });
-        // A container MCP must request AZURE_DEVOPS_EXT_PAT for the auto-map to trigger
-        fm.mcp_servers.insert(
-            "ado-tool".to_string(),
-            McpConfig::WithOptions(McpOptions {
-                container: Some("node:20-slim".to_string()),
-                env: {
-                    let mut e = HashMap::new();
-                    e.insert("AZURE_DEVOPS_EXT_PAT".to_string(), "".to_string());
-                    e
-                },
-                ..Default::default()
-            }),
-        );
-        let env = generate_mcpg_docker_env(&fm);
+        // When ADO tool is enabled with permissions.read, the extension's
+        // required_pipeline_vars should produce the -e flag
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\npermissions:\n  read: my-read-sc\n---\n",
+        ).unwrap();
+        let extensions = collect_extensions(&fm);
+        let env = generate_mcpg_docker_env(&fm, &extensions);
         assert!(
-            env.contains("-e AZURE_DEVOPS_EXT_PAT=\"$(SC_READ_TOKEN)\""),
-            "Should auto-map ADO token when permissions.read is set and MCP requests it"
+            env.contains("-e AZURE_DEVOPS_EXT_PAT=\"$SC_READ_TOKEN\""),
+            "Should map ADO token via extension pipeline var"
         );
     }
 
     #[test]
-    fn test_generate_mcpg_docker_env_permissions_read_no_mcp_request() {
-        let mut fm = minimal_front_matter();
-        fm.permissions = Some(crate::compile::types::PermissionsConfig {
-            read: Some("my-read-sc".to_string()),
-            write: None,
-        });
-        // No MCP requests AZURE_DEVOPS_EXT_PAT — auto-map should NOT trigger
-        fm.mcp_servers.insert(
-            "unrelated-tool".to_string(),
-            McpConfig::WithOptions(McpOptions {
-                container: Some("node:20-slim".to_string()),
-                ..Default::default()
-            }),
-        );
-        let env = generate_mcpg_docker_env(&fm);
+    fn test_generate_mcpg_docker_env_no_extensions() {
+        // No tools enabled — no extension pipeline vars — only user MCP passthrough
+        let fm = minimal_front_matter();
+        let extensions = collect_extensions(&fm);
+        let env = generate_mcpg_docker_env(&fm, &extensions);
         assert!(
             !env.contains("AZURE_DEVOPS_EXT_PAT"),
-            "Should NOT auto-map ADO token when no MCP requests it"
+            "Should not have ADO token when no extension needs it"
         );
     }
 
     #[test]
-    fn test_generate_mcpg_docker_env_dedup_auto_map_and_passthrough() {
-        // When permissions.read is set AND MCP has AZURE_DEVOPS_EXT_PAT: "",
-        // the auto-mapped form (with SC_READ_TOKEN) should win — no duplicate
-        let mut fm = minimal_front_matter();
-        fm.permissions = Some(crate::compile::types::PermissionsConfig {
-            read: Some("my-read-sc".to_string()),
-            write: None,
-        });
+    fn test_generate_mcpg_docker_env_dedup_extension_and_user_passthrough() {
+        // Extension provides AZURE_DEVOPS_EXT_PAT mapping, user MCP also has it as passthrough.
+        // Extension mapping should win (deduplicated).
+        let (mut fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\npermissions:\n  read: my-read-sc\n---\n",
+        ).unwrap();
         fm.mcp_servers.insert(
             "ado-tool".to_string(),
             McpConfig::WithOptions(McpOptions {
@@ -4242,25 +4221,10 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let env = generate_mcpg_docker_env(&fm);
-        // Should have the SC_READ_TOKEN form (auto-mapped), not bare passthrough
-        assert!(
-            env.contains("-e AZURE_DEVOPS_EXT_PAT=\"$(SC_READ_TOKEN)\""),
-            "Auto-mapped form should be present"
-        );
-        // Should appear exactly once
+        let extensions = collect_extensions(&fm);
+        let env = generate_mcpg_docker_env(&fm, &extensions);
         let count = env.matches("AZURE_DEVOPS_EXT_PAT").count();
         assert_eq!(count, 1, "AZURE_DEVOPS_EXT_PAT should appear exactly once, got {}", count);
-    }
-
-    #[test]
-    fn test_generate_mcpg_docker_env_without_permissions() {
-        let fm = minimal_front_matter();
-        let env = generate_mcpg_docker_env(&fm);
-        assert!(
-            !env.contains("AZURE_DEVOPS_EXT_PAT"),
-            "Should not map ADO token when permissions.read is not set"
-        );
     }
 
     #[test]
@@ -4279,7 +4243,8 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let env = generate_mcpg_docker_env(&fm);
+        let extensions = collect_extensions(&fm);
+        let env = generate_mcpg_docker_env(&fm, &extensions);
         assert!(env.contains("-e PASS_THROUGH"), "Should include passthrough var");
         assert!(!env.contains("-e STATIC"), "Should NOT include static var");
     }
@@ -4293,16 +4258,15 @@ mod tests {
                 container: Some("img:latest".to_string()),
                 env: {
                     let mut e = HashMap::new();
-                    // Injection attempt: env var name with Docker flag
                     e.insert("MY_VAR --privileged".to_string(), "".to_string());
-                    // Valid env var for comparison
                     e.insert("GOOD_VAR".to_string(), "".to_string());
                     e
                 },
                 ..Default::default()
             }),
         );
-        let env = generate_mcpg_docker_env(&fm);
+        let extensions = collect_extensions(&fm);
+        let env = generate_mcpg_docker_env(&fm, &extensions);
         assert!(
             !env.contains("--privileged"),
             "Should reject invalid env var name with Docker flag injection"
@@ -4311,6 +4275,29 @@ mod tests {
             env.contains("-e GOOD_VAR"),
             "Should include valid env var"
         );
+    }
+
+    // ─── generate_mcpg_step_env ──────────────────────────────────────────────
+
+    #[test]
+    fn test_generate_mcpg_step_env_with_ado_extension() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\n---\n",
+        ).unwrap();
+        let extensions = collect_extensions(&fm);
+        let env = generate_mcpg_step_env(&extensions);
+        assert!(
+            env.contains("SC_READ_TOKEN: $(SC_READ_TOKEN)"),
+            "Should map SC_READ_TOKEN for ADO extension"
+        );
+    }
+
+    #[test]
+    fn test_generate_mcpg_step_env_no_extensions() {
+        let fm = minimal_front_matter();
+        let extensions = collect_extensions(&fm);
+        let env = generate_mcpg_step_env(&extensions);
+        assert!(env.is_empty(), "Should be empty when no extensions need pipeline vars");
     }
 
     #[test]
@@ -4508,7 +4495,8 @@ mod tests {
             "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\npermissions:\n  read: my-read-sc\n---\n",
         )
         .unwrap();
-        let env = generate_mcpg_docker_env(&fm);
+        let extensions = collect_extensions(&fm);
+        let env = generate_mcpg_docker_env(&fm, &extensions);
         assert!(
             env.contains("AZURE_DEVOPS_EXT_PAT"),
             "Should include ADO token passthrough when permissions.read is set"

@@ -2189,7 +2189,7 @@ fn test_fixture_azure_devops_mcp_compiled_output() {
 
     // Should contain the MCPG docker env passthrough (auto-mapped ADO token)
     assert!(
-        compiled.contains("-e AZURE_DEVOPS_EXT_PAT=\"$(SC_READ_TOKEN)\""),
+        compiled.contains("-e AZURE_DEVOPS_EXT_PAT=\"$SC_READ_TOKEN\""),
         "Should auto-map SC_READ_TOKEN to AZURE_DEVOPS_EXT_PAT on MCPG Docker run"
     );
 
@@ -2291,8 +2291,9 @@ fn test_mcpg_docker_env_passthrough() {
 
     let compiled = fs::read_to_string(&output_path).unwrap();
 
-    // Should auto-map AZURE_DEVOPS_EXT_PAT from SC_READ_TOKEN
-    assert!(compiled.contains("-e AZURE_DEVOPS_EXT_PAT=\"$(SC_READ_TOKEN)\""), "Should auto-map ADO token");
+    // AZURE_DEVOPS_EXT_PAT with "" is bare passthrough for user-configured MCPs
+    // (only tools.azure-devops extension provides SC_READ_TOKEN mapping)
+    assert!(compiled.contains("-e AZURE_DEVOPS_EXT_PAT"), "Should forward AZURE_DEVOPS_EXT_PAT as passthrough");
 
     // Should forward passthrough env var MY_TOKEN
     assert!(compiled.contains("-e MY_TOKEN"), "Should forward passthrough env var");
