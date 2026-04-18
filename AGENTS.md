@@ -741,9 +741,9 @@ When the compiler is built with `--skip-integrity` (debug builds only), this pla
 
 ## {{ mcpg_debug_flags }}
 
-Generates MCPG debug environment flags for the Docker run command. When `--debug-pipeline` is passed (debug builds only), this inserts `-e DEBUG="*"` to enable verbose MCPG logging and `2> >(tee ...)` to stream MCPG stderr to both the pipeline console and a log file.
+Generates MCPG debug environment flags for the Docker run command. When `--debug-pipeline` is passed (debug builds only), this inserts `-e DEBUG="*"` to enable verbose MCPG logging.
 
-When `--debug-pipeline` is not passed, this placeholder is replaced with an empty string.
+When `--debug-pipeline` is not passed, this placeholder is replaced with a bare `\` to maintain bash line continuation.
 
 ## {{ verify_mcp_backends }}
 

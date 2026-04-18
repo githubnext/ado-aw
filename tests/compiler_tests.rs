@@ -3168,10 +3168,6 @@ fn test_debug_pipeline_includes_debug_env() {
         compiled.contains(r#"DEBUG="*""#),
         "Pipeline compiled with --debug-pipeline should contain DEBUG=* env var"
     );
-    assert!(
-        compiled.contains("tee /tmp/gh-aw/mcp-logs/stderr.log"),
-        "Pipeline compiled with --debug-pipeline should contain stderr tee"
-    );
 }
 
 /// Test that --debug-pipeline includes the MCP backend probe step
@@ -3209,10 +3205,6 @@ fn test_default_excludes_debug_diagnostics() {
     assert!(
         !compiled.contains("Verify MCP backends"),
         "Pipeline compiled without --debug-pipeline should NOT contain probe step"
-    );
-    assert!(
-        !compiled.contains("tee /tmp/gh-aw/mcp-logs/stderr.log"),
-        "Pipeline compiled without --debug-pipeline should NOT contain stderr tee"
     );
 }
 

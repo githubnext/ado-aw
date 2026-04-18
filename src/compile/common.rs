@@ -862,14 +862,14 @@ pub fn generate_integrity_check(skip: bool) -> String {
 pub fn generate_debug_pipeline_replacements(debug: bool) -> Vec<(String, String)> {
     if !debug {
         return vec![
-            ("{{ mcpg_debug_flags }}".into(), String::new()),
+            // Emit `\` to maintain bash line continuation (same pattern as
+            // generate_mcpg_docker_env when no env flags are needed).
+            ("{{ mcpg_debug_flags }}".into(), "\\".into()),
             ("{{ verify_mcp_backends }}".into(), String::new()),
         ];
     }
 
-    let mcpg_debug_flags = r##"-e DEBUG="*" \
-2> >(tee /tmp/gh-aw/mcp-logs/stderr.log >&2)"##
-        .to_string();
+    let mcpg_debug_flags = r##"-e DEBUG="*" \"##.to_string();
 
     let verify_mcp_backends = r###"# Probe all MCPG backends to force eager launch and surface failures.
 # MCPG lazily starts stdio backends on first tool call — without this
@@ -2984,13 +2984,12 @@ mod tests {
     fn test_debug_pipeline_replacements_disabled() {
         let replacements = generate_debug_pipeline_replacements(false);
         assert_eq!(replacements.len(), 2);
-        for (marker, value) in &replacements {
-            assert!(
-                value.is_empty(),
-                "Marker '{}' should be empty when debug is false",
-                marker
-            );
-        }
+        // mcpg_debug_flags returns `\` for bash line continuation
+        let flags = replacements.iter().find(|(m, _)| m == "{{ mcpg_debug_flags }}").unwrap();
+        assert_eq!(flags.1, "\\", "mcpg_debug_flags should be a bare backslash when disabled");
+        // verify_mcp_backends should be empty
+        let probe = replacements.iter().find(|(m, _)| m == "{{ verify_mcp_backends }}").unwrap();
+        assert!(probe.1.is_empty(), "verify_mcp_backends should be empty when disabled");
     }
 
     #[test]
@@ -3002,7 +3001,6 @@ mod tests {
         assert!(flags.is_some(), "Should have mcpg_debug_flags marker");
         let flags_value = &flags.unwrap().1;
         assert!(flags_value.contains("DEBUG"), "Should contain DEBUG env var");
-        assert!(flags_value.contains("tee"), "Should contain stderr tee");
 
         let probe = replacements.iter().find(|(m, _)| m == "{{ verify_mcp_backends }}");
         assert!(probe.is_some(), "Should have verify_mcp_backends marker");

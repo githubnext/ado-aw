@@ -252,7 +252,7 @@ jobs:
             {{ mcpg_docker_env }}
             {{ mcpg_image }}:v{{ mcpg_version }} \
             --routed --listen 0.0.0.0:{{ mcpg_port }} --config-stdin --log-dir /tmp/gh-aw/mcp-logs \
-            > "$GATEWAY_OUTPUT" &
+            > "$GATEWAY_OUTPUT" 2> >(tee /tmp/gh-aw/mcp-logs/stderr.log >&2) &
           MCPG_PID=$!
           echo "MCPG started (PID: $MCPG_PID)"
 
