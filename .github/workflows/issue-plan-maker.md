@@ -14,7 +14,7 @@ tools:
   github:
     toolsets: [default]
 network:
-  allowed: [defaults, rust]
+  allowed: [defaults]
 safe-outputs:
   add-comment:
     max: 2
