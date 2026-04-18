@@ -4185,7 +4185,7 @@ mod tests {
         let extensions = collect_extensions(&fm);
         let env = generate_mcpg_docker_env(&fm, &extensions);
         assert!(
-            env.contains("-e AZURE_DEVOPS_EXT_PAT=\"$SC_READ_TOKEN\""),
+            env.contains("-e ADO_MCP_AUTH_TOKEN=\"$SC_READ_TOKEN\""),
             "Should map ADO token via extension pipeline var"
         );
     }
@@ -4197,14 +4197,14 @@ mod tests {
         let extensions = collect_extensions(&fm);
         let env = generate_mcpg_docker_env(&fm, &extensions);
         assert!(
-            !env.contains("AZURE_DEVOPS_EXT_PAT"),
+            !env.contains("ADO_MCP_AUTH_TOKEN"),
             "Should not have ADO token when no extension needs it"
         );
     }
 
     #[test]
     fn test_generate_mcpg_docker_env_dedup_extension_and_user_passthrough() {
-        // Extension provides AZURE_DEVOPS_EXT_PAT mapping, user MCP also has it as passthrough.
+        // Extension provides ADO_MCP_AUTH_TOKEN mapping, user MCP also has it as passthrough.
         // Extension mapping should win (deduplicated).
         let (mut fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\npermissions:\n  read: my-read-sc\n---\n",
@@ -4215,7 +4215,7 @@ mod tests {
                 container: Some("node:20-slim".to_string()),
                 env: {
                     let mut e = HashMap::new();
-                    e.insert("AZURE_DEVOPS_EXT_PAT".to_string(), "".to_string());
+                    e.insert("ADO_MCP_AUTH_TOKEN".to_string(), "".to_string());
                     e
                 },
                 ..Default::default()
@@ -4223,8 +4223,8 @@ mod tests {
         );
         let extensions = collect_extensions(&fm);
         let env = generate_mcpg_docker_env(&fm, &extensions);
-        let count = env.matches("AZURE_DEVOPS_EXT_PAT").count();
-        assert_eq!(count, 1, "AZURE_DEVOPS_EXT_PAT should appear exactly once, got {}", count);
+        let count = env.matches("ADO_MCP_AUTH_TOKEN").count();
+        assert_eq!(count, 1, "ADO_MCP_AUTH_TOKEN should appear exactly once, got {}", count);
     }
 
     #[test]
@@ -4355,9 +4355,9 @@ mod tests {
         assert!(args.contains(&"-y".to_string()));
         assert!(args.contains(&ADO_MCP_PACKAGE.to_string()));
         assert!(args.contains(&"inferred-org".to_string()));
-        // Should have AZURE_DEVOPS_EXT_PAT in env
+        // Should have ADO_MCP_AUTH_TOKEN in env (for bearer token via envvar auth)
         let env = ado.env.as_ref().unwrap();
-        assert!(env.contains_key("AZURE_DEVOPS_EXT_PAT"));
+        assert!(env.contains_key("ADO_MCP_AUTH_TOKEN"));
     }
 
     #[test]
@@ -4498,7 +4498,7 @@ mod tests {
         let extensions = collect_extensions(&fm);
         let env = generate_mcpg_docker_env(&fm, &extensions);
         assert!(
-            env.contains("AZURE_DEVOPS_EXT_PAT"),
+            env.contains("ADO_MCP_AUTH_TOKEN"),
             "Should include ADO token passthrough when permissions.read is set"
         );
     }

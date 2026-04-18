@@ -540,15 +540,20 @@ impl CompilerExtension for AzureDevOpsExtension {
             Some(self.config.allowed().to_vec())
         };
 
-        // ADO MCP needs the PAT token passed via environment
+        // ADO MCP authentication: the @azure-devops/mcp npm package accepts
+        // auth type via CLI arg (-a) and token via env var. For pipeline use,
+        // we use "envvar" auth which reads ADO_MCP_AUTH_TOKEN.
+        // SC_READ_TOKEN is a bearer JWT from `az account get-access-token`.
+        entrypoint_args.extend(["-a".to_string(), "envvar".to_string()]);
+
         let env = Some(HashMap::from([
             (
-                "AZURE_DEVOPS_EXT_PAT".to_string(),
-                String::new(), // Passthrough from pipeline
+                "ADO_MCP_AUTH_TOKEN".to_string(),
+                String::new(), // Passthrough — bearer token via pipeline var mapping
             ),
             (
                 "DEBUG".to_string(),
-                "*".to_string(), // Verbose logging for ADO MCP
+                "*".to_string(),
             ),
         ]));
 
@@ -596,7 +601,7 @@ impl CompilerExtension for AzureDevOpsExtension {
     }
     fn required_pipeline_vars(&self) -> Vec<PipelineEnvMapping> {
         vec![PipelineEnvMapping {
-            container_var: "AZURE_DEVOPS_EXT_PAT".to_string(),
+            container_var: "ADO_MCP_AUTH_TOKEN".to_string(),
             pipeline_var: "SC_READ_TOKEN".to_string(),
         }]
     }

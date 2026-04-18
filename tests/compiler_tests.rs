@@ -2175,10 +2175,10 @@ fn test_fixture_azure_devops_mcp_compiled_output() {
         "MCPG config should NOT use command field"
     );
 
-    // Should contain env passthrough for AZURE_DEVOPS_EXT_PAT
+    // Should contain env for ADO_MCP_AUTH_TOKEN (envvar auth for @azure-devops/mcp)
     assert!(
-        compiled.contains("AZURE_DEVOPS_EXT_PAT"),
-        "Should reference AZURE_DEVOPS_EXT_PAT"
+        compiled.contains("ADO_MCP_AUTH_TOKEN"),
+        "Should reference ADO_MCP_AUTH_TOKEN"
     );
 
     // Should contain SC_READ_TOKEN (from permissions.read)
@@ -2189,8 +2189,8 @@ fn test_fixture_azure_devops_mcp_compiled_output() {
 
     // Should contain the MCPG docker env passthrough (auto-mapped ADO token)
     assert!(
-        compiled.contains("-e AZURE_DEVOPS_EXT_PAT=\"$SC_READ_TOKEN\""),
-        "Should auto-map SC_READ_TOKEN to AZURE_DEVOPS_EXT_PAT on MCPG Docker run"
+        compiled.contains("-e ADO_MCP_AUTH_TOKEN=\"$SC_READ_TOKEN\""),
+        "Should auto-map SC_READ_TOKEN to ADO_MCP_AUTH_TOKEN on MCPG Docker run"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
