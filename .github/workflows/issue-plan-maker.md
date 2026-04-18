@@ -35,7 +35,7 @@ Perform a comprehensive investigation before proposing a plan:
 1. Read the issue content and all discussion comments for full context.
 2. Explore the relevant repository areas (source files, tests, docs, workflows) using GitHub tools.
 3. Identify likely root causes, constraints, and affected components.
-4. When repository context is insufficient, use web search to validate external facts, APIs, version behavior, or best practices.
+4. When repository context is insufficient, use web search to validate external facts, APIs, version behavior, or best practices **if web-search capability is available in this run**.
 5. Cross-check for related open issues or PRs to avoid duplicate or conflicting guidance.
 
 ## Plan Requirements
