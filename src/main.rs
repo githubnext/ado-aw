@@ -36,6 +36,12 @@ enum Commands {
         #[cfg(debug_assertions)]
         #[arg(long)]
         skip_integrity: bool,
+        /// Include MCPG debug diagnostics in the generated pipeline (debug
+        /// logging, stderr streaming, backend probe step).
+        /// Only available in debug builds.
+        #[cfg(debug_assertions)]
+        #[arg(long)]
+        debug_pipeline: bool,
     },
     /// Check that a compiled pipeline matches its source markdown
     Check {
@@ -160,16 +166,23 @@ async fn main() -> Result<()> {
                 output,
                 #[cfg(debug_assertions)]
                 skip_integrity,
+                #[cfg(debug_assertions)]
+                debug_pipeline,
             } => {
                 #[cfg(not(debug_assertions))]
                 let skip_integrity = false;
+                #[cfg(not(debug_assertions))]
+                let debug_pipeline = false;
 
                 if skip_integrity {
                     eprintln!("Warning: pipeline integrity check step omitted (--skip-integrity)");
                 }
+                if debug_pipeline {
+                    eprintln!("Warning: debug diagnostics enabled in generated pipeline (--debug-pipeline)");
+                }
 
                 match path {
-                    Some(p) => compile::compile_pipeline(&p, output.as_deref(), skip_integrity).await?,
+                    Some(p) => compile::compile_pipeline(&p, output.as_deref(), skip_integrity, debug_pipeline).await?,
                     None => {
                         if output.is_some() {
                             anyhow::bail!(
@@ -177,7 +190,7 @@ async fn main() -> Result<()> {
                                  Specify a path to compile a single file with a custom output."
                             );
                         }
-                        compile::compile_all_pipelines(skip_integrity).await?
+                        compile::compile_all_pipelines(skip_integrity, debug_pipeline).await?
                     }
                 }
             }

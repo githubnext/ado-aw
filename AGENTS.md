@@ -739,6 +739,18 @@ Generates the "Verify pipeline integrity" pipeline step that downloads the relea
 
 When the compiler is built with `--skip-integrity` (debug builds only), this placeholder is replaced with an empty string and the integrity step is omitted from the generated pipeline.
 
+## {{ mcpg_debug_flags }}
+
+Generates MCPG debug environment flags for the Docker run command. When `--debug-pipeline` is passed (debug builds only), this inserts `-e DEBUG="*"` to enable verbose MCPG logging and `2> >(tee ...)` to stream MCPG stderr to both the pipeline console and a log file.
+
+When `--debug-pipeline` is not passed, this placeholder is replaced with an empty string.
+
+## {{ verify_mcp_backends }}
+
+Generates a pipeline step that probes each configured MCPG backend with an MCP initialize + tools/list handshake. This forces MCPG's lazy initialization and catches failures (e.g., container timeout, network blocked) before the agent runs, surfacing them as ADO pipeline warnings.
+
+When `--debug-pipeline` is not passed (the default), this placeholder is replaced with an empty string.
+
 ## {{ pr_trigger }}
 
 Generates PR trigger configuration. When a schedule or pipeline trigger is configured, this generates `pr: none` to disable PR triggers. Otherwise, it generates an empty string, allowing the default PR trigger behavior.
@@ -963,6 +975,7 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
 - `compile [<path>]` - Compile a markdown file to Azure DevOps pipeline YAML. If no path is given, auto-discovers and recompiles all detected agentic pipelines in the current directory.
   - `--output, -o <path>` - Optional output path for generated YAML (only valid when a path is provided)
   - `--skip-integrity` - *(debug builds only)* Omit the "Verify pipeline integrity" step from the generated pipeline. Useful during local development when the compiled output won't match a released compiler version. This flag is not available in release builds.
+  - `--debug-pipeline` - *(debug builds only)* Include MCPG debug diagnostics in the generated pipeline: `DEBUG=*` environment variable for verbose MCPG logging, stderr streaming to log files, and a "Verify MCP backends" step that probes each backend with MCP initialize + tools/list before the agent runs. This flag is not available in release builds.
 - `check <pipeline>` - Verify that a compiled pipeline matches its source markdown
   - `<pipeline>` - Path to the pipeline YAML file to verify
   - The source markdown path is auto-detected from the `@ado-aw` header in the pipeline file

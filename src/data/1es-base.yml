@@ -269,7 +269,6 @@ extends:
                     # Upstream fix: https://github.com/github/gh-aw-mcpg/issues/TBD
                     #
                     # stdout → gateway-output.json (machine-readable config, read after health check)
-                    # stderr → tee to both pipeline console and mcp-logs/stderr.log
                     echo "$MCPG_CONFIG" | docker run -i --rm \
                       --name mcpg \
                       --network host \
@@ -278,11 +277,11 @@ extends:
                       -e MCP_GATEWAY_PORT="$(MCP_GATEWAY_PORT)" \
                       -e MCP_GATEWAY_DOMAIN="$(MCP_GATEWAY_DOMAIN)" \
                       -e MCP_GATEWAY_API_KEY="$(MCP_GATEWAY_API_KEY)" \
-                      -e DEBUG="*" \
+                      {{ mcpg_debug_flags }}
                       {{ mcpg_docker_env }}
                       {{ mcpg_image }}:v{{ mcpg_version }} \
                       --routed --listen 0.0.0.0:{{ mcpg_port }} --config-stdin --log-dir /tmp/gh-aw/mcp-logs \
-                      > "$GATEWAY_OUTPUT" 2> >(tee /tmp/gh-aw/mcp-logs/stderr.log >&2) &
+                      > "$GATEWAY_OUTPUT" &
                     MCPG_PID=$!
                     echo "MCPG started (PID: $MCPG_PID)"
 
@@ -298,8 +297,6 @@ extends:
                     done
                     if [ "$READY" != "true" ]; then
                       echo "##vso[task.complete result=Failed]MCPG did not become ready within 30s"
-                      echo "MCPG stderr:"
-                      cat /tmp/gh-aw/mcp-logs/stderr.log 2>/dev/null || true
                       exit 1
                     fi
 
@@ -343,66 +340,7 @@ extends:
                     cat /tmp/awf-tools/mcp-config.json
                   displayName: "Start MCP Gateway (MCPG)"
 
-                # Probe all MCPG backends to force eager launch and surface failures.
-                # MCPG lazily starts stdio backends on first tool call — without this
-                # step, a broken backend (e.g., npx timeout) only surfaces as a silent
-                # missing-tool error during the agent run.
-                - bash: |
-                    echo "=== Probing MCP backends ==="
-                    PROBE_FAILED=false
-                    for server in $(jq -r '.mcpServers | keys[]' /tmp/awf-tools/mcp-config.json); do
-                      echo ""
-                      echo "--- Probing: $server ---"
-                      # MCP requires initialize handshake before tools/list.
-                      # Send initialize first, then tools/list in a second request
-                      # using the session ID from the initialize response.
-                      INIT_RESPONSE=$(curl -s -D /tmp/probe-headers.txt -o /tmp/probe-init.json -w "%{http_code}" --max-time 120 -X POST \
-                        -H "Authorization: $MCPG_API_KEY" \
-                        -H "Content-Type: application/json" \
-                        -H "Accept: application/json, text/event-stream" \
-                        -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ado-aw-probe","version":"1.0"}}}' \
-                        "http://localhost:{{ mcpg_port }}/mcp/$server" 2>&1)
-                      SESSION_ID=$(grep -i "mcp-session-id" /tmp/probe-headers.txt 2>/dev/null | tr -d '\r' | awk '{print $2}')
-                      echo "Initialize: HTTP $INIT_RESPONSE, session=$SESSION_ID"
-
-                      if [ -z "$SESSION_ID" ]; then
-                        echo "##vso[task.logissue type=warning]MCP backend '$server' did not return a session ID"
-                        cat /tmp/probe-init.json 2>/dev/null || true
-                        PROBE_FAILED=true
-                        continue
-                      fi
-
-                      # Now send tools/list with the session
-                      HTTP_CODE=$(curl -s -o /tmp/probe-response.json -w "%{http_code}" --max-time 120 -X POST \
-                        -H "Authorization: $MCPG_API_KEY" \
-                        -H "Content-Type: application/json" \
-                        -H "Accept: application/json, text/event-stream" \
-                        -H "Mcp-Session-Id: $SESSION_ID" \
-                        -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-                        "http://localhost:{{ mcpg_port }}/mcp/$server" 2>&1)
-                      BODY=$(cat /tmp/probe-response.json 2>/dev/null || echo "(empty)")
-                      # Extract tool count from SSE data line
-                      TOOL_COUNT=$(echo "$BODY" | grep '^data:' | sed 's/^data: //' | jq -r '.result.tools | length' 2>/dev/null || echo "?")
-                      echo "tools/list: HTTP $HTTP_CODE"
-                      if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ] && [ "$TOOL_COUNT" != "?" ]; then
-                        echo "✓ $server: $TOOL_COUNT tools available"
-                      else
-                        echo "##vso[task.logissue type=warning]MCP backend '$server' tools/list returned HTTP $HTTP_CODE"
-                        echo "Response: $BODY"
-                        PROBE_FAILED=true
-                      fi
-                    done
-
-                    echo ""
-                    echo "=== MCPG health after probes ==="
-                    curl -sf "http://localhost:{{ mcpg_port }}/health" | jq . || true
-
-                    if [ "$PROBE_FAILED" = "true" ]; then
-                      echo "##vso[task.logissue type=warning]One or more MCP backends failed to initialize — check logs above"
-                    fi
-                  displayName: "Verify MCP backends"
-                  env:
-                    MCPG_API_KEY: $(MCP_GATEWAY_API_KEY)
+                {{ verify_mcp_backends }}
 
                 # Network isolation via AWF (Agentic Workflow Firewall)
                 - bash: |

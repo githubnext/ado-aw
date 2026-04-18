@@ -850,6 +850,95 @@ pub fn generate_integrity_check(skip: bool) -> String {
         .to_string()
 }
 
+/// Generate debug pipeline replacement values for template markers.
+///
+/// When `debug` is `true`, returns content for MCPG debug diagnostics:
+/// - `{{ mcpg_debug_flags }}`: `-e DEBUG="*"` env, stderr tee redirect, and
+///   stderr dump on health-check failure
+/// - `{{ verify_mcp_backends }}`: full pipeline step that probes each MCPG
+///   backend with MCP initialize + tools/list
+///
+/// When `debug` is `false`, both markers resolve to empty strings.
+pub fn generate_debug_pipeline_replacements(debug: bool) -> Vec<(String, String)> {
+    if !debug {
+        return vec![
+            ("{{ mcpg_debug_flags }}".into(), String::new()),
+            ("{{ verify_mcp_backends }}".into(), String::new()),
+        ];
+    }
+
+    let mcpg_debug_flags = r##"-e DEBUG="*" \
+            2> >(tee /tmp/gh-aw/mcp-logs/stderr.log >&2)"##
+        .to_string();
+
+    let verify_mcp_backends = r###"# Probe all MCPG backends to force eager launch and surface failures.
+      # MCPG lazily starts stdio backends on first tool call — without this
+      # step, a broken backend (e.g., npx timeout) only surfaces as a silent
+      # missing-tool error during the agent run.
+      - bash: |
+          echo "=== Probing MCP backends ==="
+          PROBE_FAILED=false
+          for server in $(jq -r '.mcpServers | keys[]' /tmp/awf-tools/mcp-config.json); do
+            echo ""
+            echo "--- Probing: $server ---"
+            # MCP requires initialize handshake before tools/list.
+            # Send initialize first, then tools/list in a second request
+            # using the session ID from the initialize response.
+            INIT_RESPONSE=$(curl -s -D /tmp/probe-headers.txt -o /tmp/probe-init.json -w "%{http_code}" --max-time 120 -X POST \
+              -H "Authorization: $MCPG_API_KEY" \
+              -H "Content-Type: application/json" \
+              -H "Accept: application/json, text/event-stream" \
+              -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ado-aw-probe","version":"1.0"}}}' \
+              "http://localhost:{{ mcpg_port }}/mcp/$server" 2>&1)
+            SESSION_ID=$(grep -i "mcp-session-id" /tmp/probe-headers.txt 2>/dev/null | tr -d '\r' | awk '{print $2}')
+            echo "Initialize: HTTP $INIT_RESPONSE, session=$SESSION_ID"
+
+            if [ -z "$SESSION_ID" ]; then
+              echo "##vso[task.logissue type=warning]MCP backend '$server' did not return a session ID"
+              cat /tmp/probe-init.json 2>/dev/null || true
+              PROBE_FAILED=true
+              continue
+            fi
+
+            # Now send tools/list with the session
+            HTTP_CODE=$(curl -s -o /tmp/probe-response.json -w "%{http_code}" --max-time 120 -X POST \
+              -H "Authorization: $MCPG_API_KEY" \
+              -H "Content-Type: application/json" \
+              -H "Accept: application/json, text/event-stream" \
+              -H "Mcp-Session-Id: $SESSION_ID" \
+              -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+              "http://localhost:{{ mcpg_port }}/mcp/$server" 2>&1)
+            BODY=$(cat /tmp/probe-response.json 2>/dev/null || echo "(empty)")
+            # Extract tool count from SSE data line
+            TOOL_COUNT=$(echo "$BODY" | grep '^data:' | sed 's/^data: //' | jq -r '.result.tools | length' 2>/dev/null || echo "?")
+            echo "tools/list: HTTP $HTTP_CODE"
+            if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ] && [ "$TOOL_COUNT" != "?" ]; then
+              echo "✓ $server: $TOOL_COUNT tools available"
+            else
+              echo "##vso[task.logissue type=warning]MCP backend '$server' tools/list returned HTTP $HTTP_CODE"
+              echo "Response: $BODY"
+              PROBE_FAILED=true
+            fi
+          done
+
+          echo ""
+          echo "=== MCPG health after probes ==="
+          curl -sf "http://localhost:{{ mcpg_port }}/health" | jq . || true
+
+          if [ "$PROBE_FAILED" = "true" ]; then
+            echo "##vso[task.logissue type=warning]One or more MCP backends failed to initialize — check logs above"
+          fi
+        displayName: "Verify MCP backends"
+        env:
+          MCPG_API_KEY: $(MCP_GATEWAY_API_KEY)"###
+        .to_string();
+
+    vec![
+        ("{{ mcpg_debug_flags }}".into(), mcpg_debug_flags),
+        ("{{ verify_mcp_backends }}".into(), verify_mcp_backends),
+    ]
+}
+
 /// Generate the pipeline YAML path for integrity checking at ADO runtime.
 ///
 /// Returns a path using `{{ workspace }}` as the base, derived from the
@@ -1967,6 +2056,10 @@ pub struct CompileConfig {
     /// generated pipeline. This is a developer-only option gated behind
     /// `cfg(debug_assertions)` at the CLI level.
     pub skip_integrity: bool,
+    /// When true, MCPG debug diagnostics (debug logging, stderr streaming,
+    /// backend probe step) are included in the generated pipeline.
+    /// Gated behind `cfg(debug_assertions)` at the CLI level.
+    pub debug_pipeline: bool,
 }
 
 /// Shared compilation flow used by both standalone and 1ES compilers.
@@ -2105,7 +2198,14 @@ pub async fn compile_shared(
         template = replace_with_indent(&template, placeholder, replacement);
     }
 
-    // 13. Shared replacements
+    // 13. Debug pipeline replacements (before shared replacements since the
+    //     probe step content itself contains {{ mcpg_port }}).
+    let debug_replacements = generate_debug_pipeline_replacements(config.debug_pipeline);
+    for (placeholder, replacement) in &debug_replacements {
+        template = replace_with_indent(&template, placeholder, replacement);
+    }
+
+    // 14. Shared replacements
     let compiler_version = env!("CARGO_PKG_VERSION");
     let integrity_check = generate_integrity_check(config.skip_integrity);
     let replacements: Vec<(&str, &str)> = vec![
@@ -2150,7 +2250,7 @@ pub async fn compile_shared(
             replace_with_indent(&yaml, placeholder, replacement)
         });
 
-    // 14. Prepend header
+    // 15. Prepend header
     let header = generate_header_comment(input_path);
     Ok(format!("{}{}", header, pipeline_yaml))
 }
@@ -2873,6 +2973,41 @@ mod tests {
             result.is_empty(),
             "Should produce empty string when skipping"
         );
+    }
+
+    // ─── generate_debug_pipeline_replacements ────────────────────────────────
+
+    #[test]
+    fn test_debug_pipeline_replacements_disabled() {
+        let replacements = generate_debug_pipeline_replacements(false);
+        assert_eq!(replacements.len(), 2);
+        for (marker, value) in &replacements {
+            assert!(
+                value.is_empty(),
+                "Marker '{}' should be empty when debug is false",
+                marker
+            );
+        }
+    }
+
+    #[test]
+    fn test_debug_pipeline_replacements_enabled() {
+        let replacements = generate_debug_pipeline_replacements(true);
+        assert_eq!(replacements.len(), 2);
+
+        let flags = replacements.iter().find(|(m, _)| m == "{{ mcpg_debug_flags }}");
+        assert!(flags.is_some(), "Should have mcpg_debug_flags marker");
+        let flags_value = &flags.unwrap().1;
+        assert!(flags_value.contains("DEBUG"), "Should contain DEBUG env var");
+        assert!(flags_value.contains("tee"), "Should contain stderr tee");
+
+        let probe = replacements.iter().find(|(m, _)| m == "{{ verify_mcp_backends }}");
+        assert!(probe.is_some(), "Should have verify_mcp_backends marker");
+        let probe_value = &probe.unwrap().1;
+        assert!(probe_value.contains("Verify MCP backends"), "Should contain displayName");
+        assert!(probe_value.contains("tools/list"), "Should contain tools/list probe");
+        assert!(probe_value.contains("initialize"), "Should contain initialize handshake");
+        assert!(probe_value.contains("MCPG_API_KEY"), "Should contain API key env mapping");
     }
 
     // ─── validate_submit_pr_review_events ────────────────────────────────────
