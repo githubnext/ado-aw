@@ -519,6 +519,12 @@ impl CompilerExtension for AzureDevOpsExtension {
             String::new(), // Passthrough from pipeline
         )]));
 
+        // --network host: AWF's DOCKER-USER iptables rules block outbound from
+        // containers on Docker's default bridge. Host networking bypasses FORWARD
+        // chain rules so the ADO MCP can reach dev.azure.com.
+        // This matches gh-aw's approach for its built-in agentic-workflows MCP.
+        let args = Some(vec!["--network".to_string(), "host".to_string()]);
+
         Ok(vec![(
             ADO_MCP_SERVER_NAME.to_string(),
             McpgServerConfig {
@@ -527,7 +533,7 @@ impl CompilerExtension for AzureDevOpsExtension {
                 entrypoint: Some(ADO_MCP_ENTRYPOINT.to_string()),
                 entrypoint_args: Some(entrypoint_args),
                 mounts: None,
-                args: None,
+                args,
                 url: None,
                 headers: None,
                 env,
@@ -1044,6 +1050,9 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains(&"myorg".to_string()));
+        // Must use --network host so AWF iptables don't block outbound
+        let args = servers[0].1.args.as_ref().expect("args should be set");
+        assert_eq!(args, &vec!["--network".to_string(), "host".to_string()]);
     }
 
     #[test]
