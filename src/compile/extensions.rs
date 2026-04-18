@@ -514,10 +514,16 @@ impl CompilerExtension for AzureDevOpsExtension {
         };
 
         // ADO MCP needs the PAT token passed via environment
-        let env = Some(HashMap::from([(
-            "AZURE_DEVOPS_EXT_PAT".to_string(),
-            String::new(), // Passthrough from pipeline
-        )]));
+        let env = Some(HashMap::from([
+            (
+                "AZURE_DEVOPS_EXT_PAT".to_string(),
+                String::new(), // Passthrough from pipeline
+            ),
+            (
+                "DEBUG".to_string(),
+                "*".to_string(), // Verbose logging for ADO MCP
+            ),
+        ]));
 
         // --network host: AWF's DOCKER-USER iptables rules block outbound from
         // containers on Docker's default bridge. Host networking bypasses FORWARD
