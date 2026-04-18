@@ -2926,10 +2926,20 @@ network:
 
 /// Helper: compile a fixture and return the compiled YAML string.
 fn compile_fixture(fixture_name: &str) -> String {
+    compile_fixture_with_flags(fixture_name, &[])
+}
+
+/// Compile a fixture with additional CLI flags (e.g., --skip-integrity, --debug-pipeline).
+fn compile_fixture_with_flags(fixture_name: &str, extra_flags: &[&str]) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique_id = COUNTER.fetch_add(1, Ordering::Relaxed);
+
     let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-yaml-validation-{}-{}",
+        "agentic-pipeline-yaml-validation-{}-{}-{}",
         fixture_name.replace('.', "-"),
-        std::process::id()
+        std::process::id(),
+        unique_id,
     ));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
@@ -2941,20 +2951,26 @@ fn compile_fixture(fixture_name: &str) -> String {
     let output_path = temp_dir.join(fixture_name.replace(".md", ".yml"));
 
     let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let mut args = vec![
+        "compile".to_string(),
+        fixture_path.to_str().unwrap().to_string(),
+        "-o".to_string(),
+        output_path.to_str().unwrap().to_string(),
+    ];
+    for flag in extra_flags {
+        args.push(flag.to_string());
+    }
+
     let output = std::process::Command::new(&binary_path)
-        .args([
-            "compile",
-            fixture_path.to_str().unwrap(),
-            "-o",
-            output_path.to_str().unwrap(),
-        ])
+        .args(&args)
         .output()
         .expect("Failed to run compiler");
 
     assert!(
         output.status.success(),
-        "Compilation of {} should succeed: {}",
+        "Compilation of {} with flags {:?} should succeed: {}",
         fixture_name,
+        extra_flags,
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -3096,4 +3112,185 @@ fn test_standalone_complete_compiled_output_is_valid_yaml() {
 fn test_standalone_pipeline_trigger_compiled_output_is_valid_yaml() {
     let compiled = compile_fixture("pipeline-trigger-agent.md");
     assert_valid_yaml(&compiled, "pipeline-trigger-agent.md");
+}
+
+// ─── --skip-integrity flag tests ─────────────────────────────────────────
+
+/// Test that --skip-integrity omits the integrity check step from the pipeline
+#[test]
+fn test_skip_integrity_omits_integrity_step() {
+    let compiled = compile_fixture_with_flags("minimal-agent.md", &["--skip-integrity"]);
+    assert_valid_yaml(&compiled, "minimal-agent.md (skip-integrity)");
+
+    assert!(
+        !compiled.contains("Verify pipeline integrity"),
+        "Pipeline compiled with --skip-integrity should NOT contain the integrity check step"
+    );
+}
+
+/// Test that without --skip-integrity, the integrity check step IS present
+#[test]
+fn test_default_includes_integrity_step() {
+    let compiled = compile_fixture("minimal-agent.md");
+
+    assert!(
+        compiled.contains("Verify pipeline integrity"),
+        "Pipeline compiled without --skip-integrity should contain the integrity check step"
+    );
+    assert!(
+        compiled.contains("agentic-pipeline-compiler/ado-aw"),
+        "Pipeline compiled without --skip-integrity should reference the ado-aw binary"
+    );
+}
+
+/// Test that --skip-integrity produces valid YAML for both standalone and 1ES
+#[test]
+fn test_skip_integrity_valid_yaml_standalone() {
+    let compiled = compile_fixture_with_flags("complete-agent.md", &["--skip-integrity"]);
+    assert_valid_yaml(&compiled, "complete-agent.md (skip-integrity)");
+}
+
+#[test]
+fn test_skip_integrity_valid_yaml_1es() {
+    let compiled = compile_fixture_with_flags("1es-test-agent.md", &["--skip-integrity"]);
+    assert_valid_yaml(&compiled, "1es-test-agent.md (skip-integrity)");
+}
+
+// ─── --debug-pipeline flag tests ─────────────────────────────────────────
+
+/// Test that --debug-pipeline includes MCPG debug diagnostics
+#[test]
+fn test_debug_pipeline_includes_debug_env() {
+    let compiled = compile_fixture_with_flags("minimal-agent.md", &["--debug-pipeline"]);
+    assert_valid_yaml(&compiled, "minimal-agent.md (debug-pipeline)");
+
+    assert!(
+        compiled.contains(r#"DEBUG="*""#),
+        "Pipeline compiled with --debug-pipeline should contain DEBUG=* env var"
+    );
+    assert!(
+        compiled.contains("tee /tmp/gh-aw/mcp-logs/stderr.log"),
+        "Pipeline compiled with --debug-pipeline should contain stderr tee"
+    );
+}
+
+/// Test that --debug-pipeline includes the MCP backend probe step
+#[test]
+fn test_debug_pipeline_includes_probe_step() {
+    let compiled = compile_fixture_with_flags("minimal-agent.md", &["--debug-pipeline"]);
+
+    assert!(
+        compiled.contains("Verify MCP backends"),
+        "Pipeline compiled with --debug-pipeline should contain probe step displayName"
+    );
+    assert!(
+        compiled.contains("tools/list"),
+        "Pipeline compiled with --debug-pipeline should contain tools/list probe"
+    );
+    assert!(
+        compiled.contains("initialize"),
+        "Pipeline compiled with --debug-pipeline should contain initialize handshake"
+    );
+    assert!(
+        compiled.contains("MCPG_API_KEY: $(MCP_GATEWAY_API_KEY)"),
+        "Pipeline compiled with --debug-pipeline should map MCPG_API_KEY env"
+    );
+}
+
+/// Test that without --debug-pipeline, debug diagnostics are NOT present
+#[test]
+fn test_default_excludes_debug_diagnostics() {
+    let compiled = compile_fixture("minimal-agent.md");
+
+    assert!(
+        !compiled.contains(r#"DEBUG="*""#),
+        "Pipeline compiled without --debug-pipeline should NOT contain DEBUG=* env var"
+    );
+    assert!(
+        !compiled.contains("Verify MCP backends"),
+        "Pipeline compiled without --debug-pipeline should NOT contain probe step"
+    );
+    assert!(
+        !compiled.contains("tee /tmp/gh-aw/mcp-logs/stderr.log"),
+        "Pipeline compiled without --debug-pipeline should NOT contain stderr tee"
+    );
+}
+
+/// Test that --debug-pipeline produces valid YAML for both targets
+#[test]
+fn test_debug_pipeline_valid_yaml_standalone() {
+    let compiled = compile_fixture_with_flags("complete-agent.md", &["--debug-pipeline"]);
+    assert_valid_yaml(&compiled, "complete-agent.md (debug-pipeline)");
+}
+
+#[test]
+fn test_debug_pipeline_valid_yaml_1es() {
+    let compiled = compile_fixture_with_flags("1es-test-agent.md", &["--debug-pipeline"]);
+    assert_valid_yaml(&compiled, "1es-test-agent.md (debug-pipeline)");
+}
+
+/// Test that both flags can be combined
+#[test]
+fn test_skip_integrity_and_debug_pipeline_combined() {
+    let compiled = compile_fixture_with_flags(
+        "minimal-agent.md",
+        &["--skip-integrity", "--debug-pipeline"],
+    );
+    assert_valid_yaml(&compiled, "minimal-agent.md (skip-integrity + debug-pipeline)");
+
+    // Debug content present
+    assert!(
+        compiled.contains(r#"DEBUG="*""#),
+        "Combined flags: should contain DEBUG=*"
+    );
+    assert!(
+        compiled.contains("Verify MCP backends"),
+        "Combined flags: should contain probe step"
+    );
+
+    // Integrity content absent
+    assert!(
+        !compiled.contains("Verify pipeline integrity"),
+        "Combined flags: should NOT contain integrity check"
+    );
+}
+
+/// Test that debug probe step indentation is correct in standalone output
+#[test]
+fn test_debug_pipeline_probe_step_indentation_standalone() {
+    let compiled = compile_fixture_with_flags("minimal-agent.md", &["--debug-pipeline"]);
+
+    // The probe step should be a proper YAML step at the same indent level as
+    // other steps in the Agent job. Find the "- bash:" line and check indent.
+    for line in compiled.lines() {
+        if line.contains("displayName: \"Verify MCP backends\"") {
+            let indent = line.len() - line.trim_start().len();
+            // Standalone jobs use 8 spaces for step properties
+            assert_eq!(
+                indent, 8,
+                "Verify MCP backends displayName should be at 8 spaces indent in standalone, got {}",
+                indent
+            );
+            break;
+        }
+    }
+}
+
+/// Test that debug probe step indentation is correct in 1ES output
+#[test]
+fn test_debug_pipeline_probe_step_indentation_1es() {
+    let compiled = compile_fixture_with_flags("1es-test-agent.md", &["--debug-pipeline"]);
+
+    for line in compiled.lines() {
+        if line.contains("displayName: \"Verify MCP backends\"") {
+            let indent = line.len() - line.trim_start().len();
+            // 1ES uses 18 spaces for step properties inside templateContext
+            assert_eq!(
+                indent, 18,
+                "Verify MCP backends displayName should be at 18 spaces indent in 1ES, got {}",
+                indent
+            );
+            break;
+        }
+    }
 }
