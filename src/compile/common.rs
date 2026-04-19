@@ -779,7 +779,7 @@ pub fn generate_header_comment(input_path: &std::path::Path) -> String {
 /// Docker image and version for the MCP Gateway (gh-aw-mcpg).
 /// Update this when upgrading to a new MCPG release.
 /// See: https://github.com/github/gh-aw-mcpg/releases
-pub const MCPG_VERSION: &str = "0.2.24";
+pub const MCPG_VERSION: &str = "0.2.25";
 
 /// Docker image for the MCPG container.
 pub const MCPG_IMAGE: &str = "ghcr.io/github/gh-aw-mcpg";
