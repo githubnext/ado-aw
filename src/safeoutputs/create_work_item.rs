@@ -237,6 +237,10 @@ async fn resolve_repository_id(
 
 #[async_trait::async_trait]
 impl Executor for CreateWorkItemResult {
+    fn dry_run_summary(&self) -> String {
+        format!("create work item: '{}'", self.title)
+    }
+
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!("Creating work item: '{}'", self.title);
         debug!("Description length: {} chars", self.description.len());

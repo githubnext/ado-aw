@@ -186,6 +186,10 @@ fn apply_title_prefix(path: &str, prefix: &str) -> String {
 
 #[async_trait::async_trait]
 impl Executor for CreateWikiPageResult {
+    fn dry_run_summary(&self) -> String {
+        format!("create wiki page: '{}'", self.path)
+    }
+
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!("Creating wiki page: '{}'", self.path);
         debug!("Content length: {} chars", self.content.len());
@@ -691,6 +695,7 @@ wiki-name: "MyProject.wiki"
             repository_name: None,
             allowed_repositories: std::collections::HashMap::new(),
             agent_stats: None,
+            dry_run: false,
         };
 
         // wiki-name not in config → should return Err
@@ -755,6 +760,7 @@ wiki-name: "MyProject.wiki"
             repository_name: None,
             allowed_repositories: HashMap::new(),
             agent_stats: None,
+            dry_run: false,
         };
 
         let outcome = result.execute_impl(&ctx).await.unwrap();
@@ -794,6 +800,7 @@ wiki-name: "MyProject.wiki"
             repository_name: None,
             allowed_repositories: HashMap::new(),
             agent_stats: None,
+            dry_run: false,
         };
 
         let outcome = result.execute_impl(&ctx).await.unwrap();
@@ -833,6 +840,7 @@ wiki-name: "MyProject.wiki"
             repository_name: None,
             allowed_repositories: HashMap::new(),
             agent_stats: None,
+            dry_run: false,
         };
 
         // The GET will fail (network unreachable with a fake host), so the

@@ -11,6 +11,7 @@ mod logging;
 mod mcp;
 mod ndjson;
 pub mod runtimes;
+mod run;
 pub mod sanitize;
 mod safeoutputs;
 mod tools;
@@ -75,6 +76,9 @@ enum Commands {
         /// Azure DevOps project name (overrides SYSTEM_TEAMPROJECT env var)
         #[arg(long)]
         ado_project: Option<String>,
+        /// Dry run: validate inputs but skip ADO API calls
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Run SafeOutputs MCP server over HTTP (for MCPG integration)
     McpHttp {
@@ -125,6 +129,29 @@ enum Commands {
         #[arg(long, value_delimiter = ',')]
         definition_ids: Option<Vec<u64>>,
     },
+    /// Run agent locally (local development mode)
+    Run {
+        /// Path to the agent markdown file
+        path: String,
+        /// Azure DevOps PAT for API access (prefer AZURE_DEVOPS_EXT_PAT env var)
+        #[arg(long, env = "AZURE_DEVOPS_EXT_PAT")]
+        pat: Option<String>,
+        /// Azure DevOps organization URL
+        #[arg(long)]
+        org: Option<String>,
+        /// Azure DevOps project name
+        #[arg(long)]
+        project: Option<String>,
+        /// Dry-run: skip real ADO API calls in execute stage
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip MCPG/Docker (only SafeOutputs MCP available)
+        #[arg(long)]
+        skip_mcpg: bool,
+        /// Output directory for safe outputs and artifacts
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -153,6 +180,7 @@ async fn main() -> Result<()> {
         Some(Commands::McpHttp { .. }) => "mcp-http",
         Some(Commands::Init { .. }) => "init",
         Some(Commands::Configure { .. }) => "configure",
+        Some(Commands::Run { .. }) => "run",
         None => "ado-aw",
     };
 
@@ -211,6 +239,7 @@ async fn main() -> Result<()> {
                 output_dir,
                 ado_org_url,
                 ado_project,
+                dry_run,
             } => {
                 // Read and parse source markdown to get tool configs
                 let content = tokio::fs::read_to_string(&source)
@@ -248,6 +277,7 @@ async fn main() -> Result<()> {
                 ctx.working_directory = safe_output_dir.clone();
                 ctx.tool_configs = front_matter.safe_outputs.clone();
                 ctx.allowed_repositories = allowed_repositories;
+                ctx.dry_run = dry_run;
 
                 // Load agent stats from OTel JSONL if available
                 let otel_path = safe_output_dir.join(agent_stats::OTEL_FILENAME);
@@ -355,6 +385,26 @@ async fn main() -> Result<()> {
                     dry_run,
                     definition_ids.as_deref(),
                 )
+                .await?;
+            }
+            Commands::Run {
+                path,
+                pat,
+                org,
+                project,
+                dry_run,
+                skip_mcpg,
+                output_dir,
+            } => {
+                run::run(&run::RunArgs {
+                    agent_path: PathBuf::from(path),
+                    pat,
+                    org,
+                    project,
+                    dry_run,
+                    skip_mcpg,
+                    output_dir,
+                })
                 .await?;
             }
         }

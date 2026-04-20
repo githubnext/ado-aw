@@ -195,6 +195,10 @@ async fn resolve_branch_to_commit(
 
 #[async_trait::async_trait]
 impl Executor for CreateBranchResult {
+    fn dry_run_summary(&self) -> String {
+        format!("create branch '{}'", self.branch_name)
+    }
+
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!("Creating branch: '{}'", self.branch_name);
 

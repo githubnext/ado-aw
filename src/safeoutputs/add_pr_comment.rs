@@ -198,6 +198,10 @@ fn validate_file_path(path: &str) -> anyhow::Result<()> {
 
 #[async_trait::async_trait]
 impl Executor for AddPrCommentResult {
+    fn dry_run_summary(&self) -> String {
+        format!("add comment to PR #{}", self.pull_request_id)
+    }
+
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!(
             "Adding comment to PR #{}: {} chars",

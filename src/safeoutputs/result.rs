@@ -58,6 +58,8 @@ pub struct ExecutionContext {
     pub allowed_repositories: HashMap<String, String>,
     /// Agent execution statistics parsed from OTel JSONL
     pub agent_stats: Option<crate::agent_stats::AgentStats>,
+    /// When true, executors validate inputs but skip network calls
+    pub dry_run: bool,
 }
 
 impl ExecutionContext {
@@ -112,6 +114,7 @@ impl Default for ExecutionContext {
             repository_name: std::env::var("BUILD_REPOSITORY_NAME").ok(),
             allowed_repositories: HashMap::new(),
             agent_stats: None,
+            dry_run: false,
         }
     }
 }
@@ -201,13 +204,27 @@ pub trait Executor: SanitizeContent + Send + Sync {
     /// use `execute_sanitized()` instead to ensure inputs are sanitized.
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult>;
 
+    /// Human-readable summary for dry-run output. Override for better messages.
+    fn dry_run_summary(&self) -> String {
+        "tool execution".to_string()
+    }
+
     /// Sanitize all untrusted fields then execute.
     ///
     /// This is the primary entry point for Stage 3 execution. It guarantees
     /// `sanitize_fields()` is called before `execute_impl()`, making it impossible
     /// to accidentally skip sanitization.
+    ///
+    /// In dry-run mode, sanitization still runs but `execute_impl()` is skipped —
+    /// no network calls are made.
     async fn execute_sanitized(&mut self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         self.sanitize_content_fields();
+        if ctx.dry_run {
+            return Ok(ExecutionResult::success(format!(
+                "[DRY-RUN] Would execute: {}",
+                self.dry_run_summary()
+            )));
+        }
         self.execute_impl(ctx).await
     }
 }

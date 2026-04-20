@@ -532,6 +532,10 @@ impl Drop for WorktreeGuard {
 
 #[async_trait::async_trait]
 impl Executor for CreatePrResult {
+    fn dry_run_summary(&self) -> String {
+        format!("create PR: '{}' in repo '{}'", self.title, self.repository)
+    }
+
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!(
             "Creating PR: '{}' in repository '{}'",
