@@ -578,10 +578,6 @@ impl CompilerExtension for AzureDevOpsExtension {
                 token_var.to_string(),
                 String::new(), // Passthrough from MCPG process env
             ),
-            (
-                "DEBUG".to_string(),
-                "*".to_string(),
-            ),
         ]));
 
         // --network host: AWF's DOCKER-USER iptables rules block outbound from

@@ -23,6 +23,7 @@ pub struct RunArgs {
     pub dry_run: bool,
     pub skip_mcpg: bool,
     pub output_dir: Option<PathBuf>,
+    pub debug: bool,
 }
 
 /// Guard that kills child processes on drop (normal exit, error, or panic).
@@ -56,6 +57,20 @@ impl Drop for CleanupGuard {
             }
         }
     }
+}
+
+/// Strip the `\\?\` extended-length path prefix that Windows `canonicalize()`
+/// adds. This prefix breaks many tools (including Copilot CLI) that don't
+/// understand UNC paths. Only strips when the path is a regular drive path
+/// (e.g., `\\?\C:\...` → `C:\...`), not a true UNC path (`\\?\UNC\...`).
+fn strip_unc_prefix(path: PathBuf) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        if !rest.starts_with(r"UNC\") {
+            return PathBuf::from(rest);
+        }
+    }
+    path
 }
 
 /// Find a free TCP port by binding to port 0.
@@ -164,6 +179,230 @@ fn is_docker_available() -> bool {
         .unwrap_or(false)
 }
 
+/// Probe all MCP backends via MCPG to force eager launch and surface failures.
+///
+/// Sends MCP `initialize` + `tools/list` handshakes to each server listed in
+/// the MCP client config. Results are printed to stdout — failures are warnings,
+/// not hard errors, since some backends may intentionally be unavailable.
+async fn probe_mcp_backends(
+    client: &reqwest::Client,
+    mcpg_port: u16,
+    api_key: &str,
+    mcp_config_path: &Path,
+) {
+    println!("\n=== Probing MCP backends ===");
+
+    let config_str = match tokio::fs::read_to_string(mcp_config_path).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Warning: Could not read MCP config for probing: {}", e);
+            return;
+        }
+    };
+    let config: serde_json::Value = match serde_json::from_str(&config_str) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Warning: Could not parse MCP config for probing: {}", e);
+            return;
+        }
+    };
+
+    let servers = match config.get("mcpServers").and_then(|s| s.as_object()) {
+        Some(s) => s,
+        None => {
+            eprintln!("Warning: No mcpServers found in MCP config");
+            return;
+        }
+    };
+
+    let mut any_failed = false;
+
+    for server_name in servers.keys() {
+        print!("  {} ... ", server_name);
+
+        // Extract the server's URL to determine the routed path
+        let server_url = format!("http://127.0.0.1:{}/mcp/{}", mcpg_port, server_name);
+
+        // Step 1: MCP initialize handshake
+        let init_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "ado-aw-probe",
+                    "version": "1.0"
+                }
+            }
+        });
+
+        // MCPG expects the raw API key in Authorization (not Bearer scheme)
+        let init_result = client
+            .post(&server_url)
+            .header("Authorization", api_key)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .timeout(std::time::Duration::from_secs(120))
+            .json(&init_body)
+            .send()
+            .await;
+
+        let session_id = match init_result {
+            Ok(resp) => {
+                let session = resp
+                    .headers()
+                    .get("mcp-session-id")
+                    .and_then(|v| v.to_str().ok())
+                    .map(String::from);
+                if session.is_none() {
+                    println!("⚠ no session ID returned");
+                    any_failed = true;
+                    continue;
+                }
+                session.unwrap()
+            }
+            Err(e) => {
+                println!("✗ initialize failed: {}", e);
+                any_failed = true;
+                continue;
+            }
+        };
+
+        // Step 2: tools/list with session ID
+        let list_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list"
+        });
+
+        let list_result = client
+            .post(&server_url)
+            .header("Authorization", api_key)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .header("Mcp-Session-Id", &session_id)
+            .timeout(std::time::Duration::from_secs(120))
+            .json(&list_body)
+            .send()
+            .await;
+
+        match list_result {
+            Ok(resp) if resp.status().is_success() => {
+                // Try to extract tool count from the response body.
+                // MCPG may return SSE (text/event-stream) or plain JSON.
+                let body = resp.text().await.unwrap_or_default();
+                let tool_count = extract_tool_count(&body);
+                match tool_count {
+                    Some(n) => println!("✓ {} tools available", n),
+                    None => println!("✓ ready (tool count unknown)"),
+                }
+            }
+            Ok(resp) => {
+                println!("⚠ tools/list returned HTTP {}", resp.status());
+                any_failed = true;
+            }
+            Err(e) => {
+                println!("✗ tools/list failed: {}", e);
+                any_failed = true;
+            }
+        }
+    }
+
+    if any_failed {
+        println!("\n  ⚠ One or more MCP backends failed to initialize — check MCPG logs");
+    }
+    println!();
+}
+
+/// Extract tool count from an MCP tools/list response body.
+/// Handles both plain JSON and SSE (text/event-stream with `data:` lines).
+fn extract_tool_count(body: &str) -> Option<usize> {
+    // Try SSE format first: look for `data: {...}` lines
+    for line in body.lines() {
+        if let Some(data) = line.strip_prefix("data: ").or_else(|| line.strip_prefix("data:")) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(data.trim()) {
+                if let Some(tools) = v.pointer("/result/tools").and_then(|t| t.as_array()) {
+                    return Some(tools.len());
+                }
+            }
+        }
+    }
+    // Try plain JSON
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(tools) = v.pointer("/result/tools").and_then(|t| t.as_array()) {
+            return Some(tools.len());
+        }
+    }
+    None
+}
+
+/// Dump MCPG log files to stderr for diagnostics. Called when MCPG fails to
+/// start or crashes during health check. Reads stderr.log (MCPG's own output)
+/// and mcp-gateway.log (unified per-server log) if they exist.
+fn dump_mcpg_logs(mcpg_log_dir: &Path) {
+    eprintln!("\n--- MCPG diagnostic logs ---");
+
+    let stderr_log = mcpg_log_dir.join("stderr.log");
+    if stderr_log.exists() {
+        if let Ok(content) = std::fs::read_to_string(&stderr_log) {
+            let content = content.trim();
+            if !content.is_empty() {
+                eprintln!("\n[stderr.log]:");
+                // Limit output to last 100 lines to avoid flooding the terminal
+                let lines: Vec<&str> = content.lines().collect();
+                let start = lines.len().saturating_sub(100);
+                for line in &lines[start..] {
+                    eprintln!("  {}", line);
+                }
+                if start > 0 {
+                    eprintln!("  ... ({} earlier lines omitted)", start);
+                }
+            }
+        }
+    }
+
+    let gateway_log = mcpg_log_dir.join("mcp-gateway.log");
+    if gateway_log.exists() {
+        if let Ok(content) = std::fs::read_to_string(&gateway_log) {
+            let content = content.trim();
+            if !content.is_empty() {
+                eprintln!("\n[mcp-gateway.log]:");
+                let lines: Vec<&str> = content.lines().collect();
+                let start = lines.len().saturating_sub(50);
+                for line in &lines[start..] {
+                    eprintln!("  {}", line);
+                }
+                if start > 0 {
+                    eprintln!("  ... ({} earlier lines omitted)", start);
+                }
+            }
+        }
+    }
+
+    // List any per-server log files for hints
+    if let Ok(entries) = std::fs::read_dir(mcpg_log_dir) {
+        let server_logs: Vec<_> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                name.ends_with(".log")
+                    && name != "stderr.log"
+                    && name != "mcp-gateway.log"
+            })
+            .collect();
+        if !server_logs.is_empty() {
+            eprintln!("\nPer-server log files:");
+            for entry in &server_logs {
+                eprintln!("  {}", entry.path().display());
+            }
+        }
+    }
+
+    eprintln!("--- end MCPG logs ---\n");
+}
+
 /// Start the MCPG Docker container. Returns the `docker run` child process
 /// and the env file handle. Both must be stored in `CleanupGuard`:
 /// - The child is reaped after `docker stop`
@@ -177,8 +416,10 @@ fn start_mcpg(
     mcpg_api_key: &str,
     port: u16,
     gateway_output_path: &Path,
+    mcpg_log_dir: &Path,
     pat: Option<&str>,
     needs_ado_token: bool,
+    debug: bool,
 ) -> Result<(Child, tempfile::NamedTempFile)> {
     // Remove stale container
     let _ = Command::new("docker")
@@ -209,6 +450,19 @@ fn start_mcpg(
     std::fs::write(env_file.path(), &env_contents)
         .with_context(|| format!("Failed to write MCPG env file: {}", env_file.path().display()))?;
 
+    // Enable verbose MCPG logging in debug mode. This sets DEBUG on the
+    // MCPG gateway process itself. Note: do NOT set DEBUG in individual
+    // server configs (McpgServerConfig.env) — MCPG passes those to child
+    // MCP containers where the npm `debug` package may write to stdout,
+    // corrupting the JSON-RPC stdio protocol.
+    if debug {
+        let mut contents = std::fs::read_to_string(env_file.path())
+            .with_context(|| "Failed to re-read MCPG env file for DEBUG injection")?;
+        contents.push_str("DEBUG=*\n");
+        std::fs::write(env_file.path(), &contents)
+            .with_context(|| "Failed to write DEBUG env to MCPG env file")?;
+    }
+
     let mut args = vec![
         "run".to_string(),
         "-i".to_string(),
@@ -233,6 +487,17 @@ fn start_mcpg(
         "/app/awmg".to_string(),
         "-v".to_string(),
         "/var/run/docker.sock:/var/run/docker.sock".to_string(),
+    ]);
+
+    // Mount the MCPG log dir to the host so logs survive container removal (--rm).
+    std::fs::create_dir_all(mcpg_log_dir)
+        .with_context(|| format!("Failed to create MCPG log dir: {}", mcpg_log_dir.display()))?;
+    args.extend([
+        "-v".to_string(),
+        format!("{}:/tmp/gh-aw/mcp-logs", mcpg_log_dir.to_string_lossy()),
+    ]);
+
+    args.extend([
         "--env-file".to_string(),
         env_file.path().to_string_lossy().into_owned(),
     ]);
@@ -256,11 +521,23 @@ fn start_mcpg(
     let gateway_file = std::fs::File::create(gateway_output_path)
         .with_context(|| format!("Failed to create gateway output file: {}", gateway_output_path.display()))?;
 
+    // Stderr handling:
+    //   debug=true  → inherit to terminal for live visibility
+    //   debug=false → capture to stderr.log (not lost, just quiet)
+    let stderr_cfg = if debug {
+        Stdio::inherit()
+    } else {
+        let stderr_path = mcpg_log_dir.join("stderr.log");
+        let stderr_file = std::fs::File::create(&stderr_path)
+            .with_context(|| format!("Failed to create MCPG stderr log: {}", stderr_path.display()))?;
+        Stdio::from(stderr_file)
+    };
+
     let mut child = Command::new("docker")
         .args(&args)
         .stdin(Stdio::piped())
         .stdout(gateway_file)
-        .stderr(Stdio::null())
+        .stderr(stderr_cfg)
         .spawn()
         .context("Failed to start MCPG Docker container")?;
 
@@ -425,8 +702,20 @@ pub async fn run(args: &RunArgs) -> Result<()> {
         .unwrap_or(Path::new("."));
     let working_dir = find_repo_root(agent_dir)
         .unwrap_or_else(|| agent_dir.to_path_buf());
+    // Resolve the full path for display. On Windows, std canonicalize()
+    // returns UNC-style `\\?\` paths which break many tools. Use
+    // dunce-style stripping to get a normal path.
+    let output_dir = match output_dir.canonicalize() {
+        Ok(p) => strip_unc_prefix(p),
+        Err(_) => output_dir,
+    };
     println!("Output directory: {}", output_dir.display());
     println!("Working directory: {}", working_dir.display());
+    if args.debug {
+        println!("Debug log locations:");
+        println!("  Copilot logs: ~/.copilot/logs/");
+        println!("  SafeOutputs logs: {}", output_dir.join("logs").display());
+    }
 
     // ── 4. Start SafeOutputs HTTP server ─────────────────────────────
     let mut guard = CleanupGuard {
@@ -511,13 +800,22 @@ pub async fn run(args: &RunArgs) -> Result<()> {
             println!("Warning: ADO MCP enabled but no PAT provided — tool calls may fail");
         }
         let gateway_output_path = output_dir.join("gateway-output.json");
+        let mcpg_log_dir = if args.debug {
+            let dir = output_dir.join("mcpg-logs");
+            println!("MCPG logs will be written to: {}", dir.display());
+            dir
+        } else {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("mcpg-logs")
+        };
         let (mcpg_child, mcpg_env_file) = start_mcpg(
             &mcpg_json,
             &mcpg_api_key,
             mcpg_port,
             &gateway_output_path,
+            &mcpg_log_dir,
             args.pat.as_deref(),
             needs_ado_token,
+            args.debug,
         )?;
         guard.mcpg_child = Some(mcpg_child);
         guard.mcpg_env_file = Some(mcpg_env_file);
@@ -529,6 +827,7 @@ pub async fn run(args: &RunArgs) -> Result<()> {
         for _ in 0..30 {
             if let Some(ref mut child) = guard.mcpg_child {
                 if let Some(status) = child.try_wait()? {
+                    dump_mcpg_logs(&mcpg_log_dir);
                     bail!("MCPG container exited during startup with {}", status);
                 }
             }
@@ -542,9 +841,12 @@ pub async fn run(args: &RunArgs) -> Result<()> {
             }
         }
         if !ready {
+            dump_mcpg_logs(&mcpg_log_dir);
             bail!("MCPG did not become ready within 30s");
         }
         println!("MCPG ready on port {}", mcpg_port);
+        println!("MCPG logs: {}", mcpg_log_dir.display());
+        println!("  Tip: tail -f {}/mcp-gateway.log", mcpg_log_dir.display());
 
         // Wait for gateway output — health check passing doesn't guarantee
         // stdout is flushed, so poll until the file contains valid JSON.
@@ -565,6 +867,7 @@ pub async fn run(args: &RunArgs) -> Result<()> {
         }
         if !gateway_ready {
             let content = tokio::fs::read_to_string(&gateway_output_path).await.unwrap_or_default();
+            dump_mcpg_logs(&mcpg_log_dir);
             bail!(
                 "MCPG gateway output not ready within 15s. Content: {}",
                 if content.is_empty() { "(empty)" } else { &content }
@@ -581,6 +884,14 @@ pub async fn run(args: &RunArgs) -> Result<()> {
             .with_context(|| format!("Failed to write MCP config: {}", mcp_config_path.display()))?;
         debug!("MCP client config written");
         println!("MCP client config generated from gateway output");
+
+        // In debug mode, probe each MCP backend to force eager launch and
+        // surface failures before the agent runs. MCPG lazily starts stdio
+        // backends on first tool call — without probing, a broken backend
+        // only surfaces as a silent missing-tool error during the agent run.
+        if args.debug {
+            probe_mcp_backends(&client, mcpg_port, &mcpg_api_key, &mcp_config_path).await;
+        }
     } else {
         // Skip MCPG — generate direct config pointing to SafeOutputs
         println!("\n=== Generating direct MCP config (no MCPG) ===");
@@ -615,18 +926,36 @@ pub async fn run(args: &RunArgs) -> Result<()> {
     println!("\n=== Copilot CLI ===");
 
     if is_on_path("copilot") {
-        println!("Running copilot...");
-
         let mut cmd = host_command_async("copilot");
-        cmd.arg("--prompt")
-            .arg(&markdown_body)
-            .arg("--additional-mcp-config")
-            .arg(format!("@{}", mcp_config_path.display()));
+        // Collect args for debug logging (tokio Command doesn't expose them)
+        let mut visible_args: Vec<String> = Vec::new();
+
+        let prompt_path_str = format!("@{}", mcp_config_path.display());
+
+        cmd.arg("--prompt").arg(&markdown_body);
+        visible_args.push("--prompt".into());
+        visible_args.push(format!("\"({} chars)\"", markdown_body.len()));
+
+        cmd.arg("--additional-mcp-config")
+            .arg(format!("\"{}\"", prompt_path_str));
+        visible_args.push("--additional-mcp-config".into());
+        visible_args.push(format!("\"{}\"", prompt_path_str));
 
         // Parse copilot_params and add as args
         for param in shell_words(&copilot_params) {
+            visible_args.push(param.clone());
             cmd.arg(param);
         }
+
+        // Debug mode: enable verbose copilot logging. Logs are written to
+        // the default ~/.copilot/logs/ directory (--log-dir is unreliable
+        // across platforms).
+        if args.debug {
+            cmd.arg("--log-level").arg("debug");
+            visible_args.extend(["--log-level".into(), "debug".into()]);
+        }
+
+        println!("Running: copilot {}", visible_args.join(" "));
 
         // Set working directory
         cmd.current_dir(&working_dir);
@@ -647,13 +976,15 @@ pub async fn run(args: &RunArgs) -> Result<()> {
             println!("Copilot exited with status: {}", status);
         }
     } else {
+        let debug_flags = if args.debug { " --log-level debug" } else { "" };
         println!("Copilot CLI not found on PATH.");
         println!("To run the agent, execute this command:\n");
         println!(
-            "  copilot --prompt \"$(cat {})\" --additional-mcp-config @{} {}\n",
+            "  copilot --prompt \"$(cat {})\" --additional-mcp-config @{} {}{}\n",
             prompt_path.display(),
             mcp_config_path.display(),
             copilot_params,
+            debug_flags,
         );
 
         if let Some(pat) = &args.pat {
