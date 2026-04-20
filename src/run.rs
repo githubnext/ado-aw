@@ -215,16 +215,14 @@ fn start_mcpg(
 /// Build a `std::process::Command` for a program that may be a script wrapper.
 ///
 /// On Windows, npm-installed tools (like `copilot`) are `.cmd` wrappers.
-/// `Command::new("copilot")` won't find them — we need a shell wrapper.
+/// On Windows, npm-installed tools like `copilot` are `.cmd`/`.ps1` wrappers.
+/// `Command::new("copilot")` won't find them — `cmd /C` resolves `.cmd`/`.bat`
+/// from PATH and handles execution natively.
 /// On Unix (Linux/macOS), `Command::new` resolves scripts via the shebang.
-///
-/// On Windows, tries `pwsh` (PowerShell 7+) first for modern resolution,
-/// then falls back to `powershell` (5.1, always available on Windows).
 fn host_command(program: &str) -> Command {
     if cfg!(windows) {
-        let shell = windows_shell();
-        let mut cmd = Command::new(&shell);
-        cmd.args(["-NoProfile", "-Command", program]);
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", program]);
         cmd
     } else {
         Command::new(program)
@@ -234,43 +232,12 @@ fn host_command(program: &str) -> Command {
 /// Async variant of [`host_command`] using `tokio::process::Command`.
 fn host_command_async(program: &str) -> tokio::process::Command {
     if cfg!(windows) {
-        let shell = windows_shell();
-        let mut cmd = tokio::process::Command::new(&shell);
-        cmd.args(["-NoProfile", "-Command", program]);
+        let mut cmd = tokio::process::Command::new("cmd");
+        cmd.args(["/C", program]);
         cmd
     } else {
         tokio::process::Command::new(program)
     }
-}
-
-/// Resolve the Windows PowerShell binary: prefer `pwsh` (PS 7+), fall back to `powershell` (5.1).
-#[cfg(windows)]
-fn windows_shell() -> String {
-    use std::sync::OnceLock;
-    static SHELL: OnceLock<String> = OnceLock::new();
-    SHELL
-        .get_or_init(|| {
-            if Command::new("pwsh")
-                .args(["-NoProfile", "-Command", "exit 0"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
-            {
-                debug!("Using pwsh (PowerShell 7+) as Windows shell");
-                "pwsh".to_string()
-            } else {
-                debug!("pwsh not found, using powershell (5.1) as Windows shell");
-                "powershell".to_string()
-            }
-        })
-        .clone()
-}
-
-#[cfg(not(windows))]
-fn windows_shell() -> String {
-    unreachable!("windows_shell called on non-Windows platform")
 }
 
 /// Check if an executable is available on PATH.
