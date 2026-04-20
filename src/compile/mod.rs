@@ -18,7 +18,6 @@ use log::{debug, info};
 use std::path::{Path, PathBuf};
 
 pub use common::parse_markdown;
-pub use common::sanitize_filename;
 pub use common::HEADER_MARKER;
 pub use common::generate_copilot_params;
 pub use common::generate_mcpg_config;
@@ -26,8 +25,7 @@ pub use common::generate_mcp_client_config;
 pub use common::MCPG_IMAGE;
 pub use common::MCPG_VERSION;
 pub use common::MCPG_PORT;
-pub use common::MCPG_DOMAIN;
-pub use types::{CompileTarget, FrontMatter, PermissionsConfig};
+pub use types::{CompileTarget, FrontMatter};
 
 /// Trait for pipeline compilers.
 ///

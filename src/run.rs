@@ -250,6 +250,7 @@ fn start_mcpg(
 /// `Command::new("copilot")` won't find them — `cmd /C` resolves `.cmd`/`.bat`
 /// from PATH and handles execution natively.
 /// On Unix (Linux/macOS), `Command::new` resolves scripts via the shebang.
+#[allow(dead_code)]
 fn host_command(program: &str) -> Command {
     if cfg!(windows) {
         let mut cmd = Command::new("cmd");
