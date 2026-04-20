@@ -29,8 +29,9 @@ pub struct RunArgs {
 struct CleanupGuard {
     safeoutputs_child: Option<Child>,
     mcpg_child: Option<Child>,
-    /// Keeps the env file alive until MCPG exits — Docker reads --env-file
-    /// asynchronously after spawn() returns (spawn is just fork, not exec).
+    /// Keeps the env file alive until MCPG exits. The file must outlive
+    /// `spawn()` because spawn is just fork — the Docker CLI reads
+    /// `--env-file` after exec, not before spawn returns.
     #[allow(dead_code)]
     mcpg_env_file: Option<tempfile::NamedTempFile>,
 }
@@ -119,14 +120,23 @@ async fn start_safeoutputs(
 
     cmd.stdout(stdout_file).stderr(stderr_file);
 
-    let child = cmd.spawn().context("Failed to start SafeOutputs HTTP server")?;
+    let mut child = cmd.spawn().context("Failed to start SafeOutputs HTTP server")?;
     info!("SafeOutputs started (PID: {}, port: {})", child.id(), port);
 
-    // Health check
+    // Health check — also detect early crash via try_wait()
     let client = reqwest::Client::new();
     let health_url = format!("http://127.0.0.1:{}/health", port);
     let mut ready = false;
     for _ in 0..30 {
+        // Check if process crashed before polling the endpoint
+        if let Some(status) = child.try_wait()? {
+            bail!(
+                "SafeOutputs HTTP server exited during startup with {}. \
+                 Check logs at {}",
+                status,
+                log_dir.display()
+            );
+        }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         match client.get(&health_url).send().await {
             Ok(resp) if resp.status().is_success() => {
@@ -172,11 +182,10 @@ fn start_mcpg(
         .stderr(Stdio::null())
         .status();
 
-    // Write secrets to a temp file (avoids exposing in ps/cmdline, and avoids
-    // persisting credentials in the output directory). Docker reads --env-file
-    // synchronously during `docker run` setup — before spawn() returns — so the
-    // file is guaranteed to exist when Docker needs it. NamedTempFile allows
-    // shared reads on Windows, so Docker can open it concurrently.
+    // Write secrets to a temp file to avoid exposing in ps/cmdline.
+    // The caller must keep the returned NamedTempFile alive — spawn() is
+    // just fork(), so the Docker CLI reads --env-file after exec, which
+    // happens after spawn() returns.
     let env_file = tempfile::NamedTempFile::new()
         .context("Failed to create temp env file for MCPG secrets")?;
     let mut env_contents = format!(
@@ -231,7 +240,7 @@ fn start_mcpg(
         drop(stdin);
     }
 
-    // Caller must keep env_file alive until MCPG has started and read it
+    // Caller must keep env_file alive until Docker has read it
     Ok((child, env_file))
 }
 
@@ -407,7 +416,8 @@ pub async fn run(args: &RunArgs) -> Result<()> {
             .replace("${SAFE_OUTPUTS_API_KEY}", &so_api_key)
             .replace("${MCP_GATEWAY_API_KEY}", &mcpg_api_key);
 
-        tokio::fs::write(output_dir.join("mcpg-config.json"), &mcpg_json).await?;
+        tokio::fs::write(output_dir.join("mcpg-config.json"), &mcpg_json).await
+            .with_context(|| format!("Failed to write MCPG config: {}", output_dir.join("mcpg-config.json").display()))?;
         debug!("MCPG config written");
 
         // Generate MCP client config for copilot
@@ -417,11 +427,17 @@ pub async fn run(args: &RunArgs) -> Result<()> {
         // Local: copilot runs on host, not inside AWF container
         let mcp_client_json = mcp_client_json.replace("host.docker.internal", "127.0.0.1");
 
-        tokio::fs::write(&mcp_config_path, &mcp_client_json).await?;
+        tokio::fs::write(&mcp_config_path, &mcp_client_json).await
+            .with_context(|| format!("Failed to write MCP config: {}", mcp_config_path.display()))?;
         debug!("MCP client config written");
 
         // Start MCPG
         println!("\n=== Starting MCP Gateway (MCPG) ===");
+        if needs_ado_token && args.pat.is_none() {
+            warn!("ADO MCP requires a PAT but none was provided (--pat or AZURE_DEVOPS_EXT_PAT). \
+                   ADO MCP tool calls will likely fail at runtime.");
+            println!("Warning: ADO MCP enabled but no PAT provided — tool calls may fail");
+        }
         let (mcpg_child, mcpg_env_file) = start_mcpg(
             &mcpg_json,
             &mcpg_api_key,
@@ -431,11 +447,16 @@ pub async fn run(args: &RunArgs) -> Result<()> {
         guard.mcpg_child = Some(mcpg_child);
         guard.mcpg_env_file = Some(mcpg_env_file);
 
-        // Health check MCPG
+        // Health check MCPG — also detect early crash
         let client = reqwest::Client::new();
         let health_url = format!("http://127.0.0.1:{}/health", compile::MCPG_PORT);
         let mut ready = false;
         for _ in 0..30 {
+            if let Some(ref mut child) = guard.mcpg_child {
+                if let Some(status) = child.try_wait()? {
+                    bail!("MCPG container exited during startup with {}", status);
+                }
+            }
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             match client.get(&health_url).send().await {
                 Ok(resp) if resp.status().is_success() => {
@@ -473,7 +494,8 @@ pub async fn run(args: &RunArgs) -> Result<()> {
 
     // ── 6. Write agent prompt ────────────────────────────────────────
     let prompt_path = output_dir.join("agent-prompt.md");
-    tokio::fs::write(&prompt_path, &markdown_body).await?;
+    tokio::fs::write(&prompt_path, &markdown_body).await
+        .with_context(|| format!("Failed to write agent prompt: {}", prompt_path.display()))?;
     debug!("Agent prompt written to {}", prompt_path.display());
 
     // ── 7. Build and run copilot command ─────────────────────────────
@@ -484,11 +506,9 @@ pub async fn run(args: &RunArgs) -> Result<()> {
     if is_on_path("copilot") {
         println!("Running copilot...");
 
-        let prompt_content = tokio::fs::read_to_string(&prompt_path).await?;
-
         let mut cmd = host_command_async("copilot");
         cmd.arg("--prompt")
-            .arg(&prompt_content)
+            .arg(&markdown_body)
             .arg("--additional-mcp-config")
             .arg(format!("@{}", mcp_config_path.display()));
 
