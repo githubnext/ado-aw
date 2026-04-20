@@ -1004,6 +1004,14 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - `--ado-project <name>` - Azure DevOps project name override
   - `--dry-run` - Validate inputs but skip ADO API calls (useful for local testing and QA review)
 
+- `run <path>` - Run an agent locally (local development mode). Orchestrates the full agent lifecycle: starts SafeOutputs, optionally starts MCPG via Docker, generates configs, runs copilot, and executes safe outputs.
+  - `--pat <pat>` / `AZURE_DEVOPS_EXT_PAT` env var - Azure DevOps PAT for API access (passed to MCPG for ADO MCP, copilot env, and Stage 3 execution)
+  - `--org <url>` - Azure DevOps organization URL (overrides auto-inference from git remote)
+  - `--project <name>` - Azure DevOps project name
+  - `--dry-run` - Skip ADO API calls in the execute stage
+  - `--skip-mcpg` - Skip MCPG/Docker (only SafeOutputs MCP available; auto-enabled when Docker is unavailable)
+  - `--output-dir <path>` - Output directory for safe outputs and artifacts (defaults to a temp directory)
+
 - `configure` - Detect agentic pipelines in a local repository and update the `GITHUB_TOKEN` pipeline variable on their Azure DevOps build definitions
   - `--token <token>` / `GITHUB_TOKEN` env var - The new GITHUB_TOKEN value (prompted if omitted)
   - `--org <url>` - Override: Azure DevOps organization URL (inferred from git remote by default)
