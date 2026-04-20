@@ -29,6 +29,10 @@ pub struct RunArgs {
 struct CleanupGuard {
     safeoutputs_child: Option<Child>,
     mcpg_child: Option<Child>,
+    /// Keeps the env file alive until MCPG exits — Docker reads --env-file
+    /// asynchronously after spawn() returns (spawn is just fork, not exec).
+    #[allow(dead_code)]
+    mcpg_env_file: Option<tempfile::NamedTempFile>,
 }
 
 impl Drop for CleanupGuard {
@@ -151,17 +155,16 @@ fn is_docker_available() -> bool {
 }
 
 /// Start the MCPG Docker container. Returns the `docker run` child process
-/// so the caller can store it in `CleanupGuard` for proper reaping.
-///
-/// Secrets (API keys, PAT) are passed via `--env-file` using a temporary file
-/// to avoid exposing them in `ps` output or `/proc/<pid>/cmdline`. The temp
-/// file is deleted when the returned guard is dropped.
+/// and the env file handle. Both must be stored in `CleanupGuard`:
+/// - The child is reaped after `docker stop`
+/// - The env file must outlive the child because `spawn()` returns after
+///   fork() — the Docker CLI hasn't yet exec'd or read `--env-file`
 fn start_mcpg(
     mcpg_config_json: &str,
     mcpg_api_key: &str,
     pat: Option<&str>,
     needs_ado_token: bool,
-) -> Result<Child> {
+) -> Result<(Child, tempfile::NamedTempFile)> {
     // Remove stale container
     let _ = Command::new("docker")
         .args(["rm", "-f", "ado-aw-mcpg"])
@@ -228,8 +231,8 @@ fn start_mcpg(
         drop(stdin);
     }
 
-    // env_file temp file deleted here on drop — Docker has already read it
-    Ok(child)
+    // Caller must keep env_file alive until MCPG has started and read it
+    Ok((child, env_file))
 }
 
 /// Build a `std::process::Command` for a program that may be a script wrapper.
@@ -356,6 +359,7 @@ pub async fn run(args: &RunArgs) -> Result<()> {
     let mut guard = CleanupGuard {
         safeoutputs_child: None,
         mcpg_child: None,
+        mcpg_env_file: None,
     };
 
     println!("\n=== Starting SafeOutputs HTTP server ===");
@@ -418,13 +422,14 @@ pub async fn run(args: &RunArgs) -> Result<()> {
 
         // Start MCPG
         println!("\n=== Starting MCP Gateway (MCPG) ===");
-        let mcpg_child = start_mcpg(
+        let (mcpg_child, mcpg_env_file) = start_mcpg(
             &mcpg_json,
             &mcpg_api_key,
             args.pat.as_deref(),
             needs_ado_token,
         )?;
         guard.mcpg_child = Some(mcpg_child);
+        guard.mcpg_env_file = Some(mcpg_env_file);
 
         // Health check MCPG
         let client = reqwest::Client::new();
@@ -536,6 +541,7 @@ pub async fn run(args: &RunArgs) -> Result<()> {
     let mut ctx = crate::safeoutputs::ExecutionContext::default();
     ctx.dry_run = args.dry_run;
     ctx.working_directory = output_dir.clone();
+    ctx.source_directory = working_dir.clone();
     ctx.tool_configs = front_matter.safe_outputs.clone();
 
     if let Some(org) = &args.org {
