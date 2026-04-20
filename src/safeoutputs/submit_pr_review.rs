@@ -137,6 +137,10 @@ impl Default for SubmitPrReviewConfig {
 
 #[async_trait::async_trait]
 impl Executor for SubmitPrReviewResult {
+    fn dry_run_summary(&self) -> String {
+        format!("submit '{}' review on PR #{}", self.event, self.pull_request_id)
+    }
+
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!(
             "Submitting review on PR #{} — event: {}",

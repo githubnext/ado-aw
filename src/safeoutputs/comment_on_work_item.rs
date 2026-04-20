@@ -166,6 +166,10 @@ async fn get_work_item_area_path(
 
 #[async_trait::async_trait]
 impl Executor for CommentOnWorkItemResult {
+    fn dry_run_summary(&self) -> String {
+        format!("comment on work item #{}", self.work_item_id)
+    }
+
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!(
             "Commenting on work item #{}: {} chars",

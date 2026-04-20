@@ -128,6 +128,10 @@ impl Default for UploadAttachmentConfig {
 
 #[async_trait::async_trait]
 impl Executor for UploadAttachmentResult {
+    fn dry_run_summary(&self) -> String {
+        format!("upload '{}' to work item #{}", self.file_path, self.work_item_id)
+    }
+
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!(
             "Uploading attachment '{}' to work item #{}",

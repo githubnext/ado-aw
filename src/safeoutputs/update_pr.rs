@@ -231,6 +231,10 @@ impl Default for UpdatePrConfig {
 
 #[async_trait::async_trait]
 impl Executor for UpdatePrResult {
+    fn dry_run_summary(&self) -> String {
+        format!("{} on PR #{}", self.operation, self.pull_request_id)
+    }
+
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!(
             "Updating PR #{} — operation: {}",

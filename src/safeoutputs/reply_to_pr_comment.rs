@@ -99,6 +99,10 @@ impl Default for ReplyToPrCommentConfig {
 
 #[async_trait::async_trait]
 impl Executor for ReplyToPrCommentResult {
+    fn dry_run_summary(&self) -> String {
+        format!("reply to thread #{} on PR #{}", self.thread_id, self.pull_request_id)
+    }
+
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!(
             "Replying to PR #{} thread #{}: {} chars",

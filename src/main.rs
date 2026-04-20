@@ -69,6 +69,9 @@ enum Commands {
         /// Azure DevOps project name (overrides SYSTEM_TEAMPROJECT env var)
         #[arg(long)]
         ado_project: Option<String>,
+        /// Dry run: validate inputs but skip ADO API calls
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Run SafeOutputs MCP server over HTTP (for MCPG integration)
     McpHttp {
@@ -198,6 +201,7 @@ async fn main() -> Result<()> {
                 output_dir,
                 ado_org_url,
                 ado_project,
+                dry_run,
             } => {
                 // Read and parse source markdown to get tool configs
                 let content = tokio::fs::read_to_string(&source)
@@ -235,6 +239,7 @@ async fn main() -> Result<()> {
                 ctx.working_directory = safe_output_dir.clone();
                 ctx.tool_configs = front_matter.safe_outputs.clone();
                 ctx.allowed_repositories = allowed_repositories;
+                ctx.dry_run = dry_run;
 
                 // Load agent stats from OTel JSONL if available
                 let otel_path = safe_output_dir.join(agent_stats::OTEL_FILENAME);

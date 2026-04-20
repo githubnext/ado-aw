@@ -515,6 +515,7 @@ mod tests {
             repository_name: None,
             allowed_repositories: HashMap::new(),
             agent_stats: None,
+            dry_run: false,
         };
 
         let result = execute_safe_output(&entry, &ctx).await;
@@ -548,6 +549,7 @@ mod tests {
             repository_name: None,
             allowed_repositories: HashMap::new(),
             agent_stats: None,
+            dry_run: false,
         };
 
         let result = execute_safe_output(&entry, &ctx).await;
@@ -697,6 +699,7 @@ mod tests {
             repository_name: None,
             allowed_repositories: HashMap::new(),
             agent_stats: None,
+            dry_run: false,
         };
 
         let result = execute_safe_output(&entry, &ctx).await;
@@ -740,6 +743,7 @@ mod tests {
             repository_name: None,
             allowed_repositories: HashMap::new(),
             agent_stats: None,
+            dry_run: false,
         };
 
         let result = execute_safe_output(&entry, &ctx).await;
@@ -783,6 +787,7 @@ mod tests {
             repository_name: None,
             allowed_repositories: HashMap::new(),
             agent_stats: None,
+            dry_run: false,
         };
 
         let result = execute_safe_output(&entry, &ctx).await;
@@ -831,6 +836,7 @@ mod tests {
             repository_name: None,
             allowed_repositories: HashMap::new(),
             agent_stats: None,
+            dry_run: false,
         };
 
         let results = execute_safe_outputs(temp_dir.path(), &ctx).await;
@@ -986,6 +992,7 @@ mod tests {
         tool_configs.insert("test-tool".to_string(), serde_json::json!({"max": 5}));
         let ctx = ExecutionContext {
             tool_configs,
+            dry_run: false,
             ..ExecutionContext::default()
         };
         assert_eq!(resolve_max(&ctx, "test-tool", 1), 5);
@@ -1003,6 +1010,7 @@ mod tests {
         tool_configs.insert("test-tool".to_string(), serde_json::json!({"other": true}));
         let ctx = ExecutionContext {
             tool_configs,
+            dry_run: false,
             ..ExecutionContext::default()
         };
         assert_eq!(resolve_max(&ctx, "test-tool", 7), 7);
@@ -1038,6 +1046,7 @@ mod tests {
             repository_name: None,
             allowed_repositories: HashMap::new(),
             agent_stats: None,
+            dry_run: false,
         };
 
         let results = execute_safe_outputs(temp_dir.path(), &ctx).await;
@@ -1082,6 +1091,7 @@ mod tests {
             repository_name: None,
             allowed_repositories: HashMap::new(),
             agent_stats: None,
+            dry_run: false,
         };
 
         let results = execute_safe_outputs(temp_dir.path(), &ctx).await.unwrap();
@@ -1103,5 +1113,123 @@ mod tests {
 
         // noop always runs
         assert!(results[4].success, "noop should still succeed");
+    }
+
+    // ─── dry-run tests ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_dry_run_create_work_item_succeeds() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let safe_output_path = temp_dir.path().join(SAFE_OUTPUT_FILENAME);
+
+        let ndjson = r#"{"name":"create-work-item","title":"Test work item title","description":"This is a test description that is long enough to pass validation checks"}"#;
+        tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
+
+        let mut ctx = ExecutionContext::default();
+        ctx.dry_run = true;
+
+        let results = execute_safe_outputs(temp_dir.path(), &ctx).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].success, "dry-run should succeed");
+        assert!(
+            results[0].message.contains("[DRY-RUN]"),
+            "message should contain [DRY-RUN], got: {}",
+            results[0].message
+        );
+        assert!(
+            results[0].message.contains("create work item"),
+            "message should contain tool summary, got: {}",
+            results[0].message
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dry_run_multiple_tools() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let safe_output_path = temp_dir.path().join(SAFE_OUTPUT_FILENAME);
+
+        let ndjson = [
+            r#"{"name":"create-work-item","title":"Test work item title","description":"This is a test description that is long enough to pass validation checks"}"#,
+            r#"{"name":"noop","context":"nothing to do"}"#,
+        ]
+        .join("\n");
+        tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
+
+        let mut ctx = ExecutionContext::default();
+        ctx.dry_run = true;
+
+        let results = execute_safe_outputs(temp_dir.path(), &ctx).await.unwrap();
+        assert_eq!(results.len(), 2);
+        // create-work-item goes through Executor trait → dry-run intercepted
+        assert!(results[0].message.contains("[DRY-RUN]"));
+        // noop is handled inline, not through Executor → runs normally
+        assert!(results[1].success);
+        assert!(results[1].message.contains("noop"));
+    }
+
+    #[tokio::test]
+    async fn test_dry_run_default_is_false() {
+        let ctx = ExecutionContext::default();
+        assert!(!ctx.dry_run, "dry_run should default to false");
+    }
+
+    #[tokio::test]
+    async fn test_non_dry_run_still_fails_without_ado_config() {
+        // Verify dry_run=false (default) still behaves normally: missing ADO config causes error
+        let entry = serde_json::json!({
+            "name": "create-work-item",
+            "title": "Test work item",
+            "description": "A description that is definitely longer than thirty characters."
+        });
+
+        let ctx = ExecutionContext {
+            ado_org_url: None,
+            ado_organization: None,
+            ado_project: None,
+            access_token: None,
+            working_directory: PathBuf::from("."),
+            source_directory: PathBuf::from("."),
+            tool_configs: HashMap::new(),
+            repository_id: None,
+            repository_name: None,
+            allowed_repositories: HashMap::new(),
+            agent_stats: None,
+            dry_run: false,
+        };
+
+        let result = execute_safe_output(&entry, &ctx).await;
+        assert!(result.is_err(), "should fail without ADO config when not in dry-run mode");
+    }
+
+    #[tokio::test]
+    async fn test_dry_run_skips_ado_validation() {
+        // With dry_run=true, missing ADO config should NOT cause failure
+        let entry = serde_json::json!({
+            "name": "create-work-item",
+            "title": "Test work item",
+            "description": "A description that is definitely longer than thirty characters."
+        });
+
+        let ctx = ExecutionContext {
+            ado_org_url: None,
+            ado_organization: None,
+            ado_project: None,
+            access_token: None,
+            working_directory: PathBuf::from("."),
+            source_directory: PathBuf::from("."),
+            tool_configs: HashMap::new(),
+            repository_id: None,
+            repository_name: None,
+            allowed_repositories: HashMap::new(),
+            agent_stats: None,
+            dry_run: true,
+        };
+
+        let result = execute_safe_output(&entry, &ctx).await;
+        assert!(result.is_ok(), "dry-run should succeed without ADO config");
+        let (tool_name, exec_result) = result.unwrap();
+        assert_eq!(tool_name, "create-work-item");
+        assert!(exec_result.success);
+        assert!(exec_result.message.contains("[DRY-RUN]"));
     }
 }
