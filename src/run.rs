@@ -54,6 +54,11 @@ impl Drop for CleanupGuard {
 }
 
 /// Find a free TCP port by binding to port 0.
+///
+/// Note: There is an inherent TOCTOU race — the port is released before the
+/// child process binds it. Another process could grab it in the gap. This is
+/// acceptable for a local dev tool; fixing it would require refactoring the
+/// mcp-http server to accept a pre-bound listener.
 fn find_free_port() -> Result<u16> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")
         .context("Failed to bind to a free port")?;
@@ -62,15 +67,14 @@ fn find_free_port() -> Result<u16> {
     Ok(port)
 }
 
-/// Generate a random API key (alphanumeric, 45 chars).
+/// Generate a random alphanumeric API key (at least 40 chars).
 fn generate_api_key() -> String {
     use rand::RngExt;
-    let mut bytes = [0u8; 33];
+    let mut bytes = [0u8; 48];
     rand::rng().fill(&mut bytes);
     base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &bytes)
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
-        .take(45)
         .collect()
 }
 
@@ -148,11 +152,15 @@ fn is_docker_available() -> bool {
 
 /// Start the MCPG Docker container. Returns the `docker run` child process
 /// so the caller can store it in `CleanupGuard` for proper reaping.
+///
+/// Secrets (API keys, PAT) are passed via `--env-file` to avoid exposing
+/// them in `ps` output or `/proc/<pid>/cmdline`.
 fn start_mcpg(
     mcpg_config_json: &str,
     mcpg_api_key: &str,
     pat: Option<&str>,
     needs_ado_token: bool,
+    output_dir: &Path,
 ) -> Result<Child> {
     // Remove stale container
     let _ = Command::new("docker")
@@ -160,6 +168,22 @@ fn start_mcpg(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+
+    // Write secrets to an env file in the output dir (avoids exposing in ps/cmdline).
+    // Docker reads this file synchronously during `docker run` setup before the
+    // container starts, so there is no race with file deletion.
+    let env_file_path = output_dir.join("mcpg.env");
+    let mut env_contents = format!(
+        "MCP_GATEWAY_PORT={}\nMCP_GATEWAY_DOMAIN=127.0.0.1\nMCP_GATEWAY_API_KEY={}\n",
+        compile::MCPG_PORT, mcpg_api_key,
+    );
+    if needs_ado_token {
+        if let Some(pat) = pat {
+            env_contents.push_str(&format!("AZURE_DEVOPS_EXT_PAT={}\n", pat));
+        }
+    }
+    std::fs::write(&env_file_path, &env_contents)
+        .with_context(|| format!("Failed to write MCPG env file: {}", env_file_path.display()))?;
 
     let mut args = vec![
         "run".to_string(),
@@ -173,21 +197,9 @@ fn start_mcpg(
         "/app/awmg".to_string(),
         "-v".to_string(),
         "/var/run/docker.sock:/var/run/docker.sock".to_string(),
-        "-e".to_string(),
-        format!("MCP_GATEWAY_PORT={}", compile::MCPG_PORT),
-        "-e".to_string(),
-        "MCP_GATEWAY_DOMAIN=127.0.0.1".to_string(),
-        "-e".to_string(),
-        format!("MCP_GATEWAY_API_KEY={}", mcpg_api_key),
+        "--env-file".to_string(),
+        env_file_path.to_string_lossy().into_owned(),
     ];
-
-    // Pass PAT to MCPG for ADO MCP child container passthrough
-    if needs_ado_token {
-        if let Some(pat) = pat {
-            args.push("-e".to_string());
-            args.push(format!("AZURE_DEVOPS_EXT_PAT={}", pat));
-        }
-    }
 
     args.push(format!("{}:v{}", compile::MCPG_IMAGE, compile::MCPG_VERSION));
     args.push("--routed".to_string());
@@ -213,12 +225,12 @@ fn start_mcpg(
         drop(stdin);
     }
 
+    // env file persists in output_dir for debugging; cleaned up with the dir
     Ok(child)
 }
 
 /// Build a `std::process::Command` for a program that may be a script wrapper.
 ///
-/// On Windows, npm-installed tools (like `copilot`) are `.cmd` wrappers.
 /// On Windows, npm-installed tools like `copilot` are `.cmd`/`.ps1` wrappers.
 /// `Command::new("copilot")` won't find them — `cmd /C` resolves `.cmd`/`.bat`
 /// from PATH and handles execution natively.
@@ -261,6 +273,23 @@ fn is_on_path(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Walk up from `start` to find the nearest directory containing `.git`.
+fn find_repo_root(start: &Path) -> Option<PathBuf> {
+    let mut current = if start.is_absolute() {
+        start.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(start)
+    };
+    loop {
+        if current.join(".git").exists() {
+            return Some(current);
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
 pub async fn run(args: &RunArgs) -> Result<()> {
     // ── 1. Parse agent markdown ──────────────────────────────────────
     let content = tokio::fs::read_to_string(&args.agent_path)
@@ -295,21 +324,29 @@ pub async fn run(args: &RunArgs) -> Result<()> {
     // ── 3. Create output directory ───────────────────────────────────
     let output_dir = match &args.output_dir {
         Some(dir) => {
-            tokio::fs::create_dir_all(dir).await?;
+            tokio::fs::create_dir_all(dir).await
+                .with_context(|| format!("Failed to create output directory: {}", dir.display()))?;
             dir.clone()
         }
         None => {
             let dir = std::env::temp_dir().join(format!("ado-aw-run-{}", std::process::id()));
-            tokio::fs::create_dir_all(&dir).await?;
+            tokio::fs::create_dir_all(&dir).await
+                .with_context(|| format!("Failed to create output directory: {}", dir.display()))?;
             dir
         }
     };
-    let working_dir = args
+
+    // Working directory: use the repository root (where .git lives) so that
+    // safe-output tools like create-pull-request operate on the full repo,
+    // not just the subdirectory containing the agent file.
+    let agent_dir = args
         .agent_path
         .parent()
-        .unwrap_or(Path::new("."))
-        .to_path_buf();
+        .unwrap_or(Path::new("."));
+    let working_dir = find_repo_root(agent_dir)
+        .unwrap_or_else(|| agent_dir.to_path_buf());
     println!("Output directory: {}", output_dir.display());
+    println!("Working directory: {}", working_dir.display());
 
     // ── 4. Start SafeOutputs HTTP server ─────────────────────────────
     let mut guard = CleanupGuard {
@@ -348,15 +385,15 @@ pub async fn run(args: &RunArgs) -> Result<()> {
 
     if use_mcpg {
         println!("\n=== Generating MCPG config ===");
-        let compile_dir = args.agent_path.parent().unwrap_or(Path::new("."));
         let compile_ctx =
-            compile::extensions::CompileContext::new(&front_matter, compile_dir).await;
+            compile::extensions::CompileContext::new(&front_matter, &working_dir).await;
 
         let mcpg_config =
             compile::generate_mcpg_config(&front_matter, &compile_ctx, &extensions)?;
 
         // Serialize and substitute runtime placeholders
-        let mcpg_json = serde_json::to_string_pretty(&mcpg_config)?;
+        let mcpg_json = serde_json::to_string_pretty(&mcpg_config)
+            .context("Failed to serialize MCPG config")?;
         let mcpg_json = mcpg_json
             .replace("${SAFE_OUTPUTS_PORT}", &so_port.to_string())
             .replace("${SAFE_OUTPUTS_API_KEY}", &so_api_key)
@@ -382,6 +419,7 @@ pub async fn run(args: &RunArgs) -> Result<()> {
             &mcpg_api_key,
             args.pat.as_deref(),
             needs_ado_token,
+            &output_dir,
         )?;
         guard.mcpg_child = Some(mcpg_child);
 
@@ -418,8 +456,10 @@ pub async fn run(args: &RunArgs) -> Result<()> {
                 }
             }
         });
-        let mcp_client_json = serde_json::to_string_pretty(&direct_config)?;
-        tokio::fs::write(&mcp_config_path, &mcp_client_json).await?;
+        let mcp_client_json = serde_json::to_string_pretty(&direct_config)
+            .context("Failed to serialize direct MCP config")?;
+        tokio::fs::write(&mcp_config_path, &mcp_client_json).await
+            .with_context(|| format!("Failed to write MCP config: {}", mcp_config_path.display()))?;
         println!("MCP config written (direct SafeOutputs, no MCPG)");
     }
 
@@ -547,8 +587,14 @@ pub async fn run(args: &RunArgs) -> Result<()> {
 }
 
 /// Simple shell-like word splitting for copilot params.
-/// Handles double-quoted strings (e.g., `--allow-tool "shell(cat)"`)
-/// but does not handle escapes or single quotes.
+///
+/// Handles double-quoted strings (e.g., `--allow-tool "shell(cat)"`).
+/// Does NOT handle backslash escapes, single quotes, or nested quotes.
+///
+/// This is safe because the input is compiler-controlled output from
+/// `generate_copilot_params()`, which only produces double-quoted values
+/// with no escapes. If params ever gain more complex quoting, consider
+/// using the `shell-words` crate.
 fn shell_words(s: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut current = String::new();
@@ -580,7 +626,7 @@ mod tests {
     fn test_generate_api_key_is_alphanumeric() {
         let key = generate_api_key();
         assert!(!key.is_empty(), "API key should not be empty");
-        assert!(key.len() >= 30, "API key should be at least 30 chars, got {}", key.len());
+        assert!(key.len() >= 40, "API key should be at least 40 chars, got {}", key.len());
         assert!(
             key.chars().all(|c| c.is_ascii_alphanumeric()),
             "API key should be alphanumeric, got: {}",
