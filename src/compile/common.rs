@@ -659,6 +659,7 @@ pub fn generate_job_timeout(front_matter: &FrontMatter) -> String {
 }
 
 /// Format a single step's YAML string with proper indentation
+#[allow(dead_code)]
 pub fn format_step_yaml(step_yaml: &str) -> String {
     let trimmed = step_yaml.trim();
     trimmed
@@ -695,6 +696,7 @@ pub fn format_step_yaml_indented(step_yaml: &str, base_indent: usize) -> String 
 }
 
 /// Format multiple steps to YAML with proper indentation for jobs
+#[allow(dead_code)]
 pub fn format_steps_yaml(steps: &[serde_yaml::Value]) -> String {
     steps
         .iter()
@@ -2204,7 +2206,7 @@ pub async fn compile_shared(
         ("{{ executor_ado_env }}", &executor_ado_env),
     ];
 
-    let mut pipeline_yaml = replacements
+    let pipeline_yaml = replacements
         .into_iter()
         .fold(template, |yaml, (placeholder, replacement)| {
             replace_with_indent(&yaml, placeholder, replacement)

@@ -31,10 +31,6 @@ fn event_to_vote(event: &str) -> Option<i32> {
     }
 }
 
-fn default_repository() -> String {
-    "self".to_string()
-}
-
 /// Parameters for submitting a pull request review
 #[derive(Deserialize, JsonSchema)]
 pub struct SubmitPrReviewParams {

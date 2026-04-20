@@ -56,6 +56,7 @@ impl PoolConfig {
     }
 
     /// Get the OS (defaults to "linux" if not specified)
+    #[allow(dead_code)]
     pub fn os(&self) -> &str {
         match self {
             PoolConfig::Name(_) => "linux",

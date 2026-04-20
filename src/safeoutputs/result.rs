@@ -19,6 +19,7 @@ pub trait ToolResult: Serialize {
     /// Whether this tool requires write access to ADO.
     /// Write-requiring tools need a `permissions.write` service connection.
     /// Diagnostic/read-only tools default to `false`.
+    #[allow(dead_code)]
     const REQUIRES_WRITE: bool = false;
 }
 
