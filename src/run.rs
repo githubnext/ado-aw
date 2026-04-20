@@ -198,11 +198,12 @@ fn start_mcpg(
         .spawn()
         .context("Failed to start MCPG Docker container")?;
 
-    // Pipe config to stdin
+    // Pipe config to stdin, then close so container sees EOF
     if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(mcpg_config_json.as_bytes())
             .context("Failed to write MCPG config to stdin")?;
+        drop(stdin);
     }
 
     // Don't wait — MCPG runs in the background
