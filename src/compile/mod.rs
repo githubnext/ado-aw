@@ -22,7 +22,6 @@ pub use common::sanitize_filename;
 pub use common::HEADER_MARKER;
 pub use common::generate_copilot_params;
 pub use common::generate_mcpg_config;
-pub use common::generate_mcp_client_config;
 pub use common::MCPG_IMAGE;
 pub use common::MCPG_VERSION;
 pub use common::MCPG_PORT;

@@ -169,9 +169,14 @@ fn is_docker_available() -> bool {
 /// - The child is reaped after `docker stop`
 /// - The env file must outlive the child because `spawn()` returns after
 ///   fork() — the Docker CLI hasn't yet exec'd or read `--env-file`
+///
+/// `gateway_output_path` receives MCPG's stdout — the runtime gateway config
+/// JSON that is later transformed into the copilot MCP client config.
 fn start_mcpg(
     mcpg_config_json: &str,
     mcpg_api_key: &str,
+    port: u16,
+    gateway_output_path: &Path,
     pat: Option<&str>,
     needs_ado_token: bool,
 ) -> Result<(Child, tempfile::NamedTempFile)> {
@@ -190,10 +195,14 @@ fn start_mcpg(
         .context("Failed to create temp env file for MCPG secrets")?;
     let mut env_contents = format!(
         "MCP_GATEWAY_PORT={}\nMCP_GATEWAY_DOMAIN=127.0.0.1\nMCP_GATEWAY_API_KEY={}\n",
-        compile::MCPG_PORT, mcpg_api_key,
+        port, mcpg_api_key,
     );
     if needs_ado_token {
         if let Some(pat) = pat {
+            // Set both vars so MCPG can passthrough whichever the auth mode needs:
+            //   PERSONAL_ACCESS_TOKEN — read by ADO MCP in `-a pat` mode (local dev)
+            //   AZURE_DEVOPS_EXT_PAT  — used by copilot and execute stages
+            env_contents.push_str(&format!("PERSONAL_ACCESS_TOKEN={}\n", pat));
             env_contents.push_str(&format!("AZURE_DEVOPS_EXT_PAT={}\n", pat));
         }
     }
@@ -206,28 +215,51 @@ fn start_mcpg(
         "--rm".to_string(),
         "--name".to_string(),
         "ado-aw-mcpg".to_string(),
-        "--network".to_string(),
-        "host".to_string(),
+    ];
+
+    // Network strategy differs by platform:
+    //   Linux:         --network host shares the host stack; 127.0.0.1 works both ways.
+    //   Windows/macOS: Docker Desktop runs containers in a VM. --network host doesn't
+    //                  expose container ports on the host. Use -p for port mapping and
+    //                  host.docker.internal for container→host communication.
+    if cfg!(target_os = "linux") {
+        args.extend(["--network".to_string(), "host".to_string()]);
+    } else {
+        args.extend(["-p".to_string(), format!("{}:{}", port, port)]);
+    }
+
+    args.extend([
         "--entrypoint".to_string(),
         "/app/awmg".to_string(),
         "-v".to_string(),
         "/var/run/docker.sock:/var/run/docker.sock".to_string(),
         "--env-file".to_string(),
         env_file.path().to_string_lossy().into_owned(),
-    ];
+    ]);
 
     args.push(format!("{}:v{}", compile::MCPG_IMAGE, compile::MCPG_VERSION));
     args.push("--routed".to_string());
     args.push("--listen".to_string());
-    args.push(format!("127.0.0.1:{}", compile::MCPG_PORT));
+    // Linux (--network host): bind to loopback only.
+    // Windows/macOS (-p mapping): bind to 0.0.0.0 so Docker can forward traffic.
+    if cfg!(target_os = "linux") {
+        args.push(format!("127.0.0.1:{}", port));
+    } else {
+        args.push(format!("0.0.0.0:{}", port));
+    }
     args.push("--config-stdin".to_string());
     args.push("--log-dir".to_string());
     args.push("/tmp/gh-aw/mcp-logs".to_string());
 
+    // Redirect stdout to the gateway output file — MCPG writes its runtime
+    // config (with actual URLs) to stdout once it finishes initialising servers.
+    let gateway_file = std::fs::File::create(gateway_output_path)
+        .with_context(|| format!("Failed to create gateway output file: {}", gateway_output_path.display()))?;
+
     let mut child = Command::new("docker")
         .args(&args)
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(gateway_file)
         .stderr(Stdio::null())
         .spawn()
         .context("Failed to start MCPG Docker container")?;
@@ -242,6 +274,34 @@ fn start_mcpg(
 
     // Caller must keep env_file alive until Docker has read it
     Ok((child, env_file))
+}
+
+/// Transform MCPG's gateway output JSON into a copilot-compatible MCP client config.
+///
+/// Mirrors the pipeline's `jq` transformation:
+///   - Keep URLs as-is (local run: copilot runs on host, same as MCPG)
+///   - Ensure `tools: ["*"]` on each server entry (Copilot CLI requirement)
+///   - Preserve headers and other fields
+fn transform_gateway_output(gateway_json: &str) -> Result<String> {
+    let mut config: serde_json::Value = serde_json::from_str(gateway_json)
+        .context("Failed to parse MCPG gateway output as JSON")?;
+
+    let servers = config
+        .get_mut("mcpServers")
+        .and_then(|v| v.as_object_mut())
+        .context("Gateway output missing mcpServers")?;
+
+    for (_name, entry) in servers.iter_mut() {
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert(
+                "tools".into(),
+                serde_json::Value::Array(vec![serde_json::Value::String("*".into())]),
+            );
+        }
+    }
+
+    serde_json::to_string_pretty(&config)
+        .context("Failed to serialize MCP client config")
 }
 
 /// Build a `std::process::Command` for a program that may be a script wrapper.
@@ -335,7 +395,11 @@ pub async fn run(args: &RunArgs) -> Result<()> {
     }
 
     // ── 2. Collect extensions ────────────────────────────────────────
-    let extensions = compile::extensions::collect_extensions(&front_matter);
+    // Local run uses PAT auth for ADO MCP (users have PATs, not bearer JWTs).
+    let extensions = compile::extensions::collect_extensions_with_ado_auth(
+        &front_matter,
+        compile::extensions::AdoAuthMode::Pat,
+    );
 
     // ── 3. Create output directory ───────────────────────────────────
     let output_dir = match &args.output_dir {
@@ -401,12 +465,18 @@ pub async fn run(args: &RunArgs) -> Result<()> {
     }
 
     if use_mcpg {
+        // Pick a free high port for MCPG — port 80 (used in pipelines) requires
+        // elevated privileges on most systems and isn't suitable for local dev.
+        let mcpg_port = find_free_port()
+            .context("Failed to find a free port for MCPG")?;
+
         println!("\n=== Generating MCPG config ===");
         let compile_ctx =
             compile::extensions::CompileContext::new(&front_matter, &working_dir).await;
 
-        let mcpg_config =
+        let mut mcpg_config =
             compile::generate_mcpg_config(&front_matter, &compile_ctx, &extensions)?;
+        mcpg_config.gateway.port = mcpg_port;
 
         // Serialize and substitute runtime placeholders
         let mcpg_json = serde_json::to_string_pretty(&mcpg_config)
@@ -416,20 +486,22 @@ pub async fn run(args: &RunArgs) -> Result<()> {
             .replace("${SAFE_OUTPUTS_API_KEY}", &so_api_key)
             .replace("${MCP_GATEWAY_API_KEY}", &mcpg_api_key);
 
+        // Rewrite SafeOutputs URL for the container→host network path.
+        // The compile-time config uses "localhost" which works in pipelines
+        // (Linux, --network host shares the host stack). Locally:
+        //   - Linux: "localhost" may resolve to ::1 (IPv6) but SafeOutputs
+        //     binds IPv4 only, so use 127.0.0.1 explicitly.
+        //   - Windows/macOS: Docker Desktop runs containers in a VM, so
+        //     "localhost" is the VM loopback. Use host.docker.internal.
+        let mcpg_json = if cfg!(target_os = "linux") {
+            mcpg_json.replace("http://localhost:", "http://127.0.0.1:")
+        } else {
+            mcpg_json.replace("http://localhost:", "http://host.docker.internal:")
+        };
+
         tokio::fs::write(output_dir.join("mcpg-config.json"), &mcpg_json).await
             .with_context(|| format!("Failed to write MCPG config: {}", output_dir.join("mcpg-config.json").display()))?;
         debug!("MCPG config written");
-
-        // Generate MCP client config for copilot
-        let mcp_client_json = compile::generate_mcp_client_config(&mcpg_config)?;
-        // Substitute ADO macro placeholder with actual key
-        let mcp_client_json = mcp_client_json.replace("$(MCP_GATEWAY_API_KEY)", &mcpg_api_key);
-        // Local: copilot runs on host, not inside AWF container
-        let mcp_client_json = mcp_client_json.replace("host.docker.internal", "127.0.0.1");
-
-        tokio::fs::write(&mcp_config_path, &mcp_client_json).await
-            .with_context(|| format!("Failed to write MCP config: {}", mcp_config_path.display()))?;
-        debug!("MCP client config written");
 
         // Start MCPG
         println!("\n=== Starting MCP Gateway (MCPG) ===");
@@ -438,9 +510,12 @@ pub async fn run(args: &RunArgs) -> Result<()> {
                    ADO MCP tool calls will likely fail at runtime.");
             println!("Warning: ADO MCP enabled but no PAT provided — tool calls may fail");
         }
+        let gateway_output_path = output_dir.join("gateway-output.json");
         let (mcpg_child, mcpg_env_file) = start_mcpg(
             &mcpg_json,
             &mcpg_api_key,
+            mcpg_port,
+            &gateway_output_path,
             args.pat.as_deref(),
             needs_ado_token,
         )?;
@@ -449,7 +524,7 @@ pub async fn run(args: &RunArgs) -> Result<()> {
 
         // Health check MCPG — also detect early crash
         let client = reqwest::Client::new();
-        let health_url = format!("http://127.0.0.1:{}/health", compile::MCPG_PORT);
+        let health_url = format!("http://127.0.0.1:{}/health", mcpg_port);
         let mut ready = false;
         for _ in 0..30 {
             if let Some(ref mut child) = guard.mcpg_child {
@@ -469,7 +544,43 @@ pub async fn run(args: &RunArgs) -> Result<()> {
         if !ready {
             bail!("MCPG did not become ready within 30s");
         }
-        println!("MCPG ready on port {}", compile::MCPG_PORT);
+        println!("MCPG ready on port {}", mcpg_port);
+
+        // Wait for gateway output — health check passing doesn't guarantee
+        // stdout is flushed, so poll until the file contains valid JSON.
+        println!("Waiting for gateway output...");
+        let mut gateway_ready = false;
+        for _ in 0..15 {
+            if let Ok(content) = tokio::fs::read_to_string(&gateway_output_path).await {
+                if serde_json::from_str::<serde_json::Value>(&content)
+                    .ok()
+                    .and_then(|v| v.get("mcpServers").cloned())
+                    .is_some()
+                {
+                    gateway_ready = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        if !gateway_ready {
+            let content = tokio::fs::read_to_string(&gateway_output_path).await.unwrap_or_default();
+            bail!(
+                "MCPG gateway output not ready within 15s. Content: {}",
+                if content.is_empty() { "(empty)" } else { &content }
+            );
+        }
+
+        // Transform MCPG's runtime output into copilot client config
+        let gateway_json = tokio::fs::read_to_string(&gateway_output_path).await
+            .context("Failed to read MCPG gateway output")?;
+        debug!("Gateway output: {}", gateway_json);
+        let mcp_client_json = transform_gateway_output(&gateway_json)?;
+
+        tokio::fs::write(&mcp_config_path, &mcp_client_json).await
+            .with_context(|| format!("Failed to write MCP config: {}", mcp_config_path.display()))?;
+        debug!("MCP client config written");
+        println!("MCP client config generated from gateway output");
     } else {
         // Skip MCPG — generate direct config pointing to SafeOutputs
         println!("\n=== Generating direct MCP config (no MCPG) ===");
@@ -713,5 +824,43 @@ mod tests {
         assert!(json.contains("127.0.0.1:8100"));
         assert!(json.contains("Bearer test-key"));
         assert!(json.contains("\"type\": \"http\""));
+    }
+
+    #[test]
+    fn test_transform_gateway_output() {
+        let gateway_json = serde_json::json!({
+            "mcpServers": {
+                "safeoutputs": {
+                    "type": "http",
+                    "url": "http://127.0.0.1:54321/mcp/safeoutputs",
+                    "headers": {
+                        "Authorization": "Bearer secret-key"
+                    }
+                },
+                "azure-devops": {
+                    "type": "http",
+                    "url": "http://127.0.0.1:54321/mcp/azure-devops"
+                }
+            }
+        });
+
+        let result = transform_gateway_output(&gateway_json.to_string()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+
+        // Each server should have tools: ["*"]
+        let servers = parsed["mcpServers"].as_object().unwrap();
+        for (name, entry) in servers {
+            assert_eq!(
+                entry["tools"],
+                serde_json::json!(["*"]),
+                "Server '{}' should have tools: [\"*\"]", name,
+            );
+        }
+
+        // URLs should be preserved as-is (local run, no rewriting needed)
+        assert!(result.contains("127.0.0.1:54321"));
+
+        // Headers should be preserved
+        assert!(result.contains("Bearer secret-key"));
     }
 }
