@@ -153,14 +153,14 @@ fn is_docker_available() -> bool {
 /// Start the MCPG Docker container. Returns the `docker run` child process
 /// so the caller can store it in `CleanupGuard` for proper reaping.
 ///
-/// Secrets (API keys, PAT) are passed via `--env-file` to avoid exposing
-/// them in `ps` output or `/proc/<pid>/cmdline`.
+/// Secrets (API keys, PAT) are passed via `--env-file` using a temporary file
+/// to avoid exposing them in `ps` output or `/proc/<pid>/cmdline`. The temp
+/// file is deleted when the returned guard is dropped.
 fn start_mcpg(
     mcpg_config_json: &str,
     mcpg_api_key: &str,
     pat: Option<&str>,
     needs_ado_token: bool,
-    output_dir: &Path,
 ) -> Result<Child> {
     // Remove stale container
     let _ = Command::new("docker")
@@ -169,10 +169,13 @@ fn start_mcpg(
         .stderr(Stdio::null())
         .status();
 
-    // Write secrets to an env file in the output dir (avoids exposing in ps/cmdline).
-    // Docker reads this file synchronously during `docker run` setup before the
-    // container starts, so there is no race with file deletion.
-    let env_file_path = output_dir.join("mcpg.env");
+    // Write secrets to a temp file (avoids exposing in ps/cmdline, and avoids
+    // persisting credentials in the output directory). Docker reads --env-file
+    // synchronously during `docker run` setup — before spawn() returns — so the
+    // file is guaranteed to exist when Docker needs it. NamedTempFile allows
+    // shared reads on Windows, so Docker can open it concurrently.
+    let env_file = tempfile::NamedTempFile::new()
+        .context("Failed to create temp env file for MCPG secrets")?;
     let mut env_contents = format!(
         "MCP_GATEWAY_PORT={}\nMCP_GATEWAY_DOMAIN=127.0.0.1\nMCP_GATEWAY_API_KEY={}\n",
         compile::MCPG_PORT, mcpg_api_key,
@@ -182,8 +185,8 @@ fn start_mcpg(
             env_contents.push_str(&format!("AZURE_DEVOPS_EXT_PAT={}\n", pat));
         }
     }
-    std::fs::write(&env_file_path, &env_contents)
-        .with_context(|| format!("Failed to write MCPG env file: {}", env_file_path.display()))?;
+    std::fs::write(env_file.path(), &env_contents)
+        .with_context(|| format!("Failed to write MCPG env file: {}", env_file.path().display()))?;
 
     let mut args = vec![
         "run".to_string(),
@@ -198,7 +201,7 @@ fn start_mcpg(
         "-v".to_string(),
         "/var/run/docker.sock:/var/run/docker.sock".to_string(),
         "--env-file".to_string(),
-        env_file_path.to_string_lossy().into_owned(),
+        env_file.path().to_string_lossy().into_owned(),
     ];
 
     args.push(format!("{}:v{}", compile::MCPG_IMAGE, compile::MCPG_VERSION));
@@ -225,7 +228,7 @@ fn start_mcpg(
         drop(stdin);
     }
 
-    // env file persists in output_dir for debugging; cleaned up with the dir
+    // env_file temp file deleted here on drop — Docker has already read it
     Ok(child)
 }
 
@@ -419,7 +422,6 @@ pub async fn run(args: &RunArgs) -> Result<()> {
             &mcpg_api_key,
             args.pat.as_deref(),
             needs_ado_token,
-            &output_dir,
         )?;
         guard.mcpg_child = Some(mcpg_child);
 
