@@ -311,11 +311,12 @@ pub async fn run(args: &RunArgs) -> Result<()> {
 
     // If --org is provided and tools.azure-devops has no explicit org,
     // inject it so AzureDevOpsExtension picks it up during config generation.
+    // Sanitize the value since it's injected after sanitize_config_fields().
     if let Some(org) = &args.org {
         if let Some(ref mut tools) = front_matter.tools {
             if let Some(ref mut ado) = tools.azure_devops {
                 if ado.org().is_none() {
-                    ado.set_org(org.clone());
+                    ado.set_org(crate::sanitize::sanitize_config(org));
                 }
             }
         }
@@ -581,6 +582,10 @@ pub async fn run(args: &RunArgs) -> Result<()> {
     drop(guard);
     println!("Done.");
 
+    // process::exit skips async runtime teardown. This is safe because:
+    // - CleanupGuard is explicitly dropped above (child processes reaped)
+    // - No tokio background tasks are spawned after the guard is set
+    // If background tasks are added in the future, they must complete before this point.
     if failure_count > 0 {
         std::process::exit(1);
     }
