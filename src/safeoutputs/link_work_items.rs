@@ -136,6 +136,10 @@ impl Default for LinkWorkItemsConfig {
 
 #[async_trait::async_trait]
 impl Executor for LinkWorkItemsResult {
+    fn dry_run_summary(&self) -> String {
+        format!("link work items #{} -> #{} ({})", self.source_id, self.target_id, self.link_type)
+    }
+
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!(
             "Linking work item #{} -> #{} ({})",

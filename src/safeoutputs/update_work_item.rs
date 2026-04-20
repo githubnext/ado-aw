@@ -242,6 +242,10 @@ async fn fetch_work_item(
 
 #[async_trait::async_trait]
 impl Executor for UpdateWorkItemResult {
+    fn dry_run_summary(&self) -> String {
+        format!("update work item #{}", self.id)
+    }
+
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!("Updating work item #{}", self.id);
         debug!(
@@ -717,6 +721,7 @@ target: 42
             repository_name: None,
             allowed_repositories: HashMap::new(),
             agent_stats: None,
+            dry_run: false,
         };
 
         let exec_result = result.execute_sanitized(&ctx).await;
@@ -767,6 +772,7 @@ target: 42
             repository_name: None,
             allowed_repositories: HashMap::new(),
             agent_stats: None,
+            dry_run: false,
         };
 
         let exec_result = result.execute_sanitized(&ctx).await.unwrap();
@@ -813,6 +819,7 @@ target: 42
             repository_name: None,
             allowed_repositories: HashMap::new(),
             agent_stats: None,
+            dry_run: false,
         };
 
         let exec_result = result.execute_sanitized(&ctx).await.unwrap();
@@ -861,6 +868,7 @@ target: 42
             repository_name: None,
             allowed_repositories: HashMap::new(),
             agent_stats: None,
+            dry_run: false,
         };
 
         let exec_result = result.execute_sanitized(&ctx).await.unwrap();

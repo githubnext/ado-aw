@@ -133,6 +133,10 @@ impl Default for ResolvePrThreadConfig {
 
 #[async_trait::async_trait]
 impl Executor for ResolvePrThreadResult {
+    fn dry_run_summary(&self) -> String {
+        format!("resolve thread #{} on PR #{} as '{}'", self.thread_id, self.pull_request_id, self.status)
+    }
+
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!(
             "Resolving thread #{} on PR #{} with status '{}'",

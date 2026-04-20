@@ -133,6 +133,10 @@ impl Default for QueueBuildConfig {
 
 #[async_trait::async_trait]
 impl Executor for QueueBuildResult {
+    fn dry_run_summary(&self) -> String {
+        format!("queue build for pipeline #{}", self.pipeline_id)
+    }
+
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!("Queuing build for pipeline definition {}", self.pipeline_id);
 

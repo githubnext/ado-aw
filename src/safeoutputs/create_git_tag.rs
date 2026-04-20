@@ -238,6 +238,10 @@ async fn resolve_head_commit(
 
 #[async_trait::async_trait]
 impl Executor for CreateGitTagResult {
+    fn dry_run_summary(&self) -> String {
+        format!("create git tag '{}'", self.tag_name)
+    }
+
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!("Creating git tag: '{}'", self.tag_name);
 
