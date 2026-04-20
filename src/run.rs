@@ -212,9 +212,35 @@ fn start_mcpg(
     Ok(())
 }
 
+/// Build a `std::process::Command` for a program that may be a script wrapper.
+///
+/// On Windows, npm-installed tools (like `copilot`) are `.cmd` wrappers.
+/// `Command::new("copilot")` won't find them — we need `cmd /C copilot`.
+/// On Unix (Linux/macOS), `Command::new` resolves scripts via the shebang.
+fn host_command(program: &str) -> Command {
+    if cfg!(windows) {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", program]);
+        cmd
+    } else {
+        Command::new(program)
+    }
+}
+
+/// Async variant of [`host_command`] using `tokio::process::Command`.
+fn host_command_async(program: &str) -> tokio::process::Command {
+    if cfg!(windows) {
+        let mut cmd = tokio::process::Command::new("cmd");
+        cmd.args(["/C", program]);
+        cmd
+    } else {
+        tokio::process::Command::new(program)
+    }
+}
+
 /// Check if an executable is available on PATH.
 fn is_on_path(name: &str) -> bool {
-    Command::new(name)
+    host_command(name)
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -400,7 +426,7 @@ pub async fn run(args: &RunArgs) -> Result<()> {
 
         let prompt_content = tokio::fs::read_to_string(&prompt_path).await?;
 
-        let mut cmd = tokio::process::Command::new("copilot");
+        let mut cmd = host_command_async("copilot");
         cmd.arg("--prompt")
             .arg(&prompt_content)
             .arg("--additional-mcp-config")
