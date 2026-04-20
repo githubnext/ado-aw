@@ -28,7 +28,7 @@ pub struct RunArgs {
 /// Guard that kills child processes on drop (normal exit, error, or panic).
 struct CleanupGuard {
     safeoutputs_child: Option<Child>,
-    mcpg_started: bool,
+    mcpg_child: Option<Child>,
 }
 
 impl Drop for CleanupGuard {
@@ -38,13 +38,17 @@ impl Drop for CleanupGuard {
             let _ = child.kill();
             let _ = child.wait();
         }
-        if self.mcpg_started {
+        if self.mcpg_child.is_some() {
             info!("Stopping MCPG container...");
             let _ = Command::new("docker")
                 .args(["stop", "ado-aw-mcpg"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();
+            // Reap the docker run process to prevent zombie
+            if let Some(ref mut child) = self.mcpg_child {
+                let _ = child.wait();
+            }
         }
     }
 }
@@ -98,10 +102,12 @@ async fn start_safeoutputs(
     // Redirect output to log files
     let log_dir = output_dir.join("logs");
     std::fs::create_dir_all(&log_dir)?;
-    let stdout_file =
-        std::fs::File::create(log_dir.join("safeoutputs.stdout.log"))?;
-    let stderr_file =
-        std::fs::File::create(log_dir.join("safeoutputs.stderr.log"))?;
+    let stdout_log = log_dir.join("safeoutputs.stdout.log");
+    let stderr_log = log_dir.join("safeoutputs.stderr.log");
+    let stdout_file = std::fs::File::create(&stdout_log)
+        .with_context(|| format!("Failed to create log file: {}", stdout_log.display()))?;
+    let stderr_file = std::fs::File::create(&stderr_log)
+        .with_context(|| format!("Failed to create log file: {}", stderr_log.display()))?;
 
     cmd.stdout(stdout_file).stderr(stderr_file);
 
@@ -140,13 +146,14 @@ fn is_docker_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Start the MCPG Docker container.
+/// Start the MCPG Docker container. Returns the `docker run` child process
+/// so the caller can store it in `CleanupGuard` for proper reaping.
 fn start_mcpg(
     mcpg_config_json: &str,
     mcpg_api_key: &str,
     pat: Option<&str>,
     needs_ado_token: bool,
-) -> Result<()> {
+) -> Result<Child> {
     // Remove stale container
     let _ = Command::new("docker")
         .args(["rm", "-f", "ado-aw-mcpg"])
@@ -185,7 +192,7 @@ fn start_mcpg(
     args.push(format!("{}:v{}", compile::MCPG_IMAGE, compile::MCPG_VERSION));
     args.push("--routed".to_string());
     args.push("--listen".to_string());
-    args.push(format!("0.0.0.0:{}", compile::MCPG_PORT));
+    args.push(format!("127.0.0.1:{}", compile::MCPG_PORT));
     args.push("--config-stdin".to_string());
     args.push("--log-dir".to_string());
     args.push("/tmp/gh-aw/mcp-logs".to_string());
@@ -206,11 +213,7 @@ fn start_mcpg(
         drop(stdin);
     }
 
-    // Don't wait — MCPG runs in the background
-    // The container will be cleaned up by CleanupGuard
-    std::mem::forget(child);
-
-    Ok(())
+    Ok(child)
 }
 
 /// Build a `std::process::Command` for a program that may be a script wrapper.
@@ -242,9 +245,15 @@ fn host_command_async(program: &str) -> tokio::process::Command {
 }
 
 /// Check if an executable is available on PATH.
+/// Uses `where` (Windows) or `which` (Unix) to avoid running the program.
 fn is_on_path(name: &str) -> bool {
-    host_command(name)
-        .arg("--version")
+    let (checker, args) = if cfg!(windows) {
+        ("where", vec![name.to_string()])
+    } else {
+        ("which", vec![name.to_string()])
+    };
+    Command::new(checker)
+        .args(&args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -305,7 +314,7 @@ pub async fn run(args: &RunArgs) -> Result<()> {
     // ── 4. Start SafeOutputs HTTP server ─────────────────────────────
     let mut guard = CleanupGuard {
         safeoutputs_child: None,
-        mcpg_started: false,
+        mcpg_child: None,
     };
 
     println!("\n=== Starting SafeOutputs HTTP server ===");
@@ -368,13 +377,13 @@ pub async fn run(args: &RunArgs) -> Result<()> {
 
         // Start MCPG
         println!("\n=== Starting MCP Gateway (MCPG) ===");
-        start_mcpg(
+        let mcpg_child = start_mcpg(
             &mcpg_json,
             &mcpg_api_key,
             args.pat.as_deref(),
             needs_ado_token,
         )?;
-        guard.mcpg_started = true;
+        guard.mcpg_child = Some(mcpg_child);
 
         // Health check MCPG
         let client = reqwest::Client::new();
