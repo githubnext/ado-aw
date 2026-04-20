@@ -1202,8 +1202,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dry_run_skips_ado_validation() {
-        // With dry_run=true, missing ADO config should NOT cause failure
+    async fn test_dry_run_succeeds_without_ado_config() {
+        // With dry_run=true, missing ADO config should NOT cause failure.
+        // Input validation (title length, etc.) still runs — only ADO API calls are skipped.
         let entry = serde_json::json!({
             "name": "create-work-item",
             "title": "Test work item",
@@ -1231,5 +1232,30 @@ mod tests {
         assert_eq!(tool_name, "create-work-item");
         assert!(exec_result.success);
         assert!(exec_result.message.contains("[DRY-RUN]"));
+    }
+
+    #[tokio::test]
+    async fn test_dry_run_report_incomplete_still_fails() {
+        // report-incomplete is dispatched inline (not through Executor trait),
+        // so it still returns ExecutionResult::failure even in dry-run mode.
+        // This is correct: the agent declared it couldn't complete the task.
+        let entry = serde_json::json!({
+            "name": "report-incomplete",
+            "reason": "Could not find the required data to complete the analysis"
+        });
+
+        let mut ctx = ExecutionContext::default();
+        ctx.dry_run = true;
+
+        let result = execute_safe_output(&entry, &ctx).await;
+        assert!(result.is_ok(), "dispatch should succeed");
+        let (tool_name, exec_result) = result.unwrap();
+        assert_eq!(tool_name, "report-incomplete");
+        assert!(!exec_result.success, "report-incomplete should still be a failure in dry-run mode");
+        assert!(
+            exec_result.message.contains("incomplete"),
+            "message should mention incomplete, got: {}",
+            exec_result.message
+        );
     }
 }

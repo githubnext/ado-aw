@@ -1002,6 +1002,7 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - `--output-dir <path>` - Output directory for processed artifacts (e.g., agent memory)
   - `--ado-org-url <url>` - Azure DevOps organization URL override
   - `--ado-project <name>` - Azure DevOps project name override
+  - `--dry-run` - Validate inputs but skip ADO API calls (useful for local testing and QA review)
 
 - `configure` - Detect agentic pipelines in a local repository and update the `GITHUB_TOKEN` pipeline variable on their Azure DevOps build definitions
   - `--token <token>` / `GITHUB_TOKEN` env var - The new GITHUB_TOKEN value (prompted if omitted)
