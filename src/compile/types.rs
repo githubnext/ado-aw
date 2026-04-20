@@ -375,6 +375,23 @@ impl AzureDevOpsToolConfig {
             AzureDevOpsToolConfig::WithOptions(opts) => opts.org.as_deref(),
         }
     }
+
+    /// Set the org override (for local run mode when --org is provided).
+    /// Converts `Enabled(true)` to `WithOptions` with the org set.
+    pub fn set_org(&mut self, org: String) {
+        match self {
+            AzureDevOpsToolConfig::Enabled(true) => {
+                *self = AzureDevOpsToolConfig::WithOptions(AzureDevOpsOptions {
+                    org: Some(org),
+                    ..Default::default()
+                });
+            }
+            AzureDevOpsToolConfig::WithOptions(opts) => {
+                opts.org = Some(org);
+            }
+            AzureDevOpsToolConfig::Enabled(false) => {}
+        }
+    }
 }
 
 impl SanitizeConfigTrait for AzureDevOpsToolConfig {
