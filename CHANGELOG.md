@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.16.0](https://github.com/githubnext/ado-aw/compare/v0.15.0...v0.16.0) (2026-04-21)
+
+
+### Features
+
+* **check:** surface specific violations with unified diff output ([#278](https://github.com/githubnext/ado-aw/issues/278)) ([57618e8](https://github.com/githubnext/ado-aw/commit/57618e8110a57507e1f6f925d819c508ea8297ce))
+
+
+### Bug Fixes
+
+* align tool allow lists with gh-aw ([#279](https://github.com/githubnext/ado-aw/issues/279)) ([be3b4c5](https://github.com/githubnext/ado-aw/commit/be3b4c5a128d1f06facfea6bb3cde03d65a97b1d))
+* revert pipeline prompt to $(cat) inline expansion ([#276](https://github.com/githubnext/ado-aw/issues/276)) ([784de06](https://github.com/githubnext/ado-aw/commit/784de069a46be9dd976033a383422c0f5ef61052))
+
 ## [0.15.0](https://github.com/githubnext/ado-aw/compare/v0.14.0...v0.15.0) (2026-04-21)
 
 
