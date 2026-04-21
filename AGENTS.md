@@ -634,8 +634,8 @@ Additional params provided to copilot CLI. The compiler generates:
 - `--model <model>` - AI model from `engine` front matter field (default: claude-opus-4.5)
 - `--no-ask-user` - Prevents interactive prompts
 - `--disable-builtin-mcps` - Disables all built-in Copilot CLI MCPs (single flag, no argument)
-- `--allow-all-tools` - When bash has wildcard (`":*"` or `"*"`), allows all tools instead of individual `--allow-tool` flags
-- `--allow-tool <tool>` - When bash is NOT wildcard, explicitly allows specific tools (github, safeoutputs, write, shell commands like cat, date, echo, grep, head, ls, pwd, sort, tail, uniq, wc, yq)
+- `--allow-all-tools` - When bash is omitted (default) or has a wildcard (`":*"` or `"*"`), allows all tools instead of individual `--allow-tool` flags
+- `--allow-tool <tool>` - When bash is NOT wildcard, explicitly allows configured tools (github, safeoutputs, write, and shell commands from the `bash:` field plus any runtime-required commands)
 - `--allow-all-paths` - When `edit` tool is enabled (default), allows the agent to write to any file path
 
 MCP servers are handled entirely by the MCP Gateway (MCPG) and are not passed as copilot CLI params.

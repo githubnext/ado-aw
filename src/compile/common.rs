@@ -547,9 +547,8 @@ pub fn generate_copilot_params(
                 }
                 None => {
                     // Invariant: bash=None → use_allow_all_tools=true → this block is
-                    // skipped. Panic in debug builds if the invariant is ever broken.
-                    debug_assert!(false, "bash=None should imply use_allow_all_tools=true");
-                    vec![]
+                    // skipped. Panic if the invariant is ever broken.
+                    unreachable!("bash=None should imply use_allow_all_tools=true")
                 }
             };
 
@@ -2515,7 +2514,10 @@ mod tests {
             }),
         );
         let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
-        assert!(!params.contains("--mcp my-tool"));
+        assert!(
+            !params.contains("--allow-tool my-tool"),
+            "default (all-tools) mode should not emit individual --allow-tool for MCPs"
+        );
     }
 
     #[test]
