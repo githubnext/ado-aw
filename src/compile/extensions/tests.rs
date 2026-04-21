@@ -91,16 +91,18 @@ fn test_collect_extensions_runtimes_always_before_tools() {
     // Find the boundary: last Runtime and first Tool
     let last_runtime_idx = exts
         .iter()
-        .rposition(|e| e.phase() == ExtensionPhase::Runtime);
-    let first_tool_idx = exts.iter().position(|e| e.phase() == ExtensionPhase::Tool);
+        .rposition(|e| e.phase() == ExtensionPhase::Runtime)
+        .expect("expected at least one Runtime extension");
+    let first_tool_idx = exts
+        .iter()
+        .position(|e| e.phase() == ExtensionPhase::Tool)
+        .expect("expected at least one Tool extension");
 
-    if let (Some(last_rt), Some(first_tool)) = (last_runtime_idx, first_tool_idx) {
-        assert!(
-            last_rt < first_tool,
-            "Runtime extensions must come before Tool extensions. \
-             Last runtime at index {last_rt}, first tool at index {first_tool}"
-        );
-    }
+    assert!(
+        last_runtime_idx < first_tool_idx,
+        "Runtime extensions must come before Tool extensions. \
+         Last runtime at index {last_runtime_idx}, first tool at index {first_tool_idx}"
+    );
 }
 
 // ── LeanExtension ──────────────────────────────────────────────
