@@ -927,7 +927,7 @@ pub async fn run(args: &RunArgs) -> Result<()> {
     debug!("Agent prompt written to {}", prompt_path.display());
 
     // ── 7. Build and run copilot command ─────────────────────────────
-    let copilot_params = compile::generate_copilot_params(&extensions, &compile_ctx)?;
+    let copilot_params = compile_ctx.engine.args(compile_ctx.front_matter, &extensions)?;
 
     println!("\n=== Copilot CLI ===");
 
@@ -1074,7 +1074,7 @@ pub async fn run(args: &RunArgs) -> Result<()> {
 /// Does NOT handle backslash escapes, single quotes, or nested quotes.
 ///
 /// This is safe because the input is compiler-controlled output from
-/// `generate_copilot_params()`, which only produces double-quoted values
+/// `Engine::args()`, which only produces double-quoted values
 /// with no escapes. If params ever gain more complex quoting, consider
 /// using the `shell-words` crate.
 fn shell_words(s: &str) -> Vec<String> {

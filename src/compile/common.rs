@@ -423,16 +423,6 @@ pub fn validate_checkout_list(repositories: &[Repository], checkout: &[String]) 
     Ok(())
 }
 
-/// Generate engine CLI params from front matter configuration.
-///
-/// Dispatches to the engine implementation resolved in the compile context.
-pub fn generate_copilot_params(
-    extensions: &[super::extensions::Extension],
-    ctx: &CompileContext<'_>,
-) -> Result<String> {
-    ctx.engine.args(ctx.front_matter, extensions)
-}
-
 /// Compute the effective workspace based on explicit setting and checkout configuration.
 pub fn compute_effective_workspace(
     explicit_workspace: &Option<String>,
@@ -1926,7 +1916,7 @@ pub async fn compile_shared(
     }
 
     // 4. Generate copilot params
-    let copilot_params = generate_copilot_params(extensions, ctx)?;
+    let copilot_params = ctx.engine.args(ctx.front_matter, extensions)?;
 
     // 5. Compute workspace, working directory, triggers
     let effective_workspace = compute_effective_workspace(
@@ -2166,7 +2156,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    // ─── generate_copilot_params ──────────────────────────────────────────────
+    // ─── Engine::args (copilot params) ──────────────────────────────────────
 
     #[test]
     fn test_copilot_params_bash_wildcard() {
@@ -2177,7 +2167,7 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = generate_copilot_params(&crate::compile::extensions::collect_extensions(&fm), &CompileContext::for_test(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("--allow-all-tools"), "wildcard bash should emit --allow-all-tools");
         assert!(!params.contains("--allow-tool"), "no individual --allow-tool flags with --allow-all-tools");
     }
@@ -2191,7 +2181,7 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = generate_copilot_params(&crate::compile::extensions::collect_extensions(&fm), &CompileContext::for_test(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("--allow-all-tools"), "\"*\" should behave same as \":*\"");
         assert!(!params.contains("--allow-tool"), "no individual --allow-tool flags with --allow-all-tools");
     }
@@ -2205,14 +2195,14 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = generate_copilot_params(&crate::compile::extensions::collect_extensions(&fm), &CompileContext::for_test(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("shell("));
     }
 
     #[test]
     fn test_copilot_params_allow_all_paths_when_edit_enabled() {
         let fm = minimal_front_matter(); // edit defaults to true, bash defaults to wildcard
-        let params = generate_copilot_params(&crate::compile::extensions::collect_extensions(&fm), &CompileContext::for_test(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("--allow-all-paths"), "edit enabled (default) should emit --allow-all-paths");
         assert!(params.contains("--allow-all-tools"), "default (no bash) should emit --allow-all-tools");
         assert!(!params.contains("--allow-tool"), "no individual --allow-tool flags with --allow-all-tools");
@@ -2227,7 +2217,7 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = generate_copilot_params(&crate::compile::extensions::collect_extensions(&fm), &CompileContext::for_test(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("--allow-all-paths"), "edit disabled should NOT emit --allow-all-paths");
         assert!(!params.contains("--allow-tool write"), "edit disabled should NOT emit --allow-tool write");
     }
@@ -2241,7 +2231,7 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = generate_copilot_params(&crate::compile::extensions::collect_extensions(&fm), &CompileContext::for_test(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("--allow-all-tools"), "wildcard bash should emit --allow-all-tools");
         assert!(params.contains("--allow-all-paths"), "edit enabled should still emit --allow-all-paths");
         assert!(!params.contains("--allow-tool"), "no individual --allow-tool flags");
@@ -2259,7 +2249,7 @@ mod tests {
         fm.runtimes = Some(crate::compile::types::RuntimesConfig {
             lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(true)),
         });
-        let params = generate_copilot_params(&crate::compile::extensions::collect_extensions(&fm), &CompileContext::for_test(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("shell(lean)"), "lean command should be allowed");
         assert!(params.contains("shell(lake)"), "lake command should be allowed");
         assert!(params.contains("shell(elan)"), "elan command should be allowed");
@@ -2279,7 +2269,7 @@ mod tests {
         fm.runtimes = Some(crate::compile::types::RuntimesConfig {
             lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(true)),
         });
-        let params = generate_copilot_params(&crate::compile::extensions::collect_extensions(&fm), &CompileContext::for_test(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("--allow-all-tools"), "wildcard should use --allow-all-tools");
         // Should NOT add individual tool flags when --allow-all-tools is active
         assert!(!params.contains("--allow-tool"), "no individual tool flags with --allow-all-tools");
@@ -2295,7 +2285,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let params = generate_copilot_params(&crate::compile::extensions::collect_extensions(&fm), &CompileContext::for_test(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(
             !params.contains("--allow-tool my-tool"),
             "default (all-tools) mode should not emit individual --allow-tool for MCPs"
@@ -2318,7 +2308,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let params = generate_copilot_params(&crate::compile::extensions::collect_extensions(&fm), &CompileContext::for_test(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("--allow-tool my-tool"), "container MCP should get --allow-tool");
     }
 
@@ -2338,7 +2328,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let params = generate_copilot_params(&crate::compile::extensions::collect_extensions(&fm), &CompileContext::for_test(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("--allow-tool remote-ado"), "URL MCP should get --allow-tool");
     }
 
@@ -2349,7 +2339,7 @@ mod tests {
             "my-tool".to_string(),
             McpConfig::Enabled(true),
         );
-        let params = generate_copilot_params(&crate::compile::extensions::collect_extensions(&fm), &CompileContext::for_test(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("--allow-tool my-tool"), "Enabled(true) with no container/url should not get --allow-tool");
     }
 
@@ -2376,7 +2366,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let params = generate_copilot_params(&crate::compile::extensions::collect_extensions(&fm), &CompileContext::for_test(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         let a_pos = params.find("--allow-tool a-tool").expect("a-tool should be present");
         let z_pos = params.find("--allow-tool z-tool").expect("z-tool should be present");
         assert!(a_pos < z_pos, "MCPs should be sorted alphabetically: a-tool before z-tool");
@@ -2387,7 +2377,7 @@ mod tests {
         let mut fm = minimal_front_matter();
         fm.mcp_servers
             .insert("ado".to_string(), McpConfig::Enabled(true));
-        let params = generate_copilot_params(&crate::compile::extensions::collect_extensions(&fm), &CompileContext::for_test(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         // Copilot CLI has no built-in MCPs — all MCPs are handled via the MCP firewall
         assert!(!params.contains("--mcp ado"));
     }
@@ -2398,14 +2388,14 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  max-turns: 50\n---\n",
         )
         .unwrap();
-        let params = generate_copilot_params(&crate::compile::extensions::collect_extensions(&fm), &CompileContext::for_test(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("--max-turns"), "max-turns should not be emitted as a CLI arg");
     }
 
     #[test]
     fn test_copilot_params_no_max_turns_when_simple_engine() {
         let fm = minimal_front_matter();
-        let params = generate_copilot_params(&crate::compile::extensions::collect_extensions(&fm), &CompileContext::for_test(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("--max-turns"));
     }
 
@@ -2415,14 +2405,14 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  timeout-minutes: 30\n---\n",
         )
         .unwrap();
-        let params = generate_copilot_params(&crate::compile::extensions::collect_extensions(&fm), &CompileContext::for_test(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("--max-timeout"), "timeout-minutes should not be emitted as a CLI arg");
     }
 
     #[test]
     fn test_copilot_params_no_max_timeout_when_simple_engine() {
         let fm = minimal_front_matter();
-        let params = generate_copilot_params(&crate::compile::extensions::collect_extensions(&fm), &CompileContext::for_test(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("--max-timeout"));
     }
 
@@ -2432,7 +2422,7 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  max-turns: 0\n---\n",
         )
         .unwrap();
-        let params = generate_copilot_params(&crate::compile::extensions::collect_extensions(&fm), &CompileContext::for_test(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("--max-turns"), "max-turns should not be emitted as a CLI arg");
     }
 
@@ -2442,7 +2432,7 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  timeout-minutes: 0\n---\n",
         )
         .unwrap();
-        let params = generate_copilot_params(&crate::compile::extensions::collect_extensions(&fm), &CompileContext::for_test(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("--max-timeout"), "timeout-minutes should not be emitted as a CLI arg");
     }
 
@@ -3394,7 +3384,7 @@ mod tests {
             args: vec![], env: None, command: None,
             max_turns: None, timeout_minutes: None,
         });
-        let result = generate_copilot_params(&crate::compile::extensions::collect_extensions(&fm), &CompileContext::for_test(&fm));
+        let result = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("invalid characters"));
     }
@@ -3409,7 +3399,7 @@ mod tests {
             args: vec![], env: None, command: None,
             max_turns: None, timeout_minutes: None,
         });
-        let result = generate_copilot_params(&crate::compile::extensions::collect_extensions(&fm), &CompileContext::for_test(&fm));
+        let result = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm));
         assert!(result.is_err());
     }
 
@@ -3424,7 +3414,7 @@ mod tests {
                 args: vec![], env: None, command: None,
                 max_turns: None, timeout_minutes: None,
             });
-            let result = generate_copilot_params(&crate::compile::extensions::collect_extensions(&fm), &CompileContext::for_test(&fm));
+            let result = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm));
             assert!(result.is_ok(), "Model name '{}' should be valid", name);
         }
     }
@@ -3438,7 +3428,7 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let result = generate_copilot_params(&crate::compile::extensions::collect_extensions(&fm), &CompileContext::for_test(&fm));
+        let result = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("single quote"));
     }
