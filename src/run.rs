@@ -924,7 +924,7 @@ pub async fn run(args: &RunArgs) -> Result<()> {
     debug!("Agent prompt written to {}", prompt_path.display());
 
     // ── 7. Build and run copilot command ─────────────────────────────
-    let copilot_params = compile::generate_copilot_params(&front_matter, &extensions)?;
+    let engine_args = compile::generate_engine_args(&front_matter, &extensions)?;
 
     println!("\n=== Copilot CLI ===");
 
@@ -945,8 +945,8 @@ pub async fn run(args: &RunArgs) -> Result<()> {
         visible_args.push("--additional-mcp-config".into());
         visible_args.push(mcp_config_ref.clone());
 
-        // Parse copilot_params and add as args
-        for param in shell_words(&copilot_params) {
+        // Parse engine_args and add as args
+        for param in shell_words(&engine_args) {
             visible_args.push(param.clone());
             cmd.arg(param);
         }
@@ -987,7 +987,7 @@ pub async fn run(args: &RunArgs) -> Result<()> {
             "  copilot --prompt @{} --additional-mcp-config @{} {}{}\n",
             prompt_path.display(),
             mcp_config_path.display(),
-            copilot_params,
+            engine_args,
             debug_flags,
         );
 
@@ -1071,7 +1071,7 @@ pub async fn run(args: &RunArgs) -> Result<()> {
 /// Does NOT handle backslash escapes, single quotes, or nested quotes.
 ///
 /// This is safe because the input is compiler-controlled output from
-/// `generate_copilot_params()`, which only produces double-quoted values
+/// `generate_engine_args()`, which only produces double-quoted values
 /// with no escapes. If params ever gain more complex quoting, consider
 /// using the `shell-words` crate.
 fn shell_words(s: &str) -> Vec<String> {
