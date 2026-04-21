@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.15.0](https://github.com/githubnext/ado-aw/compare/v0.14.0...v0.15.0) (2026-04-21)
+
+
+### Features
+
+* add /scout issue slash-command workflow ([#258](https://github.com/githubnext/ado-aw/issues/258)) ([57afa1e](https://github.com/githubnext/ado-aw/commit/57afa1e9c947476a59184bb01bf12d26a642c94c))
+* add ado-aw run subcommand for local development ([#266](https://github.com/githubnext/ado-aw/issues/266)) ([55db04c](https://github.com/githubnext/ado-aw/commit/55db04cb8cd77e2938977b523d9d2a868b2b8bf2))
+* add macOS x64 and arm64 release binaries in GitHub Actions ([#264](https://github.com/githubnext/ado-aw/issues/264)) ([9bfe8ea](https://github.com/githubnext/ado-aw/commit/9bfe8ea79d8f224f4586c2ff83d957e5ed536e0d))
+* **compile:** add --skip-integrity flag for debug builds ([#246](https://github.com/githubnext/ado-aw/issues/246)) ([8cae693](https://github.com/githubnext/ado-aw/commit/8cae693d2e5b4c51cd717e9b4ecb5affa99b3824))
+* **execute:** add --dry-run flag to execute command ([#265](https://github.com/githubnext/ado-aw/issues/265)) ([b2955d4](https://github.com/githubnext/ado-aw/commit/b2955d45e8bc31e884fd76db7c6bb30544d6227c))
+* model GitHub and SafeOutputs as extensions, add --allow-tool for all MCP servers ([#251](https://github.com/githubnext/ado-aw/issues/251)) ([2150cdb](https://github.com/githubnext/ado-aw/commit/2150cdb560dcbd41aef924248ebbb83a84cec0fb))
+
+
+### Bug Fixes
+
+* add required 'domain' field to MCPG gateway config ([#249](https://github.com/githubnext/ado-aw/issues/249)) ([e355b92](https://github.com/githubnext/ado-aw/commit/e355b921cb8819882d8fea7df886b0ebd0b29813))
+* align MCPG integration with gh-aw reference implementation ([#244](https://github.com/githubnext/ado-aw/issues/244)) ([bb4cccd](https://github.com/githubnext/ado-aw/commit/bb4cccddafe48914ae09bd3e78ca440e7ee70fc9))
+* bypass MCPG run_containerized.sh to fix port validation with --network host ([#250](https://github.com/githubnext/ado-aw/issues/250)) ([9b0568e](https://github.com/githubnext/ado-aw/commit/9b0568ea5959eecbb686057085b1fa60643ac1e6))
+* resolve compiler warnings and remove dead code ([#268](https://github.com/githubnext/ado-aw/issues/268)) ([dd7df1f](https://github.com/githubnext/ado-aw/commit/dd7df1ff9bc68cdcd0fe725732d872b7c793f18f))
+* **run:** base64-encode PAT for ADO MCP and pass prompts via [@file](https://github.com/file) ([#270](https://github.com/githubnext/ado-aw/issues/270)) ([11b01ec](https://github.com/githubnext/ado-aw/commit/11b01ec207f050d324488f87894fbf0eae7675be))
+
 ## [0.14.0](https://github.com/githubnext/ado-aw/compare/v0.13.0...v0.14.0) (2026-04-16)
 
 
