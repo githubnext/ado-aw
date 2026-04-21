@@ -467,6 +467,10 @@ pub fn generate_copilot_params(
     // 1. Bash has an explicit wildcard entry (":*" or "*"), OR
     // 2. Bash is not specified at all (None) — ado-aw agents always run in AWF sandbox,
     //    and gh-aw defaults to bash: ["*"] when sandbox is enabled (applyDefaultTools).
+    //
+    // Note: wildcard detection requires exactly one entry (cmds.len() == 1). Mixing a
+    // wildcard with other commands (e.g. bash: [":*", "cat"]) is not supported and will
+    // fall through to the restricted path, emitting "shell(:*)" literally.
     let bash_config = front_matter.tools.as_ref().and_then(|t| t.bash.as_ref());
     let use_allow_all_tools = match bash_config {
         Some(cmds) if cmds.len() == 1 && (cmds[0] == ":*" || cmds[0] == "*") => true,
@@ -521,6 +525,9 @@ pub fn generate_copilot_params(
             allowed_tools.push(name.clone());
         }
 
+        // Intentional: with restricted bash, both --allow-tool write (tool identity)
+        // and --allow-all-paths (path scope) are emitted. --allow-all-tools subsumes
+        // --allow-tool write, so only --allow-all-paths is needed on that path.
         if edit_enabled {
             allowed_tools.push("write".to_string());
         }
@@ -539,8 +546,9 @@ pub fn generate_copilot_params(
                     cmds.clone()
                 }
                 None => {
-                    // Unreachable: bash=None → use_allow_all_tools=true → block skipped.
-                    // Keep as defensive fallback.
+                    // Invariant: bash=None → use_allow_all_tools=true → this block is
+                    // skipped. Panic in debug builds if the invariant is ever broken.
+                    debug_assert!(false, "bash=None should imply use_allow_all_tools=true");
                     vec![]
                 }
             };
