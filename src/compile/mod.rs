@@ -341,14 +341,13 @@ fn format_diff(existing: &str, expected: &str, pipeline_path: &Path) -> String {
     ));
 
     // First pass: count total changes across the full diff.
-    let total_added = diff
-        .iter_all_changes()
-        .filter(|c| c.tag() == ChangeTag::Insert)
-        .count();
-    let total_removed = diff
-        .iter_all_changes()
-        .filter(|c| c.tag() == ChangeTag::Delete)
-        .count();
+    let (total_added, total_removed) = diff.iter_all_changes().fold((0usize, 0usize), |(a, r), c| {
+        match c.tag() {
+            ChangeTag::Insert => (a + 1, r),
+            ChangeTag::Delete => (a, r + 1),
+            ChangeTag::Equal => (a, r),
+        }
+    });
 
     let mut changed_lines_shown = 0usize;
     let mut truncated = false;
@@ -358,7 +357,9 @@ fn format_diff(existing: &str, expected: &str, pipeline_path: &Path) -> String {
             break;
         }
 
-        output.push_str(&format!("{}\n", hunk.header()));
+        // Buffer hunk lines so we only emit the header if we have content to show.
+        // This avoids orphaned hunk headers when truncation fires mid-hunk.
+        let mut hunk_buf = String::new();
 
         for change in hunk.iter_changes() {
             let tag = change.tag();
@@ -379,10 +380,15 @@ fn format_diff(existing: &str, expected: &str, pipeline_path: &Path) -> String {
             };
             // Lines from TextDiff include trailing newlines; write directly.
             if line.ends_with('\n') {
-                output.push_str(&format!("{}{}", prefix, line));
+                hunk_buf.push_str(&format!("{}{}", prefix, line));
             } else {
-                output.push_str(&format!("{}{}\n", prefix, line));
+                hunk_buf.push_str(&format!("{}{}\n", prefix, line));
             }
+        }
+
+        if !hunk_buf.is_empty() {
+            output.push_str(&format!("{}\n", hunk.header()));
+            output.push_str(&hunk_buf);
         }
     }
 
