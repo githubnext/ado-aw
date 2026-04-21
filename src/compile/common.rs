@@ -458,52 +458,25 @@ pub fn validate_checkout_list(repositories: &[Repository], checkout: &[String]) 
     Ok(())
 }
 
-/// Default bash commands allowed for agents (matches gh-aw defaults + yq)
-const DEFAULT_BASH_COMMANDS: &[&str] = &[
-    "cat", "date", "echo", "grep", "head", "ls", "pwd", "sort", "tail", "uniq", "wc", "yq",
-];
-
 /// Generate copilot CLI params from front matter configuration
 pub fn generate_copilot_params(
     front_matter: &FrontMatter,
     extensions: &[super::extensions::Extension],
 ) -> Result<String> {
-    let mut allowed_tools: Vec<String> = Vec::new();
-
-    // Collect tool permissions from extensions (github, safeoutputs, azure-devops, etc.)
-    for ext in extensions {
-        for tool in ext.allowed_copilot_tools() {
-            if !allowed_tools.contains(&tool) {
-                allowed_tools.push(tool);
-            }
-        }
-    }
-
-    // Collect tool permissions from user-defined MCP servers (sorted for deterministic output).
-    // Only add --allow-tool for MCPs that will actually produce an MCPG entry (i.e.,
-    // WithOptions that have a container or url). McpConfig::Enabled(true) has no backing
-    // server in MCPG, so granting the permission would cause confusing runtime errors.
-    let mut sorted_mcps: Vec<_> = front_matter.mcp_servers.iter().collect();
-    sorted_mcps.sort_by(|(a, _), (b, _)| a.cmp(b));
-    for (name, config) in sorted_mcps {
-        // Skip servers already provided by extensions (case-insensitive to match
-        // generate_mcpg_config's eq_ignore_ascii_case guard for reserved names)
-        if allowed_tools.iter().any(|t| t.eq_ignore_ascii_case(name)) {
-            continue;
-        }
-        // Only add MCPs that have a backing server (container or url)
-        let has_backing_server = match config {
-            crate::compile::types::McpConfig::Enabled(_) => false,
-            crate::compile::types::McpConfig::WithOptions(opts) => {
-                opts.enabled.unwrap_or(true)
-                    && (opts.container.is_some() || opts.url.is_some())
-            }
-        };
-        if !has_backing_server {
-            continue;
-        }
-        allowed_tools.push(name.clone());
-    }
+    // Check if bash triggers --allow-all-tools. This happens when:
+    // 1. Bash has an explicit wildcard entry (":*" or "*"), OR
+    // 2. Bash is not specified at all (None) — ado-aw agents always run in AWF sandbox,
+    //    and gh-aw defaults to bash: ["*"] when sandbox is enabled (applyDefaultTools).
+    //
+    // Note: wildcard detection requires exactly one entry (cmds.len() == 1). Mixing a
+    // wildcard with other commands (e.g. bash: [":*", "cat"]) is not supported and will
+    // fall through to the restricted path, emitting "shell(:*)" literally.
+    let bash_config = front_matter.tools.as_ref().and_then(|t| t.bash.as_ref());
+    let use_allow_all_tools = match bash_config {
+        Some(cmds) if cmds.len() == 1 && (cmds[0] == ":*" || cmds[0] == "*") => true,
+        None => true, // default: all tools (matches gh-aw sandbox default)
+        _ => false,
+    };
 
     // Edit tool: enabled by default, can be disabled with `edit: false`
     let edit_enabled = front_matter
@@ -511,40 +484,75 @@ pub fn generate_copilot_params(
         .as_ref()
         .and_then(|t| t.edit)
         .unwrap_or(true);
-    if edit_enabled {
-        allowed_tools.push("write".to_string());
-    }
 
-    // Bash tool: use configured list, or defaults if not specified
-    let mut bash_commands: Vec<String> =
-        match front_matter.tools.as_ref().and_then(|t| t.bash.as_ref()) {
-            Some(cmds) if cmds.len() == 1 && cmds[0] == ":*" => {
-                // Unrestricted: single wildcard entry
-                allowed_tools.push("shell(:*)".to_string());
-                vec![]
-            }
-            Some(cmds) if cmds.is_empty() => {
-                // Explicitly disabled: no bash commands
-                vec![]
-            }
-            Some(cmds) => {
-                // Explicit list of commands
-                cmds.clone()
-            }
-            None => {
-                // Default safe commands
-                DEFAULT_BASH_COMMANDS.iter().map(|s| (*s).to_string()).collect()
-            }
-        };
+    // When --allow-all-tools is active, skip individual tool collection entirely.
+    // --allow-all-tools is a superset that permits all tool calls regardless.
+    let mut allowed_tools: Vec<String> = Vec::new();
 
-    // Auto-add extension-declared bash commands (runtimes + first-party tools)
-    let is_unrestricted_bash = front_matter
-        .tools
-        .as_ref()
-        .and_then(|t| t.bash.as_ref())
-        .is_some_and(|cmds| cmds.len() == 1 && cmds[0] == ":*");
+    if !use_allow_all_tools {
+        // Collect tool permissions from extensions (github, safeoutputs, azure-devops, etc.)
+        for ext in extensions {
+            for tool in ext.allowed_copilot_tools() {
+                if !allowed_tools.contains(&tool) {
+                    allowed_tools.push(tool);
+                }
+            }
+        }
 
-    if !is_unrestricted_bash {
+        // Collect tool permissions from user-defined MCP servers (sorted for deterministic output).
+        // Only add --allow-tool for MCPs that will actually produce an MCPG entry (i.e.,
+        // WithOptions that have a container or url). McpConfig::Enabled(true) has no backing
+        // server in MCPG, so granting the permission would cause confusing runtime errors.
+        let mut sorted_mcps: Vec<_> = front_matter.mcp_servers.iter().collect();
+        sorted_mcps.sort_by(|(a, _), (b, _)| a.cmp(b));
+        for (name, config) in sorted_mcps {
+            // Skip servers already provided by extensions (case-insensitive to match
+            // generate_mcpg_config's eq_ignore_ascii_case guard for reserved names)
+            if allowed_tools.iter().any(|t| t.eq_ignore_ascii_case(name)) {
+                continue;
+            }
+            // Only add MCPs that have a backing server (container or url)
+            let has_backing_server = match config {
+                crate::compile::types::McpConfig::Enabled(_) => false,
+                crate::compile::types::McpConfig::WithOptions(opts) => {
+                    opts.enabled.unwrap_or(true)
+                        && (opts.container.is_some() || opts.url.is_some())
+                }
+            };
+            if !has_backing_server {
+                continue;
+            }
+            allowed_tools.push(name.clone());
+        }
+
+        // Intentional: with restricted bash, both --allow-tool write (tool identity)
+        // and --allow-all-paths (path scope) are emitted. --allow-all-tools subsumes
+        // --allow-tool write, so only --allow-all-paths is needed on that path.
+        if edit_enabled {
+            allowed_tools.push("write".to_string());
+        }
+
+        // Bash tool: use the explicitly configured list.
+        // When bash is None (not specified), use_allow_all_tools is true and this
+        // block is skipped entirely (gh-aw sandbox default = wildcard).
+        let mut bash_commands: Vec<String> =
+            match front_matter.tools.as_ref().and_then(|t| t.bash.as_ref()) {
+                Some(cmds) if cmds.is_empty() => {
+                    // Explicitly disabled: no bash commands
+                    vec![]
+                }
+                Some(cmds) => {
+                    // Explicit list of commands
+                    cmds.clone()
+                }
+                None => {
+                    // Invariant: bash=None → use_allow_all_tools=true → this block is
+                    // skipped. Panic if the invariant is ever broken.
+                    unreachable!("bash=None should imply use_allow_all_tools=true")
+                }
+            };
+
+        // Auto-add extension-declared bash commands (runtimes + first-party tools)
         for ext in extensions {
             for cmd in ext.required_bash_commands() {
                 if !bash_commands.contains(&cmd) {
@@ -552,19 +560,19 @@ pub fn generate_copilot_params(
                 }
             }
         }
-    }
 
-    for cmd in &bash_commands {
-        // Reject single quotes in bash commands — copilot_params are embedded inside
-        // a single-quoted bash string in the AWF command.
-        if cmd.contains('\'') {
-            anyhow::bail!(
-                "Bash command '{}' contains a single quote, which is not allowed \
-                 (would break AWF shell quoting).",
-                cmd
-            );
+        for cmd in &bash_commands {
+            // Reject single quotes in bash commands — copilot_params are embedded inside
+            // a single-quoted bash string in the AWF command.
+            if cmd.contains('\'') {
+                anyhow::bail!(
+                    "Bash command '{}' contains a single quote, which is not allowed \
+                     (would break AWF shell quoting).",
+                    cmd
+                );
+            }
+            allowed_tools.push(format!("shell({})", cmd));
         }
-        allowed_tools.push(format!("shell({})", cmd));
     }
 
     let mut params = Vec::new();
@@ -604,14 +612,24 @@ pub fn generate_copilot_params(
     params.push("--disable-builtin-mcps".to_string());
     params.push("--no-ask-user".to_string());
 
-    for tool in allowed_tools {
-        if tool.contains('(') || tool.contains(')') || tool.contains(' ') {
-            // Use double quotes - the copilot_params are embedded inside a single-quoted
-            // bash string in the AWF command, so single quotes would break quoting.
-            params.push(format!("--allow-tool \"{}\"", tool));
-        } else {
-            params.push(format!("--allow-tool {}", tool));
+    if use_allow_all_tools {
+        params.push("--allow-all-tools".to_string());
+    } else {
+        for tool in allowed_tools {
+            if tool.contains('(') || tool.contains(')') || tool.contains(' ') {
+                // Use double quotes - the copilot_params are embedded inside a single-quoted
+                // bash string in the AWF command, so single quotes would break quoting.
+                params.push(format!("--allow-tool \"{}\"", tool));
+            } else {
+                params.push(format!("--allow-tool {}", tool));
+            }
         }
+    }
+
+    // --allow-all-paths when edit is enabled — lets the agent write to any file path.
+    // Emitted independently of --allow-all-tools (matches gh-aw behavior).
+    if edit_enabled {
+        params.push("--allow-all-paths".to_string());
     }
 
     Ok(params.join(" "))
@@ -2378,7 +2396,22 @@ mod tests {
             azure_devops: None,
         });
         let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
-        assert!(params.contains("--allow-tool \"shell(:*)\""));
+        assert!(params.contains("--allow-all-tools"), "wildcard bash should emit --allow-all-tools");
+        assert!(!params.contains("--allow-tool"), "no individual --allow-tool flags with --allow-all-tools");
+    }
+
+    #[test]
+    fn test_copilot_params_bash_star_wildcard() {
+        let mut fm = minimal_front_matter();
+        fm.tools = Some(crate::compile::types::ToolsConfig {
+            bash: Some(vec!["*".to_string()]),
+            edit: None,
+            cache_memory: None,
+            azure_devops: None,
+        });
+        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        assert!(params.contains("--allow-all-tools"), "\"*\" should behave same as \":*\"");
+        assert!(!params.contains("--allow-tool"), "no individual --allow-tool flags with --allow-all-tools");
     }
 
     #[test]
@@ -2395,8 +2428,52 @@ mod tests {
     }
 
     #[test]
+    fn test_copilot_params_allow_all_paths_when_edit_enabled() {
+        let fm = minimal_front_matter(); // edit defaults to true, bash defaults to wildcard
+        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        assert!(params.contains("--allow-all-paths"), "edit enabled (default) should emit --allow-all-paths");
+        assert!(params.contains("--allow-all-tools"), "default (no bash) should emit --allow-all-tools");
+        assert!(!params.contains("--allow-tool"), "no individual --allow-tool flags with --allow-all-tools");
+    }
+
+    #[test]
+    fn test_copilot_params_no_allow_all_paths_when_edit_disabled() {
+        let mut fm = minimal_front_matter();
+        fm.tools = Some(crate::compile::types::ToolsConfig {
+            bash: None,
+            edit: Some(false),
+            cache_memory: None,
+            azure_devops: None,
+        });
+        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        assert!(!params.contains("--allow-all-paths"), "edit disabled should NOT emit --allow-all-paths");
+        assert!(!params.contains("--allow-tool write"), "edit disabled should NOT emit --allow-tool write");
+    }
+
+    #[test]
+    fn test_copilot_params_allow_all_tools_with_allow_all_paths() {
+        let mut fm = minimal_front_matter();
+        fm.tools = Some(crate::compile::types::ToolsConfig {
+            bash: Some(vec![":*".to_string()]),
+            edit: Some(true),
+            cache_memory: None,
+            azure_devops: None,
+        });
+        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        assert!(params.contains("--allow-all-tools"), "wildcard bash should emit --allow-all-tools");
+        assert!(params.contains("--allow-all-paths"), "edit enabled should still emit --allow-all-paths");
+        assert!(!params.contains("--allow-tool"), "no individual --allow-tool flags");
+    }
+
+    #[test]
     fn test_copilot_params_lean_adds_bash_commands() {
         let mut fm = minimal_front_matter();
+        fm.tools = Some(crate::compile::types::ToolsConfig {
+            bash: Some(vec!["cat".to_string()]),
+            edit: None,
+            cache_memory: None,
+            azure_devops: None,
+        });
         fm.runtimes = Some(crate::compile::types::RuntimesConfig {
             lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(true)),
         });
@@ -2404,8 +2481,8 @@ mod tests {
         assert!(params.contains("shell(lean)"), "lean command should be allowed");
         assert!(params.contains("shell(lake)"), "lake command should be allowed");
         assert!(params.contains("shell(elan)"), "elan command should be allowed");
-        // Default bash commands should still be present
-        assert!(params.contains("shell(cat)"), "default commands should remain");
+        // Explicit bash commands should still be present
+        assert!(params.contains("shell(cat)"), "explicit commands should remain");
     }
 
     #[test]
@@ -2421,9 +2498,9 @@ mod tests {
             lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(true)),
         });
         let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
-        assert!(params.contains("shell(:*)"), "unrestricted should be preserved");
-        // Should NOT add individual lean commands when unrestricted
-        assert!(!params.contains("shell(lean)"), "lean not needed with :*");
+        assert!(params.contains("--allow-all-tools"), "wildcard should use --allow-all-tools");
+        // Should NOT add individual tool flags when --allow-all-tools is active
+        assert!(!params.contains("--allow-tool"), "no individual tool flags with --allow-all-tools");
     }
 
     #[test]
@@ -2437,12 +2514,21 @@ mod tests {
             }),
         );
         let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
-        assert!(!params.contains("--mcp my-tool"));
+        assert!(
+            !params.contains("--allow-tool my-tool"),
+            "default (all-tools) mode should not emit individual --allow-tool for MCPs"
+        );
     }
 
     #[test]
     fn test_copilot_params_allow_tool_for_container_mcp() {
         let mut fm = minimal_front_matter();
+        fm.tools = Some(crate::compile::types::ToolsConfig {
+            bash: Some(vec!["cat".to_string()]),
+            edit: None,
+            cache_memory: None,
+            azure_devops: None,
+        });
         fm.mcp_servers.insert(
             "my-tool".to_string(),
             McpConfig::WithOptions(McpOptions {
@@ -2457,6 +2543,12 @@ mod tests {
     #[test]
     fn test_copilot_params_allow_tool_for_url_mcp() {
         let mut fm = minimal_front_matter();
+        fm.tools = Some(crate::compile::types::ToolsConfig {
+            bash: Some(vec!["cat".to_string()]),
+            edit: None,
+            cache_memory: None,
+            azure_devops: None,
+        });
         fm.mcp_servers.insert(
             "remote-ado".to_string(),
             McpConfig::WithOptions(McpOptions {
@@ -2482,6 +2574,12 @@ mod tests {
     #[test]
     fn test_copilot_params_allow_tool_mcps_sorted() {
         let mut fm = minimal_front_matter();
+        fm.tools = Some(crate::compile::types::ToolsConfig {
+            bash: Some(vec!["cat".to_string()]),
+            edit: None,
+            cache_memory: None,
+            azure_devops: None,
+        });
         fm.mcp_servers.insert(
             "z-tool".to_string(),
             McpConfig::WithOptions(McpOptions {
