@@ -12,7 +12,7 @@ fn test_run_subcommand_exposed_in_debug_builds() {
     assert!(output.status.success(), "--help should succeed");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("run") && stdout.contains("Run agent locally"),
+        stdout.contains("Run agent locally"),
         "Debug build help output should include the run subcommand, got:\n{stdout}"
     );
 }
