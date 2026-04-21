@@ -121,8 +121,9 @@ The compiler expects markdown files with YAML front matter similar to gh-aw:
 name: "name for this agent"
 description: "One line description for this agent"
 target: standalone # Optional: "standalone" (default) or "1es". See Target Platforms section below.
-engine: claude-opus-4.5 # AI engine to use. Defaults to claude-opus-4.5. Other options include claude-sonnet-4.5, gpt-5.2-codex, gemini-3-pro-preview, etc.
+engine: copilot # Engine identifier. Defaults to copilot. Currently only 'copilot' (GitHub Copilot CLI) is supported.
 # engine:                        # Alternative object format (with additional options)
+#   id: copilot
 #   model: claude-opus-4.5
 #   timeout-minutes: 30
 schedule: daily around 14:00 # Fuzzy schedule syntax - see Schedule Syntax section below
@@ -314,14 +315,15 @@ schedule:
 
 ### Engine Configuration
 
-The `engine` field specifies which AI model to use and optional execution parameters. It accepts both a simple string format (model name only) and an object format with additional options.
+The `engine` field specifies which engine to use for the agentic task. The string form is an engine identifier (currently only `copilot` is supported). The object form uses `id` for the engine identifier plus additional options like model selection and timeout.
 
 ```yaml
-# Simple string format (just a model name)
-engine: claude-opus-4.5
+# Simple string format (engine identifier, defaults to copilot)
+engine: copilot
 
 # Object format with additional options
 engine:
+  id: copilot
   model: claude-opus-4.5
   timeout-minutes: 30
 ```
@@ -330,10 +332,19 @@ engine:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `id` | string | `copilot` | Engine identifier. Currently only `copilot` (GitHub Copilot CLI) is supported. |
 | `model` | string | `claude-opus-4.5` | AI model to use. Options include `claude-sonnet-4.5`, `gpt-5.2-codex`, `gemini-3-pro-preview`, etc. |
 | `timeout-minutes` | integer | *(none)* | Maximum time in minutes the agent job is allowed to run. Sets `timeoutInMinutes` on the `Agent` job in the generated pipeline. |
+| `version` | string | *(none)* | Engine CLI version to install (e.g., `"0.0.422"`, `"latest"`). **Not yet wired** — parsed but ignored with a warning. |
+| `agent` | string | *(none)* | Custom agent file identifier (Copilot only). **Not yet wired** — parsed but ignored with a warning. |
+| `api-target` | string | *(none)* | Custom API endpoint hostname for GHES/GHEC (e.g., `"api.acme.ghe.com"`). **Not yet wired** — parsed but ignored with a warning. |
+| `args` | list | `[]` | Custom CLI arguments injected before the prompt. **Not yet wired** — parsed but ignored with a warning. |
+| `env` | map | *(none)* | Engine-specific environment variables. **Not yet wired** — parsed but ignored with a warning. |
+| `command` | string | *(none)* | Custom engine executable path (skips default installation). **Not yet wired** — parsed but ignored with a warning. |
 
 > **Deprecated:** `max-turns` is still accepted in front matter for backwards compatibility but is ignored at compile time (a warning is emitted). It was specific to Claude Code and is not supported by Copilot CLI.
+
+> **Note:** Fields marked "not yet wired" are accepted in the schema for forward compatibility with gh-aw but produce a compile-time warning. Pipeline wiring for these fields is incremental.
 
 #### `timeout-minutes`
 
@@ -837,29 +848,6 @@ When `safe-outputs:` is empty (or omitted), this is replaced with an empty strin
 Tool names are validated at compile time:
 - Names must contain only ASCII alphanumerics and hyphens (shell injection prevention)
 - Unrecognized names (not in `ALL_KNOWN_SAFE_OUTPUTS`) emit a warning to catch typos
-
-## {{ cancel_previous_builds }}
-
-When `triggers.pipeline` is configured, this generates a bash step that cancels any previously queued or in-progress builds of the same pipeline definition. This prevents multiple builds from accumulating when the upstream pipeline triggers rapidly (e.g., multiple PRs merged in quick succession).
-
-The step:
-- Uses the Azure DevOps REST API to query builds for the current pipeline definition
-- Filters to only `notStarted` and `inProgress` builds
-- Excludes the current build from cancellation
-- Cancels each older build via PATCH request
-
-Example output:
-```yaml
-- bash: |
-    CURRENT_BUILD_ID=$(Build.BuildId)
-    BUILDS=$(curl -s -u ":$SYSTEM_ACCESSTOKEN" \
-      "$(System.CollectionUri)$(System.TeamProject)/_apis/build/builds?definitions=$(System.DefinitionId)&statusFilter=notStarted,inProgress&api-version=7.1" \
-      | jq -r --arg current "$CURRENT_BUILD_ID" '.value[] | select(.id != ($current | tonumber)) | .id')
-    # ... cancels each build
-  displayName: "Cancel previous queued builds"
-  env:
-    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
-```
 
 ## {{ threat_analysis_prompt }}
 
