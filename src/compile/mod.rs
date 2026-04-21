@@ -24,6 +24,10 @@ pub use common::generate_mcpg_config;
 pub use common::MCPG_IMAGE;
 pub use common::MCPG_VERSION;
 pub use common::MCPG_PORT;
+pub use common::ADO_MCP_ENTRYPOINT;
+pub use common::ADO_MCP_IMAGE;
+pub use common::ADO_MCP_PACKAGE;
+pub use common::ADO_MCP_SERVER_NAME;
 pub use types::{CompileTarget, FrontMatter};
 
 /// Trait for pipeline compilers.

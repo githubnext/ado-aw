@@ -351,16 +351,14 @@ macro_rules! extension_enum {
     };
 }
 
-mod azure_devops;
-mod cache_memory;
 mod github;
-mod lean;
 mod safe_outputs;
 
-pub use azure_devops::{AdoAuthMode, AzureDevOpsExtension};
-pub use cache_memory::CacheMemoryExtension;
+// Re-export tool/runtime extensions from their colocated homes
+pub use crate::tools::azure_devops::{AdoAuthMode, AzureDevOpsExtension};
+pub use crate::tools::cache_memory::CacheMemoryExtension;
 pub use github::GitHubExtension;
-pub use lean::LeanExtension;
+pub use crate::runtimes::lean::LeanExtension;
 pub use safe_outputs::SafeOutputsExtension;
 
 extension_enum! {

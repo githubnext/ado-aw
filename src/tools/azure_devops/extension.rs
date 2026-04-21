@@ -1,10 +1,10 @@
 // ─── Azure DevOps MCP ────────────────────────────────────────────────
 
-use super::{
+use crate::compile::extensions::{
     CompileContext, CompilerExtension, ExtensionPhase, McpgServerConfig, PipelineEnvMapping,
 };
 use crate::allowed_hosts::mcp_required_hosts;
-use crate::compile::common::{
+use crate::compile::{
     ADO_MCP_ENTRYPOINT, ADO_MCP_IMAGE, ADO_MCP_PACKAGE, ADO_MCP_SERVER_NAME,
 };
 use crate::compile::types::AzureDevOpsToolConfig;

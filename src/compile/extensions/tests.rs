@@ -1,5 +1,5 @@
 use super::*;
-use crate::compile::common::{ADO_MCP_SERVER_NAME, parse_markdown};
+use crate::compile::{ADO_MCP_SERVER_NAME, parse_markdown};
 use crate::compile::types::{AzureDevOpsToolConfig, CacheMemoryToolConfig};
 use crate::runtimes::lean::LeanRuntimeConfig;
 
