@@ -441,9 +441,14 @@ fn start_mcpg(
     if needs_ado_token {
         if let Some(pat) = pat {
             // Set both vars so MCPG can passthrough whichever the auth mode needs:
-            //   PERSONAL_ACCESS_TOKEN — read by ADO MCP in `-a pat` mode (local dev)
-            //   AZURE_DEVOPS_EXT_PAT  — used by copilot and execute stages
-            env_contents.push_str(&format!("PERSONAL_ACCESS_TOKEN={}\n", pat));
+            //   PERSONAL_ACCESS_TOKEN — read by ADO MCP in `-a pat` mode (local dev).
+            //     The ADO MCP returns this value as-is for Basic auth, so it must be
+            //     base64(":<rawPAT>") per the microsoft/azure-devops-mcp auth contract.
+            //   AZURE_DEVOPS_EXT_PAT  — used by copilot and execute stages (raw PAT)
+            use base64::Engine;
+            let b64_pat =
+                base64::engine::general_purpose::STANDARD.encode(format!(":{}", pat));
+            env_contents.push_str(&format!("PERSONAL_ACCESS_TOKEN={}\n", b64_pat));
             env_contents.push_str(&format!("AZURE_DEVOPS_EXT_PAT={}\n", pat));
         }
     }
@@ -930,16 +935,17 @@ pub async fn run(args: &RunArgs) -> Result<()> {
         // Collect args for debug logging (tokio Command doesn't expose them)
         let mut visible_args: Vec<String> = Vec::new();
 
-        let prompt_path_str = format!("@{}", mcp_config_path.display());
-
-        cmd.arg("--prompt").arg(&markdown_body);
+        // Pass prompt via @file to avoid cmd.exe argument length limits on Windows
+        let prompt_file_ref = format!("@{}", prompt_path.display());
+        cmd.arg("--prompt").arg(&prompt_file_ref);
         visible_args.push("--prompt".into());
-        visible_args.push(format!("\"({} chars)\"", markdown_body.len()));
+        visible_args.push(prompt_file_ref.clone());
 
+        let mcp_config_ref = format!("@{}", mcp_config_path.display());
         cmd.arg("--additional-mcp-config")
-            .arg(format!("\"{}\"", prompt_path_str));
+            .arg(&mcp_config_ref);
         visible_args.push("--additional-mcp-config".into());
-        visible_args.push(format!("\"{}\"", prompt_path_str));
+        visible_args.push(mcp_config_ref.clone());
 
         // Parse copilot_params and add as args
         for param in shell_words(&copilot_params) {
@@ -980,7 +986,7 @@ pub async fn run(args: &RunArgs) -> Result<()> {
         println!("Copilot CLI not found on PATH.");
         println!("To run the agent, execute this command:\n");
         println!(
-            "  copilot --prompt \"$(cat {})\" --additional-mcp-config @{} {}{}\n",
+            "  copilot --prompt @{} --additional-mcp-config @{} {}{}\n",
             prompt_path.display(),
             mcp_config_path.display(),
             copilot_params,

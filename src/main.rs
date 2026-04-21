@@ -404,6 +404,7 @@ async fn main() -> Result<()> {
                     dry_run,
                     skip_mcpg,
                     output_dir,
+                    debug: args.debug,
                 })
                 .await?;
             }
