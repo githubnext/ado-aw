@@ -133,7 +133,7 @@ enum Commands {
     Run {
         /// Path to the agent markdown file
         path: String,
-        /// Azure DevOps PAT for API access (also passed as ADO_MCP_AUTH_TOKEN to MCPG)
+        /// Azure DevOps PAT for API access (base64-encoded as PERSONAL_ACCESS_TOKEN for MCPG in local dev)
         #[arg(long, env = "AZURE_DEVOPS_EXT_PAT")]
         pat: Option<String>,
         /// Azure DevOps organization URL

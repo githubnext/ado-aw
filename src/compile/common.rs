@@ -1901,7 +1901,17 @@ pub fn generate_mcpg_step_env(
         }
     }
 
-    entries.join("\n")
+    if entries.is_empty() {
+        return String::new();
+    }
+
+    // Return full `env:` block so the template marker can be cleanly omitted when empty
+    let indented = entries
+        .iter()
+        .map(|e| format!("  {}", e))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("env:\n{}", indented)
 }
 
 // ==================== Domain allowlist ====================
@@ -4286,6 +4296,10 @@ mod tests {
         ).unwrap();
         let extensions = collect_extensions(&fm);
         let env = generate_mcpg_step_env(&extensions);
+        assert!(
+            env.starts_with("env:\n"),
+            "Should emit full env: block header"
+        );
         assert!(
             env.contains("SC_READ_TOKEN: $(SC_READ_TOKEN)"),
             "Should map SC_READ_TOKEN for ADO extension"

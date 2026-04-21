@@ -339,8 +339,7 @@ extends:
                     echo "Generated MCP config at: /tmp/awf-tools/mcp-config.json"
                     cat /tmp/awf-tools/mcp-config.json
                   displayName: "Start MCP Gateway (MCPG)"
-                  env:
-                    {{ mcpg_step_env }}
+                  {{ mcpg_step_env }}
 
                 {{ verify_mcp_backends }}
 

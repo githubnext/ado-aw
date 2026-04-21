@@ -3275,6 +3275,7 @@ fn test_debug_pipeline_no_unresolved_markers() {
         "Compiled output should not contain unresolved {{ verify_mcp_backends }} marker"
     );
 }
+#[test]
 fn test_debug_pipeline_probe_step_indentation_standalone() {
     let compiled = compile_fixture_with_flags("minimal-agent.md", &["--debug-pipeline"]);
 
