@@ -227,6 +227,18 @@
     "kotlin.bintray.com",
     "maven.pkg.jetbrains.space"
   ],
+  "latex": [
+    "ctan.org",
+    "mirror.ctan.org",
+    "mirrors.ctan.org",
+    "tug.org",
+    "www.tug.org",
+    "ftp.tug.org",
+    "latex-project.org",
+    "www.latex-project.org",
+    "miktex.org",
+    "packages.miktex.org"
+  ],
   "lean": [
     "elan.lean-lang.org",
     "lean-lang.org",
