@@ -12,6 +12,7 @@ mod logging;
 mod mcp;
 mod ndjson;
 pub mod runtimes;
+#[cfg(debug_assertions)]
 mod run;
 pub mod sanitize;
 mod safeoutputs;
@@ -131,6 +132,7 @@ enum Commands {
         definition_ids: Option<Vec<u64>>,
     },
     /// Run agent locally (local development mode)
+    #[cfg(debug_assertions)]
     Run {
         /// Path to the agent markdown file
         path: String,
@@ -181,6 +183,7 @@ async fn main() -> Result<()> {
         Some(Commands::McpHttp { .. }) => "mcp-http",
         Some(Commands::Init { .. }) => "init",
         Some(Commands::Configure { .. }) => "configure",
+        #[cfg(debug_assertions)]
         Some(Commands::Run { .. }) => "run",
         None => "ado-aw",
     };
@@ -388,6 +391,7 @@ async fn main() -> Result<()> {
                 )
                 .await?;
             }
+            #[cfg(debug_assertions)]
             Commands::Run {
                 path,
                 pat,
