@@ -2203,8 +2203,6 @@ pub async fn compile_shared(
         threat_analysis_prompt,
     );
 
-    // 12. Apply extra replacements first (target-specific overrides)
-    // These run before shared replacements so targets can override shared
     // 12. Debug pipeline replacements (MUST run before extra_replacements
     //     because the probe step content contains {{ mcpg_port }} which is
     //     resolved by extra_replacements).

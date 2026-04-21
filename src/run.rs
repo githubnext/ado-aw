@@ -678,7 +678,7 @@ pub async fn run(args: &RunArgs) -> Result<()> {
 
     // ── 2. Collect extensions ────────────────────────────────────────
     // Local run uses PAT auth for ADO MCP (users have PATs, not bearer JWTs).
-    let extensions = compile::extensions::collect_extensions_with_ado_auth(
+    let extensions = compile::extensions::collect_extensions_with_auth(
         &front_matter,
         compile::extensions::AdoAuthMode::Pat,
     );
@@ -805,13 +805,10 @@ pub async fn run(args: &RunArgs) -> Result<()> {
             println!("Warning: ADO MCP enabled but no PAT provided — tool calls may fail");
         }
         let gateway_output_path = output_dir.join("gateway-output.json");
-        let mcpg_log_dir = if args.debug {
-            let dir = output_dir.join("mcpg-logs");
-            println!("MCPG logs will be written to: {}", dir.display());
-            dir
-        } else {
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("mcpg-logs")
-        };
+        let mcpg_log_dir = output_dir.join("mcpg-logs");
+        if args.debug {
+            println!("MCPG logs will be written to: {}", mcpg_log_dir.display());
+        }
         let (mcpg_child, mcpg_env_file) = start_mcpg(
             &mcpg_json,
             &mcpg_api_key,

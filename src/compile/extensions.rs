@@ -823,20 +823,13 @@ These tools generate safe outputs that will be reviewed and executed in a separa
 /// (runtimes in `RuntimesConfig` field order, tools in `ToolsConfig`
 /// field order).
 pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
-    collect_extensions_with_options(front_matter, AdoAuthMode::default())
+    collect_extensions_with_auth(front_matter, AdoAuthMode::default())
 }
 
 /// Collect extensions with an explicit ADO auth mode.
 ///
 /// Used by `ado-aw run` to switch from bearer (pipeline default) to PAT auth.
-pub fn collect_extensions_with_ado_auth(
-    front_matter: &FrontMatter,
-    ado_auth: AdoAuthMode,
-) -> Vec<Extension> {
-    collect_extensions_with_options(front_matter, ado_auth)
-}
-
-fn collect_extensions_with_options(
+pub fn collect_extensions_with_auth(
     front_matter: &FrontMatter,
     ado_auth: AdoAuthMode,
 ) -> Vec<Extension> {
