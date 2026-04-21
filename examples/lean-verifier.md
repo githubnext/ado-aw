@@ -1,7 +1,9 @@
 ---
 name: "Lean Formal Verifier"
 description: "Analyzes code and builds formal Lean 4 proofs of critical invariants"
-engine: claude-opus-4.5
+engine:
+  id: copilot
+  model: claude-opus-4.5
 schedule: weekly on friday around 17:00
 tools:
   cache-memory: true

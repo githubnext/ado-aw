@@ -3,26 +3,65 @@ use anyhow::Result;
 use crate::compile::extensions::{CompilerExtension, Extension};
 use crate::compile::types::{FrontMatter, McpConfig};
 
-pub trait Engine {
-    fn generate_cli_params(
-        &self,
-        front_matter: &FrontMatter,
-        extensions: &[Extension],
-    ) -> Result<String>;
+/// Default model used by the Copilot engine when no model is specified in front matter.
+pub const DEFAULT_COPILOT_MODEL: &str = "claude-opus-4.5";
 
-    fn generate_agent_ado_env(&self, read_service_connection: Option<&str>) -> String;
+/// Resolved engine — enum dispatch over supported engine identifiers.
+///
+/// Currently only `Copilot` (GitHub Copilot CLI) is supported. New engines
+/// are added as variants here rather than via trait objects.
+#[derive(Debug, Clone, Copy)]
+pub enum Engine {
+    Copilot,
 }
 
-pub struct GitHubCopilotCliEngine;
+/// Resolve the engine for a given engine identifier from front matter.
+///
+/// Currently only `copilot` is supported. Other identifiers produce a
+/// compile error to prevent misconfiguration.
+pub fn get_engine(engine_id: &str) -> Result<Engine> {
+    match engine_id {
+        "copilot" => Ok(Engine::Copilot),
+        other => anyhow::bail!(
+            "Unsupported engine '{}'. Only 'copilot' is supported by ado-aw. \
+             See gh-aw documentation for engine identifiers.",
+            other
+        ),
+    }
+}
 
-pub const GITHUB_COPILOT_CLI_ENGINE: GitHubCopilotCliEngine = GitHubCopilotCliEngine;
+impl Engine {
+    /// The default engine binary name (e.g., "copilot").
+    /// Overridden by `engine.command` in front matter when set.
+    pub fn command(&self) -> &str {
+        match self {
+            Engine::Copilot => "copilot",
+        }
+    }
 
-impl Engine for GitHubCopilotCliEngine {
-    fn generate_cli_params(
+    /// Generate CLI arguments for the engine invocation.
+    pub fn args(
         &self,
         front_matter: &FrontMatter,
         extensions: &[Extension],
     ) -> Result<String> {
+        match self {
+            Engine::Copilot => copilot_args(front_matter, extensions),
+        }
+    }
+
+    /// Generate the env block entries for the engine's sandbox step.
+    pub fn env(&self) -> String {
+        match self {
+            Engine::Copilot => copilot_env(),
+        }
+    }
+}
+
+fn copilot_args(
+    front_matter: &FrontMatter,
+    extensions: &[Extension],
+) -> Result<String> {
         // Check if bash triggers --allow-all-tools. This happens when:
         // 1. Bash has an explicit wildcard entry (":*" or "*"), OR
         // 2. Bash is not specified at all (None) — ado-aw agents always run in AWF sandbox,
@@ -139,7 +178,7 @@ impl Engine for GitHubCopilotCliEngine {
 
         // Validate model name to prevent shell injection — copilot_params are embedded
         // inside a single-quoted bash string in the AWF command.
-        let model = front_matter.engine.model();
+        let model = front_matter.engine.model().unwrap_or(DEFAULT_COPILOT_MODEL);
         if model.is_empty()
             || !model
                 .chars()
@@ -195,41 +234,81 @@ impl Engine for GitHubCopilotCliEngine {
         Ok(params.join(" "))
     }
 
-    fn generate_agent_ado_env(&self, read_service_connection: Option<&str>) -> String {
-        match read_service_connection {
-            Some(_) => {
-                "AZURE_DEVOPS_EXT_PAT: $(SC_READ_TOKEN)\nSYSTEM_ACCESSTOKEN: $(SC_READ_TOKEN)"
-                    .to_string()
-            }
-            None => String::new(),
-        }
-    }
+fn copilot_env() -> String {
+    let lines = [
+        "GITHUB_TOKEN: $(GITHUB_TOKEN)",
+        "GITHUB_READ_ONLY: 1",
+        "COPILOT_OTEL_ENABLED: \"true\"",
+        "COPILOT_OTEL_EXPORTER_TYPE: \"file\"",
+        "COPILOT_OTEL_FILE_EXPORTER_PATH: \"/tmp/awf-tools/staging/otel.jsonl\"",
+    ];
+    lines.join("\n")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Engine, GITHUB_COPILOT_CLI_ENGINE};
+    use super::{get_engine, Engine};
     use crate::compile::{extensions::collect_extensions, parse_markdown};
 
     #[test]
-    fn copilot_engine_generates_cli_params() {
+    fn copilot_engine_command() {
+        assert_eq!(Engine::Copilot.command(), "copilot");
+    }
+
+    #[test]
+    fn copilot_engine_args() {
         let (front_matter, _) = parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
-        let params = GITHUB_COPILOT_CLI_ENGINE
-            .generate_cli_params(&front_matter, &collect_extensions(&front_matter))
+        let params = Engine::Copilot
+            .args(&front_matter, &collect_extensions(&front_matter))
             .unwrap();
+        // Default engine (copilot) uses default model (claude-opus-4.5)
         assert!(params.contains("--model claude-opus-4.5"));
         assert!(params.contains("--disable-builtin-mcps"));
     }
 
     #[test]
-    fn copilot_engine_generates_agent_ado_env() {
-        let env = GITHUB_COPILOT_CLI_ENGINE.generate_agent_ado_env(Some("read-sc"));
-        assert!(env.contains("AZURE_DEVOPS_EXT_PAT: $(SC_READ_TOKEN)"));
-        assert!(env.contains("SYSTEM_ACCESSTOKEN: $(SC_READ_TOKEN)"));
+    fn copilot_engine_with_explicit_model() {
+        let (front_matter, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  model: gpt-5\n---\n",
+        )
+        .unwrap();
+        let params = Engine::Copilot
+            .args(&front_matter, &collect_extensions(&front_matter))
+            .unwrap();
+        assert!(params.contains("--model gpt-5"));
     }
 
     #[test]
-    fn copilot_engine_generates_empty_ado_env_without_service_connection() {
-        assert!(GITHUB_COPILOT_CLI_ENGINE.generate_agent_ado_env(None).is_empty());
+    fn copilot_engine_env() {
+        let env = Engine::Copilot.env();
+        assert!(env.contains("GITHUB_TOKEN: $(GITHUB_TOKEN)"));
+        assert!(env.contains("GITHUB_READ_ONLY: 1"));
+        assert!(env.contains("COPILOT_OTEL_ENABLED"));
+        assert!(!env.contains("SYSTEM_ACCESSTOKEN"));
+        assert!(!env.contains("AZURE_DEVOPS_EXT_PAT"));
+    }
+
+    #[test]
+    fn get_engine_resolves_copilot() {
+        let engine = get_engine("copilot").unwrap();
+        assert_eq!(engine.command(), "copilot");
+        let (front_matter, _) = parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
+        let params = engine
+            .args(&front_matter, &collect_extensions(&front_matter))
+            .unwrap();
+        assert!(params.contains("--model claude-opus-4.5"));
+    }
+
+    #[test]
+    fn get_engine_rejects_unsupported() {
+        let result = get_engine("claude");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Unsupported engine 'claude'"));
+    }
+
+    #[test]
+    fn get_engine_rejects_codex() {
+        assert!(get_engine("codex").is_err());
     }
 }

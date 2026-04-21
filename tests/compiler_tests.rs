@@ -457,7 +457,6 @@ fn test_compiled_output_no_unreplaced_markers() {
 /// Verifies that the `triggers.pipeline` front matter field generates:
 /// - `resources.pipelines` block with the correct source pipeline name
 /// - `trigger: none` and `pr: none` to suppress CI/PR triggers
-/// - A cancel-previous-builds bash step
 /// - No `schedules:` block (since only a pipeline trigger is configured)
 #[test]
 fn test_fixture_pipeline_trigger_agent_compiled_output() {
@@ -527,10 +526,10 @@ fn test_fixture_pipeline_trigger_agent_compiled_output() {
         "Compiled output should disable PR trigger with 'pr: none'"
     );
 
-    // Should include the cancel-previous-builds step
+    // cancel-previous-builds was removed — verify it's not present
     assert!(
-        compiled.contains("Cancel previous queued builds"),
-        "Compiled output should include cancel-previous-builds step"
+        !compiled.contains("Cancel previous queued builds"),
+        "Compiled output should not include cancel-previous-builds step"
     );
 
     // Should NOT contain a schedules block (no schedule configured)

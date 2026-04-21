@@ -140,22 +140,36 @@ pub struct ScheduleOptions {
     pub branches: Vec<String>,
 }
 
-/// Engine configuration - accepts both string and object formats
+/// Engine configuration — aligned with gh-aw's engine front matter.
+///
+/// The string form is an engine identifier (e.g., `copilot`). The object form
+/// uses `id` for the engine identifier plus additional options.
+///
+/// Currently only `copilot` (GitHub Copilot CLI) is supported. Other engine
+/// identifiers produce a compile error.
 ///
 /// Examples:
 /// ```yaml
-/// # Simple string format (just a model name)
-/// engine: claude-opus-4.5
+/// # Simple string format (engine identifier, defaults to copilot)
+/// engine: copilot
 ///
 /// # Object format (with additional options)
 /// engine:
+///   id: copilot
 ///   model: claude-opus-4.5
 ///   timeout-minutes: 30
+///   version: latest
+///   agent: my-custom-agent
+///   api-target: api.acme.ghe.com
+///   args: ["--verbose"]
+///   env:
+///     DEBUG_MODE: "true"
+///   command: /usr/local/bin/copilot
 /// ```
 #[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum EngineConfig {
-    /// Simple model name string
+    /// Engine identifier string (e.g., "copilot")
     Simple(String),
     /// Full engine configuration object
     Full(EngineOptions),
@@ -163,16 +177,25 @@ pub enum EngineConfig {
 
 impl Default for EngineConfig {
     fn default() -> Self {
-        EngineConfig::Simple(default_model())
+        EngineConfig::Simple("copilot".to_string())
     }
 }
 
 impl EngineConfig {
-    /// Get the model name
-    pub fn model(&self) -> &str {
+    /// Get the engine identifier (e.g., "copilot").
+    pub fn engine_id(&self) -> &str {
         match self {
             EngineConfig::Simple(s) => s,
-            EngineConfig::Full(opts) => opts.model.as_deref().unwrap_or("claude-opus-4.5"),
+            EngineConfig::Full(opts) => opts.id.as_deref().unwrap_or("copilot"),
+        }
+    }
+
+    /// Get the model name override, if specified.
+    /// Returns `None` when the engine should use its default model.
+    pub fn model(&self) -> Option<&str> {
+        match self {
+            EngineConfig::Simple(_) => None,
+            EngineConfig::Full(opts) => opts.model.as_deref(),
         }
     }
 
@@ -191,6 +214,54 @@ impl EngineConfig {
             EngineConfig::Full(opts) => opts.timeout_minutes,
         }
     }
+
+    /// Get the engine version override (e.g., "0.0.422", "latest")
+    pub fn version(&self) -> Option<&str> {
+        match self {
+            EngineConfig::Simple(_) => None,
+            EngineConfig::Full(opts) => opts.version.as_deref(),
+        }
+    }
+
+    /// Get the custom agent file identifier (Copilot only, e.g., "my-agent")
+    pub fn agent(&self) -> Option<&str> {
+        match self {
+            EngineConfig::Simple(_) => None,
+            EngineConfig::Full(opts) => opts.agent.as_deref(),
+        }
+    }
+
+    /// Get the custom API endpoint hostname (GHEC/GHES)
+    pub fn api_target(&self) -> Option<&str> {
+        match self {
+            EngineConfig::Simple(_) => None,
+            EngineConfig::Full(opts) => opts.api_target.as_deref(),
+        }
+    }
+
+    /// Get custom CLI arguments
+    pub fn args(&self) -> &[String] {
+        match self {
+            EngineConfig::Simple(_) => &[],
+            EngineConfig::Full(opts) => &opts.args,
+        }
+    }
+
+    /// Get custom environment variables
+    pub fn env(&self) -> Option<&HashMap<String, String>> {
+        match self {
+            EngineConfig::Simple(_) => None,
+            EngineConfig::Full(opts) => opts.env.as_ref(),
+        }
+    }
+
+    /// Get custom engine command path
+    pub fn command(&self) -> Option<&str> {
+        match self {
+            EngineConfig::Simple(_) => None,
+            EngineConfig::Full(opts) => opts.command.as_deref(),
+        }
+    }
 }
 
 impl SanitizeConfigTrait for EngineConfig {
@@ -204,9 +275,30 @@ impl SanitizeConfigTrait for EngineConfig {
 
 #[derive(Debug, Deserialize, Clone, SanitizeConfig)]
 pub struct EngineOptions {
-    /// AI model to use (defaults to claude-opus-4.5)
+    /// Engine identifier (e.g., "copilot"). Defaults to "copilot" when omitted.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// AI model to use (engine-specific default when omitted)
     #[serde(default)]
     pub model: Option<String>,
+    /// Engine CLI version to install (e.g., "0.0.422", "latest")
+    #[serde(default)]
+    pub version: Option<String>,
+    /// Custom agent file identifier (Copilot only — references .github/agents/)
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// Custom API endpoint hostname (GHEC/GHES, e.g., "api.acme.ghe.com")
+    #[serde(default, rename = "api-target")]
+    pub api_target: Option<String>,
+    /// Custom CLI arguments injected before the prompt
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Engine-specific environment variables
+    #[serde(default)]
+    pub env: Option<HashMap<String, String>>,
+    /// Custom engine executable path (skips default installation)
+    #[serde(default)]
+    pub command: Option<String>,
     /// Maximum number of chat iterations per run (deprecated — not supported by Copilot CLI)
     #[serde(default, rename = "max-turns")]
     pub max_turns: Option<u32>,
@@ -499,7 +591,7 @@ pub struct FrontMatter {
     /// Agent pool configuration
     #[serde(default)]
     pub pool: Option<PoolConfig>,
-    /// AI engine configuration (defaults to claude-opus-4.5)
+    /// AI engine configuration (defaults to copilot)
     #[serde(default)]
     pub engine: EngineConfig,
     /// Tools configuration
@@ -600,10 +692,6 @@ impl SanitizeConfigTrait for FrontMatter {
             p.sanitize_config_fields();
         }
     }
-}
-
-fn default_model() -> String {
-    "claude-opus-4.5".to_string()
 }
 
 /// Network policy configuration (standalone target only)
@@ -845,18 +933,20 @@ mod tests {
 
     #[test]
     fn test_engine_config_simple_string() {
-        let ec = EngineConfig::Simple("gpt-5.1".to_string());
-        assert_eq!(ec.model(), "gpt-5.1");
+        let ec = EngineConfig::Simple("copilot".to_string());
+        assert_eq!(ec.engine_id(), "copilot");
+        assert_eq!(ec.model(), None);
         assert_eq!(ec.max_turns(), None);
         assert_eq!(ec.timeout_minutes(), None);
     }
 
     #[test]
     fn test_engine_config_full_object() {
-        let yaml = "model: claude-sonnet-4.5\nmax-turns: 50\ntimeout-minutes: 30";
+        let yaml = "id: copilot\nmodel: claude-sonnet-4.5\nmax-turns: 50\ntimeout-minutes: 30";
         let opts: EngineOptions = serde_yaml::from_str(yaml).unwrap();
         let ec = EngineConfig::Full(opts);
-        assert_eq!(ec.model(), "claude-sonnet-4.5");
+        assert_eq!(ec.engine_id(), "copilot");
+        assert_eq!(ec.model(), Some("claude-sonnet-4.5"));
         assert_eq!(ec.max_turns(), Some(50));
         assert_eq!(ec.timeout_minutes(), Some(30));
     }
@@ -866,8 +956,10 @@ mod tests {
         let yaml = "max-turns: 10";
         let opts: EngineOptions = serde_yaml::from_str(yaml).unwrap();
         let ec = EngineConfig::Full(opts);
-        // model defaults to claude-opus-4.5 when not specified
-        assert_eq!(ec.model(), "claude-opus-4.5");
+        // id defaults to "copilot" when not specified
+        assert_eq!(ec.engine_id(), "copilot");
+        // model is None when not specified (engine impl decides default)
+        assert_eq!(ec.model(), None);
         assert_eq!(ec.max_turns(), Some(10));
         assert_eq!(ec.timeout_minutes(), None);
     }
@@ -875,17 +967,19 @@ mod tests {
     #[test]
     fn test_engine_config_default() {
         let ec = EngineConfig::default();
-        assert_eq!(ec.model(), "claude-opus-4.5");
+        assert_eq!(ec.engine_id(), "copilot");
+        assert_eq!(ec.model(), None);
         assert_eq!(ec.max_turns(), None);
         assert_eq!(ec.timeout_minutes(), None);
     }
 
     #[test]
     fn test_engine_config_deserialized_as_string() {
-        let yaml = "engine: my-custom-model";
+        let yaml = "engine: copilot";
         let fm: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let ec: EngineConfig = serde_yaml::from_value(fm["engine"].clone()).unwrap();
-        assert_eq!(ec.model(), "my-custom-model");
+        assert_eq!(ec.engine_id(), "copilot");
+        assert_eq!(ec.model(), None);
         assert_eq!(ec.max_turns(), None);
         assert_eq!(ec.timeout_minutes(), None);
     }
@@ -893,12 +987,52 @@ mod tests {
     #[test]
     fn test_engine_config_deserialized_as_object() {
         let yaml =
-            "engine:\n  model: claude-opus-4.5\n  max-turns: 50\n  timeout-minutes: 30";
+            "engine:\n  id: copilot\n  model: claude-opus-4.5\n  max-turns: 50\n  timeout-minutes: 30";
         let fm: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let ec: EngineConfig = serde_yaml::from_value(fm["engine"].clone()).unwrap();
-        assert_eq!(ec.model(), "claude-opus-4.5");
+        assert_eq!(ec.engine_id(), "copilot");
+        assert_eq!(ec.model(), Some("claude-opus-4.5"));
         assert_eq!(ec.max_turns(), Some(50));
         assert_eq!(ec.timeout_minutes(), Some(30));
+    }
+
+    #[test]
+    fn test_engine_config_full_with_all_gh_aw_fields() {
+        let yaml = r#"
+id: copilot
+model: gpt-5
+version: "0.0.422"
+agent: my-custom-agent
+api-target: api.acme.ghe.com
+args: ["--verbose", "--add-dir", "/workspace"]
+env:
+  DEBUG_MODE: "true"
+  AWS_REGION: us-west-2
+command: /usr/local/bin/copilot
+timeout-minutes: 60
+"#;
+        let opts: EngineOptions = serde_yaml::from_str(yaml).unwrap();
+        let ec = EngineConfig::Full(opts);
+        assert_eq!(ec.engine_id(), "copilot");
+        assert_eq!(ec.model(), Some("gpt-5"));
+        assert_eq!(ec.version(), Some("0.0.422"));
+        assert_eq!(ec.agent(), Some("my-custom-agent"));
+        assert_eq!(ec.api_target(), Some("api.acme.ghe.com"));
+        assert_eq!(ec.args(), &["--verbose", "--add-dir", "/workspace"]);
+        assert_eq!(ec.command(), Some("/usr/local/bin/copilot"));
+        assert_eq!(ec.timeout_minutes(), Some(60));
+        let env = ec.env().unwrap();
+        assert_eq!(env.get("DEBUG_MODE").unwrap(), "true");
+        assert_eq!(env.get("AWS_REGION").unwrap(), "us-west-2");
+    }
+
+    #[test]
+    fn test_engine_config_id_defaults_to_copilot() {
+        let yaml = "model: gpt-5\ntimeout-minutes: 30";
+        let opts: EngineOptions = serde_yaml::from_str(yaml).unwrap();
+        let ec = EngineConfig::Full(opts);
+        assert_eq!(ec.engine_id(), "copilot");
+        assert_eq!(ec.model(), Some("gpt-5"));
     }
 
     // ─── PermissionsConfig deserialization ───────────────────────────────
