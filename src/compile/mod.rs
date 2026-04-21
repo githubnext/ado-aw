@@ -23,7 +23,6 @@ pub use common::generate_copilot_params;
 pub use common::generate_mcpg_config;
 pub use common::MCPG_IMAGE;
 pub use common::MCPG_VERSION;
-pub use common::MCPG_PORT;
 pub use common::ADO_MCP_ENTRYPOINT;
 pub use common::ADO_MCP_IMAGE;
 pub use common::ADO_MCP_PACKAGE;
