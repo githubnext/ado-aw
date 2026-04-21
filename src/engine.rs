@@ -227,4 +227,9 @@ mod tests {
         assert!(env.contains("AZURE_DEVOPS_EXT_PAT: $(SC_READ_TOKEN)"));
         assert!(env.contains("SYSTEM_ACCESSTOKEN: $(SC_READ_TOKEN)"));
     }
+
+    #[test]
+    fn copilot_engine_generates_empty_ado_env_without_service_connection() {
+        assert!(GITHUB_COPILOT_CLI_ENGINE.generate_agent_ado_env(None).is_empty());
+    }
 }

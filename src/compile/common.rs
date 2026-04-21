@@ -7,6 +7,7 @@ use std::path::Path;
 use super::types::{FrontMatter, PipelineParameter, Repository, TriggerConfig};
 use super::extensions::{CompilerExtension, Extension, McpgServerConfig, McpgGatewayConfig, McpgConfig, CompileContext};
 use crate::compile::types::McpConfig;
+use crate::engine::Engine as _;
 use crate::fuzzy_schedule;
 use crate::allowed_hosts::{CORE_ALLOWED_HOSTS, mcp_required_hosts};
 use crate::ecosystem_domains::{get_ecosystem_domains, is_ecosystem_identifier, is_known_ecosystem};
@@ -463,11 +464,7 @@ pub fn generate_copilot_params(
     front_matter: &FrontMatter,
     extensions: &[super::extensions::Extension],
 ) -> Result<String> {
-    crate::engine::Engine::generate_cli_params(
-        &crate::engine::GITHUB_COPILOT_CLI_ENGINE,
-        front_matter,
-        extensions,
-    )
+    crate::engine::GITHUB_COPILOT_CLI_ENGINE.generate_cli_params(front_matter, extensions)
 }
 
 /// Compute the effective workspace based on explicit setting and checkout configuration.
@@ -917,10 +914,7 @@ pub fn generate_acquire_ado_token(service_connection: Option<&str>, variable_nam
 /// Uses the read-only token from the read service connection.
 /// When not configured, omits ADO access tokens entirely.
 pub fn generate_copilot_ado_env(read_service_connection: Option<&str>) -> String {
-    crate::engine::Engine::generate_agent_ado_env(
-        &crate::engine::GITHUB_COPILOT_CLI_ENGINE,
-        read_service_connection,
-    )
+    crate::engine::GITHUB_COPILOT_CLI_ENGINE.generate_agent_ado_env(read_service_connection)
 }
 
 /// Generate the env block entries for the executor step (Stage 3 Execution).
