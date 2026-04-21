@@ -739,6 +739,18 @@ Generates the "Verify pipeline integrity" pipeline step that downloads the relea
 
 When the compiler is built with `--skip-integrity` (debug builds only), this placeholder is replaced with an empty string and the integrity step is omitted from the generated pipeline.
 
+## {{ mcpg_debug_flags }}
+
+Generates MCPG debug environment flags for the Docker run command. When `--debug-pipeline` is passed (debug builds only), this inserts `-e DEBUG="*"` to enable verbose MCPG logging.
+
+When `--debug-pipeline` is not passed, this placeholder is replaced with a bare `\` to maintain bash line continuation.
+
+## {{ verify_mcp_backends }}
+
+Generates a pipeline step that probes each configured MCPG backend with an MCP initialize + tools/list handshake. This forces MCPG's lazy initialization and catches failures (e.g., container timeout, network blocked) before the agent runs, surfacing them as ADO pipeline warnings.
+
+When `--debug-pipeline` is not passed (the default), this placeholder is replaced with an empty string.
+
 ## {{ pr_trigger }}
 
 Generates PR trigger configuration. When a schedule or pipeline trigger is configured, this generates `pr: none` to disable PR triggers. Otherwise, it generates an empty string, allowing the default PR trigger behavior.
@@ -795,41 +807,18 @@ If no passthrough env vars are needed, this marker is replaced with an empty str
 
 ## {{ mcp_client_config }}
 
-Should be replaced with the Copilot CLI `mcp-config.json` content, generated at compile time from the MCPG server configuration. This follows gh-aw's pattern where `convert_gateway_config_copilot.cjs` produces per-server routed URLs.
+**Removed.** The Copilot CLI `mcp-config.json` is no longer generated at compile time. Instead, it is derived at **pipeline runtime** from MCPG's actual gateway output, matching gh-aw's `convert_gateway_config_copilot.cjs` pattern.
 
-MCPG runs in routed mode by default, exposing each backend at `/mcp/{serverID}`. The generated JSON lists one entry per MCPG-managed server with:
-- `type: "http"` — Copilot CLI HTTP transport
-- `url` — routed endpoint (`http://host.docker.internal:{port}/mcp/{name}`)
-- `headers` — Bearer auth with the gateway API key (ADO variable `$(MCP_GATEWAY_API_KEY)`)
-- `tools: ["*"]` — allow all tools (Copilot CLI requirement)
+The "Start MCP Gateway (MCPG)" pipeline step:
+1. Redirects MCPG's stdout to `gateway-output.json`
+2. Waits for the health check and for valid JSON output
+3. Transforms the output with a Python script that:
+   - Rewrites URLs from `127.0.0.1` → `host.docker.internal` (AWF container loopback vs host)
+   - Ensures `tools: ["*"]` on each server entry (Copilot CLI requirement)
+   - Preserves all other fields (headers, type, etc.)
+4. Writes the result to `/tmp/awf-tools/mcp-config.json` and `$HOME/.copilot/mcp-config.json`
 
-**Variable expansion note:** The `$(MCP_GATEWAY_API_KEY)` token in the generated JSON uses ADO macro syntax. Although the JSON is written to disk via a quoted bash heredoc (`<< 'EOF'`), which prevents bash `$(...)` command substitution, ADO macro expansion processes the entire script body *before* bash executes it. The real API key value is therefore substituted by ADO at pipeline runtime, and the file on disk contains the actual secret — Copilot CLI does not need to perform any variable expansion.
-
-Server names are validated for URL path safety (no `/`, `#`, `?`, `%`, or spaces). Server entries are sorted alphabetically for deterministic output.
-
-Example output:
-```json
-{
-  "mcpServers": {
-    "azure-devops": {
-      "type": "http",
-      "url": "http://host.docker.internal:80/mcp/azure-devops",
-      "headers": {
-        "Authorization": "Bearer $(MCP_GATEWAY_API_KEY)"
-      },
-      "tools": ["*"]
-    },
-    "safeoutputs": {
-      "type": "http",
-      "url": "http://host.docker.internal:80/mcp/safeoutputs",
-      "headers": {
-        "Authorization": "Bearer $(MCP_GATEWAY_API_KEY)"
-      },
-      "tools": ["*"]
-    }
-  }
-}
-```
+This ensures the Copilot CLI config reflects MCPG's actual runtime state rather than a compile-time prediction.
 
 ## {{ allowed_domains }}
 
@@ -986,6 +975,7 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
 - `compile [<path>]` - Compile a markdown file to Azure DevOps pipeline YAML. If no path is given, auto-discovers and recompiles all detected agentic pipelines in the current directory.
   - `--output, -o <path>` - Optional output path for generated YAML (only valid when a path is provided)
   - `--skip-integrity` - *(debug builds only)* Omit the "Verify pipeline integrity" step from the generated pipeline. Useful during local development when the compiled output won't match a released compiler version. This flag is not available in release builds.
+  - `--debug-pipeline` - *(debug builds only)* Include MCPG debug diagnostics in the generated pipeline: `DEBUG=*` environment variable for verbose MCPG logging, stderr streaming to log files, and a "Verify MCP backends" step that probes each backend with MCP initialize + tools/list before the agent runs. This flag is not available in release builds.
 - `check <pipeline>` - Verify that a compiled pipeline matches its source markdown
   - `<pipeline>` - Path to the pipeline YAML file to verify
   - The source markdown path is auto-detected from the `@ado-aw` header in the pipeline file

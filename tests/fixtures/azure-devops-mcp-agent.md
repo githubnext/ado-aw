@@ -1,13 +1,10 @@
 ---
 name: "Azure DevOps MCP Agent"
-description: "Agent with Azure DevOps MCP via containerized stdio transport"
-mcp-servers:
+description: "Agent with Azure DevOps MCP via first-class tool integration"
+tools:
   azure-devops:
-    container: "node:20-slim"
-    entrypoint: "npx"
-    entrypoint-args: ["-y", "@azure-devops/mcp", "myorg", "-d", "core", "work-items"]
-    env:
-      AZURE_DEVOPS_EXT_PAT: ""
+    org: myorg
+    toolsets: [core, work-items]
     allowed:
       - core_list_projects
       - wit_get_work_item
@@ -19,10 +16,6 @@ permissions:
 safe-outputs:
   create-work-item:
     work-item-type: Task
-network:
-  allowed:
-    - "dev.azure.com"
-    - "*.dev.azure.com"
 ---
 
 ## Azure DevOps MCP Integration Test

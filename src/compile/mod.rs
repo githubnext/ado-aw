@@ -21,7 +21,6 @@ pub use common::parse_markdown;
 pub use common::HEADER_MARKER;
 pub use common::generate_copilot_params;
 pub use common::generate_mcpg_config;
-pub use common::generate_mcp_client_config;
 pub use common::MCPG_IMAGE;
 pub use common::MCPG_VERSION;
 pub use common::MCPG_PORT;
@@ -40,6 +39,7 @@ pub trait Compiler: Send + Sync {
         front_matter: &FrontMatter,
         markdown_body: &str,
         skip_integrity: bool,
+        debug_pipeline: bool,
     ) -> Result<String>;
 
     /// Get the target name for logging.
@@ -53,6 +53,7 @@ pub async fn compile_pipeline(
     input_path: &str,
     output_path: Option<&str>,
     skip_integrity: bool,
+    debug_pipeline: bool,
 ) -> Result<()> {
     let input_path = Path::new(input_path);
     info!("Compiling pipeline from: {}", input_path.display());
@@ -99,7 +100,7 @@ pub async fn compile_pipeline(
 
     // Compile
     let pipeline_yaml = compiler
-        .compile(input_path, &yaml_output_path, &front_matter, &markdown_body, skip_integrity)
+        .compile(input_path, &yaml_output_path, &front_matter, &markdown_body, skip_integrity, debug_pipeline)
         .await?;
 
     // Clean up spacing artifacts from empty placeholder replacements
@@ -129,7 +130,7 @@ pub async fn compile_pipeline(
 /// Scans for compiled YAML files containing the `# @ado-aw source=...` header,
 /// resolves each source markdown path, and recompiles. Pipelines whose source
 /// files are missing are reported but don't abort the batch.
-pub async fn compile_all_pipelines(skip_integrity: bool) -> Result<()> {
+pub async fn compile_all_pipelines(skip_integrity: bool, debug_pipeline: bool) -> Result<()> {
     let root = Path::new(".");
     info!("Auto-discovering agentic pipelines for recompilation");
 
@@ -173,7 +174,7 @@ pub async fn compile_all_pipelines(skip_integrity: bool) -> Result<()> {
         let source_str = source_path.to_string_lossy();
         let output_str = yaml_output_path.to_string_lossy();
 
-        match compile_pipeline(&source_str, Some(&output_str), skip_integrity).await {
+        match compile_pipeline(&source_str, Some(&output_str), skip_integrity, debug_pipeline).await {
             Ok(()) => success_count += 1,
             Err(e) => {
                 eprintln!(
@@ -281,6 +282,7 @@ pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
             pipeline_path,
             &front_matter,
             &markdown_body,
+            false,
             false,
         )
         .await?;

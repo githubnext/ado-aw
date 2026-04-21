@@ -16,8 +16,7 @@ use super::common::{
     generate_allowed_domains,
     generate_cancel_previous_builds,
     generate_enabled_tools_args,
-    generate_mcpg_config, generate_mcpg_docker_env,
-    generate_mcp_client_config,
+    generate_mcpg_config, generate_mcpg_docker_env, generate_mcpg_step_env,
     format_steps_yaml_indented,
 };
 use super::types::FrontMatter;
@@ -38,6 +37,7 @@ impl Compiler for OneESCompiler {
         front_matter: &FrontMatter,
         markdown_body: &str,
         skip_integrity: bool,
+        debug_pipeline: bool,
     ) -> Result<String> {
         info!("Compiling for 1ES target");
 
@@ -56,10 +56,10 @@ impl Compiler for OneESCompiler {
         let mcpg_config = generate_mcpg_config(front_matter, &ctx, &extensions)?;
         let mcpg_config_json = serde_json::to_string_pretty(&mcpg_config)
             .context("Failed to serialize MCPG config")?;
-        let mcpg_docker_env = generate_mcpg_docker_env(front_matter);
-        let mcp_client_config = generate_mcp_client_config(&mcpg_config)?;
+        let mcpg_docker_env = generate_mcpg_docker_env(front_matter, &extensions);
+        let mcpg_step_env = generate_mcpg_step_env(&extensions);
 
-        // Generate 1ES-specific setup/teardown jobs (no per-job pool, uses templateContext).
+        // Generate 1ES-specific setup/teardown jobs(no per-job pool, uses templateContext).
         // These override the shared {{ setup_job }} / {{ teardown_job }} markers via
         // extra_replacements, which are applied before the shared replacements.
         let setup_job = generate_setup_job(&front_matter.setup);
@@ -78,11 +78,12 @@ impl Compiler for OneESCompiler {
                 ("{{ cancel_previous_builds }}".into(), cancel_previous_builds),
                 ("{{ mcpg_config }}".into(), mcpg_config_json),
                 ("{{ mcpg_docker_env }}".into(), mcpg_docker_env),
-                ("{{ mcp_client_config }}".into(), mcp_client_config),
+                ("{{ mcpg_step_env }}".into(), mcpg_step_env),
                 ("{{ setup_job }}".into(), setup_job),
                 ("{{ teardown_job }}".into(), teardown_job),
             ],
             skip_integrity,
+            debug_pipeline,
         };
 
         compile_shared(input_path, output_path, front_matter, markdown_body, &extensions, &ctx, config).await

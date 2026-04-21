@@ -794,8 +794,7 @@ pub const MCPG_PORT: u16 = 80;
 /// inside containers running with `--network host` or via Docker DNS.
 pub const MCPG_DOMAIN: &str = "host.docker.internal";
 
-/// Docker image for the Azure DevOps MCP container.
-/// This is the container used when `tools: azure-devops:` is configured.
+/// Docker base image for the Azure DevOps MCP container.
 pub const ADO_MCP_IMAGE: &str = "node:20-slim";
 
 /// Default entrypoint for the Azure DevOps MCP container.
@@ -851,6 +850,95 @@ pub fn generate_integrity_check(skip: bool) -> String {
     $AGENTIC_PIPELINES_PATH check "{{ pipeline_path }}"
   displayName: "Verify pipeline integrity""#
         .to_string()
+}
+
+/// Generate debug pipeline replacement values for template markers.
+///
+/// When `debug` is `true`, returns content for MCPG debug diagnostics:
+/// - `{{ mcpg_debug_flags }}`: `-e DEBUG="*"` env, stderr tee redirect, and
+///   stderr dump on health-check failure
+/// - `{{ verify_mcp_backends }}`: full pipeline step that probes each MCPG
+///   backend with MCP initialize + tools/list
+///
+/// When `debug` is `false`, both markers resolve to empty strings.
+pub fn generate_debug_pipeline_replacements(debug: bool) -> Vec<(String, String)> {
+    if !debug {
+        return vec![
+            // Emit `\` to maintain bash line continuation (same pattern as
+            // generate_mcpg_docker_env when no env flags are needed).
+            ("{{ mcpg_debug_flags }}".into(), "\\".into()),
+            ("{{ verify_mcp_backends }}".into(), String::new()),
+        ];
+    }
+
+    let mcpg_debug_flags = r##"-e DEBUG="*" \"##.to_string();
+
+    let verify_mcp_backends = r###"# Probe all MCPG backends to force eager launch and surface failures.
+# MCPG lazily starts stdio backends on first tool call — without this
+# step, a broken backend (e.g., npx timeout) only surfaces as a silent
+# missing-tool error during the agent run.
+- bash: |
+    echo "=== Probing MCP backends ==="
+    PROBE_FAILED=false
+    for server in $(jq -r '.mcpServers | keys[]' /tmp/awf-tools/mcp-config.json); do
+      echo ""
+      echo "--- Probing: $server ---"
+      # MCP requires initialize handshake before tools/list.
+      # Send initialize first, then tools/list in a second request
+      # using the session ID from the initialize response.
+      INIT_RESPONSE=$(curl -s -D /tmp/probe-headers.txt -o /tmp/probe-init.json -w "%{http_code}" --max-time 120 -X POST \
+        -H "Authorization: $MCPG_API_KEY" \
+        -H "Content-Type: application/json" \
+        -H "Accept: application/json, text/event-stream" \
+        -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ado-aw-probe","version":"1.0"}}}' \
+        "http://localhost:{{ mcpg_port }}/mcp/$server" 2>&1)
+      SESSION_ID=$(grep -i "mcp-session-id" /tmp/probe-headers.txt 2>/dev/null | tr -d '\r' | awk '{print $2}')
+      echo "Initialize: HTTP $INIT_RESPONSE, session=$SESSION_ID"
+
+      if [ -z "$SESSION_ID" ]; then
+        echo "##vso[task.logissue type=warning]MCP backend '$server' did not return a session ID"
+        cat /tmp/probe-init.json 2>/dev/null || true
+        PROBE_FAILED=true
+        continue
+      fi
+
+      # Now send tools/list with the session
+      HTTP_CODE=$(curl -s -o /tmp/probe-response.json -w "%{http_code}" --max-time 120 -X POST \
+        -H "Authorization: $MCPG_API_KEY" \
+        -H "Content-Type: application/json" \
+        -H "Accept: application/json, text/event-stream" \
+        -H "Mcp-Session-Id: $SESSION_ID" \
+        -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+        "http://localhost:{{ mcpg_port }}/mcp/$server" 2>&1)
+      BODY=$(cat /tmp/probe-response.json 2>/dev/null || echo "(empty)")
+      # Extract tool count from SSE data line
+      TOOL_COUNT=$(echo "$BODY" | grep '^data:' | sed 's/^data: //' | jq -r '.result.tools | length' 2>/dev/null || echo "?")
+      echo "tools/list: HTTP $HTTP_CODE"
+      if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ] && [ "$TOOL_COUNT" != "?" ]; then
+        echo "✓ $server: $TOOL_COUNT tools available"
+      else
+        echo "##vso[task.logissue type=warning]MCP backend '$server' tools/list returned HTTP $HTTP_CODE"
+        echo "Response: $BODY"
+        PROBE_FAILED=true
+      fi
+    done
+
+    echo ""
+    echo "=== MCPG health after probes ==="
+    curl -sf "http://localhost:{{ mcpg_port }}/health" | jq . || true
+
+    if [ "$PROBE_FAILED" = "true" ]; then
+      echo "##vso[task.logissue type=warning]One or more MCP backends failed to initialize — check logs above"
+    fi
+  displayName: "Verify MCP backends"
+  env:
+    MCPG_API_KEY: $(MCP_GATEWAY_API_KEY)"###
+        .to_string();
+
+    vec![
+        ("{{ mcpg_debug_flags }}".into(), mcpg_debug_flags),
+        ("{{ verify_mcp_backends }}".into(), verify_mcp_backends),
+    ]
 }
 
 /// Generate the pipeline YAML path for integrity checking at ADO runtime.
@@ -1719,68 +1807,48 @@ pub fn generate_mcpg_config(
 
 /// Generate additional `-e` flags for the MCPG Docker run command.
 ///
-/// MCP containers spawned by MCPG may need environment variables that flow from
-/// the pipeline through the MCPG container (passthrough). This function:
-/// 1. Auto-maps `AZURE_DEVOPS_EXT_PAT` from `SC_READ_TOKEN` when `permissions.read` is configured
-/// 2. Collects passthrough env vars (value is `""`) from container-based MCP configs
-///
-/// Only container-based MCPs are considered — HTTP MCPs don't have child containers
-/// that need env passthrough.
+/// Two sources of env flags:
+/// 1. **Extension pipeline var mappings** — extensions declare `required_pipeline_vars()`
+///    which map container env vars to pipeline variables (typically secrets).
+///    These become `-e CONTAINER_VAR="$PIPELINE_VAR"` flags referencing bash vars
+///    (the companion `generate_mcpg_step_env` provides the ADO `env:` mapping).
+/// 2. **User-configured MCP passthrough** — front matter `mcp-servers:` entries with
+///    `env: { VAR: "" }` become bare `-e VAR` flags (MCPG passthrough from host env).
 ///
 /// Returns flags formatted for inline insertion in the `docker run` command.
-/// The marker sits after the last hardcoded `-e` flag, so the output must
-/// include leading `\\\n` for line continuation when non-empty.
-pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
+pub fn generate_mcpg_docker_env(
+    front_matter: &FrontMatter,
+    extensions: &[super::extensions::Extension],
+) -> String {
     let mut env_flags: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
-    // Check if any container MCP requests AZURE_DEVOPS_EXT_PAT passthrough
-    let any_mcp_needs_ado_token = front_matter.mcp_servers.values().any(|config| {
-        matches!(config, McpConfig::WithOptions(opts)
-            if opts.enabled.unwrap_or(true)
-                && opts.container.is_some()
-                && opts.env.contains_key("AZURE_DEVOPS_EXT_PAT"))
-    });
-
-    // Also check if tools.azure-devops is enabled (auto-configured ADO MCP always needs token)
-    let ado_tool_needs_token = front_matter
-        .tools
-        .as_ref()
-        .and_then(|t| t.azure_devops.as_ref())
-        .is_some_and(|ado| ado.is_enabled());
-
-    // Auto-map AZURE_DEVOPS_EXT_PAT from SC_READ_TOKEN when permissions.read is configured
-    // AND at least one container MCP requests it via env passthrough (or the ADO tool is enabled)
-    if any_mcp_needs_ado_token || ado_tool_needs_token {
-        if front_matter.permissions.as_ref().and_then(|p| p.read.as_ref()).is_some() {
-            env_flags.push(
-                "-e AZURE_DEVOPS_EXT_PAT=\"$(SC_READ_TOKEN)\"".to_string(),
-            );
-            seen.insert("AZURE_DEVOPS_EXT_PAT".to_string());
-        } else {
-            eprintln!(
-                "Warning: one or more container MCPs request AZURE_DEVOPS_EXT_PAT passthrough \
-                but permissions.read is not configured. The token will be empty at runtime. \
-                Add `permissions: {{ read: <service-connection> }}` to enable auto-mapping."
-            );
+    // 1. Extension pipeline var mappings (e.g., AZURE_DEVOPS_EXT_PAT -> SC_READ_TOKEN)
+    for ext in extensions {
+        for mapping in ext.required_pipeline_vars() {
+            if seen.contains(&mapping.container_var) {
+                continue;
+            }
+            env_flags.push(format!(
+                "-e {}=\"${}\"",
+                mapping.container_var, mapping.pipeline_var
+            ));
+            seen.insert(mapping.container_var.clone());
         }
     }
 
-    // Collect passthrough env vars from container-based MCP configs only.
-    // HTTP MCPs don't have child containers — env passthrough doesn't apply.
+    // 2. User-configured MCP passthrough env vars (empty value = passthrough from host)
     for (mcp_name, config) in &front_matter.mcp_servers {
         let opts = match config {
             McpConfig::WithOptions(opts) if opts.enabled.unwrap_or(true) => opts,
             _ => continue,
         };
 
-        // Only container-based MCPs need env passthrough on the MCPG Docker run
         if opts.container.is_none() {
             continue;
         }
 
         for (var_name, var_value) in &opts.env {
-            // Validate env var name to prevent Docker flag injection (e.g. "X --privileged")
             if !is_valid_env_var_name(var_name) {
                 log::warn!(
                     "MCP '{}': skipping invalid env var name '{}' — must match [A-Za-z_][A-Za-z0-9_]*",
@@ -1791,7 +1859,6 @@ pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
             if seen.contains(var_name) {
                 continue;
             }
-            // Passthrough: empty string means forward from host/pipeline environment
             if var_value.is_empty() {
                 env_flags.push(format!("-e {}", var_name));
                 seen.insert(var_name.clone());
@@ -1801,77 +1868,52 @@ pub fn generate_mcpg_docker_env(front_matter: &FrontMatter) -> String {
 
     env_flags.sort();
     if env_flags.is_empty() {
-        // No extra flags — emit a lone `\` so the bash line continuation from the
-        // preceding `-e MCP_GATEWAY_API_KEY=...` flag connects to the image name on
-        // the next line. This is valid bash: a backslash at end-of-line continues
-        // the command. replace_with_indent preserves this on its own indented line.
         "\\".to_string()
     } else {
-        // Emit each flag on its own line with `\` continuation.
-        // replace_with_indent handles indentation from the template (base.yml),
-        // so we only emit the content without hardcoded spaces.
         let flags = env_flags.join(" \\\n");
         format!("{} \\", flags)
     }
 }
 
-/// Generate the Copilot CLI `mcp-config.json` with per-server routed URLs.
+/// Generate the ADO step-level `env:` block for the MCPG start step.
 ///
-/// MCPG runs in routed mode by default, exposing each backend at `/mcp/{serverID}`.
-/// This function generates the client-side config that the Copilot CLI uses to
-/// reach each MCPG-managed server. Follows the same pattern as gh-aw's
-/// `convert_gateway_config_copilot.cjs`.
+/// ADO secret variables (set via `##vso[task.setvariable;issecret=true]`) must
+/// be explicitly mapped via the step's `env:` block to be available as bash
+/// environment variables. This function collects all pipeline variable mappings
+/// from extensions and generates the corresponding `env:` entries.
 ///
-/// The generated JSON lists one entry per MCPG server with:
-/// - `type: "http"` — Copilot CLI HTTP transport
-/// - `url` — routed endpoint `http://{MCPG_DOMAIN}:{port}/mcp/{name}`
-/// - `headers` — Bearer auth with the gateway API key (ADO variable reference)
-/// - `tools: ["*"]` — allow all tools (Copilot CLI requirement)
-///
-/// # Pre-conditions
-///
-/// All server names in `mcpg_config.mcp_servers` must be URL-safe path segments
-/// (validated by [`generate_mcpg_config`]). Names are embedded directly in URL
-/// paths without encoding.
-pub fn generate_mcp_client_config(mcpg_config: &McpgConfig) -> Result<String> {
-    // serde_json::Map is BTreeMap-backed, so keys are sorted on insert.
-    // Server names are validated in generate_mcpg_config (allowlist: [a-zA-Z0-9_.-]).
-    let mut servers = serde_json::Map::new();
+/// Returns YAML `env:` entries (e.g., `SC_READ_TOKEN: $(SC_READ_TOKEN)`),
+/// or an empty string if no mappings are needed.
+pub fn generate_mcpg_step_env(
+    extensions: &[super::extensions::Extension],
+) -> String {
+    let mut entries: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
 
-    for (name, _) in &mcpg_config.mcp_servers {
-        let mut entry = serde_json::Map::new();
-        entry.insert("type".to_string(), serde_json::Value::String("http".to_string()));
-        entry.insert(
-            "url".to_string(),
-            serde_json::Value::String(format!(
-                "http://{}:{}/mcp/{}",
-                MCPG_DOMAIN, mcpg_config.gateway.port, name
-            )),
-        );
-
-        // $(MCP_GATEWAY_API_KEY) uses ADO macro syntax. The generated JSON is embedded
-        // in a bash heredoc; ADO expands $(VARNAME) in script bodies before bash runs,
-        // so the real API key value is substituted at pipeline runtime.
-        let mut headers = serde_json::Map::new();
-        headers.insert(
-            "Authorization".to_string(),
-            serde_json::Value::String("Bearer $(MCP_GATEWAY_API_KEY)".to_string()),
-        );
-        entry.insert("headers".to_string(), serde_json::Value::Object(headers));
-
-        entry.insert(
-            "tools".to_string(),
-            serde_json::Value::Array(vec![serde_json::Value::String("*".to_string())]),
-        );
-
-        servers.insert(name.to_string(), serde_json::Value::Object(entry));
+    for ext in extensions {
+        for mapping in ext.required_pipeline_vars() {
+            if seen.contains(&mapping.pipeline_var) {
+                continue;
+            }
+            entries.push(format!(
+                "{}: $({})",
+                mapping.pipeline_var, mapping.pipeline_var
+            ));
+            seen.insert(mapping.pipeline_var.clone());
+        }
     }
 
-    let mut root = serde_json::Map::new();
-    root.insert("mcpServers".to_string(), serde_json::Value::Object(servers));
+    if entries.is_empty() {
+        return String::new();
+    }
 
-    serde_json::to_string_pretty(&serde_json::Value::Object(root))
-        .context("Failed to serialize MCP client config")
+    // Return full `env:` block so the template marker can be cleanly omitted when empty
+    let indented = entries
+        .iter()
+        .map(|e| format!("  {}", e))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("env:\n{}", indented)
 }
 
 // ==================== Domain allowlist ====================
@@ -2029,6 +2071,10 @@ pub struct CompileConfig {
     /// generated pipeline. This is a developer-only option gated behind
     /// `cfg(debug_assertions)` at the CLI level.
     pub skip_integrity: bool,
+    /// When true, MCPG debug diagnostics (debug logging, stderr streaming,
+    /// backend probe step) are included in the generated pipeline.
+    /// Gated behind `cfg(debug_assertions)` at the CLI level.
+    pub debug_pipeline: bool,
 }
 
 /// Shared compilation flow used by both standalone and 1ES compilers.
@@ -2159,15 +2205,23 @@ pub async fn compile_shared(
         threat_analysis_prompt,
     );
 
-    // 12. Apply extra replacements first (target-specific overrides)
+    // 12. Debug pipeline replacements (MUST run before extra_replacements
+    //     because the probe step content contains {{ mcpg_port }} which is
+    //     resolved by extra_replacements).
+    let debug_replacements = generate_debug_pipeline_replacements(config.debug_pipeline);
+    let mut template = template;
+    for (placeholder, replacement) in &debug_replacements {
+        template = replace_with_indent(&template, placeholder, replacement);
+    }
+
+    // 13. Apply extra replacements (target-specific overrides like {{ mcpg_port }})
     // These run before shared replacements so targets can override shared
     // markers like {{ setup_job }} and {{ teardown_job }}.
-    let mut template = template;
     for (placeholder, replacement) in &config.extra_replacements {
         template = replace_with_indent(&template, placeholder, replacement);
     }
 
-    // 13. Shared replacements
+    // 14. Shared replacements
     let compiler_version = env!("CARGO_PKG_VERSION");
     let integrity_check = generate_integrity_check(config.skip_integrity);
     let replacements: Vec<(&str, &str)> = vec![
@@ -2212,7 +2266,7 @@ pub async fn compile_shared(
             replace_with_indent(&yaml, placeholder, replacement)
         });
 
-    // 14. Prepend header
+    // 15. Prepend header
     let header = generate_header_comment(input_path);
     Ok(format!("{}{}", header, pipeline_yaml))
 }
@@ -2935,6 +2989,39 @@ mod tests {
             result.is_empty(),
             "Should produce empty string when skipping"
         );
+    }
+
+    // ─── generate_debug_pipeline_replacements ────────────────────────────────
+
+    #[test]
+    fn test_debug_pipeline_replacements_disabled() {
+        let replacements = generate_debug_pipeline_replacements(false);
+        assert_eq!(replacements.len(), 2);
+        // mcpg_debug_flags returns `\` for bash line continuation
+        let flags = replacements.iter().find(|(m, _)| m == "{{ mcpg_debug_flags }}").unwrap();
+        assert_eq!(flags.1, "\\", "mcpg_debug_flags should be a bare backslash when disabled");
+        // verify_mcp_backends should be empty
+        let probe = replacements.iter().find(|(m, _)| m == "{{ verify_mcp_backends }}").unwrap();
+        assert!(probe.1.is_empty(), "verify_mcp_backends should be empty when disabled");
+    }
+
+    #[test]
+    fn test_debug_pipeline_replacements_enabled() {
+        let replacements = generate_debug_pipeline_replacements(true);
+        assert_eq!(replacements.len(), 2);
+
+        let flags = replacements.iter().find(|(m, _)| m == "{{ mcpg_debug_flags }}");
+        assert!(flags.is_some(), "Should have mcpg_debug_flags marker");
+        let flags_value = &flags.unwrap().1;
+        assert!(flags_value.contains("DEBUG"), "Should contain DEBUG env var");
+
+        let probe = replacements.iter().find(|(m, _)| m == "{{ verify_mcp_backends }}");
+        assert!(probe.is_some(), "Should have verify_mcp_backends marker");
+        let probe_value = &probe.unwrap().1;
+        assert!(probe_value.contains("Verify MCP backends"), "Should contain displayName");
+        assert!(probe_value.contains("tools/list"), "Should contain tools/list probe");
+        assert!(probe_value.contains("initialize"), "Should contain initialize handshake");
+        assert!(probe_value.contains("MCPG_API_KEY"), "Should contain API key env mapping");
     }
 
     // ─── validate_submit_pr_review_events ────────────────────────────────────
@@ -4100,93 +4187,54 @@ mod tests {
 
     #[test]
     fn test_generate_mcpg_docker_env_with_permissions_read() {
-        let mut fm = minimal_front_matter();
-        fm.permissions = Some(crate::compile::types::PermissionsConfig {
-            read: Some("my-read-sc".to_string()),
-            write: None,
-        });
-        // A container MCP must request AZURE_DEVOPS_EXT_PAT for the auto-map to trigger
-        fm.mcp_servers.insert(
-            "ado-tool".to_string(),
-            McpConfig::WithOptions(McpOptions {
-                container: Some("node:20-slim".to_string()),
-                env: {
-                    let mut e = HashMap::new();
-                    e.insert("AZURE_DEVOPS_EXT_PAT".to_string(), "".to_string());
-                    e
-                },
-                ..Default::default()
-            }),
-        );
-        let env = generate_mcpg_docker_env(&fm);
+        // When ADO tool is enabled with permissions.read, the extension's
+        // required_pipeline_vars should produce the -e flag
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\npermissions:\n  read: my-read-sc\n---\n",
+        ).unwrap();
+        let extensions = collect_extensions(&fm);
+        let env = generate_mcpg_docker_env(&fm, &extensions);
         assert!(
-            env.contains("-e AZURE_DEVOPS_EXT_PAT=\"$(SC_READ_TOKEN)\""),
-            "Should auto-map ADO token when permissions.read is set and MCP requests it"
+            env.contains("-e ADO_MCP_AUTH_TOKEN=\"$SC_READ_TOKEN\""),
+            "Should map ADO token via extension pipeline var"
         );
     }
 
     #[test]
-    fn test_generate_mcpg_docker_env_permissions_read_no_mcp_request() {
-        let mut fm = minimal_front_matter();
-        fm.permissions = Some(crate::compile::types::PermissionsConfig {
-            read: Some("my-read-sc".to_string()),
-            write: None,
-        });
-        // No MCP requests AZURE_DEVOPS_EXT_PAT — auto-map should NOT trigger
-        fm.mcp_servers.insert(
-            "unrelated-tool".to_string(),
-            McpConfig::WithOptions(McpOptions {
-                container: Some("node:20-slim".to_string()),
-                ..Default::default()
-            }),
-        );
-        let env = generate_mcpg_docker_env(&fm);
-        assert!(
-            !env.contains("AZURE_DEVOPS_EXT_PAT"),
-            "Should NOT auto-map ADO token when no MCP requests it"
-        );
-    }
-
-    #[test]
-    fn test_generate_mcpg_docker_env_dedup_auto_map_and_passthrough() {
-        // When permissions.read is set AND MCP has AZURE_DEVOPS_EXT_PAT: "",
-        // the auto-mapped form (with SC_READ_TOKEN) should win — no duplicate
-        let mut fm = minimal_front_matter();
-        fm.permissions = Some(crate::compile::types::PermissionsConfig {
-            read: Some("my-read-sc".to_string()),
-            write: None,
-        });
-        fm.mcp_servers.insert(
-            "ado-tool".to_string(),
-            McpConfig::WithOptions(McpOptions {
-                container: Some("node:20-slim".to_string()),
-                env: {
-                    let mut e = HashMap::new();
-                    e.insert("AZURE_DEVOPS_EXT_PAT".to_string(), "".to_string());
-                    e
-                },
-                ..Default::default()
-            }),
-        );
-        let env = generate_mcpg_docker_env(&fm);
-        // Should have the SC_READ_TOKEN form (auto-mapped), not bare passthrough
-        assert!(
-            env.contains("-e AZURE_DEVOPS_EXT_PAT=\"$(SC_READ_TOKEN)\""),
-            "Auto-mapped form should be present"
-        );
-        // Should appear exactly once
-        let count = env.matches("AZURE_DEVOPS_EXT_PAT").count();
-        assert_eq!(count, 1, "AZURE_DEVOPS_EXT_PAT should appear exactly once, got {}", count);
-    }
-
-    #[test]
-    fn test_generate_mcpg_docker_env_without_permissions() {
+    fn test_generate_mcpg_docker_env_no_extensions() {
+        // No tools enabled — no extension pipeline vars — only user MCP passthrough
         let fm = minimal_front_matter();
-        let env = generate_mcpg_docker_env(&fm);
+        let extensions = collect_extensions(&fm);
+        let env = generate_mcpg_docker_env(&fm, &extensions);
         assert!(
-            !env.contains("AZURE_DEVOPS_EXT_PAT"),
-            "Should not map ADO token when permissions.read is not set"
+            !env.contains("ADO_MCP_AUTH_TOKEN"),
+            "Should not have ADO token when no extension needs it"
         );
+    }
+
+    #[test]
+    fn test_generate_mcpg_docker_env_dedup_extension_and_user_passthrough() {
+        // Extension provides ADO_MCP_AUTH_TOKEN mapping, user MCP also has it as passthrough.
+        // Extension mapping should win (deduplicated).
+        let (mut fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\npermissions:\n  read: my-read-sc\n---\n",
+        ).unwrap();
+        fm.mcp_servers.insert(
+            "ado-tool".to_string(),
+            McpConfig::WithOptions(McpOptions {
+                container: Some("node:20-slim".to_string()),
+                env: {
+                    let mut e = HashMap::new();
+                    e.insert("ADO_MCP_AUTH_TOKEN".to_string(), "".to_string());
+                    e
+                },
+                ..Default::default()
+            }),
+        );
+        let extensions = collect_extensions(&fm);
+        let env = generate_mcpg_docker_env(&fm, &extensions);
+        let count = env.matches("ADO_MCP_AUTH_TOKEN").count();
+        assert_eq!(count, 1, "ADO_MCP_AUTH_TOKEN should appear exactly once, got {}", count);
     }
 
     #[test]
@@ -4205,7 +4253,8 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let env = generate_mcpg_docker_env(&fm);
+        let extensions = collect_extensions(&fm);
+        let env = generate_mcpg_docker_env(&fm, &extensions);
         assert!(env.contains("-e PASS_THROUGH"), "Should include passthrough var");
         assert!(!env.contains("-e STATIC"), "Should NOT include static var");
     }
@@ -4219,16 +4268,15 @@ mod tests {
                 container: Some("img:latest".to_string()),
                 env: {
                     let mut e = HashMap::new();
-                    // Injection attempt: env var name with Docker flag
                     e.insert("MY_VAR --privileged".to_string(), "".to_string());
-                    // Valid env var for comparison
                     e.insert("GOOD_VAR".to_string(), "".to_string());
                     e
                 },
                 ..Default::default()
             }),
         );
-        let env = generate_mcpg_docker_env(&fm);
+        let extensions = collect_extensions(&fm);
+        let env = generate_mcpg_docker_env(&fm, &extensions);
         assert!(
             !env.contains("--privileged"),
             "Should reject invalid env var name with Docker flag injection"
@@ -4237,6 +4285,33 @@ mod tests {
             env.contains("-e GOOD_VAR"),
             "Should include valid env var"
         );
+    }
+
+    // ─── generate_mcpg_step_env ──────────────────────────────────────────────
+
+    #[test]
+    fn test_generate_mcpg_step_env_with_ado_extension() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\n---\n",
+        ).unwrap();
+        let extensions = collect_extensions(&fm);
+        let env = generate_mcpg_step_env(&extensions);
+        assert!(
+            env.starts_with("env:\n"),
+            "Should emit full env: block header"
+        );
+        assert!(
+            env.contains("SC_READ_TOKEN: $(SC_READ_TOKEN)"),
+            "Should map SC_READ_TOKEN for ADO extension"
+        );
+    }
+
+    #[test]
+    fn test_generate_mcpg_step_env_no_extensions() {
+        let fm = minimal_front_matter();
+        let extensions = collect_extensions(&fm);
+        let env = generate_mcpg_step_env(&extensions);
+        assert!(env.is_empty(), "Should be empty when no extensions need pipeline vars");
     }
 
     #[test]
@@ -4251,61 +4326,6 @@ mod tests {
         assert!(!is_valid_env_var_name("MY VAR"));
         assert!(!is_valid_env_var_name("X --privileged"));
         assert!(!is_valid_env_var_name("X -v /etc:/etc:rw"));
-    }
-
-    // ─── generate_mcp_client_config ────────────────────────────────────────
-
-    #[test]
-    fn test_generate_mcp_client_config_default() {
-        let fm = minimal_front_matter();
-        let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
-        let json = generate_mcp_client_config(&config).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        let servers = parsed["mcpServers"].as_object().unwrap();
-
-        // Default config has only safeoutputs
-        assert!(servers.contains_key("safeoutputs"), "Should have safeoutputs entry");
-        assert_eq!(servers.len(), 1, "Should have exactly one server by default");
-
-        let so = &servers["safeoutputs"];
-        assert_eq!(so["type"], "http");
-        assert!(so["url"].as_str().unwrap().contains("/mcp/safeoutputs"), "Should have routed URL");
-        assert_eq!(so["tools"], serde_json::json!(["*"]));
-        assert!(so["headers"]["Authorization"].as_str().unwrap().contains("MCP_GATEWAY_API_KEY"));
-    }
-
-    #[test]
-    fn test_generate_mcp_client_config_multiple_servers() {
-        let mut fm = minimal_front_matter();
-        fm.mcp_servers.insert(
-            "my-tool".to_string(),
-            McpConfig::WithOptions(McpOptions {
-                container: Some("python:3.12-slim".to_string()),
-                ..Default::default()
-            }),
-        );
-        let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
-        let json = generate_mcp_client_config(&config).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        let servers = parsed["mcpServers"].as_object().unwrap();
-
-        assert_eq!(servers.len(), 2, "Should have safeoutputs + my-tool");
-        assert!(servers.contains_key("safeoutputs"));
-        assert!(servers.contains_key("my-tool"));
-
-        // Verify routed URLs
-        assert!(servers["safeoutputs"]["url"].as_str().unwrap().ends_with("/mcp/safeoutputs"));
-        assert!(servers["my-tool"]["url"].as_str().unwrap().ends_with("/mcp/my-tool"));
-    }
-
-    #[test]
-    fn test_generate_mcp_client_config_uses_correct_port() {
-        let fm = minimal_front_matter();
-        let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
-        let json = generate_mcp_client_config(&config).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        let url = parsed["mcpServers"]["safeoutputs"]["url"].as_str().unwrap();
-        assert!(url.contains(":80/"), "URL should use MCPG port 80");
     }
 
     #[test]
@@ -4349,9 +4369,9 @@ mod tests {
         assert!(args.contains(&"-y".to_string()));
         assert!(args.contains(&ADO_MCP_PACKAGE.to_string()));
         assert!(args.contains(&"inferred-org".to_string()));
-        // Should have AZURE_DEVOPS_EXT_PAT in env
+        // Should have ADO_MCP_AUTH_TOKEN in env (for bearer token via envvar auth)
         let env = ado.env.as_ref().unwrap();
-        assert!(env.contains_key("AZURE_DEVOPS_EXT_PAT"));
+        assert!(env.contains_key("ADO_MCP_AUTH_TOKEN"));
     }
 
     #[test]
@@ -4489,9 +4509,10 @@ mod tests {
             "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\npermissions:\n  read: my-read-sc\n---\n",
         )
         .unwrap();
-        let env = generate_mcpg_docker_env(&fm);
+        let extensions = collect_extensions(&fm);
+        let env = generate_mcpg_docker_env(&fm, &extensions);
         assert!(
-            env.contains("AZURE_DEVOPS_EXT_PAT"),
+            env.contains("ADO_MCP_AUTH_TOKEN"),
             "Should include ADO token passthrough when permissions.read is set"
         );
     }

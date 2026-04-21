@@ -151,28 +151,7 @@ extends:
 
                     # Copy MCPG config to /tmp
                     cp "$(Agent.TempDirectory)/staging/mcpg-config.json" /tmp/awf-tools/staging/mcpg-config.json
-
-                    # Generate MCP config for copilot CLI pointing to MCPG gateway on host.
-                    # The agent inside AWF reaches MCPG via host.docker.internal using routed
-                    # endpoints (/mcp/{serverID}). Each server has its own entry with auth headers.
-                    #
-                    # NOTE: The quoted heredoc (<< 'EOF') prevents bash from expanding $(...)
-                    # as command substitution. However, $(MCP_GATEWAY_API_KEY) in the JSON is
-                    # still expanded by ADO macro expansion, which processes the entire script
-                    # body *before* bash executes it. The real API key value ends up in the file.
-                    cat > /tmp/awf-tools/mcp-config.json << 'MCP_CLIENT_CONFIG_EOF'
-                    {{ mcp_client_config }}
-                    MCP_CLIENT_CONFIG_EOF
-
-                    # Also write to $HOME/.copilot for host-side use
-                    cp /tmp/awf-tools/mcp-config.json "$HOME/.copilot/mcp-config.json"
-
-                    echo "Generated MCP config at: /tmp/awf-tools/mcp-config.json"
-                    cat /tmp/awf-tools/mcp-config.json
-
-                    # Validate JSON
-                    python3 -m json.tool /tmp/awf-tools/mcp-config.json > /dev/null && echo "JSON is valid"
-                  displayName: "Generate MCP configs"
+                  displayName: "Prepare tooling"
 
                 - bash: |
                     # Write agent instructions to /tmp so it's accessible inside AWF container
@@ -271,9 +250,12 @@ extends:
                     echo "Starting MCPG with config template:"
                     cat /tmp/awf-tools/staging/mcpg-config.json | python3 -m json.tool
 
-                    # Remove any leftover container from a previous interrupted run
+                    # Remove any leftover container or stale output from a previous interrupted run
                     # (--rm only cleans up on clean exit; OOM/SIGKILL may leave it behind)
                     docker rm -f mcpg 2>/dev/null || true
+                    GATEWAY_OUTPUT="/tmp/gh-aw/mcp-config/gateway-output.json"
+                    mkdir -p "$(dirname "$GATEWAY_OUTPUT")" /tmp/gh-aw/mcp-logs
+                    rm -f "$GATEWAY_OUTPUT"
 
                     # Start MCPG Docker container on host network.
                     # The Docker socket mount is required because MCPG spawns stdio-based MCP
@@ -285,6 +267,8 @@ extends:
                     # which is empty with --network host (by design), causing a spurious error:
                     #   [ERROR] Port 80 is not exposed from the container
                     # Upstream fix: https://github.com/github/gh-aw-mcpg/issues/TBD
+                    #
+                    # stdout → gateway-output.json (machine-readable config, read after health check)
                     echo "$MCPG_CONFIG" | docker run -i --rm \
                       --name mcpg \
                       --network host \
@@ -293,9 +277,11 @@ extends:
                       -e MCP_GATEWAY_PORT="$(MCP_GATEWAY_PORT)" \
                       -e MCP_GATEWAY_DOMAIN="$(MCP_GATEWAY_DOMAIN)" \
                       -e MCP_GATEWAY_API_KEY="$(MCP_GATEWAY_API_KEY)" \
+                      {{ mcpg_debug_flags }}
                       {{ mcpg_docker_env }}
                       {{ mcpg_image }}:v{{ mcpg_version }} \
-                      --routed --listen 0.0.0.0:{{ mcpg_port }} --config-stdin --log-dir /tmp/gh-aw/mcp-logs &
+                      --routed --listen 0.0.0.0:{{ mcpg_port }} --config-stdin --log-dir /tmp/gh-aw/mcp-logs \
+                      > "$GATEWAY_OUTPUT" 2> >(tee /tmp/gh-aw/mcp-logs/stderr.log >&2) &
                     MCPG_PID=$!
                     echo "MCPG started (PID: $MCPG_PID)"
 
@@ -313,7 +299,49 @@ extends:
                       echo "##vso[task.complete result=Failed]MCPG did not become ready within 30s"
                       exit 1
                     fi
+
+                    # Wait for gateway output file to contain valid JSON with mcpServers.
+                    # Health check passing doesn't guarantee stdout is flushed, so poll.
+                    echo "Waiting for gateway output file..."
+                    GATEWAY_READY=false
+                    for i in $(seq 1 15); do
+                      if [ -s "$GATEWAY_OUTPUT" ] && jq -e '.mcpServers' "$GATEWAY_OUTPUT" > /dev/null 2>&1; then
+                        echo "Gateway output is ready"
+                        GATEWAY_READY=true
+                        break
+                      fi
+                      sleep 1
+                    done
+                    if [ "$GATEWAY_READY" != "true" ]; then
+                      echo "##vso[task.complete result=Failed]Gateway output file not ready within 15s"
+                      echo "Gateway output content:"
+                      cat "$GATEWAY_OUTPUT" 2>/dev/null || echo "(empty or missing)"
+                      exit 1
+                    fi
+
+                    echo "Gateway output:"
+                    cat "$GATEWAY_OUTPUT"
+
+                    # Convert gateway output to Copilot CLI mcp-config.json.
+                    # Mirrors gh-aw's convert_gateway_config_copilot.cjs:
+                    #   - Rewrite URLs from 127.0.0.1 to host.docker.internal (AWF container needs
+                    #     host.docker.internal to reach MCPG on the host; 127.0.0.1 is container loopback)
+                    #   - Ensure tools: ["*"] on each server entry (Copilot CLI requirement)
+                    #   - Preserve all other fields (headers, type, etc.)
+                    jq --arg prefix "http://$(MCP_GATEWAY_DOMAIN):$(MCP_GATEWAY_PORT)" \
+                      '.mcpServers |= (to_entries | sort_by(.key) | map(.value.url |= sub("^http://[^/]+/"; "\($prefix)/") | .value.tools = ["*"]) | from_entries)' \
+                      "$GATEWAY_OUTPUT" > /tmp/awf-tools/mcp-config.json
+
+                    # Also write to $HOME/.copilot for host-side use
+                    cp /tmp/awf-tools/mcp-config.json "$HOME/.copilot/mcp-config.json"
+                    chmod 600 /tmp/awf-tools/mcp-config.json "$HOME/.copilot/mcp-config.json"
+
+                    echo "Generated MCP config at: /tmp/awf-tools/mcp-config.json"
+                    cat /tmp/awf-tools/mcp-config.json
                   displayName: "Start MCP Gateway (MCPG)"
+                  {{ mcpg_step_env }}
+
+                {{ verify_mcp_backends }}
 
                 # Network isolation via AWF (Agentic Workflow Firewall)
                 - bash: |
@@ -342,7 +370,7 @@ extends:
                       --container-workdir "{{ working_directory }}" \
                       --log-level info \
                       --proxy-logs-dir "$(Agent.TempDirectory)/staging/logs/firewall" \
-                      -- '/tmp/awf-tools/copilot --prompt "$(cat /tmp/awf-tools/agent-prompt.md)" --additional-mcp-config @/tmp/awf-tools/mcp-config.json {{ copilot_params }}' \
+                      -- '/tmp/awf-tools/copilot --prompt @/tmp/awf-tools/agent-prompt.md --additional-mcp-config @/tmp/awf-tools/mcp-config.json {{ copilot_params }}' \
                       2>&1 \
                       | sed -u 's/##vso\[/[VSO-FILTERED] vso[/g; s/##\[/[VSO-FILTERED] [/g' \
                       | tee "$AGENT_OUTPUT_FILE" \
@@ -399,6 +427,10 @@ extends:
                     fi
                     if [ -d ~/.ado-aw/logs ]; then
                       cp -r ~/.ado-aw/logs/* "$(Agent.TempDirectory)/staging/logs/" 2>/dev/null || true
+                    fi
+                    if [ -d /tmp/gh-aw/mcp-logs ]; then
+                      mkdir -p "$(Agent.TempDirectory)/staging/logs/mcpg"
+                      cp -r /tmp/gh-aw/mcp-logs/* "$(Agent.TempDirectory)/staging/logs/mcpg/" 2>/dev/null || true
                     fi
                     echo "Logs copied to $(Agent.TempDirectory)/staging/logs"
                     ls -la "$(Agent.TempDirectory)/staging/logs" 2>/dev/null || echo "No logs found"
@@ -531,7 +563,7 @@ extends:
                       --container-workdir "{{ working_directory }}" \
                       --log-level info \
                       --proxy-logs-dir "$(Agent.TempDirectory)/threat-analysis-logs/firewall" \
-                      -- '/tmp/awf-tools/copilot --prompt "$(cat /tmp/awf-tools/threat-analysis-prompt.md)" {{ copilot_params }}' \
+                      -- '/tmp/awf-tools/copilot --prompt @/tmp/awf-tools/threat-analysis-prompt.md {{ copilot_params }}' \
                       2>&1 \
                       | sed -u 's/##vso\[/[VSO-FILTERED] vso[/g; s/##\[/[VSO-FILTERED] [/g' \
                       | tee "$THREAT_OUTPUT_FILE" \

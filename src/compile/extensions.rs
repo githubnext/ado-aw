@@ -261,6 +261,30 @@ pub trait CompilerExtension {
     fn validate(&self, _ctx: &CompileContext) -> Result<Vec<String>> {
         Ok(vec![])
     }
+
+    /// Pipeline variable mappings needed by this extension's MCP containers.
+    ///
+    /// Each mapping declares that a container env var (e.g., `AZURE_DEVOPS_EXT_PAT`)
+    /// should be populated from a pipeline variable (e.g., `SC_READ_TOKEN`).
+    /// The compiler uses these to generate:
+    /// 1. `env:` block on the MCPG step (maps ADO secret → bash var)
+    /// 2. `-e` flags on the MCPG docker run (passes bash var → MCPG process)
+    /// 3. MCPG config keeps `""` (MCPG passthrough from its env → child container)
+    fn required_pipeline_vars(&self) -> Vec<PipelineEnvMapping> {
+        vec![]
+    }
+}
+
+/// Maps a container environment variable to a pipeline variable.
+///
+/// Used by extensions to declare that an MCP container needs a specific
+/// pipeline variable (typically a secret) injected into its environment.
+#[derive(Debug, Clone)]
+pub struct PipelineEnvMapping {
+    /// The env var name inside the MCP container (e.g., `AZURE_DEVOPS_EXT_PAT`).
+    pub container_var: String,
+    /// The ADO pipeline variable name (e.g., `SC_READ_TOKEN`).
+    pub pipeline_var: String,
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -319,6 +343,9 @@ macro_rules! extension_enum {
             }
             fn validate(&self, ctx: &CompileContext) -> Result<Vec<String>> {
                 match self { $( $Enum::$Variant(e) => e.validate(ctx), )+ }
+            }
+            fn required_pipeline_vars(&self) -> Vec<PipelineEnvMapping> {
+                match self { $( $Enum::$Variant(e) => e.required_pipeline_vars(), )+ }
             }
         }
     };
@@ -431,11 +458,34 @@ use super::types::AzureDevOpsToolConfig;
 /// ADO MCP), and compile-time validation (org inference, duplicate MCP).
 pub struct AzureDevOpsExtension {
     config: AzureDevOpsToolConfig,
+    auth_mode: AdoAuthMode,
+}
+
+/// Authentication mode for the ADO MCP server.
+///
+/// Pipelines use bearer tokens (JWT from ARM service connections).
+/// Local development uses PATs (Personal Access Tokens).
+#[derive(Debug, Clone, Copy, Default)]
+pub enum AdoAuthMode {
+    /// `-a envvar` + `ADO_MCP_AUTH_TOKEN` — bearer JWT from ARM (pipeline default)
+    #[default]
+    Bearer,
+    /// `-a pat` + `AZURE_DEVOPS_EXT_PAT` — Personal Access Token (local dev)
+    Pat,
 }
 
 impl AzureDevOpsExtension {
     pub fn new(config: AzureDevOpsToolConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            auth_mode: AdoAuthMode::default(),
+        }
+    }
+
+    /// Set the authentication mode (e.g., `AdoAuthMode::Pat` for local runs).
+    pub fn with_auth_mode(mut self, mode: AdoAuthMode) -> Self {
+        self.auth_mode = mode;
+        self
     }
 }
 
@@ -449,10 +499,14 @@ impl CompilerExtension for AzureDevOpsExtension {
     }
 
     fn required_hosts(&self) -> Vec<String> {
-        mcp_required_hosts("ado")
+        let mut hosts: Vec<String> = mcp_required_hosts("ado")
             .iter()
             .map(|h| (*h).to_string())
-            .collect()
+            .collect();
+        // The ADO MCP runs in a container via `npx -y @azure-devops/mcp`.
+        // npx needs npm registry access to resolve and install the package.
+        hosts.push("node".to_string());
+        hosts
     }
 
     fn allowed_copilot_tools(&self) -> Vec<String> {
@@ -509,11 +563,28 @@ impl CompilerExtension for AzureDevOpsExtension {
             Some(self.config.allowed().to_vec())
         };
 
-        // ADO MCP needs the PAT token passed via environment
-        let env = Some(HashMap::from([(
-            "AZURE_DEVOPS_EXT_PAT".to_string(),
-            String::new(), // Passthrough from pipeline
-        )]));
+        // ADO MCP authentication: the @azure-devops/mcp npm package accepts
+        // auth type via CLI arg (-a) and token via env var.
+        //   Bearer: `-a envvar` reads ADO_MCP_AUTH_TOKEN (pipeline JWT from ARM)
+        //   Pat:    `-a pat`    reads PERSONAL_ACCESS_TOKEN (base64-encoded PAT)
+        let (auth_flag, token_var) = match self.auth_mode {
+            AdoAuthMode::Bearer => ("envvar", "ADO_MCP_AUTH_TOKEN"),
+            AdoAuthMode::Pat => ("pat", "PERSONAL_ACCESS_TOKEN"),
+        };
+        entrypoint_args.extend(["-a".to_string(), auth_flag.to_string()]);
+
+        let env = Some(HashMap::from([
+            (
+                token_var.to_string(),
+                String::new(), // Passthrough from MCPG process env
+            ),
+        ]));
+
+        // --network host: AWF's DOCKER-USER iptables rules block outbound from
+        // containers on Docker's default bridge. Host networking bypasses FORWARD
+        // chain rules so the ADO MCP can reach dev.azure.com.
+        // This matches gh-aw's approach for its built-in agentic-workflows MCP.
+        let args = Some(vec!["--network".to_string(), "host".to_string()]);
 
         Ok(vec![(
             ADO_MCP_SERVER_NAME.to_string(),
@@ -523,7 +594,7 @@ impl CompilerExtension for AzureDevOpsExtension {
                 entrypoint: Some(ADO_MCP_ENTRYPOINT.to_string()),
                 entrypoint_args: Some(entrypoint_args),
                 mounts: None,
-                args: None,
+                args,
                 url: None,
                 headers: None,
                 env,
@@ -551,9 +622,18 @@ impl CompilerExtension for AzureDevOpsExtension {
 
         Ok(warnings)
     }
+    fn required_pipeline_vars(&self) -> Vec<PipelineEnvMapping> {
+        match self.auth_mode {
+            AdoAuthMode::Bearer => vec![PipelineEnvMapping {
+                container_var: "ADO_MCP_AUTH_TOKEN".to_string(),
+                pipeline_var: "SC_READ_TOKEN".to_string(),
+            }],
+            // PAT mode: no pipeline var mapping needed — the PAT is passed
+            // directly via AZURE_DEVOPS_EXT_PAT in the MCPG env file.
+            AdoAuthMode::Pat => vec![],
+        }
+    }
 }
-
-// ─── Cache Memory ────────────────────────────────────────────────────
 
 use super::types::CacheMemoryToolConfig;
 
@@ -743,6 +823,16 @@ These tools generate safe outputs that will be reviewed and executed in a separa
 /// (runtimes in `RuntimesConfig` field order, tools in `ToolsConfig`
 /// field order).
 pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
+    collect_extensions_with_auth(front_matter, AdoAuthMode::default())
+}
+
+/// Collect extensions with an explicit ADO auth mode.
+///
+/// Used by `ado-aw run` to switch from bearer (pipeline default) to PAT auth.
+pub fn collect_extensions_with_auth(
+    front_matter: &FrontMatter,
+    ado_auth: AdoAuthMode,
+) -> Vec<Extension> {
     let mut extensions = Vec::new();
 
     // ── Always-on internal extensions ──
@@ -764,9 +854,9 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
     if let Some(tools) = front_matter.tools.as_ref() {
         if let Some(ado) = tools.azure_devops.as_ref() {
             if ado.is_enabled() {
-                extensions.push(Extension::AzureDevOps(AzureDevOpsExtension::new(
-                    ado.clone(),
-                )));
+                extensions.push(Extension::AzureDevOps(
+                    AzureDevOpsExtension::new(ado.clone()).with_auth_mode(ado_auth),
+                ));
             }
         }
         if let Some(memory) = tools.cache_memory.as_ref() {
@@ -1021,6 +1111,8 @@ mod tests {
         let ext = AzureDevOpsExtension::new(AzureDevOpsToolConfig::Enabled(true));
         let hosts = ext.required_hosts();
         assert!(hosts.contains(&"dev.azure.com".to_string()));
+        // Node ecosystem is required for npx to resolve @azure-devops/mcp
+        assert!(hosts.contains(&"node".to_string()));
     }
 
     #[test]
@@ -1038,6 +1130,9 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains(&"myorg".to_string()));
+        // Must use --network host so AWF iptables don't block outbound
+        let args = servers[0].1.args.as_ref().expect("args should be set");
+        assert_eq!(args, &vec!["--network".to_string(), "host".to_string()]);
     }
 
     #[test]
