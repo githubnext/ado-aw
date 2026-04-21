@@ -340,8 +340,16 @@ fn format_diff(existing: &str, expected: &str, pipeline_path: &Path) -> String {
         pipeline_path.display(),
     ));
 
-    let mut added = 0usize;
-    let mut removed = 0usize;
+    // First pass: count total changes across the full diff.
+    let total_added = diff
+        .iter_all_changes()
+        .filter(|c| c.tag() == ChangeTag::Insert)
+        .count();
+    let total_removed = diff
+        .iter_all_changes()
+        .filter(|c| c.tag() == ChangeTag::Delete)
+        .count();
+
     let mut changed_lines_shown = 0usize;
     let mut truncated = false;
 
@@ -356,21 +364,12 @@ fn format_diff(existing: &str, expected: &str, pipeline_path: &Path) -> String {
             let tag = change.tag();
             let line = change.value();
 
-            match tag {
-                ChangeTag::Delete => {
-                    removed += 1;
-                    changed_lines_shown += 1;
+            if tag != ChangeTag::Equal {
+                if changed_lines_shown >= MAX_DIFF_CHANGED_LINES {
+                    truncated = true;
+                    break;
                 }
-                ChangeTag::Insert => {
-                    added += 1;
-                    changed_lines_shown += 1;
-                }
-                ChangeTag::Equal => {}
-            }
-
-            if changed_lines_shown > MAX_DIFF_CHANGED_LINES && tag != ChangeTag::Equal {
-                truncated = true;
-                break;
+                changed_lines_shown += 1;
             }
 
             let prefix = match tag {
@@ -392,13 +391,13 @@ fn format_diff(existing: &str, expected: &str, pipeline_path: &Path) -> String {
             "\n... diff truncated after {} changed lines (showing {} of {} total changes)\n",
             MAX_DIFF_CHANGED_LINES,
             changed_lines_shown,
-            added + removed,
+            total_added + total_removed,
         ));
     }
 
     output.push_str(&format!(
         "\nSummary: {} line(s) added, {} line(s) removed\n",
-        added, removed
+        total_added, total_removed
     ));
 
     output
@@ -647,5 +646,29 @@ Body
         let diff = format_diff("a\n", "b\n", Path::new("my-pipeline.yml"));
         assert!(diff.contains("my-pipeline.yml (on disk)"));
         assert!(diff.contains("my-pipeline.yml (expected from source)"));
+    }
+
+    #[test]
+    fn test_format_diff_truncates_at_limit() {
+        // 100 unique old lines replaced by 100 unique new lines = 200 total changes.
+        let existing: String = (0..100).map(|i| format!("old{}\n", i)).collect();
+        let expected: String = (0..100).map(|i| format!("new{}\n", i)).collect();
+        let diff = format_diff(&existing, &expected, Path::new("test.yml"));
+        assert!(
+            diff.contains("... diff truncated"),
+            "diff should be truncated for >80 changed lines"
+        );
+        // Exactly 80 changed lines shown, 200 total changes (100 removed + 100 added).
+        assert!(
+            diff.contains("showing 80 of 200 total changes"),
+            "truncation message should report 80 shown of 200 total, got:\n{}",
+            diff
+        );
+        // Summary should reflect ALL changes, not just the shown ones.
+        assert!(
+            diff.contains("100 line(s) added, 100 line(s) removed"),
+            "summary should report full totals, got:\n{}",
+            diff
+        );
     }
 }
