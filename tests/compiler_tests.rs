@@ -2706,7 +2706,7 @@ network:
 /// Verifies that a pipeline compiled with `runtimes: lean: true` contains:
 /// - The elan installer step (`elan-init.sh`)
 /// - Lean ecosystem domains in the network allow-list (`elan.lean-lang.org`)
-/// - Lean tool shell allow-args (`shell(lean)`, `shell(lake)`, `shell(elan)`)
+/// - `--allow-all-tools` (default when bash is not explicitly configured)
 /// - No unreplaced `{{ }}` template markers
 #[test]
 fn test_lean_runtime_compiled_output() {
@@ -2764,18 +2764,11 @@ Prove theorems and build Lean 4 projects.
         "Compiled output should include elan.lean-lang.org in allowed domains"
     );
 
-    // Lean tools should appear as shell allow-args for the Copilot CLI
+    // With no explicit bash config, default is --allow-all-tools (gh-aw sandbox default).
+    // Lean tools are implicitly covered by --allow-all-tools.
     assert!(
-        compiled.contains("shell(lean)"),
-        "Compiled output should include shell(lean) in --allow-tool args"
-    );
-    assert!(
-        compiled.contains("shell(lake)"),
-        "Compiled output should include shell(lake) in --allow-tool args"
-    );
-    assert!(
-        compiled.contains("shell(elan)"),
-        "Compiled output should include shell(elan) in --allow-tool args"
+        compiled.contains("--allow-all-tools"),
+        "Compiled output should include --allow-all-tools (default when bash is not specified)"
     );
 
     // Verify no unreplaced {{ markers }} remain
