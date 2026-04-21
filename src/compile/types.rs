@@ -937,6 +937,65 @@ mod tests {
         assert_eq!(ec.timeout_minutes(), Some(30));
     }
 
+    #[test]
+    fn test_engine_config_version_accessor() {
+        let yaml = "version: \"1.2.3\"";
+        let opts: EngineOptions = serde_yaml::from_str(yaml).unwrap();
+        let ec = EngineConfig::Full(opts);
+        assert_eq!(ec.version(), Some("1.2.3"));
+    }
+
+    #[test]
+    fn test_engine_config_version_none_by_default() {
+        let ec = EngineConfig::default();
+        assert_eq!(ec.version(), None);
+    }
+
+    #[test]
+    fn test_engine_config_version_none_for_simple() {
+        let ec = EngineConfig::Simple("claude-opus-4.5".to_string());
+        assert_eq!(ec.version(), None);
+    }
+
+    #[test]
+    fn test_engine_config_command_accessor() {
+        let yaml = "command: /usr/local/bin/my-copilot";
+        let opts: EngineOptions = serde_yaml::from_str(yaml).unwrap();
+        let ec = EngineConfig::Full(opts);
+        assert_eq!(ec.command(), Some("/usr/local/bin/my-copilot"));
+    }
+
+    #[test]
+    fn test_engine_config_command_none_by_default() {
+        let ec = EngineConfig::default();
+        assert_eq!(ec.command(), None);
+    }
+
+    #[test]
+    fn test_engine_config_agent_accessor() {
+        let yaml = "agent: technical-doc-writer";
+        let opts: EngineOptions = serde_yaml::from_str(yaml).unwrap();
+        let ec = EngineConfig::Full(opts);
+        assert_eq!(ec.agent(), Some("technical-doc-writer"));
+    }
+
+    #[test]
+    fn test_engine_config_agent_none_by_default() {
+        let ec = EngineConfig::default();
+        assert_eq!(ec.agent(), None);
+    }
+
+    #[test]
+    fn test_engine_config_full_with_all_new_fields() {
+        let yaml = "model: claude-opus-4.5\nversion: \"0.0.422\"\ncommand: /usr/bin/copilot\nagent: my-agent";
+        let opts: EngineOptions = serde_yaml::from_str(yaml).unwrap();
+        let ec = EngineConfig::Full(opts);
+        assert_eq!(ec.model(), "claude-opus-4.5");
+        assert_eq!(ec.version(), Some("0.0.422"));
+        assert_eq!(ec.command(), Some("/usr/bin/copilot"));
+        assert_eq!(ec.agent(), Some("my-agent"));
+    }
+
     // ─── PermissionsConfig deserialization ───────────────────────────────
 
     #[test]

@@ -2535,6 +2535,86 @@ mod tests {
         assert_eq!(generate_job_timeout(&fm), "timeoutInMinutes: 0");
     }
 
+    // ─── generate_engine_install_steps ─────────────────────────────────────────
+
+    #[test]
+    fn test_engine_install_steps_default() {
+        let fm = minimal_front_matter();
+        let steps = generate_engine_install_steps(&fm).unwrap();
+        assert!(steps.contains("NuGetAuthenticate@1"));
+        assert!(steps.contains(&format!("-Version {}", COPILOT_CLI_VERSION)));
+    }
+
+    #[test]
+    fn test_engine_install_steps_custom_version() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  version: \"2.0.0\"\n---\n",
+        )
+        .unwrap();
+        let steps = generate_engine_install_steps(&fm).unwrap();
+        assert!(steps.contains("-Version 2.0.0"));
+        assert!(!steps.contains(COPILOT_CLI_VERSION));
+    }
+
+    #[test]
+    fn test_engine_install_steps_latest_omits_version() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  version: latest\n---\n",
+        )
+        .unwrap();
+        let steps = generate_engine_install_steps(&fm).unwrap();
+        assert!(!steps.contains("-Version"));
+        assert!(steps.contains("NuGetAuthenticate@1"));
+    }
+
+    #[test]
+    fn test_engine_install_steps_skipped_with_command() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  command: /usr/bin/copilot\n---\n",
+        )
+        .unwrap();
+        let steps = generate_engine_install_steps(&fm).unwrap();
+        assert!(steps.is_empty());
+    }
+
+    // ─── generate_copilot_command ─────────────────────────────────────────────
+
+    #[test]
+    fn test_copilot_command_default() {
+        let fm = minimal_front_matter();
+        let cmd = generate_copilot_command(&fm).unwrap();
+        assert_eq!(cmd, "/tmp/awf-tools/copilot");
+    }
+
+    #[test]
+    fn test_copilot_command_custom() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  command: /usr/local/bin/my-engine\n---\n",
+        )
+        .unwrap();
+        let cmd = generate_copilot_command(&fm).unwrap();
+        assert_eq!(cmd, "/usr/local/bin/my-engine");
+    }
+
+    // ─── generate_copilot_params with agent ───────────────────────────────────
+
+    #[test]
+    fn test_copilot_params_with_agent() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  agent: my-agent\n---\n",
+        )
+        .unwrap();
+        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        assert!(params.contains("--agent my-agent"));
+    }
+
+    #[test]
+    fn test_copilot_params_no_agent_by_default() {
+        let fm = minimal_front_matter();
+        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        assert!(!params.contains("--agent"));
+    }
+
     // ─── sanitize_filename ────────────────────────────────────────────────────
 
     #[test]

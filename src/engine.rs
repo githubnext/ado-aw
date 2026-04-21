@@ -365,4 +365,206 @@ mod tests {
     fn copilot_engine_generates_empty_ado_env_without_service_connection() {
         assert!(GITHUB_COPILOT_CLI_ENGINE.generate_agent_ado_env(None).is_empty());
     }
+
+    // ─── engine.agent ────────────────────────────────────────────────────────
+
+    #[test]
+    fn copilot_engine_agent_flag_when_set() {
+        let (front_matter, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  agent: technical-doc-writer\n---\n",
+        )
+        .unwrap();
+        let params = GITHUB_COPILOT_CLI_ENGINE
+            .generate_cli_params(&front_matter, &collect_extensions(&front_matter))
+            .unwrap();
+        assert!(
+            params.contains("--agent technical-doc-writer"),
+            "Expected --agent flag, got: {}",
+            params
+        );
+    }
+
+    #[test]
+    fn copilot_engine_no_agent_flag_by_default() {
+        let (front_matter, _) =
+            parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
+        let params = GITHUB_COPILOT_CLI_ENGINE
+            .generate_cli_params(&front_matter, &collect_extensions(&front_matter))
+            .unwrap();
+        assert!(
+            !params.contains("--agent"),
+            "Should not have --agent flag by default, got: {}",
+            params
+        );
+    }
+
+    #[test]
+    fn copilot_engine_agent_rejects_path_separators() {
+        let (front_matter, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  agent: ../evil/agent\n---\n",
+        )
+        .unwrap();
+        let result = GITHUB_COPILOT_CLI_ENGINE
+            .generate_cli_params(&front_matter, &collect_extensions(&front_matter));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid characters"));
+    }
+
+    #[test]
+    fn copilot_engine_agent_rejects_empty() {
+        let (front_matter, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  agent: \"\"\n---\n",
+        )
+        .unwrap();
+        let result = GITHUB_COPILOT_CLI_ENGINE
+            .generate_cli_params(&front_matter, &collect_extensions(&front_matter));
+        assert!(result.is_err());
+    }
+
+    // ─── engine.version (install steps) ─────────────────────────────────────
+
+    #[test]
+    fn install_steps_default_version() {
+        let (front_matter, _) =
+            parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
+        let steps = GITHUB_COPILOT_CLI_ENGINE
+            .generate_install_steps(&front_matter)
+            .unwrap();
+        assert!(
+            steps.contains(&format!("-Version {}", crate::compile::COPILOT_CLI_VERSION)),
+            "Should contain default version, got: {}",
+            steps
+        );
+        assert!(steps.contains("NuGetAuthenticate@1"));
+        assert!(steps.contains("Install Copilot CLI"));
+    }
+
+    #[test]
+    fn install_steps_custom_version() {
+        let (front_matter, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  version: \"1.2.3\"\n---\n",
+        )
+        .unwrap();
+        let steps = GITHUB_COPILOT_CLI_ENGINE
+            .generate_install_steps(&front_matter)
+            .unwrap();
+        assert!(
+            steps.contains("-Version 1.2.3"),
+            "Should contain custom version, got: {}",
+            steps
+        );
+    }
+
+    #[test]
+    fn install_steps_latest_version_omits_version_flag() {
+        let (front_matter, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  version: latest\n---\n",
+        )
+        .unwrap();
+        let steps = GITHUB_COPILOT_CLI_ENGINE
+            .generate_install_steps(&front_matter)
+            .unwrap();
+        assert!(
+            !steps.contains("-Version"),
+            "Should not contain -Version flag when 'latest', got: {}",
+            steps
+        );
+        // Still contains install steps
+        assert!(steps.contains("NuGetAuthenticate@1"));
+    }
+
+    #[test]
+    fn install_steps_version_rejects_shell_metacharacters() {
+        let (front_matter, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  version: \"1.0; evil\"\n---\n",
+        )
+        .unwrap();
+        let result = GITHUB_COPILOT_CLI_ENGINE.generate_install_steps(&front_matter);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid characters"));
+    }
+
+    // ─── engine.command ─────────────────────────────────────────────────────
+
+    #[test]
+    fn install_steps_skipped_when_command_set() {
+        let (front_matter, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  command: /usr/local/bin/my-copilot\n---\n",
+        )
+        .unwrap();
+        let steps = GITHUB_COPILOT_CLI_ENGINE
+            .generate_install_steps(&front_matter)
+            .unwrap();
+        assert!(
+            steps.is_empty(),
+            "Install steps should be empty when command is set, got: {}",
+            steps
+        );
+    }
+
+    #[test]
+    fn command_path_default() {
+        let (front_matter, _) =
+            parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
+        let cmd = GITHUB_COPILOT_CLI_ENGINE
+            .generate_command_path(&front_matter)
+            .unwrap();
+        assert_eq!(cmd, "/tmp/awf-tools/copilot");
+    }
+
+    #[test]
+    fn command_path_custom_absolute() {
+        let (front_matter, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  command: /usr/local/bin/my-copilot\n---\n",
+        )
+        .unwrap();
+        let cmd = GITHUB_COPILOT_CLI_ENGINE
+            .generate_command_path(&front_matter)
+            .unwrap();
+        assert_eq!(cmd, "/usr/local/bin/my-copilot");
+    }
+
+    #[test]
+    fn command_path_bare_binary() {
+        let (front_matter, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  command: my-copilot\n---\n",
+        )
+        .unwrap();
+        let cmd = GITHUB_COPILOT_CLI_ENGINE
+            .generate_command_path(&front_matter)
+            .unwrap();
+        assert_eq!(cmd, "my-copilot");
+    }
+
+    #[test]
+    fn command_path_rejects_relative_path() {
+        let (front_matter, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  command: bin/copilot\n---\n",
+        )
+        .unwrap();
+        let result = GITHUB_COPILOT_CLI_ENGINE.generate_command_path(&front_matter);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("absolute path"));
+    }
+
+    #[test]
+    fn command_path_rejects_shell_metacharacters() {
+        let (front_matter, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  command: \"/tmp/copilot; rm -rf /\"\n---\n",
+        )
+        .unwrap();
+        let result = GITHUB_COPILOT_CLI_ENGINE.generate_command_path(&front_matter);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("shell metacharacters"));
+    }
+
+    #[test]
+    fn command_path_rejects_path_traversal() {
+        let (front_matter, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  command: /tmp/../etc/evil\n---\n",
+        )
+        .unwrap();
+        let result = GITHUB_COPILOT_CLI_ENGINE.generate_command_path(&front_matter);
+        assert!(result.is_err());
+    }
 }
