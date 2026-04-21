@@ -191,6 +191,30 @@ impl EngineConfig {
             EngineConfig::Full(opts) => opts.timeout_minutes,
         }
     }
+
+    /// Get the engine CLI version override
+    pub fn version(&self) -> Option<&str> {
+        match self {
+            EngineConfig::Simple(_) => None,
+            EngineConfig::Full(opts) => opts.version.as_deref(),
+        }
+    }
+
+    /// Get the custom engine command path override
+    pub fn command(&self) -> Option<&str> {
+        match self {
+            EngineConfig::Simple(_) => None,
+            EngineConfig::Full(opts) => opts.command.as_deref(),
+        }
+    }
+
+    /// Get the custom Copilot agent identifier
+    pub fn agent(&self) -> Option<&str> {
+        match self {
+            EngineConfig::Simple(_) => None,
+            EngineConfig::Full(opts) => opts.agent.as_deref(),
+        }
+    }
 }
 
 impl SanitizeConfigTrait for EngineConfig {
@@ -213,6 +237,18 @@ pub struct EngineOptions {
     /// Workflow timeout in minutes
     #[serde(default, rename = "timeout-minutes")]
     pub timeout_minutes: Option<u32>,
+    /// Pin the engine CLI to a specific release version (e.g., "0.0.422").
+    /// When set to "latest", omits the -Version flag from the NuGet install step.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// Override the default engine executable path. Skips the default installation
+    /// step when set. Must be an absolute path or a bare binary name.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Reference a custom Copilot agent file in .github/agents/
+    /// (e.g., "technical-doc-writer" → .github/agents/technical-doc-writer.agent.md).
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 /// Tools configuration for the agent

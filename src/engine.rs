@@ -1,5 +1,6 @@
 use anyhow::Result;
 
+use crate::compile::COPILOT_CLI_VERSION;
 use crate::compile::extensions::{CompilerExtension, Extension};
 use crate::compile::types::{FrontMatter, McpConfig};
 
@@ -11,6 +12,14 @@ pub trait Engine {
     ) -> Result<String>;
 
     fn generate_agent_ado_env(&self, read_service_connection: Option<&str>) -> String;
+
+    /// Generate the pipeline install steps for the engine CLI.
+    /// Returns empty string when `engine.command` is set (custom command, skip install).
+    fn generate_install_steps(&self, front_matter: &FrontMatter) -> Result<String>;
+
+    /// Return the engine command path used inside the AWF container.
+    /// Returns `engine.command` when set, otherwise the default NuGet-installed path.
+    fn generate_command_path(&self, front_matter: &FrontMatter) -> Result<String>;
 }
 
 pub struct GitHubCopilotCliEngine;
@@ -192,6 +201,25 @@ impl Engine for GitHubCopilotCliEngine {
             params.push("--allow-all-paths".to_string());
         }
 
+        // --agent <identifier> when engine.agent is set — references a custom Copilot agent
+        // file in .github/agents/ (e.g., "technical-doc-writer" →
+        // .github/agents/technical-doc-writer.agent.md). Copilot-only feature.
+        if let Some(agent) = front_matter.engine.agent() {
+            // Validate: alphanumeric + hyphens only (no path separators, shell metacharacters)
+            if agent.is_empty()
+                || !agent
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-')
+            {
+                anyhow::bail!(
+                    "Agent identifier '{}' contains invalid characters. \
+                     Only ASCII alphanumerics and hyphens are allowed.",
+                    agent
+                );
+            }
+            params.push(format!("--agent {}", agent));
+        }
+
         Ok(params.join(" "))
     }
 
@@ -202,6 +230,111 @@ impl Engine for GitHubCopilotCliEngine {
                     .to_string()
             }
             None => String::new(),
+        }
+    }
+
+    fn generate_install_steps(&self, front_matter: &FrontMatter) -> Result<String> {
+        // When engine.command is set, skip install entirely — the user provides
+        // a pre-installed binary.
+        if front_matter.engine.command().is_some() {
+            return Ok(String::new());
+        }
+
+        // Determine the NuGet -Version flag
+        let version_flag = match front_matter.engine.version() {
+            Some(v) if v.eq_ignore_ascii_case("latest") => {
+                // "latest" → omit -Version flag; NuGet resolves to latest available
+                String::new()
+            }
+            Some(v) => {
+                // Validate version string for shell safety
+                if v.is_empty()
+                    || !v
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+                {
+                    anyhow::bail!(
+                        "Engine version '{}' contains invalid characters. \
+                         Only ASCII alphanumerics, '.', '-', and '+' are allowed.",
+                        v
+                    );
+                }
+                format!(" -Version {}", v)
+            }
+            None => {
+                // Default: use the pinned COPILOT_CLI_VERSION constant
+                format!(" -Version {}", COPILOT_CLI_VERSION)
+            }
+        };
+
+        Ok(format!(
+            r###"- task: NuGetAuthenticate@1
+  displayName: "Authenticate NuGet Feed"
+
+- task: NuGetCommand@2
+  displayName: "Install Copilot CLI"
+  inputs:
+    command: 'custom'
+    arguments: 'install Microsoft.Copilot.CLI.linux-x64 -Source "https://pkgs.dev.azure.com/msazuresphere/_packaging/Guardian1ESPTUpstreamOrgFeed/nuget/v3/index.json"{version_flag} -OutputDirectory $(Agent.TempDirectory)/tools -ExcludeVersion -NonInteractive'
+
+- bash: |
+    ls -la "$(Agent.TempDirectory)/tools"
+    echo "##vso[task.prependpath]$(Agent.TempDirectory)/tools/Microsoft.Copilot.CLI.linux-x64"
+
+    # Copy copilot binary to /tmp so it's accessible inside AWF container
+    # (AWF auto-mounts /tmp:/tmp:rw but not Agent.TempDirectory)
+    mkdir -p /tmp/awf-tools
+    cp "$(Agent.TempDirectory)/tools/Microsoft.Copilot.CLI.linux-x64/copilot" /tmp/awf-tools/copilot
+    chmod +x /tmp/awf-tools/copilot
+  displayName: "Add copilot to PATH"
+
+- bash: |
+    copilot --version
+    copilot -h
+  displayName: "Output copilot version""###,
+            version_flag = version_flag
+        ))
+    }
+
+    fn generate_command_path(&self, front_matter: &FrontMatter) -> Result<String> {
+        match front_matter.engine.command() {
+            Some(cmd) => {
+                // Validate: must be an absolute path or a bare binary name (no shell
+                // metacharacters). The command is embedded in a single-quoted bash string
+                // inside the AWF invocation, so no shell injection is possible, but we
+                // still validate for correctness and to catch operator mistakes.
+                if cmd.is_empty() {
+                    anyhow::bail!("Engine command path must not be empty.");
+                }
+                // Reject shell metacharacters and path traversal
+                if cmd.contains('\'')
+                    || cmd.contains('"')
+                    || cmd.contains('`')
+                    || cmd.contains('$')
+                    || cmd.contains(';')
+                    || cmd.contains('|')
+                    || cmd.contains('&')
+                    || cmd.contains('\n')
+                    || cmd.contains("..")
+                {
+                    anyhow::bail!(
+                        "Engine command '{}' contains shell metacharacters or path traversal. \
+                         Must be an absolute path or a bare binary name.",
+                        cmd
+                    );
+                }
+                // Must be an absolute path (starts with /) or a bare binary name (no slashes at all)
+                let has_slash = cmd.contains('/');
+                if has_slash && !cmd.starts_with('/') {
+                    anyhow::bail!(
+                        "Engine command '{}' must be an absolute path (starting with /) \
+                         or a bare binary name (no path separators).",
+                        cmd
+                    );
+                }
+                Ok(cmd.to_string())
+            }
+            None => Ok("/tmp/awf-tools/copilot".to_string()),
         }
     }
 }

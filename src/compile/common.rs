@@ -467,6 +467,20 @@ pub fn generate_copilot_params(
     crate::engine::GITHUB_COPILOT_CLI_ENGINE.generate_cli_params(front_matter, extensions)
 }
 
+/// Generate engine install steps for the pipeline template.
+/// Delegates to the engine implementation which handles `engine.version` and `engine.command`.
+pub fn generate_engine_install_steps(front_matter: &FrontMatter) -> Result<String> {
+    use crate::engine::Engine as _;
+    crate::engine::GITHUB_COPILOT_CLI_ENGINE.generate_install_steps(front_matter)
+}
+
+/// Generate the engine command path for the AWF invocation.
+/// Delegates to the engine implementation which handles `engine.command`.
+pub fn generate_copilot_command(front_matter: &FrontMatter) -> Result<String> {
+    use crate::engine::Engine as _;
+    crate::engine::GITHUB_COPILOT_CLI_ENGINE.generate_command_path(front_matter)
+}
+
 /// Compute the effective workspace based on explicit setting and checkout configuration.
 pub fn compute_effective_workspace(
     explicit_workspace: &Option<String>,
@@ -1969,6 +1983,10 @@ pub async fn compile_shared(
     // 4. Generate copilot params
     let copilot_params = generate_copilot_params(front_matter, extensions)?;
 
+    // 4b. Generate engine install steps and command path
+    let engine_install_steps = generate_engine_install_steps(front_matter)?;
+    let copilot_command = generate_copilot_command(front_matter)?;
+
     // 5. Compute workspace, working directory, triggers
     let effective_workspace = compute_effective_workspace(
         &front_matter.workspace,
@@ -2073,7 +2091,8 @@ pub async fn compile_shared(
     let replacements: Vec<(&str, &str)> = vec![
         ("{{ parameters }}", &parameters_yaml),
         ("{{ compiler_version }}", compiler_version),
-        ("{{ copilot_version }}", COPILOT_CLI_VERSION),
+        ("{{ engine_install_steps }}", &engine_install_steps),
+        ("{{ copilot_command }}", &copilot_command),
         ("{{ pool }}", &pool),
         ("{{ setup_job }}", &setup_job),
         ("{{ teardown_job }}", &teardown_job),

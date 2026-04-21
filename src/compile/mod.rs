@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 
 pub use common::parse_markdown;
 pub use common::HEADER_MARKER;
+pub use common::COPILOT_CLI_VERSION;
 pub use common::generate_copilot_params;
 pub use common::generate_mcpg_config;
 pub use common::MCPG_IMAGE;
