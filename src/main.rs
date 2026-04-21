@@ -4,6 +4,7 @@ mod compile;
 mod configure;
 mod detect;
 mod ecosystem_domains;
+mod engine;
 mod execute;
 mod fuzzy_schedule;
 mod init;
