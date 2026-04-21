@@ -927,7 +927,7 @@ pub async fn run(args: &RunArgs) -> Result<()> {
     debug!("Agent prompt written to {}", prompt_path.display());
 
     // ── 7. Build and run copilot command ─────────────────────────────
-    let copilot_params = compile::generate_copilot_params(&front_matter, &extensions, &compile_ctx)?;
+    let copilot_params = compile::generate_copilot_params(&extensions, &compile_ctx)?;
 
     println!("\n=== Copilot CLI ===");
 

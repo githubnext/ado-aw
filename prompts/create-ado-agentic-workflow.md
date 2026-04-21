@@ -62,20 +62,23 @@ name: "Weekly Dependency Updater"
 description: "Checks for outdated dependencies and opens PRs to update them"
 ```
 
-### Step 2 — AI Model (engine)
+### Step 2 — Engine
 
-Default is `claude-opus-4.5`. Only include `engine:` if the user requests a different model.
+Default engine is `copilot` (GitHub Copilot CLI). The `engine:` field is an engine identifier, not a model name. Only include `engine:` if you need to set a non-default model or timeout.
 
-| Value | Use when |
+The default model is `claude-opus-4.5`. To use a different model, use the object form:
+
+| Model | Use when |
 |---|---|
 | `claude-opus-4.5` | Default. Best reasoning, complex tasks. |
 | `claude-sonnet-4.5` | Faster, cheaper, simpler tasks. |
 | `gpt-5.2-codex` | Code-heavy tasks. |
 | `gemini-3-pro-preview` | Google ecosystem tasks. |
 
-Object form with extra options:
+Object form with model selection and extra options:
 ```yaml
 engine:
+  id: copilot
   model: claude-sonnet-4.5
   timeout-minutes: 30
 ```
@@ -427,7 +430,9 @@ Use `noop` with a brief summary of what was reviewed.
 ---
 name: "Dependency Updater"
 description: "Checks for outdated npm dependencies and opens PRs to update them"
-engine: claude-sonnet-4.5
+engine:
+  id: copilot
+  model: claude-sonnet-4.5
 schedule: weekly on monday around 9:00
 tools:
   azure-devops: true
