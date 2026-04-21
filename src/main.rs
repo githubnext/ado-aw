@@ -6,6 +6,7 @@ mod detect;
 mod ecosystem_domains;
 mod execute;
 mod fuzzy_schedule;
+mod engine;
 mod init;
 mod logging;
 mod mcp;
