@@ -76,12 +76,9 @@ impl Engine {
     ///
     /// When `engine.command` is set, install steps are skipped (empty string)
     /// because the user is providing their own engine binary.
-    ///
-    /// The `indent` parameter specifies the leading whitespace for each line
-    /// (e.g., `"      "` for standalone, `"                "` for 1ES).
-    pub fn install_steps(&self, front_matter: &FrontMatter, indent: &str) -> Result<String> {
+    pub fn install_steps(&self, front_matter: &FrontMatter) -> Result<String> {
         match self {
-            Engine::Copilot => copilot_install_steps(front_matter, indent),
+            Engine::Copilot => copilot_install_steps(front_matter),
         }
     }
 }
@@ -376,10 +373,11 @@ fn copilot_command_path(front_matter: &FrontMatter) -> Result<String> {
 /// The returned string uses no leading indentation — `replace_with_indent` will
 /// add the correct indent based on where `{{ engine_install_steps }}` appears
 /// in the template.
-fn copilot_install_steps(front_matter: &FrontMatter, _indent: &str) -> Result<String> {
+fn copilot_install_steps(front_matter: &FrontMatter) -> Result<String> {
     // When a custom command is provided, skip all install steps.
+    // Validation of the command path is handled by copilot_command_path(),
+    // which runs earlier in the compilation flow.
     if front_matter.engine.command().is_some() {
-        validate_engine_command(front_matter.engine.command().unwrap())?;
         return Ok(String::new());
     }
 
@@ -582,7 +580,7 @@ mod tests {
     #[test]
     fn install_steps_default_includes_version() {
         let (fm, _) = parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
-        let steps = Engine::Copilot.install_steps(&fm, "").unwrap();
+        let steps = Engine::Copilot.install_steps(&fm).unwrap();
         assert!(steps.contains("NuGetAuthenticate@1"));
         assert!(steps.contains(&format!("-Version {}", super::COPILOT_CLI_VERSION)));
         assert!(steps.contains("Add copilot to PATH"));
@@ -594,7 +592,7 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  version: \"0.0.422\"\n---\n",
         )
         .unwrap();
-        let steps = Engine::Copilot.install_steps(&fm, "").unwrap();
+        let steps = Engine::Copilot.install_steps(&fm).unwrap();
         assert!(steps.contains("-Version 0.0.422"));
         assert!(!steps.contains(&format!("-Version {}", super::COPILOT_CLI_VERSION)));
     }
@@ -605,7 +603,7 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  version: \"latest\"\n---\n",
         )
         .unwrap();
-        let steps = Engine::Copilot.install_steps(&fm, "").unwrap();
+        let steps = Engine::Copilot.install_steps(&fm).unwrap();
         assert!(!steps.contains("-Version "));
         assert!(steps.contains("NuGetAuthenticate@1"));
     }
@@ -616,7 +614,7 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  command: /usr/local/bin/copilot\n---\n",
         )
         .unwrap();
-        let steps = Engine::Copilot.install_steps(&fm, "").unwrap();
+        let steps = Engine::Copilot.install_steps(&fm).unwrap();
         assert!(steps.is_empty(), "install steps should be empty when engine.command is set");
     }
 
@@ -628,7 +626,7 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  version: \"1.0; rm -rf /\"\n---\n",
         )
         .unwrap();
-        let result = Engine::Copilot.install_steps(&fm, "");
+        let result = Engine::Copilot.install_steps(&fm);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("invalid characters"));
     }

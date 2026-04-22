@@ -1917,7 +1917,7 @@ pub async fn compile_shared(
 
     // 4. Generate copilot params
     let copilot_params = ctx.engine.args(ctx.front_matter, extensions)?;
-    let engine_install_steps = ctx.engine.install_steps(ctx.front_matter, "")?;
+    let engine_install_steps = ctx.engine.install_steps(ctx.front_matter)?;
     let copilot_command = ctx.engine.command_path(ctx.front_matter)?;
 
     // 5. Compute workspace, working directory, triggers
