@@ -199,14 +199,6 @@ impl EngineConfig {
         }
     }
 
-    /// Get the max turns setting (deprecated — ignored at compile time)
-    pub fn max_turns(&self) -> Option<u32> {
-        match self {
-            EngineConfig::Simple(_) => None,
-            EngineConfig::Full(opts) => opts.max_turns,
-        }
-    }
-
     /// Get the timeout in minutes
     pub fn timeout_minutes(&self) -> Option<u32> {
         match self {
@@ -299,9 +291,6 @@ pub struct EngineOptions {
     /// Custom engine executable path (skips default installation)
     #[serde(default)]
     pub command: Option<String>,
-    /// Maximum number of chat iterations per run (deprecated — not supported by Copilot CLI)
-    #[serde(default, rename = "max-turns")]
-    pub max_turns: Option<u32>,
     /// Workflow timeout in minutes
     #[serde(default, rename = "timeout-minutes")]
     pub timeout_minutes: Option<u32>,
@@ -936,32 +925,29 @@ mod tests {
         let ec = EngineConfig::Simple("copilot".to_string());
         assert_eq!(ec.engine_id(), "copilot");
         assert_eq!(ec.model(), None);
-        assert_eq!(ec.max_turns(), None);
         assert_eq!(ec.timeout_minutes(), None);
     }
 
     #[test]
     fn test_engine_config_full_object() {
-        let yaml = "id: copilot\nmodel: claude-sonnet-4.5\nmax-turns: 50\ntimeout-minutes: 30";
+        let yaml = "id: copilot\nmodel: claude-sonnet-4.5\ntimeout-minutes: 30";
         let opts: EngineOptions = serde_yaml::from_str(yaml).unwrap();
         let ec = EngineConfig::Full(opts);
         assert_eq!(ec.engine_id(), "copilot");
         assert_eq!(ec.model(), Some("claude-sonnet-4.5"));
-        assert_eq!(ec.max_turns(), Some(50));
         assert_eq!(ec.timeout_minutes(), Some(30));
     }
 
     #[test]
     fn test_engine_config_full_object_partial_fields() {
-        let yaml = "max-turns: 10";
+        let yaml = "timeout-minutes: 10";
         let opts: EngineOptions = serde_yaml::from_str(yaml).unwrap();
         let ec = EngineConfig::Full(opts);
         // id defaults to "copilot" when not specified
         assert_eq!(ec.engine_id(), "copilot");
         // model is None when not specified (engine impl decides default)
         assert_eq!(ec.model(), None);
-        assert_eq!(ec.max_turns(), Some(10));
-        assert_eq!(ec.timeout_minutes(), None);
+        assert_eq!(ec.timeout_minutes(), Some(10));
     }
 
     #[test]
@@ -969,7 +955,6 @@ mod tests {
         let ec = EngineConfig::default();
         assert_eq!(ec.engine_id(), "copilot");
         assert_eq!(ec.model(), None);
-        assert_eq!(ec.max_turns(), None);
         assert_eq!(ec.timeout_minutes(), None);
     }
 
@@ -980,19 +965,17 @@ mod tests {
         let ec: EngineConfig = serde_yaml::from_value(fm["engine"].clone()).unwrap();
         assert_eq!(ec.engine_id(), "copilot");
         assert_eq!(ec.model(), None);
-        assert_eq!(ec.max_turns(), None);
         assert_eq!(ec.timeout_minutes(), None);
     }
 
     #[test]
     fn test_engine_config_deserialized_as_object() {
         let yaml =
-            "engine:\n  id: copilot\n  model: claude-opus-4.5\n  max-turns: 50\n  timeout-minutes: 30";
+            "engine:\n  id: copilot\n  model: claude-opus-4.5\n  timeout-minutes: 30";
         let fm: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let ec: EngineConfig = serde_yaml::from_value(fm["engine"].clone()).unwrap();
         assert_eq!(ec.engine_id(), "copilot");
         assert_eq!(ec.model(), Some("claude-opus-4.5"));
-        assert_eq!(ec.max_turns(), Some(50));
         assert_eq!(ec.timeout_minutes(), Some(30));
     }
 

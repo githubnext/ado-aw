@@ -353,8 +353,6 @@ engine:
 | `env` | map | *(none)* | Engine-specific environment variables. **Not yet wired** — parsed but ignored with a warning. |
 | `command` | string | *(none)* | Custom engine executable path (skips default installation). **Not yet wired** — parsed but ignored with a warning. |
 
-> **Deprecated:** `max-turns` is still accepted in front matter for backwards compatibility but is ignored at compile time (a warning is emitted). It was specific to Claude Code and is not supported by Copilot CLI.
-
 > **Note:** Fields marked "not yet wired" are accepted in the schema for forward compatibility with gh-aw but produce a compile-time warning. Pipeline wiring for these fields is incremental.
 
 #### `timeout-minutes`

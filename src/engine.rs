@@ -243,13 +243,6 @@ fn copilot_args(
         );
     }
     params.push(format!("--model {}", model));
-    if front_matter.engine.max_turns().is_some() {
-        eprintln!(
-            "Warning: Agent '{}' has max-turns set, but max-turns is not supported by Copilot CLI \
-            and will be ignored. Consider removing it from the engine configuration.",
-            front_matter.name
-        );
-    }
     if let Some(timeout_minutes) = front_matter.engine.timeout_minutes() {
         if timeout_minutes == 0 {
             eprintln!(

