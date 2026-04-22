@@ -25,6 +25,13 @@ fn is_valid_hostname(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
 }
 
+/// Characters allowed in engine.version strings (e.g., "1.0.34", "latest").
+fn is_valid_version(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
 /// Characters allowed in individual engine.args entries.
 /// Strict allowlist to prevent shell injection inside AWF single-quoted commands.
 fn is_valid_arg(s: &str) -> bool {
@@ -155,7 +162,7 @@ impl Engine {
     /// Uses `engine_config.version()` if set in front matter, otherwise falls back
     /// to the pinned `COPILOT_CLI_VERSION` constant. Returns an empty string when
     /// `engine.command` is set (the user provides their own binary).
-    pub fn install_steps(&self, engine_config: &EngineConfig) -> String {
+    pub fn install_steps(&self, engine_config: &EngineConfig) -> Result<String> {
         match self {
             Engine::Copilot => copilot_install_steps(engine_config),
         }
@@ -435,9 +442,13 @@ fn copilot_env(engine_config: &EngineConfig) -> Result<String> {
             let value = &env_map[key];
 
             // Validate key: must be a valid env var name
-            let first_char = key.chars().next().unwrap();
-            if key.is_empty()
-                || !(first_char.is_ascii_alphabetic() || first_char == '_')
+            let Some(first_char) = key.chars().next() else {
+                anyhow::bail!(
+                    "engine.env contains an empty key. \
+                     Keys must match [A-Za-z_][A-Za-z0-9_]*."
+                );
+            };
+            if !(first_char.is_ascii_alphabetic() || first_char == '_')
                 || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
             {
                 anyhow::bail!(
@@ -492,17 +503,27 @@ fn copilot_env(engine_config: &EngineConfig) -> Result<String> {
 /// Produces the YAML block that authenticates with NuGet, installs the
 /// `Microsoft.Copilot.CLI.linux-x64` package, copies the binary to
 /// `/tmp/awf-tools/copilot`, and verifies the install.
-fn copilot_install_steps(engine_config: &EngineConfig) -> String {
+fn copilot_install_steps(engine_config: &EngineConfig) -> Result<String> {
     // Custom binary path → skip NuGet install entirely
     if engine_config.command().is_some() {
-        return String::new();
+        return Ok(String::new());
     }
 
     let version = engine_config
         .version()
         .unwrap_or(COPILOT_CLI_VERSION);
 
-    format!(
+    // Validate version to prevent NuGet argument injection — the version string
+    // is embedded directly into NuGet command arguments.
+    if !is_valid_version(version) {
+        anyhow::bail!(
+            "engine.version '{}' contains invalid characters. \
+             Only ASCII alphanumerics, '.', '_', and '-' are allowed.",
+            version
+        );
+    }
+
+    Ok(format!(
         "\
 - task: NuGetAuthenticate@1
   displayName: \"Authenticate NuGet Feed\"
@@ -528,7 +549,7 @@ fn copilot_install_steps(engine_config: &EngineConfig) -> String {
     copilot --version
     copilot -h
   displayName: \"Output copilot version\""
-    )
+    ))
 }
 
 /// Build the full AWF `--` command string for the Copilot CLI.
@@ -886,5 +907,56 @@ mod tests {
         ).unwrap();
         let env = Engine::Copilot.env(&fm.engine).unwrap();
         assert!(env.contains(r#"MY_VAR: "has \"quotes\"""#));
+    }
+
+    // ─── engine.version validation tests ──────────────────────────────────
+
+    #[test]
+    fn engine_version_rejects_injection() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  version: '1.0.0 -Source https://evil.com'\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.install_steps(&fm.engine);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid characters"));
+    }
+
+    #[test]
+    fn engine_version_rejects_single_quotes() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  version: \"1.0.0'\"\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.install_steps(&fm.engine);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn engine_version_accepts_valid() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  version: '1.0.34'\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.install_steps(&fm.engine).unwrap();
+        assert!(result.contains("-Version 1.0.34"));
+    }
+
+    #[test]
+    fn engine_version_accepts_latest() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  version: latest\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.install_steps(&fm.engine).unwrap();
+        assert!(result.contains("-Version latest"));
+    }
+
+    // ─── engine.env empty key test ────────────────────────────────────────
+
+    #[test]
+    fn engine_env_rejects_empty_key() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    \"\": value\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.env(&fm.engine);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty key"));
     }
 }
