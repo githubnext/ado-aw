@@ -1,6 +1,7 @@
 ---
 name: "Daily Clippy Complexity Reducer"
 description: "Runs Clippy daily, targets high cyclomatic complexity hotspots, and opens a PR with refactors"
+# Intentionally no fixed hour to use deterministic full-day schedule scattering.
 schedule: daily
 tools:
   bash:
