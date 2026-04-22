@@ -85,6 +85,29 @@ impl Engine {
             Engine::Copilot => copilot_install_steps(engine_config),
         }
     }
+
+    /// Generate the full AWF `--` command string for running the engine.
+    ///
+    /// Returns the content for the AWF `-- '<command>'` argument, including the
+    /// binary path, prompt delivery flag, MCP config flag, and all CLI arguments.
+    /// The engine controls how the prompt is provided (e.g., `--prompt "$(cat ...)"`
+    /// for Copilot) and how MCP config is referenced.
+    ///
+    /// `prompt_path` is the path to the prompt file inside the AWF container.
+    /// `mcp_config_path` is optionally the path to the MCP config file
+    /// (Some for Agent job, None for Detection job which has no MCP).
+    pub fn invocation(
+        &self,
+        front_matter: &FrontMatter,
+        extensions: &[Extension],
+        prompt_path: &str,
+        mcp_config_path: Option<&str>,
+    ) -> Result<String> {
+        let args = self.args(front_matter, extensions)?;
+        match self {
+            Engine::Copilot => Ok(copilot_invocation(prompt_path, mcp_config_path, &args)),
+        }
+    }
 }
 
 fn copilot_args(
@@ -356,6 +379,30 @@ fn copilot_install_steps(engine_config: &EngineConfig) -> String {
     copilot -h
   displayName: \"Output copilot version\""
     )
+}
+
+/// Build the full AWF `--` command string for the Copilot CLI.
+///
+/// The returned string goes inside `-- '...'` in the pipeline YAML.
+fn copilot_invocation(
+    prompt_path: &str,
+    mcp_config_path: Option<&str>,
+    args: &str,
+) -> String {
+    let mut parts = vec![
+        "/tmp/awf-tools/copilot".to_string(),
+        format!("--prompt \"$(cat {prompt_path})\""),
+    ];
+
+    if let Some(mcp_path) = mcp_config_path {
+        parts.push(format!("--additional-mcp-config @{mcp_path}"));
+    }
+
+    if !args.is_empty() {
+        parts.push(args.to_string());
+    }
+
+    parts.join(" ")
 }
 
 #[cfg(test)]

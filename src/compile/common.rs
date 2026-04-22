@@ -1910,8 +1910,19 @@ pub async fn compile_shared(
         }
     }
 
-    // 4. Generate copilot params
-    let copilot_params = ctx.engine.args(ctx.front_matter, extensions)?;
+    // 4. Generate engine invocations and install steps
+    let engine_run = ctx.engine.invocation(
+        ctx.front_matter,
+        extensions,
+        "/tmp/awf-tools/agent-prompt.md",
+        Some("/tmp/awf-tools/mcp-config.json"),
+    )?;
+    let engine_run_detection = ctx.engine.invocation(
+        ctx.front_matter,
+        extensions,
+        "/tmp/awf-tools/threat-analysis-prompt.md",
+        None,
+    )?;
     let engine_install_steps = ctx.engine.install_steps(&front_matter.engine);
 
     // 5. Compute workspace, working directory, triggers
@@ -2032,7 +2043,8 @@ pub async fn compile_shared(
         ("{{ agent }}", &agent_name),
         ("{{ agent_name }}", &front_matter.name),
         ("{{ agent_description }}", &front_matter.description),
-        ("{{ copilot_params }}", &copilot_params),
+        ("{{ engine_run }}", &engine_run),
+        ("{{ engine_run_detection }}", &engine_run_detection),
         ("{{ source_path }}", &source_path),
         // integrity_check must come before pipeline_path because the
         // integrity step content itself contains {{ pipeline_path }}.
@@ -2157,7 +2169,7 @@ mod tests {
     // ─── Engine::args (copilot params) ──────────────────────────────────────
 
     #[test]
-    fn test_copilot_params_bash_wildcard() {
+    fn test_engine_args_bash_wildcard() {
         let mut fm = minimal_front_matter();
         fm.tools = Some(crate::compile::types::ToolsConfig {
             bash: Some(vec![":*".to_string()]),
@@ -2171,7 +2183,7 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_params_bash_star_wildcard() {
+    fn test_engine_args_bash_star_wildcard() {
         let mut fm = minimal_front_matter();
         fm.tools = Some(crate::compile::types::ToolsConfig {
             bash: Some(vec!["*".to_string()]),
@@ -2185,7 +2197,7 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_params_bash_disabled() {
+    fn test_engine_args_bash_disabled() {
         let mut fm = minimal_front_matter();
         fm.tools = Some(crate::compile::types::ToolsConfig {
             bash: Some(vec![]),
@@ -2198,7 +2210,7 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_params_allow_all_paths_when_edit_enabled() {
+    fn test_engine_args_allow_all_paths_when_edit_enabled() {
         let fm = minimal_front_matter(); // edit defaults to true, bash defaults to wildcard
         let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("--allow-all-paths"), "edit enabled (default) should emit --allow-all-paths");
@@ -2207,7 +2219,7 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_params_no_allow_all_paths_when_edit_disabled() {
+    fn test_engine_args_no_allow_all_paths_when_edit_disabled() {
         let mut fm = minimal_front_matter();
         fm.tools = Some(crate::compile::types::ToolsConfig {
             bash: None,
@@ -2221,7 +2233,7 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_params_allow_all_tools_with_allow_all_paths() {
+    fn test_engine_args_allow_all_tools_with_allow_all_paths() {
         let mut fm = minimal_front_matter();
         fm.tools = Some(crate::compile::types::ToolsConfig {
             bash: Some(vec![":*".to_string()]),
@@ -2236,7 +2248,7 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_params_lean_adds_bash_commands() {
+    fn test_engine_args_lean_adds_bash_commands() {
         let mut fm = minimal_front_matter();
         fm.tools = Some(crate::compile::types::ToolsConfig {
             bash: Some(vec!["cat".to_string()]),
@@ -2256,7 +2268,7 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_params_lean_with_unrestricted_bash() {
+    fn test_engine_args_lean_with_unrestricted_bash() {
         let mut fm = minimal_front_matter();
         fm.tools = Some(crate::compile::types::ToolsConfig {
             bash: Some(vec![":*".to_string()]),
@@ -2274,7 +2286,7 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_params_custom_mcp_no_mcp_flag() {
+    fn test_engine_args_custom_mcp_no_mcp_flag() {
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "my-tool".to_string(),
@@ -2291,7 +2303,7 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_params_allow_tool_for_container_mcp() {
+    fn test_engine_args_allow_tool_for_container_mcp() {
         let mut fm = minimal_front_matter();
         fm.tools = Some(crate::compile::types::ToolsConfig {
             bash: Some(vec!["cat".to_string()]),
@@ -2311,7 +2323,7 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_params_allow_tool_for_url_mcp() {
+    fn test_engine_args_allow_tool_for_url_mcp() {
         let mut fm = minimal_front_matter();
         fm.tools = Some(crate::compile::types::ToolsConfig {
             bash: Some(vec!["cat".to_string()]),
@@ -2331,7 +2343,7 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_params_no_allow_tool_for_enabled_only_mcp() {
+    fn test_engine_args_no_allow_tool_for_enabled_only_mcp() {
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "my-tool".to_string(),
@@ -2342,7 +2354,7 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_params_allow_tool_mcps_sorted() {
+    fn test_engine_args_allow_tool_mcps_sorted() {
         let mut fm = minimal_front_matter();
         fm.tools = Some(crate::compile::types::ToolsConfig {
             bash: Some(vec!["cat".to_string()]),
@@ -2371,7 +2383,7 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_params_builtin_mcp_no_mcp_flag() {
+    fn test_engine_args_builtin_mcp_no_mcp_flag() {
         let mut fm = minimal_front_matter();
         fm.mcp_servers
             .insert("ado".to_string(), McpConfig::Enabled(true));
@@ -2381,7 +2393,7 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_params_max_turns_ignored() {
+    fn test_engine_args_max_turns_ignored() {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  max-turns: 50\n---\n",
         )
@@ -2391,14 +2403,14 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_params_no_max_turns_when_simple_engine() {
+    fn test_engine_args_no_max_turns_when_simple_engine() {
         let fm = minimal_front_matter();
         let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("--max-turns"));
     }
 
     #[test]
-    fn test_copilot_params_no_max_timeout() {
+    fn test_engine_args_no_max_timeout() {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  timeout-minutes: 30\n---\n",
         )
@@ -2408,14 +2420,14 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_params_no_max_timeout_when_simple_engine() {
+    fn test_engine_args_no_max_timeout_when_simple_engine() {
         let fm = minimal_front_matter();
         let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("--max-timeout"));
     }
 
     #[test]
-    fn test_copilot_params_max_turns_zero_not_emitted() {
+    fn test_engine_args_max_turns_zero_not_emitted() {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  max-turns: 0\n---\n",
         )
@@ -2425,7 +2437,7 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_params_max_timeout_zero_not_emitted() {
+    fn test_engine_args_max_timeout_zero_not_emitted() {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  timeout-minutes: 0\n---\n",
         )

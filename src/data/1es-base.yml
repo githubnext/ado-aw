@@ -342,7 +342,7 @@ extends:
                       --container-workdir "{{ working_directory }}" \
                       --log-level info \
                       --proxy-logs-dir "$(Agent.TempDirectory)/staging/logs/firewall" \
-                      -- '/tmp/awf-tools/copilot --prompt "$(cat /tmp/awf-tools/agent-prompt.md)" --additional-mcp-config @/tmp/awf-tools/mcp-config.json {{ copilot_params }}' \
+                      -- '{{ engine_run }}' \
                       2>&1 \
                       | sed -u 's/##vso\[/[VSO-FILTERED] vso[/g; s/##\[/[VSO-FILTERED] [/g' \
                       | tee "$AGENT_OUTPUT_FILE" \
@@ -508,7 +508,7 @@ extends:
                       --container-workdir "{{ working_directory }}" \
                       --log-level info \
                       --proxy-logs-dir "$(Agent.TempDirectory)/threat-analysis-logs/firewall" \
-                      -- '/tmp/awf-tools/copilot --prompt "$(cat /tmp/awf-tools/threat-analysis-prompt.md)" {{ copilot_params }}' \
+                      -- '{{ engine_run_detection }}' \
                       2>&1 \
                       | sed -u 's/##vso\[/[VSO-FILTERED] vso[/g; s/##\[/[VSO-FILTERED] [/g' \
                       | tee "$THREAT_OUTPUT_FILE" \

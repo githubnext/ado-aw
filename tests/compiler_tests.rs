@@ -105,8 +105,8 @@ fn test_compiled_yaml_structure() {
         "Template should contain agent_name marker"
     );
     assert!(
-        template_content.contains("{{ copilot_params }}"),
-        "Template should contain copilot_params marker"
+        template_content.contains("{{ engine_run }}"),
+        "Template should contain engine_run marker"
     );
     assert!(
         template_content.contains("{{ compiler_version }}"),
