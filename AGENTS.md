@@ -873,11 +873,15 @@ The step:
 
 If `permissions.read` is not configured, this marker is replaced with an empty string.
 
-## {{ copilot_ado_env }}
+## {{ engine_env }}
 
-Generates environment variable entries for the copilot AWF step when `permissions.read` is configured. Sets both `AZURE_DEVOPS_EXT_PAT` and `SYSTEM_ACCESSTOKEN` to the read service connection token (`SC_READ_TOKEN`).
+Generates engine-specific environment variable entries for the AWF sandbox step via `Engine::env()`. For the Copilot engine, this produces:
 
-If `permissions.read` is not configured, this marker is replaced with an empty string, and ADO access tokens are omitted from the copilot invocation.
+- `GITHUB_TOKEN: $(GITHUB_TOKEN)` — GitHub authentication
+- `GITHUB_READ_ONLY: 1` — Restricts GitHub API to read-only access
+- `COPILOT_OTEL_ENABLED`, `COPILOT_OTEL_EXPORTER_TYPE`, `COPILOT_OTEL_FILE_EXPORTER_PATH` — OpenTelemetry file-based tracing for agent statistics
+
+ADO access tokens (`AZURE_DEVOPS_EXT_PAT`, `SYSTEM_ACCESSTOKEN`) are not part of this marker — they are injected separately by `{{ acquire_ado_token }}` and extension pipeline variable mappings when `permissions.read` is configured.
 
 ## {{ acquire_write_token }}
 

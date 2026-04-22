@@ -156,6 +156,9 @@ impl<'a> CompileContext<'a> {
     }
 
     /// Create a context for tests (no async, no git remote inference).
+    // TODO: resolve engine from front_matter.engine when multiple engines are supported,
+    // instead of hardcoding Engine::Copilot. Currently safe because "copilot" is the only
+    // engine variant, but this will need to call get_engine() once more are added.
     #[cfg(test)]
     pub fn for_test(front_matter: &'a FrontMatter) -> Self {
         Self {
