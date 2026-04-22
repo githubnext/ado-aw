@@ -97,17 +97,6 @@ pub fn sanitize_config(input: &str) -> String {
     s
 }
 
-/// Light sanitization: only remove control characters.
-///
-/// Used for structural identifiers (e.g., wiki page paths) that must not have
-/// their content altered beyond stripping unsafe control sequences.
-pub fn sanitize_light(input: &str) -> String {
-    input
-        .chars()
-        .filter(|c| !c.is_control() || *c == '\n' || *c == '\t' || *c == '\r')
-        .collect()
-}
-
 // ── IS-09: Control character & ANSI escape removal ─────────────────────────
 
 /// Remove ANSI escape sequences and unsafe control characters.
@@ -657,25 +646,5 @@ mod tests {
     fn test_sanitize_config_preserves_normal_text() {
         let input = "MyProject\\Team\\Sprint 1";
         assert_eq!(sanitize_config(input), input);
-    }
-
-    // ── sanitize_light tests ──────────────────────────────────────────────
-
-    #[test]
-    fn test_sanitize_light_removes_control_chars() {
-        let input = "/Overview/\x01Page";
-        assert_eq!(sanitize_light(input), "/Overview/Page");
-    }
-
-    #[test]
-    fn test_sanitize_light_preserves_whitespace() {
-        let input = "path/with\ttab\nand\nnewlines";
-        assert_eq!(sanitize_light(input), input);
-    }
-
-    #[test]
-    fn test_sanitize_light_preserves_everything_else() {
-        let input = "<html> @user ##vso[cmd] fixes #42";
-        assert_eq!(sanitize_light(input), input, "Light sanitize should only remove control chars");
     }
 }
