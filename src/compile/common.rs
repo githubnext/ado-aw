@@ -134,10 +134,6 @@ pub fn generate_parameters(parameters: &[PipelineParameter]) -> Result<String> {
     Ok(format!("parameters:\n{}", yaml))
 }
 
-// Character allowlist validators, format validators, and injection
-// detectors are centralised in crate::validate.  The functions below
-// are thin wrappers or direct call-through to that module.
-
 /// Validate front matter `name` and `description` fields.
 ///
 /// These values are substituted directly into the pipeline YAML template and must not
@@ -1139,10 +1135,6 @@ pub fn generate_agentic_depends_on(setup_steps: &[serde_yaml::Value]) -> String 
         String::new()
     }
 }
-
-// Container, Docker, MCP, and env-var-name validators are centralised
-// in `crate::validate`.  The following re-exports preserve the `pub`
-// surface for callers within the compile module.
 
 /// Generate MCPG configuration from front matter.
 ///

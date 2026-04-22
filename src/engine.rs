@@ -410,6 +410,12 @@ fn copilot_env(engine_config: &EngineConfig) -> Result<String> {
             let value = &env_map[key];
 
             // Validate key: must be a valid env var name
+            if key.is_empty() {
+                anyhow::bail!(
+                    "engine.env contains an empty key. \
+                     Keys must match [A-Za-z_][A-Za-z0-9_]*."
+                );
+            }
             if !is_valid_env_var_name(key) {
                 anyhow::bail!(
                     "engine.env key '{}' is not a valid environment variable name. \
@@ -931,6 +937,6 @@ mod tests {
         ).unwrap();
         let result = Engine::Copilot.env(&fm.engine);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not a valid environment variable name"));
+        assert!(result.unwrap_err().to_string().contains("empty key"));
     }
 }
