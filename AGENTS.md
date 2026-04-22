@@ -346,12 +346,12 @@ engine:
 | `id` | string | `copilot` | Engine identifier. Currently only `copilot` (GitHub Copilot CLI) is supported. |
 | `model` | string | `claude-opus-4.5` | AI model to use. Options include `claude-sonnet-4.5`, `gpt-5.2-codex`, `gemini-3-pro-preview`, etc. |
 | `timeout-minutes` | integer | *(none)* | Maximum time in minutes the agent job is allowed to run. Sets `timeoutInMinutes` on the `Agent` job in the generated pipeline. |
-| `version` | string | *(none)* | Engine CLI version to install (e.g., `"0.0.422"`, `"latest"`). **Not yet wired** — parsed but ignored with a warning. |
-| `agent` | string | *(none)* | Custom agent file identifier (Copilot only). **Not yet wired** — parsed but ignored with a warning. |
+| `version` | string | *(none)* | Engine CLI version to install (e.g., `"0.0.422"`, `"latest"`). When set, overrides `COPILOT_CLI_VERSION`. When `"latest"`, omits the `-Version` flag from NuGet install. |
+| `agent` | string | *(none)* | Custom agent file identifier (Copilot only — references `.github/agents/<agent>.agent.md`). When set, adds `--agent <value>` to Copilot CLI args. Must be alphanumeric with hyphens only. |
 | `api-target` | string | *(none)* | Custom API endpoint hostname for GHES/GHEC (e.g., `"api.acme.ghe.com"`). **Not yet wired** — parsed but ignored with a warning. |
 | `args` | list | `[]` | Custom CLI arguments injected before the prompt. **Not yet wired** — parsed but ignored with a warning. |
 | `env` | map | *(none)* | Engine-specific environment variables. **Not yet wired** — parsed but ignored with a warning. |
-| `command` | string | *(none)* | Custom engine executable path (skips default installation). **Not yet wired** — parsed but ignored with a warning. |
+| `command` | string | *(none)* | Custom engine executable path (skips default installation). When set, the NuGet install steps are omitted and the specified path is used in the AWF invocation. Must contain only safe path characters. |
 
 > **Deprecated:** `max-turns` is still accepted in front matter for backwards compatibility but is ignored at compile time (a warning is emitted). It was specific to Claude Code and is not supported by Copilot CLI.
 
@@ -654,6 +654,7 @@ Should be replaced with the human-readable name from the front matter (e.g., "Da
 
 Additional params provided to copilot CLI. The compiler generates:
 - `--model <model>` - AI model from `engine` front matter field (default: claude-opus-4.5)
+- `--agent <agent>` - Custom agent file identifier from `engine.agent` (only when set; must be alphanumeric + hyphens)
 - `--no-ask-user` - Prevents interactive prompts
 - `--disable-builtin-mcps` - Disables all built-in Copilot CLI MCPs (single flag, no argument)
 - `--allow-all-tools` - When bash is omitted (default) or has a wildcard (`":*"` or `"*"`), allows all tools instead of individual `--allow-tool` flags
@@ -951,12 +952,25 @@ Should be replaced with the domain the AWF-sandboxed agent uses to reach MCPG on
 
 ## {{ copilot_version }}
 
-Should be replaced with the pinned version of the `Microsoft.Copilot.CLI.linux-x64` NuGet package (defined as `COPILOT_CLI_VERSION` constant in `src/compile/common.rs`). This version is used in the pipeline step that installs the Copilot CLI tool from Azure Artifacts.
+Should be replaced with the pinned version of the `Microsoft.Copilot.CLI.linux-x64` NuGet package (defined as `COPILOT_CLI_VERSION` constant in `src/compile/common.rs`). This constant serves as the default version; it can be overridden per-agent via the `engine.version` front matter field.
 
-The generated pipelines install the package from:
-```
-https://pkgs.dev.azure.com/msazuresphere/_packaging/Guardian1ESPTUpstreamOrgFeed/nuget/v3/index.json
-```
+**Note:** This marker is no longer used directly in the pipeline templates — it is consumed internally by `{{ engine_install_steps }}`. It remains available as a replacement marker for backwards compatibility.
+
+## {{ engine_install_steps }}
+
+Generates the engine CLI install steps (NuGet authentication, package install, binary copy, and version output). The behavior depends on the `engine` front matter configuration:
+
+- **Default** (no `engine.version` or `engine.command`): Generates the full NuGet install sequence using `COPILOT_CLI_VERSION`.
+- **`engine.version: "0.0.422"`**: Uses the specified version instead of `COPILOT_CLI_VERSION` in the `-Version` NuGet flag.
+- **`engine.version: "latest"`**: Omits the `-Version` flag entirely, installing the latest available package.
+- **`engine.command: /path/to/binary`**: Returns an empty string — no install steps are generated because the user provides their own engine binary.
+
+## {{ copilot_command }}
+
+Should be replaced with the path to the engine binary inside the AWF container.
+
+- **Default**: `/tmp/awf-tools/copilot` (the default location where the installed binary is copied).
+- **`engine.command: /path/to/binary`**: The custom path specified in front matter.
 
 ### 1ES-Specific Template Markers
 
