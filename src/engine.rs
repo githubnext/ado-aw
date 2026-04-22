@@ -61,6 +61,15 @@ impl Engine {
             Engine::Copilot => copilot_env(),
         }
     }
+
+    /// Return the engine's log directory path.
+    ///
+    /// Used by log collection steps to copy engine logs to pipeline artifacts.
+    pub fn log_dir(&self) -> &str {
+        match self {
+            Engine::Copilot => "~/.copilot/logs",
+        }
+    }
 }
 
 fn copilot_args(

@@ -1965,6 +1965,7 @@ pub async fn compile_shared(
         "SC_READ_TOKEN",
     );
     let engine_env = ctx.engine.env();
+    let engine_log_dir = ctx.engine.log_dir();
     let acquire_write_token = generate_acquire_ado_token(
         front_matter
             .permissions
@@ -2046,6 +2047,7 @@ pub async fn compile_shared(
         ("{{ agent_content }}", markdown_body),
         ("{{ acquire_ado_token }}", &acquire_read_token),
         ("{{ engine_env }}", &engine_env),
+        ("{{ engine_log_dir }}", engine_log_dir),
         ("{{ acquire_write_token }}", &acquire_write_token),
         ("{{ executor_ado_env }}", &executor_ado_env),
     ];

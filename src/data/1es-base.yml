@@ -412,8 +412,8 @@ extends:
                 - bash: |
                     # Copy all logs to output directory for artifact upload
                     mkdir -p "$(Agent.TempDirectory)/staging/logs"
-                    if [ -d ~/.copilot/logs ]; then
-                      cp -r ~/.copilot/logs/* "$(Agent.TempDirectory)/staging/logs/" 2>/dev/null || true
+                    if [ -d {{ engine_log_dir }} ]; then
+                      cp -r {{ engine_log_dir }}/* "$(Agent.TempDirectory)/staging/logs/" 2>/dev/null || true
                     fi
                     if [ -d ~/.ado-aw/logs ]; then
                       cp -r ~/.ado-aw/logs/* "$(Agent.TempDirectory)/staging/logs/" 2>/dev/null || true
@@ -631,9 +631,9 @@ extends:
                 - bash: |
                     # Copy all logs to analyzed outputs for artifact upload
                     mkdir -p "$(Agent.TempDirectory)/analyzed_outputs/logs"
-                    if [ -d ~/.copilot/logs ]; then
+                    if [ -d {{ engine_log_dir }} ]; then
                       mkdir -p "$(Agent.TempDirectory)/analyzed_outputs/logs/copilot"
-                      cp -r ~/.copilot/logs/* "$(Agent.TempDirectory)/analyzed_outputs/logs/copilot/" 2>/dev/null || true
+                      cp -r {{ engine_log_dir }}/* "$(Agent.TempDirectory)/analyzed_outputs/logs/copilot/" 2>/dev/null || true
                     fi
                     if [ -d ~/.ado-aw/logs ]; then
                       mkdir -p "$(Agent.TempDirectory)/analyzed_outputs/logs/ado-aw"
@@ -713,9 +713,9 @@ extends:
                     # Copy agent output log from analyzed_outputs for optimisation use
                     cp "$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)/logs/agent-output.txt" \
                       "$(Agent.TempDirectory)/staging/logs/agent-output.txt" 2>/dev/null || true
-                    if [ -d ~/.copilot/logs ]; then
+                    if [ -d {{ engine_log_dir }} ]; then
                       mkdir -p "$(Agent.TempDirectory)/staging/logs/copilot"
-                      cp -r ~/.copilot/logs/* "$(Agent.TempDirectory)/staging/logs/copilot/" 2>/dev/null || true
+                      cp -r {{ engine_log_dir }}/* "$(Agent.TempDirectory)/staging/logs/copilot/" 2>/dev/null || true
                     fi
                     if [ -d ~/.ado-aw/logs ]; then
                       mkdir -p "$(Agent.TempDirectory)/staging/logs/ado-aw"
