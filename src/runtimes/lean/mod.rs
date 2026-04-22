@@ -8,6 +8,10 @@
 //! Lean is installed via elan (the Lean toolchain manager) into `$HOME/.elan/bin`,
 //! then symlinked into `/tmp/awf-tools/` for AWF chroot compatibility.
 
+pub mod extension;
+
+pub use extension::LeanExtension;
+
 use ado_aw_derive::SanitizeConfig;
 use serde::Deserialize;
 

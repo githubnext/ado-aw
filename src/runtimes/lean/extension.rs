@@ -1,7 +1,7 @@
 // ─── Lean 4 ──────────────────────────────────────────────────────────
 
-use super::{CompileContext, CompilerExtension, ExtensionPhase};
-use crate::runtimes::lean::{self, LEAN_BASH_COMMANDS, LeanRuntimeConfig};
+use crate::compile::extensions::{CompileContext, CompilerExtension, ExtensionPhase};
+use super::{LEAN_BASH_COMMANDS, LeanRuntimeConfig, generate_lean_install};
 use anyhow::Result;
 
 /// Lean 4 runtime extension.
@@ -53,7 +53,7 @@ the toolchain. Lean files use the `.lean` extension.\n"
     }
 
     fn prepare_steps(&self) -> Vec<String> {
-        vec![lean::generate_lean_install(&self.config)]
+        vec![generate_lean_install(&self.config)]
     }
 
     fn validate(&self, ctx: &CompileContext) -> Result<Vec<String>> {

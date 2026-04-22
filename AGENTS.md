@@ -29,7 +29,10 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 │   │   ├── common.rs     # Shared helpers across targets
 │   │   ├── standalone.rs # Standalone pipeline compiler
 │   │   ├── onees.rs      # 1ES Pipeline Template compiler
-│   │   ├── extensions.rs # CompilerExtension trait for runtimes/tools
+│   │   ├── extensions/   # CompilerExtension trait and infrastructure extensions
+│   │   │   ├── mod.rs    # Trait, Extension enum, collect_extensions(), re-exports
+│   │   │   ├── github.rs # Always-on GitHub MCP extension
+│   │   │   └── safe_outputs.rs # Always-on SafeOutputs MCP extension
 │   │   └── types.rs      # Front matter grammar and types
 │   ├── init.rs           # Repository initialization for AI-first authoring
 │   ├── execute.rs        # Stage 3 safe output execution
@@ -65,18 +68,26 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 │   │   ├── update_wiki_page.rs
 │   │   ├── update_work_item.rs
 │   │   └── upload_attachment.rs
-│   ├── runtimes/         # Runtime environment implementations
+│   ├── runtimes/         # Runtime environment implementations (one dir per runtime)
 │   │   ├── mod.rs        # Module entry point
-│   │   └── lean.rs       # Lean 4 theorem prover runtime
+│   │   └── lean/         # Lean 4 theorem prover runtime
+│   │       ├── mod.rs    # Config types, install helpers
+│   │       └── extension.rs # CompilerExtension impl
 │   ├── data/
 │   │   ├── base.yml          # Base pipeline template for standalone
 │   │   ├── 1es-base.yml      # Base pipeline template for 1ES target
 │   │   ├── ecosystem_domains.json # Network allowlists per ecosystem
 │   │   ├── init-agent.md     # Dispatcher agent template for `init` command
 │   │   └── threat-analysis.md # Threat detection analysis prompt template
-│   └── tools/            # First-class tool implementations (compiler auto-configures)
+│   └── tools/            # First-class tool implementations (one dir per tool)
 │       ├── mod.rs
-│       └── cache_memory.rs
+│       ├── azure_devops/  # Azure DevOps MCP tool
+│       │   ├── mod.rs
+│       │   └── extension.rs # CompilerExtension impl
+│       └── cache_memory/  # Persistent agent memory tool
+│           ├── mod.rs
+│           ├── extension.rs # CompilerExtension impl (compile-time)
+│           └── execute.rs   # Stage 3 runtime (validate/copy)
 ├── examples/             # Example agent definitions
 ├── tests/                # Integration tests and fixtures
 ├── Cargo.toml            # Rust dependencies
@@ -1481,13 +1492,24 @@ When extending the compiler:
 3. **New front matter fields**: Add fields to `FrontMatter` in `src/compile/types.rs`
 4. **New template markers**: Handle replacements in the target-specific compiler (e.g., `standalone.rs` or `onees.rs`)
 5. **New safe-output tools**: Add to `src/safeoutputs/` — implement `ToolResult`, `Executor`, register in `mod.rs`, `mcp.rs`, `execute.rs`
-6. **New first-class tools**: Add to `src/tools/` — extend `ToolsConfig` in `types.rs`, implement `CompilerExtension` trait in `src/compile/extensions.rs`, add collection in `collect_extensions()`
-7. **New runtimes**: Add to `src/runtimes/` — extend `RuntimesConfig` in `types.rs`, implement `CompilerExtension` trait in `src/compile/extensions.rs`, add collection in `collect_extensions()`
+6. **New first-class tools**: Create `src/tools/<name>/` with `mod.rs` and `extension.rs` (CompilerExtension impl). Add `execute.rs` if the tool has Stage 3 runtime logic. Extend `ToolsConfig` in `types.rs`, add collection in `collect_extensions()`
+7. **New runtimes**: Create `src/runtimes/<name>/` with `mod.rs` (config types) and `extension.rs` (CompilerExtension impl). Extend `RuntimesConfig` in `types.rs`, add collection in `collect_extensions()`
 8. **Validation**: Add compile-time validation for safe outputs and permissions
+
+#### Code Organization Principles
+
+The codebase follows a **colocation** principle for tools and runtimes:
+
+- **Tools** (`tools:` front matter) live in `src/tools/<name>/` — one directory per tool, containing both compile-time (`extension.rs`) and runtime (`execute.rs`) code. This means you can look at a single directory to understand everything a tool does.
+- **Runtimes** (`runtimes:` front matter) live in `src/runtimes/<name>/` — one directory per runtime, with config types in `mod.rs` and the `CompilerExtension` impl in `extension.rs`.
+- **Infrastructure extensions** (GitHub MCP, SafeOutputs MCP) that are always-on and not user-configured stay in `src/compile/extensions/`. These are internal plumbing, not user-facing tools.
+- **Safe outputs** (`safe-outputs:` front matter) stay in `src/safeoutputs/` — they follow a different lifecycle (Stage 1 NDJSON → Stage 3 execution) and are not `CompilerExtension` implementations.
+
+The `src/compile/extensions/mod.rs` file owns the `CompilerExtension` trait, the `Extension` enum, and `collect_extensions()`. It re-exports tool/runtime extension types from their colocated homes so the rest of the compiler can import them from a single path.
 
 #### `CompilerExtension` Trait
 
-Runtimes and first-party tools declare their compilation requirements via the `CompilerExtension` trait (`src/compile/extensions.rs`). Instead of scattering special-case `if` blocks across the compiler, each runtime/tool implements this trait and the compiler collects requirements generically:
+Runtimes and first-party tools declare their compilation requirements via the `CompilerExtension` trait (`src/compile/extensions/mod.rs`). Instead of scattering special-case `if` blocks across the compiler, each runtime/tool implements this trait and the compiler collects requirements generically:
 
 ```rust
 pub trait CompilerExtension: Send {
@@ -1501,7 +1523,7 @@ pub trait CompilerExtension: Send {
 }
 ```
 
-To add a new runtime or tool: (1) create a struct implementing `CompilerExtension`, (2) add a collection check in `collect_extensions()`. No other files need modification.
+To add a new runtime or tool: (1) create a directory under `src/tools/` or `src/runtimes/`, (2) implement `CompilerExtension` in `extension.rs`, (3) add a variant to the `Extension` enum and a collection check in `collect_extensions()` in `src/compile/extensions/mod.rs`.
 
 ### Security Considerations
 

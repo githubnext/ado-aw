@@ -1,4 +1,4 @@
-use super::{CompilerExtension, ExtensionPhase};
+use crate::compile::extensions::{CompilerExtension, ExtensionPhase};
 use crate::compile::types::CacheMemoryToolConfig;
 
 /// Cache memory tool extension.
