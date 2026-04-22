@@ -17,34 +17,13 @@ use std::collections::HashMap;
 /// ADO MCP), and compile-time validation (org inference, duplicate MCP).
 pub struct AzureDevOpsExtension {
     config: AzureDevOpsToolConfig,
-    auth_mode: AdoAuthMode,
-}
-
-/// Authentication mode for the ADO MCP server.
-///
-/// Pipelines use bearer tokens (JWT from ARM service connections).
-/// Local development uses PATs (Personal Access Tokens).
-#[derive(Debug, Clone, Copy, Default)]
-pub enum AdoAuthMode {
-    /// `-a envvar` + `ADO_MCP_AUTH_TOKEN` — bearer JWT from ARM (pipeline default)
-    #[default]
-    Bearer,
-    /// `-a pat` + `AZURE_DEVOPS_EXT_PAT` — Personal Access Token (local dev)
-    Pat,
 }
 
 impl AzureDevOpsExtension {
     pub fn new(config: AzureDevOpsToolConfig) -> Self {
         Self {
             config,
-            auth_mode: AdoAuthMode::default(),
         }
-    }
-
-    /// Set the authentication mode (e.g., `AdoAuthMode::Pat` for local runs).
-    pub fn with_auth_mode(mut self, mode: AdoAuthMode) -> Self {
-        self.auth_mode = mode;
-        self
     }
 }
 
@@ -124,12 +103,8 @@ impl CompilerExtension for AzureDevOpsExtension {
 
         // ADO MCP authentication: the @azure-devops/mcp npm package accepts
         // auth type via CLI arg (-a) and token via env var.
-        //   Bearer: `-a envvar` reads ADO_MCP_AUTH_TOKEN (pipeline JWT from ARM)
-        //   Pat:    `-a pat`    reads PERSONAL_ACCESS_TOKEN (base64-encoded PAT)
-        let (auth_flag, token_var) = match self.auth_mode {
-            AdoAuthMode::Bearer => ("envvar", "ADO_MCP_AUTH_TOKEN"),
-            AdoAuthMode::Pat => ("pat", "PERSONAL_ACCESS_TOKEN"),
-        };
+        // Bearer: `-a envvar` reads ADO_MCP_AUTH_TOKEN (pipeline JWT from ARM)
+        let (auth_flag, token_var) = ("envvar", "ADO_MCP_AUTH_TOKEN");
         entrypoint_args.extend(["-a".to_string(), auth_flag.to_string()]);
 
         let env = Some(HashMap::from([(
@@ -180,14 +155,9 @@ impl CompilerExtension for AzureDevOpsExtension {
         Ok(warnings)
     }
     fn required_pipeline_vars(&self) -> Vec<PipelineEnvMapping> {
-        match self.auth_mode {
-            AdoAuthMode::Bearer => vec![PipelineEnvMapping {
-                container_var: "ADO_MCP_AUTH_TOKEN".to_string(),
-                pipeline_var: "SC_READ_TOKEN".to_string(),
-            }],
-            // PAT mode: no pipeline var mapping needed — the PAT is passed
-            // directly via AZURE_DEVOPS_EXT_PAT in the MCPG env file.
-            AdoAuthMode::Pat => vec![],
-        }
+        vec![PipelineEnvMapping {
+            container_var: "ADO_MCP_AUTH_TOKEN".to_string(),
+            pipeline_var: "SC_READ_TOKEN".to_string(),
+        }]
     }
 }

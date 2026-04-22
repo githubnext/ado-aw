@@ -19,9 +19,6 @@ use std::path::{Path, PathBuf};
 
 pub use common::parse_markdown;
 pub use common::HEADER_MARKER;
-pub use common::generate_mcpg_config;
-pub use common::MCPG_IMAGE;
-pub use common::MCPG_VERSION;
 pub use common::ADO_MCP_ENTRYPOINT;
 pub use common::ADO_MCP_IMAGE;
 pub use common::ADO_MCP_PACKAGE;
