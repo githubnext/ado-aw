@@ -68,7 +68,7 @@ Tests checkout step generation for:
 - Empty repository list
 - Multiple repositories
 
-### `test_generate_copilot_params_*` (3 tests)
+### `test_generate_engine_args_*` (3 tests)
 Tests copilot parameter generation for:
 - Built-in MCPs (enabled)
 - Built-in MCPs (disabled)
@@ -101,7 +101,7 @@ Verifies that the base template contains all required markers:
 - `{{ checkout_repositories }}`
 - `{{ agent }}`
 - `{{ agent_name }}`
-- `{{ copilot_params }}`
+- `{{ engine_run }}`
 
 ### `test_example_file_structure`
 Validates the example file (`examples/sample-agent.md`) to ensure:

@@ -3039,7 +3039,7 @@ fn test_1es_compiled_output_is_valid_yaml() {
     );
     assert!(
         compiled.contains("copilot --prompt"),
-        "1ES output should contain copilot invocation (copilot_params substituted)"
+        "1ES output should contain copilot invocation (engine_run substituted)"
     );
     assert!(
         compiled.contains("threat-analysis"),

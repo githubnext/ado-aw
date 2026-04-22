@@ -28,9 +28,9 @@ Added 18 comprehensive unit tests in the `tests` module at the end of `main.rs`:
 - `test_generate_checkout_steps_multiple` - Tests multiple checkout steps
 
 #### Copilot Parameters (3 tests)
-- `test_copilot_params_custom_mcp_no_mcp_flag` - Verifies custom MCPs don't generate --mcp flags
-- `test_copilot_params_builtin_mcp_no_mcp_flag` - Verifies built-in MCPs don't generate --mcp flags (all MCPs handled via firewall)
-- `test_generate_copilot_params_custom_mcp_skipped` - Verifies custom MCPs are skipped
+- `test_engine_args_custom_mcp_no_mcp_flag` - Verifies custom MCPs don't generate --mcp flags
+- `test_engine_args_builtin_mcp_no_mcp_flag` - Verifies built-in MCPs don't generate --mcp flags (all MCPs handled via firewall)
+- `test_generate_engine_args_custom_mcp_skipped` - Verifies custom MCPs are skipped
 
 #### Markdown Parsing (4 tests)
 - `test_parse_markdown_valid` - Tests valid markdown with front matter
