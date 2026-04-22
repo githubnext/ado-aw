@@ -6,4 +6,4 @@
 
 pub mod extension;
 
-pub use extension::{AdoAuthMode, AzureDevOpsExtension};
+pub use extension::AzureDevOpsExtension;

@@ -12,8 +12,6 @@ mod logging;
 mod mcp;
 mod ndjson;
 pub mod runtimes;
-#[cfg(debug_assertions)]
-mod run;
 pub mod sanitize;
 mod safeoutputs;
 mod tools;
@@ -132,30 +130,6 @@ enum Commands {
         #[arg(long, value_delimiter = ',')]
         definition_ids: Option<Vec<u64>>,
     },
-    /// Run agent locally (local development mode)
-    #[cfg(debug_assertions)]
-    Run {
-        /// Path to the agent markdown file
-        path: String,
-        /// Azure DevOps PAT for API access (base64-encoded as PERSONAL_ACCESS_TOKEN for MCPG in local dev)
-        #[arg(long, env = "AZURE_DEVOPS_EXT_PAT")]
-        pat: Option<String>,
-        /// Azure DevOps organization URL
-        #[arg(long)]
-        org: Option<String>,
-        /// Azure DevOps project name
-        #[arg(long)]
-        project: Option<String>,
-        /// Dry-run: skip real ADO API calls in execute stage
-        #[arg(long)]
-        dry_run: bool,
-        /// Skip MCPG/Docker (only SafeOutputs MCP available)
-        #[arg(long)]
-        skip_mcpg: bool,
-        /// Output directory for safe outputs and artifacts
-        #[arg(long)]
-        output_dir: Option<PathBuf>,
-    },
 }
 
 #[derive(Parser, Debug)]
@@ -184,8 +158,6 @@ async fn main() -> Result<()> {
         Some(Commands::McpHttp { .. }) => "mcp-http",
         Some(Commands::Init { .. }) => "init",
         Some(Commands::Configure { .. }) => "configure",
-        #[cfg(debug_assertions)]
-        Some(Commands::Run { .. }) => "run",
         None => "ado-aw",
     };
 
@@ -390,28 +362,6 @@ async fn main() -> Result<()> {
                     dry_run,
                     definition_ids.as_deref(),
                 )
-                .await?;
-            }
-            #[cfg(debug_assertions)]
-            Commands::Run {
-                path,
-                pat,
-                org,
-                project,
-                dry_run,
-                skip_mcpg,
-                output_dir,
-            } => {
-                run::run(&run::RunArgs {
-                    agent_path: PathBuf::from(path),
-                    pat,
-                    org,
-                    project,
-                    dry_run,
-                    skip_mcpg,
-                    output_dir,
-                    debug: args.debug,
-                })
                 .await?;
             }
         }

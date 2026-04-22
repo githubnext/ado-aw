@@ -366,7 +366,7 @@ mod github;
 mod safe_outputs;
 
 // Re-export tool/runtime extensions from their colocated homes
-pub use crate::tools::azure_devops::{AdoAuthMode, AzureDevOpsExtension};
+pub use crate::tools::azure_devops::AzureDevOpsExtension;
 pub use crate::tools::cache_memory::CacheMemoryExtension;
 pub use github::GitHubExtension;
 pub use crate::runtimes::lean::LeanExtension;
@@ -402,16 +402,6 @@ extension_enum! {
 /// (runtimes in `RuntimesConfig` field order, tools in `ToolsConfig`
 /// field order).
 pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
-    collect_extensions_with_auth(front_matter, AdoAuthMode::default())
-}
-
-/// Collect extensions with an explicit ADO auth mode.
-///
-/// Used by `ado-aw run` to switch from bearer (pipeline default) to PAT auth.
-pub fn collect_extensions_with_auth(
-    front_matter: &FrontMatter,
-    ado_auth: AdoAuthMode,
-) -> Vec<Extension> {
     let mut extensions = Vec::new();
 
     // ── Always-on internal extensions ──
@@ -430,7 +420,7 @@ pub fn collect_extensions_with_auth(
         if let Some(ado) = tools.azure_devops.as_ref() {
             if ado.is_enabled() {
                 extensions.push(Extension::AzureDevOps(
-                    AzureDevOpsExtension::new(ado.clone()).with_auth_mode(ado_auth),
+                    AzureDevOpsExtension::new(ado.clone()),
                 ));
             }
         }
