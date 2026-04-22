@@ -16,7 +16,6 @@ use super::common::{
     AWF_VERSION, MCPG_VERSION, MCPG_IMAGE, MCPG_PORT, MCPG_DOMAIN,
     CompileConfig, compile_shared,
     generate_allowed_domains,
-    generate_cancel_previous_builds,
     generate_enabled_tools_args,
     generate_mcpg_config, generate_mcpg_docker_env, generate_mcpg_step_env,
 };
@@ -47,12 +46,11 @@ impl Compiler for StandaloneCompiler {
 
         // Build compile context for MCPG config generation
         let input_dir = input_path.parent().unwrap_or(std::path::Path::new("."));
-        let ctx = super::extensions::CompileContext::new(front_matter, input_dir).await;
+        let ctx = super::extensions::CompileContext::new(front_matter, input_dir).await?;
 
         // Standalone-specific values
         let allowed_domains = generate_allowed_domains(front_matter, &extensions)?;
         let enabled_tools_args = generate_enabled_tools_args(front_matter);
-        let cancel_previous_builds = generate_cancel_previous_builds(&front_matter.triggers);
 
         let config_obj = generate_mcpg_config(front_matter, &ctx, &extensions)?;
         let mcpg_config_json =
@@ -70,7 +68,6 @@ impl Compiler for StandaloneCompiler {
                 ("{{ mcpg_domain }}".into(), MCPG_DOMAIN.into()),
                 ("{{ allowed_domains }}".into(), allowed_domains),
                 ("{{ enabled_tools_args }}".into(), enabled_tools_args),
-                ("{{ cancel_previous_builds }}".into(), cancel_previous_builds),
                 ("{{ mcpg_config }}".into(), mcpg_config_json),
                 ("{{ mcpg_docker_env }}".into(), mcpg_docker_env),
                 ("{{ mcpg_step_env }}".into(), mcpg_step_env),

@@ -19,7 +19,6 @@ use std::path::{Path, PathBuf};
 
 pub use common::parse_markdown;
 pub use common::HEADER_MARKER;
-pub use common::generate_copilot_params;
 pub use common::generate_mcpg_config;
 pub use common::MCPG_IMAGE;
 pub use common::MCPG_VERSION;
@@ -76,7 +75,7 @@ pub async fn compile_pipeline(
     info!("Parsed agent: '{}'", front_matter.name);
     debug!("Description: {}", front_matter.description);
     debug!("Target: {:?}", front_matter.target);
-    debug!("Engine model: {}", front_matter.engine.model());
+    debug!("Engine: {} (model: {})", front_matter.engine.engine_id(), front_matter.engine.model().unwrap_or("default"));
     debug!("Schedule: {:?}", front_matter.schedule);
     debug!("Repositories: {}", front_matter.repositories.len());
     debug!("MCP servers configured: {}", front_matter.mcp_servers.len());

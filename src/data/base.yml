@@ -27,8 +27,6 @@ jobs:
 
       {{ acquire_ado_token }}
 
-      {{ cancel_previous_builds }}
-
       - task: NuGetAuthenticate@1
         displayName: "Authenticate NuGet Feed"
 
@@ -357,12 +355,7 @@ jobs:
         displayName: "Run copilot (AWF network isolated)"
         workingDirectory: {{ working_directory }}
         env:
-          {{ copilot_ado_env }}
-          GITHUB_TOKEN: $(GITHUB_TOKEN)
-          GITHUB_READ_ONLY: 1
-          COPILOT_OTEL_ENABLED: "true"
-          COPILOT_OTEL_EXPORTER_TYPE: "file"
-          COPILOT_OTEL_FILE_EXPORTER_PATH: "/tmp/awf-tools/staging/otel.jsonl"
+          {{ engine_env }}
 
       - bash: |
           # Copy safe outputs from /tmp back to staging for artifact publish

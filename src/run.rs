@@ -659,7 +659,7 @@ pub async fn run(args: &RunArgs) -> Result<()> {
 
     println!("=== ado-aw run: {} ===", front_matter.name);
     println!("Description: {}", front_matter.description);
-    println!("Engine: {}", front_matter.engine.model());
+    println!("Engine: {} (model: {})", front_matter.engine.engine_id(), front_matter.engine.model().unwrap_or("default"));
     if args.dry_run {
         println!("Mode: dry-run (ADO API calls will be skipped in execute stage)");
     }
@@ -759,6 +759,11 @@ pub async fn run(args: &RunArgs) -> Result<()> {
         println!("Warning: Docker not available, running without MCPG");
     }
 
+    // Build compile context (resolves engine + ADO context) — needed by both
+    // MCPG config generation and copilot params generation.
+    let compile_ctx =
+        compile::extensions::CompileContext::new(&front_matter, &working_dir).await?;
+
     if use_mcpg {
         // Pick a free high port for MCPG — port 80 (used in pipelines) requires
         // elevated privileges on most systems and isn't suitable for local dev.
@@ -766,8 +771,6 @@ pub async fn run(args: &RunArgs) -> Result<()> {
             .context("Failed to find a free port for MCPG")?;
 
         println!("\n=== Generating MCPG config ===");
-        let compile_ctx =
-            compile::extensions::CompileContext::new(&front_matter, &working_dir).await;
 
         let mut mcpg_config =
             compile::generate_mcpg_config(&front_matter, &compile_ctx, &extensions)?;
@@ -924,7 +927,7 @@ pub async fn run(args: &RunArgs) -> Result<()> {
     debug!("Agent prompt written to {}", prompt_path.display());
 
     // ── 7. Build and run copilot command ─────────────────────────────
-    let copilot_params = compile::generate_copilot_params(&front_matter, &extensions)?;
+    let copilot_params = compile_ctx.engine.args(compile_ctx.front_matter, &extensions)?;
 
     println!("\n=== Copilot CLI ===");
 
@@ -1071,7 +1074,7 @@ pub async fn run(args: &RunArgs) -> Result<()> {
 /// Does NOT handle backslash escapes, single quotes, or nested quotes.
 ///
 /// This is safe because the input is compiler-controlled output from
-/// `generate_copilot_params()`, which only produces double-quoted values
+/// `Engine::args()`, which only produces double-quoted values
 /// with no escapes. If params ever gain more complex quoting, consider
 /// using the `shell-words` crate.
 fn shell_words(s: &str) -> Vec<String> {

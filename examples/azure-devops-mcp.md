@@ -2,7 +2,6 @@
 name: "ADO Work Item Triage"
 description: "Triages work items using the Azure DevOps MCP"
 schedule: daily around 9:00
-engine: claude-sonnet-4.5
 tools:
   azure-devops:
     toolsets: [core, work, work-items]

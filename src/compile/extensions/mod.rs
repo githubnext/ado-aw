@@ -83,6 +83,7 @@ pub struct McpgConfig {
 // ──────────────────────────────────────────────────────────────────────
 
 use crate::configure::AdoContext;
+use crate::engine::{self, Engine};
 use std::path::Path;
 
 /// Metadata resolved at compile time from the local environment.
@@ -99,20 +100,25 @@ pub struct CompileContext<'a> {
     /// ADO context inferred from the git remote (org URL, project, repo name).
     /// `None` if the compile directory has no ADO remote.
     pub ado_context: Option<AdoContext>,
+    /// Resolved engine based on the front matter `engine:` field.
+    pub engine: Engine,
 }
 
 impl<'a> CompileContext<'a> {
     /// Build a fully-resolved compile context.
     ///
-    /// Infers ADO context from the git remote in `compile_dir`. This is
-    /// async because it shells out to `git remote get-url origin`.
-    pub async fn new(front_matter: &'a FrontMatter, compile_dir: &Path) -> Self {
+    /// Resolves the engine implementation from front matter and infers ADO
+    /// context from the git remote in `compile_dir`. Returns an error if
+    /// the engine identifier is unsupported.
+    pub async fn new(front_matter: &'a FrontMatter, compile_dir: &Path) -> Result<Self> {
+        let engine = engine::get_engine(front_matter.engine.engine_id())?;
         let ado_context = Self::infer_ado_context(compile_dir).await;
-        Self {
+        Ok(Self {
             agent_name: &front_matter.name,
             front_matter,
             ado_context,
-        }
+            engine,
+        })
     }
 
     /// Convenience accessor: extract the ADO org name from the inferred context.
@@ -156,6 +162,7 @@ impl<'a> CompileContext<'a> {
             agent_name: &front_matter.name,
             front_matter,
             ado_context: None,
+            engine: crate::engine::Engine::Copilot,
         }
     }
 
@@ -170,6 +177,7 @@ impl<'a> CompileContext<'a> {
                 project: "test-project".to_string(),
                 repo_name: "test-repo".to_string(),
             }),
+            engine: crate::engine::Engine::Copilot,
         }
     }
 }
