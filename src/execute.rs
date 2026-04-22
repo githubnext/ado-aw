@@ -5,6 +5,7 @@
 
 use anyhow::{Result, bail};
 use log::{debug, error, info, warn};
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
@@ -213,6 +214,24 @@ pub async fn execute_safe_outputs(
     Ok(results)
 }
 
+/// Parse a JSON entry as `T` and run it through `execute_sanitized`.
+///
+/// This is the common path for all tools that implement `Executor`. The tool name
+/// is used only for the error message so callers don't have to repeat it.
+async fn dispatch_tool<T>(
+    tool_name: &str,
+    entry: &Value,
+    ctx: &ExecutionContext,
+) -> Result<ExecutionResult>
+where
+    T: DeserializeOwned + Executor,
+{
+    debug!("Parsing {} payload", tool_name);
+    let mut output: T = serde_json::from_value(entry.clone())
+        .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", tool_name, e))?;
+    output.execute_sanitized(ctx).await
+}
+
 /// Execute a single safe output entry, returning the tool name and result
 pub async fn execute_safe_output(
     entry: &Value,
@@ -226,186 +245,39 @@ pub async fn execute_safe_output(
 
     debug!("Dispatching tool: {}", tool_name);
 
-    // Dispatch based on tool name
+    // Dispatch based on tool name. All standard tools go through `dispatch_tool` which
+    // handles deserialization and sanitized execution uniformly. Special cases (informational
+    // outputs and report-incomplete) are handled inline.
     let result = match tool_name {
-        "create-work-item" => {
-            debug!("Parsing create-work-item payload");
-            let mut output: CreateWorkItemResult = serde_json::from_value(entry.clone())
-                .map_err(|e| anyhow::anyhow!("Failed to parse create-work-item: {}", e))?;
-            debug!(
-                "create-work-item: title='{}', description length={}",
-                output.title,
-                output.description.len()
-            );
-            output.execute_sanitized(ctx).await?
+        "create-work-item" => dispatch_tool::<CreateWorkItemResult>(tool_name, entry, ctx).await?,
+        "comment-on-work-item" => dispatch_tool::<CommentOnWorkItemResult>(tool_name, entry, ctx).await?,
+        "update-work-item" => dispatch_tool::<UpdateWorkItemResult>(tool_name, entry, ctx).await?,
+        "create-pull-request" => dispatch_tool::<CreatePrResult>(tool_name, entry, ctx).await?,
+        "update-wiki-page" => dispatch_tool::<UpdateWikiPageResult>(tool_name, entry, ctx).await?,
+        "create-wiki-page" => dispatch_tool::<CreateWikiPageResult>(tool_name, entry, ctx).await?,
+        "add-pr-comment" => dispatch_tool::<AddPrCommentResult>(tool_name, entry, ctx).await?,
+        "link-work-items" => dispatch_tool::<LinkWorkItemsResult>(tool_name, entry, ctx).await?,
+        "queue-build" => dispatch_tool::<QueueBuildResult>(tool_name, entry, ctx).await?,
+        "create-git-tag" => dispatch_tool::<CreateGitTagResult>(tool_name, entry, ctx).await?,
+        "add-build-tag" => dispatch_tool::<AddBuildTagResult>(tool_name, entry, ctx).await?,
+        "create-branch" => dispatch_tool::<CreateBranchResult>(tool_name, entry, ctx).await?,
+        "update-pr" => dispatch_tool::<UpdatePrResult>(tool_name, entry, ctx).await?,
+        "upload-attachment" => dispatch_tool::<UploadAttachmentResult>(tool_name, entry, ctx).await?,
+        "submit-pr-review" => dispatch_tool::<SubmitPrReviewResult>(tool_name, entry, ctx).await?,
+        "reply-to-pr-review-comment" => dispatch_tool::<ReplyToPrCommentResult>(tool_name, entry, ctx).await?,
+        "resolve-pr-thread" => dispatch_tool::<ResolvePrThreadResult>(tool_name, entry, ctx).await?,
+        // Informational outputs — no side effects, always succeed
+        "noop" | "missing-tool" | "missing-data" => {
+            debug!("Skipping informational entry: {}", tool_name);
+            ExecutionResult::success(format!("Skipped informational output: {}", tool_name))
         }
-        "comment-on-work-item" => {
-            debug!("Parsing comment-on-work-item payload");
-            let mut output: CommentOnWorkItemResult = serde_json::from_value(entry.clone())
-                .map_err(|e| anyhow::anyhow!("Failed to parse comment-on-work-item: {}", e))?;
-            debug!(
-                "comment-on-work-item: work_item_id={}, body length={}",
-                output.work_item_id,
-                output.body.len()
-            );
-            output.execute_sanitized(ctx).await?
-        }
-        "update-work-item" => {
-            debug!("Parsing update-work-item payload");
-            let mut output: UpdateWorkItemResult = serde_json::from_value(entry.clone())
-                .map_err(|e| anyhow::anyhow!("Failed to parse update-work-item: {}", e))?;
-            debug!("update-work-item: id={}", output.id);
-            output.execute_sanitized(ctx).await?
-        }
-        "create-pull-request" => {
-            debug!("Parsing create-pull-request payload");
-            let mut output: CreatePrResult = serde_json::from_value(entry.clone())
-                .map_err(|e| anyhow::anyhow!("Failed to parse create-pull-request: {}", e))?;
-            debug!(
-                "create-pull-request: title='{}', repo='{}', branch='{}', patch='{}'",
-                output.title, output.repository, output.source_branch, output.patch_file
-            );
-            output.execute_sanitized(ctx).await?
-        }
-        "update-wiki-page" => {
-            debug!("Parsing update-wiki-page payload");
-            let mut output: UpdateWikiPageResult = serde_json::from_value(entry.clone())
-                .map_err(|e| anyhow::anyhow!("Failed to parse update-wiki-page: {}", e))?;
-            debug!(
-                "update-wiki-page: path='{}', content length={}",
-                output.path,
-                output.content.len()
-            );
-            output.execute_sanitized(ctx).await?
-        }
-        "create-wiki-page" => {
-            debug!("Parsing create-wiki-page payload");
-            let mut output: CreateWikiPageResult = serde_json::from_value(entry.clone())
-                .map_err(|e| anyhow::anyhow!("Failed to parse create-wiki-page: {}", e))?;
-            debug!(
-                "create-wiki-page: path='{}', content length={}",
-                output.path,
-                output.content.len()
-            );
-            output.execute_sanitized(ctx).await?
-        }
-        "add-pr-comment" => {
-            debug!("Parsing add-pr-comment payload");
-            let mut output: AddPrCommentResult = serde_json::from_value(entry.clone())
-                .map_err(|e| anyhow::anyhow!("Failed to parse add-pr-comment: {}", e))?;
-            debug!(
-                "add-pr-comment: pr_id={}, content length={}",
-                output.pull_request_id,
-                output.content.len()
-            );
-            output.execute_sanitized(ctx).await?
-        }
-        "link-work-items" => {
-            debug!("Parsing link-work-items payload");
-            let mut output: LinkWorkItemsResult = serde_json::from_value(entry.clone())
-                .map_err(|e| anyhow::anyhow!("Failed to parse link-work-items: {}", e))?;
-            debug!(
-                "link-work-items: source={}, target={}, type={}",
-                output.source_id, output.target_id, output.link_type
-            );
-            output.execute_sanitized(ctx).await?
-        }
-        "queue-build" => {
-            debug!("Parsing queue-build payload");
-            let mut output: QueueBuildResult = serde_json::from_value(entry.clone())
-                .map_err(|e| anyhow::anyhow!("Failed to parse queue-build: {}", e))?;
-            debug!("queue-build: pipeline_id={}", output.pipeline_id);
-            output.execute_sanitized(ctx).await?
-        }
-        "create-git-tag" => {
-            debug!("Parsing create-git-tag payload");
-            let mut output: CreateGitTagResult = serde_json::from_value(entry.clone())
-                .map_err(|e| anyhow::anyhow!("Failed to parse create-git-tag: {}", e))?;
-            debug!("create-git-tag: tag_name='{}'", output.tag_name);
-            output.execute_sanitized(ctx).await?
-        }
-        "add-build-tag" => {
-            debug!("Parsing add-build-tag payload");
-            let mut output: AddBuildTagResult = serde_json::from_value(entry.clone())
-                .map_err(|e| anyhow::anyhow!("Failed to parse add-build-tag: {}", e))?;
-            debug!("add-build-tag: build_id={}, tag='{}'", output.build_id, output.tag);
-            output.execute_sanitized(ctx).await?
-        }
-        "create-branch" => {
-            debug!("Parsing create-branch payload");
-            let mut output: CreateBranchResult = serde_json::from_value(entry.clone())
-                .map_err(|e| anyhow::anyhow!("Failed to parse create-branch: {}", e))?;
-            debug!("create-branch: branch_name='{}'", output.branch_name);
-            output.execute_sanitized(ctx).await?
-        }
-        "update-pr" => {
-            debug!("Parsing update-pr payload");
-            let mut output: UpdatePrResult = serde_json::from_value(entry.clone())
-                .map_err(|e| anyhow::anyhow!("Failed to parse update-pr: {}", e))?;
-            debug!(
-                "update-pr: pr_id={}, operation='{}'",
-                output.pull_request_id, output.operation
-            );
-            output.execute_sanitized(ctx).await?
-        }
-        "upload-attachment" => {
-            debug!("Parsing upload-attachment payload");
-            let mut output: UploadAttachmentResult = serde_json::from_value(entry.clone())
-                .map_err(|e| anyhow::anyhow!("Failed to parse upload-attachment: {}", e))?;
-            debug!(
-                "upload-attachment: work_item_id={}, file_path='{}'",
-                output.work_item_id, output.file_path
-            );
-            output.execute_sanitized(ctx).await?
-        }
-        "submit-pr-review" => {
-            debug!("Parsing submit-pr-review payload");
-            let mut output: SubmitPrReviewResult = serde_json::from_value(entry.clone())
-                .map_err(|e| anyhow::anyhow!("Failed to parse submit-pr-review: {}", e))?;
-            debug!(
-                "submit-pr-review: pr_id={}, event='{}'",
-                output.pull_request_id, output.event
-            );
-            output.execute_sanitized(ctx).await?
-        }
-        "reply-to-pr-review-comment" => {
-            debug!("Parsing reply-to-pr-review-comment payload");
-            let mut output: ReplyToPrCommentResult = serde_json::from_value(entry.clone())
-                .map_err(|e| anyhow::anyhow!("Failed to parse reply-to-pr-review-comment: {}", e))?;
-            debug!(
-                "reply-to-pr-review-comment: pr_id={}, thread_id={}",
-                output.pull_request_id, output.thread_id
-            );
-            output.execute_sanitized(ctx).await?
-        }
-        "resolve-pr-thread" => {
-            debug!("Parsing resolve-pr-thread payload");
-            let mut output: ResolvePrThreadResult = serde_json::from_value(entry.clone())
-                .map_err(|e| anyhow::anyhow!("Failed to parse resolve-pr-thread: {}", e))?;
-            debug!(
-                "resolve-pr-thread: pr_id={}, thread_id={}, status='{}'",
-                output.pull_request_id, output.thread_id, output.status
-            );
-            output.execute_sanitized(ctx).await?
-        }
-        "noop" => {
-            debug!("Skipping noop entry");
-            ExecutionResult::success("Skipped informational output: noop")
-        }
+        // report-incomplete does not implement Executor; Stage 3 surfaces its reason as a failure
         "report-incomplete" => {
             let mut output: ReportIncompleteResult = serde_json::from_value(entry.clone())
                 .map_err(|e| anyhow::anyhow!("Failed to parse report-incomplete: {}", e))?;
             output.sanitize_content_fields();
             debug!("report-incomplete: {}", output.reason);
             ExecutionResult::failure(format!("Agent reported task incomplete: {}", output.reason))
-        }
-        "missing-tool" => {
-            debug!("Skipping missing-tool entry");
-            ExecutionResult::success("Skipped informational output: missing-tool")
-        }
-        "missing-data" => {
-            debug!("Skipping missing-data entry");
-            ExecutionResult::success("Skipped informational output: missing-data")
         }
         other => {
             error!("Unknown tool type: {}", other);
