@@ -1782,6 +1782,13 @@ pub fn generate_allowed_domains(
         }
     }
 
+    // Add engine-required hosts (e.g., GHES/GHEC api-target hostname).
+    // The engine resolves its config and returns additional hosts that AWF must allow.
+    let engine = crate::engine::get_engine(front_matter.engine.engine_id())?;
+    for host in engine.required_hosts(&front_matter.engine) {
+        hosts.insert(host);
+    }
+
     // Add user-specified hosts (validated against DNS-safe characters)
     // Entries may be ecosystem identifiers (e.g., "python", "rust") which
     // expand to their domain lists, or raw domain names.
@@ -1971,7 +1978,7 @@ pub async fn compile_shared(
             .and_then(|p| p.read.as_deref()),
         "SC_READ_TOKEN",
     );
-    let engine_env = ctx.engine.env();
+    let engine_env = ctx.engine.env(&front_matter.engine)?;
     let engine_log_dir = ctx.engine.log_dir();
     let acquire_write_token = generate_acquire_ado_token(
         front_matter
@@ -3322,7 +3329,7 @@ mod tests {
     fn test_engine_env() {
         let fm = minimal_front_matter();
         let ctx = CompileContext::for_test(&fm);
-        let result = ctx.engine.env();
+        let result = ctx.engine.env(&fm.engine).unwrap();
         assert!(
             result.contains("GITHUB_TOKEN: $(GITHUB_TOKEN)"),
             "Should include GITHUB_TOKEN"

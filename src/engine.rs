@@ -3,6 +3,65 @@ use anyhow::Result;
 use crate::compile::extensions::{CompilerExtension, Extension};
 use crate::compile::types::{EngineConfig, FrontMatter, McpConfig};
 
+/// Characters allowed in engine.command paths (absolute path chars only).
+/// Prevents shell injection when the path is embedded in AWF single-quoted commands.
+fn is_valid_command_path(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'))
+}
+
+/// Characters allowed in engine.agent and engine.model identifiers.
+fn is_valid_identifier(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'))
+}
+
+/// Characters allowed in engine.api-target hostnames.
+fn is_valid_hostname(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+}
+
+/// Characters allowed in individual engine.args entries.
+/// Strict allowlist to prevent shell injection inside AWF single-quoted commands.
+fn is_valid_arg(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-' | '=' | '/' | '@'))
+}
+
+/// Flags that the compiler controls — user args must not attempt to override these.
+const BLOCKED_ARG_PREFIXES: &[&str] = &[
+    "--prompt",
+    "--additional-mcp-config",
+    "--allow-tool",
+    "--allow-all-tools",
+    "--allow-all-paths",
+    "--disable-builtin-mcps",
+    "--no-ask-user",
+    "--ask-user",
+];
+
+/// Environment variable keys that the compiler controls — users must not override these.
+const BLOCKED_ENV_KEYS: &[&str] = &[
+    "GITHUB_TOKEN",
+    "GITHUB_READ_ONLY",
+    "COPILOT_OTEL_ENABLED",
+    "COPILOT_OTEL_EXPORTER_TYPE",
+    "COPILOT_OTEL_FILE_EXPORTER_PATH",
+    // Shell/system vars that could affect AWF or pipeline behavior
+    "PATH",
+    "HOME",
+    "BASH_ENV",
+    "ENV",
+    "IFS",
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+];
+
 /// Default model used by the Copilot engine when no model is specified in front matter.
 pub const DEFAULT_COPILOT_MODEL: &str = "claude-opus-4.5";
 
@@ -60,9 +119,9 @@ impl Engine {
     }
 
     /// Generate the env block entries for the engine's sandbox step.
-    pub fn env(&self) -> String {
+    pub fn env(&self, engine_config: &EngineConfig) -> Result<String> {
         match self {
-            Engine::Copilot => copilot_env(),
+            Engine::Copilot => copilot_env(engine_config),
         }
     }
 
@@ -72,6 +131,22 @@ impl Engine {
     pub fn log_dir(&self) -> &str {
         match self {
             Engine::Copilot => "~/.copilot/logs",
+        }
+    }
+
+    /// Return additional hosts the engine needs based on its configuration.
+    ///
+    /// Used by the domain allowlist generator to ensure engine-specific endpoints
+    /// (e.g., GHES/GHEC API targets) are reachable through AWF.
+    pub fn required_hosts(&self, engine_config: &EngineConfig) -> Vec<String> {
+        match self {
+            Engine::Copilot => {
+                let mut hosts = Vec::new();
+                if let Some(api_target) = engine_config.api_target() {
+                    hosts.push(api_target.to_string());
+                }
+                hosts
+            }
         }
     }
 
@@ -105,7 +180,22 @@ impl Engine {
     ) -> Result<String> {
         let args = self.args(front_matter, extensions)?;
         match self {
-            Engine::Copilot => Ok(copilot_invocation(prompt_path, mcp_config_path, &args)),
+            Engine::Copilot => {
+                let command_path = match front_matter.engine.command() {
+                    Some(cmd) => {
+                        if !is_valid_command_path(cmd) {
+                            anyhow::bail!(
+                                "engine.command '{}' contains invalid characters. \
+                                 Only ASCII alphanumerics, '.', '_', '/', and '-' are allowed.",
+                                cmd
+                            );
+                        }
+                        cmd.to_string()
+                    }
+                    None => "/tmp/awf-tools/copilot".to_string(),
+                };
+                Ok(copilot_invocation(&command_path, prompt_path, mcp_config_path, &args))
+            }
         }
     }
 }
@@ -243,54 +333,37 @@ fn copilot_args(
         );
     }
     params.push(format!("--model {}", model));
-    if let Some(timeout_minutes) = front_matter.engine.timeout_minutes() {
-        if timeout_minutes == 0 {
-            eprintln!(
-                "Warning: Agent '{}' has timeout-minutes: 0, which means no time is allowed. \
-                The agent job will time out immediately. \
-                Consider setting timeout-minutes to at least 1.",
-                front_matter.name
-            );
-        }
+    if let Some(0) = front_matter.engine.timeout_minutes() {
+        eprintln!(
+            "Warning: Agent '{}' has timeout-minutes: 0, which means no time is allowed. \
+            The agent job will time out immediately. \
+            Consider setting timeout-minutes to at least 1.",
+            front_matter.name
+        );
     }
 
-    // Warn about engine options that are parsed but not yet wired into the pipeline.
-    // These fields are scaffolding for future engines/features — users should know
-    // they have no effect today so they aren't confused by silent no-ops.
-    if !front_matter.engine.args().is_empty() {
-        eprintln!(
-            "Warning: Agent '{}' has engine.args set, but custom CLI arguments are not yet \
-            wired into the pipeline and will be ignored.",
-            front_matter.name
-        );
+    // Wire engine.agent — selects a custom agent from .github/agents/
+    if let Some(agent) = front_matter.engine.agent() {
+        if !is_valid_identifier(agent) {
+            anyhow::bail!(
+                "engine.agent '{}' contains invalid characters. \
+                 Only ASCII alphanumerics, '.', '_', ':', and '-' are allowed.",
+                agent
+            );
+        }
+        params.push(format!("--agent {}", agent));
     }
-    if front_matter.engine.agent().is_some() {
-        eprintln!(
-            "Warning: Agent '{}' has engine.agent set, but custom agent file selection is not yet \
-            wired into the pipeline and will be ignored.",
-            front_matter.name
-        );
-    }
-    if front_matter.engine.api_target().is_some() {
-        eprintln!(
-            "Warning: Agent '{}' has engine.api-target set, but custom API target (GHES/GHEC) is \
-            not yet wired into the pipeline and will be ignored.",
-            front_matter.name
-        );
-    }
-    if front_matter.engine.command().is_some() {
-        eprintln!(
-            "Warning: Agent '{}' has engine.command set, but custom engine command paths are not \
-            yet wired into the pipeline and will be ignored.",
-            front_matter.name
-        );
-    }
-    if front_matter.engine.env().is_some() {
-        eprintln!(
-            "Warning: Agent '{}' has engine.env set, but custom engine environment variables are \
-            not yet wired into the pipeline and will be ignored.",
-            front_matter.name
-        );
+
+    // Wire engine.api-target — sets the GHES/GHEC API endpoint hostname
+    if let Some(api_target) = front_matter.engine.api_target() {
+        if !is_valid_hostname(api_target) {
+            anyhow::bail!(
+                "engine.api-target '{}' contains invalid characters. \
+                 Only ASCII alphanumerics, '.', and '-' are allowed.",
+                api_target
+            );
+        }
+        params.push(format!("--api-target {}", api_target));
     }
 
     params.push("--disable-builtin-mcps".to_string());
@@ -316,18 +389,102 @@ fn copilot_args(
         params.push("--allow-all-paths".to_string());
     }
 
+    // Wire engine.args — append user-provided CLI arguments after compiler-generated args.
+    // User args are additive; they cannot remove compiler security flags but may override
+    // non-security defaults via last-wins semantics (e.g., --model).
+    for arg in front_matter.engine.args() {
+        if !is_valid_arg(arg) {
+            anyhow::bail!(
+                "engine.args entry '{}' contains invalid characters. \
+                 Only ASCII alphanumerics and '.', '_', ':', '-', '=', '/', '@' are allowed.",
+                arg
+            );
+        }
+        // Reject args that attempt to override compiler-controlled flags
+        for blocked in BLOCKED_ARG_PREFIXES {
+            if arg.starts_with(blocked) {
+                anyhow::bail!(
+                    "engine.args entry '{}' conflicts with compiler-controlled flag '{}'. \
+                     These flags are managed by the compiler and cannot be overridden.",
+                    arg,
+                    blocked
+                );
+            }
+        }
+        params.push(arg.to_string());
+    }
+
     Ok(params.join(" "))
 }
 
-fn copilot_env() -> String {
-    let lines = [
-        "GITHUB_TOKEN: $(GITHUB_TOKEN)",
-        "GITHUB_READ_ONLY: 1",
-        "COPILOT_OTEL_ENABLED: \"true\"",
-        "COPILOT_OTEL_EXPORTER_TYPE: \"file\"",
-        "COPILOT_OTEL_FILE_EXPORTER_PATH: \"/tmp/awf-tools/staging/otel.jsonl\"",
+fn copilot_env(engine_config: &EngineConfig) -> Result<String> {
+    let mut lines: Vec<String> = vec![
+        "GITHUB_TOKEN: $(GITHUB_TOKEN)".to_string(),
+        "GITHUB_READ_ONLY: 1".to_string(),
+        "COPILOT_OTEL_ENABLED: \"true\"".to_string(),
+        "COPILOT_OTEL_EXPORTER_TYPE: \"file\"".to_string(),
+        "COPILOT_OTEL_FILE_EXPORTER_PATH: \"/tmp/awf-tools/staging/otel.jsonl\"".to_string(),
     ];
-    lines.join("\n")
+
+    // Wire engine.env — merge user-provided environment variables
+    if let Some(env_map) = engine_config.env() {
+        let mut sorted_keys: Vec<&String> = env_map.keys().collect();
+        sorted_keys.sort();
+
+        for key in sorted_keys {
+            let value = &env_map[key];
+
+            // Validate key: must be a valid env var name
+            let first_char = key.chars().next().unwrap();
+            if key.is_empty()
+                || !(first_char.is_ascii_alphabetic() || first_char == '_')
+                || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                anyhow::bail!(
+                    "engine.env key '{}' is not a valid environment variable name. \
+                     Must match [A-Za-z_][A-Za-z0-9_]*.",
+                    key
+                );
+            }
+
+            // Block compiler-controlled env vars
+            if BLOCKED_ENV_KEYS.iter().any(|blocked| key.eq_ignore_ascii_case(blocked)) {
+                anyhow::bail!(
+                    "engine.env key '{}' conflicts with a compiler-controlled environment variable. \
+                     These variables are managed by the compiler and cannot be overridden.",
+                    key
+                );
+            }
+
+            // Validate value: reject ADO command injection and YAML-breaking content
+            if value.contains("##vso[") || value.contains("##[") {
+                anyhow::bail!(
+                    "engine.env value for '{}' contains ADO pipeline command injection ('##vso[' or '##['). \
+                     This is not allowed.",
+                    key
+                );
+            }
+            if value.contains("$(") || value.contains("${{") {
+                anyhow::bail!(
+                    "engine.env value for '{}' contains ADO expression syntax ('$(' or '${{{{}}}}')). \
+                     Use literal values only — ADO macro/expression expansion is not allowed.",
+                    key
+                );
+            }
+            if value.contains('\n') || value.contains('\r') {
+                anyhow::bail!(
+                    "engine.env value for '{}' contains newline characters, \
+                     which would break YAML formatting.",
+                    key
+                );
+            }
+
+            // YAML-quote the value to prevent injection
+            lines.push(format!("{}: \"{}\"", key, value.replace('\\', "\\\\").replace('"', "\\\"")));
+        }
+    }
+
+    Ok(lines.join("\n"))
 }
 
 /// Generate Copilot CLI install steps for Azure DevOps pipelines.
@@ -378,12 +535,13 @@ fn copilot_install_steps(engine_config: &EngineConfig) -> String {
 ///
 /// The returned string goes inside `-- '...'` in the pipeline YAML.
 fn copilot_invocation(
+    command_path: &str,
     prompt_path: &str,
     mcp_config_path: Option<&str>,
     args: &str,
 ) -> String {
     let mut parts = vec![
-        "/tmp/awf-tools/copilot".to_string(),
+        command_path.to_string(),
         format!("--prompt \"$(cat {prompt_path})\""),
     ];
 
@@ -433,7 +591,8 @@ mod tests {
 
     #[test]
     fn copilot_engine_env() {
-        let env = Engine::Copilot.env();
+        let (front_matter, _) = parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
+        let env = Engine::Copilot.env(&front_matter.engine).unwrap();
         assert!(env.contains("GITHUB_TOKEN: $(GITHUB_TOKEN)"));
         assert!(env.contains("GITHUB_READ_ONLY: 1"));
         assert!(env.contains("COPILOT_OTEL_ENABLED"));
@@ -463,5 +622,269 @@ mod tests {
     #[test]
     fn get_engine_rejects_codex() {
         assert!(get_engine("codex").is_err());
+    }
+
+    // ─── engine.command tests ─────────────────────────────────────────────
+
+    #[test]
+    fn engine_command_overrides_binary_path() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  command: /usr/local/bin/my-copilot\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot
+            .invocation(&fm, &collect_extensions(&fm), "/tmp/prompt.md", Some("/tmp/mcp.json"))
+            .unwrap();
+        assert!(result.starts_with("/usr/local/bin/my-copilot "));
+        assert!(!result.contains("/tmp/awf-tools/copilot"));
+    }
+
+    #[test]
+    fn engine_command_default_uses_awf_path() {
+        let (fm, _) = parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
+        let result = Engine::Copilot
+            .invocation(&fm, &collect_extensions(&fm), "/tmp/prompt.md", Some("/tmp/mcp.json"))
+            .unwrap();
+        assert!(result.starts_with("/tmp/awf-tools/copilot "));
+    }
+
+    #[test]
+    fn engine_command_rejects_shell_metacharacters() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  command: \"/tmp/copilot; rm -rf /\"\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.invocation(&fm, &collect_extensions(&fm), "/tmp/prompt.md", None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid characters"));
+    }
+
+    #[test]
+    fn engine_command_rejects_single_quotes() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  command: \"/tmp/co'pilot\"\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.invocation(&fm, &collect_extensions(&fm), "/tmp/prompt.md", None);
+        assert!(result.is_err());
+    }
+
+    // ─── engine.agent tests ───────────────────────────────────────────────
+
+    #[test]
+    fn engine_agent_adds_flag() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  agent: my-custom-agent\n---\n",
+        ).unwrap();
+        let params = Engine::Copilot.args(&fm, &collect_extensions(&fm)).unwrap();
+        assert!(params.contains("--agent my-custom-agent"));
+    }
+
+    #[test]
+    fn engine_agent_validates_identifier() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  agent: \"bad agent!\"\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.args(&fm, &collect_extensions(&fm));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid characters"));
+    }
+
+    // ─── engine.api-target tests ──────────────────────────────────────────
+
+    #[test]
+    fn engine_api_target_adds_flag() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  api-target: api.acme.ghe.com\n---\n",
+        ).unwrap();
+        let params = Engine::Copilot.args(&fm, &collect_extensions(&fm)).unwrap();
+        assert!(params.contains("--api-target api.acme.ghe.com"));
+    }
+
+    #[test]
+    fn engine_api_target_validates_hostname() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  api-target: \"bad host/path\"\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.args(&fm, &collect_extensions(&fm));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid characters"));
+    }
+
+    #[test]
+    fn engine_api_target_adds_to_required_hosts() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  api-target: api.acme.ghe.com\n---\n",
+        ).unwrap();
+        let hosts = Engine::Copilot.required_hosts(&fm.engine);
+        assert_eq!(hosts, vec!["api.acme.ghe.com"]);
+    }
+
+    #[test]
+    fn engine_no_api_target_no_required_hosts() {
+        let (fm, _) = parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
+        let hosts = Engine::Copilot.required_hosts(&fm.engine);
+        assert!(hosts.is_empty());
+    }
+
+    // ─── engine.args tests ────────────────────────────────────────────────
+
+    #[test]
+    fn engine_args_appended_after_compiler_args() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  args:\n    - --verbose\n    - --debug\n---\n",
+        ).unwrap();
+        let params = Engine::Copilot.args(&fm, &collect_extensions(&fm)).unwrap();
+        // Compiler args come first
+        assert!(params.contains("--disable-builtin-mcps"));
+        assert!(params.contains("--no-ask-user"));
+        // User args come after
+        let disable_pos = params.find("--disable-builtin-mcps").unwrap();
+        let verbose_pos = params.find("--verbose").unwrap();
+        assert!(verbose_pos > disable_pos, "User args must come after compiler args");
+        assert!(params.contains("--debug"));
+    }
+
+    #[test]
+    fn engine_args_rejects_shell_injection() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  args:\n    - \"--flag; rm -rf /\"\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.args(&fm, &collect_extensions(&fm));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid characters"));
+    }
+
+    #[test]
+    fn engine_args_blocks_prompt_override() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  args:\n    - --prompt=evil\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.args(&fm, &collect_extensions(&fm));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("compiler-controlled"));
+    }
+
+    #[test]
+    fn engine_args_blocks_allow_tool() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  args:\n    - --allow-tool=evil\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.args(&fm, &collect_extensions(&fm));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn engine_args_blocks_ask_user() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  args:\n    - --ask-user\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.args(&fm, &collect_extensions(&fm));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn engine_args_blocks_additional_mcp_config() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  args:\n    - --additional-mcp-config=@evil.json\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.args(&fm, &collect_extensions(&fm));
+        assert!(result.is_err());
+    }
+
+    // ─── engine.env tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn engine_env_merges_user_vars() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    MY_VAR: hello\n---\n",
+        ).unwrap();
+        let env = Engine::Copilot.env(&fm.engine).unwrap();
+        assert!(env.contains("GITHUB_TOKEN: $(GITHUB_TOKEN)"), "compiler vars preserved");
+        assert!(env.contains("MY_VAR: \"hello\""), "user var included");
+    }
+
+    #[test]
+    fn engine_env_blocks_github_token() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    GITHUB_TOKEN: evil\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.env(&fm.engine);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("compiler-controlled"));
+    }
+
+    #[test]
+    fn engine_env_blocks_path() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    PATH: /evil\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.env(&fm.engine);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn engine_env_blocks_bash_env() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    BASH_ENV: /evil\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.env(&fm.engine);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn engine_env_blocks_ld_preload() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    LD_PRELOAD: /evil.so\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.env(&fm.engine);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn engine_env_rejects_vso_injection() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    MY_VAR: \"##vso[task.setvariable]evil\"\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.env(&fm.engine);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("ADO pipeline command injection"));
+    }
+
+    #[test]
+    fn engine_env_rejects_ado_expressions() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    MY_VAR: \"$(SYSTEM_ACCESSTOKEN)\"\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.env(&fm.engine);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("ADO expression syntax"));
+    }
+
+    #[test]
+    fn engine_env_rejects_newlines() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    MY_VAR: \"line1\\nline2\"\n---\n",
+        ).unwrap();
+        // YAML double-quoted strings interpret \n as an actual newline
+        let result = Engine::Copilot.env(&fm.engine);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("newline characters"));
+    }
+
+    #[test]
+    fn engine_env_rejects_invalid_key() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    \"123bad\": value\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.env(&fm.engine);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not a valid environment variable name"));
+    }
+
+    #[test]
+    fn engine_env_escapes_quotes_in_values() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    MY_VAR: 'has \"quotes\"'\n---\n",
+        ).unwrap();
+        let env = Engine::Copilot.env(&fm.engine).unwrap();
+        assert!(env.contains(r#"MY_VAR: "has \"quotes\"""#));
     }
 }
