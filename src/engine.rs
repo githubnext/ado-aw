@@ -1,10 +1,14 @@
 use anyhow::Result;
 
 use crate::compile::extensions::{CompilerExtension, Extension};
-use crate::compile::types::{FrontMatter, McpConfig};
+use crate::compile::types::{EngineConfig, FrontMatter, McpConfig};
 
 /// Default model used by the Copilot engine when no model is specified in front matter.
 pub const DEFAULT_COPILOT_MODEL: &str = "claude-opus-4.5";
+
+/// Default pinned version of the Copilot CLI NuGet package.
+/// Override per-agent via `engine: { id: copilot, version: "1.0.35" }` in front matter.
+pub const COPILOT_CLI_VERSION: &str = "1.0.34";
 
 /// Resolved engine — enum dispatch over supported engine identifiers.
 ///
@@ -68,6 +72,17 @@ impl Engine {
     pub fn log_dir(&self) -> &str {
         match self {
             Engine::Copilot => "~/.copilot/logs",
+        }
+    }
+
+    /// Generate pipeline YAML steps to install the engine binary.
+    ///
+    /// Uses `engine_config.version()` if set in front matter, otherwise falls back
+    /// to the pinned `COPILOT_CLI_VERSION` constant. Returns an empty string when
+    /// `engine.command` is set (the user provides their own binary).
+    pub fn install_steps(&self, engine_config: &EngineConfig) -> String {
+        match self {
+            Engine::Copilot => copilot_install_steps(engine_config),
         }
     }
 }
@@ -233,13 +248,6 @@ fn copilot_args(
             front_matter.name
         );
     }
-    if front_matter.engine.version().is_some() {
-        eprintln!(
-            "Warning: Agent '{}' has engine.version set, but custom engine versioning is not yet \
-            wired into the pipeline and will be ignored.",
-            front_matter.name
-        );
-    }
     if front_matter.engine.agent().is_some() {
         eprintln!(
             "Warning: Agent '{}' has engine.agent set, but custom agent file selection is not yet \
@@ -304,6 +312,50 @@ fn copilot_env() -> String {
         "COPILOT_OTEL_FILE_EXPORTER_PATH: \"/tmp/awf-tools/staging/otel.jsonl\"",
     ];
     lines.join("\n")
+}
+
+/// Generate Copilot CLI install steps for Azure DevOps pipelines.
+///
+/// Produces the YAML block that authenticates with NuGet, installs the
+/// `Microsoft.Copilot.CLI.linux-x64` package, copies the binary to
+/// `/tmp/awf-tools/copilot`, and verifies the install.
+fn copilot_install_steps(engine_config: &EngineConfig) -> String {
+    // Custom binary path → skip NuGet install entirely
+    if engine_config.command().is_some() {
+        return String::new();
+    }
+
+    let version = engine_config
+        .version()
+        .unwrap_or(COPILOT_CLI_VERSION);
+
+    format!(
+        "\
+- task: NuGetAuthenticate@1
+  displayName: \"Authenticate NuGet Feed\"
+
+- task: NuGetCommand@2
+  displayName: \"Install Copilot CLI\"
+  inputs:
+    command: 'custom'
+    arguments: 'install Microsoft.Copilot.CLI.linux-x64 -Source \"https://pkgs.dev.azure.com/msazuresphere/_packaging/Guardian1ESPTUpstreamOrgFeed/nuget/v3/index.json\" -Version {version} -OutputDirectory $(Agent.TempDirectory)/tools -ExcludeVersion -NonInteractive'
+
+- bash: |
+    ls -la \"$(Agent.TempDirectory)/tools\"
+    echo \"##vso[task.prependpath]$(Agent.TempDirectory)/tools/Microsoft.Copilot.CLI.linux-x64\"
+
+    # Copy copilot binary to /tmp so it's accessible inside AWF container
+    # (AWF auto-mounts /tmp:/tmp:rw but not Agent.TempDirectory)
+    mkdir -p /tmp/awf-tools
+    cp \"$(Agent.TempDirectory)/tools/Microsoft.Copilot.CLI.linux-x64/copilot\" /tmp/awf-tools/copilot
+    chmod +x /tmp/awf-tools/copilot
+  displayName: \"Add copilot to PATH\"
+
+- bash: |
+    copilot --version
+    copilot -h
+  displayName: \"Output copilot version\""
+    )
 }
 
 #[cfg(test)]
