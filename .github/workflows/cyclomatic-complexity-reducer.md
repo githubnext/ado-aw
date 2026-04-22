@@ -3,8 +3,8 @@ on:
   schedule: daily
 description: Identifies and refactors functions with high cyclomatic complexity using Clippy analysis
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
+  pull-requests: read
   issues: read
 tools:
   github:
