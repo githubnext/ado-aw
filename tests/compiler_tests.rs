@@ -105,8 +105,8 @@ fn test_compiled_yaml_structure() {
         "Template should contain agent_name marker"
     );
     assert!(
-        template_content.contains("{{ copilot_params }}"),
-        "Template should contain copilot_params marker"
+        template_content.contains("{{ engine_run }}"),
+        "Template should contain engine_run marker"
     );
     assert!(
         template_content.contains("{{ compiler_version }}"),
@@ -3039,7 +3039,7 @@ fn test_1es_compiled_output_is_valid_yaml() {
     );
     assert!(
         compiled.contains("copilot --prompt"),
-        "1ES output should contain copilot invocation (copilot_params substituted)"
+        "1ES output should contain copilot invocation (engine_run substituted)"
     );
     assert!(
         compiled.contains("threat-analysis"),

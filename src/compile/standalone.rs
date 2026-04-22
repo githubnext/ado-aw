@@ -256,4 +256,17 @@ mod tests {
         assert!(domains.contains("crates.io"), "rust domains present");
     }
 
+    #[test]
+    fn test_generate_allowed_domains_api_target_included() {
+        let (mut fm, _) = parse_markdown(
+            "---\nname: test-agent\ndescription: test\nengine:\n  id: copilot\n  api-target: api.acme.ghe.com\n---\n",
+        ).unwrap();
+        fm.network = None;
+        let exts = super::super::extensions::collect_extensions(&fm);
+        let domains = generate_allowed_domains(&fm, &exts).unwrap();
+        assert!(
+            domains.contains("api.acme.ghe.com"),
+            "api-target hostname must be in the allowlist"
+        );
+    }
 }

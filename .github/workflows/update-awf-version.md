@@ -29,7 +29,7 @@ There are four items to check:
 | Item | Upstream Source | Local Path |
 |------|---------------|------------|
 | `AWF_VERSION` | [github/gh-aw-firewall](https://github.com/github/gh-aw-firewall) latest release | `src/compile/common.rs` |
-| `COPILOT_CLI_VERSION` | [github/copilot-cli](https://github.com/github/copilot-cli) latest release | `src/compile/common.rs` |
+| `COPILOT_CLI_VERSION` | [github/copilot-cli](https://github.com/github/copilot-cli) latest release | `src/engine.rs` |
 | `MCPG_VERSION` | [github/gh-aw-mcpg](https://github.com/github/gh-aw-mcpg) latest release | `src/compile/common.rs` |
 | `ecosystem_domains.json` | [github/gh-aw](https://github.com/github/gh-aw) `pkg/workflow/data/ecosystem_domains.json` on `main` | `src/data/ecosystem_domains.json` |
 
@@ -45,7 +45,7 @@ Fetch the latest release of the upstream repository. Record the tag name, stripp
 
 ### Step 2: Read the Current Version
 
-Read the file `src/compile/common.rs` in this repository and find the corresponding constant:
+Read the file `src/compile/common.rs` (for `AWF_VERSION`, `MCPG_VERSION`) or `src/engine.rs` (for `COPILOT_CLI_VERSION`) in this repository and find the corresponding constant:
 
 - `pub const AWF_VERSION: &str = "...";`
 - `pub const COPILOT_CLI_VERSION: &str = "...";`
@@ -89,7 +89,7 @@ If the latest version is newer than the current constant:
   ```markdown
   ## Dependency Update
 
-  Updates the pinned `COPILOT_CLI_VERSION` constant in `src/compile/common.rs` from `<old-version>` to `<latest-version>`.
+  Updates the pinned `COPILOT_CLI_VERSION` constant in `src/engine.rs` from `<old-version>` to `<latest-version>`.
 
   ### Release
 
