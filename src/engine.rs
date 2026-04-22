@@ -458,7 +458,11 @@ fn copilot_env(engine_config: &EngineConfig) -> Result<String> {
                 );
             }
 
-            // Block compiler-controlled env vars
+            // Block compiler-controlled env vars.
+            // Intentionally case-insensitive: while Linux env vars are case-sensitive,
+            // blocking both "GITHUB_TOKEN" and "github_token" prevents accidental
+            // shadowing and confusion. The trade-off is that a legitimate custom var
+            // whose name collides case-insensitively with a blocked key is rejected.
             if BLOCKED_ENV_KEYS.iter().any(|blocked| key.eq_ignore_ascii_case(blocked)) {
                 anyhow::bail!(
                     "engine.env key '{}' conflicts with a compiler-controlled environment variable. \
@@ -523,6 +527,14 @@ fn copilot_install_steps(engine_config: &EngineConfig) -> Result<String> {
         );
     }
 
+    // "latest" means "install the newest available version" — NuGet doesn't
+    // recognise "latest" as a version string; omitting -Version installs the newest.
+    let version_arg = if version == "latest" {
+        String::new()
+    } else {
+        format!("-Version {version} ")
+    };
+
     Ok(format!(
         "\
 - task: NuGetAuthenticate@1
@@ -532,7 +544,7 @@ fn copilot_install_steps(engine_config: &EngineConfig) -> Result<String> {
   displayName: \"Install Copilot CLI\"
   inputs:
     command: 'custom'
-    arguments: 'install Microsoft.Copilot.CLI.linux-x64 -Source \"https://pkgs.dev.azure.com/msazuresphere/_packaging/Guardian1ESPTUpstreamOrgFeed/nuget/v3/index.json\" -Version {version} -OutputDirectory $(Agent.TempDirectory)/tools -ExcludeVersion -NonInteractive'
+    arguments: 'install Microsoft.Copilot.CLI.linux-x64 -Source \"https://pkgs.dev.azure.com/msazuresphere/_packaging/Guardian1ESPTUpstreamOrgFeed/nuget/v3/index.json\" {version_arg}-OutputDirectory $(Agent.TempDirectory)/tools -ExcludeVersion -NonInteractive'
 
 - bash: |
     ls -la \"$(Agent.TempDirectory)/tools\"
@@ -945,7 +957,9 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  version: latest\n---\n",
         ).unwrap();
         let result = Engine::Copilot.install_steps(&fm.engine).unwrap();
-        assert!(result.contains("-Version latest"));
+        // "latest" omits -Version entirely so NuGet installs the newest available
+        assert!(!result.contains("-Version"), "should not contain -Version flag for 'latest'");
+        assert!(result.contains("-OutputDirectory"), "should still contain other NuGet args");
     }
 
     // ─── engine.env empty key test ────────────────────────────────────────
