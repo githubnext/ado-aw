@@ -2,43 +2,11 @@ use anyhow::Result;
 
 use crate::compile::extensions::{CompilerExtension, Extension};
 use crate::compile::types::{EngineConfig, FrontMatter, McpConfig};
-
-/// Characters allowed in engine.command paths (absolute path chars only).
-/// Prevents shell injection when the path is embedded in AWF single-quoted commands.
-fn is_valid_command_path(s: &str) -> bool {
-    !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'))
-}
-
-/// Characters allowed in engine.agent and engine.model identifiers.
-fn is_valid_identifier(s: &str) -> bool {
-    !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'))
-}
-
-/// Characters allowed in engine.api-target hostnames.
-fn is_valid_hostname(s: &str) -> bool {
-    !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
-}
-
-/// Characters allowed in engine.version strings (e.g., "1.0.34", "latest").
-fn is_valid_version(s: &str) -> bool {
-    !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-}
-
-/// Characters allowed in individual engine.args entries.
-/// Strict allowlist to prevent shell injection inside AWF single-quoted commands.
-fn is_valid_arg(s: &str) -> bool {
-    !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-' | '=' | '/' | '@'))
-}
+use crate::validate::{
+    contains_ado_expression, contains_newline, contains_pipeline_command, is_valid_arg,
+    is_valid_command_path, is_valid_env_var_name, is_valid_hostname, is_valid_identifier,
+    is_valid_version,
+};
 
 /// Flags that the compiler controls — user args must not attempt to override these.
 const BLOCKED_ARG_PREFIXES: &[&str] = &[
@@ -442,15 +410,13 @@ fn copilot_env(engine_config: &EngineConfig) -> Result<String> {
             let value = &env_map[key];
 
             // Validate key: must be a valid env var name
-            let Some(first_char) = key.chars().next() else {
+            if key.is_empty() {
                 anyhow::bail!(
                     "engine.env contains an empty key. \
                      Keys must match [A-Za-z_][A-Za-z0-9_]*."
                 );
-            };
-            if !(first_char.is_ascii_alphabetic() || first_char == '_')
-                || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-            {
+            }
+            if !is_valid_env_var_name(key) {
                 anyhow::bail!(
                     "engine.env key '{}' is not a valid environment variable name. \
                      Must match [A-Za-z_][A-Za-z0-9_]*.",
@@ -472,21 +438,21 @@ fn copilot_env(engine_config: &EngineConfig) -> Result<String> {
             }
 
             // Validate value: reject ADO command injection and YAML-breaking content
-            if value.contains("##vso[") || value.contains("##[") {
+            if contains_pipeline_command(value) {
                 anyhow::bail!(
                     "engine.env value for '{}' contains ADO pipeline command injection ('##vso[' or '##['). \
                      This is not allowed.",
                     key
                 );
             }
-            if value.contains("$(") || value.contains("${{") {
+            if contains_ado_expression(value) {
                 anyhow::bail!(
                     "engine.env value for '{}' contains ADO expression syntax ('$(' or '${{{{}}}}')). \
                      Use literal values only — ADO macro/expression expansion is not allowed.",
                     key
                 );
             }
-            if value.contains('\n') || value.contains('\r') {
+            if contains_newline(value) {
                 anyhow::bail!(
                     "engine.env value for '{}' contains newline characters, \
                      which would break YAML formatting.",

@@ -10,6 +10,7 @@ use crate::compile::types::McpConfig;
 use crate::fuzzy_schedule;
 use crate::allowed_hosts::{CORE_ALLOWED_HOSTS, mcp_required_hosts};
 use crate::ecosystem_domains::{get_ecosystem_domains, is_ecosystem_identifier, is_known_ecosystem};
+use crate::validate;
 
 /// Parse the markdown file and extract front matter and body
 pub fn parse_markdown(content: &str) -> Result<(FrontMatter, String)> {
@@ -100,7 +101,7 @@ pub fn generate_parameters(parameters: &[PipelineParameter]) -> Result<String> {
     // Validate parameter names — must be valid ADO identifiers to prevent
     // YAML injection or template expression injection.
     for p in parameters {
-        if !is_valid_parameter_name(&p.name) {
+        if !validate::is_valid_parameter_name(&p.name) {
             anyhow::bail!(
                 "Invalid parameter name '{}': must match [A-Za-z_][A-Za-z0-9_]* (ADO identifier)",
                 p.name
@@ -109,14 +110,14 @@ pub fn generate_parameters(parameters: &[PipelineParameter]) -> Result<String> {
         // Reject ADO expressions in string fields to prevent template expression injection.
         // Parameter definitions should only contain literal values.
         if let Some(ref display_name) = p.display_name {
-            reject_ado_expressions(display_name, &p.name, "displayName")?;
+            validate::reject_ado_expressions(display_name, &p.name, "displayName")?;
         }
         if let Some(ref default) = p.default {
-            reject_ado_expressions_in_value(default, &p.name, "default")?;
+            validate::reject_ado_expressions_in_value(default, &p.name, "default")?;
         }
         if let Some(ref values) = p.values {
             for v in values {
-                reject_ado_expressions_in_value(v, &p.name, "values")?;
+                validate::reject_ado_expressions_in_value(v, &p.name, "values")?;
             }
         }
     }
@@ -133,31 +134,6 @@ pub fn generate_parameters(parameters: &[PipelineParameter]) -> Result<String> {
     Ok(format!("parameters:\n{}", yaml))
 }
 
-/// Validate that a string is a valid ADO pipeline parameter name (`[A-Za-z_][A-Za-z0-9_]*`).
-fn is_valid_parameter_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    chars
-        .next()
-        .map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
-/// Reject ADO template expressions (`${{`), macro expressions (`$(`), and runtime
-/// expressions (`$[`) in a string value. Parameter definitions should only contain
-/// literal values — expressions could enable information disclosure or logic manipulation
-/// in the generated pipeline.
-fn reject_ado_expressions(value: &str, param_name: &str, field_name: &str) -> Result<()> {
-    if value.contains("${{") || value.contains("$(") || value.contains("$[") {
-        anyhow::bail!(
-            "Parameter '{}' field '{}' contains an ADO expression ('${{{{', '$(', or '$[') which \
-             is not allowed in parameter definitions. Use literal values only.",
-            param_name,
-            field_name,
-        );
-    }
-    Ok(())
-}
-
 /// Validate front matter `name` and `description` fields.
 ///
 /// These values are substituted directly into the pipeline YAML template and must not
@@ -165,97 +141,23 @@ fn reject_ado_expressions(value: &str, param_name: &str, field_name: &str) -> Re
 /// pipeline logic. Newlines are also rejected to prevent YAML structure injection.
 pub fn validate_front_matter_identity(front_matter: &FrontMatter) -> Result<()> {
     for (field, value) in [("name", &front_matter.name), ("description", &front_matter.description)] {
-        if value.contains("${{") || value.contains("$(") || value.contains("$[") {
-            anyhow::bail!(
-                "Front matter '{}' contains an ADO expression ('${{{{', '$(', or '$[') which is not allowed. \
-                 Use literal values only. Found: '{}'",
-                field,
-                value,
-            );
-        }
-        if value.contains('\n') || value.contains('\r') {
-            anyhow::bail!(
-                "Front matter '{}' must be a single line (no newlines). \
-                 Multi-line values could inject YAML structure into the generated pipeline.",
-                field,
-            );
-        }
+        validate::reject_pipeline_injection(value, field)?;
     }
 
     // Validate trigger.pipeline fields for newlines and ADO expressions
     if let Some(trigger_config) = &front_matter.triggers {
         if let Some(pipeline) = &trigger_config.pipeline {
-            for (field, value) in [("triggers.pipeline.name", pipeline.name.as_str())] {
-                if value.contains("${{") || value.contains("$(") || value.contains("$[") {
-                    anyhow::bail!(
-                        "Front matter '{}' contains an ADO expression ('${{{{', '$(', or '$[') which is not allowed. \
-                         Use literal values only. Found: '{}'",
-                        field,
-                        value,
-                    );
-                }
-                if value.contains('\n') || value.contains('\r') {
-                    anyhow::bail!(
-                        "Front matter '{}' must be a single line (no newlines). \
-                         Multi-line values could inject YAML structure into the generated pipeline.",
-                        field,
-                    );
-                }
-            }
+            validate::reject_pipeline_injection(&pipeline.name, "triggers.pipeline.name")?;
             if let Some(project) = &pipeline.project {
-                if project.contains("${{") || project.contains("$(") || project.contains("$[") {
-                    anyhow::bail!(
-                        "Front matter 'triggers.pipeline.project' contains an ADO expression ('${{{{', '$(', or '$[') which is not allowed. \
-                         Use literal values only. Found: '{}'",
-                        project,
-                    );
-                }
-                if project.contains('\n') || project.contains('\r') {
-                    anyhow::bail!(
-                        "Front matter 'triggers.pipeline.project' must be a single line (no newlines). \
-                         Multi-line values could inject YAML structure into the generated pipeline.",
-                    );
-                }
+                validate::reject_pipeline_injection(project, "triggers.pipeline.project")?;
             }
             for branch in &pipeline.branches {
-                if branch.contains("${{") || branch.contains("$(") || branch.contains("$[") {
-                    anyhow::bail!(
-                        "Front matter 'triggers.pipeline.branches' entry {:?} contains an ADO expression ('${{{{', '$(', or '$[') \
-                         which is not allowed. Use literal values only.",
-                        branch,
-                    );
-                }
-                if branch.contains('\n') || branch.contains('\r') {
-                    anyhow::bail!(
-                        "Front matter 'triggers.pipeline.branches' entry {:?} must be single line (no newlines). \
-                         Multi-line values could inject YAML structure into the generated pipeline.",
-                        branch,
-                    );
-                }
+                validate::reject_pipeline_injection(branch, &format!("triggers.pipeline.branches entry {:?}", branch))?;
             }
         }
     }
 
     Ok(())
-}
-
-/// Reject ADO expressions in a serde_yaml::Value, recursing into strings within sequences.
-fn reject_ado_expressions_in_value(
-    value: &serde_yaml::Value,
-    param_name: &str,
-    field_name: &str,
-) -> Result<()> {
-    match value {
-        serde_yaml::Value::String(s) => reject_ado_expressions(s, param_name, field_name),
-        serde_yaml::Value::Sequence(seq) => {
-            for item in seq {
-                reject_ado_expressions_in_value(item, param_name, field_name)?;
-            }
-            Ok(())
-        }
-        // Booleans, numbers, null — safe, no injection risk
-        _ => Ok(()),
-    }
 }
 
 /// Build the final parameters list by combining user-defined parameters
@@ -871,13 +773,6 @@ pub fn generate_executor_ado_env(write_service_connection: Option<&str>) -> Stri
     }
 }
 
-/// Returns true if the name contains only ASCII alphanumerics and hyphens.
-/// This value is embedded inline in a shell command, so control characters
-/// (including newlines) and whitespace must be rejected to prevent corruption.
-fn is_safe_tool_name(name: &str) -> bool {
-    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-}
-
 /// Generate `--enabled-tools` CLI args for the SafeOutputs MCP server.
 ///
 /// Derives the tool list from `safe-outputs:` front matter keys plus always-on
@@ -901,7 +796,7 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
     let mut tools: Vec<String> = Vec::new();
     let mut effective_mcp_tool_count = 0usize;
     for key in front_matter.safe_outputs.keys() {
-        if !is_safe_tool_name(key) {
+        if !validate::is_safe_tool_name(key) {
             eprintln!(
                 "Warning: skipping invalid safe-output tool name '{}' (must be ASCII alphanumeric/hyphens only)",
                 key
@@ -1241,188 +1136,6 @@ pub fn generate_agentic_depends_on(setup_steps: &[serde_yaml::Value]) -> String 
     }
 }
 
-/// Sensitive host path prefixes that should not be bind-mounted into MCP containers.
-pub const SENSITIVE_MOUNT_PREFIXES: &[&str] = &[
-    "/etc",
-    "/root",
-    "/home",
-    "/proc",
-    "/sys",
-];
-
-/// Docker runtime flag names that grant dangerous host access.
-/// Checked both as `--flag=value` and as `--flag value` (split across two args).
-pub const DANGEROUS_DOCKER_FLAGS: &[&str] = &[
-    "--privileged",
-    "--cap-add",
-    "--security-opt",
-    "--pid",
-    "--network",
-    "--ipc",
-    "--user",
-    "-u",
-    "--add-host",
-    "--entrypoint",
-];
-
-/// Validate a container image name for injection attempts.
-/// Allows `[a-zA-Z0-9./_:-]` which covers standard Docker image references.
-pub fn validate_container_image(image: &str, mcp_name: &str) -> Vec<String> {
-    let mut warnings = Vec::new();
-    if image.is_empty() {
-        warnings.push(format!("Warning: MCP '{}': container image name is empty.", mcp_name));
-        return warnings;
-    }
-    if !image.chars().all(|c| c.is_ascii_alphanumeric() || "._/:-@".contains(c)) {
-        warnings.push(format!(
-            "Warning: MCP '{}': container image '{}' contains unexpected characters. \
-            Image names should only contain [a-zA-Z0-9./_:-@].",
-            mcp_name, image
-        ));
-    }
-    warnings
-}
-
-/// Validate a volume mount source path, warning on sensitive host directories.
-/// Docker socket mounts are escalated to stderr warnings since they grant container escape.
-/// Note: paths are lowercased for comparison to catch cross-platform casing (e.g. `/ETC/shadow`).
-pub fn validate_mount_source(mount: &str, mcp_name: &str) -> Vec<String> {
-    let mut warnings = Vec::new();
-    // Format: "source:dest:mode"
-    if let Some(source) = mount.split(':').next() {
-        let source_lower = source.to_lowercase();
-        if source_lower.contains("docker.sock") {
-            warnings.push(format!(
-                "Warning: MCP '{}': mount '{}' exposes the Docker socket to the MCP container. \
-                This grants full host Docker access and may allow container escape.",
-                mcp_name, mount
-            ));
-            return warnings;
-        }
-        for prefix in SENSITIVE_MOUNT_PREFIXES {
-            // Match exact path or path with trailing separator to avoid false positives
-            // (e.g. /etc matches /etc and /etc/shadow, but not /etc-configs)
-            if source_lower == *prefix || source_lower.starts_with(&format!("{}/", prefix)) {
-                warnings.push(format!(
-                    "Warning: MCP '{}': mount source '{}' references a sensitive host path ({}). \
-                    Ensure this is intentional.",
-                    mcp_name, source, prefix
-                ));
-                break;
-            }
-        }
-    }
-    warnings
-}
-
-/// Validate Docker runtime args for dangerous flags that could escalate privileges.
-/// Also detects volume mounts smuggled via `-v`/`--volume` that bypass `mounts` validation.
-/// Handles both `--flag=value` and `--flag value` (split) forms.
-pub fn validate_docker_args(args: &[String], mcp_name: &str) -> Vec<String> {
-    let mut warnings = Vec::new();
-    for (i, arg) in args.iter().enumerate() {
-        let arg_lower = arg.to_lowercase();
-        // Check for dangerous Docker flags (both --flag=value and --flag value)
-        for dangerous in DANGEROUS_DOCKER_FLAGS {
-            if arg_lower == *dangerous
-                || arg_lower.starts_with(&format!("{}=", dangerous))
-            {
-                let extra_hint = if *dangerous == "--entrypoint" {
-                    " Use the 'entrypoint:' field instead of passing --entrypoint in args."
-                } else {
-                    ""
-                };
-                warnings.push(format!(
-                    "Warning: MCP '{}': Docker arg '{}' grants elevated privileges. \
-                    Ensure this is intentional.{}",
-                    mcp_name, arg, extra_hint
-                ));
-            }
-        }
-        // Check for volume mounts smuggled via args (bypasses mounts validation)
-        if arg == "-v" || arg == "--volume" {
-            if let Some(mount_spec) = args.get(i + 1) {
-                warnings.push(format!(
-                    "Warning: MCP '{}': volume mount '{}' in args bypasses mounts validation. \
-                    Use the 'mounts:' field instead.",
-                    mcp_name, mount_spec
-                ));
-                warnings.extend(validate_mount_source(mount_spec, mcp_name));
-            } else {
-                warnings.push(format!(
-                    "Warning: MCP '{}': '{}' flag is the last arg with no mount spec following it. \
-                    This is likely a malformed args list.",
-                    mcp_name, arg
-                ));
-            }
-        } else if arg_lower.starts_with("-v=") || arg_lower.starts_with("--volume=") {
-            let mount_spec = arg.splitn(2, '=').nth(1).unwrap_or("");
-            warnings.push(format!(
-                "Warning: MCP '{}': volume mount '{}' in args bypasses mounts validation. \
-                Use the 'mounts:' field instead.",
-                mcp_name, mount_spec
-            ));
-            warnings.extend(validate_mount_source(mount_spec, mcp_name));
-        }
-    }
-    warnings
-}
-
-/// Validate that an MCP HTTP URL uses an allowed scheme.
-pub fn validate_mcp_url(url: &str, mcp_name: &str) -> Vec<String> {
-    let mut warnings = Vec::new();
-    if !url.starts_with("https://") && !url.starts_with("http://") {
-        warnings.push(format!(
-            "Warning: MCP '{}': URL '{}' does not use http:// or https:// scheme. \
-            This may not work with MCPG.",
-            mcp_name, url
-        ));
-    }
-    warnings
-}
-
-/// Warn when env values or headers look like they contain inline secrets.
-/// Secrets should use pipeline variables and passthrough ("") instead.
-pub fn warn_potential_secrets(mcp_name: &str, env: &HashMap<String, String>, headers: &HashMap<String, String>) -> Vec<String> {
-    let mut warnings = Vec::new();
-    for (key, value) in env {
-        if !value.is_empty() && (key.to_lowercase().contains("token")
-            || key.to_lowercase().contains("secret")
-            || key.to_lowercase().contains("key")
-            || key.to_lowercase().contains("password")
-            || key.to_lowercase().contains("pat"))
-        {
-            warnings.push(format!(
-                "Warning: MCP '{}': env var '{}' has an inline value that may be a secret. \
-                Use an empty string (\"\") for passthrough from pipeline variables instead.",
-                mcp_name, key
-            ));
-        }
-    }
-    for (key, value) in headers {
-        if value.to_lowercase().contains("bearer ")
-            || key.to_lowercase() == "authorization"
-        {
-            warnings.push(format!(
-                "Warning: MCP '{}': header '{}' may contain inline credentials. \
-                These will appear in plaintext in the compiled pipeline YAML.",
-                mcp_name, key
-            ));
-        }
-    }
-    warnings
-}
-
-/// Validate that a string is a legal environment variable name (`[A-Za-z_][A-Za-z0-9_]*`).
-/// Prevents injection of arbitrary Docker flags via user-controlled front matter keys.
-pub fn is_valid_env_var_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    chars
-        .next()
-        .map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
 /// Generate MCPG configuration from front matter.
 ///
 /// Converts the front matter `mcp-servers` definitions into MCPG-compatible JSON.
@@ -1489,15 +1202,15 @@ pub fn generate_mcpg_config(
 
             if let Some(container) = &opts.container {
                 // Container-based stdio MCP (MCPG-native, per spec §3.2.1)
-                for w in validate_container_image(container, name) { eprintln!("{}", w); }
+                for w in validate::validate_container_image(container, name) { eprintln!("{}", w); }
                 // Validate mount paths for sensitive host directories
                 for mount in &opts.mounts {
-                    for w in validate_mount_source(mount, name) { eprintln!("{}", w); }
+                    for w in validate::validate_mount_source(mount, name) { eprintln!("{}", w); }
                 }
                 // Validate Docker runtime args for privilege escalation
-                for w in validate_docker_args(&opts.args, name) { eprintln!("{}", w); }
+                for w in validate::validate_docker_args(&opts.args, name) { eprintln!("{}", w); }
                 // Warn about potential inline secrets (check headers too in case user set both)
-                for w in warn_potential_secrets(name, &opts.env, &opts.headers) { eprintln!("{}", w); }
+                for w in validate::warn_potential_secrets(name, &opts.env, &opts.headers) { eprintln!("{}", w); }
                 let entrypoint_args = if opts.entrypoint_args.is_empty() {
                     None
                 } else {
@@ -1540,9 +1253,9 @@ pub fn generate_mcpg_config(
                 );
             } else if let Some(url) = &opts.url {
                 // HTTP-based MCP (remote server)
-                for w in validate_mcp_url(url, name) { eprintln!("{}", w); }
+                for w in validate::validate_mcp_url(url, name) { eprintln!("{}", w); }
                 // Warn about potential inline secrets in headers
-                for w in warn_potential_secrets(name, &HashMap::new(), &opts.headers) { eprintln!("{}", w); }
+                for w in validate::warn_potential_secrets(name, &HashMap::new(), &opts.headers) { eprintln!("{}", w); }
                 if !opts.env.is_empty() {
                     eprintln!(
                         "Warning: MCP '{}': env vars are not supported for HTTP MCPs — they will be ignored. \
@@ -1639,7 +1352,7 @@ pub fn generate_mcpg_docker_env(
         }
 
         for (var_name, var_value) in &opts.env {
-            if !is_valid_env_var_name(var_name) {
+            if !validate::is_valid_env_var_name(var_name) {
                 log::warn!(
                     "MCP '{}': skipping invalid env var name '{}' — must match [A-Za-z_][A-Za-z0-9_]*",
                     mcp_name, var_name
@@ -1807,24 +1520,7 @@ pub fn generate_allowed_domains(
                 hosts.insert(domain);
             }
         } else {
-            let valid_chars = !host.is_empty()
-                && host
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '*'));
-            if !valid_chars {
-                anyhow::bail!(
-                    "network.allowed domain '{}' contains characters invalid in DNS names. \
-                     Only ASCII alphanumerics, '.', '-', and '*' are allowed.",
-                    host
-                );
-            }
-            if host.contains('*') && !(host.starts_with("*.") && !host[2..].contains('*')) {
-                anyhow::bail!(
-                    "network.allowed domain '{}' uses '*' in an unsupported position. \
-                     Wildcards must appear only as a leading prefix (e.g. '*.example.com').",
-                    host
-                );
-            }
+            validate::validate_dns_domain(host)?;
             hosts.insert(host.clone());
         }
     }
@@ -3055,14 +2751,14 @@ mod tests {
 
     #[test]
     fn test_is_safe_tool_name() {
-        assert!(is_safe_tool_name("create-pull-request"));
-        assert!(is_safe_tool_name("noop"));
-        assert!(is_safe_tool_name("my-tool-123"));
-        assert!(!is_safe_tool_name(""));
-        assert!(!is_safe_tool_name("$(curl evil.com)"));
-        assert!(!is_safe_tool_name("foo; rm -rf /"));
-        assert!(!is_safe_tool_name("tool name"));
-        assert!(!is_safe_tool_name("tool\ttab"));
+        assert!(validate::is_safe_tool_name("create-pull-request"));
+        assert!(validate::is_safe_tool_name("noop"));
+        assert!(validate::is_safe_tool_name("my-tool-123"));
+        assert!(!validate::is_safe_tool_name(""));
+        assert!(!validate::is_safe_tool_name("$(curl evil.com)"));
+        assert!(!validate::is_safe_tool_name("foo; rm -rf /"));
+        assert!(!validate::is_safe_tool_name("tool name"));
+        assert!(!validate::is_safe_tool_name("tool\ttab"));
     }
 
     #[test]
@@ -3104,15 +2800,15 @@ mod tests {
 
     #[test]
     fn test_is_valid_parameter_name() {
-        assert!(is_valid_parameter_name("clearMemory"));
-        assert!(is_valid_parameter_name("myParam"));
-        assert!(is_valid_parameter_name("_private"));
-        assert!(is_valid_parameter_name("param123"));
-        assert!(!is_valid_parameter_name(""));
-        assert!(!is_valid_parameter_name("has space"));
-        assert!(!is_valid_parameter_name("has-dash"));
-        assert!(!is_valid_parameter_name("${{inject}}"));
-        assert!(!is_valid_parameter_name("123startsWithDigit"));
+        assert!(validate::is_valid_parameter_name("clearMemory"));
+        assert!(validate::is_valid_parameter_name("myParam"));
+        assert!(validate::is_valid_parameter_name("_private"));
+        assert!(validate::is_valid_parameter_name("param123"));
+        assert!(!validate::is_valid_parameter_name(""));
+        assert!(!validate::is_valid_parameter_name("has space"));
+        assert!(!validate::is_valid_parameter_name("has-dash"));
+        assert!(!validate::is_valid_parameter_name("${{inject}}"));
+        assert!(!validate::is_valid_parameter_name("123startsWithDigit"));
     }
 
     #[test]
@@ -4154,16 +3850,16 @@ mod tests {
 
     #[test]
     fn test_is_valid_env_var_name() {
-        assert!(is_valid_env_var_name("MY_VAR"));
-        assert!(is_valid_env_var_name("_PRIVATE"));
-        assert!(is_valid_env_var_name("A"));
-        assert!(is_valid_env_var_name("VAR123"));
-        assert!(!is_valid_env_var_name(""));
-        assert!(!is_valid_env_var_name("123ABC"));
-        assert!(!is_valid_env_var_name("MY-VAR"));
-        assert!(!is_valid_env_var_name("MY VAR"));
-        assert!(!is_valid_env_var_name("X --privileged"));
-        assert!(!is_valid_env_var_name("X -v /etc:/etc:rw"));
+        assert!(validate::is_valid_env_var_name("MY_VAR"));
+        assert!(validate::is_valid_env_var_name("_PRIVATE"));
+        assert!(validate::is_valid_env_var_name("A"));
+        assert!(validate::is_valid_env_var_name("VAR123"));
+        assert!(!validate::is_valid_env_var_name(""));
+        assert!(!validate::is_valid_env_var_name("123ABC"));
+        assert!(!validate::is_valid_env_var_name("MY-VAR"));
+        assert!(!validate::is_valid_env_var_name("MY VAR"));
+        assert!(!validate::is_valid_env_var_name("X --privileged"));
+        assert!(!validate::is_valid_env_var_name("X -v /etc:/etc:rw"));
     }
 
     #[test]
@@ -4359,14 +4055,14 @@ mod tests {
 
     #[test]
     fn test_validate_docker_args_privileged_flag() {
-        let warnings = validate_docker_args(&["--privileged".to_string()], "my-mcp");
+        let warnings = validate::validate_docker_args(&["--privileged".to_string()], "my-mcp");
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("--privileged"), "should warn about --privileged");
     }
 
     #[test]
     fn test_validate_docker_args_entrypoint_in_args_warns() {
-        let warnings = validate_docker_args(
+        let warnings = validate::validate_docker_args(
             &[
                 "--entrypoint".to_string(),
                 "/bin/sh".to_string(),
@@ -4380,7 +4076,7 @@ mod tests {
     #[test]
     fn test_validate_docker_args_volume_flag_calls_mount_validation() {
         // -v docker.sock in args bypasses `mounts:` validation; should produce warnings
-        let warnings = validate_docker_args(
+        let warnings = validate::validate_docker_args(
             &[
                 "-v".to_string(),
                 "/var/run/docker.sock:/var/run/docker.sock".to_string(),
@@ -4396,7 +4092,7 @@ mod tests {
     #[test]
     fn test_validate_docker_args_volume_equals_form() {
         // --volume=source:dest form should also be detected
-        let warnings = validate_docker_args(
+        let warnings = validate::validate_docker_args(
             &["--volume=/var/run/docker.sock:/var/run/docker.sock".to_string()],
             "my-mcp",
         );
@@ -4407,20 +4103,20 @@ mod tests {
     #[test]
     fn test_validate_docker_args_safe_args_no_warnings() {
         // A legitimate arg like --read-only should produce no warnings
-        let warnings = validate_docker_args(&["--read-only".to_string()], "my-mcp");
+        let warnings = validate::validate_docker_args(&["--read-only".to_string()], "my-mcp");
         assert!(warnings.is_empty(), "safe args should not produce warnings");
     }
 
     #[test]
     fn test_validate_docker_args_empty_no_warnings() {
-        let warnings = validate_docker_args(&[], "my-mcp");
+        let warnings = validate::validate_docker_args(&[], "my-mcp");
         assert!(warnings.is_empty(), "empty args should not produce warnings");
     }
 
     #[test]
     fn test_validate_docker_args_volume_flag_trailing_warns() {
         // -v as the last arg with no mount spec is malformed
-        let warnings = validate_docker_args(&["-v".to_string()], "my-mcp");
+        let warnings = validate::validate_docker_args(&["-v".to_string()], "my-mcp");
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("malformed"), "trailing -v with no mount spec should warn");
     }
@@ -4428,7 +4124,7 @@ mod tests {
     #[test]
     fn test_validate_docker_args_long_volume_flag_trailing_warns() {
         // --volume as the last arg with no mount spec is malformed
-        let warnings = validate_docker_args(&["--volume".to_string()], "my-mcp");
+        let warnings = validate::validate_docker_args(&["--volume".to_string()], "my-mcp");
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("malformed"), "trailing --volume with no mount spec should warn");
     }
@@ -4437,26 +4133,26 @@ mod tests {
 
     #[test]
     fn test_validate_mcp_url_https_no_warnings() {
-        let warnings = validate_mcp_url("https://mcp.dev.azure.com/myorg", "my-mcp");
+        let warnings = validate::validate_mcp_url("https://mcp.dev.azure.com/myorg", "my-mcp");
         assert!(warnings.is_empty(), "https URL should not produce warnings");
     }
 
     #[test]
     fn test_validate_mcp_url_http_no_warnings() {
-        let warnings = validate_mcp_url("http://localhost:8100/mcp", "my-mcp");
+        let warnings = validate::validate_mcp_url("http://localhost:8100/mcp", "my-mcp");
         assert!(warnings.is_empty(), "http URL should not produce warnings");
     }
 
     #[test]
     fn test_validate_mcp_url_bad_scheme_warns() {
-        let warnings = validate_mcp_url("ftp://files.example.com", "my-mcp");
+        let warnings = validate::validate_mcp_url("ftp://files.example.com", "my-mcp");
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("does not use http://"), "non-HTTP scheme should warn");
     }
 
     #[test]
     fn test_validate_mcp_url_no_scheme_warns() {
-        let warnings = validate_mcp_url("mcp.dev.azure.com/myorg", "my-mcp");
+        let warnings = validate::validate_mcp_url("mcp.dev.azure.com/myorg", "my-mcp");
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("does not use http://"), "URL without scheme should warn");
     }
@@ -4465,21 +4161,21 @@ mod tests {
 
     #[test]
     fn test_validate_mount_source_docker_sock() {
-        let warnings = validate_mount_source("/var/run/docker.sock:/var/run/docker.sock:rw", "my-mcp");
+        let warnings = validate::validate_mount_source("/var/run/docker.sock:/var/run/docker.sock:rw", "my-mcp");
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("Docker socket"), "should warn about Docker socket exposure");
     }
 
     #[test]
     fn test_validate_mount_source_sensitive_path_etc() {
-        let warnings = validate_mount_source("/etc/passwd:/data/passwd:ro", "my-mcp");
+        let warnings = validate::validate_mount_source("/etc/passwd:/data/passwd:ro", "my-mcp");
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("sensitive host path"), "should warn about /etc mount");
     }
 
     #[test]
     fn test_validate_mount_source_sensitive_path_proc() {
-        let warnings = validate_mount_source("/proc:/host/proc:ro", "my-mcp");
+        let warnings = validate::validate_mount_source("/proc:/host/proc:ro", "my-mcp");
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("sensitive host path"), "should warn about /proc mount");
     }
@@ -4487,7 +4183,7 @@ mod tests {
     #[test]
     fn test_validate_mount_source_case_insensitive() {
         // /ETC/shadow should match sensitive /etc prefix (lowercased comparison)
-        let warnings = validate_mount_source("/ETC/shadow:/data/shadow:ro", "my-mcp");
+        let warnings = validate::validate_mount_source("/ETC/shadow:/data/shadow:ro", "my-mcp");
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("sensitive host path"), "case-insensitive match should trigger warning");
     }
@@ -4495,14 +4191,14 @@ mod tests {
     #[test]
     fn test_validate_mount_source_no_false_positive_on_etc_configs() {
         // /etc-configs should NOT match the /etc prefix (path boundary check requires trailing /)
-        let warnings = validate_mount_source("/etc-configs:/app/config:ro", "my-mcp");
+        let warnings = validate::validate_mount_source("/etc-configs:/app/config:ro", "my-mcp");
         assert!(warnings.is_empty(), "/etc-configs must not match /etc prefix due to path boundary check");
     }
 
     #[test]
     fn test_validate_mount_source_safe_path_no_warnings() {
         // /app/data is not a sensitive path; should produce no warnings
-        let warnings = validate_mount_source("/app/data:/app/data:ro", "my-mcp");
+        let warnings = validate::validate_mount_source("/app/data:/app/data:ro", "my-mcp");
         assert!(warnings.is_empty(), "safe path should not produce warnings");
     }
 
@@ -4510,14 +4206,14 @@ mod tests {
 
     #[test]
     fn test_validate_container_image_empty_string() {
-        let warnings = validate_container_image("", "my-mcp");
+        let warnings = validate::validate_container_image("", "my-mcp");
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("empty"), "should warn about empty image name");
     }
 
     #[test]
     fn test_validate_container_image_shell_metacharacters() {
-        let warnings = validate_container_image("node:20-slim; rm -rf /", "my-mcp");
+        let warnings = validate::validate_container_image("node:20-slim; rm -rf /", "my-mcp");
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("unexpected characters"), "should warn about shell metacharacters");
     }
@@ -4525,9 +4221,9 @@ mod tests {
     #[test]
     fn test_validate_container_image_valid_name_no_warnings() {
         // Standard image references should produce no warnings
-        assert!(validate_container_image("node:20-slim", "my-mcp").is_empty());
-        assert!(validate_container_image("ghcr.io/org/image:latest", "my-mcp").is_empty());
-        assert!(validate_container_image("python:3.12-slim", "my-mcp").is_empty());
+        assert!(validate::validate_container_image("node:20-slim", "my-mcp").is_empty());
+        assert!(validate::validate_container_image("ghcr.io/org/image:latest", "my-mcp").is_empty());
+        assert!(validate::validate_container_image("python:3.12-slim", "my-mcp").is_empty());
     }
 
     // ─── warn_potential_secrets ──────────────────────────────────────────────
@@ -4536,7 +4232,7 @@ mod tests {
     fn test_warn_potential_secrets_token_env_var_triggers() {
         let env = HashMap::from([("API_TOKEN".to_string(), "secret123".to_string())]);
         let headers = HashMap::new();
-        let warnings = warn_potential_secrets("my-mcp", &env, &headers);
+        let warnings = validate::warn_potential_secrets("my-mcp", &env, &headers);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("API_TOKEN"), "should warn about secret-looking env var");
     }
@@ -4546,7 +4242,7 @@ mod tests {
         // Empty string = passthrough; should NOT trigger a warning
         let env = HashMap::from([("API_TOKEN".to_string(), "".to_string())]);
         let headers = HashMap::new();
-        let warnings = warn_potential_secrets("my-mcp", &env, &headers);
+        let warnings = validate::warn_potential_secrets("my-mcp", &env, &headers);
         assert!(warnings.is_empty(), "empty passthrough value must not trigger a warning");
     }
 
@@ -4555,7 +4251,7 @@ mod tests {
         let env = HashMap::new();
         let headers =
             HashMap::from([("Authorization".to_string(), "Bearer abc".to_string())]);
-        let warnings = warn_potential_secrets("my-mcp", &env, &headers);
+        let warnings = validate::warn_potential_secrets("my-mcp", &env, &headers);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("Authorization"), "should warn about Authorization header");
     }
@@ -4566,7 +4262,7 @@ mod tests {
         let env = HashMap::new();
         let headers =
             HashMap::from([("X-Custom-Auth".to_string(), "Bearer token123".to_string())]);
-        let warnings = warn_potential_secrets("my-mcp", &env, &headers);
+        let warnings = validate::warn_potential_secrets("my-mcp", &env, &headers);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("X-Custom-Auth"), "should warn about header with Bearer value");
     }
@@ -4576,7 +4272,7 @@ mod tests {
         // Env keys with non-secret names and non-empty values should produce no warnings
         let env = HashMap::from([("MY_CONFIG".to_string(), "value".to_string())]);
         let headers = HashMap::new();
-        let warnings = warn_potential_secrets("my-mcp", &env, &headers);
+        let warnings = validate::warn_potential_secrets("my-mcp", &env, &headers);
         assert!(warnings.is_empty(), "non-secret env var should not produce warnings");
     }
 }

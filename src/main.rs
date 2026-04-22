@@ -17,6 +17,7 @@ mod run;
 pub mod sanitize;
 mod safeoutputs;
 mod tools;
+pub mod validate;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
