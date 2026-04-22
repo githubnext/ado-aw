@@ -6,7 +6,6 @@
 
 use anyhow::{Context, Result, bail};
 use log::{debug, info, warn};
-use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -24,6 +23,14 @@ pub struct RunArgs {
     pub skip_mcpg: bool,
     pub output_dir: Option<PathBuf>,
     pub debug: bool,
+}
+
+/// Result of [`setup_mcp_config`]: the client config path and optional MCPG
+/// process handles that must be transferred into [`CleanupGuard`].
+struct McpSetupResult {
+    mcp_config_path: PathBuf,
+    mcpg_child: Option<Child>,
+    mcpg_env_file: Option<tempfile::NamedTempFile>,
 }
 
 /// Guard that kills child processes on drop (normal exit, error, or panic).
@@ -648,6 +655,332 @@ fn find_repo_root(start: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Generate the MCP client config and optionally start the MCPG gateway.
+///
+/// When `use_mcpg` is true, this:
+/// 1. Generates and serialises the MCPG config with runtime placeholder substitution
+/// 2. Starts the MCPG Docker container
+/// 3. Waits for the MCPG health endpoint
+/// 4. Polls for the gateway's runtime output JSON
+/// 5. Transforms that output into the Copilot MCP client config
+///
+/// When `use_mcpg` is false, writes a minimal direct-to-SafeOutputs config.
+///
+/// Returns an [`McpSetupResult`] whose `mcpg_child` / `mcpg_env_file` fields
+/// must be stored in the caller's [`CleanupGuard`].
+async fn setup_mcp_config(
+    use_mcpg: bool,
+    output_dir: &Path,
+    so_port: u16,
+    so_api_key: &str,
+    front_matter: &compile::types::FrontMatter,
+    compile_ctx: &compile::extensions::CompileContext<'_>,
+    extensions: &[compile::extensions::Extension],
+    pat: Option<&str>,
+    needs_ado_token: bool,
+    debug: bool,
+) -> Result<McpSetupResult> {
+    let mcp_config_path = output_dir.join("mcp-config.json");
+
+    if use_mcpg {
+        let mcpg_api_key = generate_api_key();
+        let mcpg_port = find_free_port().context("Failed to find a free port for MCPG")?;
+
+        println!("\n=== Generating MCPG config ===");
+
+        let mut mcpg_config =
+            compile::generate_mcpg_config(front_matter, compile_ctx, extensions)?;
+        mcpg_config.gateway.port = mcpg_port;
+
+        let mcpg_json = serde_json::to_string_pretty(&mcpg_config)
+            .context("Failed to serialize MCPG config")?;
+        let mcpg_json = mcpg_json
+            .replace("${SAFE_OUTPUTS_PORT}", &so_port.to_string())
+            .replace("${SAFE_OUTPUTS_API_KEY}", so_api_key)
+            .replace("${MCP_GATEWAY_API_KEY}", &mcpg_api_key);
+
+        // Rewrite SafeOutputs URL for the container→host network path.
+        // The compile-time config uses "localhost" which works in pipelines
+        // (Linux, --network host shares the host stack). Locally:
+        //   - Linux: "localhost" may resolve to ::1 (IPv6) but SafeOutputs
+        //     binds IPv4 only, so use 127.0.0.1 explicitly.
+        //   - Windows/macOS: Docker Desktop runs containers in a VM, so
+        //     "localhost" is the VM loopback. Use host.docker.internal.
+        let mcpg_json = if cfg!(target_os = "linux") {
+            mcpg_json.replace("http://localhost:", "http://127.0.0.1:")
+        } else {
+            mcpg_json.replace("http://localhost:", "http://host.docker.internal:")
+        };
+
+        tokio::fs::write(output_dir.join("mcpg-config.json"), &mcpg_json)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to write MCPG config: {}",
+                    output_dir.join("mcpg-config.json").display()
+                )
+            })?;
+        debug!("MCPG config written");
+
+        println!("\n=== Starting MCP Gateway (MCPG) ===");
+        if needs_ado_token && pat.is_none() {
+            warn!(
+                "ADO MCP requires a PAT but none was provided (--pat or AZURE_DEVOPS_EXT_PAT). \
+                 ADO MCP tool calls will likely fail at runtime."
+            );
+            println!("Warning: ADO MCP enabled but no PAT provided — tool calls may fail");
+        }
+
+        let gateway_output_path = output_dir.join("gateway-output.json");
+        let mcpg_log_dir = output_dir.join("mcpg-logs");
+        if debug {
+            println!("MCPG logs will be written to: {}", mcpg_log_dir.display());
+        }
+
+        let (mcpg_child, mcpg_env_file) = start_mcpg(
+            &mcpg_json,
+            &mcpg_api_key,
+            mcpg_port,
+            &gateway_output_path,
+            &mcpg_log_dir,
+            pat,
+            needs_ado_token,
+            debug,
+        )?;
+
+        wait_for_mcpg_health(mcpg_port, &mcpg_log_dir).await?;
+
+        println!("MCPG ready on port {}", mcpg_port);
+        println!("MCPG logs: {}", mcpg_log_dir.display());
+        println!("  Tip: tail -f {}/mcp-gateway.log", mcpg_log_dir.display());
+
+        wait_for_gateway_output(&gateway_output_path, &mcpg_log_dir).await?;
+
+        let gateway_json = tokio::fs::read_to_string(&gateway_output_path)
+            .await
+            .context("Failed to read MCPG gateway output")?;
+        debug!("Gateway output: {}", gateway_json);
+        let mcp_client_json = transform_gateway_output(&gateway_json)?;
+
+        tokio::fs::write(&mcp_config_path, &mcp_client_json)
+            .await
+            .with_context(|| {
+                format!("Failed to write MCP config: {}", mcp_config_path.display())
+            })?;
+        debug!("MCP client config written");
+        println!("MCP client config generated from gateway output");
+
+        if debug {
+            let client = reqwest::Client::new();
+            probe_mcp_backends(&client, mcpg_port, &mcpg_api_key, &mcp_config_path).await;
+        }
+
+        Ok(McpSetupResult {
+            mcp_config_path,
+            mcpg_child: Some(mcpg_child),
+            mcpg_env_file: Some(mcpg_env_file),
+        })
+    } else {
+        println!("\n=== Generating direct MCP config (no MCPG) ===");
+        let direct_config = serde_json::json!({
+            "mcpServers": {
+                "safeoutputs": {
+                    "type": "http",
+                    "url": format!("http://127.0.0.1:{}/mcp", so_port),
+                    "headers": {
+                        "Authorization": format!("Bearer {}", so_api_key)
+                    },
+                    "tools": ["*"]
+                }
+            }
+        });
+        let mcp_client_json = serde_json::to_string_pretty(&direct_config)
+            .context("Failed to serialize direct MCP config")?;
+        tokio::fs::write(&mcp_config_path, &mcp_client_json)
+            .await
+            .with_context(|| {
+                format!("Failed to write MCP config: {}", mcp_config_path.display())
+            })?;
+        println!("MCP config written (direct SafeOutputs, no MCPG)");
+
+        Ok(McpSetupResult {
+            mcp_config_path,
+            mcpg_child: None,
+            mcpg_env_file: None,
+        })
+    }
+}
+
+/// Poll the MCPG health endpoint until it responds, detecting early crashes.
+async fn wait_for_mcpg_health(mcpg_port: u16, mcpg_log_dir: &Path) -> Result<()> {
+    let client = reqwest::Client::new();
+    let health_url = format!("http://127.0.0.1:{}/health", mcpg_port);
+    for _ in 0..30 {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        if let Ok(resp) = client.get(&health_url).send().await {
+            if resp.status().is_success() {
+                return Ok(());
+            }
+        }
+    }
+    dump_mcpg_logs(mcpg_log_dir);
+    bail!("MCPG did not become ready within 30s");
+}
+
+/// Poll the MCPG gateway output file until it contains valid JSON with `mcpServers`.
+async fn wait_for_gateway_output(gateway_output_path: &Path, mcpg_log_dir: &Path) -> Result<()> {
+    println!("Waiting for gateway output...");
+    for _ in 0..15 {
+        if let Ok(content) = tokio::fs::read_to_string(gateway_output_path).await {
+            let has_servers = serde_json::from_str::<serde_json::Value>(&content)
+                .ok()
+                .and_then(|v| v.get("mcpServers").cloned())
+                .is_some();
+            if has_servers {
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    let content = tokio::fs::read_to_string(gateway_output_path)
+        .await
+        .unwrap_or_default();
+    dump_mcpg_logs(mcpg_log_dir);
+    bail!(
+        "MCPG gateway output not ready within 15s. Content: {}",
+        if content.is_empty() { "(empty)" } else { &content }
+    );
+}
+
+/// Run the Copilot CLI agent, or print instructions when Copilot is not on PATH.
+async fn run_copilot_agent(
+    working_dir: &Path,
+    prompt_path: &Path,
+    mcp_config_path: &Path,
+    copilot_params: &str,
+    debug: bool,
+    pat: Option<&str>,
+) -> Result<()> {
+    if is_on_path("copilot") {
+        run_copilot_on_path(working_dir, prompt_path, mcp_config_path, copilot_params, debug, pat)
+            .await
+    } else {
+        print_copilot_manual_instructions(prompt_path, mcp_config_path, copilot_params, debug, pat)
+            .await
+    }
+}
+
+/// Execute the Copilot CLI command when it is present on PATH.
+async fn run_copilot_on_path(
+    working_dir: &Path,
+    prompt_path: &Path,
+    mcp_config_path: &Path,
+    copilot_params: &str,
+    debug: bool,
+    pat: Option<&str>,
+) -> Result<()> {
+    let mut cmd = host_command_async("copilot");
+    let mut visible_args: Vec<String> = Vec::new();
+
+    // Pass prompt via @file to avoid cmd.exe argument length limits on Windows
+    let prompt_file_ref = format!("@{}", prompt_path.display());
+    cmd.arg("--prompt").arg(&prompt_file_ref);
+    visible_args.push("--prompt".into());
+    visible_args.push(prompt_file_ref);
+
+    let mcp_config_ref = format!("@{}", mcp_config_path.display());
+    cmd.arg("--additional-mcp-config").arg(&mcp_config_ref);
+    visible_args.push("--additional-mcp-config".into());
+    visible_args.push(mcp_config_ref);
+
+    for param in shell_words(copilot_params) {
+        visible_args.push(param.clone());
+        cmd.arg(param);
+    }
+
+    if debug {
+        cmd.arg("--log-level").arg("debug");
+        visible_args.extend(["--log-level".into(), "debug".into()]);
+    }
+
+    println!("Running: copilot {}", visible_args.join(" "));
+    cmd.current_dir(working_dir);
+
+    if let Some(pat) = pat {
+        cmd.env("AZURE_DEVOPS_EXT_PAT", pat);
+        cmd.env("SYSTEM_ACCESSTOKEN", pat);
+    }
+
+    let status = cmd.status().await.context("Failed to run copilot")?;
+    if !status.success() {
+        warn!("Copilot exited with status: {}", status);
+        println!("Copilot exited with status: {}", status);
+    }
+    Ok(())
+}
+
+/// Print manual invocation instructions when Copilot CLI is absent from PATH.
+async fn print_copilot_manual_instructions(
+    prompt_path: &Path,
+    mcp_config_path: &Path,
+    copilot_params: &str,
+    debug: bool,
+    pat: Option<&str>,
+) -> Result<()> {
+    let debug_flags = if debug { " --log-level debug" } else { "" };
+    println!("Copilot CLI not found on PATH.");
+    println!("To run the agent, execute this command:\n");
+    println!(
+        "  copilot --prompt @{} --additional-mcp-config @{} {}{}\n",
+        prompt_path.display(),
+        mcp_config_path.display(),
+        copilot_params,
+        debug_flags,
+    );
+
+    if let Some(pat) = pat {
+        println!("With environment:");
+        println!("  export AZURE_DEVOPS_EXT_PAT=\"{}...\"", &pat[..4.min(pat.len())]);
+    }
+
+    println!("\nPress Enter after the agent completes to continue with execution...");
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    Ok(())
+}
+
+/// Build the [`ExecutionContext`] for the safe-outputs stage from run arguments.
+fn build_execution_context(
+    front_matter: &compile::types::FrontMatter,
+    output_dir: PathBuf,
+    working_dir: PathBuf,
+    args: &RunArgs,
+) -> crate::safeoutputs::ExecutionContext {
+    let mut ctx = crate::safeoutputs::ExecutionContext::default();
+    ctx.dry_run = args.dry_run;
+    ctx.working_directory = output_dir;
+    ctx.source_directory = working_dir;
+    ctx.tool_configs = front_matter.safe_outputs.clone();
+    ctx.ado_org_url = args.org.clone();
+    ctx.ado_project = args.project.clone();
+    ctx.access_token = args.pat.clone();
+
+    // Build allowed repositories mapping (checkout aliases → repo names)
+    ctx.allowed_repositories = front_matter
+        .checkout
+        .iter()
+        .filter_map(|alias| {
+            front_matter
+                .repositories
+                .iter()
+                .find(|r| &r.repository == alias)
+                .map(|repo| (alias.clone(), repo.name.clone()))
+        })
+        .collect();
+
+    ctx
+}
+
 pub async fn run(args: &RunArgs) -> Result<()> {
     // ── 1. Parse agent markdown ──────────────────────────────────────
     let content = tokio::fs::read_to_string(&args.agent_path)
@@ -667,12 +1000,10 @@ pub async fn run(args: &RunArgs) -> Result<()> {
     // If --org is provided and tools.azure-devops has no explicit org,
     // inject it so AzureDevOpsExtension picks it up during config generation.
     // Sanitize the value since it's injected after sanitize_config_fields().
-    if let Some(org) = &args.org {
-        if let Some(ref mut tools) = front_matter.tools {
-            if let Some(ref mut ado) = tools.azure_devops {
-                if ado.org().is_none() {
-                    ado.set_org(crate::sanitize::sanitize_config(org));
-                }
+    if let (Some(org), Some(tools)) = (&args.org, front_matter.tools.as_mut()) {
+        if let Some(ado) = tools.azure_devops.as_mut() {
+            if ado.org().is_none() {
+                ado.set_org(crate::sanitize::sanitize_config(org));
             }
         }
     }
@@ -737,8 +1068,6 @@ pub async fn run(args: &RunArgs) -> Result<()> {
     println!("SafeOutputs ready on port {}", so_port);
 
     // ── 5. Generate configs + optionally start MCPG ──────────────────
-    let mcpg_api_key = generate_api_key();
-    let mcp_config_path = output_dir.join("mcp-config.json");
 
     // Check if any MCP or ADO tool needs a token
     let needs_ado_token = front_matter
@@ -764,161 +1093,22 @@ pub async fn run(args: &RunArgs) -> Result<()> {
     let compile_ctx =
         compile::extensions::CompileContext::new(&front_matter, &working_dir).await?;
 
-    if use_mcpg {
-        // Pick a free high port for MCPG — port 80 (used in pipelines) requires
-        // elevated privileges on most systems and isn't suitable for local dev.
-        let mcpg_port = find_free_port()
-            .context("Failed to find a free port for MCPG")?;
-
-        println!("\n=== Generating MCPG config ===");
-
-        let mut mcpg_config =
-            compile::generate_mcpg_config(&front_matter, &compile_ctx, &extensions)?;
-        mcpg_config.gateway.port = mcpg_port;
-
-        // Serialize and substitute runtime placeholders
-        let mcpg_json = serde_json::to_string_pretty(&mcpg_config)
-            .context("Failed to serialize MCPG config")?;
-        let mcpg_json = mcpg_json
-            .replace("${SAFE_OUTPUTS_PORT}", &so_port.to_string())
-            .replace("${SAFE_OUTPUTS_API_KEY}", &so_api_key)
-            .replace("${MCP_GATEWAY_API_KEY}", &mcpg_api_key);
-
-        // Rewrite SafeOutputs URL for the container→host network path.
-        // The compile-time config uses "localhost" which works in pipelines
-        // (Linux, --network host shares the host stack). Locally:
-        //   - Linux: "localhost" may resolve to ::1 (IPv6) but SafeOutputs
-        //     binds IPv4 only, so use 127.0.0.1 explicitly.
-        //   - Windows/macOS: Docker Desktop runs containers in a VM, so
-        //     "localhost" is the VM loopback. Use host.docker.internal.
-        let mcpg_json = if cfg!(target_os = "linux") {
-            mcpg_json.replace("http://localhost:", "http://127.0.0.1:")
-        } else {
-            mcpg_json.replace("http://localhost:", "http://host.docker.internal:")
-        };
-
-        tokio::fs::write(output_dir.join("mcpg-config.json"), &mcpg_json).await
-            .with_context(|| format!("Failed to write MCPG config: {}", output_dir.join("mcpg-config.json").display()))?;
-        debug!("MCPG config written");
-
-        // Start MCPG
-        println!("\n=== Starting MCP Gateway (MCPG) ===");
-        if needs_ado_token && args.pat.is_none() {
-            warn!("ADO MCP requires a PAT but none was provided (--pat or AZURE_DEVOPS_EXT_PAT). \
-                   ADO MCP tool calls will likely fail at runtime.");
-            println!("Warning: ADO MCP enabled but no PAT provided — tool calls may fail");
-        }
-        let gateway_output_path = output_dir.join("gateway-output.json");
-        let mcpg_log_dir = output_dir.join("mcpg-logs");
-        if args.debug {
-            println!("MCPG logs will be written to: {}", mcpg_log_dir.display());
-        }
-        let (mcpg_child, mcpg_env_file) = start_mcpg(
-            &mcpg_json,
-            &mcpg_api_key,
-            mcpg_port,
-            &gateway_output_path,
-            &mcpg_log_dir,
-            args.pat.as_deref(),
-            needs_ado_token,
-            args.debug,
-        )?;
-        guard.mcpg_child = Some(mcpg_child);
-        guard.mcpg_env_file = Some(mcpg_env_file);
-
-        // Health check MCPG — also detect early crash
-        let client = reqwest::Client::new();
-        let health_url = format!("http://127.0.0.1:{}/health", mcpg_port);
-        let mut ready = false;
-        for _ in 0..30 {
-            if let Some(ref mut child) = guard.mcpg_child {
-                if let Some(status) = child.try_wait()? {
-                    dump_mcpg_logs(&mcpg_log_dir);
-                    bail!("MCPG container exited during startup with {}", status);
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            match client.get(&health_url).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    ready = true;
-                    break;
-                }
-                _ => continue,
-            }
-        }
-        if !ready {
-            dump_mcpg_logs(&mcpg_log_dir);
-            bail!("MCPG did not become ready within 30s");
-        }
-        println!("MCPG ready on port {}", mcpg_port);
-        println!("MCPG logs: {}", mcpg_log_dir.display());
-        println!("  Tip: tail -f {}/mcp-gateway.log", mcpg_log_dir.display());
-
-        // Wait for gateway output — health check passing doesn't guarantee
-        // stdout is flushed, so poll until the file contains valid JSON.
-        println!("Waiting for gateway output...");
-        let mut gateway_ready = false;
-        for _ in 0..15 {
-            if let Ok(content) = tokio::fs::read_to_string(&gateway_output_path).await {
-                if serde_json::from_str::<serde_json::Value>(&content)
-                    .ok()
-                    .and_then(|v| v.get("mcpServers").cloned())
-                    .is_some()
-                {
-                    gateway_ready = true;
-                    break;
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        }
-        if !gateway_ready {
-            let content = tokio::fs::read_to_string(&gateway_output_path).await.unwrap_or_default();
-            dump_mcpg_logs(&mcpg_log_dir);
-            bail!(
-                "MCPG gateway output not ready within 15s. Content: {}",
-                if content.is_empty() { "(empty)" } else { &content }
-            );
-        }
-
-        // Transform MCPG's runtime output into copilot client config
-        let gateway_json = tokio::fs::read_to_string(&gateway_output_path).await
-            .context("Failed to read MCPG gateway output")?;
-        debug!("Gateway output: {}", gateway_json);
-        let mcp_client_json = transform_gateway_output(&gateway_json)?;
-
-        tokio::fs::write(&mcp_config_path, &mcp_client_json).await
-            .with_context(|| format!("Failed to write MCP config: {}", mcp_config_path.display()))?;
-        debug!("MCP client config written");
-        println!("MCP client config generated from gateway output");
-
-        // In debug mode, probe each MCP backend to force eager launch and
-        // surface failures before the agent runs. MCPG lazily starts stdio
-        // backends on first tool call — without probing, a broken backend
-        // only surfaces as a silent missing-tool error during the agent run.
-        if args.debug {
-            probe_mcp_backends(&client, mcpg_port, &mcpg_api_key, &mcp_config_path).await;
-        }
-    } else {
-        // Skip MCPG — generate direct config pointing to SafeOutputs
-        println!("\n=== Generating direct MCP config (no MCPG) ===");
-        let direct_config = serde_json::json!({
-            "mcpServers": {
-                "safeoutputs": {
-                    "type": "http",
-                    "url": format!("http://127.0.0.1:{}/mcp", so_port),
-                    "headers": {
-                        "Authorization": format!("Bearer {}", so_api_key)
-                    },
-                    "tools": ["*"]
-                }
-            }
-        });
-        let mcp_client_json = serde_json::to_string_pretty(&direct_config)
-            .context("Failed to serialize direct MCP config")?;
-        tokio::fs::write(&mcp_config_path, &mcp_client_json).await
-            .with_context(|| format!("Failed to write MCP config: {}", mcp_config_path.display()))?;
-        println!("MCP config written (direct SafeOutputs, no MCPG)");
-    }
+    let mcp_setup = setup_mcp_config(
+        use_mcpg,
+        &output_dir,
+        so_port,
+        &so_api_key,
+        &front_matter,
+        &compile_ctx,
+        &extensions,
+        args.pat.as_deref(),
+        needs_ado_token,
+        args.debug,
+    )
+    .await?;
+    guard.mcpg_child = mcp_setup.mcpg_child;
+    guard.mcpg_env_file = mcp_setup.mcpg_env_file;
+    let mcp_config_path = mcp_setup.mcp_config_path;
 
     // ── 6. Write agent prompt ────────────────────────────────────────
     let prompt_path = output_dir.join("agent-prompt.md");
@@ -930,112 +1120,20 @@ pub async fn run(args: &RunArgs) -> Result<()> {
     let copilot_params = compile_ctx.engine.args(compile_ctx.front_matter, &extensions)?;
 
     println!("\n=== Copilot CLI ===");
-
-    if is_on_path("copilot") {
-        let mut cmd = host_command_async("copilot");
-        // Collect args for debug logging (tokio Command doesn't expose them)
-        let mut visible_args: Vec<String> = Vec::new();
-
-        // Pass prompt via @file to avoid cmd.exe argument length limits on Windows
-        let prompt_file_ref = format!("@{}", prompt_path.display());
-        cmd.arg("--prompt").arg(&prompt_file_ref);
-        visible_args.push("--prompt".into());
-        visible_args.push(prompt_file_ref.clone());
-
-        let mcp_config_ref = format!("@{}", mcp_config_path.display());
-        cmd.arg("--additional-mcp-config")
-            .arg(&mcp_config_ref);
-        visible_args.push("--additional-mcp-config".into());
-        visible_args.push(mcp_config_ref.clone());
-
-        // Parse copilot_params and add as args
-        for param in shell_words(&copilot_params) {
-            visible_args.push(param.clone());
-            cmd.arg(param);
-        }
-
-        // Debug mode: enable verbose copilot logging. Logs are written to
-        // the default ~/.copilot/logs/ directory (--log-dir is unreliable
-        // across platforms).
-        if args.debug {
-            cmd.arg("--log-level").arg("debug");
-            visible_args.extend(["--log-level".into(), "debug".into()]);
-        }
-
-        println!("Running: copilot {}", visible_args.join(" "));
-
-        // Set working directory
-        cmd.current_dir(&working_dir);
-
-        // Set environment
-        if let Some(pat) = &args.pat {
-            cmd.env("AZURE_DEVOPS_EXT_PAT", pat);
-            cmd.env("SYSTEM_ACCESSTOKEN", pat);
-        }
-
-        let status = cmd
-            .status()
-            .await
-            .context("Failed to run copilot")?;
-
-        if !status.success() {
-            warn!("Copilot exited with status: {}", status);
-            println!("Copilot exited with status: {}", status);
-        }
-    } else {
-        let debug_flags = if args.debug { " --log-level debug" } else { "" };
-        println!("Copilot CLI not found on PATH.");
-        println!("To run the agent, execute this command:\n");
-        println!(
-            "  copilot --prompt @{} --additional-mcp-config @{} {}{}\n",
-            prompt_path.display(),
-            mcp_config_path.display(),
-            copilot_params,
-            debug_flags,
-        );
-
-        if let Some(pat) = &args.pat {
-            println!("With environment:");
-            println!("  export AZURE_DEVOPS_EXT_PAT=\"{}...\"", &pat[..4.min(pat.len())]);
-        }
-
-        println!("\nPress Enter after the agent completes to continue with execution...");
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-    }
+    run_copilot_agent(
+        &working_dir,
+        &prompt_path,
+        &mcp_config_path,
+        &copilot_params,
+        args.debug,
+        args.pat.as_deref(),
+    )
+    .await?;
 
     // ── 8. Execute safe outputs ──────────────────────────────────────
     println!("\n=== Executing safe outputs ===");
 
-    let mut ctx = crate::safeoutputs::ExecutionContext::default();
-    ctx.dry_run = args.dry_run;
-    ctx.working_directory = output_dir.clone();
-    ctx.source_directory = working_dir.clone();
-    ctx.tool_configs = front_matter.safe_outputs.clone();
-
-    if let Some(org) = &args.org {
-        ctx.ado_org_url = Some(org.clone());
-    }
-    if let Some(project) = &args.project {
-        ctx.ado_project = Some(project.clone());
-    }
-    if let Some(pat) = &args.pat {
-        ctx.access_token = Some(pat.clone());
-    }
-
-    // Build allowed repositories mapping
-    let mut allowed_repositories = HashMap::new();
-    for checkout_alias in &front_matter.checkout {
-        if let Some(repo) = front_matter
-            .repositories
-            .iter()
-            .find(|r| &r.repository == checkout_alias)
-        {
-            allowed_repositories.insert(checkout_alias.clone(), repo.name.clone());
-        }
-    }
-    ctx.allowed_repositories = allowed_repositories;
-
+    let ctx = build_execution_context(&front_matter, output_dir.clone(), working_dir.clone(), args);
     let results = crate::execute::execute_safe_outputs(&output_dir, &ctx).await?;
 
     // Print summary
