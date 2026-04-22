@@ -6,6 +6,11 @@ use crate::compile::types::{FrontMatter, McpConfig};
 /// Default model used by the Copilot engine when no model is specified in front matter.
 pub const DEFAULT_COPILOT_MODEL: &str = "claude-opus-4.5";
 
+/// Version of the GitHub Copilot CLI (Microsoft.Copilot.CLI.linux-x64) NuGet package to install.
+/// Update this when upgrading to a new Copilot CLI release.
+/// See: https://pkgs.dev.azure.com/msazuresphere/_packaging/Guardian1ESPTUpstreamOrgFeed/nuget/v3/index.json
+pub const COPILOT_CLI_VERSION: &str = "1.0.34";
+
 /// Resolved engine — enum dispatch over supported engine identifiers.
 ///
 /// Currently only `Copilot` (GitHub Copilot CLI) is supported. New engines
@@ -33,14 +38,56 @@ pub fn get_engine(engine_id: &str) -> Result<Engine> {
 impl Engine {
     /// The default engine binary name (e.g., "copilot").
     ///
-    /// Currently scaffolding — the pipeline templates hard-code the binary path
-    /// (`/tmp/awf-tools/copilot`). This will be wired into template substitution
-    /// when additional engines are added. Can be overridden per-agent via
-    /// `engine.command` in front matter.
+    /// Can be overridden per-agent via `engine.command` in front matter.
     #[allow(dead_code)]
     pub fn command(&self) -> &str {
         match self {
             Engine::Copilot => "copilot",
+        }
+    }
+
+    /// Return the engine CLI version string (e.g., "1.0.34").
+    pub fn version(&self) -> &str {
+        match self {
+            Engine::Copilot => COPILOT_CLI_VERSION,
+        }
+    }
+
+    /// Generate pipeline YAML steps that install the engine binary.
+    ///
+    /// The steps authenticate the NuGet feed, install the package, copy the
+    /// binary to `/tmp/awf-tools/`, and verify the installation.
+    pub fn install_steps(&self) -> String {
+        match self {
+            Engine::Copilot => copilot_install_steps(),
+        }
+    }
+
+    /// Generate the shell command that AWF executes for the Agent job.
+    ///
+    /// Returns the full command string (including engine binary, prompt,
+    /// MCP config, and engine args) that goes after AWF's `--` flag.
+    /// `engine_args` is the output of [`Engine::args`].
+    pub fn invocation(&self, engine_args: &str) -> String {
+        match self {
+            Engine::Copilot => format!(
+                "'/tmp/awf-tools/copilot --prompt \"$(cat /tmp/awf-tools/agent-prompt.md)\" \
+                 --additional-mcp-config @/tmp/awf-tools/mcp-config.json {}'",
+                engine_args,
+            ),
+        }
+    }
+
+    /// Generate the shell command that AWF executes for the Detection job.
+    ///
+    /// Similar to [`Engine::invocation`] but uses the threat-analysis prompt
+    /// and omits the MCP config (Detection runs without MCPG).
+    pub fn detection_invocation(&self, engine_args: &str) -> String {
+        match self {
+            Engine::Copilot => format!(
+                "'/tmp/awf-tools/copilot --prompt \"$(cat /tmp/awf-tools/threat-analysis-prompt.md)\" {}'",
+                engine_args,
+            ),
         }
     }
 
@@ -59,6 +106,34 @@ impl Engine {
     pub fn env(&self) -> String {
         match self {
             Engine::Copilot => copilot_env(),
+        }
+    }
+
+    /// Return the engine's home configuration directory (e.g., `$HOME/.copilot`).
+    ///
+    /// Used in pipeline steps that create the config dir and copy MCP config.
+    pub fn home_config_dir(&self) -> &str {
+        match self {
+            Engine::Copilot => "$HOME/.copilot",
+        }
+    }
+
+    /// Return the engine's log directory (e.g., `~/.copilot/logs`).
+    ///
+    /// Used in pipeline steps that collect engine logs after the agent runs.
+    pub fn log_dir(&self) -> &str {
+        match self {
+            Engine::Copilot => "~/.copilot/logs",
+        }
+    }
+
+    /// Return the engine-specific path where MCP config is copied in the home dir.
+    ///
+    /// The primary MCP config is always at `/tmp/awf-tools/mcp-config.json`;
+    /// this returns the secondary copy path for host-side use.
+    pub fn mcp_config_path(&self) -> &str {
+        match self {
+            Engine::Copilot => "$HOME/.copilot/mcp-config.json",
         }
     }
 }
@@ -166,7 +241,7 @@ fn copilot_args(
         }
 
         for cmd in &bash_commands {
-            // Reject single quotes in bash commands — copilot_params are embedded inside
+            // Reject single quotes in bash commands — engine_args are embedded inside
             // a single-quoted bash string in the AWF command.
             if cmd.contains('\'') {
                 anyhow::bail!(
@@ -181,7 +256,7 @@ fn copilot_args(
 
     let mut params = Vec::new();
 
-    // Validate model name to prevent shell injection — copilot_params are embedded
+    // Validate model name to prevent shell injection — engine_args are embedded
     // inside a single-quoted bash string in the AWF command.
     let model = front_matter.engine.model().unwrap_or(DEFAULT_COPILOT_MODEL);
     if model.is_empty()
@@ -268,7 +343,7 @@ fn copilot_args(
     } else {
         for tool in allowed_tools {
             if tool.contains('(') || tool.contains(')') || tool.contains(' ') {
-                // Use double quotes - the copilot_params are embedded inside a single-quoted
+                // Use double quotes - the engine_args are embedded inside a single-quoted
                 // bash string in the AWF command, so single quotes would break quoting.
                 params.push(format!("--allow-tool \"{}\"", tool));
             } else {
@@ -286,6 +361,40 @@ fn copilot_args(
     Ok(params.join(" "))
 }
 
+/// Generate the Copilot CLI install steps as YAML pipeline steps.
+///
+/// These steps: authenticate the NuGet feed, install the package, copy the
+/// binary to /tmp/awf-tools/, and run a version check.
+fn copilot_install_steps() -> String {
+    format!(
+        r###"- task: NuGetAuthenticate@1
+  displayName: "Authenticate NuGet Feed"
+
+- task: NuGetCommand@2
+  displayName: "Install Copilot CLI"
+  inputs:
+    command: 'custom'
+    arguments: 'install Microsoft.Copilot.CLI.linux-x64 -Source "https://pkgs.dev.azure.com/msazuresphere/_packaging/Guardian1ESPTUpstreamOrgFeed/nuget/v3/index.json" -Version {version} -OutputDirectory $(Agent.TempDirectory)/tools -ExcludeVersion -NonInteractive'
+
+- bash: |
+    ls -la "$(Agent.TempDirectory)/tools"
+    echo "##vso[task.prependpath]$(Agent.TempDirectory)/tools/Microsoft.Copilot.CLI.linux-x64"
+
+    # Copy copilot binary to /tmp so it's accessible inside AWF container
+    # (AWF auto-mounts /tmp:/tmp:rw but not Agent.TempDirectory)
+    mkdir -p /tmp/awf-tools
+    cp "$(Agent.TempDirectory)/tools/Microsoft.Copilot.CLI.linux-x64/copilot" /tmp/awf-tools/copilot
+    chmod +x /tmp/awf-tools/copilot
+  displayName: "Add copilot to PATH"
+
+- bash: |
+    copilot --version
+    copilot -h
+  displayName: "Output copilot version""###,
+        version = COPILOT_CLI_VERSION,
+    )
+}
+
 fn copilot_env() -> String {
     let lines = [
         "GITHUB_TOKEN: $(GITHUB_TOKEN)",
@@ -299,12 +408,63 @@ fn copilot_env() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{get_engine, Engine};
+    use super::{get_engine, Engine, COPILOT_CLI_VERSION};
     use crate::compile::{extensions::collect_extensions, parse_markdown};
 
     #[test]
     fn copilot_engine_command() {
         assert_eq!(Engine::Copilot.command(), "copilot");
+    }
+
+    #[test]
+    fn copilot_engine_version() {
+        assert_eq!(Engine::Copilot.version(), COPILOT_CLI_VERSION);
+    }
+
+    #[test]
+    fn copilot_engine_install_steps() {
+        let steps = Engine::Copilot.install_steps();
+        assert!(steps.contains("NuGetAuthenticate@1"));
+        assert!(steps.contains("Install Copilot CLI"));
+        assert!(steps.contains(COPILOT_CLI_VERSION));
+        assert!(steps.contains("/tmp/awf-tools/copilot"));
+        assert!(steps.contains("copilot --version"));
+    }
+
+    #[test]
+    fn copilot_engine_invocation() {
+        let inv = Engine::Copilot.invocation("--model claude-opus-4.5 --no-ask-user");
+        assert!(inv.contains("/tmp/awf-tools/copilot"));
+        assert!(inv.contains("--prompt"));
+        assert!(inv.contains("agent-prompt.md"));
+        assert!(inv.contains("--additional-mcp-config"));
+        assert!(inv.contains("mcp-config.json"));
+        assert!(inv.contains("--model claude-opus-4.5"));
+    }
+
+    #[test]
+    fn copilot_engine_detection_invocation() {
+        let inv = Engine::Copilot.detection_invocation("--model claude-opus-4.5 --no-ask-user");
+        assert!(inv.contains("/tmp/awf-tools/copilot"));
+        assert!(inv.contains("--prompt"));
+        assert!(inv.contains("threat-analysis-prompt.md"));
+        assert!(!inv.contains("--additional-mcp-config"), "detection should not include MCP config");
+        assert!(inv.contains("--model claude-opus-4.5"));
+    }
+
+    #[test]
+    fn copilot_engine_home_config_dir() {
+        assert_eq!(Engine::Copilot.home_config_dir(), "$HOME/.copilot");
+    }
+
+    #[test]
+    fn copilot_engine_log_dir() {
+        assert_eq!(Engine::Copilot.log_dir(), "~/.copilot/logs");
+    }
+
+    #[test]
+    fn copilot_engine_mcp_config_path() {
+        assert_eq!(Engine::Copilot.mcp_config_path(), "$HOME/.copilot/mcp-config.json");
     }
 
     #[test]

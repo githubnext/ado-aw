@@ -1,5 +1,5 @@
 # 1ES Pipeline Template for Agentic Pipelines
-# This template extends the 1ES Unofficial Pipeline Template with Copilot CLI,
+# This template extends the 1ES Unofficial Pipeline Template with engine CLI,
 # AWF network isolation, and MCP Gateway — matching the standalone pipeline model.
 
 name: {{ agent_name }}-$(BuildID)
@@ -56,30 +56,7 @@ extends:
 
                 {{ acquire_ado_token }}
 
-                - task: NuGetAuthenticate@1
-                  displayName: "Authenticate NuGet Feed"
-
-                - task: NuGetCommand@2
-                  displayName: "Install Copilot CLI"
-                  inputs:
-                    command: 'custom'
-                    arguments: 'install Microsoft.Copilot.CLI.linux-x64 -Source "https://pkgs.dev.azure.com/msazuresphere/_packaging/Guardian1ESPTUpstreamOrgFeed/nuget/v3/index.json" -Version {{ copilot_version }} -OutputDirectory $(Agent.TempDirectory)/tools -ExcludeVersion -NonInteractive'
-
-                - bash: |
-                    ls -la "$(Agent.TempDirectory)/tools"
-                    echo "##vso[task.prependpath]$(Agent.TempDirectory)/tools/Microsoft.Copilot.CLI.linux-x64"
-
-                    # Copy copilot binary to /tmp so it's accessible inside AWF container
-                    # (AWF auto-mounts /tmp:/tmp:rw but not Agent.TempDirectory)
-                    mkdir -p /tmp/awf-tools
-                    cp "$(Agent.TempDirectory)/tools/Microsoft.Copilot.CLI.linux-x64/copilot" /tmp/awf-tools/copilot
-                    chmod +x /tmp/awf-tools/copilot
-                  displayName: "Add copilot to PATH"
-
-                - bash: |
-                    copilot --version
-                    copilot -h
-                  displayName: "Output copilot version"
+                {{ engine_install }}
 
                 - bash: |
                     COMPILER_VERSION="{{ compiler_version }}"
@@ -129,7 +106,7 @@ extends:
                   displayName: "Prepare MCPG config"
 
                 - bash: |
-                    mkdir -p "$HOME/.copilot"
+                    mkdir -p "{{ engine_home_config_dir }}"
                     mkdir -p /tmp/awf-tools/staging
 
                     echo "HOME: $HOME"
@@ -320,7 +297,7 @@ extends:
                     echo "Gateway output:"
                     cat "$GATEWAY_OUTPUT"
 
-                    # Convert gateway output to Copilot CLI mcp-config.json.
+                    # Convert gateway output to engine mcp-config.json.
                     # Mirrors gh-aw's convert_gateway_config_copilot.cjs:
                     #   - Rewrite URLs from 127.0.0.1 to host.docker.internal (AWF container needs
                     #     host.docker.internal to reach MCPG on the host; 127.0.0.1 is container loopback)
@@ -330,9 +307,9 @@ extends:
                       '.mcpServers |= (to_entries | sort_by(.key) | map(.value.url |= sub("^http://[^/]+/"; "\($prefix)/") | .value.tools = ["*"]) | from_entries)' \
                       "$GATEWAY_OUTPUT" > /tmp/awf-tools/mcp-config.json
 
-                    # Also write to $HOME/.copilot for host-side use
-                    cp /tmp/awf-tools/mcp-config.json "$HOME/.copilot/mcp-config.json"
-                    chmod 600 /tmp/awf-tools/mcp-config.json "$HOME/.copilot/mcp-config.json"
+                    # Also write to engine home config dir for host-side use
+                    cp /tmp/awf-tools/mcp-config.json "{{ engine_mcp_config_path }}"
+                    chmod 600 /tmp/awf-tools/mcp-config.json "{{ engine_mcp_config_path }}"
 
                     echo "Generated MCP config at: /tmp/awf-tools/mcp-config.json"
                     cat /tmp/awf-tools/mcp-config.json
@@ -354,7 +331,7 @@ extends:
                     # AWF provides L7 domain whitelisting via Squid proxy + Docker containers.
                     # --enable-host-access allows the AWF container to reach host services
                     # (MCPG and SafeOutputs) via host.docker.internal.
-                    # AWF auto-mounts /tmp:/tmp:rw into the container, so copilot binary,
+                    # AWF auto-mounts /tmp:/tmp:rw into the container, so the engine binary,
                     # agent prompt, and MCP config are placed under /tmp/awf-tools/.
                     # Stream agent output in real-time while filtering VSO commands.
                     # sed -u = unbuffered (line-by-line) so output appears immediately.
@@ -368,7 +345,7 @@ extends:
                       --container-workdir "{{ working_directory }}" \
                       --log-level info \
                       --proxy-logs-dir "$(Agent.TempDirectory)/staging/logs/firewall" \
-                      -- '/tmp/awf-tools/copilot --prompt "$(cat /tmp/awf-tools/agent-prompt.md)" --additional-mcp-config @/tmp/awf-tools/mcp-config.json {{ copilot_params }}' \
+                      -- {{ engine_run }} \
                       2>&1 \
                       | sed -u 's/##vso\[/[VSO-FILTERED] vso[/g; s/##\[/[VSO-FILTERED] [/g' \
                       | tee "$AGENT_OUTPUT_FILE" \
@@ -381,7 +358,7 @@ extends:
                     fi
 
                     exit $AGENT_EXIT_CODE
-                  displayName: "Run copilot (AWF network isolated)"
+                  displayName: "Run agent (AWF network isolated)"
                   workingDirectory: {{ working_directory }}
                   env:
                     {{ engine_env }}
@@ -415,8 +392,8 @@ extends:
                 - bash: |
                     # Copy all logs to output directory for artifact upload
                     mkdir -p "$(Agent.TempDirectory)/staging/logs"
-                    if [ -d ~/.copilot/logs ]; then
-                      cp -r ~/.copilot/logs/* "$(Agent.TempDirectory)/staging/logs/" 2>/dev/null || true
+                    if [ -d {{ engine_log_dir }} ]; then
+                      cp -r {{ engine_log_dir }}/* "$(Agent.TempDirectory)/staging/logs/" 2>/dev/null || true
                     fi
                     if [ -d ~/.ado-aw/logs ]; then
                       cp -r ~/.ado-aw/logs/* "$(Agent.TempDirectory)/staging/logs/" 2>/dev/null || true
@@ -448,29 +425,7 @@ extends:
                 - download: current
                   artifact: agent_outputs_$(Build.BuildId)
 
-                - task: NuGetAuthenticate@1
-                  displayName: "Authenticate NuGet Feed"
-
-                - task: NuGetCommand@2
-                  displayName: "Install Copilot CLI"
-                  inputs:
-                    command: 'custom'
-                    arguments: 'install Microsoft.Copilot.CLI.linux-x64 -Source "https://pkgs.dev.azure.com/msazuresphere/_packaging/Guardian1ESPTUpstreamOrgFeed/nuget/v3/index.json" -Version {{ copilot_version }} -OutputDirectory $(Agent.TempDirectory)/tools -ExcludeVersion -NonInteractive'
-
-                - bash: |
-                    ls -la "$(Agent.TempDirectory)/tools"
-                    echo "##vso[task.prependpath]$(Agent.TempDirectory)/tools/Microsoft.Copilot.CLI.linux-x64"
-
-                    # Copy copilot binary to /tmp so it's accessible inside AWF container
-                    mkdir -p /tmp/awf-tools
-                    cp "$(Agent.TempDirectory)/tools/Microsoft.Copilot.CLI.linux-x64/copilot" /tmp/awf-tools/copilot
-                    chmod +x /tmp/awf-tools/copilot
-                  displayName: "Add copilot to PATH"
-
-                - bash: |
-                    copilot --version
-                    copilot -h
-                  displayName: "Output copilot version"
+                {{ engine_install }}
 
                 - bash: |
                     COMPILER_VERSION="{{ compiler_version }}"
@@ -556,7 +511,7 @@ extends:
                       --container-workdir "{{ working_directory }}" \
                       --log-level info \
                       --proxy-logs-dir "$(Agent.TempDirectory)/threat-analysis-logs/firewall" \
-                      -- '/tmp/awf-tools/copilot --prompt "$(cat /tmp/awf-tools/threat-analysis-prompt.md)" {{ copilot_params }}' \
+                      -- {{ engine_run_detection }} \
                       2>&1 \
                       | sed -u 's/##vso\[/[VSO-FILTERED] vso[/g; s/##\[/[VSO-FILTERED] [/g' \
                       | tee "$THREAT_OUTPUT_FILE" \
@@ -634,9 +589,9 @@ extends:
                 - bash: |
                     # Copy all logs to analyzed outputs for artifact upload
                     mkdir -p "$(Agent.TempDirectory)/analyzed_outputs/logs"
-                    if [ -d ~/.copilot/logs ]; then
-                      mkdir -p "$(Agent.TempDirectory)/analyzed_outputs/logs/copilot"
-                      cp -r ~/.copilot/logs/* "$(Agent.TempDirectory)/analyzed_outputs/logs/copilot/" 2>/dev/null || true
+                    if [ -d {{ engine_log_dir }} ]; then
+                      mkdir -p "$(Agent.TempDirectory)/analyzed_outputs/logs/engine"
+                      cp -r {{ engine_log_dir }}/* "$(Agent.TempDirectory)/analyzed_outputs/logs/engine/" 2>/dev/null || true
                     fi
                     if [ -d ~/.ado-aw/logs ]; then
                       mkdir -p "$(Agent.TempDirectory)/analyzed_outputs/logs/ado-aw"
@@ -716,9 +671,9 @@ extends:
                     # Copy agent output log from analyzed_outputs for optimisation use
                     cp "$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)/logs/agent-output.txt" \
                       "$(Agent.TempDirectory)/staging/logs/agent-output.txt" 2>/dev/null || true
-                    if [ -d ~/.copilot/logs ]; then
-                      mkdir -p "$(Agent.TempDirectory)/staging/logs/copilot"
-                      cp -r ~/.copilot/logs/* "$(Agent.TempDirectory)/staging/logs/copilot/" 2>/dev/null || true
+                    if [ -d {{ engine_log_dir }} ]; then
+                      mkdir -p "$(Agent.TempDirectory)/staging/logs/engine"
+                      cp -r {{ engine_log_dir }}/* "$(Agent.TempDirectory)/staging/logs/engine/" 2>/dev/null || true
                     fi
                     if [ -d ~/.ado-aw/logs ]; then
                       mkdir -p "$(Agent.TempDirectory)/staging/logs/ado-aw"

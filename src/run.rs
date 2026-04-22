@@ -926,8 +926,8 @@ pub async fn run(args: &RunArgs) -> Result<()> {
         .with_context(|| format!("Failed to write agent prompt: {}", prompt_path.display()))?;
     debug!("Agent prompt written to {}", prompt_path.display());
 
-    // ── 7. Build and run copilot command ─────────────────────────────
-    let copilot_params = compile_ctx.engine.args(compile_ctx.front_matter, &extensions)?;
+    // ── 7. Build and run engine command ─────────────────────────────
+    let engine_args = compile_ctx.engine.args(compile_ctx.front_matter, &extensions)?;
 
     println!("\n=== Copilot CLI ===");
 
@@ -948,8 +948,8 @@ pub async fn run(args: &RunArgs) -> Result<()> {
         visible_args.push("--additional-mcp-config".into());
         visible_args.push(mcp_config_ref.clone());
 
-        // Parse copilot_params and add as args
-        for param in shell_words(&copilot_params) {
+        // Parse engine_args and add as args
+        for param in shell_words(&engine_args) {
             visible_args.push(param.clone());
             cmd.arg(param);
         }
@@ -990,7 +990,7 @@ pub async fn run(args: &RunArgs) -> Result<()> {
             "  copilot --prompt @{} --additional-mcp-config @{} {}{}\n",
             prompt_path.display(),
             mcp_config_path.display(),
-            copilot_params,
+            engine_args,
             debug_flags,
         );
 
