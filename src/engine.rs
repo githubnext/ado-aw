@@ -118,12 +118,12 @@ impl Engine {
         }
     }
 
-    /// Return the engine's log directory (e.g., `~/.copilot/logs`).
+    /// Return the engine's log directory (e.g., `$HOME/.copilot/logs`).
     ///
     /// Used in pipeline steps that collect engine logs after the agent runs.
     pub fn log_dir(&self) -> &str {
         match self {
-            Engine::Copilot => "~/.copilot/logs",
+            Engine::Copilot => "$HOME/.copilot/logs",
         }
     }
 
@@ -459,7 +459,7 @@ mod tests {
 
     #[test]
     fn copilot_engine_log_dir() {
-        assert_eq!(Engine::Copilot.log_dir(), "~/.copilot/logs");
+        assert_eq!(Engine::Copilot.log_dir(), "$HOME/.copilot/logs");
     }
 
     #[test]
