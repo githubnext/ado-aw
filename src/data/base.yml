@@ -100,7 +100,6 @@ jobs:
         displayName: "Prepare MCPG config"
 
       - bash: |
-          mkdir -p "$HOME/.copilot"
           mkdir -p /tmp/awf-tools/staging
 
           echo "HOME: $HOME"
@@ -301,9 +300,7 @@ jobs:
             '.mcpServers |= (to_entries | sort_by(.key) | map(.value.url |= sub("^http://[^/]+/"; "\($prefix)/") | .value.tools = ["*"]) | from_entries)' \
             "$GATEWAY_OUTPUT" > /tmp/awf-tools/mcp-config.json
 
-          # Also write to $HOME/.copilot for host-side use
-          cp /tmp/awf-tools/mcp-config.json "$HOME/.copilot/mcp-config.json"
-          chmod 600 /tmp/awf-tools/mcp-config.json "$HOME/.copilot/mcp-config.json"
+          chmod 600 /tmp/awf-tools/mcp-config.json
 
           echo "Generated MCP config at: /tmp/awf-tools/mcp-config.json"
           cat /tmp/awf-tools/mcp-config.json
