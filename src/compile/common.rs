@@ -1917,6 +1917,8 @@ pub async fn compile_shared(
 
     // 4. Generate copilot params
     let copilot_params = ctx.engine.args(ctx.front_matter, extensions)?;
+    let engine_install_steps = ctx.engine.install_steps(ctx.front_matter, "")?;
+    let copilot_command = ctx.engine.command_path(ctx.front_matter)?;
 
     // 5. Compute workspace, working directory, triggers
     let effective_workspace = compute_effective_workspace(
@@ -2018,6 +2020,8 @@ pub async fn compile_shared(
         ("{{ parameters }}", &parameters_yaml),
         ("{{ compiler_version }}", compiler_version),
         ("{{ copilot_version }}", COPILOT_CLI_VERSION),
+        ("{{ engine_install_steps }}", &engine_install_steps),
+        ("{{ copilot_command }}", &copilot_command),
         ("{{ pool }}", &pool),
         ("{{ setup_job }}", &setup_job),
         ("{{ teardown_job }}", &teardown_job),

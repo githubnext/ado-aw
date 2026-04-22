@@ -1,10 +1,14 @@
 use anyhow::Result;
 
+use crate::compile::COPILOT_CLI_VERSION;
 use crate::compile::extensions::{CompilerExtension, Extension};
 use crate::compile::types::{FrontMatter, McpConfig};
 
 /// Default model used by the Copilot engine when no model is specified in front matter.
 pub const DEFAULT_COPILOT_MODEL: &str = "claude-opus-4.5";
+
+/// Default path where the engine binary is placed for AWF container access.
+const DEFAULT_COPILOT_COMMAND_PATH: &str = "/tmp/awf-tools/copilot";
 
 /// Resolved engine — enum dispatch over supported engine identifiers.
 ///
@@ -32,11 +36,6 @@ pub fn get_engine(engine_id: &str) -> Result<Engine> {
 
 impl Engine {
     /// The default engine binary name (e.g., "copilot").
-    ///
-    /// Currently scaffolding — the pipeline templates hard-code the binary path
-    /// (`/tmp/awf-tools/copilot`). This will be wired into template substitution
-    /// when additional engines are added. Can be overridden per-agent via
-    /// `engine.command` in front matter.
     #[allow(dead_code)]
     pub fn command(&self) -> &str {
         match self {
@@ -59,6 +58,30 @@ impl Engine {
     pub fn env(&self) -> String {
         match self {
             Engine::Copilot => copilot_env(),
+        }
+    }
+
+    /// Resolve the command path for the engine binary inside the AWF container.
+    ///
+    /// When `engine.command` is set in front matter, the custom path is used
+    /// (skipping the default install). Otherwise returns the default path
+    /// (`/tmp/awf-tools/copilot`).
+    pub fn command_path(&self, front_matter: &FrontMatter) -> Result<String> {
+        match self {
+            Engine::Copilot => copilot_command_path(front_matter),
+        }
+    }
+
+    /// Generate the YAML install steps for the engine (NuGet install + binary copy).
+    ///
+    /// When `engine.command` is set, install steps are skipped (empty string)
+    /// because the user is providing their own engine binary.
+    ///
+    /// The `indent` parameter specifies the leading whitespace for each line
+    /// (e.g., `"      "` for standalone, `"                "` for 1ES).
+    pub fn install_steps(&self, front_matter: &FrontMatter, indent: &str) -> Result<String> {
+        match self {
+            Engine::Copilot => copilot_install_steps(front_matter, indent),
         }
     }
 }
@@ -224,31 +247,10 @@ fn copilot_args(
             front_matter.name
         );
     }
-    if front_matter.engine.version().is_some() {
-        eprintln!(
-            "Warning: Agent '{}' has engine.version set, but custom engine versioning is not yet \
-            wired into the pipeline and will be ignored.",
-            front_matter.name
-        );
-    }
-    if front_matter.engine.agent().is_some() {
-        eprintln!(
-            "Warning: Agent '{}' has engine.agent set, but custom agent file selection is not yet \
-            wired into the pipeline and will be ignored.",
-            front_matter.name
-        );
-    }
     if front_matter.engine.api_target().is_some() {
         eprintln!(
             "Warning: Agent '{}' has engine.api-target set, but custom API target (GHES/GHEC) is \
             not yet wired into the pipeline and will be ignored.",
-            front_matter.name
-        );
-    }
-    if front_matter.engine.command().is_some() {
-        eprintln!(
-            "Warning: Agent '{}' has engine.command set, but custom engine command paths are not \
-            yet wired into the pipeline and will be ignored.",
             front_matter.name
         );
     }
@@ -258,6 +260,22 @@ fn copilot_args(
             not yet wired into the pipeline and will be ignored.",
             front_matter.name
         );
+    }
+
+    // Validate and wire engine.agent — add --agent <value> to Copilot CLI args
+    if let Some(agent) = front_matter.engine.agent() {
+        if agent.is_empty()
+            || !agent
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        {
+            anyhow::bail!(
+                "engine.agent '{}' contains invalid characters. \
+                 Only ASCII alphanumerics and hyphens are allowed.",
+                agent
+            );
+        }
+        params.push(format!("--agent {}", agent));
     }
 
     params.push("--disable-builtin-mcps".to_string());
@@ -284,6 +302,129 @@ fn copilot_args(
     }
 
     Ok(params.join(" "))
+}
+
+/// Validate an engine command path for safety.
+///
+/// Rejects shell metacharacters that could break the AWF invocation (the command
+/// is embedded inside a single-quoted bash string). Accepts absolute paths and
+/// bare binary names.
+fn validate_engine_command(cmd: &str) -> Result<()> {
+    if cmd.is_empty() {
+        anyhow::bail!("engine.command must not be empty");
+    }
+    // Allow only safe characters: alphanumeric, path separators, dots, hyphens, underscores
+    if !cmd
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '-' | '_'))
+    {
+        anyhow::bail!(
+            "engine.command '{}' contains invalid characters. \
+             Only ASCII alphanumerics, '/', '.', '-', and '_' are allowed.",
+            cmd
+        );
+    }
+    Ok(())
+}
+
+/// Validate an engine version string for safety.
+///
+/// The version is embedded in a NuGet command line, so it must not contain shell
+/// metacharacters or whitespace.
+fn validate_engine_version(version: &str) -> Result<()> {
+    if version.is_empty() {
+        anyhow::bail!("engine.version must not be empty");
+    }
+    // "latest" is a special value that omits the -Version flag
+    if version == "latest" {
+        return Ok(());
+    }
+    // Allow only safe version characters: alphanumeric, dots, hyphens, underscores
+    if !version
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    {
+        anyhow::bail!(
+            "engine.version '{}' contains invalid characters. \
+             Only ASCII alphanumerics, '.', '-', and '_' are allowed (or \"latest\").",
+            version
+        );
+    }
+    Ok(())
+}
+
+/// Resolve the Copilot CLI command path inside the AWF container.
+///
+/// When `engine.command` is set, returns the custom path.
+/// Otherwise returns the default path (`/tmp/awf-tools/copilot`).
+fn copilot_command_path(front_matter: &FrontMatter) -> Result<String> {
+    match front_matter.engine.command() {
+        Some(cmd) => {
+            validate_engine_command(cmd)?;
+            Ok(cmd.to_string())
+        }
+        None => Ok(DEFAULT_COPILOT_COMMAND_PATH.to_string()),
+    }
+}
+
+/// Generate the Copilot CLI install steps for the pipeline.
+///
+/// When `engine.command` is set, returns an empty string (no install needed).
+/// When `engine.version` is `"latest"`, omits the `-Version` flag from the NuGet command.
+/// Otherwise uses the specified version (or the default `COPILOT_CLI_VERSION` constant).
+///
+/// The returned string uses no leading indentation — `replace_with_indent` will
+/// add the correct indent based on where `{{ engine_install_steps }}` appears
+/// in the template.
+fn copilot_install_steps(front_matter: &FrontMatter, _indent: &str) -> Result<String> {
+    // When a custom command is provided, skip all install steps.
+    if front_matter.engine.command().is_some() {
+        validate_engine_command(front_matter.engine.command().unwrap())?;
+        return Ok(String::new());
+    }
+
+    // Determine the NuGet version argument
+    let version_arg = match front_matter.engine.version() {
+        Some("latest") => String::new(), // Omit -Version flag entirely
+        Some(v) => {
+            validate_engine_version(v)?;
+            format!(" -Version {v}")
+        }
+        None => format!(" -Version {}", COPILOT_CLI_VERSION),
+    };
+
+    let nuget_source = "https://pkgs.dev.azure.com/msazuresphere/_packaging/Guardian1ESPTUpstreamOrgFeed/nuget/v3/index.json";
+    let nuget_args = format!(
+        "install Microsoft.Copilot.CLI.linux-x64 -Source \"{nuget_source}\"{version_arg} -OutputDirectory $(Agent.TempDirectory)/tools -ExcludeVersion -NonInteractive"
+    );
+
+    let mut lines = Vec::new();
+    lines.push("- task: NuGetAuthenticate@1".to_string());
+    lines.push("  displayName: \"Authenticate NuGet Feed\"".to_string());
+    lines.push(String::new());
+    lines.push("- task: NuGetCommand@2".to_string());
+    lines.push("  displayName: \"Install Copilot CLI\"".to_string());
+    lines.push("  inputs:".to_string());
+    lines.push("    command: 'custom'".to_string());
+    lines.push(format!("    arguments: '{nuget_args}'"));
+    lines.push(String::new());
+    lines.push("- bash: |".to_string());
+    lines.push("    ls -la \"$(Agent.TempDirectory)/tools\"".to_string());
+    lines.push("    echo \"##vso[task.prependpath]$(Agent.TempDirectory)/tools/Microsoft.Copilot.CLI.linux-x64\"".to_string());
+    lines.push(String::new());
+    lines.push("    # Copy copilot binary to /tmp so it's accessible inside AWF container".to_string());
+    lines.push("    # (AWF auto-mounts /tmp:/tmp:rw but not Agent.TempDirectory)".to_string());
+    lines.push("    mkdir -p /tmp/awf-tools".to_string());
+    lines.push("    cp \"$(Agent.TempDirectory)/tools/Microsoft.Copilot.CLI.linux-x64/copilot\" /tmp/awf-tools/copilot".to_string());
+    lines.push("    chmod +x /tmp/awf-tools/copilot".to_string());
+    lines.push("  displayName: \"Add copilot to PATH\"".to_string());
+    lines.push(String::new());
+    lines.push("- bash: |".to_string());
+    lines.push("    copilot --version".to_string());
+    lines.push("    copilot -h".to_string());
+    lines.push("  displayName: \"Output copilot version\"".to_string());
+
+    Ok(lines.join("\n"))
 }
 
 fn copilot_env() -> String {
@@ -362,5 +503,133 @@ mod tests {
     #[test]
     fn get_engine_rejects_codex() {
         assert!(get_engine("codex").is_err());
+    }
+
+    // ─── engine.agent tests ─────────────────────────────────────────
+
+    #[test]
+    fn copilot_args_with_agent() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  agent: my-agent\n---\n",
+        )
+        .unwrap();
+        let params = Engine::Copilot
+            .args(&fm, &collect_extensions(&fm))
+            .unwrap();
+        assert!(params.contains("--agent my-agent"));
+    }
+
+    #[test]
+    fn copilot_args_without_agent() {
+        let (fm, _) = parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
+        let params = Engine::Copilot
+            .args(&fm, &collect_extensions(&fm))
+            .unwrap();
+        assert!(!params.contains("--agent"));
+    }
+
+    #[test]
+    fn copilot_args_agent_validation_rejects_path_separators() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  agent: ../etc/passwd\n---\n",
+        )
+        .unwrap();
+        let result = Engine::Copilot.args(&fm, &collect_extensions(&fm));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid characters"));
+    }
+
+    #[test]
+    fn copilot_args_agent_validation_rejects_spaces() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  agent: \"my agent\"\n---\n",
+        )
+        .unwrap();
+        let result = Engine::Copilot.args(&fm, &collect_extensions(&fm));
+        assert!(result.is_err());
+    }
+
+    // ─── engine.command tests ───────────────────────────────────────
+
+    #[test]
+    fn command_path_default() {
+        let (fm, _) = parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
+        let path = Engine::Copilot.command_path(&fm).unwrap();
+        assert_eq!(path, "/tmp/awf-tools/copilot");
+    }
+
+    #[test]
+    fn command_path_custom() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  command: /usr/local/bin/my-copilot\n---\n",
+        )
+        .unwrap();
+        let path = Engine::Copilot.command_path(&fm).unwrap();
+        assert_eq!(path, "/usr/local/bin/my-copilot");
+    }
+
+    #[test]
+    fn command_path_rejects_shell_metacharacters() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  command: \"/bin/sh; rm -rf /\"\n---\n",
+        )
+        .unwrap();
+        let result = Engine::Copilot.command_path(&fm);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid characters"));
+    }
+
+    #[test]
+    fn install_steps_default_includes_version() {
+        let (fm, _) = parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
+        let steps = Engine::Copilot.install_steps(&fm, "").unwrap();
+        assert!(steps.contains("NuGetAuthenticate@1"));
+        assert!(steps.contains(&format!("-Version {}", super::COPILOT_CLI_VERSION)));
+        assert!(steps.contains("Add copilot to PATH"));
+    }
+
+    #[test]
+    fn install_steps_custom_version() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  version: \"0.0.422\"\n---\n",
+        )
+        .unwrap();
+        let steps = Engine::Copilot.install_steps(&fm, "").unwrap();
+        assert!(steps.contains("-Version 0.0.422"));
+        assert!(!steps.contains(&format!("-Version {}", super::COPILOT_CLI_VERSION)));
+    }
+
+    #[test]
+    fn install_steps_latest_version_omits_flag() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  version: \"latest\"\n---\n",
+        )
+        .unwrap();
+        let steps = Engine::Copilot.install_steps(&fm, "").unwrap();
+        assert!(!steps.contains("-Version "));
+        assert!(steps.contains("NuGetAuthenticate@1"));
+    }
+
+    #[test]
+    fn install_steps_skipped_when_custom_command() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  command: /usr/local/bin/copilot\n---\n",
+        )
+        .unwrap();
+        let steps = Engine::Copilot.install_steps(&fm, "").unwrap();
+        assert!(steps.is_empty(), "install steps should be empty when engine.command is set");
+    }
+
+    // ─── engine.version validation tests ────────────────────────────
+
+    #[test]
+    fn version_validation_rejects_shell_injection() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  version: \"1.0; rm -rf /\"\n---\n",
+        )
+        .unwrap();
+        let result = Engine::Copilot.install_steps(&fm, "");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid characters"));
     }
 }
