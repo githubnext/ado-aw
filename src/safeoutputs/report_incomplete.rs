@@ -66,17 +66,18 @@ impl Executor for ReportIncompleteResult {
     }
 
     async fn execute_impl(&self, _: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
-        Ok(ExecutionResult::failure(format!(
-            "Agent reported task incomplete: {}",
-            self.reason
-        )))
+        let mut message = format!("Agent reported task incomplete: {}", self.reason);
+        if let Some(context) = &self.context {
+            message.push_str(&format!(" [{context}]"));
+        }
+        Ok(ExecutionResult::failure(message))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safeoutputs::ToolResult;
+    use crate::safeoutputs::{Executor, ToolResult};
 
     #[test]
     fn test_result_has_correct_name() {
@@ -125,5 +126,23 @@ mod tests {
 
         assert!(json.contains(r#""name":"report-incomplete""#));
         assert!(json.contains(r#""reason":"API timed out after 30s""#));
+    }
+
+    #[tokio::test]
+    async fn test_execute_impl_includes_context_when_present() {
+        let mut result: ReportIncompleteResult = ReportIncompleteParams {
+            reason: "API timed out after 30s".to_string(),
+            context: Some("tried 3 retries".to_string()),
+        }
+        .try_into()
+        .unwrap();
+
+        let exec = result
+            .execute_sanitized(&crate::safeoutputs::ExecutionContext::default())
+            .await
+            .unwrap();
+        assert!(!exec.success);
+        assert!(exec.message.contains("API timed out after 30s"));
+        assert!(exec.message.contains("[tried 3 retries]"));
     }
 }
