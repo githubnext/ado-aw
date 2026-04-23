@@ -145,6 +145,10 @@ impl Executor for LinkWorkItemsResult {
             "Linking work item #{} -> #{} ({})",
             self.source_id, self.target_id, self.link_type
         );
+        debug!(
+            "link-work-items: source={}, target={}, type={}",
+            self.source_id, self.target_id, self.link_type
+        );
 
         let org_url = ctx
             .ado_org_url

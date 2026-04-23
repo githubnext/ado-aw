@@ -201,6 +201,7 @@ impl Executor for CreateBranchResult {
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!("Creating branch: '{}'", self.branch_name);
+        debug!("create-branch: branch_name='{}'", self.branch_name);
 
         let org_url = ctx
             .ado_org_url

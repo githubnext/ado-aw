@@ -142,6 +142,10 @@ impl Executor for ResolvePrThreadResult {
             "Resolving thread #{} on PR #{} with status '{}'",
             self.thread_id, self.pull_request_id, self.status
         );
+        debug!(
+            "resolve-pr-thread: pr_id={}, thread_id={}, status='{}'",
+            self.pull_request_id, self.thread_id, self.status
+        );
 
         let org_url = ctx
             .ado_org_url

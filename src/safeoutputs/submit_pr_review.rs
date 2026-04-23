@@ -142,6 +142,10 @@ impl Executor for SubmitPrReviewResult {
             "Submitting review on PR #{} — event: {}",
             self.pull_request_id, self.event
         );
+        debug!(
+            "submit-pr-review: pr_id={}, event='{}'",
+            self.pull_request_id, self.event
+        );
 
         let org_url = ctx
             .ado_org_url

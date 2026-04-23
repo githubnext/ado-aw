@@ -139,6 +139,7 @@ impl Executor for QueueBuildResult {
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!("Queuing build for pipeline definition {}", self.pipeline_id);
+        debug!("queue-build: pipeline_id={}", self.pipeline_id);
 
         let org_url = ctx
             .ado_org_url

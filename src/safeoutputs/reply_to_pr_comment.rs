@@ -110,6 +110,10 @@ impl Executor for ReplyToPrCommentResult {
             self.thread_id,
             self.content.len()
         );
+        debug!(
+            "reply-to-pr-review-comment: pr_id={}, thread_id={}",
+            self.pull_request_id, self.thread_id
+        );
 
         let org_url = ctx
             .ado_org_url

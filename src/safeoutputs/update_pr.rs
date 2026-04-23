@@ -240,6 +240,10 @@ impl Executor for UpdatePrResult {
             "Updating PR #{} — operation: {}",
             self.pull_request_id, self.operation
         );
+        debug!(
+            "update-pr: pr_id={}, operation='{}'",
+            self.pull_request_id, self.operation
+        );
 
         let org_url = ctx
             .ado_org_url
