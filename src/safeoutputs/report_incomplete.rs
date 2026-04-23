@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
-use crate::safeoutputs::Validate;
+use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use anyhow::ensure;
 
 /// Parameters for reporting that a task could not be completed
@@ -49,10 +49,35 @@ impl SanitizeContent for ReportIncompleteResult {
     }
 }
 
+#[async_trait::async_trait]
+impl Executor for ReportIncompleteResult {
+    fn dry_run_summary(&self) -> String {
+        "report task incomplete".to_string()
+    }
+
+    // Intentionally bypass default dry-run behavior: this tool signals that the
+    // task itself failed, so Stage 3 should preserve failure semantics in dry-run.
+    async fn execute_sanitized(
+        &mut self,
+        ctx: &ExecutionContext,
+    ) -> anyhow::Result<ExecutionResult> {
+        self.sanitize_content_fields();
+        self.execute_impl(ctx).await
+    }
+
+    async fn execute_impl(&self, _: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
+        let mut message = format!("Agent reported task incomplete: {}", self.reason);
+        if let Some(context) = &self.context {
+            message.push_str(&format!(" [{context}]"));
+        }
+        Ok(ExecutionResult::failure(message))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safeoutputs::ToolResult;
+    use crate::safeoutputs::{Executor, ToolResult};
 
     #[test]
     fn test_result_has_correct_name() {
@@ -101,5 +126,23 @@ mod tests {
 
         assert!(json.contains(r#""name":"report-incomplete""#));
         assert!(json.contains(r#""reason":"API timed out after 30s""#));
+    }
+
+    #[tokio::test]
+    async fn test_execute_impl_includes_context_when_present() {
+        let mut result: ReportIncompleteResult = ReportIncompleteParams {
+            reason: "API timed out after 30s".to_string(),
+            context: Some("tried 3 retries".to_string()),
+        }
+        .try_into()
+        .unwrap();
+
+        let exec = result
+            .execute_sanitized(&crate::safeoutputs::ExecutionContext::default())
+            .await
+            .unwrap();
+        assert!(!exec.success);
+        assert!(exec.message.contains("API timed out after 30s"));
+        assert!(exec.message.contains("[tried 3 retries]"));
     }
 }

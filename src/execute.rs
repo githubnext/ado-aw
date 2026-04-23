@@ -11,14 +11,13 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
-use crate::sanitize::SanitizeContent;
 use crate::safeoutputs::{
     AddBuildTagResult, AddPrCommentResult, CreateBranchResult, CreateGitTagResult,
     CreatePrResult, CreateWikiPageResult, CreateWorkItemResult, CommentOnWorkItemResult,
-    ExecutionContext, ExecutionResult, Executor, LinkWorkItemsResult, QueueBuildResult,
-    ReplyToPrCommentResult, ReportIncompleteResult, ResolvePrThreadResult, SubmitPrReviewResult,
-    ToolResult, UpdatePrResult, UpdateWikiPageResult, UpdateWorkItemResult,
-    UploadAttachmentResult,
+    ExecutionContext, ExecutionResult, Executor, LinkWorkItemsResult, MissingDataResult,
+    MissingToolResult, NoopResult, QueueBuildResult, ReplyToPrCommentResult,
+    ReportIncompleteResult, ResolvePrThreadResult, SubmitPrReviewResult, ToolResult,
+    UpdatePrResult, UpdateWikiPageResult, UpdateWorkItemResult, UploadAttachmentResult,
 };
 
 // Re-export memory types for use by main.rs
@@ -256,10 +255,13 @@ pub async fn execute_safe_output(
 
     debug!("Dispatching tool: {}", tool_name);
 
-    // Dispatch based on tool name. All standard tools go through `dispatch_tool` which
-    // handles deserialization and sanitized execution uniformly. Special cases (informational
-    // outputs and report-incomplete) are handled inline.
+    // Dispatch based on tool name. All registered tools go through `dispatch_tool`,
+    // which handles deserialization and sanitized execution uniformly.
     let result = if let Some(dispatched_result) = dispatch_executor_tools!(tool_name, entry, ctx, {
+        "noop" => NoopResult,
+        "missing-tool" => MissingToolResult,
+        "missing-data" => MissingDataResult,
+        "report-incomplete" => ReportIncompleteResult,
         "create-work-item" => CreateWorkItemResult,
         "comment-on-work-item" => CommentOnWorkItemResult,
         "update-work-item" => UpdateWorkItemResult,
@@ -280,25 +282,8 @@ pub async fn execute_safe_output(
     })? {
         dispatched_result
     } else {
-        match tool_name {
-        // Informational outputs — no side effects, always succeed
-        "noop" | "missing-tool" | "missing-data" => {
-            debug!("Skipping informational entry: {}", tool_name);
-            ExecutionResult::success(format!("Skipped informational output: {}", tool_name))
-        }
-        // report-incomplete does not implement Executor; Stage 3 surfaces its reason as a failure
-        "report-incomplete" => {
-            let mut output: ReportIncompleteResult = serde_json::from_value(entry.clone())
-                .map_err(|e| anyhow::anyhow!("Failed to parse report-incomplete: {}", e))?;
-            output.sanitize_content_fields();
-            debug!("report-incomplete: {}", output.reason);
-            ExecutionResult::failure(format!("Agent reported task incomplete: {}", output.reason))
-        }
-        other => {
-            error!("Unknown tool type: {}", other);
-            bail!("Unknown tool type: {}. No executor registered.", other)
-        }
-    }
+        error!("Unknown tool type: {}", tool_name);
+        bail!("Unknown tool type: {}. No executor registered.", tool_name)
     };
 
     Ok((tool_name.to_string(), result))
@@ -470,7 +455,7 @@ mod tests {
         let (tool_name, result) = result.unwrap();
         assert_eq!(tool_name, "noop");
         assert!(result.success);
-        assert!(result.message.contains("Skipped"));
+        assert!(result.message.contains("No operation"));
     }
 
     #[tokio::test]
@@ -1050,9 +1035,9 @@ mod tests {
         assert_eq!(results.len(), 2);
         // create-work-item goes through Executor trait → dry-run intercepted
         assert!(results[0].message.contains("[DRY-RUN]"));
-        // noop is handled inline, not through Executor → runs normally
+        // noop now also goes through Executor trait → dry-run intercepted
         assert!(results[1].success);
-        assert!(results[1].message.contains("noop"));
+        assert!(results[1].message.contains("[DRY-RUN]"));
     }
 
     #[tokio::test]
@@ -1124,8 +1109,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_dry_run_report_incomplete_still_fails() {
-        // report-incomplete is dispatched inline (not through Executor trait),
-        // so it still returns ExecutionResult::failure even in dry-run mode.
+        // report-incomplete uses an Executor override that still returns
+        // ExecutionResult::failure even in dry-run mode.
         // This is correct: the agent declared it couldn't complete the task.
         let entry = serde_json::json!({
             "name": "report-incomplete",

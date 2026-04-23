@@ -3,8 +3,9 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
-use crate::safeoutputs::Validate;
+use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 
 /// Parameters for reporting a missing tool
 #[derive(Deserialize, JsonSchema)]
@@ -26,6 +27,28 @@ tool_result! {
         tool_name: String,
         #[serde(default)]
         context: Option<String>,
+    }
+}
+
+impl SanitizeContent for MissingToolResult {
+    fn sanitize_content_fields(&mut self) {
+        self.tool_name = sanitize_text(&self.tool_name);
+        self.context = self.context.as_deref().map(sanitize_text);
+    }
+}
+
+#[async_trait::async_trait]
+impl Executor for MissingToolResult {
+    fn dry_run_summary(&self) -> String {
+        format!("report missing tool '{}'", self.tool_name)
+    }
+
+    async fn execute_impl(&self, _: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
+        let message = match &self.context {
+            Some(context) => format!("Missing tool reported: {} ({context})", self.tool_name),
+            None => format!("Missing tool reported: {}", self.tool_name),
+        };
+        Ok(ExecutionResult::success(message))
     }
 }
 

@@ -3,8 +3,9 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
-use crate::safeoutputs::Validate;
+use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 
 /// Parameters for reporting missing data
 #[derive(Deserialize, JsonSchema)]
@@ -31,6 +32,32 @@ tool_result! {
         reason: String,
         #[serde(default)]
         context: Option<String>,
+    }
+}
+
+impl SanitizeContent for MissingDataResult {
+    fn sanitize_content_fields(&mut self) {
+        self.data_type = sanitize_text(&self.data_type);
+        self.reason = sanitize_text(&self.reason);
+        self.context = self.context.as_deref().map(sanitize_text);
+    }
+}
+
+#[async_trait::async_trait]
+impl Executor for MissingDataResult {
+    fn dry_run_summary(&self) -> String {
+        format!("report missing data '{}'", self.data_type)
+    }
+
+    async fn execute_impl(&self, _: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
+        let mut message = format!(
+            "Missing data reported: {} ({})",
+            self.data_type, self.reason
+        );
+        if let Some(context) = &self.context {
+            message.push_str(&format!(" [{context}]"));
+        }
+        Ok(ExecutionResult::success(message))
     }
 }
 
