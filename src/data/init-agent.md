@@ -20,12 +20,6 @@ curl -fsSL -o /tmp/ado-aw "https://github.com/githubnext/ado-aw/releases/downloa
 curl -fsSL -o /tmp/checksums.txt "https://github.com/githubnext/ado-aw/releases/download/v${VERSION}/checksums.txt"
 cd /tmp && grep "ado-aw-linux-x64" checksums.txt | sha256sum -c - && chmod +x /tmp/ado-aw
 
-# macOS (Intel)
-VERSION="{{ compiler_version }}"
-curl -fsSL -o /tmp/ado-aw "https://github.com/githubnext/ado-aw/releases/download/v${VERSION}/ado-aw-darwin-x64"
-curl -fsSL -o /tmp/checksums.txt "https://github.com/githubnext/ado-aw/releases/download/v${VERSION}/checksums.txt"
-cd /tmp && grep "ado-aw-darwin-x64" checksums.txt | shasum -a 256 -c - && chmod +x /tmp/ado-aw
-
 # macOS (Apple Silicon)
 VERSION="{{ compiler_version }}"
 curl -fsSL -o /tmp/ado-aw "https://github.com/githubnext/ado-aw/releases/download/v${VERSION}/ado-aw-darwin-arm64"
