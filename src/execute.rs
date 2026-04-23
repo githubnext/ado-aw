@@ -232,6 +232,17 @@ where
     output.execute_sanitized(ctx).await
 }
 
+macro_rules! dispatch_executor_tools {
+    ($tool_name:expr, $entry:expr, $ctx:expr, { $($name:literal => $ty:ty),+ $(,)? }) => {
+        match $tool_name {
+            $(
+                $name => Some(dispatch_tool::<$ty>($tool_name, $entry, $ctx).await?),
+            )+
+            _ => None,
+        }
+    };
+}
+
 /// Execute a single safe output entry, returning the tool name and result
 pub async fn execute_safe_output(
     entry: &Value,
@@ -248,24 +259,28 @@ pub async fn execute_safe_output(
     // Dispatch based on tool name. All standard tools go through `dispatch_tool` which
     // handles deserialization and sanitized execution uniformly. Special cases (informational
     // outputs and report-incomplete) are handled inline.
-    let result = match tool_name {
-        "create-work-item" => dispatch_tool::<CreateWorkItemResult>(tool_name, entry, ctx).await?,
-        "comment-on-work-item" => dispatch_tool::<CommentOnWorkItemResult>(tool_name, entry, ctx).await?,
-        "update-work-item" => dispatch_tool::<UpdateWorkItemResult>(tool_name, entry, ctx).await?,
-        "create-pull-request" => dispatch_tool::<CreatePrResult>(tool_name, entry, ctx).await?,
-        "update-wiki-page" => dispatch_tool::<UpdateWikiPageResult>(tool_name, entry, ctx).await?,
-        "create-wiki-page" => dispatch_tool::<CreateWikiPageResult>(tool_name, entry, ctx).await?,
-        "add-pr-comment" => dispatch_tool::<AddPrCommentResult>(tool_name, entry, ctx).await?,
-        "link-work-items" => dispatch_tool::<LinkWorkItemsResult>(tool_name, entry, ctx).await?,
-        "queue-build" => dispatch_tool::<QueueBuildResult>(tool_name, entry, ctx).await?,
-        "create-git-tag" => dispatch_tool::<CreateGitTagResult>(tool_name, entry, ctx).await?,
-        "add-build-tag" => dispatch_tool::<AddBuildTagResult>(tool_name, entry, ctx).await?,
-        "create-branch" => dispatch_tool::<CreateBranchResult>(tool_name, entry, ctx).await?,
-        "update-pr" => dispatch_tool::<UpdatePrResult>(tool_name, entry, ctx).await?,
-        "upload-attachment" => dispatch_tool::<UploadAttachmentResult>(tool_name, entry, ctx).await?,
-        "submit-pr-review" => dispatch_tool::<SubmitPrReviewResult>(tool_name, entry, ctx).await?,
-        "reply-to-pr-review-comment" => dispatch_tool::<ReplyToPrCommentResult>(tool_name, entry, ctx).await?,
-        "resolve-pr-thread" => dispatch_tool::<ResolvePrThreadResult>(tool_name, entry, ctx).await?,
+    let result = if let Some(result) = dispatch_executor_tools!(tool_name, entry, ctx, {
+        "create-work-item" => CreateWorkItemResult,
+        "comment-on-work-item" => CommentOnWorkItemResult,
+        "update-work-item" => UpdateWorkItemResult,
+        "create-pull-request" => CreatePrResult,
+        "update-wiki-page" => UpdateWikiPageResult,
+        "create-wiki-page" => CreateWikiPageResult,
+        "add-pr-comment" => AddPrCommentResult,
+        "link-work-items" => LinkWorkItemsResult,
+        "queue-build" => QueueBuildResult,
+        "create-git-tag" => CreateGitTagResult,
+        "add-build-tag" => AddBuildTagResult,
+        "create-branch" => CreateBranchResult,
+        "update-pr" => UpdatePrResult,
+        "upload-attachment" => UploadAttachmentResult,
+        "submit-pr-review" => SubmitPrReviewResult,
+        "reply-to-pr-review-comment" => ReplyToPrCommentResult,
+        "resolve-pr-thread" => ResolvePrThreadResult,
+    }) {
+        result
+    } else {
+        match tool_name {
         // Informational outputs — no side effects, always succeed
         "noop" | "missing-tool" | "missing-data" => {
             debug!("Skipping informational entry: {}", tool_name);
@@ -283,6 +298,7 @@ pub async fn execute_safe_output(
             error!("Unknown tool type: {}", other);
             bail!("Unknown tool type: {}. No executor registered.", other)
         }
+    }
     };
 
     Ok((tool_name.to_string(), result))
