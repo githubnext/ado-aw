@@ -1,6 +1,7 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 
@@ -21,6 +22,12 @@ tool_result! {
     pub struct NoopResult {
         #[serde(default)]
         context: Option<String>,
+    }
+}
+
+impl SanitizeContent for NoopResult {
+    fn sanitize_content_fields(&mut self) {
+        self.context = self.context.as_deref().map(sanitize_text);
     }
 }
 

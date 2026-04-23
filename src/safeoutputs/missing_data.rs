@@ -3,6 +3,7 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 
@@ -31,6 +32,14 @@ tool_result! {
         reason: String,
         #[serde(default)]
         context: Option<String>,
+    }
+}
+
+impl SanitizeContent for MissingDataResult {
+    fn sanitize_content_fields(&mut self) {
+        self.data_type = sanitize_text(&self.data_type);
+        self.reason = sanitize_text(&self.reason);
+        self.context = self.context.as_deref().map(sanitize_text);
     }
 }
 
