@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.17.0](https://github.com/githubnext/ado-aw/compare/v0.16.0...v0.17.0) (2026-04-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* The `run` subcommand is removed. See docs/local-development.md for manual local development instructions.
+* The engine front matter format changed from model names (engine: claude-opus-4.5) to engine identifiers (engine: copilot). Model is now a sub-field in the object form (engine: { id: copilot, model: ... }).
+
+### Features
+
+* add cyclomatic complexity reducer agentic workflow ([#298](https://github.com/githubnext/ado-aw/issues/298)) ([1066a2f](https://github.com/githubnext/ado-aw/commit/1066a2fee0c30991a50bf6a50b221308b43ee6a8))
+* align engine front matter with gh-aw and hook up Engine enum ([#286](https://github.com/githubnext/ado-aw/issues/286)) ([f90bd81](https://github.com/githubnext/ado-aw/commit/f90bd81c5e6eb83bdf595332a493da41b29e4fea))
+* remove `run` subcommand ([#306](https://github.com/githubnext/ado-aw/issues/306)) ([a71ed16](https://github.com/githubnext/ado-aw/commit/a71ed16db5a472e7727c0f6637cfd88b7097eef8))
+
+
+### Bug Fixes
+
+* prefix agent filename with ado to distinguish from gh-aw ([#299](https://github.com/githubnext/ado-aw/issues/299)) ([b3ecca7](https://github.com/githubnext/ado-aw/commit/b3ecca7ee241d4798ce91e815cf281d28f4e15cd))
+
 ## [0.16.0](https://github.com/githubnext/ado-aw/compare/v0.15.0...v0.16.0) (2026-04-21)
 
 
