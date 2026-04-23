@@ -236,9 +236,9 @@ macro_rules! dispatch_executor_tools {
     ($tool_name:expr, $entry:expr, $ctx:expr, { $($name:literal => $ty:ty),+ $(,)? }) => {
         match $tool_name {
             $(
-                $name => Some(dispatch_tool::<$ty>($tool_name, $entry, $ctx).await?),
+                $name => dispatch_tool::<$ty>($tool_name, $entry, $ctx).await.map(Some),
             )+
-            _ => None,
+            _ => Ok(None),
         }
     };
 }
@@ -259,7 +259,7 @@ pub async fn execute_safe_output(
     // Dispatch based on tool name. All standard tools go through `dispatch_tool` which
     // handles deserialization and sanitized execution uniformly. Special cases (informational
     // outputs and report-incomplete) are handled inline.
-    let result = if let Some(result) = dispatch_executor_tools!(tool_name, entry, ctx, {
+    let result = if let Some(dispatched_result) = dispatch_executor_tools!(tool_name, entry, ctx, {
         "create-work-item" => CreateWorkItemResult,
         "comment-on-work-item" => CommentOnWorkItemResult,
         "update-work-item" => UpdateWorkItemResult,
@@ -277,8 +277,8 @@ pub async fn execute_safe_output(
         "submit-pr-review" => SubmitPrReviewResult,
         "reply-to-pr-review-comment" => ReplyToPrCommentResult,
         "resolve-pr-thread" => ResolvePrThreadResult,
-    }) {
-        result
+    })? {
+        dispatched_result
     } else {
         match tool_name {
         // Informational outputs — no side effects, always succeed
