@@ -243,6 +243,11 @@ impl Executor for CreateWorkItemResult {
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!("Creating work item: '{}'", self.title);
+        debug!(
+            "create-work-item: title='{}', description length={}",
+            self.title,
+            self.description.len()
+        );
         debug!("Description length: {} chars", self.description.len());
 
         let org_url = ctx
@@ -538,4 +543,3 @@ tags:
         assert_eq!(config.tags, vec!["my-tag"]);
     }
 }
-

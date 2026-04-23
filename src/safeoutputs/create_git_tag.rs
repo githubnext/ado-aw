@@ -244,6 +244,7 @@ impl Executor for CreateGitTagResult {
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!("Creating git tag: '{}'", self.tag_name);
+        debug!("create-git-tag: tag_name='{}'", self.tag_name);
 
         let org_url = ctx
             .ado_org_url

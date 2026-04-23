@@ -112,6 +112,7 @@ impl Executor for AddBuildTagResult {
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!("Adding tag '{}' to build #{}", self.tag, self.build_id);
+        debug!("add-build-tag: build_id={}, tag='{}'", self.build_id, self.tag);
 
         // 1. Extract required context
         let org_url = ctx

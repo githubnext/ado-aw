@@ -541,6 +541,10 @@ impl Executor for CreatePrResult {
             "Creating PR: '{}' in repository '{}'",
             self.title, self.repository
         );
+        debug!(
+            "create-pull-request: title='{}', repo='{}', branch='{}', patch='{}'",
+            self.title, self.repository, self.source_branch, self.patch_file
+        );
         debug!("PR description length: {} chars", self.description.len());
         debug!("Source branch: {}", self.source_branch);
         debug!("Patch file: {}", self.patch_file);

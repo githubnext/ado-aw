@@ -248,6 +248,7 @@ impl Executor for UpdateWorkItemResult {
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!("Updating work item #{}", self.id);
+        debug!("update-work-item: id={}", self.id);
         debug!(
             "Fields: title={:?}, body_len={:?}, state={:?}, area={:?}, iter={:?}, assignee={:?}, tags={:?}",
             self.title,

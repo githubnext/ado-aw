@@ -208,6 +208,11 @@ impl Executor for AddPrCommentResult {
             self.pull_request_id,
             self.content.len()
         );
+        debug!(
+            "add-pr-comment: pr_id={}, content length={}",
+            self.pull_request_id,
+            self.content.len()
+        );
 
         let org_url = ctx
             .ado_org_url
@@ -625,4 +630,3 @@ allowed-statuses:
         );
     }
 }
-

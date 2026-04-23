@@ -137,6 +137,10 @@ impl Executor for UploadAttachmentResult {
             "Uploading attachment '{}' to work item #{}",
             self.file_path, self.work_item_id
         );
+        debug!(
+            "upload-attachment: work_item_id={}, file_path='{}'",
+            self.work_item_id, self.file_path
+        );
 
         let org_url = ctx
             .ado_org_url

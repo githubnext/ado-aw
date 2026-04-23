@@ -176,6 +176,11 @@ impl Executor for CommentOnWorkItemResult {
             self.work_item_id,
             self.body.len()
         );
+        debug!(
+            "comment-on-work-item: work_item_id={}, body length={}",
+            self.work_item_id,
+            self.body.len()
+        );
 
         let org_url = ctx
             .ado_org_url

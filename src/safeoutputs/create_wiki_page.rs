@@ -192,6 +192,11 @@ impl Executor for CreateWikiPageResult {
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!("Creating wiki page: '{}'", self.path);
+        debug!(
+            "create-wiki-page: path='{}', content length={}",
+            self.path,
+            self.content.len()
+        );
         debug!("Content length: {} chars", self.content.len());
 
         let org_url = ctx
@@ -922,4 +927,3 @@ wiki-name: "MyProject.wiki"
         assert_eq!(encoded, "MyProject.wiki");
     }
 }
-
