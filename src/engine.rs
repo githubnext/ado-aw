@@ -53,6 +53,18 @@ pub enum Engine {
     Copilot,
 }
 
+/// Dispatches an [`Engine`] enum to the matching per-engine expression.
+///
+/// Keeps method bodies compact while still using explicit enum-based static
+/// dispatch. Add new variants here as new engines are introduced.
+macro_rules! dispatch_engine {
+    ($engine:expr, $copilot:expr) => {
+        match $engine {
+            Engine::Copilot => $copilot,
+        }
+    };
+}
+
 /// Resolve the engine for a given engine identifier from front matter.
 ///
 /// Currently only `copilot` is supported. Other identifiers produce a
@@ -77,9 +89,7 @@ impl Engine {
     /// `engine.command` in front matter.
     #[allow(dead_code)]
     pub fn command(&self) -> &str {
-        match self {
-            Engine::Copilot => "copilot",
-        }
+        dispatch_engine!(self, "copilot")
     }
 
     /// Generate CLI arguments for the engine invocation.
@@ -88,25 +98,19 @@ impl Engine {
         front_matter: &FrontMatter,
         extensions: &[Extension],
     ) -> Result<String> {
-        match self {
-            Engine::Copilot => copilot_args(front_matter, extensions),
-        }
+        dispatch_engine!(self, copilot_args(front_matter, extensions))
     }
 
     /// Generate the env block entries for the engine's sandbox step.
     pub fn env(&self, engine_config: &EngineConfig) -> Result<String> {
-        match self {
-            Engine::Copilot => copilot_env(engine_config),
-        }
+        dispatch_engine!(self, copilot_env(engine_config))
     }
 
     /// Return the engine's log directory path.
     ///
     /// Used by log collection steps to copy engine logs to pipeline artifacts.
     pub fn log_dir(&self) -> &str {
-        match self {
-            Engine::Copilot => "~/.copilot/logs",
-        }
+        dispatch_engine!(self, "~/.copilot/logs")
     }
 
     /// Return additional hosts the engine needs based on its configuration.
@@ -114,15 +118,13 @@ impl Engine {
     /// Used by the domain allowlist generator to ensure engine-specific endpoints
     /// (e.g., GHES/GHEC API targets) are reachable through AWF.
     pub fn required_hosts(&self, engine_config: &EngineConfig) -> Vec<String> {
-        match self {
-            Engine::Copilot => {
-                let mut hosts = Vec::new();
-                if let Some(api_target) = engine_config.api_target() {
-                    hosts.push(api_target.to_string());
-                }
-                hosts
+        dispatch_engine!(self, {
+            let mut hosts = Vec::new();
+            if let Some(api_target) = engine_config.api_target() {
+                hosts.push(api_target.to_string());
             }
-        }
+            hosts
+        })
     }
 
     /// Generate pipeline YAML steps to install the engine binary.
@@ -131,9 +133,7 @@ impl Engine {
     /// to the pinned `COPILOT_CLI_VERSION` constant. Returns an empty string when
     /// `engine.command` is set (the user provides their own binary).
     pub fn install_steps(&self, engine_config: &EngineConfig) -> Result<String> {
-        match self {
-            Engine::Copilot => copilot_install_steps(engine_config),
-        }
+        dispatch_engine!(self, copilot_install_steps(engine_config))
     }
 
     /// Generate the full AWF `--` command string for running the engine.
@@ -154,24 +154,22 @@ impl Engine {
         mcp_config_path: Option<&str>,
     ) -> Result<String> {
         let args = self.args(front_matter, extensions)?;
-        match self {
-            Engine::Copilot => {
-                let command_path = match front_matter.engine.command() {
-                    Some(cmd) => {
-                        if !is_valid_command_path(cmd) {
-                            anyhow::bail!(
-                                "engine.command '{}' contains invalid characters. \
-                                 Only ASCII alphanumerics, '.', '_', '/', and '-' are allowed.",
-                                cmd
-                            );
-                        }
-                        cmd.to_string()
+        dispatch_engine!(self, {
+            let command_path = match front_matter.engine.command() {
+                Some(cmd) => {
+                    if !is_valid_command_path(cmd) {
+                        anyhow::bail!(
+                            "engine.command '{}' contains invalid characters. \
+                             Only ASCII alphanumerics, '.', '_', '/', and '-' are allowed.",
+                            cmd
+                        );
                     }
-                    None => "/tmp/awf-tools/copilot".to_string(),
-                };
-                Ok(copilot_invocation(&command_path, prompt_path, mcp_config_path, &args))
-            }
-        }
+                    cmd.to_string()
+                }
+                None => "/tmp/awf-tools/copilot".to_string(),
+            };
+            Ok(copilot_invocation(&command_path, prompt_path, mcp_config_path, &args))
+        })
     }
 }
 
