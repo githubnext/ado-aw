@@ -37,7 +37,7 @@ impl Executor for NoopResult {
         "noop".to_string()
     }
 
-    async fn execute_impl(&self, _ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
+    async fn execute_impl(&self, _: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         let message = match &self.context {
             Some(context) => format!("No operation needed: {context}"),
             None => "No operation needed".to_string(),

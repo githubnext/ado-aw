@@ -55,6 +55,8 @@ impl Executor for ReportIncompleteResult {
         "report task incomplete".to_string()
     }
 
+    // Intentionally bypass default dry-run behavior: this tool signals that the
+    // task itself failed, so Stage 3 should preserve failure semantics in dry-run.
     async fn execute_sanitized(
         &mut self,
         ctx: &ExecutionContext,
@@ -63,7 +65,7 @@ impl Executor for ReportIncompleteResult {
         self.execute_impl(ctx).await
     }
 
-    async fn execute_impl(&self, _ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
+    async fn execute_impl(&self, _: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         Ok(ExecutionResult::failure(format!(
             "Agent reported task incomplete: {}",
             self.reason

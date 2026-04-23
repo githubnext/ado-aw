@@ -43,7 +43,7 @@ impl Executor for MissingToolResult {
         format!("report missing tool '{}'", self.tool_name)
     }
 
-    async fn execute_impl(&self, _ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
+    async fn execute_impl(&self, _: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         let message = match &self.context {
             Some(context) => format!("Missing tool reported: {} ({context})", self.tool_name),
             None => format!("Missing tool reported: {}", self.tool_name),

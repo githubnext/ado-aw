@@ -49,7 +49,7 @@ impl Executor for MissingDataResult {
         format!("report missing data '{}'", self.data_type)
     }
 
-    async fn execute_impl(&self, _ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
+    async fn execute_impl(&self, _: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         let mut message = format!(
             "Missing data reported: {} ({})",
             self.data_type, self.reason
