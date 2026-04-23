@@ -2,7 +2,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::tool_result;
-use crate::safeoutputs::Validate;
+use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 
 /// Parameters for describing a no operation. Use this if there is no work to do.
 #[derive(Deserialize, JsonSchema)]
@@ -21,6 +21,21 @@ tool_result! {
     pub struct NoopResult {
         #[serde(default)]
         context: Option<String>,
+    }
+}
+
+#[async_trait::async_trait]
+impl Executor for NoopResult {
+    fn dry_run_summary(&self) -> String {
+        "noop".to_string()
+    }
+
+    async fn execute_impl(&self, _ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
+        let message = match &self.context {
+            Some(context) => format!("No operation needed: {context}"),
+            None => "No operation needed".to_string(),
+        };
+        Ok(ExecutionResult::success(message))
     }
 }
 

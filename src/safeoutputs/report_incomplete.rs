@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
-use crate::safeoutputs::Validate;
+use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use anyhow::ensure;
 
 /// Parameters for reporting that a task could not be completed
@@ -46,6 +46,28 @@ impl SanitizeContent for ReportIncompleteResult {
         if let Some(ref ctx) = self.context {
             self.context = Some(sanitize_text(ctx));
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl Executor for ReportIncompleteResult {
+    fn dry_run_summary(&self) -> String {
+        "report task incomplete".to_string()
+    }
+
+    async fn execute_sanitized(
+        &mut self,
+        ctx: &ExecutionContext,
+    ) -> anyhow::Result<ExecutionResult> {
+        self.sanitize_content_fields();
+        self.execute_impl(ctx).await
+    }
+
+    async fn execute_impl(&self, _ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
+        Ok(ExecutionResult::failure(format!(
+            "Agent reported task incomplete: {}",
+            self.reason
+        )))
     }
 }
 
