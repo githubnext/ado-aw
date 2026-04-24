@@ -32,7 +32,8 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 │   │   ├── extensions/   # CompilerExtension trait and infrastructure extensions
 │   │   │   ├── mod.rs    # Trait, Extension enum, collect_extensions(), re-exports
 │   │   │   ├── github.rs # Always-on GitHub MCP extension
-│   │   │   └── safe_outputs.rs # Always-on SafeOutputs MCP extension
+│   │   │   ├── safe_outputs.rs # Always-on SafeOutputs MCP extension
+│   │   │   └── tests.rs  # Extension integration tests
 │   │   └── types.rs      # Front matter grammar and types
 │   ├── init.rs           # Repository initialization for AI-first authoring
 │   ├── execute.rs        # Stage 3 safe output execution
@@ -43,6 +44,7 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 │   ├── detect.rs         # Agentic pipeline detection (helper for `configure`)
 │   ├── ndjson.rs         # NDJSON parsing utilities
 │   ├── sanitize.rs       # Input sanitization for safe outputs
+│   ├── validate.rs       # Structural input validators (char allowlists, format checks, injection detectors)
 │   ├── agent_stats.rs    # OTel-based agent statistics parsing (token usage, duration, turns)
 │   ├── safeoutputs/      # Safe-output MCP tool implementations (Stage 1 → NDJSON → Stage 3)
 │   │   ├── mod.rs
@@ -860,6 +862,12 @@ Additionally, any env vars in MCP configs with empty string values (`""`) are co
 Environment variable names are validated against `[A-Za-z_][A-Za-z0-9_]*` to prevent Docker flag injection.
 
 If no passthrough env vars are needed, this marker is replaced with an empty string.
+
+## {{ mcpg_step_env }}
+
+Generates an `env:` block for the "Start MCP Gateway (MCPG)" pipeline step, forwarding pipeline variables required by enabled extensions (e.g., `AZURE_DEVOPS_EXT_PAT` when the Azure DevOps MCP tool is configured). The compiler iterates through all active `CompilerExtension` instances, collects their `required_pipeline_vars()` mappings, de-duplicates by variable name, and emits each as `VAR_NAME: $(VAR_NAME)` in ADO variable-reference syntax.
+
+When no extensions require pipeline variables, this marker is replaced with an empty string and the MCPG step has no `env:` block.
 
 ## {{ mcp_client_config }}
 

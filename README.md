@@ -78,7 +78,9 @@ The AI will generate a markdown file like:
 ---
 name: "Dependency Updater"
 description: "Checks for outdated dependencies and opens PRs"
-engine: claude-sonnet-4.5
+engine:
+  id: copilot
+  model: claude-sonnet-4.5
 schedule: weekly on monday around 9:00
 pool: AZS-1ES-L-MMS-ubuntu-22.04
 tools:
@@ -225,7 +227,7 @@ the service connections. Approve the permissions and the pipeline is ready.
 | `name` | string | **required** | Human-readable name for the agent |
 | `description` | string | **required** | One-line summary of the agent's purpose |
 | `target` | `standalone` \| `1es` | `standalone` | Pipeline output format |
-| `engine` | string or object | `claude-opus-4.5` | AI model to use |
+| `engine` | string or object | `copilot` | Engine identifier or object with `id`, `model`, `timeout-minutes`, etc. |
 | `schedule` | string or object | — | [Fuzzy schedule expression](#schedule-syntax) |
 | `pool` | string or object | `AZS-1ES-L-MMS-ubuntu-22.04` | Agent pool |
 | `workspace` | `root` \| `repo` | auto | Working directory mode |
