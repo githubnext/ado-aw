@@ -22,8 +22,7 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 │   ├── main.rs           # Entry point with clap CLI
 │   ├── allowed_hosts.rs  # Core network allowlist definitions
 │   ├── ecosystem_domains.rs # Ecosystem domain lookups (python, rust, node, etc.)
-│   ├── data/
-│   │   └── ecosystem_domains.json # Ecosystem domain lists (synced from gh-aw)
+│   ├── engine.rs         # Engine enum, CLI params, model/version defaults
 │   ├── compile/          # Pipeline compilation module
 │   │   ├── mod.rs        # Module entry point and Compiler trait
 │   │   ├── common.rs     # Shared helpers across targets

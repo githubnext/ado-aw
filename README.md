@@ -328,6 +328,20 @@ mcp-servers:
     container: "node:20-slim"
     entrypoint: "node"
     entrypoint-args: ["path/to/mcp-server.js"]
+    # args: additional Docker runtime arguments inserted before the image name
+    #   (e.g. ["--memory", "512m"]).  Dangerous flags like --privileged trigger
+    #   a compile-time warning.
+    args: []
+    # mounts: volume mounts in "source:dest:mode" format
+    mounts:
+      - "/host/data:/app/data:ro"
+    # env: environment variables for the MCP container process.
+    #   Use "" (empty string) as the value to forward the variable from the
+    #   pipeline environment (passthrough); supply a literal string for static
+    #   values.
+    env:
+      MY_SECRET: ""          # passthrough from pipeline env
+      STATIC_VALUE: "hello"  # literal value
     allowed:
       - search
       - analyze
