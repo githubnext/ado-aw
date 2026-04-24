@@ -1137,6 +1137,142 @@ pub fn generate_agentic_depends_on(setup_steps: &[serde_yaml::Value]) -> String 
     }
 }
 
+/// Returns `Some(v.clone())` when `v` is non-empty, otherwise `None`.
+fn nonempty_vec<T: Clone>(v: &[T]) -> Option<Vec<T>> {
+    if v.is_empty() { None } else { Some(v.to_vec()) }
+}
+
+/// Returns `Some(m.clone())` when `m` is non-empty, otherwise `None`.
+fn nonempty_map<K, V>(m: &HashMap<K, V>) -> Option<HashMap<K, V>>
+where
+    K: Clone + Eq + std::hash::Hash,
+    V: Clone,
+{
+    if m.is_empty() { None } else { Some(m.clone()) }
+}
+
+/// Validate a container-based MCP entry and emit any warnings.
+fn validate_stdio_mcp(name: &str, opts: &crate::compile::types::McpOptions) {
+    let container = opts.container.as_deref().unwrap_or("");
+    for w in validate::validate_container_image(container, name) { eprintln!("{}", w); }
+    for mount in &opts.mounts {
+        for w in validate::validate_mount_source(mount, name) { eprintln!("{}", w); }
+    }
+    for w in validate::validate_docker_args(&opts.args, name) { eprintln!("{}", w); }
+    for w in validate::warn_potential_secrets(name, &opts.env, &opts.headers) { eprintln!("{}", w); }
+}
+
+/// Build a stdio `McpgServerConfig` from a container-based MCP options block.
+fn build_stdio_mcpg_server(container: &str, opts: &crate::compile::types::McpOptions) -> McpgServerConfig {
+    McpgServerConfig {
+        server_type: "stdio".to_string(),
+        container: Some(container.to_string()),
+        entrypoint: opts.entrypoint.clone(),
+        entrypoint_args: nonempty_vec(&opts.entrypoint_args),
+        mounts: nonempty_vec(&opts.mounts),
+        args: nonempty_vec(&opts.args),
+        url: None,
+        headers: None,
+        env: nonempty_map(&opts.env),
+        tools: nonempty_vec(&opts.allowed),
+    }
+}
+
+/// Build an HTTP `McpgServerConfig` from a URL-based MCP options block.
+fn build_http_mcpg_server(url: &str, opts: &crate::compile::types::McpOptions) -> McpgServerConfig {
+    McpgServerConfig {
+        server_type: "http".to_string(),
+        container: None,
+        entrypoint: None,
+        entrypoint_args: None,
+        mounts: None,
+        args: None,
+        url: Some(url.to_string()),
+        headers: nonempty_map(&opts.headers),
+        env: None,
+        tools: nonempty_vec(&opts.allowed),
+    }
+}
+
+/// Validate and insert a single user-defined MCP server into `servers`.
+///
+/// Returns `Ok(())` on success. Returns `Err` for invalid server names.
+/// Silently skips reserved names, disabled entries, and unconfigured entries.
+fn try_add_user_mcp(
+    name: &str,
+    config: &McpConfig,
+    servers: &mut HashMap<String, McpgServerConfig>,
+) -> Result<()> {
+    // Prevent user-defined MCPs from overwriting the reserved safeoutputs backend
+    if name.eq_ignore_ascii_case("safeoutputs") {
+        log::warn!(
+            "MCP name 'safeoutputs' is reserved for the safe outputs HTTP backend — skipping"
+        );
+        return Ok(());
+    }
+
+    // Validate server name for URL safety — names are embedded in MCPG routed
+    // endpoints (/mcp/{name}) and must be safe URL path segments.
+    // Leading dots are rejected to prevent path normalization issues (e.g., ".." → parent).
+    if name.is_empty()
+        || name.starts_with('.')
+        || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        anyhow::bail!(
+            "MCP server name '{}' is invalid — must be non-empty, not start with '.', and contain only ASCII alphanumerics, hyphens, underscores, and dots",
+            name
+        );
+    }
+
+    // Skip if already auto-configured by an extension (e.g., tools.azure-devops)
+    if servers.contains_key(name) {
+        return Ok(());
+    }
+
+    let opts = match config {
+        McpConfig::Enabled(false) => return Ok(()),
+        McpConfig::Enabled(true) => {
+            log::warn!("MCP '{}' has no container or url — skipping", name);
+            return Ok(());
+        }
+        McpConfig::WithOptions(opts) => {
+            if !opts.enabled.unwrap_or(true) {
+                return Ok(());
+            }
+            opts
+        }
+    };
+
+    if opts.container.is_some() && opts.url.is_some() {
+        log::warn!(
+            "MCP '{}': both 'container' and 'url' are set — using 'container' (stdio). \
+            Remove 'url' to silence this warning.",
+            name
+        );
+    }
+
+    if let Some(container) = &opts.container {
+        validate_stdio_mcp(name, opts);
+        servers.insert(name.to_string(), build_stdio_mcpg_server(container, opts));
+    } else if let Some(url) = &opts.url {
+        // HTTP-based MCP (remote server)
+        for w in validate::validate_mcp_url(url, name) { eprintln!("{}", w); }
+        for w in validate::warn_potential_secrets(name, &HashMap::new(), &opts.headers) { eprintln!("{}", w); }
+        if !opts.env.is_empty() {
+            eprintln!(
+                "Warning: MCP '{}': env vars are not supported for HTTP MCPs — they will be ignored. \
+                Use headers for authentication instead.",
+                name
+            );
+        }
+        servers.insert(name.to_string(), build_http_mcpg_server(url, opts));
+    } else {
+        log::warn!("MCP '{}' has no container or url — skipping", name);
+    }
+
+    Ok(())
+}
+
 /// Generate MCPG configuration from front matter.
 ///
 /// Converts the front matter `mcp-servers` definitions into MCPG-compatible JSON.
@@ -1157,145 +1293,7 @@ pub fn generate_mcpg_config(
     }
 
     for (name, config) in &front_matter.mcp_servers {
-        // Prevent user-defined MCPs from overwriting the reserved safeoutputs backend
-        if name.eq_ignore_ascii_case("safeoutputs") {
-            log::warn!(
-                "MCP name 'safeoutputs' is reserved for the safe outputs HTTP backend — skipping"
-            );
-            continue;
-        }
-
-        // Validate server name for URL safety — names are embedded in MCPG routed
-        // endpoints (/mcp/{name}) and must be safe URL path segments.
-        // Leading dots are rejected to prevent path normalization issues (e.g., ".." → parent).
-        if name.is_empty()
-            || name.starts_with('.')
-            || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-        {
-            anyhow::bail!(
-                "MCP server name '{}' is invalid — must be non-empty, not start with '.', and contain only ASCII alphanumerics, hyphens, underscores, and dots",
-                name
-            );
-        }
-
-        // Skip if already auto-configured by an extension (e.g., tools.azure-devops)
-        if mcp_servers.contains_key(name) {
-            continue;
-        }
-
-        let (is_enabled, options) = match config {
-            McpConfig::Enabled(enabled) => (*enabled, None),
-            McpConfig::WithOptions(opts) => (opts.enabled.unwrap_or(true), Some(opts)),
-        };
-
-        if !is_enabled {
-            continue;
-        }
-
-        if let Some(opts) = options {
-            if opts.container.is_some() && opts.url.is_some() {
-                log::warn!(
-                    "MCP '{}': both 'container' and 'url' are set — using 'container' (stdio). \
-                    Remove 'url' to silence this warning.",
-                    name
-                );
-            }
-
-            if let Some(container) = &opts.container {
-                // Container-based stdio MCP (MCPG-native, per spec §3.2.1)
-                for w in validate::validate_container_image(container, name) { eprintln!("{}", w); }
-                // Validate mount paths for sensitive host directories
-                for mount in &opts.mounts {
-                    for w in validate::validate_mount_source(mount, name) { eprintln!("{}", w); }
-                }
-                // Validate Docker runtime args for privilege escalation
-                for w in validate::validate_docker_args(&opts.args, name) { eprintln!("{}", w); }
-                // Warn about potential inline secrets (check headers too in case user set both)
-                for w in validate::warn_potential_secrets(name, &opts.env, &opts.headers) { eprintln!("{}", w); }
-                let entrypoint_args = if opts.entrypoint_args.is_empty() {
-                    None
-                } else {
-                    Some(opts.entrypoint_args.clone())
-                };
-                let args = if opts.args.is_empty() {
-                    None
-                } else {
-                    Some(opts.args.clone())
-                };
-                let mounts = if opts.mounts.is_empty() {
-                    None
-                } else {
-                    Some(opts.mounts.clone())
-                };
-                let env = if opts.env.is_empty() {
-                    None
-                } else {
-                    Some(opts.env.clone())
-                };
-                let tools = if opts.allowed.is_empty() {
-                    None
-                } else {
-                    Some(opts.allowed.clone())
-                };
-                mcp_servers.insert(
-                    name.clone(),
-                    McpgServerConfig {
-                        server_type: "stdio".to_string(),
-                        container: Some(container.clone()),
-                        entrypoint: opts.entrypoint.clone(),
-                        entrypoint_args,
-                        mounts,
-                        args,
-                        url: None,
-                        headers: None,
-                        env,
-                        tools,
-                    },
-                );
-            } else if let Some(url) = &opts.url {
-                // HTTP-based MCP (remote server)
-                for w in validate::validate_mcp_url(url, name) { eprintln!("{}", w); }
-                // Warn about potential inline secrets in headers
-                for w in validate::warn_potential_secrets(name, &HashMap::new(), &opts.headers) { eprintln!("{}", w); }
-                if !opts.env.is_empty() {
-                    eprintln!(
-                        "Warning: MCP '{}': env vars are not supported for HTTP MCPs — they will be ignored. \
-                        Use headers for authentication instead.",
-                        name
-                    );
-                }
-                let headers = if opts.headers.is_empty() {
-                    None
-                } else {
-                    Some(opts.headers.clone())
-                };
-                let tools = if opts.allowed.is_empty() {
-                    None
-                } else {
-                    Some(opts.allowed.clone())
-                };
-                mcp_servers.insert(
-                    name.clone(),
-                    McpgServerConfig {
-                        server_type: "http".to_string(),
-                        container: None,
-                        entrypoint: None,
-                        entrypoint_args: None,
-                        mounts: None,
-                        args: None,
-                        url: Some(url.clone()),
-                        headers,
-                        env: None,
-                        tools,
-                    },
-                );
-            } else {
-                log::warn!("MCP '{}' has no container or url — skipping", name);
-                continue;
-            }
-        } else {
-            log::warn!("MCP '{}' has no container or url — skipping", name);
-        }
+        try_add_user_mcp(name, config, &mut mcp_servers)?;
     }
 
     Ok(McpgConfig {
