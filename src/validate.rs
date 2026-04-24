@@ -99,6 +99,15 @@ pub fn contains_newline(s: &str) -> bool {
     s.contains('\n') || s.contains('\r')
 }
 
+/// Returns true if the string contains the compiler's template marker
+/// delimiter (`{{`).  Values substituted into the pipeline template must
+/// not contain this sequence — otherwise a second-order substitution can
+/// inject arbitrary content (e.g., `{{ agent_content }}` in the `name`
+/// field would be expanded by a later replacement pass).
+pub fn contains_template_marker(s: &str) -> bool {
+    s.contains("{{")
+}
+
 /// Reject ADO template expressions (`${{`), macro expressions (`$(`), and runtime
 /// expressions (`$[`) in a string value. Parameter definitions should only contain
 /// literal values — expressions could enable information disclosure or logic manipulation
@@ -135,8 +144,8 @@ pub fn reject_ado_expressions_in_value(
 }
 
 /// Reject values that could cause pipeline injection: ADO expressions,
-/// pipeline commands (`##vso[`, `##[`), and newlines.  A combined check
-/// for fields embedded into YAML templates.
+/// pipeline commands (`##vso[`, `##[`), template markers (`{{`), and
+/// newlines.  A combined check for fields embedded into YAML templates.
 pub fn reject_pipeline_injection(value: &str, field_name: &str) -> Result<()> {
     if contains_ado_expression(value) {
         anyhow::bail!(
@@ -144,6 +153,13 @@ pub fn reject_pipeline_injection(value: &str, field_name: &str) -> Result<()> {
              Use literal values only. Found: '{}'",
             field_name,
             value,
+        );
+    }
+    if contains_template_marker(value) {
+        anyhow::bail!(
+            "Front matter '{}' contains a template marker delimiter '{{{{{{{{' which is not allowed. \
+             Template markers could cause second-order injection into the generated pipeline.",
+            field_name,
         );
     }
     if contains_newline(value) {
@@ -482,6 +498,15 @@ mod tests {
     }
 
     #[test]
+    fn test_contains_template_marker() {
+        assert!(contains_template_marker("{{ agent_content }}"));
+        assert!(contains_template_marker("prefix {{ something }} suffix"));
+        assert!(contains_template_marker("{{no_spaces}}"));
+        assert!(!contains_template_marker("normal text"));
+        assert!(!contains_template_marker("just a single { brace"));
+    }
+
+    #[test]
     fn test_reject_ado_expressions() {
         assert!(reject_ado_expressions("normal value", "param", "field").is_ok());
         assert!(reject_ado_expressions("$(SYSTEM_ACCESSTOKEN)", "param", "field").is_err());
@@ -494,6 +519,8 @@ mod tests {
         assert!(reject_pipeline_injection("normal value", "field").is_ok());
         assert!(reject_pipeline_injection("$(SYSTEM_ACCESSTOKEN)", "field").is_err());
         assert!(reject_pipeline_injection("value\ninjected", "field").is_err());
+        assert!(reject_pipeline_injection("{{ agent_content }}", "field").is_err());
+        assert!(reject_pipeline_injection("{{ copilot_params }}", "field").is_err());
     }
 
     // ── DNS domain validators ───────────────────────────────────────────

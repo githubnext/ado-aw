@@ -137,8 +137,9 @@ pub fn generate_parameters(parameters: &[PipelineParameter]) -> Result<String> {
 /// Validate front matter `name` and `description` fields.
 ///
 /// These values are substituted directly into the pipeline YAML template and must not
-/// contain ADO expressions (`${{`, `$(`, `$[`) which could disclose secrets or manipulate
-/// pipeline logic. Newlines are also rejected to prevent YAML structure injection.
+/// contain ADO expressions (`${{`, `$(`, `$[`), the compiler's own template marker
+/// delimiter (`{{`), or newlines — any of which could disclose secrets or manipulate
+/// pipeline logic via second-order injection.
 pub fn validate_front_matter_identity(front_matter: &FrontMatter) -> Result<()> {
     for (field, value) in [("name", &front_matter.name), ("description", &front_matter.description)] {
         validate::reject_pipeline_injection(value, field)?;
@@ -3144,6 +3145,24 @@ mod tests {
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("single line"));
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_template_marker_in_name() {
+        let mut fm = minimal_front_matter();
+        fm.name = "{{ agent_content }}".to_string();
+        let result = validate_front_matter_identity(&fm);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("template marker"));
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_template_marker_in_description() {
+        let mut fm = minimal_front_matter();
+        fm.description = "{{ copilot_params }}".to_string();
+        let result = validate_front_matter_identity(&fm);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("template marker"));
     }
 
     #[test]
