@@ -1137,7 +1137,7 @@ pub fn generate_agentic_depends_on(setup_steps: &[serde_yaml::Value]) -> String 
     }
 }
 
-/// Returns `Some(v.clone())` when `v` is non-empty, otherwise `None`.
+/// Returns `Some(v.to_vec())` when `v` is non-empty, otherwise `None`.
 fn nonempty_vec<T: Clone>(v: &[T]) -> Option<Vec<T>> {
     if v.is_empty() { None } else { Some(v.to_vec()) }
 }
@@ -1152,8 +1152,7 @@ where
 }
 
 /// Validate a container-based MCP entry and emit any warnings.
-fn validate_stdio_mcp(name: &str, opts: &crate::compile::types::McpOptions) {
-    let container = opts.container.as_deref().unwrap_or("");
+fn validate_stdio_mcp(name: &str, container: &str, opts: &crate::compile::types::McpOptions) {
     for w in validate::validate_container_image(container, name) { eprintln!("{}", w); }
     for mount in &opts.mounts {
         for w in validate::validate_mount_source(mount, name) { eprintln!("{}", w); }
@@ -1252,7 +1251,7 @@ fn try_add_user_mcp(
     }
 
     if let Some(container) = &opts.container {
-        validate_stdio_mcp(name, opts);
+        validate_stdio_mcp(name, container, opts);
         servers.insert(name.to_string(), build_stdio_mcpg_server(container, opts));
     } else if let Some(url) = &opts.url {
         // HTTP-based MCP (remote server)
