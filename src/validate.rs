@@ -155,11 +155,20 @@ pub fn reject_pipeline_injection(value: &str, field_name: &str) -> Result<()> {
             value,
         );
     }
+    if contains_pipeline_command(value) {
+        anyhow::bail!(
+            "Front matter '{}' contains an ADO pipeline command ('##vso[' or '##[') which is not allowed. \
+             Pipeline commands could manipulate pipeline behavior. Found: '{}'",
+            field_name,
+            value,
+        );
+    }
     if contains_template_marker(value) {
         anyhow::bail!(
             "Front matter '{}' contains a template marker delimiter '{{{{' which is not allowed. \
-             Template markers could cause second-order injection into the generated pipeline.",
+             Template markers could cause second-order injection into the generated pipeline. Found: '{}'",
             field_name,
+            value,
         );
     }
     if contains_newline(value) {
@@ -521,6 +530,8 @@ mod tests {
         assert!(reject_pipeline_injection("value\ninjected", "field").is_err());
         assert!(reject_pipeline_injection("{{ agent_content }}", "field").is_err());
         assert!(reject_pipeline_injection("{{ copilot_params }}", "field").is_err());
+        assert!(reject_pipeline_injection("##vso[task.setvariable]x", "field").is_err());
+        assert!(reject_pipeline_injection("##[section]foo", "field").is_err());
     }
 
     // ── DNS domain validators ───────────────────────────────────────────
