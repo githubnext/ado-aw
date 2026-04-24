@@ -157,7 +157,7 @@ pub fn reject_pipeline_injection(value: &str, field_name: &str) -> Result<()> {
     }
     if contains_template_marker(value) {
         anyhow::bail!(
-            "Front matter '{}' contains a template marker delimiter '{{{{{{{{' which is not allowed. \
+            "Front matter '{}' contains a template marker delimiter '{{{{' which is not allowed. \
              Template markers could cause second-order injection into the generated pipeline.",
             field_name,
         );
