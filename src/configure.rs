@@ -614,6 +614,120 @@ async fn update_pipeline_variable(
 
 // ==================== Command orchestration ====================
 
+/// Resolve ADO authentication from CLI flag, Azure CLI, or interactive prompt.
+///
+/// Priority: `--pat` / `AZURE_DEVOPS_EXT_PAT` env var → `az account get-access-token` → prompt.
+async fn resolve_auth(pat: Option<&str>) -> Result<AdoAuth> {
+    if let Some(p) = pat {
+        info!("Using PAT from --pat flag or AZURE_DEVOPS_EXT_PAT env var");
+        return Ok(AdoAuth::Pat(p.to_string()));
+    }
+
+    info!("No PAT provided, trying Azure CLI authentication...");
+    match try_azure_cli_token().await {
+        Ok(token) => {
+            println!("Using Azure CLI authentication (az account get-access-token)");
+            Ok(AdoAuth::Bearer(token))
+        }
+        Err(e) => {
+            warn!("Azure CLI auth failed: {:#}. Falling back to interactive prompt.", e);
+            let pat = inquire::Password::new("Enter your Azure DevOps PAT:")
+                .without_confirmation()
+                .prompt()
+                .context("Failed to read PAT from interactive prompt. Set AZURE_DEVOPS_EXT_PAT env var, log in with 'az login', or use --pat flag.")?;
+            Ok(AdoAuth::Pat(pat))
+        }
+    }
+}
+
+/// Resolve the ADO context from the git remote URL, applying any CLI overrides.
+///
+/// Falls back to `--org` / `--project` when the remote is absent or not an ADO URL.
+async fn resolve_ado_context(
+    repo_path: &Path,
+    org: Option<&str>,
+    project: Option<&str>,
+) -> Result<AdoContext> {
+    let remote_ctx = get_git_remote_url(repo_path)
+        .await
+        .ok()
+        .and_then(|url| {
+            info!("Git remote: {}", url);
+            match parse_ado_remote(&url) {
+                Ok(ctx) => Some(ctx),
+                Err(e) => {
+                    debug!("Git remote is not an ADO URL: {:#}", e);
+                    None
+                }
+            }
+        });
+
+    match (remote_ctx, org, project) {
+        // Git remote parsed — apply CLI overrides
+        (Some(mut ctx), org, project) => {
+            if let Some(org) = org {
+                ctx.org_url = org.to_string();
+            }
+            if let Some(project) = project {
+                ctx.project = project.to_string();
+            }
+            Ok(ctx)
+        }
+        // No usable remote — require explicit --org and --project
+        (None, Some(org), Some(project)) => {
+            info!("No ADO git remote; using --org and --project");
+            Ok(AdoContext {
+                org_url: org.to_string(),
+                project: project.to_string(),
+                repo_name: String::new(),
+            })
+        }
+        (None, _, _) => {
+            anyhow::bail!(
+                "Could not determine ADO context: no ADO git remote found and --org/--project not both provided.\n\
+                 When using --definition-ids outside an ADO repo, both --org and --project are required."
+            );
+        }
+    }
+}
+
+/// Apply GITHUB_TOKEN updates to all matched definitions, reporting per-item results.
+///
+/// Returns `Ok(())` when all updates succeed. Returns an error if any update fails,
+/// after attempting all items (non-aborting).
+async fn apply_token_updates(
+    client: &reqwest::Client,
+    ado_ctx: &AdoContext,
+    auth: &AdoAuth,
+    matched: &[MatchedDefinition],
+    token: &str,
+) -> Result<()> {
+    println!("Updating GITHUB_TOKEN on matched definitions...");
+    let mut success_count = 0;
+    let mut failure_count = 0;
+
+    for m in matched {
+        match update_pipeline_variable(client, ado_ctx, auth, m.id, "GITHUB_TOKEN", token).await {
+            Ok(()) => {
+                println!("  \u{2713} Updated '{}' (id={})", m.name, m.id);
+                success_count += 1;
+            }
+            Err(e) => {
+                eprintln!("  \u{2717} Failed to update '{}' (id={}): {}", m.name, m.id, e);
+                failure_count += 1;
+            }
+        }
+    }
+
+    println!();
+    println!("Done: {} updated, {} failed.", success_count, failure_count);
+
+    if failure_count > 0 {
+        anyhow::bail!("{} definition(s) failed to update", failure_count);
+    }
+    Ok(())
+}
+
 /// Run the configure command.
 pub async fn run(
     token: Option<&str>,
@@ -642,76 +756,8 @@ pub async fn run(
             .context("Failed to read token from interactive prompt")?,
     };
 
-    // Resolve auth: CLI flag > env var (handled by clap) > Azure CLI > interactive prompt
-    let auth = match pat {
-        Some(p) => {
-            info!("Using PAT from --pat flag or AZURE_DEVOPS_EXT_PAT env var");
-            AdoAuth::Pat(p.to_string())
-        }
-        None => {
-            info!("No PAT provided, trying Azure CLI authentication...");
-            match try_azure_cli_token().await {
-                Ok(token) => {
-                    println!("Using Azure CLI authentication (az account get-access-token)");
-                    AdoAuth::Bearer(token)
-                }
-                Err(e) => {
-                    warn!("Azure CLI auth failed: {:#}. Falling back to interactive prompt.", e);
-                    let pat = inquire::Password::new("Enter your Azure DevOps PAT:")
-                        .without_confirmation()
-                        .prompt()
-                        .context("Failed to read PAT from interactive prompt. Set AZURE_DEVOPS_EXT_PAT env var, log in with 'az login', or use --pat flag.")?;
-                    AdoAuth::Pat(pat)
-                }
-            }
-        }
-    };
-
-    // Resolve ADO context from git remote (best-effort), with CLI overrides.
-    // If a git remote exists but isn't an ADO URL (e.g. GitHub), fall back to --org/--project.
-    let ado_ctx = {
-        let remote_ctx = get_git_remote_url(&repo_path)
-            .await
-            .ok()
-            .and_then(|url| {
-                info!("Git remote: {}", url);
-                match parse_ado_remote(&url) {
-                    Ok(ctx) => Some(ctx),
-                    Err(e) => {
-                        debug!("Git remote is not an ADO URL: {:#}", e);
-                        None
-                    }
-                }
-            });
-
-        match (remote_ctx, org, project) {
-            // Git remote parsed — apply overrides
-            (Some(mut ctx), org, project) => {
-                if let Some(org) = org {
-                    ctx.org_url = org.to_string();
-                }
-                if let Some(project) = project {
-                    ctx.project = project.to_string();
-                }
-                ctx
-            }
-            // No usable remote — require explicit --org and --project
-            (None, Some(org), Some(project)) => {
-                info!("No ADO git remote; using --org and --project");
-                AdoContext {
-                    org_url: org.to_string(),
-                    project: project.to_string(),
-                    repo_name: String::new(),
-                }
-            }
-            (None, _, _) => {
-                anyhow::bail!(
-                    "Could not determine ADO context: no ADO git remote found and --org/--project not both provided.\n\
-                     When using --definition-ids outside an ADO repo, both --org and --project are required."
-                );
-            }
-        }
-    };
+    let auth = resolve_auth(pat).await?;
+    let ado_ctx = resolve_ado_context(&repo_path, org, project).await?;
 
     println!(
         "ADO context: org={}, project={}{}",
@@ -783,10 +829,7 @@ pub async fn run(
     println!("{} definition(s) to update:", matched.len());
     for m in &matched {
         if m.yaml_path.is_empty() {
-            println!(
-                "  [{}] '{}' (id={})",
-                m.match_method, m.name, m.id
-            );
+            println!("  [{}] '{}' (id={})", m.match_method, m.name, m.id);
         } else {
             println!(
                 "  [{}] '{}' (id={}) \u{2190} {}",
@@ -796,7 +839,6 @@ pub async fn run(
     }
     println!();
 
-    // Step 4: Update GITHUB_TOKEN
     if dry_run {
         println!("Dry run \u{2014} no changes applied.");
         println!(
@@ -806,40 +848,7 @@ pub async fn run(
         return Ok(());
     }
 
-    println!("Updating GITHUB_TOKEN on matched definitions...");
-    let mut success_count = 0;
-    let mut failure_count = 0;
-
-    for m in &matched {
-        match update_pipeline_variable(
-            &client,
-            &ado_ctx,
-            &auth,
-            m.id,
-            "GITHUB_TOKEN",
-            &token,
-        )
-        .await
-        {
-            Ok(()) => {
-                println!("  \u{2713} Updated '{}' (id={})", m.name, m.id);
-                success_count += 1;
-            }
-            Err(e) => {
-                eprintln!("  \u{2717} Failed to update '{}' (id={}): {}", m.name, m.id, e);
-                failure_count += 1;
-            }
-        }
-    }
-
-    println!();
-    println!("Done: {} updated, {} failed.", success_count, failure_count);
-
-    if failure_count > 0 {
-        anyhow::bail!("{} definition(s) failed to update", failure_count);
-    }
-
-    Ok(())
+    apply_token_updates(&client, &ado_ctx, &auth, &matched, &token).await
 }
 
 #[cfg(test)]
