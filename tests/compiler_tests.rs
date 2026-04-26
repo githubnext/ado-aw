@@ -59,12 +59,116 @@ This is a test agent for integration testing.
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
+/// Asserts that all required `{{ marker }}` placeholders are present in the template.
+fn assert_required_markers(content: &str) {
+    let required = [
+        "{{ repositories }}",
+        "{{ schedule }}",
+        "{{ checkout_self }}",
+        "{{ checkout_repositories }}",
+        "{{ allowed_domains }}",
+        "{{ source_path }}",
+        "{{ agent_name }}",
+        "{{ engine_run }}",
+        "{{ compiler_version }}",
+        "{{ integrity_check }}",
+        "{{ firewall_version }}",
+        "{{ mcpg_config }}",
+        "{{ mcpg_version }}",
+    ];
+    for marker in &required {
+        assert!(
+            content.contains(marker),
+            "Template should contain marker: {marker}"
+        );
+    }
+    // Sanity-check that at least 6 replacement markers exist in total.
+    // (${{ }} is valid ADO pipeline syntax and must be preserved.)
+    let marker_count = content.matches("{{ ").count();
+    assert!(
+        marker_count >= 6,
+        "Template should have at least 6 replacement markers"
+    );
+}
+
+/// Asserts that the pool configuration uses the `{{ pool }}` marker everywhere
+/// and that no hardcoded pool name leaks into the template.
+fn assert_pool_config(content: &str) {
+    // Must appear once per job: Agent, Detection, Execution.
+    let pool_marker_count = content.matches("name: {{ pool }}").count();
+    assert_eq!(
+        pool_marker_count, 3,
+        "Template should use '{{ pool }}' marker exactly three times (once for each job)"
+    );
+    assert!(
+        !content.contains("name: AZS-1ES-L-MMS-ubuntu-22.04"),
+        "Template should not contain hardcoded pool name 'AZS-1ES-L-MMS-ubuntu-22.04'"
+    );
+}
+
+/// Asserts that the `ado-aw` compiler binary is fetched from GitHub Releases
+/// with a correct, targeted checksum verification.
+fn assert_compiler_download(content: &str) {
+    assert!(
+        !content.contains("pipeline: 2437"),
+        "Template should not reference ADO pipeline 2437 for the compiler"
+    );
+    assert!(
+        content.contains("github.com/githubnext/ado-aw/releases"),
+        "Template should download the compiler from GitHub Releases"
+    );
+    // --ignore-missing silently passes when the binary is absent from checksums.txt.
+    assert!(
+        !content.contains("sha256sum -c checksums.txt --ignore-missing"),
+        "Template should not use --ignore-missing in checksum verification"
+    );
+    assert!(
+        content.contains(r#"grep "ado-aw-linux-x64" checksums.txt | sha256sum -c -"#),
+        "Template should verify ado-aw checksum using targeted grep to ensure binary entry exists"
+    );
+    assert!(
+        !content.contains("grep -q"),
+        "Checksum verification should not pipe through grep -q"
+    );
+}
+
+/// Asserts that the AWF binary is fetched from GitHub Releases, not ADO
+/// pipeline artifacts, and that no legacy artifact tasks remain.
+fn assert_awf_download(content: &str) {
+    assert!(
+        !content.contains("pipeline: 2450"),
+        "Template should not reference ADO pipeline 2450 for the firewall"
+    );
+    assert!(
+        !content.contains("DownloadPipelineArtifact"),
+        "Template should not use DownloadPipelineArtifact task"
+    );
+    assert!(
+        content.contains("github.com/github/gh-aw-firewall/releases"),
+        "Template should download AWF from GitHub Releases"
+    );
+}
+
+/// Asserts that MCPG is integrated correctly and that no legacy mcp-firewall
+/// artefacts remain in the template.
+fn assert_mcpg_integration(content: &str) {
+    assert!(
+        content.contains("--enable-host-access"),
+        "Template should include --enable-host-access for MCPG"
+    );
+    assert!(
+        !content.contains("mcp-firewall-config"),
+        "Template should not reference legacy mcp-firewall config"
+    );
+    assert!(
+        !content.contains("MCP_FIREWALL_EOF"),
+        "Template should not contain legacy firewall heredoc"
+    );
+}
+
 /// Test that verifies the expected structure of the compiled YAML output
 #[test]
 fn test_compiled_yaml_structure() {
-    // This test reads a pre-compiled YAML and verifies its structure
-    // Since we need the actual compilation to happen, we'll verify the template structure
-
     let template_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("src")
         .join("data")
@@ -72,137 +176,14 @@ fn test_compiled_yaml_structure() {
 
     assert!(template_path.exists(), "Base template should exist");
 
-    let template_content =
+    let content =
         fs::read_to_string(&template_path).expect("Should be able to read base template");
 
-    // Verify template contains expected markers
-    assert!(
-        template_content.contains("{{ repositories }}"),
-        "Template should contain repositories marker"
-    );
-    assert!(
-        template_content.contains("{{ schedule }}"),
-        "Template should contain schedule marker"
-    );
-    assert!(
-        template_content.contains("{{ checkout_self }}"),
-        "Template should contain checkout_self marker"
-    );
-    assert!(
-        template_content.contains("{{ checkout_repositories }}"),
-        "Template should contain checkout marker"
-    );
-    assert!(
-        template_content.contains("{{ allowed_domains }}"),
-        "Template should contain allowed_domains marker"
-    );
-    assert!(
-        template_content.contains("{{ source_path }}"),
-        "Template should contain source_path marker"
-    );
-    assert!(
-        template_content.contains("{{ agent_name }}"),
-        "Template should contain agent_name marker"
-    );
-    assert!(
-        template_content.contains("{{ engine_run }}"),
-        "Template should contain engine_run marker"
-    );
-    assert!(
-        template_content.contains("{{ compiler_version }}"),
-        "Template should contain compiler_version marker"
-    );
-    assert!(
-        template_content.contains("{{ integrity_check }}"),
-        "Template should contain integrity_check marker"
-    );
-
-    // Verify template doesn't accidentally use ${{ }} where {{ }} should be used
-    // (The ${{ }} syntax is for Azure DevOps pipeline expressions and should be preserved)
-    let marker_count = template_content.matches("{{ ").count();
-    assert!(
-        marker_count >= 6,
-        "Template should have at least 6 replacement markers"
-    );
-
-    // Verify that {{ pool }} marker is used for all jobs, not hardcoded pool names
-    // This ensures consistency across Agent, Detection, and Execution jobs.
-    let pool_marker_count = template_content.matches("name: {{ pool }}").count();
-    assert_eq!(
-        pool_marker_count, 3,
-        "Template should use '{{ pool }}' marker exactly three times (once for each job)"
-    );
-
-    // Verify that the default pool name is NOT hardcoded in the template
-    // The default should only exist in the compiler's Rust code, not the template
-    assert!(
-        !template_content.contains("name: AZS-1ES-L-MMS-ubuntu-22.04"),
-        "Template should not contain hardcoded pool name 'AZS-1ES-L-MMS-ubuntu-22.04'"
-    );
-
-    // Verify that the ado-aw compiler is downloaded from GitHub Releases, not ADO pipeline artifacts
-    assert!(
-        !template_content.contains("pipeline: 2437"),
-        "Template should not reference ADO pipeline 2437 for the compiler"
-    );
-    assert!(
-        template_content.contains("github.com/githubnext/ado-aw/releases"),
-        "Template should download the compiler from GitHub Releases"
-    );
-    assert!(
-        !template_content.contains("sha256sum -c checksums.txt --ignore-missing"),
-        "Template should not use --ignore-missing which silently passes when binary is missing from checksums"
-    );
-    assert!(
-        template_content.contains(r#"grep "ado-aw-linux-x64" checksums.txt | sha256sum -c -"#),
-        "Template should verify ado-aw checksum using targeted grep to ensure binary entry exists"
-    );
-    assert!(
-        !template_content.contains("grep -q"),
-        "Checksum verification should not pipe through grep"
-    );
-
-    // Verify AWF (Agentic Workflow Firewall) is downloaded from GitHub Releases, not ADO pipeline artifacts
-    assert!(
-        !template_content.contains("pipeline: 2450"),
-        "Template should not reference ADO pipeline 2450 for the firewall"
-    );
-    assert!(
-        !template_content.contains("DownloadPipelineArtifact"),
-        "Template should not use DownloadPipelineArtifact task"
-    );
-    assert!(
-        template_content.contains("github.com/github/gh-aw-firewall/releases"),
-        "Template should download AWF from GitHub Releases"
-    );
-    assert!(
-        template_content.contains("{{ firewall_version }}"),
-        "Template should contain firewall_version marker"
-    );
-
-    // Verify MCPG integration
-    assert!(
-        template_content.contains("{{ mcpg_config }}"),
-        "Template should contain mcpg_config marker"
-    );
-    assert!(
-        template_content.contains("{{ mcpg_version }}"),
-        "Template should contain mcpg_version marker"
-    );
-    assert!(
-        template_content.contains("--enable-host-access"),
-        "Template should include --enable-host-access for MCPG"
-    );
-
-    // Verify no legacy mcp-firewall references in template
-    assert!(
-        !template_content.contains("mcp-firewall-config"),
-        "Template should not reference legacy mcp-firewall config"
-    );
-    assert!(
-        !template_content.contains("MCP_FIREWALL_EOF"),
-        "Template should not contain legacy firewall heredoc"
-    );
+    assert_required_markers(&content);
+    assert_pool_config(&content);
+    assert_compiler_download(&content);
+    assert_awf_download(&content);
+    assert_mcpg_integration(&content);
 }
 
 /// Test that the example file is valid and can be parsed
