@@ -16,7 +16,7 @@
 
 use anyhow::Result;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use super::types::FrontMatter;
 
@@ -51,10 +51,10 @@ pub struct McpgServerConfig {
     pub url: Option<String>,
     /// HTTP headers (e.g., Authorization)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub headers: Option<HashMap<String, String>>,
+    pub headers: Option<BTreeMap<String, String>>,
     /// Environment variables for the server process
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub env: Option<HashMap<String, String>>,
+    pub env: Option<BTreeMap<String, String>>,
     /// Tool allow-list (if empty or absent, all tools are allowed)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<String>>,
@@ -74,7 +74,7 @@ pub struct McpgGatewayConfig {
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct McpgConfig {
-    pub mcp_servers: HashMap<String, McpgServerConfig>,
+    pub mcp_servers: BTreeMap<String, McpgServerConfig>,
     pub gateway: McpgGatewayConfig,
 }
 

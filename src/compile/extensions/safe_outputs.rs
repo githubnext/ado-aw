@@ -1,6 +1,6 @@
 use super::{CompileContext, CompilerExtension, ExtensionPhase, McpgServerConfig};
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 // ─── SafeOutputs (always-on, internal) ───────────────────────────────
 
@@ -34,7 +34,7 @@ impl CompilerExtension for SafeOutputsExtension {
                 mounts: None,
                 args: None,
                 url: Some("http://localhost:${SAFE_OUTPUTS_PORT}/mcp".to_string()),
-                headers: Some(HashMap::from([(
+                headers: Some(BTreeMap::from([(
                     "Authorization".to_string(),
                     "Bearer ${SAFE_OUTPUTS_API_KEY}".to_string(),
                 )])),

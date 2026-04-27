@@ -1142,13 +1142,20 @@ fn nonempty_vec<T: Clone>(v: &[T]) -> Option<Vec<T>> {
     if v.is_empty() { None } else { Some(v.to_vec()) }
 }
 
-/// Returns `Some(m.clone())` when `m` is non-empty, otherwise `None`.
-fn nonempty_map<K, V>(m: &HashMap<K, V>) -> Option<HashMap<K, V>>
+/// Returns `Some(BTreeMap from m)` when `m` is non-empty, otherwise `None`.
+///
+/// Converts a `HashMap` source to a `BTreeMap` so JSON serialization is
+/// deterministic (keys are emitted in sorted order).
+fn nonempty_map<K, V>(m: &HashMap<K, V>) -> Option<std::collections::BTreeMap<K, V>>
 where
-    K: Clone + Eq + std::hash::Hash,
+    K: Clone + Eq + std::hash::Hash + Ord,
     V: Clone,
 {
-    if m.is_empty() { None } else { Some(m.clone()) }
+    if m.is_empty() {
+        None
+    } else {
+        Some(m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+    }
 }
 
 /// Validate a container-based MCP entry and emit any warnings.
@@ -1200,7 +1207,7 @@ fn build_http_mcpg_server(url: &str, opts: &crate::compile::types::McpOptions) -
 fn try_add_user_mcp(
     name: &str,
     config: &McpConfig,
-    servers: &mut HashMap<String, McpgServerConfig>,
+    servers: &mut std::collections::BTreeMap<String, McpgServerConfig>,
 ) -> Result<()> {
     // Prevent user-defined MCPs from overwriting the reserved safeoutputs backend
     if name.eq_ignore_ascii_case("safeoutputs") {
@@ -1282,7 +1289,7 @@ pub fn generate_mcpg_config(
     ctx: &CompileContext,
     extensions: &[super::extensions::Extension],
 ) -> Result<McpgConfig> {
-    let mut mcp_servers = HashMap::new();
+    let mut mcp_servers = std::collections::BTreeMap::new();
 
     // Add extension-contributed MCPG server entries (safeoutputs, azure-devops, etc.)
     for ext in extensions {
