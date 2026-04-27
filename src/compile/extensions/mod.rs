@@ -284,6 +284,17 @@ pub trait CompilerExtension {
     fn required_pipeline_vars(&self) -> Vec<PipelineEnvMapping> {
         vec![]
     }
+
+    /// Runtime config substitutions for MCPG config JSON.
+    ///
+    /// Extensions that embed `${PLACEHOLDER}` references in their MCPG
+    /// server config (e.g., HTTP headers, URLs) declare the corresponding
+    /// substitutions here. The compiler generates `sed` commands that
+    /// replace each `${placeholder}` with `$(pipeline_var)` at runtime,
+    /// before the config is piped to MCPG via stdin.
+    fn mcpg_config_replacements(&self) -> Vec<McpgConfigReplacement> {
+        vec![]
+    }
 }
 
 /// Maps a container environment variable to a pipeline variable.
@@ -295,6 +306,22 @@ pub struct PipelineEnvMapping {
     /// The env var name inside the MCP container (e.g., `AZURE_DEVOPS_EXT_PAT`).
     pub container_var: String,
     /// The ADO pipeline variable name (e.g., `SC_READ_TOKEN`).
+    pub pipeline_var: String,
+}
+
+/// Declares a runtime `sed` substitution for the MCPG config JSON.
+///
+/// Extensions that use `${PLACEHOLDER}` references in their MCPG server
+/// config (e.g., HTTP headers with Bearer tokens) declare substitutions
+/// here. The compiler generates `sed` lines that replace each placeholder
+/// with the actual pipeline variable value before passing the config to MCPG.
+#[derive(Debug, Clone)]
+pub struct McpgConfigReplacement {
+    /// Placeholder name in the MCPG config JSON (e.g., `"S360_TOKEN"`).
+    /// Referenced as `${placeholder}` in the config.
+    pub placeholder: String,
+    /// ADO pipeline variable name whose value replaces the placeholder
+    /// at runtime (e.g., `"SC_S360_TOKEN"`).
     pub pipeline_var: String,
 }
 
@@ -358,6 +385,9 @@ macro_rules! extension_enum {
             fn required_pipeline_vars(&self) -> Vec<PipelineEnvMapping> {
                 match self { $( $Enum::$Variant(e) => e.required_pipeline_vars(), )+ }
             }
+            fn mcpg_config_replacements(&self) -> Vec<McpgConfigReplacement> {
+                match self { $( $Enum::$Variant(e) => e.mcpg_config_replacements(), )+ }
+            }
         }
     };
 }
@@ -368,6 +398,7 @@ mod safe_outputs;
 // Re-export tool/runtime extensions from their colocated homes
 pub use crate::tools::azure_devops::AzureDevOpsExtension;
 pub use crate::tools::cache_memory::CacheMemoryExtension;
+pub use crate::tools::s360_breeze::S360BreezeExtension;
 pub use github::GitHubExtension;
 pub use crate::runtimes::lean::LeanExtension;
 pub use safe_outputs::SafeOutputsExtension;
@@ -383,6 +414,7 @@ extension_enum! {
         Lean(LeanExtension),
         AzureDevOps(AzureDevOpsExtension),
         CacheMemory(CacheMemoryExtension),
+        S360Breeze(S360BreezeExtension),
     }
 }
 // ──────────────────────────────────────────────────────────────────────
@@ -421,6 +453,13 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
             if ado.is_enabled() {
                 extensions.push(Extension::AzureDevOps(
                     AzureDevOpsExtension::new(ado.clone()),
+                ));
+            }
+        }
+        if let Some(s360) = tools.s360_breeze.as_ref() {
+            if s360.is_enabled() {
+                extensions.push(Extension::S360Breeze(
+                    S360BreezeExtension::new(s360.clone()),
                 ));
             }
         }

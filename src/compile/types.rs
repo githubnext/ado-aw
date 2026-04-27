@@ -331,6 +331,11 @@ pub struct ToolsConfig {
     /// and network allowlist domains.
     #[serde(default, rename = "azure-devops")]
     pub azure_devops: Option<AzureDevOpsToolConfig>,
+    /// First-class S360 Breeze MCP integration.
+    /// Auto-configures the S360 HTTP MCP backend, service principal
+    /// authentication, MCPG entry, and network allowlist domains.
+    #[serde(default, rename = "s360-breeze")]
+    pub s360_breeze: Option<S360BreezeToolConfig>,
 }
 
 impl SanitizeConfigTrait for ToolsConfig {
@@ -343,6 +348,9 @@ impl SanitizeConfigTrait for ToolsConfig {
         }
         if let Some(ref mut ado) = self.azure_devops {
             ado.sanitize_config_fields();
+        }
+        if let Some(ref mut s360) = self.s360_breeze {
+            s360.sanitize_config_fields();
         }
     }
 }
@@ -483,6 +491,76 @@ pub struct AzureDevOpsOptions {
     /// Auto-inferred from the git remote URL at compile time if not specified.
     #[serde(default)]
     pub org: Option<String>,
+}
+
+/// S360 Breeze MCP tool configuration — accepts both `true` and object formats
+///
+/// Examples:
+/// ```yaml
+/// # Simple enablement
+/// s360-breeze: true
+///
+/// # With options
+/// s360-breeze:
+///   service-connection: my-s360-arm-sc
+///   allowed: [search_s360_kpi_metadata]
+/// ```
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum S360BreezeToolConfig {
+    /// Simple boolean enablement
+    Enabled(bool),
+    /// Full configuration with options
+    WithOptions(S360BreezeOptions),
+}
+
+impl S360BreezeToolConfig {
+    /// Whether the S360 Breeze MCP is enabled
+    pub fn is_enabled(&self) -> bool {
+        match self {
+            S360BreezeToolConfig::Enabled(enabled) => *enabled,
+            S360BreezeToolConfig::WithOptions(_) => true,
+        }
+    }
+
+    /// Get the explicit tool allow-list
+    pub fn allowed(&self) -> &[String] {
+        match self {
+            S360BreezeToolConfig::Enabled(_) => &[],
+            S360BreezeToolConfig::WithOptions(opts) => &opts.allowed,
+        }
+    }
+
+    /// Get the ARM service connection name for S360 authentication
+    pub fn service_connection(&self) -> Option<&str> {
+        match self {
+            S360BreezeToolConfig::Enabled(_) => None,
+            S360BreezeToolConfig::WithOptions(opts) => opts.service_connection.as_deref(),
+        }
+    }
+}
+
+impl SanitizeConfigTrait for S360BreezeToolConfig {
+    fn sanitize_config_fields(&mut self) {
+        match self {
+            S360BreezeToolConfig::Enabled(_) => {}
+            S360BreezeToolConfig::WithOptions(opts) => opts.sanitize_config_fields(),
+        }
+    }
+}
+
+/// S360 Breeze MCP options
+#[derive(Debug, Deserialize, Clone, Default, SanitizeConfig)]
+pub struct S360BreezeOptions {
+    /// ARM service connection for acquiring S360-scoped Azure AD token.
+    /// The service principal must be in the CORP tenant and approved
+    /// by the S360 team for service-to-service access.
+    #[serde(default, rename = "service-connection")]
+    pub service_connection: Option<String>,
+    /// Explicit tool allow-list (e.g., search_s360_kpi_metadata)
+    /// Passed to MCPG for tool-level filtering.
+    #[serde(default)]
+    pub allowed: Vec<String>,
 }
 
 /// Runtime configuration for language environments.
@@ -1232,6 +1310,62 @@ Body
         assert!(tools.azure_devops.as_ref().unwrap().is_enabled());
         assert_eq!(tools.bash.as_ref().unwrap(), &["cat", "ls"]);
         assert_eq!(tools.edit, Some(true));
+    }
+
+    // ─── S360BreezeToolConfig deserialization ──────────────────────────────
+
+    #[test]
+    fn test_s360_breeze_bool_true() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+tools:
+  s360-breeze: true
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let s360 = fm.tools.as_ref().unwrap().s360_breeze.as_ref().unwrap();
+        assert!(s360.is_enabled());
+        assert!(s360.allowed().is_empty());
+        assert!(s360.service_connection().is_none());
+    }
+
+    #[test]
+    fn test_s360_breeze_with_options() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+tools:
+  s360-breeze:
+    service-connection: my-s360-sc
+    allowed: [search_s360_kpi_metadata, get_kpi_info]
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let s360 = fm.tools.as_ref().unwrap().s360_breeze.as_ref().unwrap();
+        assert!(s360.is_enabled());
+        assert_eq!(s360.service_connection(), Some("my-s360-sc"));
+        assert_eq!(s360.allowed(), &["search_s360_kpi_metadata", "get_kpi_info"]);
+    }
+
+    #[test]
+    fn test_s360_breeze_bool_false() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+tools:
+  s360-breeze: false
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let s360 = fm.tools.as_ref().unwrap().s360_breeze.as_ref().unwrap();
+        assert!(!s360.is_enabled());
     }
 
     // ─── LeanRuntimeConfig deserialization ──────────────────────────────

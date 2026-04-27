@@ -1,4 +1,4 @@
-use super::{CompileContext, CompilerExtension, ExtensionPhase, McpgServerConfig};
+use super::{CompileContext, CompilerExtension, ExtensionPhase, McpgConfigReplacement, McpgServerConfig, PipelineEnvMapping};
 use anyhow::Result;
 use std::collections::BTreeMap;
 
@@ -57,5 +57,31 @@ These tools generate safe outputs that will be reviewed and executed in a separa
 "#
             .to_string(),
         )
+    }
+
+    fn required_pipeline_vars(&self) -> Vec<PipelineEnvMapping> {
+        vec![
+            PipelineEnvMapping {
+                container_var: "SAFE_OUTPUTS_PORT".to_string(),
+                pipeline_var: "SAFE_OUTPUTS_PORT".to_string(),
+            },
+            PipelineEnvMapping {
+                container_var: "SAFE_OUTPUTS_API_KEY".to_string(),
+                pipeline_var: "SAFE_OUTPUTS_API_KEY".to_string(),
+            },
+        ]
+    }
+
+    fn mcpg_config_replacements(&self) -> Vec<McpgConfigReplacement> {
+        vec![
+            McpgConfigReplacement {
+                placeholder: "SAFE_OUTPUTS_PORT".to_string(),
+                pipeline_var: "SAFE_OUTPUTS_PORT".to_string(),
+            },
+            McpgConfigReplacement {
+                placeholder: "SAFE_OUTPUTS_API_KEY".to_string(),
+                pipeline_var: "SAFE_OUTPUTS_API_KEY".to_string(),
+            },
+        ]
     }
 }

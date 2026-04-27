@@ -106,6 +106,12 @@ pub fn mcp_required_hosts(mcp_name: &str) -> &'static [&'static str] {
         // Stack MCP (internal)
         "stack" => &["stack.microsoft.com", "*.stack.microsoft.com"],
 
+        // S360 Breeze MCP
+        "s360" => &[
+            "mcp.vnext.s360.msftcloudes.com",
+            "*.msftcloudes.com",
+        ],
+
         // Calculator MCP - no network needed
         "calculator" => &[],
 

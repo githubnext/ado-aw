@@ -1424,6 +1424,70 @@ pub fn generate_mcpg_step_env(
     format!("env:\n{}", indented)
 }
 
+/// Generate the MCPG config `sed` substitution chain.
+///
+/// Collects `mcpg_config_replacements()` from all extensions to generate
+/// `sed` lines that replace `${PLACEHOLDER}` references in the MCPG config
+/// JSON with actual pipeline variable values at runtime.
+///
+/// The `MCP_GATEWAY_API_KEY` substitution is always included (gateway concern,
+/// not extension-specific). Extension-declared replacements are appended.
+///
+/// Each `sed` line uses `|` as the delimiter to avoid conflicts with `/`
+/// in Base64-encoded tokens and URLs.
+///
+/// Returns the full `sed` chain for embedding in the MCPG start bash step:
+/// ```bash
+/// | sed "s|\${SAFE_OUTPUTS_PORT}|$(SAFE_OUTPUTS_PORT)|g" \
+/// | sed "s|\${SAFE_OUTPUTS_API_KEY}|$(SAFE_OUTPUTS_API_KEY)|g" \
+/// | sed "s|\${MCP_GATEWAY_API_KEY}|$(MCP_GATEWAY_API_KEY)|g"
+/// ```
+pub fn generate_mcpg_config_subs(
+    extensions: &[super::extensions::Extension],
+) -> String {
+    use std::collections::HashSet;
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    // Extension-declared replacements (SafeOutputs, S360, etc.)
+    for ext in extensions {
+        for replacement in ext.mcpg_config_replacements() {
+            if seen.contains(&replacement.placeholder) {
+                continue;
+            }
+            lines.push(format!(
+                r#"| sed "s|\${{{}}}|$({})|g""#,
+                replacement.placeholder, replacement.pipeline_var,
+            ));
+            seen.insert(replacement.placeholder.clone());
+        }
+    }
+
+    // Gateway API key is always needed (not extension-specific)
+    if !seen.contains("MCP_GATEWAY_API_KEY") {
+        lines.push(
+            r#"| sed "s|\${MCP_GATEWAY_API_KEY}|$(MCP_GATEWAY_API_KEY)|g""#.to_string(),
+        );
+    }
+
+    // The last line doesn't need a trailing backslash continuation;
+    // the surrounding template context handles line continuation.
+    // No leading indent — replace_with_indent adds it from the marker position.
+    lines
+        .iter()
+        .enumerate()
+        .map(|(i, line)| {
+            if i < lines.len() - 1 {
+                format!("{} \\", line)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 // ==================== Domain allowlist ====================
 
 /// Generate the allowed domains list for AWF network isolation.
@@ -1884,6 +1948,7 @@ mod tests {
             edit: None,
             cache_memory: None,
             azure_devops: None,
+            s360_breeze: None,
         });
         let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("--allow-all-tools"), "wildcard bash should emit --allow-all-tools");
@@ -1898,6 +1963,7 @@ mod tests {
             edit: None,
             cache_memory: None,
             azure_devops: None,
+            s360_breeze: None,
         });
         let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("--allow-all-tools"), "\"*\" should behave same as \":*\"");
@@ -1912,6 +1978,7 @@ mod tests {
             edit: None,
             cache_memory: None,
             azure_devops: None,
+            s360_breeze: None,
         });
         let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("shell("));
@@ -1934,6 +2001,7 @@ mod tests {
             edit: Some(false),
             cache_memory: None,
             azure_devops: None,
+            s360_breeze: None,
         });
         let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(!params.contains("--allow-all-paths"), "edit disabled should NOT emit --allow-all-paths");
@@ -1948,6 +2016,7 @@ mod tests {
             edit: Some(true),
             cache_memory: None,
             azure_devops: None,
+            s360_breeze: None,
         });
         let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("--allow-all-tools"), "wildcard bash should emit --allow-all-tools");
@@ -1963,6 +2032,7 @@ mod tests {
             edit: None,
             cache_memory: None,
             azure_devops: None,
+            s360_breeze: None,
         });
         fm.runtimes = Some(crate::compile::types::RuntimesConfig {
             lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(true)),
@@ -1983,6 +2053,7 @@ mod tests {
             edit: None,
             cache_memory: None,
             azure_devops: None,
+            s360_breeze: None,
         });
         fm.runtimes = Some(crate::compile::types::RuntimesConfig {
             lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(true)),
@@ -2018,6 +2089,7 @@ mod tests {
             edit: None,
             cache_memory: None,
             azure_devops: None,
+            s360_breeze: None,
         });
         fm.mcp_servers.insert(
             "my-tool".to_string(),
@@ -2038,6 +2110,7 @@ mod tests {
             edit: None,
             cache_memory: None,
             azure_devops: None,
+            s360_breeze: None,
         });
         fm.mcp_servers.insert(
             "remote-ado".to_string(),
@@ -2069,6 +2142,7 @@ mod tests {
             edit: None,
             cache_memory: None,
             azure_devops: None,
+            s360_breeze: None,
         });
         fm.mcp_servers.insert(
             "z-tool".to_string(),
@@ -3118,6 +3192,7 @@ mod tests {
             edit: None,
             cache_memory: None,
             azure_devops: None,
+            s360_breeze: None,
         });
         let result = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm));
         assert!(result.is_err());
@@ -3865,10 +3940,19 @@ mod tests {
 
     #[test]
     fn test_generate_mcpg_step_env_no_extensions() {
+        // With no user-configured tools, only always-on extensions (SafeOutputs)
+        // contribute pipeline vars.
         let fm = minimal_front_matter();
         let extensions = collect_extensions(&fm);
         let env = generate_mcpg_step_env(&extensions);
-        assert!(env.is_empty(), "Should be empty when no extensions need pipeline vars");
+        assert!(
+            env.contains("SAFE_OUTPUTS_PORT: $(SAFE_OUTPUTS_PORT)"),
+            "SafeOutputs (always-on) should contribute SAFE_OUTPUTS_PORT"
+        );
+        assert!(
+            env.contains("SAFE_OUTPUTS_API_KEY: $(SAFE_OUTPUTS_API_KEY)"),
+            "SafeOutputs (always-on) should contribute SAFE_OUTPUTS_API_KEY"
+        );
     }
 
     #[test]

@@ -18,6 +18,7 @@ use super::common::{
     generate_allowed_domains,
     generate_enabled_tools_args,
     generate_mcpg_config, generate_mcpg_docker_env, generate_mcpg_step_env,
+    generate_mcpg_config_subs,
 };
 use super::types::FrontMatter;
 
@@ -57,6 +58,7 @@ impl Compiler for StandaloneCompiler {
             serde_json::to_string_pretty(&config_obj).context("Failed to serialize MCPG config")?;
         let mcpg_docker_env = generate_mcpg_docker_env(front_matter, &extensions);
         let mcpg_step_env = generate_mcpg_step_env(&extensions);
+        let mcpg_config_subs = generate_mcpg_config_subs(&extensions);
 
         let config = CompileConfig {
             template: include_str!("../data/base.yml").to_string(),
@@ -71,6 +73,7 @@ impl Compiler for StandaloneCompiler {
                 ("{{ mcpg_config }}".into(), mcpg_config_json),
                 ("{{ mcpg_docker_env }}".into(), mcpg_docker_env),
                 ("{{ mcpg_step_env }}".into(), mcpg_step_env),
+                ("{{ mcpg_config_subs }}".into(), mcpg_config_subs),
             ],
             skip_integrity,
             debug_pipeline,

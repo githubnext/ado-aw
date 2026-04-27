@@ -187,9 +187,7 @@ jobs:
       - bash: |
           # Substitute runtime values into MCPG config
           MCPG_CONFIG=$(cat /tmp/awf-tools/staging/mcpg-config.json \
-            | sed "s|\${SAFE_OUTPUTS_PORT}|$(SAFE_OUTPUTS_PORT)|g" \
-            | sed "s|\${SAFE_OUTPUTS_API_KEY}|$(SAFE_OUTPUTS_API_KEY)|g" \
-            | sed "s|\${MCP_GATEWAY_API_KEY}|$(MCP_GATEWAY_API_KEY)|g")
+            {{ mcpg_config_subs }})
 
           # Log the template config (before API key substitution) for debugging.
           echo "Starting MCPG with config template:"

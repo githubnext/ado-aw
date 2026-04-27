@@ -16,6 +16,7 @@ use super::common::{
     generate_allowed_domains,
     generate_enabled_tools_args,
     generate_mcpg_config, generate_mcpg_docker_env, generate_mcpg_step_env,
+    generate_mcpg_config_subs,
     format_steps_yaml_indented,
 };
 use super::types::FrontMatter;
@@ -56,6 +57,7 @@ impl Compiler for OneESCompiler {
             .context("Failed to serialize MCPG config")?;
         let mcpg_docker_env = generate_mcpg_docker_env(front_matter, &extensions);
         let mcpg_step_env = generate_mcpg_step_env(&extensions);
+        let mcpg_config_subs = generate_mcpg_config_subs(&extensions);
 
         // Generate 1ES-specific setup/teardown jobs(no per-job pool, uses templateContext).
         // These override the shared {{ setup_job }} / {{ teardown_job }} markers via
@@ -76,6 +78,7 @@ impl Compiler for OneESCompiler {
                 ("{{ mcpg_config }}".into(), mcpg_config_json),
                 ("{{ mcpg_docker_env }}".into(), mcpg_docker_env),
                 ("{{ mcpg_step_env }}".into(), mcpg_step_env),
+                ("{{ mcpg_config_subs }}".into(), mcpg_config_subs),
                 ("{{ setup_job }}".into(), setup_job),
                 ("{{ teardown_job }}".into(), teardown_job),
             ],
