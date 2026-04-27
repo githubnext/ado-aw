@@ -175,6 +175,129 @@ impl Engine {
     }
 }
 
+/// Collects the list of allowed tool identifiers when bash is not in wildcard mode.
+///
+/// Returns a flat `Vec<String>` of fully-qualified tool identifiers ready to be
+/// passed as `--allow-tool` arguments. Only called when `use_allow_all_tools` is
+/// `false`; the caller upholds that invariant.
+fn collect_allowed_tools(
+    front_matter: &FrontMatter,
+    extensions: &[Extension],
+    edit_enabled: bool,
+) -> Result<Vec<String>> {
+    let mut allowed_tools: Vec<String> = Vec::new();
+
+    // Tools from compiler extensions (github, safeoutputs, azure-devops, etc.)
+    for ext in extensions {
+        for tool in ext.allowed_copilot_tools() {
+            if !allowed_tools.contains(&tool) {
+                allowed_tools.push(tool);
+            }
+        }
+    }
+
+    // Tools from user-defined MCP servers (sorted for deterministic output).
+    // Only add --allow-tool for MCPs that will actually produce an MCPG entry (i.e.,
+    // WithOptions that have a container or url). McpConfig::Enabled(true) has no backing
+    // server in MCPG, so granting the permission would cause confusing runtime errors.
+    let mut sorted_mcps: Vec<_> = front_matter.mcp_servers.iter().collect();
+    sorted_mcps.sort_by(|(a, _), (b, _)| a.cmp(b));
+    for (name, config) in sorted_mcps {
+        // Skip servers already provided by extensions (case-insensitive to match
+        // generate_mcpg_config's eq_ignore_ascii_case guard for reserved names)
+        if allowed_tools.iter().any(|t| t.eq_ignore_ascii_case(name)) {
+            continue;
+        }
+        // Only add MCPs that have a backing server (container or url)
+        let has_backing_server = match config {
+            McpConfig::Enabled(_) => false,
+            McpConfig::WithOptions(opts) => {
+                opts.enabled.unwrap_or(true) && (opts.container.is_some() || opts.url.is_some())
+            }
+        };
+        if has_backing_server {
+            allowed_tools.push(name.clone());
+        }
+    }
+
+    // Intentional: with restricted bash, both --allow-tool write (tool identity)
+    // and --allow-all-paths (path scope) are emitted. --allow-all-tools subsumes
+    // --allow-tool write, so only --allow-all-paths is needed on that path.
+    if edit_enabled {
+        allowed_tools.push("write".to_string());
+    }
+
+    // Bash tool: use the explicitly configured list.
+    // When bash is None (not specified), use_allow_all_tools is true and this
+    // function is not called — that invariant is upheld by the caller.
+    let mut bash_commands: Vec<String> =
+        match front_matter.tools.as_ref().and_then(|t| t.bash.as_ref()) {
+            Some(cmds) if cmds.is_empty() => {
+                // Explicitly disabled: no bash commands
+                vec![]
+            }
+            Some(cmds) => {
+                // Explicit list of commands
+                cmds.clone()
+            }
+            None => {
+                // Invariant: bash=None → use_allow_all_tools=true → this function is
+                // not called. Panic if the invariant is ever broken.
+                unreachable!("bash=None should imply use_allow_all_tools=true")
+            }
+        };
+
+    // Auto-add extension-declared bash commands (runtimes + first-party tools)
+    for ext in extensions {
+        for cmd in ext.required_bash_commands() {
+            if !bash_commands.contains(&cmd) {
+                bash_commands.push(cmd);
+            }
+        }
+    }
+
+    for cmd in &bash_commands {
+        // Reject single quotes in bash commands — copilot_params are embedded inside
+        // a single-quoted bash string in the AWF command.
+        if cmd.contains('\'') {
+            anyhow::bail!(
+                "Bash command '{}' contains a single quote, which is not allowed \
+                 (would break AWF shell quoting).",
+                cmd
+            );
+        }
+        allowed_tools.push(format!("shell({})", cmd));
+    }
+
+    Ok(allowed_tools)
+}
+
+/// Validates a single `engine.args` entry.
+///
+/// Returns an error if the argument contains unsafe characters or attempts to
+/// override a compiler-controlled flag.
+fn validate_user_arg(arg: &str) -> Result<()> {
+    if !is_valid_arg(arg) {
+        anyhow::bail!(
+            "engine.args entry '{}' contains invalid characters. \
+             Only ASCII alphanumerics and '.', '_', ':', '-', '=', '/', '@' are allowed.",
+            arg
+        );
+    }
+    // Reject args that attempt to override compiler-controlled flags
+    for blocked in BLOCKED_ARG_PREFIXES {
+        if arg.starts_with(blocked) {
+            anyhow::bail!(
+                "engine.args entry '{}' conflicts with compiler-controlled flag '{}'. \
+                 These flags are managed by the compiler and cannot be overridden.",
+                arg,
+                blocked
+            );
+        }
+    }
+    Ok(())
+}
+
 fn copilot_args(
     front_matter: &FrontMatter,
     extensions: &[Extension],
@@ -203,93 +326,11 @@ fn copilot_args(
 
     // When --allow-all-tools is active, skip individual tool collection entirely.
     // --allow-all-tools is a superset that permits all tool calls regardless.
-    let mut allowed_tools: Vec<String> = Vec::new();
-
-    if !use_allow_all_tools {
-        // Collect tool permissions from extensions (github, safeoutputs, azure-devops, etc.)
-        for ext in extensions {
-            for tool in ext.allowed_copilot_tools() {
-                if !allowed_tools.contains(&tool) {
-                    allowed_tools.push(tool);
-                }
-            }
-        }
-
-        // Collect tool permissions from user-defined MCP servers (sorted for deterministic output).
-        // Only add --allow-tool for MCPs that will actually produce an MCPG entry (i.e.,
-        // WithOptions that have a container or url). McpConfig::Enabled(true) has no backing
-        // server in MCPG, so granting the permission would cause confusing runtime errors.
-        let mut sorted_mcps: Vec<_> = front_matter.mcp_servers.iter().collect();
-        sorted_mcps.sort_by(|(a, _), (b, _)| a.cmp(b));
-        for (name, config) in sorted_mcps {
-            // Skip servers already provided by extensions (case-insensitive to match
-            // generate_mcpg_config's eq_ignore_ascii_case guard for reserved names)
-            if allowed_tools.iter().any(|t| t.eq_ignore_ascii_case(name)) {
-                continue;
-            }
-            // Only add MCPs that have a backing server (container or url)
-            let has_backing_server = match config {
-                McpConfig::Enabled(_) => false,
-                McpConfig::WithOptions(opts) => {
-                    opts.enabled.unwrap_or(true)
-                        && (opts.container.is_some() || opts.url.is_some())
-                }
-            };
-            if !has_backing_server {
-                continue;
-            }
-            allowed_tools.push(name.clone());
-        }
-
-        // Intentional: with restricted bash, both --allow-tool write (tool identity)
-        // and --allow-all-paths (path scope) are emitted. --allow-all-tools subsumes
-        // --allow-tool write, so only --allow-all-paths is needed on that path.
-        if edit_enabled {
-            allowed_tools.push("write".to_string());
-        }
-
-        // Bash tool: use the explicitly configured list.
-        // When bash is None (not specified), use_allow_all_tools is true and this
-        // block is skipped entirely (gh-aw sandbox default = wildcard).
-        let mut bash_commands: Vec<String> =
-            match front_matter.tools.as_ref().and_then(|t| t.bash.as_ref()) {
-                Some(cmds) if cmds.is_empty() => {
-                    // Explicitly disabled: no bash commands
-                    vec![]
-                }
-                Some(cmds) => {
-                    // Explicit list of commands
-                    cmds.clone()
-                }
-                None => {
-                    // Invariant: bash=None → use_allow_all_tools=true → this block is
-                    // skipped. Panic if the invariant is ever broken.
-                    unreachable!("bash=None should imply use_allow_all_tools=true")
-                }
-            };
-
-        // Auto-add extension-declared bash commands (runtimes + first-party tools)
-        for ext in extensions {
-            for cmd in ext.required_bash_commands() {
-                if !bash_commands.contains(&cmd) {
-                    bash_commands.push(cmd);
-                }
-            }
-        }
-
-        for cmd in &bash_commands {
-            // Reject single quotes in bash commands — copilot_params are embedded inside
-            // a single-quoted bash string in the AWF command.
-            if cmd.contains('\'') {
-                anyhow::bail!(
-                    "Bash command '{}' contains a single quote, which is not allowed \
-                     (would break AWF shell quoting).",
-                    cmd
-                );
-            }
-            allowed_tools.push(format!("shell({})", cmd));
-        }
-    }
+    let allowed_tools: Vec<String> = if use_allow_all_tools {
+        Vec::new()
+    } else {
+        collect_allowed_tools(front_matter, extensions, edit_enabled)?
+    };
 
     let mut params = Vec::new();
 
@@ -368,24 +409,7 @@ fn copilot_args(
     // User args are additive; they cannot remove compiler security flags but may override
     // non-security defaults via last-wins semantics (e.g., --model).
     for arg in front_matter.engine.args() {
-        if !is_valid_arg(arg) {
-            anyhow::bail!(
-                "engine.args entry '{}' contains invalid characters. \
-                 Only ASCII alphanumerics and '.', '_', ':', '-', '=', '/', '@' are allowed.",
-                arg
-            );
-        }
-        // Reject args that attempt to override compiler-controlled flags
-        for blocked in BLOCKED_ARG_PREFIXES {
-            if arg.starts_with(blocked) {
-                anyhow::bail!(
-                    "engine.args entry '{}' conflicts with compiler-controlled flag '{}'. \
-                     These flags are managed by the compiler and cannot be overridden.",
-                    arg,
-                    blocked
-                );
-            }
-        }
+        validate_user_arg(arg)?;
         params.push(arg.to_string());
     }
 
