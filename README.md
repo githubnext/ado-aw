@@ -328,6 +328,7 @@ mcp-servers:
     container: "node:20-slim"
     entrypoint: "node"
     entrypoint-args: ["path/to/mcp-server.js"]
+    # enabled: set to false to temporarily disable without removing the entry
     # args: additional Docker runtime arguments inserted before the image name
     #   (e.g. ["--memory", "512m"]).  Dangerous flags like --privileged trigger
     #   a compile-time warning.

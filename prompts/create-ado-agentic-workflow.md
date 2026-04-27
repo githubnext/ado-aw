@@ -201,6 +201,7 @@ mcp-servers:
     container: "node:20-slim"
     entrypoint: "node"
     entrypoint-args: ["path/to/server.js"]
+    enabled: false             # Set to false to temporarily disable without removing
     env:
       API_KEY: "$(MY_SECRET)"
     allowed:
