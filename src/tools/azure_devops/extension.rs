@@ -9,7 +9,7 @@ use crate::compile::{
 };
 use crate::compile::types::AzureDevOpsToolConfig;
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Azure DevOps first-party tool extension.
 ///
@@ -107,7 +107,7 @@ impl CompilerExtension for AzureDevOpsExtension {
         let (auth_flag, token_var) = ("envvar", "ADO_MCP_AUTH_TOKEN");
         entrypoint_args.extend(["-a".to_string(), auth_flag.to_string()]);
 
-        let env = Some(HashMap::from([(
+        let env = Some(BTreeMap::from([(
             token_var.to_string(),
             String::new(), // Passthrough from MCPG process env
         )]));
