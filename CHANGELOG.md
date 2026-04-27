@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.1](https://github.com/githubnext/ado-aw/compare/v0.17.0...v0.17.1) (2026-04-27)
+
+
+### Bug Fixes
+
+* block template marker delimiters in front matter identity fields ([#315](https://github.com/githubnext/ado-aw/issues/315)) ([2575246](https://github.com/githubnext/ado-aw/commit/2575246ef14b958e4baf757688190d6109286bf4))
+* deterministic MCPG config key ordering (HashMap -&gt; BTreeMap) ([#328](https://github.com/githubnext/ado-aw/issues/328)) ([889ee62](https://github.com/githubnext/ado-aw/commit/889ee62143d535ec029ef2a71e6fe9d0de23d297))
+
 ## [0.17.0](https://github.com/githubnext/ado-aw/compare/v0.16.0...v0.17.0) (2026-04-23)
 
 
