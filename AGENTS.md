@@ -399,7 +399,7 @@ Parameters can be referenced in custom steps using `${{ parameters.paramName }}`
 
 #### Auto-injected `clearMemory` Parameter
 
-When `safe-outputs.memory` is configured, the compiler automatically injects a `clearMemory` boolean parameter (default: `false`) at the beginning of the parameters list. This parameter:
+When `tools.cache-memory` is configured, the compiler automatically injects a `clearMemory` boolean parameter (default: `false`) at the beginning of the parameters list. This parameter:
 
 - Is surfaced in the ADO UI when manually queuing a run
 - When set to `true`, skips downloading the previous agent memory artifact
@@ -566,7 +566,7 @@ Explicit markings are embedded in these templates that the compiler is allowed t
 
 Should be replaced with the top-level `parameters:` block generated from the `parameters` front matter field. If no parameters are defined (and no auto-injected parameters apply), this marker is replaced with an empty string.
 
-When `safe-outputs.memory` is configured, the compiler auto-injects a `clearMemory` boolean parameter (default: `false`) unless one is already user-defined.
+When `tools.cache-memory` is configured, the compiler auto-injects a `clearMemory` boolean parameter (default: `false`) unless one is already user-defined.
 
 Example output:
 ```yaml
@@ -1648,6 +1648,7 @@ mcp-servers:
 - `headers:` - HTTP headers to include in requests (e.g., `Authorization`, `X-MCP-Toolsets`)
 
 **Common (both types):**
+- `enabled:` - Whether this MCP server is active (default: `true`). Set to `false` to temporarily disable an entry without removing it from the front matter.
 - `allowed:` - Array of tool names the agent is permitted to call (required for security)
 - `env:` - Environment variables for the MCP server process. Use `""` (empty string) for passthrough from the pipeline environment.
 
