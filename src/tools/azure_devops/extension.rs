@@ -59,30 +59,80 @@ impl CompilerExtension for AzureDevOpsExtension {
             None => return vec![], // validate() will catch this
         };
 
-        let mut lines = Vec::new();
-        lines.push("- task: AzureCLI@2".to_string());
-        lines.push(format!(
+        // Step 1: Acquire the ADO-scoped token via AzureCLI@2
+        let mut acq = Vec::new();
+        acq.push("- task: AzureCLI@2".to_string());
+        acq.push(format!(
             r#"  displayName: "Acquire ADO token ({})""#,
             ADO_MCP_PIPELINE_VAR
         ));
-        lines.push("  inputs:".to_string());
-        lines.push(format!(
+        acq.push("  inputs:".to_string());
+        acq.push(format!(
             "    azureSubscription: '{}'",
             sc.replace('\'', "''")
         ));
-        lines.push("    scriptType: 'bash'".to_string());
-        lines.push("    scriptLocation: 'inlineScript'".to_string());
-        lines.push("    addSpnToEnvironment: true".to_string());
-        lines.push("    inlineScript: |".to_string());
-        lines.push("      ADO_TOKEN=$(az account get-access-token \\".to_string());
-        lines.push(format!("        --resource {} \\", ADO_RESOURCE_ID));
-        lines.push("        --query accessToken -o tsv)".to_string());
-        lines.push(format!(
+        acq.push("    scriptType: 'bash'".to_string());
+        acq.push("    scriptLocation: 'inlineScript'".to_string());
+        acq.push("    addSpnToEnvironment: true".to_string());
+        acq.push("    inlineScript: |".to_string());
+        acq.push("      ADO_TOKEN=$(az account get-access-token \\".to_string());
+        acq.push(format!("        --resource {} \\", ADO_RESOURCE_ID));
+        acq.push("        --query accessToken -o tsv)".to_string());
+        acq.push(format!(
             "      echo \"##vso[task.setvariable variable={};issecret=true]$ADO_TOKEN\"",
             ADO_MCP_PIPELINE_VAR
         ));
 
-        vec![lines.join("\n")]
+        // Step 2: Validate the token is read-only by probing a write endpoint
+        // with an intentionally empty body. ADO returns:
+        //   403 → token is read-only (expected)
+        //   400/2xx → token has write access (fail the pipeline)
+        let org = self.config.org().unwrap_or("$(ADO_ORG)");
+        let mut val = Vec::new();
+        val.push("- bash: |".to_string());
+        val.push(format!(
+            "    TOKEN=\"$({})\"", ADO_MCP_PIPELINE_VAR
+        ));
+        val.push(format!(
+            "    ORG=\"{}\"", org
+        ));
+        val.push("    PROJECT=\"$(System.TeamProject)\"".to_string());
+        val.push(String::new());
+        val.push("    # Decode JWT and validate audience".to_string());
+        val.push("    PAYLOAD=$(echo \"$TOKEN\" | cut -d '.' -f2 | tr '_-' '/+' | base64 -d 2>/dev/null || true)".to_string());
+        val.push("    AUD=$(echo \"$PAYLOAD\" | python3 -c \"import sys,json; print(json.load(sys.stdin).get('aud',''))\" 2>/dev/null || true)".to_string());
+        val.push(format!(
+            "    if [ \"$AUD\" != \"{}\" ]; then",
+            ADO_RESOURCE_ID
+        ));
+        val.push(format!(
+            "      echo \"##vso[task.logissue type=warning]ADO token audience mismatch: expected '{}', got '$AUD'\"\n    fi",
+            ADO_RESOURCE_ID
+        ));
+        val.push(String::new());
+        val.push("    # Probe write endpoint with empty body to verify read-only access".to_string());
+        val.push("    STATUS=$(curl -s -o /dev/null -w \"%{http_code}\" \\".to_string());
+        val.push("      -X POST \"https://dev.azure.com/$ORG/$PROJECT/_apis/wit/workitems/\\$Task?api-version=7.1\" \\".to_string());
+        val.push("      -H \"Authorization: Bearer $TOKEN\" \\".to_string());
+        val.push("      -H \"Content-Type: application/json-patch+json\" \\".to_string());
+        val.push("      -d '[]')".to_string());
+        val.push(String::new());
+        val.push("    if [ \"$STATUS\" = \"403\" ] || [ \"$STATUS\" = \"401\" ]; then".to_string());
+        val.push("      echo \"ADO token verified: read-only access (write probe returned $STATUS)\"".to_string());
+        val.push("    elif [ \"$STATUS\" = \"000\" ]; then".to_string());
+        val.push("      echo \"##vso[task.logissue type=warning]Could not reach ADO API to verify token (network error)\"".to_string());
+        val.push("    else".to_string());
+        val.push("      echo \"##vso[task.logissue type=error]ADO token has write access (write probe returned $STATUS). Expected read-only (403).\"".to_string());
+        val.push("      echo \"##vso[task.complete result=Failed]ADO service-connection token must be read-only\"".to_string());
+        val.push("      exit 1".to_string());
+        val.push("    fi".to_string());
+        val.push("  displayName: \"Verify ADO token is read-only\"".to_string());
+        val.push("  env:".to_string());
+        val.push(format!(
+            "    {}: $({})", ADO_MCP_PIPELINE_VAR, ADO_MCP_PIPELINE_VAR
+        ));
+
+        vec![acq.join("\n"), val.join("\n")]
     }
 
     fn mcpg_servers(&self, ctx: &CompileContext) -> Result<Vec<(String, McpgServerConfig)>> {
