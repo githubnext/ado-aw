@@ -544,9 +544,12 @@ fn test_permissions_read_write_compiled_output() {
     let test_input = temp_dir.join("perms-agent.md");
     let test_content = r#"---
 name: "Permissions Test Agent"
-description: "Agent with read and write permissions"
+description: "Agent with write permissions and ADO tool with service-connection"
+tools:
+  azure-devops:
+    service-connection: my-read-sc
+    org: myorg
 permissions:
-  read: my-read-sc
   write: my-write-sc
 safe-outputs:
   create-work-item:
@@ -574,14 +577,14 @@ Do something.
 
     let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
 
-    // Should contain read token acquisition (SC_READ_TOKEN)
+    // Should contain ADO MCP token acquisition (SC_ADO_MCP_TOKEN) via tool service-connection
     assert!(
-        compiled.contains("SC_READ_TOKEN"),
-        "Compiled output should contain SC_READ_TOKEN for read service connection"
+        compiled.contains("SC_ADO_MCP_TOKEN"),
+        "Compiled output should contain SC_ADO_MCP_TOKEN for ADO tool service-connection"
     );
     assert!(
         compiled.contains("my-read-sc"),
-        "Compiled output should contain the read service connection name"
+        "Compiled output should contain the ADO tool service connection name"
     );
 
     // Should contain write token acquisition (SC_WRITE_TOKEN)
@@ -592,12 +595,6 @@ Do something.
     assert!(
         compiled.contains("my-write-sc"),
         "Compiled output should contain the write service connection name"
-    );
-
-    // Should NOT contain System.AccessToken in executor env
-    assert!(
-        !compiled.contains("SYSTEM_ACCESSTOKEN: $(System.AccessToken)"),
-        "Compiled output should not pass System.AccessToken to executor"
     );
 
     // Verify no unreplaced markers remain
@@ -766,21 +763,24 @@ Do something.
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
-/// Test that read-only permissions work (agent gets token, executor does not)
+/// Test that write-only permissions work (executor gets write token, no read token)
 #[test]
-fn test_permissions_read_only_compiled_output() {
+fn test_permissions_write_only_compiled_output() {
     let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-permissions-ro-{}",
+        "agentic-pipeline-permissions-wo-{}",
         std::process::id()
     ));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
-    let test_input = temp_dir.join("read-only-agent.md");
+    let test_input = temp_dir.join("write-only-agent.md");
     let test_content = r#"---
-name: "Read Only Agent"
-description: "Agent with read-only permissions"
+name: "Write Only Agent"
+description: "Agent with write-only permissions"
 permissions:
-  read: my-read-sc
+  write: my-write-sc
+safe-outputs:
+  create-work-item:
+    work-item-type: Task
 ---
 
 ## Test Agent
@@ -789,7 +789,7 @@ Do something.
 "#;
     fs::write(&test_input, test_content).expect("Failed to write test input");
 
-    let output_path = temp_dir.join("read-only-agent.yml");
+    let output_path = temp_dir.join("write-only-agent.yml");
     let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
     let output = std::process::Command::new(&binary_path)
         .args(["compile", test_input.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
@@ -804,14 +804,10 @@ Do something.
 
     let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
 
-    // Should contain read token but not write token
+    // Should contain write token
     assert!(
-        compiled.contains("SC_READ_TOKEN"),
-        "Compiled output should contain SC_READ_TOKEN"
-    );
-    assert!(
-        !compiled.contains("SC_WRITE_TOKEN"),
-        "Compiled output should not contain SC_WRITE_TOKEN when only read is configured"
+        compiled.contains("SC_WRITE_TOKEN"),
+        "Compiled output should contain SC_WRITE_TOKEN"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -2161,16 +2157,16 @@ fn test_fixture_azure_devops_mcp_compiled_output() {
         "Should reference ADO_MCP_AUTH_TOKEN"
     );
 
-    // Should contain SC_READ_TOKEN (from permissions.read)
+    // Should contain SC_ADO_MCP_TOKEN (from tool service-connection)
     assert!(
-        compiled.contains("SC_READ_TOKEN"),
-        "Should contain SC_READ_TOKEN"
+        compiled.contains("SC_ADO_MCP_TOKEN"),
+        "Should contain SC_ADO_MCP_TOKEN"
     );
 
     // Should contain the MCPG docker env passthrough (auto-mapped ADO token)
     assert!(
-        compiled.contains("-e ADO_MCP_AUTH_TOKEN=\"$SC_READ_TOKEN\""),
-        "Should auto-map SC_READ_TOKEN to ADO_MCP_AUTH_TOKEN on MCPG Docker run"
+        compiled.contains("-e ADO_MCP_AUTH_TOKEN=\"$SC_ADO_MCP_TOKEN\""),
+        "Should auto-map SC_ADO_MCP_TOKEN to ADO_MCP_AUTH_TOKEN on MCPG Docker run"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);

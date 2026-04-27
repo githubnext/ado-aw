@@ -731,14 +731,12 @@ fn find_git_root(path: &std::path::Path) -> Option<std::path::PathBuf> {
 
 // ==================== Permission helpers ====================
 
-/// ADO resource ID for minting ADO-scoped tokens via Azure CLI.
-const ADO_RESOURCE_ID: &str = "499b84ac-1321-427f-aa17-267ca6975798";
-
 /// Generate an AzureCLI@2 step to acquire an ADO-scoped token from an ARM service connection.
 /// The `variable_name` parameter controls which pipeline variable the token is stored in
-/// (e.g. "SC_READ_TOKEN" for the agent, "SC_WRITE_TOKEN" for the executor).
+/// (e.g. "SC_WRITE_TOKEN" for the executor).
 /// Returns empty string if no service connection is provided.
 pub fn generate_acquire_ado_token(service_connection: Option<&str>, variable_name: &str) -> String {
+    use crate::tools::azure_devops::ADO_RESOURCE_ID;
     match service_connection {
         Some(sc) => {
             let mut lines = Vec::new();
@@ -1331,7 +1329,7 @@ pub fn generate_mcpg_docker_env(
     let mut env_flags: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
-    // 1. Extension pipeline var mappings (e.g., AZURE_DEVOPS_EXT_PAT -> SC_READ_TOKEN)
+    // 1. Extension pipeline var mappings (e.g., ADO_MCP_AUTH_TOKEN -> SC_ADO_MCP_TOKEN)
     for ext in extensions {
         for mapping in ext.required_pipeline_vars() {
             if seen.contains(&mapping.container_var) {
@@ -1390,7 +1388,7 @@ pub fn generate_mcpg_docker_env(
 /// environment variables. This function collects all pipeline variable mappings
 /// from extensions and generates the corresponding `env:` entries.
 ///
-/// Returns YAML `env:` entries (e.g., `SC_READ_TOKEN: $(SC_READ_TOKEN)`),
+/// Returns YAML `env:` entries (e.g., `SC_ADO_MCP_TOKEN: $(SC_ADO_MCP_TOKEN)`),
 /// or an empty string if no mappings are needed.
 pub fn generate_mcpg_step_env(
     extensions: &[super::extensions::Extension],
@@ -1736,13 +1734,6 @@ pub async fn compile_shared(
     let job_timeout = generate_job_timeout(front_matter);
 
     // 9. Token acquisition and env vars
-    let acquire_read_token = generate_acquire_ado_token(
-        front_matter
-            .permissions
-            .as_ref()
-            .and_then(|p| p.read.as_deref()),
-        "SC_READ_TOKEN",
-    );
     let engine_env = ctx.engine.env(&front_matter.engine)?;
     let engine_log_dir = ctx.engine.log_dir();
     let acquire_write_token = generate_acquire_ado_token(
@@ -1825,7 +1816,6 @@ pub async fn compile_shared(
         ("{{ working_directory }}", &working_directory),
         ("{{ workspace }}", &working_directory),
         ("{{ agent_content }}", markdown_body),
-        ("{{ acquire_ado_token }}", &acquire_read_token),
         ("{{ engine_env }}", &engine_env),
         ("{{ engine_log_dir }}", engine_log_dir),
         ("{{ acquire_write_token }}", &acquire_write_token),
@@ -3069,14 +3059,14 @@ mod tests {
 
     #[test]
     fn test_generate_acquire_ado_token_with_sc() {
-        let result = generate_acquire_ado_token(Some("my-arm-sc"), "SC_READ_TOKEN");
+        let result = generate_acquire_ado_token(Some("my-arm-sc"), "SC_WRITE_TOKEN");
         assert!(result.contains("AzureCLI@2"), "Should use AzureCLI@2 task");
         assert!(
             result.contains("azureSubscription: 'my-arm-sc'"),
             "Should embed service connection name"
         );
         assert!(
-            result.contains("variable=SC_READ_TOKEN;issecret=true"),
+            result.contains("variable=SC_WRITE_TOKEN;issecret=true"),
             "Should set correct pipeline variable as secret"
         );
         assert!(
@@ -3087,7 +3077,7 @@ mod tests {
 
     #[test]
     fn test_generate_acquire_ado_token_none_returns_empty() {
-        let result = generate_acquire_ado_token(None, "SC_READ_TOKEN");
+        let result = generate_acquire_ado_token(None, "SC_WRITE_TOKEN");
         assert!(result.is_empty(), "None service connection should return empty string");
     }
 
@@ -3095,7 +3085,6 @@ mod tests {
     fn test_generate_acquire_ado_token_write_token_variable() {
         let result = generate_acquire_ado_token(Some("write-sc"), "SC_WRITE_TOKEN");
         assert!(result.contains("variable=SC_WRITE_TOKEN;issecret=true"));
-        assert!(!result.contains("SC_READ_TOKEN"));
     }
 
     // ─── engine env / generate_executor_ado_env ────────────────────────────
@@ -3121,11 +3110,6 @@ mod tests {
         assert!(
             result.contains("SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)"),
             "Executor should use SC_WRITE_TOKEN"
-        );
-        // Must NOT expose the read token in the executor env
-        assert!(
-            !result.contains("SC_READ_TOKEN"),
-            "Executor env must not contain SC_READ_TOKEN"
         );
     }
 
@@ -3818,16 +3802,16 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_mcpg_docker_env_with_permissions_read() {
-        // When ADO tool is enabled with permissions.read, the extension's
+    fn test_generate_mcpg_docker_env_with_ado_tool() {
+        // When ADO tool is enabled with service-connection, the extension's
         // required_pipeline_vars should produce the -e flag
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\npermissions:\n  read: my-read-sc\n---\n",
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    service-connection: my-ado-sc\n    org: myorg\n---\n",
         ).unwrap();
         let extensions = collect_extensions(&fm);
         let env = generate_mcpg_docker_env(&fm, &extensions);
         assert!(
-            env.contains("-e ADO_MCP_AUTH_TOKEN=\"$SC_READ_TOKEN\""),
+            env.contains("-e ADO_MCP_AUTH_TOKEN=\"$SC_ADO_MCP_TOKEN\""),
             "Should map ADO token via extension pipeline var"
         );
     }
@@ -3849,7 +3833,7 @@ mod tests {
         // Extension provides ADO_MCP_AUTH_TOKEN mapping, user MCP also has it as passthrough.
         // Extension mapping should win (deduplicated).
         let (mut fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\npermissions:\n  read: my-read-sc\n---\n",
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    service-connection: my-ado-sc\n    org: myorg\n---\n",
         ).unwrap();
         fm.mcp_servers.insert(
             "ado-tool".to_string(),
@@ -3924,7 +3908,7 @@ mod tests {
     #[test]
     fn test_generate_mcpg_step_env_with_ado_extension() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\n---\n",
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    service-connection: my-sc\n    org: myorg\n---\n",
         ).unwrap();
         let extensions = collect_extensions(&fm);
         let env = generate_mcpg_step_env(&extensions);
@@ -3933,8 +3917,8 @@ mod tests {
             "Should emit full env: block header"
         );
         assert!(
-            env.contains("SC_READ_TOKEN: $(SC_READ_TOKEN)"),
-            "Should map SC_READ_TOKEN for ADO extension"
+            env.contains("SC_ADO_MCP_TOKEN: $(SC_ADO_MCP_TOKEN)"),
+            "Should map SC_ADO_MCP_TOKEN for ADO extension"
         );
     }
 
@@ -4147,14 +4131,14 @@ mod tests {
     #[test]
     fn test_ado_tool_docker_env_passthrough() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\npermissions:\n  read: my-read-sc\n---\n",
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    service-connection: my-ado-sc\n    org: myorg\n---\n",
         )
         .unwrap();
         let extensions = collect_extensions(&fm);
         let env = generate_mcpg_docker_env(&fm, &extensions);
         assert!(
             env.contains("ADO_MCP_AUTH_TOKEN"),
-            "Should include ADO token passthrough when permissions.read is set"
+            "Should include ADO token passthrough when service-connection is set"
         );
     }
 

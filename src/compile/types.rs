@@ -465,6 +465,14 @@ impl AzureDevOpsToolConfig {
             AzureDevOpsToolConfig::WithOptions(opts) => opts.org.as_deref(),
         }
     }
+
+    /// Get the ARM service connection name for dedicated token acquisition.
+    pub fn service_connection(&self) -> Option<&str> {
+        match self {
+            AzureDevOpsToolConfig::Enabled(_) => None,
+            AzureDevOpsToolConfig::WithOptions(opts) => opts.service_connection.as_deref(),
+        }
+    }
 }
 
 impl SanitizeConfigTrait for AzureDevOpsToolConfig {
@@ -491,6 +499,11 @@ pub struct AzureDevOpsOptions {
     /// Auto-inferred from the git remote URL at compile time if not specified.
     #[serde(default)]
     pub org: Option<String>,
+    /// ARM service connection for acquiring an ADO-scoped access token.
+    /// When set, the extension acquires its own token via `AzureCLI@2`
+    /// instead of relying on `permissions.read` / `SC_READ_TOKEN`.
+    #[serde(default, rename = "service-connection")]
+    pub service_connection: Option<String>,
 }
 
 /// S360 Breeze MCP tool configuration — accepts both `true` and object formats
@@ -771,25 +784,15 @@ pub struct NetworkConfig {
 ///
 /// Examples:
 /// ```yaml
-/// # Both read and write
-/// permissions:
-///   read: my-read-arm-connection
-///   write: my-write-arm-connection
-///
-/// # Read-only (agent can query ADO APIs, no write safe-outputs)
-/// permissions:
-///   read: my-read-arm-connection
-///
-/// # Write-only (safe-outputs can write, agent gets no ADO token)
+/// # Write permissions (safe-outputs can write via Stage 3 executor)
 /// permissions:
 ///   write: my-write-arm-connection
 /// ```
+///
+/// Read access for tools (e.g., Azure DevOps MCP, S360 Breeze) is configured
+/// via `service-connection` on each tool, not through a blanket `permissions.read`.
 #[derive(Debug, Deserialize, Clone, Default, SanitizeConfig)]
 pub struct PermissionsConfig {
-    /// ARM service connection for read-only ADO access.
-    /// Token is minted and given to the agent in Stage 1 (inside AWF sandbox).
-    #[serde(default)]
-    pub read: Option<String>,
     /// ARM service connection for write ADO access.
     /// Token is minted and used only by the executor in Stage 3 (Execution).
     /// This token is never exposed to the agent.
@@ -1082,33 +1085,15 @@ timeout-minutes: 60
     // ─── PermissionsConfig deserialization ───────────────────────────────
 
     #[test]
-    fn test_permissions_both_fields() {
-        let yaml = "read: my-read-sc\nwrite: my-write-sc";
-        let pc: PermissionsConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(pc.read.as_deref(), Some("my-read-sc"));
-        assert_eq!(pc.write.as_deref(), Some("my-write-sc"));
-    }
-
-    #[test]
-    fn test_permissions_read_only() {
-        let yaml = "read: my-read-sc";
-        let pc: PermissionsConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(pc.read.as_deref(), Some("my-read-sc"));
-        assert!(pc.write.is_none());
-    }
-
-    #[test]
-    fn test_permissions_write_only() {
+    fn test_permissions_write_field() {
         let yaml = "write: my-write-sc";
         let pc: PermissionsConfig = serde_yaml::from_str(yaml).unwrap();
-        assert!(pc.read.is_none());
         assert_eq!(pc.write.as_deref(), Some("my-write-sc"));
     }
 
     #[test]
     fn test_permissions_default() {
         let pc = PermissionsConfig::default();
-        assert!(pc.read.is_none());
         assert!(pc.write.is_none());
     }
 
@@ -1118,7 +1103,6 @@ timeout-minutes: 60
 name: "Test Agent"
 description: "Test"
 permissions:
-  read: my-read-sc
   write: my-write-sc
 ---
 
@@ -1126,7 +1110,6 @@ Body
 "#;
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
         let perms = fm.permissions.unwrap();
-        assert_eq!(perms.read.as_deref(), Some("my-read-sc"));
         assert_eq!(perms.write.as_deref(), Some("my-write-sc"));
     }
 

@@ -8,13 +8,15 @@ use crate::compile::{
     ADO_MCP_ENTRYPOINT, ADO_MCP_IMAGE, ADO_MCP_PACKAGE, ADO_MCP_SERVER_NAME,
 };
 use crate::compile::types::AzureDevOpsToolConfig;
+use super::{ADO_MCP_PIPELINE_VAR, ADO_MCP_TOKEN_VAR, ADO_RESOURCE_ID};
 use anyhow::Result;
 use std::collections::BTreeMap;
 
 /// Azure DevOps first-party tool extension.
 ///
 /// Injects: network hosts (ADO domains), MCPG server entry (containerized
-/// ADO MCP), and compile-time validation (org inference, duplicate MCP).
+/// ADO MCP), `AzureCLI@2` token acquisition step, and compile-time
+/// validation (org inference, service-connection required, duplicate MCP).
 pub struct AzureDevOpsExtension {
     config: AzureDevOpsToolConfig,
 }
@@ -49,6 +51,38 @@ impl CompilerExtension for AzureDevOpsExtension {
 
     fn allowed_copilot_tools(&self) -> Vec<String> {
         vec![ADO_MCP_SERVER_NAME.to_string()]
+    }
+
+    fn prepare_steps(&self) -> Vec<String> {
+        let sc = match self.config.service_connection() {
+            Some(sc) => sc,
+            None => return vec![], // validate() will catch this
+        };
+
+        let mut lines = Vec::new();
+        lines.push("- task: AzureCLI@2".to_string());
+        lines.push(format!(
+            r#"  displayName: "Acquire ADO token ({})""#,
+            ADO_MCP_PIPELINE_VAR
+        ));
+        lines.push("  inputs:".to_string());
+        lines.push(format!(
+            "    azureSubscription: '{}'",
+            sc.replace('\'', "''")
+        ));
+        lines.push("    scriptType: 'bash'".to_string());
+        lines.push("    scriptLocation: 'inlineScript'".to_string());
+        lines.push("    addSpnToEnvironment: true".to_string());
+        lines.push("    inlineScript: |".to_string());
+        lines.push("      ADO_TOKEN=$(az account get-access-token \\".to_string());
+        lines.push(format!("        --resource {} \\", ADO_RESOURCE_ID));
+        lines.push("        --query accessToken -o tsv)".to_string());
+        lines.push(format!(
+            "      echo \"##vso[task.setvariable variable={};issecret=true]$ADO_TOKEN\"",
+            ADO_MCP_PIPELINE_VAR
+        ));
+
+        vec![lines.join("\n")]
     }
 
     fn mcpg_servers(&self, ctx: &CompileContext) -> Result<Vec<(String, McpgServerConfig)>> {
@@ -104,11 +138,10 @@ impl CompilerExtension for AzureDevOpsExtension {
         // ADO MCP authentication: the @azure-devops/mcp npm package accepts
         // auth type via CLI arg (-a) and token via env var.
         // Bearer: `-a envvar` reads ADO_MCP_AUTH_TOKEN (pipeline JWT from ARM)
-        let (auth_flag, token_var) = ("envvar", "ADO_MCP_AUTH_TOKEN");
-        entrypoint_args.extend(["-a".to_string(), auth_flag.to_string()]);
+        entrypoint_args.extend(["-a".to_string(), "envvar".to_string()]);
 
         let env = Some(BTreeMap::from([(
-            token_var.to_string(),
+            ADO_MCP_TOKEN_VAR.to_string(),
             String::new(), // Passthrough from MCPG process env
         )]));
 
@@ -138,6 +171,16 @@ impl CompilerExtension for AzureDevOpsExtension {
     fn validate(&self, ctx: &CompileContext) -> Result<Vec<String>> {
         let mut warnings = Vec::new();
 
+        // Require service-connection
+        if self.config.service_connection().is_none() {
+            anyhow::bail!(
+                "Agent '{}' has tools.azure-devops enabled but no service-connection is configured. \
+                 Set tools.azure-devops.service-connection to an ARM service connection for \
+                 ADO API access.",
+                ctx.agent_name
+            );
+        }
+
         // Warn if user also has a manual mcp-servers entry for azure-devops
         if ctx
             .front_matter
@@ -154,10 +197,11 @@ impl CompilerExtension for AzureDevOpsExtension {
 
         Ok(warnings)
     }
+
     fn required_pipeline_vars(&self) -> Vec<PipelineEnvMapping> {
         vec![PipelineEnvMapping {
-            container_var: "ADO_MCP_AUTH_TOKEN".to_string(),
-            pipeline_var: "SC_READ_TOKEN".to_string(),
+            container_var: ADO_MCP_TOKEN_VAR.to_string(),
+            pipeline_var: ADO_MCP_PIPELINE_VAR.to_string(),
         }]
     }
 }

@@ -276,7 +276,7 @@ pub trait CompilerExtension {
     /// Pipeline variable mappings needed by this extension's MCP containers.
     ///
     /// Each mapping declares that a container env var (e.g., `AZURE_DEVOPS_EXT_PAT`)
-    /// should be populated from a pipeline variable (e.g., `SC_READ_TOKEN`).
+    /// should be populated from a pipeline variable (e.g., `SC_ADO_MCP_TOKEN`).
     /// The compiler uses these to generate:
     /// 1. `env:` block on the MCPG step (maps ADO secret → bash var)
     /// 2. `-e` flags on the MCPG docker run (passes bash var → MCPG process)
@@ -305,7 +305,7 @@ pub trait CompilerExtension {
 pub struct PipelineEnvMapping {
     /// The env var name inside the MCP container (e.g., `AZURE_DEVOPS_EXT_PAT`).
     pub container_var: String,
-    /// The ADO pipeline variable name (e.g., `SC_READ_TOKEN`).
+    /// The ADO pipeline variable name (e.g., `SC_ADO_MCP_TOKEN`).
     pub pipeline_var: String,
 }
 

@@ -4,6 +4,7 @@ description: "Agent with Azure DevOps MCP via first-class tool integration"
 tools:
   azure-devops:
     org: myorg
+    service-connection: my-read-arm-connection
     toolsets: [core, work-items]
     allowed:
       - core_list_projects
@@ -11,7 +12,6 @@ tools:
       - wit_create_work_item
       - wit_my_work_items
 permissions:
-  read: my-read-arm-connection
   write: my-write-arm-connection
 safe-outputs:
   create-work-item:

@@ -210,7 +210,13 @@ fn test_ado_validate_duplicate_mcp_warning() {
         crate::compile::types::McpConfig::Enabled(true),
     );
     let ctx = ctx_from(&fm);
-    let ext = AzureDevOpsExtension::new(AzureDevOpsToolConfig::Enabled(true));
+    let ext = AzureDevOpsExtension::new(AzureDevOpsToolConfig::WithOptions(
+        crate::compile::types::AzureDevOpsOptions {
+            service_connection: Some("my-sc".to_string()),
+            org: Some("myorg".to_string()),
+            ..Default::default()
+        },
+    ));
     let warnings = ext.validate(&ctx).unwrap();
     assert_eq!(warnings.len(), 1);
     assert!(warnings[0].contains("both tools.azure-devops and mcp-servers"));

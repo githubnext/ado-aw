@@ -25,8 +25,6 @@ jobs:
       {{ checkout_self }}
       {{ checkout_repositories }}
 
-      {{ acquire_ado_token }}
-
       {{ engine_install_steps }}
 
       - bash: |
