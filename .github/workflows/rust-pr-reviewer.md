@@ -1,7 +1,5 @@
 ---
 on:
-  bots:
-    - "copilot[bot]"
   pull_request:
     types: [opened, synchronize]
     paths:
