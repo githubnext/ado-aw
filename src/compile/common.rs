@@ -326,35 +326,88 @@ pub fn validate_checkout_list(repositories: &[Repository], checkout: &[String]) 
     Ok(())
 }
 
+/// Sentinel prefix used to encode a repository-alias workspace selection
+/// in the string returned by [`compute_effective_workspace`]. The prefix is
+/// only ever produced internally by `compute_effective_workspace` from a
+/// user-supplied alias that has just been checked against the `checkout:`
+/// list, so the encoded value never round-trips back through user input.
+const WORKSPACE_ALIAS_PREFIX: &str = "alias:";
+
 /// Compute the effective workspace based on explicit setting and checkout configuration.
+///
+/// Accepted values for `explicit_workspace`:
+/// - `"root"` — `$(Build.SourcesDirectory)` (the checkout root)
+/// - `"repo"` or `"self"` — the trigger repository's subfolder
+/// - any repository alias listed in `checkout` — that repository's subfolder
+///
+/// Returns an encoded string that [`generate_working_directory`] resolves to
+/// the actual ADO path expression.
 pub fn compute_effective_workspace(
     explicit_workspace: &Option<String>,
     checkout: &[String],
     agent_name: &str,
-) -> String {
+) -> Result<String> {
     let has_additional_checkouts = !checkout.is_empty();
 
     match explicit_workspace {
-        Some(ws) if ws == "repo" && !has_additional_checkouts => {
-            eprintln!(
-                "Warning: Agent '{}' has workspace: repo but no additional repositories in checkout. \
-                When only 'self' is checked out, $(Build.SourcesDirectory) already contains the repository content. \
-                The workspace setting has no effect in this case.",
-                agent_name
-            );
-            "repo".to_string()
+        Some(ws) => {
+            let ws = ws.as_str();
+            match ws {
+                "root" => Ok("root".to_string()),
+                "repo" | "self" => {
+                    if !has_additional_checkouts {
+                        eprintln!(
+                            "Warning: Agent '{}' has workspace: {} but no additional repositories in checkout. \
+                            When only 'self' is checked out, $(Build.SourcesDirectory) already contains the repository content. \
+                            The workspace setting has no effect in this case.",
+                            agent_name, ws
+                        );
+                    }
+                    Ok("repo".to_string())
+                }
+                alias => {
+                    if !has_additional_checkouts {
+                        anyhow::bail!(
+                            "Agent '{}' has workspace: '{}' but no additional repositories are checked out. \
+                            A repository alias for workspace is only valid when multiple repositories appear in 'checkout:'. \
+                            Use 'root', 'repo' (or 'self'), or add the repository to the 'checkout:' list.",
+                            agent_name,
+                            alias
+                        );
+                    }
+                    if !checkout.iter().any(|c| c == alias) {
+                        anyhow::bail!(
+                            "Agent '{}' has workspace: '{}' which does not match any checked-out repository. \
+                            Valid values: 'root', 'repo' (or 'self'), or one of {:?}",
+                            agent_name,
+                            alias,
+                            checkout
+                        );
+                    }
+                    Ok(format!("{}{}", WORKSPACE_ALIAS_PREFIX, alias))
+                }
+            }
         }
-        Some(ws) => ws.clone(),
-        None if has_additional_checkouts => "repo".to_string(),
-        None => "root".to_string(),
+        None if has_additional_checkouts => Ok("repo".to_string()),
+        None => Ok("root".to_string()),
     }
 }
 
 /// Generate working directory based on workspace setting
 pub fn generate_working_directory(effective_workspace: &str) -> String {
+    if let Some(alias) = effective_workspace.strip_prefix(WORKSPACE_ALIAS_PREFIX) {
+        return format!("$(Build.SourcesDirectory)/{}", alias);
+    }
     match effective_workspace {
         "repo" => "$(Build.SourcesDirectory)/$(Build.Repository.Name)".to_string(),
-        "root" | _ => "$(Build.SourcesDirectory)".to_string(),
+        "root" => "$(Build.SourcesDirectory)".to_string(),
+        // compute_effective_workspace only ever returns "root", "repo", or an
+        // "alias:<name>" sentinel; any other value indicates a programming
+        // error rather than user input. Fall back to the safest path.
+        other => {
+            debug_assert!(false, "unexpected effective workspace value: {other}");
+            "$(Build.SourcesDirectory)".to_string()
+        }
     }
 }
 
@@ -1638,7 +1691,7 @@ pub async fn compile_shared(
         &front_matter.workspace,
         &front_matter.checkout,
         &front_matter.name,
-    );
+    )?;
     let working_directory = generate_working_directory(&effective_workspace);
     let pipeline_resources = generate_pipeline_resources(&front_matter.triggers)?;
     let has_schedule = front_matter.schedule.is_some();
@@ -1796,35 +1849,96 @@ mod tests {
 
     #[test]
     fn test_workspace_explicit_root() {
-        let ws = compute_effective_workspace(&Some("root".to_string()), &[], "agent");
+        let ws = compute_effective_workspace(&Some("root".to_string()), &[], "agent").unwrap();
         assert_eq!(ws, "root");
+        assert_eq!(generate_working_directory(&ws), "$(Build.SourcesDirectory)");
     }
 
     #[test]
     fn test_workspace_explicit_repo_with_checkouts() {
         let checkouts = vec!["other-repo".to_string()];
-        let ws = compute_effective_workspace(&Some("repo".to_string()), &checkouts, "agent");
+        let ws =
+            compute_effective_workspace(&Some("repo".to_string()), &checkouts, "agent").unwrap();
         assert_eq!(ws, "repo");
+        assert_eq!(
+            generate_working_directory(&ws),
+            "$(Build.SourcesDirectory)/$(Build.Repository.Name)"
+        );
+    }
+
+    #[test]
+    fn test_workspace_explicit_self_alias_for_repo() {
+        let checkouts = vec!["other-repo".to_string()];
+        let ws =
+            compute_effective_workspace(&Some("self".to_string()), &checkouts, "agent").unwrap();
+        // 'self' is a synonym for 'repo' (the trigger repository).
+        assert_eq!(ws, "repo");
+        assert_eq!(
+            generate_working_directory(&ws),
+            "$(Build.SourcesDirectory)/$(Build.Repository.Name)"
+        );
     }
 
     #[test]
     fn test_workspace_implicit_root_no_checkouts() {
-        let ws = compute_effective_workspace(&None, &[], "agent");
+        let ws = compute_effective_workspace(&None, &[], "agent").unwrap();
         assert_eq!(ws, "root");
     }
 
     #[test]
     fn test_workspace_implicit_repo_with_checkouts() {
         let checkouts = vec!["other-repo".to_string()];
-        let ws = compute_effective_workspace(&None, &checkouts, "agent");
+        let ws = compute_effective_workspace(&None, &checkouts, "agent").unwrap();
         assert_eq!(ws, "repo");
     }
 
     #[test]
     fn test_workspace_explicit_repo_no_checkouts_still_returns_repo() {
         // Emits a warning but still returns "repo"
-        let ws = compute_effective_workspace(&Some("repo".to_string()), &[], "agent");
+        let ws = compute_effective_workspace(&Some("repo".to_string()), &[], "agent").unwrap();
         assert_eq!(ws, "repo");
+    }
+
+    #[test]
+    fn test_workspace_explicit_alias_resolves_to_repo_subdir() {
+        let checkouts = vec!["exp23-a7-nw".to_string(), "another-repo".to_string()];
+        let ws = compute_effective_workspace(
+            &Some("exp23-a7-nw".to_string()),
+            &checkouts,
+            "agent",
+        )
+        .unwrap();
+        assert_eq!(
+            generate_working_directory(&ws),
+            "$(Build.SourcesDirectory)/exp23-a7-nw"
+        );
+    }
+
+    #[test]
+    fn test_workspace_explicit_alias_not_in_checkout_fails() {
+        let checkouts = vec!["other-repo".to_string()];
+        let err = compute_effective_workspace(
+            &Some("exp23-a7-nw".to_string()),
+            &checkouts,
+            "agent",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("exp23-a7-nw"), "msg: {msg}");
+        assert!(msg.contains("does not match"), "msg: {msg}");
+    }
+
+    #[test]
+    fn test_workspace_explicit_alias_no_checkouts_fails() {
+        let err =
+            compute_effective_workspace(&Some("exp23-a7-nw".to_string()), &[], "agent")
+                .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("exp23-a7-nw"), "msg: {msg}");
+        assert!(
+            msg.contains("no additional repositories are checked out"),
+            "msg: {msg}"
+        );
     }
 
     // ─── validate_checkout_list ───────────────────────────────────────────────
