@@ -387,14 +387,10 @@ pub fn compute_effective_workspace(
                     // by `validate_checkout_list` to match a `repository:`
                     // name, refuse anything that could escape the workspace
                     // root once embedded into the working directory path.
-                    if alias.contains("..")
-                        || alias.contains('/')
-                        || alias.contains('\\')
-                        || alias.starts_with('.')
-                    {
+                    if !validate::is_safe_path_segment(alias) {
                         anyhow::bail!(
-                            "Agent '{}' has workspace: '{}' which contains an unsafe \
-                            path component. Repository aliases must not contain '..', \
+                            "Agent '{}' has workspace: '{}' which is not a safe path \
+                            segment. Repository aliases must not be empty, contain '..', \
                             '/', '\\\\' or start with '.'.",
                             agent_name,
                             alias
@@ -1954,7 +1950,7 @@ mod tests {
         )
         .unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("unsafe path component"), "msg: {msg}");
+        assert!(msg.contains("not a safe path"), "msg: {msg}");
     }
 
     #[test]
@@ -1967,7 +1963,7 @@ mod tests {
         )
         .unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("unsafe path component"), "msg: {msg}");
+        assert!(msg.contains("not a safe path"), "msg: {msg}");
     }
 
     #[test]
