@@ -15,7 +15,7 @@ use std::path::Path;
 
 const BEGIN_MARKER: &str = "# BEGIN ado-aw managed (do not edit)";
 const END_MARKER: &str = "# END ado-aw managed";
-const ATTRIBUTES: &str = "linguist-generated=true merge=ours";
+const ATTRIBUTES: &str = "linguist-generated=true merge=ours text eol=lf";
 
 /// Update the managed block of `<repo_root>/.gitattributes` so that exactly
 /// the supplied compiled-pipeline paths are marked as generated.
@@ -154,12 +154,12 @@ mod tests {
         let written = std::fs::read_to_string(dir.path().join(".gitattributes")).unwrap();
         assert!(written.contains(BEGIN_MARKER));
         assert!(written.contains(END_MARKER));
-        assert!(
-            written.contains(".azdo/pipelines/review.lock.yml linguist-generated=true merge=ours")
-        );
-        assert!(
-            written.contains("agents/my-agent.lock.yml linguist-generated=true merge=ours")
-        );
+        assert!(written.contains(
+            ".azdo/pipelines/review.lock.yml linguist-generated=true merge=ours text eol=lf"
+        ));
+        assert!(written.contains(
+            "agents/my-agent.lock.yml linguist-generated=true merge=ours text eol=lf"
+        ));
     }
 
     #[tokio::test]
@@ -177,14 +177,14 @@ mod tests {
 
         let written = std::fs::read_to_string(dir.path().join(".gitattributes")).unwrap();
         assert!(written.starts_with("*.png binary\n# my own comment\n"));
-        assert!(written.contains("agents/x.lock.yml linguist-generated=true merge=ours"));
+        assert!(written.contains("agents/x.lock.yml linguist-generated=true merge=ours text eol=lf"));
     }
 
     #[tokio::test]
     async fn replaces_existing_managed_block() {
         let dir = tempfile::tempdir().unwrap();
         let initial = format!(
-            "*.png binary\n{}\nstale/path.lock.yml linguist-generated=true merge=ours\n{}\n",
+            "*.png binary\n{}\nstale/path.lock.yml linguist-generated=true merge=ours text eol=lf\n{}\n",
             BEGIN_MARKER, END_MARKER
         );
         std::fs::write(dir.path().join(".gitattributes"), initial).unwrap();
@@ -199,7 +199,7 @@ mod tests {
         let written = std::fs::read_to_string(dir.path().join(".gitattributes")).unwrap();
         assert!(written.starts_with("*.png binary\n"));
         assert!(!written.contains("stale/path.lock.yml"));
-        assert!(written.contains("new/path.lock.yml linguist-generated=true merge=ours"));
+        assert!(written.contains("new/path.lock.yml linguist-generated=true merge=ours text eol=lf"));
         // Block markers should appear exactly once
         assert_eq!(written.matches(BEGIN_MARKER).count(), 1);
         assert_eq!(written.matches(END_MARKER).count(), 1);
@@ -209,7 +209,7 @@ mod tests {
     async fn removes_block_when_no_pipelines() {
         let dir = tempfile::tempdir().unwrap();
         let initial = format!(
-            "*.png binary\n{}\nold/path.lock.yml linguist-generated=true merge=ours\n{}\n",
+            "*.png binary\n{}\nold/path.lock.yml linguist-generated=true merge=ours text eol=lf\n{}\n",
             BEGIN_MARKER, END_MARKER
         );
         std::fs::write(dir.path().join(".gitattributes"), initial).unwrap();
@@ -265,8 +265,29 @@ mod tests {
 
         let written = std::fs::read_to_string(dir.path().join(".gitattributes")).unwrap();
         assert!(
-            written.contains("\"my agents/pipeline.lock.yml\" linguist-generated=true merge=ours"),
+            written.contains("\"my agents/pipeline.lock.yml\" linguist-generated=true merge=ours text eol=lf"),
             "expected quoted path entry, got:\n{}",
+            written
+        );
+    }
+
+    #[tokio::test]
+    async fn entries_pin_lf_eol() {
+        // Regression: managed entries must include `text eol=lf` so that Git
+        // doesn't autoconvert LF→CRLF on Windows checkouts and emit warnings
+        // each time the pipeline is recompiled.
+        let dir = tempfile::tempdir().unwrap();
+        update_gitattributes(
+            dir.path(),
+            vec![PathBuf::from("agents/x.lock.yml")],
+        )
+        .await
+        .unwrap();
+
+        let written = std::fs::read_to_string(dir.path().join(".gitattributes")).unwrap();
+        assert!(
+            written.contains("text eol=lf"),
+            "managed entries must pin LF line endings, got:\n{}",
             written
         );
     }

@@ -28,6 +28,7 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 │   │   ├── common.rs     # Shared helpers across targets
 │   │   ├── standalone.rs # Standalone pipeline compiler
 │   │   ├── onees.rs      # 1ES Pipeline Template compiler
+│   │   ├── gitattributes.rs # .gitattributes management for compiled pipelines
 │   │   ├── extensions/   # CompilerExtension trait and infrastructure extensions
 │   │   │   ├── mod.rs    # Trait, Extension enum, collect_extensions(), re-exports
 │   │   │   ├── github.rs # Always-on GitHub MCP extension
@@ -796,17 +797,21 @@ This is used for the `workingDirectory` property of the copilot task.
 
 ## {{ source_path }}
 
-Should be replaced with the path to the agent markdown source file for Stage 3 execution. The path is anchored at the **trigger ("self") repository** via `{{ trigger_repo_directory }}` (see below), independent of the user's `workspace:` setting:
-- No additional checkouts: `$(Build.SourcesDirectory)/agents/<filename>.md`
-- Additional checkouts present: `$(Build.SourcesDirectory)/$(Build.Repository.Name)/agents/<filename>.md`
+Should be replaced with the path to the agent markdown source file for Stage 3 execution. The path is anchored at the **trigger ("self") repository** via `{{ trigger_repo_directory }}` (see below), independent of the user's `workspace:` setting, and mirrors the relative path used at compile time:
+- No additional checkouts: `$(Build.SourcesDirectory)/<relative-path>.md`
+- Additional checkouts present: `$(Build.SourcesDirectory)/$(Build.Repository.Name)/<relative-path>.md`
+
+For example, compiling `agents/my-agent.md` produces a runtime path of `$(Build.SourcesDirectory)/agents/my-agent.md` (or the equivalent under `$(Build.Repository.Name)` when additional repositories are checked out).
 
 Used by the execute command's --source parameter. The agent markdown only ever lives in the trigger repo, so this is intentionally not affected by `workspace:` pointing at a non-self alias.
 
 ## {{ pipeline_path }}
 
-Should be replaced with the path to the compiled pipeline YAML file for runtime integrity checking. The path is derived from the output path's filename and is anchored at the **trigger ("self") repository** via `{{ trigger_repo_directory }}` (see below), independent of the user's `workspace:` setting:
-- No additional checkouts: `$(Build.SourcesDirectory)/<filename>.yml`
-- Additional checkouts present: `$(Build.SourcesDirectory)/$(Build.Repository.Name)/<filename>.yml`
+Should be replaced with the path to the compiled pipeline YAML file for runtime integrity checking. The path is derived from the output path (preserving any directory structure) and is anchored at the **trigger ("self") repository** via `{{ trigger_repo_directory }}` (see below), independent of the user's `workspace:` setting:
+- No additional checkouts: `$(Build.SourcesDirectory)/<relative-path>.yml`
+- Additional checkouts present: `$(Build.SourcesDirectory)/$(Build.Repository.Name)/<relative-path>.yml`
+
+For example, an output path of `pipelines/production/review.lock.yml` resolves to `$(Build.SourcesDirectory)/pipelines/production/review.lock.yml` when no additional repositories are checked out.
 
 Used by the pipeline's integrity check step to verify the pipeline hasn't been modified outside the compilation process. The compiled yaml only ever lives in the trigger repo, so this is intentionally not affected by `workspace:` pointing at a non-self alias.
 
