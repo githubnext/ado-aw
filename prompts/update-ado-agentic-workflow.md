@@ -336,7 +336,7 @@ After completing an update:
 Next steps:
   1. Review the changes in <filename>.md
   2. Recompile: ado-aw compile <path/to/agent.md>
-  3. Commit both the updated .md source and regenerated .yml pipeline
+  3. Commit both the updated .md source and regenerated .lock.yml pipeline
 ```
 
 If only agent instructions were changed:

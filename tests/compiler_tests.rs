@@ -1597,7 +1597,7 @@ This agent tests the auto-discovery feature.
     );
 
     // Verify the YAML was created with the header
-    let yaml_path = agents_dir.join("my-agent.yml");
+    let yaml_path = agents_dir.join("my-agent.lock.yml");
     assert!(yaml_path.exists(), "Compiled YAML should exist");
     let initial_yaml = fs::read_to_string(&yaml_path).expect("Should read initial YAML");
     assert!(

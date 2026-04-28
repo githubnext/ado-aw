@@ -8,6 +8,7 @@
 
 mod common;
 pub mod extensions;
+mod gitattributes;
 mod onees;
 mod standalone;
 pub mod types;
@@ -83,10 +84,12 @@ pub async fn compile_pipeline(
     // Validate checkout list against repositories
     common::validate_checkout_list(&front_matter.repositories, &front_matter.checkout)?;
 
-    // Determine output path
+    // Determine output path. By default use `.lock.yml` to match
+    // gh-aw's convention for compiled-pipeline files (so they can be
+    // marked as generated and merge=ours via `.gitattributes`).
     let yaml_output_path = match output_path {
         Some(p) => PathBuf::from(p),
-        None => input_path.with_extension("yml"),
+        None => input_path.with_extension("lock.yml"),
     };
 
     // Select compiler based on target
@@ -121,7 +124,32 @@ pub async fn compile_pipeline(
         yaml_output_path.display()
     );
 
+    // Update .gitattributes at the repo root so every compiled pipeline is
+    // marked as a generated file with `merge=ours`. Best-effort: silently
+    // skip when the output is not inside a git repository.
+    if let Err(e) = sync_gitattributes_for_output(&yaml_output_path).await {
+        debug!("Skipped .gitattributes update: {}", e);
+    }
+
     Ok(())
+}
+
+/// Locate the repo root containing `output_path`, scan it for all compiled
+/// pipelines, and write the managed block of `.gitattributes`.
+async fn sync_gitattributes_for_output(output_path: &Path) -> Result<()> {
+    let abs = if output_path.is_absolute() {
+        output_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(output_path)
+    };
+    let repo_root = find_repo_root(&abs)
+        .with_context(|| format!("no .git directory found above {}", output_path.display()))?;
+
+    let detected = crate::detect::detect_pipelines(&repo_root).await?;
+    let paths: Vec<PathBuf> = detected.into_iter().map(|p| p.yaml_path).collect();
+    gitattributes::update_gitattributes(&repo_root, paths).await
 }
 
 /// Auto-discover and recompile all agentic pipelines in the current directory.
