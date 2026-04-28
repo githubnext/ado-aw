@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.0](https://github.com/githubnext/ado-aw/compare/v0.17.1...v0.18.0) (2026-04-28)
+
+
+### Features
+
+* trigger release for unreleased changes ([#338](https://github.com/githubnext/ado-aw/issues/338)) ([b8c899b](https://github.com/githubnext/ado-aw/commit/b8c899b5d61eedc7fdd413b0b77f3e0d366d0e23))
+
 ## [0.17.1](https://github.com/githubnext/ado-aw/compare/v0.17.0...v0.17.1) (2026-04-27)
 
 
