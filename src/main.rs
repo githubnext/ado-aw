@@ -30,7 +30,10 @@ enum Commands {
         /// Path to the input markdown file. If omitted, auto-discovers and
         /// recompiles all existing agentic pipelines in the current directory.
         path: Option<String>,
-        /// Optional output path for the generated YAML file
+        /// Optional output path for the generated YAML file. If the path
+        /// refers to an existing directory, the compiled YAML is written
+        /// inside that directory using the default filename derived from
+        /// the input markdown (e.g. `foo.md` -> `<dir>/foo.yml`).
         #[arg(short, long)]
         output: Option<String>,
         /// Omit the "Verify pipeline integrity" step from the generated pipeline.
