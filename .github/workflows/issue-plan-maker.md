@@ -3,8 +3,6 @@ on:
   slash_command:
     name: plan
     events: [issues, issue_comment]
-  bots:
-    - "copilot[bot]"
 description: Comprehensive issue investigation and planning triggered by /plan
 permissions:
   contents: read

@@ -3,8 +3,6 @@ on:
   slash_command:
     name: scout
     events: [issues, issue_comment]
-  bots:
-    - "copilot[bot]"
 description: On-demand code history investigation triggered by /scout on issues
 permissions:
   contents: read

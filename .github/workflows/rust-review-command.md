@@ -3,8 +3,6 @@ on:
   slash_command:
     name: rust-review
     events: [pull_request, pull_request_comment]
-  bots:
-    - "copilot[bot]"
 description: On-demand Rust code review triggered by /rust-review command on PRs
 permissions:
   contents: read
