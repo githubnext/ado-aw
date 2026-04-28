@@ -304,6 +304,13 @@ pub fn generate_checkout_self() -> String {
     "- checkout: self".to_string()
 }
 
+/// Names that are reserved by the `workspace:` resolver and therefore cannot
+/// be used as repository aliases / `checkout:` entries. If a user defines a
+/// repository named `repo` and writes `workspace: repo`, the special-cased
+/// reserved arm would silently win over the alias resolution, producing the
+/// wrong working directory. We reject this at compile time instead.
+const RESERVED_WORKSPACE_NAMES: &[&str] = &["root", "repo", "self"];
+
 /// Validate that all entries in checkout list exist in repositories
 pub fn validate_checkout_list(repositories: &[Repository], checkout: &[String]) -> Result<()> {
     if checkout.is_empty() {
@@ -319,6 +326,16 @@ pub fn validate_checkout_list(repositories: &[Repository], checkout: &[String]) 
                 "Checkout entry '{}' not found in repositories. Available: {:?}",
                 name,
                 repo_names
+            );
+        }
+        if RESERVED_WORKSPACE_NAMES.contains(&name.as_str()) {
+            anyhow::bail!(
+                "Checkout entry '{}' uses a name reserved by the 'workspace:' resolver \
+                ({:?}). Rename the repository alias to avoid ambiguity with \
+                'workspace: {}'.",
+                name,
+                RESERVED_WORKSPACE_NAMES,
+                name
             );
         }
     }
@@ -366,16 +383,36 @@ pub fn compute_effective_workspace(
                     Ok("repo".to_string())
                 }
                 alias => {
-                    if !has_additional_checkouts {
+                    // Defense in depth: even though aliases are constrained
+                    // by `validate_checkout_list` to match a `repository:`
+                    // name, refuse anything that could escape the workspace
+                    // root once embedded into the working directory path.
+                    if alias.contains("..")
+                        || alias.contains('/')
+                        || alias.contains('\\')
+                        || alias.starts_with('.')
+                    {
                         anyhow::bail!(
-                            "Agent '{}' has workspace: '{}' but no additional repositories are checked out. \
-                            A repository alias for workspace is only valid when multiple repositories appear in 'checkout:'. \
-                            Use 'root', 'repo' (or 'self'), or add the repository to the 'checkout:' list.",
+                            "Agent '{}' has workspace: '{}' which contains an unsafe \
+                            path component. Repository aliases must not contain '..', \
+                            '/', '\\\\' or start with '.'.",
                             agent_name,
                             alias
                         );
                     }
+                    // A single contains() check covers both "alias not in
+                    // checkout" and "checkout is empty" — produce one error
+                    // message that clearly lists what would have been valid.
                     if !checkout.iter().any(|c| c == alias) {
+                        if checkout.is_empty() {
+                            anyhow::bail!(
+                                "Agent '{}' has workspace: '{}' but no additional repositories are checked out. \
+                                A repository alias for workspace is only valid when at least one repository appears in 'checkout:'. \
+                                Use 'root', 'repo' (or 'self'), or add the repository to the 'checkout:' list.",
+                                agent_name,
+                                alias
+                            );
+                        }
                         anyhow::bail!(
                             "Agent '{}' has workspace: '{}' which does not match any checked-out repository. \
                             Valid values: 'root', 'repo' (or 'self'), or one of {:?}",
@@ -1900,6 +1937,40 @@ mod tests {
     }
 
     #[test]
+    fn test_workspace_explicit_self_no_checkouts_still_returns_repo() {
+        // 'self' takes the same code path as 'repo'; it should also warn
+        // and still resolve to the repo subfolder.
+        let ws = compute_effective_workspace(&Some("self".to_string()), &[], "agent").unwrap();
+        assert_eq!(ws, "repo");
+    }
+
+    #[test]
+    fn test_workspace_explicit_alias_with_traversal_fails() {
+        let checkouts = vec!["../sibling".to_string()];
+        let err = compute_effective_workspace(
+            &Some("../sibling".to_string()),
+            &checkouts,
+            "agent",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unsafe path component"), "msg: {msg}");
+    }
+
+    #[test]
+    fn test_workspace_explicit_alias_with_slash_fails() {
+        let checkouts = vec!["foo/bar".to_string()];
+        let err = compute_effective_workspace(
+            &Some("foo/bar".to_string()),
+            &checkouts,
+            "agent",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unsafe path component"), "msg: {msg}");
+    }
+
+    #[test]
     fn test_workspace_explicit_alias_resolves_to_repo_subdir() {
         let checkouts = vec!["exp23-a7-nw".to_string(), "another-repo".to_string()];
         let ws = compute_effective_workspace(
@@ -1986,6 +2057,23 @@ mod tests {
         }];
         let result = validate_checkout_list(&repos, &[]);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_checkout_list_reserved_name_fails() {
+        // A repo aliased "repo" would silently shadow `workspace: repo`, so
+        // reject it at compile time.
+        let repos = vec![Repository {
+            repository: "repo".to_string(),
+            repo_type: "git".to_string(),
+            name: "org/repo".to_string(),
+            repo_ref: "refs/heads/main".to_string(),
+        }];
+        let checkout = vec!["repo".to_string()];
+        let err = validate_checkout_list(&repos, &checkout).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("reserved"), "msg: {msg}");
+        assert!(msg.contains("'repo'"), "msg: {msg}");
     }
 
     // ─── Engine::args (copilot params) ──────────────────────────────────────
