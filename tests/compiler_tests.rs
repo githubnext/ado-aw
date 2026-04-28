@@ -17,7 +17,8 @@ fn test_compile_pipeline_basic() {
     let test_content = r#"---
 name: "Test Agent"
 description: "A test agent for verification"
-schedule: daily
+on:
+  schedule: daily
 repositories:
   - repository: test-repo
     type: git
@@ -2808,11 +2809,12 @@ fn test_schedule_object_form_with_branches_compiled_output() {
     let input = r#"---
 name: "Scheduled Agent"
 description: "Agent with branch-filtered schedule"
-schedule:
-  run: daily around 14:00
-  branches:
-    - main
-    - release/*
+on:
+  schedule:
+    run: daily around 14:00
+    branches:
+      - main
+      - release/*
 ---
 
 ## Scheduled Agent

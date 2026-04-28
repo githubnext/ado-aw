@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use super::types::{FrontMatter, PipelineParameter, Repository, TriggerConfig};
+use super::types::{FrontMatter, OnConfig, PipelineParameter, Repository};
 use super::extensions::{CompilerExtension, Extension, McpgServerConfig, McpgGatewayConfig, McpgConfig, CompileContext};
 use crate::compile::types::McpConfig;
 use crate::fuzzy_schedule;
@@ -146,14 +146,14 @@ pub fn validate_front_matter_identity(front_matter: &FrontMatter) -> Result<()> 
     }
 
     // Validate trigger.pipeline fields for newlines and ADO expressions
-    if let Some(trigger_config) = &front_matter.triggers {
+    if let Some(trigger_config) = &front_matter.on_config {
         if let Some(pipeline) = &trigger_config.pipeline {
-            validate::reject_pipeline_injection(&pipeline.name, "triggers.pipeline.name")?;
+            validate::reject_pipeline_injection(&pipeline.name, "on.pipeline.name")?;
             if let Some(project) = &pipeline.project {
-                validate::reject_pipeline_injection(project, "triggers.pipeline.project")?;
+                validate::reject_pipeline_injection(project, "on.pipeline.project")?;
             }
             for branch in &pipeline.branches {
-                validate::reject_pipeline_injection(branch, &format!("triggers.pipeline.branches entry {:?}", branch))?;
+                validate::reject_pipeline_injection(branch, &format!("on.pipeline.branches entry {:?}", branch))?;
             }
         }
     }
@@ -202,20 +202,20 @@ pub fn generate_schedule(name: &str, config: &super::types::ScheduleConfig) -> R
 /// When `triggers.pr` is explicitly configured, PR triggers stay enabled regardless
 /// of schedule or pipeline triggers (overrides suppression). Native ADO branch/path
 /// filters are emitted if configured.
-pub fn generate_pr_trigger(triggers: &Option<TriggerConfig>, has_schedule: bool) -> String {
-    let has_pipeline_trigger = triggers
+pub fn generate_pr_trigger(on_config: &Option<OnConfig>, has_schedule: bool) -> String {
+    let has_pipeline_trigger = on_config
         .as_ref()
         .and_then(|t| t.pipeline.as_ref())
         .is_some();
 
-    let has_pr_trigger = triggers
+    let has_pr_trigger = on_config
         .as_ref()
         .and_then(|t| t.pr.as_ref())
         .is_some();
 
     // Explicit triggers.pr overrides schedule/pipeline suppression
     if has_pr_trigger {
-        return super::pr_filters::generate_native_pr_trigger(triggers.as_ref().unwrap().pr.as_ref().unwrap());
+        return super::pr_filters::generate_native_pr_trigger(on_config.as_ref().unwrap().pr.as_ref().unwrap());
     }
 
     match (has_pipeline_trigger, has_schedule) {
@@ -227,8 +227,8 @@ pub fn generate_pr_trigger(triggers: &Option<TriggerConfig>, has_schedule: bool)
 }
 
 /// Generate CI trigger configuration
-pub fn generate_ci_trigger(triggers: &Option<TriggerConfig>, has_schedule: bool) -> String {
-    let has_pipeline_trigger = triggers
+pub fn generate_ci_trigger(on_config: &Option<OnConfig>, has_schedule: bool) -> String {
+    let has_pipeline_trigger = on_config
         .as_ref()
         .and_then(|t| t.pipeline.as_ref())
         .is_some();
@@ -241,8 +241,8 @@ pub fn generate_ci_trigger(triggers: &Option<TriggerConfig>, has_schedule: bool)
 }
 
 /// Generate pipeline resource YAML for pipeline completion triggers
-pub fn generate_pipeline_resources(triggers: &Option<TriggerConfig>) -> Result<String> {
-    let Some(trigger_config) = triggers else {
+pub fn generate_pipeline_resources(on_config: &Option<OnConfig>) -> Result<String> {
+    let Some(trigger_config) = on_config else {
         return Ok(String::new());
     };
 
@@ -1894,7 +1894,7 @@ pub async fn compile_shared(
     validate_front_matter_identity(front_matter)?;
 
     // 2. Generate schedule
-    let schedule = match &front_matter.schedule {
+    let schedule = match front_matter.schedule() {
         Some(s) => generate_schedule(&front_matter.name, s)
             .with_context(|| format!("Failed to parse schedule '{}'", s.expression()))?,
         None => String::new(),
@@ -1935,10 +1935,10 @@ pub async fn compile_shared(
     )?;
     let working_directory = generate_working_directory(&effective_workspace);
     let trigger_repo_directory = generate_trigger_repo_directory(&front_matter.checkout);
-    let pipeline_resources = generate_pipeline_resources(&front_matter.triggers)?;
-    let has_schedule = front_matter.schedule.is_some();
-    let pr_trigger = generate_pr_trigger(&front_matter.triggers, has_schedule);
-    let ci_trigger = generate_ci_trigger(&front_matter.triggers, has_schedule);
+    let pipeline_resources = generate_pipeline_resources(&front_matter.on_config)?;
+    let has_schedule = front_matter.has_schedule();
+    let pr_trigger = generate_pr_trigger(&front_matter.on_config, has_schedule);
+    let ci_trigger = generate_ci_trigger(&front_matter.on_config, has_schedule);
 
     // 6. Generate source path and pipeline path
     let source_path = generate_source_path(input_path);
@@ -1952,11 +1952,7 @@ pub async fn compile_shared(
         .unwrap_or_else(|| DEFAULT_POOL.to_string());
 
     // 8. Setup/teardown jobs, parameters, prepare/finalize steps
-    let pr_filters = front_matter
-        .triggers
-        .as_ref()
-        .and_then(|t| t.pr.as_ref())
-        .and_then(|pr| pr.filters.as_ref());
+    let pr_filters = front_matter.pr_filters();
     let has_pr_filters = pr_filters.is_some();
     let setup_job = generate_setup_job(&front_matter.setup, &pool, pr_filters);
     let teardown_job = generate_teardown_job(&front_matter.teardown, &pool);
@@ -2624,13 +2620,15 @@ mod tests {
 
     #[test]
     fn test_generate_pr_trigger_pipeline_only() {
-        let triggers = Some(crate::compile::types::TriggerConfig {
+        let triggers = Some(crate::compile::types::OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build".into(),
                 project: None,
                 branches: vec![],
+            filters: None,
             }),
         pr: None,
+        schedule: None,
         });
         let result = generate_pr_trigger(&triggers, false);
         assert!(result.contains("pr: none"));
@@ -2639,13 +2637,15 @@ mod tests {
 
     #[test]
     fn test_generate_pr_trigger_both_pipeline_and_schedule() {
-        let triggers = Some(crate::compile::types::TriggerConfig {
+        let triggers = Some(crate::compile::types::OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build".into(),
                 project: None,
                 branches: vec![],
+            filters: None,
             }),
         pr: None,
+        schedule: None,
         });
         let result = generate_pr_trigger(&triggers, true);
         assert!(result.contains("pr: none"));
@@ -2672,13 +2672,15 @@ mod tests {
 
     #[test]
     fn test_generate_ci_trigger_pipeline_only() {
-        let triggers = Some(crate::compile::types::TriggerConfig {
+        let triggers = Some(crate::compile::types::OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build".into(),
                 project: None,
                 branches: vec![],
+            filters: None,
             }),
         pr: None,
+        schedule: None,
         });
         let result = generate_ci_trigger(&triggers, false);
         assert_eq!(result, "trigger: none");
@@ -2686,13 +2688,15 @@ mod tests {
 
     #[test]
     fn test_generate_ci_trigger_both_pipeline_and_schedule() {
-        let triggers = Some(crate::compile::types::TriggerConfig {
+        let triggers = Some(crate::compile::types::OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build".into(),
                 project: None,
                 branches: vec![],
+            filters: None,
             }),
         pr: None,
+        schedule: None,
         });
         let result = generate_ci_trigger(&triggers, true);
         assert_eq!(result, "trigger: none");
@@ -2708,20 +2712,22 @@ mod tests {
 
     #[test]
     fn test_generate_pipeline_resources_empty_trigger_config() {
-        let triggers = Some(crate::compile::types::TriggerConfig { pipeline: None, pr: None });
+        let triggers = Some(crate::compile::types::OnConfig { schedule: None, pipeline: None, pr: None });
         let result = generate_pipeline_resources(&triggers).unwrap();
         assert!(result.is_empty());
     }
 
     #[test]
     fn test_generate_pipeline_resources_with_branches() {
-        let triggers = Some(crate::compile::types::TriggerConfig {
+        let triggers = Some(crate::compile::types::OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build Pipeline".into(),
                 project: Some("OtherProject".into()),
                 branches: vec!["main".into(), "release/*".into()],
+            filters: None,
             }),
         pr: None,
+        schedule: None,
         });
         let result = generate_pipeline_resources(&triggers).unwrap();
         assert!(result.contains("source: 'Build Pipeline'"));
@@ -2735,13 +2741,15 @@ mod tests {
 
     #[test]
     fn test_generate_pipeline_resources_without_branches_triggers_on_any() {
-        let triggers = Some(crate::compile::types::TriggerConfig {
+        let triggers = Some(crate::compile::types::OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "My Pipeline".into(),
                 project: None,
                 branches: vec![],
+            filters: None,
             }),
         pr: None,
+        schedule: None,
         });
         let result = generate_pipeline_resources(&triggers).unwrap();
         assert!(result.contains("source: 'My Pipeline'"));
@@ -2752,13 +2760,15 @@ mod tests {
 
     #[test]
     fn test_generate_pipeline_resources_resource_id_is_snake_case() {
-        let triggers = Some(crate::compile::types::TriggerConfig {
+        let triggers = Some(crate::compile::types::OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "My Build Pipeline".into(),
                 project: None,
                 branches: vec![],
+            filters: None,
             }),
         pr: None,
+        schedule: None,
         });
         let result = generate_pipeline_resources(&triggers).unwrap();
         // The pipeline resource ID should be snake_case derived from the name
@@ -3664,49 +3674,55 @@ mod tests {
     #[test]
     fn test_validate_front_matter_identity_rejects_newline_in_trigger_pipeline_name() {
         let mut fm = minimal_front_matter();
-        fm.triggers = Some(TriggerConfig {
+        fm.on_config = Some(OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build\ninjected: true".to_string(),
                 project: None,
                 branches: vec![],
+            filters: None,
             }),
         pr: None,
+        schedule: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("triggers.pipeline.name"));
+        assert!(result.unwrap_err().to_string().contains("on.pipeline.name"));
     }
 
     #[test]
     fn test_validate_front_matter_identity_rejects_newline_in_trigger_pipeline_project() {
         let mut fm = minimal_front_matter();
-        fm.triggers = Some(TriggerConfig {
+        fm.on_config = Some(OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build Pipeline".to_string(),
                 project: Some("OtherProject\ninjected: true".to_string()),
                 branches: vec![],
+            filters: None,
             }),
         pr: None,
+        schedule: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("triggers.pipeline.project"));
+        assert!(result.unwrap_err().to_string().contains("on.pipeline.project"));
     }
 
     #[test]
     fn test_validate_front_matter_identity_rejects_newline_in_trigger_pipeline_branch() {
         let mut fm = minimal_front_matter();
-        fm.triggers = Some(TriggerConfig {
+        fm.on_config = Some(OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build Pipeline".to_string(),
                 project: None,
                 branches: vec!["main\ninjected: true".to_string()],
+            filters: None,
             }),
         pr: None,
+        schedule: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("triggers.pipeline.branches"));
+        assert!(result.unwrap_err().to_string().contains("on.pipeline.branches"));
     }
 
     #[test]
@@ -3721,13 +3737,15 @@ mod tests {
     #[test]
     fn test_validate_front_matter_identity_allows_valid_trigger_pipeline_fields() {
         let mut fm = minimal_front_matter();
-        fm.triggers = Some(TriggerConfig {
+        fm.on_config = Some(OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build Pipeline".to_string(),
                 project: Some("OtherProject".to_string()),
                 branches: vec!["main".to_string(), "release/*".to_string()],
+            filters: None,
             }),
         pr: None,
+        schedule: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_ok());
@@ -3745,13 +3763,15 @@ mod tests {
     #[test]
     fn test_validate_front_matter_identity_rejects_ado_expression_in_trigger_pipeline_name() {
         let mut fm = minimal_front_matter();
-        fm.triggers = Some(TriggerConfig {
+        fm.on_config = Some(OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build $(System.AccessToken)".to_string(),
                 project: None,
                 branches: vec![],
+            filters: None,
             }),
         pr: None,
+        schedule: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -3761,13 +3781,15 @@ mod tests {
     #[test]
     fn test_validate_front_matter_identity_rejects_ado_expression_in_trigger_pipeline_project() {
         let mut fm = minimal_front_matter();
-        fm.triggers = Some(TriggerConfig {
+        fm.on_config = Some(OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build Pipeline".to_string(),
                 project: Some("$(System.AccessToken)".to_string()),
                 branches: vec![],
+            filters: None,
             }),
         pr: None,
+        schedule: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -3777,13 +3799,15 @@ mod tests {
     #[test]
     fn test_validate_front_matter_identity_rejects_ado_expression_in_trigger_pipeline_branch() {
         let mut fm = minimal_front_matter();
-        fm.triggers = Some(TriggerConfig {
+        fm.on_config = Some(OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build Pipeline".to_string(),
                 project: None,
                 branches: vec!["$[variables['token']]".to_string()],
+            filters: None,
             }),
         pr: None,
+        schedule: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -3792,13 +3816,15 @@ mod tests {
 
     #[test]
     fn test_pipeline_resources_escapes_single_quotes() {
-        let triggers = Some(TriggerConfig {
+        let triggers = Some(OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build's Pipeline".to_string(),
                 project: Some("My'Project".to_string()),
                 branches: vec!["main".to_string(), "it's-branch".to_string()],
+            filters: None,
             }),
         pr: None,
+        schedule: None,
         });
         let result = generate_pipeline_resources(&triggers).unwrap();
         assert!(result.contains("source: 'Build''s Pipeline'"));

@@ -554,9 +554,6 @@ pub struct FrontMatter {
     /// Target platform: "standalone" (default) or "1es"
     #[serde(default)]
     pub target: CompileTarget,
-    /// Fuzzy schedule configuration
-    #[serde(default)]
-    pub schedule: Option<ScheduleConfig>,
     /// Workspace setting: "root" or "repo" (auto-computed if not set)
     #[serde(default)]
     pub workspace: Option<String>,
@@ -584,9 +581,9 @@ pub struct FrontMatter {
     /// Per-tool configuration for safe outputs
     #[serde(default, rename = "safe-outputs")]
     pub safe_outputs: HashMap<String, serde_json::Value>,
-    /// Pipeline trigger configuration
-    #[serde(default)]
-    pub triggers: Option<TriggerConfig>,
+    /// Unified trigger configuration: schedule, pipeline, PR triggers and filters
+    #[serde(default, rename = "on")]
+    pub on_config: Option<OnConfig>,
     /// Network policy for standalone target (ignored in 1ES)
     #[serde(default)]
     pub network: Option<NetworkConfig>,
@@ -619,13 +616,37 @@ pub struct FrontMatter {
     pub parameters: Vec<PipelineParameter>,
 }
 
+impl FrontMatter {
+    /// Get the schedule configuration (if any).
+    pub fn schedule(&self) -> Option<&ScheduleConfig> {
+        self.on_config.as_ref().and_then(|o| o.schedule.as_ref())
+    }
+
+    /// Check if a schedule is configured.
+    pub fn has_schedule(&self) -> bool {
+        self.schedule().is_some()
+    }
+
+    /// Get the pipeline trigger configuration (if any).
+    pub fn pipeline_trigger(&self) -> Option<&PipelineTrigger> {
+        self.on_config.as_ref().and_then(|o| o.pipeline.as_ref())
+    }
+
+    /// Get the PR trigger configuration (if any).
+    pub fn pr_trigger(&self) -> Option<&PrTriggerConfig> {
+        self.on_config.as_ref().and_then(|o| o.pr.as_ref())
+    }
+
+    /// Get the PR runtime filters (if any).
+    pub fn pr_filters(&self) -> Option<&PrFilters> {
+        self.pr_trigger().and_then(|pr| pr.filters.as_ref())
+    }
+}
+
 impl SanitizeConfigTrait for FrontMatter {
     fn sanitize_config_fields(&mut self) {
         self.name = crate::sanitize::sanitize_config(&self.name);
         self.description = crate::sanitize::sanitize_config(&self.description);
-        if let Some(ref mut s) = self.schedule {
-            s.sanitize_config_fields();
-        }
         self.workspace = self.workspace.as_deref().map(crate::sanitize::sanitize_config);
         if let Some(ref mut p) = self.pool {
             p.sanitize_config_fields();
@@ -646,8 +667,8 @@ impl SanitizeConfigTrait for FrontMatter {
         }
         // safe_outputs: HashMap<String, serde_json::Value> — opaque JSON, sanitized at
         // Stage 3 execution via get_tool_config() when deserialized into typed configs.
-        if let Some(ref mut t) = self.triggers {
-            t.sanitize_config_fields();
+        if let Some(ref mut o) = self.on_config {
+            o.sanitize_config_fields();
         }
         if let Some(ref mut n) = self.network {
             n.sanitize_config_fields();
@@ -787,9 +808,15 @@ pub struct McpOptions {
     pub env: HashMap<String, String>,
 }
 
-/// Trigger configuration for the pipeline
+/// Unified trigger configuration — `on:` front matter key.
+///
+/// Consolidates all trigger types: schedule, pipeline completion, and PR triggers.
+/// Aligns with gh-aw's `on:` key.
 #[derive(Debug, Deserialize, Clone, Default)]
-pub struct TriggerConfig {
+pub struct OnConfig {
+    /// Fuzzy schedule configuration
+    #[serde(default)]
+    pub schedule: Option<ScheduleConfig>,
     /// Pipeline completion trigger
     #[serde(default)]
     pub pipeline: Option<PipelineTrigger>,
@@ -798,8 +825,11 @@ pub struct TriggerConfig {
     pub pr: Option<PrTriggerConfig>,
 }
 
-impl SanitizeConfigTrait for TriggerConfig {
+impl SanitizeConfigTrait for OnConfig {
     fn sanitize_config_fields(&mut self) {
+        if let Some(ref mut s) = self.schedule {
+            s.sanitize_config_fields();
+        }
         if let Some(ref mut p) = self.pipeline {
             p.sanitize_config_fields();
         }
@@ -810,7 +840,7 @@ impl SanitizeConfigTrait for TriggerConfig {
 }
 
 /// Pipeline completion trigger configuration
-#[derive(Debug, Deserialize, Clone, SanitizeConfig)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct PipelineTrigger {
     /// The name of the source pipeline that triggers this one
     pub name: String,
@@ -820,6 +850,63 @@ pub struct PipelineTrigger {
     /// Branches to trigger on (empty = any branch)
     #[serde(default)]
     pub branches: Vec<String>,
+    /// Pipeline-specific runtime filters
+    #[serde(default)]
+    pub filters: Option<PipelineFilters>,
+}
+
+impl SanitizeConfigTrait for PipelineTrigger {
+    fn sanitize_config_fields(&mut self) {
+        self.name = crate::sanitize::sanitize_config(&self.name);
+        if let Some(ref mut p) = self.project {
+            *p = crate::sanitize::sanitize_config(p);
+        }
+        self.branches = self.branches.iter().map(|s| crate::sanitize::sanitize_config(s)).collect();
+        if let Some(ref mut f) = self.filters {
+            f.sanitize_config_fields();
+        }
+    }
+}
+
+/// Pipeline completion trigger filters.
+/// Only exposes filters applicable to pipeline triggers.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct PipelineFilters {
+    /// Only run during a specific time window (UTC)
+    #[serde(default, rename = "time-window")]
+    pub time_window: Option<TimeWindowFilter>,
+    /// Regex match on upstream pipeline name (Build.TriggeredBy.DefinitionName)
+    #[serde(default, rename = "source-pipeline")]
+    pub source_pipeline: Option<PatternFilter>,
+    /// Regex match on triggering branch (Build.SourceBranch)
+    #[serde(default)]
+    pub branch: Option<PatternFilter>,
+    /// Include/exclude by build reason
+    #[serde(default, rename = "build-reason")]
+    pub build_reason: Option<IncludeExcludeFilter>,
+    /// Raw ADO condition expression escape hatch
+    #[serde(default)]
+    pub expression: Option<String>,
+}
+
+impl SanitizeConfigTrait for PipelineFilters {
+    fn sanitize_config_fields(&mut self) {
+        if let Some(ref mut tw) = self.time_window {
+            tw.sanitize_config_fields();
+        }
+        if let Some(ref mut sp) = self.source_pipeline {
+            sp.sanitize_config_fields();
+        }
+        if let Some(ref mut b) = self.branch {
+            b.sanitize_config_fields();
+        }
+        if let Some(ref mut br) = self.build_reason {
+            br.sanitize_config_fields();
+        }
+        if let Some(ref mut e) = self.expression {
+            *e = crate::sanitize::sanitize_config(e);
+        }
+    }
 }
 
 // ─── PR Trigger Types ───────────────────────────────────────────────────────
@@ -886,6 +973,9 @@ pub struct PrFilters {
     /// Regex match on target branch (System.PullRequest.TargetBranch)
     #[serde(default, rename = "target-branch")]
     pub target_branch: Option<PatternFilter>,
+    /// Regex match on last commit message (Build.SourceVersionMessage)
+    #[serde(default, rename = "commit-message")]
+    pub commit_message: Option<PatternFilter>,
     /// PR label matching (any-of, all-of, none-of)
     #[serde(default)]
     pub labels: Option<LabelFilter>,
@@ -925,6 +1015,9 @@ impl SanitizeConfigTrait for PrFilters {
         }
         if let Some(ref mut t) = self.target_branch {
             t.sanitize_config_fields();
+        }
+        if let Some(ref mut cm) = self.commit_message {
+            cm.sanitize_config_fields();
         }
         if let Some(ref mut l) = self.labels {
             l.sanitize_config_fields();
@@ -1599,7 +1692,7 @@ triggers:
         match: "\\[agent\\]"
 "#;
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
-        let tc: TriggerConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
+        let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
         let pr = tc.pr.unwrap();
         let filters = pr.filters.unwrap();
         assert_eq!(filters.title.unwrap().pattern, "\\[agent\\]");
@@ -1616,7 +1709,7 @@ triggers:
         exclude: ["bot@noreply.com"]
 "#;
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
-        let tc: TriggerConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
+        let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
         let pr = tc.pr.unwrap();
         let author = pr.filters.unwrap().author.unwrap();
         assert_eq!(author.include, vec!["alice@corp.com", "bob@corp.com"]);
@@ -1638,7 +1731,7 @@ triggers:
         match: "^main$"
 "#;
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
-        let tc: TriggerConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
+        let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
         let pr = tc.pr.unwrap();
         let branches = pr.branches.unwrap();
         assert_eq!(branches.include, vec!["main", "release/*"]);
@@ -1659,7 +1752,7 @@ triggers:
         none-of: ["do-not-run"]
 "#;
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
-        let tc: TriggerConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
+        let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
         let labels = tc.pr.unwrap().filters.unwrap().labels.unwrap();
         assert_eq!(labels.any_of, vec!["run-agent", "automated"]);
         assert!(labels.all_of.is_empty());
@@ -1675,7 +1768,7 @@ triggers:
       draft: false
 "#;
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
-        let tc: TriggerConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
+        let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
         assert_eq!(tc.pr.unwrap().filters.unwrap().draft, Some(false));
     }
 
@@ -1690,7 +1783,7 @@ triggers:
         exclude: ["docs/**"]
 "#;
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
-        let tc: TriggerConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
+        let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
         let changed = tc.pr.unwrap().filters.unwrap().changed_files.unwrap();
         assert_eq!(changed.include, vec!["src/**/*.rs"]);
         assert_eq!(changed.exclude, vec!["docs/**"]);
@@ -1705,7 +1798,7 @@ triggers:
       include: ["src/*"]
 "#;
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
-        let tc: TriggerConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
+        let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
         let pr = tc.pr.unwrap();
         assert!(pr.filters.is_none());
         assert_eq!(pr.paths.unwrap().include, vec!["src/*"]);
@@ -1723,7 +1816,7 @@ triggers:
         match: "\\[review\\]"
 "#;
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
-        let tc: TriggerConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
+        let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
         assert!(tc.pipeline.is_some());
         assert!(tc.pr.is_some());
         assert_eq!(tc.pr.unwrap().filters.unwrap().title.unwrap().pattern, "\\[review\\]");
@@ -1737,7 +1830,7 @@ triggers:
     filters: {}
 "#;
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
-        let tc: TriggerConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
+        let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
         let filters = tc.pr.unwrap().filters.unwrap();
         assert!(filters.title.is_none());
         assert!(filters.author.is_none());
@@ -1749,7 +1842,7 @@ triggers:
         let content = r#"---
 name: "Test Agent"
 description: "Test"
-triggers:
+on:
   pr:
     branches:
       include: [main]
@@ -1762,7 +1855,7 @@ triggers:
 Body
 "#;
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
-        let pr = fm.triggers.unwrap().pr.unwrap();
+        let pr = fm.on_config.unwrap().pr.unwrap();
         assert_eq!(pr.branches.unwrap().include, vec!["main"]);
         let filters = pr.filters.unwrap();
         assert_eq!(filters.title.unwrap().pattern, "\\[agent\\]");

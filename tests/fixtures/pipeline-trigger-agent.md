@@ -1,7 +1,7 @@
 ---
 name: "Pipeline Trigger Agent"
 description: "Agent triggered by an upstream pipeline"
-triggers:
+on:
   pipeline:
     name: "Build Pipeline"
     project: "OtherProject"

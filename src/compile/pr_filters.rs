@@ -703,9 +703,10 @@ mod tests {
 
     #[test]
     fn test_generate_pr_trigger_with_explicit_pr_trigger_overrides_schedule() {
-        let triggers = Some(TriggerConfig {
+        let triggers = Some(OnConfig {
             pipeline: None,
             pr: Some(PrTriggerConfig::default()),
+        schedule: None,
         });
         let result = generate_pr_trigger(&triggers, true);
         assert!(!result.contains("pr: none"), "triggers.pr should override schedule suppression");
@@ -713,13 +714,15 @@ mod tests {
 
     #[test]
     fn test_generate_pr_trigger_with_pr_trigger_and_pipeline_trigger() {
-        let triggers = Some(TriggerConfig {
+        let triggers = Some(OnConfig {
             pipeline: Some(PipelineTrigger {
                 name: "Build".into(),
                 project: None,
                 branches: vec![],
+            filters: None,
             }),
             pr: Some(PrTriggerConfig::default()),
+        schedule: None,
         });
         let result = generate_pr_trigger(&triggers, false);
         assert!(!result.contains("pr: none"), "triggers.pr should override pipeline trigger suppression");
@@ -727,7 +730,7 @@ mod tests {
 
     #[test]
     fn test_generate_pr_trigger_with_branches() {
-        let triggers = Some(TriggerConfig {
+        let triggers = Some(OnConfig {
             pipeline: None,
             pr: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
@@ -737,6 +740,7 @@ mod tests {
                 paths: None,
                 filters: None,
             }),
+        schedule: None,
         });
         let result = generate_pr_trigger(&triggers, false);
         assert!(result.contains("pr:"), "should emit pr: block");
@@ -749,7 +753,7 @@ mod tests {
 
     #[test]
     fn test_generate_pr_trigger_with_paths() {
-        let triggers = Some(TriggerConfig {
+        let triggers = Some(OnConfig {
             pipeline: None,
             pr: Some(PrTriggerConfig {
                 branches: None,
@@ -759,6 +763,7 @@ mod tests {
                 }),
                 filters: None,
             }),
+        schedule: None,
         });
         let result = generate_pr_trigger(&triggers, false);
         assert!(result.contains("pr:"), "should emit pr: block");
@@ -769,7 +774,7 @@ mod tests {
 
     #[test]
     fn test_generate_pr_trigger_with_filters_only_no_pr_block() {
-        let triggers = Some(TriggerConfig {
+        let triggers = Some(OnConfig {
             pipeline: None,
             pr: Some(PrTriggerConfig {
                 branches: None,
@@ -779,6 +784,7 @@ mod tests {
                     ..Default::default()
                 }),
             }),
+        schedule: None,
         });
         let result = generate_pr_trigger(&triggers, false);
         assert!(result.is_empty(), "filters-only should not emit a pr: block (use default trigger)");
@@ -1197,7 +1203,7 @@ triggers:
       expression: "eq(variables['Custom.Flag'], 'true')"
 "#;
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
-        let tc: TriggerConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
+        let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
         let filters = tc.pr.unwrap().filters.unwrap();
         assert_eq!(filters.time_window.as_ref().unwrap().start, "09:00");
         assert_eq!(filters.time_window.as_ref().unwrap().end, "17:00");

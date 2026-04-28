@@ -1,7 +1,8 @@
 ---
 name: "Complete Test Agent"
 description: "A complete test agent with all features enabled"
-schedule: daily around 14:00
+on:
+  schedule: daily around 14:00
 repositories:
   - repository: test-repo-1
     type: git
