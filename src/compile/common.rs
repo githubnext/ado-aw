@@ -197,12 +197,26 @@ pub fn generate_schedule(name: &str, config: &super::types::ScheduleConfig) -> R
     fuzzy_schedule::generate_schedule_yaml(config.expression(), name, effective_branches)
 }
 
-/// Generate PR trigger configuration
+/// Generate PR trigger configuration.
+///
+/// When `triggers.pr` is explicitly configured, PR triggers stay enabled regardless
+/// of schedule or pipeline triggers (overrides suppression). Native ADO branch/path
+/// filters are emitted if configured.
 pub fn generate_pr_trigger(triggers: &Option<TriggerConfig>, has_schedule: bool) -> String {
     let has_pipeline_trigger = triggers
         .as_ref()
         .and_then(|t| t.pipeline.as_ref())
         .is_some();
+
+    let has_pr_trigger = triggers
+        .as_ref()
+        .and_then(|t| t.pr.as_ref())
+        .is_some();
+
+    // Explicit triggers.pr overrides schedule/pipeline suppression
+    if has_pr_trigger {
+        return generate_native_pr_trigger(triggers.as_ref().unwrap().pr.as_ref().unwrap());
+    }
 
     match (has_pipeline_trigger, has_schedule) {
         (true, true) => "# Disable PR triggers - only run on schedule or when upstream pipeline completes\npr: none".to_string(),
@@ -210,6 +224,56 @@ pub fn generate_pr_trigger(triggers: &Option<TriggerConfig>, has_schedule: bool)
         (false, true) => "# Disable PR triggers - only run on schedule\npr: none".to_string(),
         (false, false) => String::new(),
     }
+}
+
+/// Generate native ADO PR trigger block from PrTriggerConfig.
+fn generate_native_pr_trigger(pr: &super::types::PrTriggerConfig) -> String {
+    let has_branches = pr.branches.as_ref().is_some_and(|b| !b.include.is_empty() || !b.exclude.is_empty());
+    let has_paths = pr.paths.as_ref().is_some_and(|p| !p.include.is_empty() || !p.exclude.is_empty());
+
+    if !has_branches && !has_paths {
+        return String::new();
+    }
+
+    let mut yaml = String::from("pr:\n");
+
+    if let Some(branches) = &pr.branches {
+        if !branches.include.is_empty() || !branches.exclude.is_empty() {
+            yaml.push_str("  branches:\n");
+            if !branches.include.is_empty() {
+                yaml.push_str("    include:\n");
+                for b in &branches.include {
+                    yaml.push_str(&format!("      - '{}'\n", b.replace('\'', "''")));
+                }
+            }
+            if !branches.exclude.is_empty() {
+                yaml.push_str("    exclude:\n");
+                for b in &branches.exclude {
+                    yaml.push_str(&format!("      - '{}'\n", b.replace('\'', "''")));
+                }
+            }
+        }
+    }
+
+    if let Some(paths) = &pr.paths {
+        if !paths.include.is_empty() || !paths.exclude.is_empty() {
+            yaml.push_str("  paths:\n");
+            if !paths.include.is_empty() {
+                yaml.push_str("    include:\n");
+                for p in &paths.include {
+                    yaml.push_str(&format!("      - '{}'\n", p.replace('\'', "''")));
+                }
+            }
+            if !paths.exclude.is_empty() {
+                yaml.push_str("    exclude:\n");
+                for p in &paths.exclude {
+                    yaml.push_str(&format!("      - '{}'\n", p.replace('\'', "''")));
+                }
+            }
+        }
+    }
+
+    yaml.trim_end().to_string()
 }
 
 /// Generate CI trigger configuration
@@ -1165,13 +1229,39 @@ pub fn validate_resolve_pr_thread_statuses(front_matter: &FrontMatter) -> Result
     Ok(())
 }
 
-/// Generate the setup job YAML
-pub fn generate_setup_job(setup_steps: &[serde_yaml::Value], pool: &str) -> String {
-    if setup_steps.is_empty() {
+/// Generate the setup job YAML.
+///
+/// When `pr_filters` is `Some`, injects a pre-activation gate step that evaluates
+/// PR filters and self-cancels the build if they don't match. The Setup job is
+/// created even if `setup_steps` is empty (solely for the gate).
+pub fn generate_setup_job(
+    setup_steps: &[serde_yaml::Value],
+    pool: &str,
+    pr_filters: Option<&super::types::PrFilters>,
+) -> String {
+    if setup_steps.is_empty() && pr_filters.is_none() {
         return String::new();
     }
 
-    let steps_yaml = format_steps_yaml_indented(setup_steps, 4);
+    let mut steps_parts = Vec::new();
+
+    // Gate step (if PR filters are configured)
+    if let Some(filters) = pr_filters {
+        steps_parts.push(generate_pr_gate_step(filters));
+    }
+
+    // User setup steps (conditioned on gate passing when PR filters are active)
+    if !setup_steps.is_empty() {
+        if pr_filters.is_some() {
+            // Add condition to each user step so they only run when the gate passes
+            let conditioned = add_condition_to_steps(setup_steps, "eq(variables['prGate.SHOULD_RUN'], 'true')");
+            steps_parts.push(format_steps_yaml_indented(&conditioned, 4));
+        } else {
+            steps_parts.push(format_steps_yaml_indented(setup_steps, 4));
+        }
+    }
+
+    let combined_steps = steps_parts.join("\n\n");
 
     format!(
         r#"- job: Setup
@@ -1182,8 +1272,192 @@ pub fn generate_setup_job(setup_steps: &[serde_yaml::Value], pool: &str) -> Stri
     - checkout: self
 {}
 "#,
-        pool, steps_yaml
+        pool, combined_steps
     )
+}
+
+/// Add a `condition:` to each step in a list of serde_yaml::Value steps.
+fn add_condition_to_steps(steps: &[serde_yaml::Value], condition: &str) -> Vec<serde_yaml::Value> {
+    steps
+        .iter()
+        .map(|step| {
+            let mut step = step.clone();
+            if let serde_yaml::Value::Mapping(ref mut map) = step {
+                map.insert(
+                    serde_yaml::Value::String("condition".into()),
+                    serde_yaml::Value::String(condition.into()),
+                );
+            }
+            step
+        })
+        .collect()
+}
+
+/// Generate the bash gate step for PR filter evaluation.
+fn generate_pr_gate_step(filters: &super::types::PrFilters) -> String {
+    let mut checks = Vec::new();
+
+    // Title filter
+    if let Some(title) = &filters.title {
+        let pattern = shell_escape(&title.pattern);
+        checks.push(format!(
+            concat!(
+                "  # Title filter\n",
+                "  TITLE=\"$(System.PullRequest.Title)\"\n",
+                "  if echo \"$TITLE\" | grep -qE '{}'; then\n",
+                "    echo \"Filter: title | Pattern: {} | Result: PASS\"\n",
+                "  else\n",
+                "    echo \"##[warning]PR filter title did not match (pattern: {})\"\n",
+                "    echo \"##vso[build.addbuildtag]pr-gate:title-mismatch\"\n",
+                "    SHOULD_RUN=false\n",
+                "  fi",
+            ),
+            pattern, pattern, pattern,
+        ));
+    }
+
+    // Author filter
+    if let Some(author) = &filters.author {
+        let mut author_check = String::from("  # Author filter\n  AUTHOR=\"$(Build.RequestedForEmail)\"\n");
+        if !author.include.is_empty() {
+            let emails: Vec<String> = author.include.iter().map(|e| shell_escape(e)).collect();
+            let pattern = emails.join("|");
+            author_check.push_str(&format!(
+                concat!(
+                    "  if echo \"$AUTHOR\" | grep -qiE '^({})$'; then\n",
+                    "    echo \"Filter: author include | Result: PASS\"\n",
+                    "  else\n",
+                    "    echo \"##[warning]PR filter author did not match include list\"\n",
+                    "    echo \"##vso[build.addbuildtag]pr-gate:author-mismatch\"\n",
+                    "    SHOULD_RUN=false\n",
+                    "  fi",
+                ),
+                pattern,
+            ));
+        }
+        if !author.exclude.is_empty() {
+            let emails: Vec<String> = author.exclude.iter().map(|e| shell_escape(e)).collect();
+            let pattern = emails.join("|");
+            author_check.push_str(&format!(
+                concat!(
+                    "\n  if echo \"$AUTHOR\" | grep -qiE '^({})$'; then\n",
+                    "    echo \"##[warning]PR filter author matched exclude list\"\n",
+                    "    echo \"##vso[build.addbuildtag]pr-gate:author-excluded\"\n",
+                    "    SHOULD_RUN=false\n",
+                    "  else\n",
+                    "    echo \"Filter: author exclude | Result: PASS (not in exclude list)\"\n",
+                    "  fi",
+                ),
+                pattern,
+            ));
+        }
+        checks.push(author_check);
+    }
+
+    // Source branch filter
+    if let Some(source) = &filters.source_branch {
+        let pattern = shell_escape(&source.pattern);
+        checks.push(format!(
+            concat!(
+                "  # Source branch filter\n",
+                "  SOURCE_BRANCH=\"$(System.PullRequest.SourceBranch)\"\n",
+                "  if echo \"$SOURCE_BRANCH\" | grep -qE '{}'; then\n",
+                "    echo \"Filter: source-branch | Pattern: {} | Result: PASS\"\n",
+                "  else\n",
+                "    echo \"##[warning]PR filter source-branch did not match (pattern: {})\"\n",
+                "    echo \"##vso[build.addbuildtag]pr-gate:source-branch-mismatch\"\n",
+                "    SHOULD_RUN=false\n",
+                "  fi",
+            ),
+            pattern, pattern, pattern,
+        ));
+    }
+
+    // Target branch filter
+    if let Some(target) = &filters.target_branch {
+        let pattern = shell_escape(&target.pattern);
+        checks.push(format!(
+            concat!(
+                "  # Target branch filter\n",
+                "  TARGET_BRANCH=\"$(System.PullRequest.TargetBranch)\"\n",
+                "  if echo \"$TARGET_BRANCH\" | grep -qE '{}'; then\n",
+                "    echo \"Filter: target-branch | Pattern: {} | Result: PASS\"\n",
+                "  else\n",
+                "    echo \"##[warning]PR filter target-branch did not match (pattern: {})\"\n",
+                "    echo \"##vso[build.addbuildtag]pr-gate:target-branch-mismatch\"\n",
+                "    SHOULD_RUN=false\n",
+                "  fi",
+            ),
+            pattern, pattern, pattern,
+        ));
+    }
+
+    let filter_checks = checks.join("\n\n");
+
+    let mut step = String::new();
+    step.push_str("- bash: |\n");
+    step.push_str("    if [ \"$(Build.Reason)\" != \"PullRequest\" ]; then\n");
+    step.push_str("      echo \"Not a PR build -- gate passes automatically\"\n");
+    step.push_str("      echo \"##vso[task.setvariable variable=SHOULD_RUN;isOutput=true]true\"\n");
+    step.push_str("      echo \"##vso[build.addbuildtag]pr-gate:passed\"\n");
+    step.push_str("      exit 0\n");
+    step.push_str("    fi\n");
+    step.push_str("\n");
+    step.push_str("    SHOULD_RUN=true\n");
+    step.push_str("\n");
+    step.push_str(&filter_checks);
+    step.push_str("\n\n");
+    step.push_str("    echo \"##vso[task.setvariable variable=SHOULD_RUN;isOutput=true]$SHOULD_RUN\"\n");
+    step.push_str("    if [ \"$SHOULD_RUN\" = \"true\" ]; then\n");
+    step.push_str("      echo \"All PR filters passed -- agent will run\"\n");
+    step.push_str("      echo \"##vso[build.addbuildtag]pr-gate:passed\"\n");
+    step.push_str("    else\n");
+    step.push_str("      echo \"PR filters not matched -- cancelling build\"\n");
+    step.push_str("      echo \"##vso[build.addbuildtag]pr-gate:skipped\"\n");
+    step.push_str("      curl -s -X PATCH \\\n");
+    step.push_str("        -H \"Authorization: Bearer $SYSTEM_ACCESSTOKEN\" \\\n");
+    step.push_str("        -H \"Content-Type: application/json\" \\\n");
+    step.push_str("        -d '{\"status\": \"cancelling\"}' \\\n");
+    step.push_str("        \"$(System.CollectionUri)$(System.TeamProject)/_apis/build/builds/$(Build.BuildId)?api-version=7.1\"\n");
+    step.push_str("    fi\n");
+    step.push_str("  name: prGate\n");
+    step.push_str("  displayName: \"Evaluate PR filters\"\n");
+    step.push_str("  env:\n");
+    step.push_str("    SYSTEM_ACCESSTOKEN: $(System.AccessToken)");
+
+    step
+}
+
+/// Shell-escape a string for use in a bash script.
+/// Prevents shell injection from filter pattern values.
+fn shell_escape(s: &str) -> String {
+    // Allow regex-safe characters, escape anything dangerous for shell
+    s.chars()
+        .filter(|c| {
+            c.is_alphanumeric()
+                || matches!(
+                    c,
+                    '.' | '*'
+                        | '+'
+                        | '?'
+                        | '^'
+                        | '$'
+                        | '|'
+                        | '('
+                        | ')'
+                        | '['
+                        | ']'
+                        | '{'
+                        | '}'
+                        | '\\'
+                        | '-'
+                        | '_'
+                        | '/'
+                        | '@'
+                        | ' '
+                )
+        })
+        .collect()
 }
 
 /// Generate the teardown job YAML
@@ -1244,12 +1518,33 @@ pub fn generate_finalize_steps(finalize_steps: &[serde_yaml::Value]) -> String {
     format_steps_yaml_indented(finalize_steps, 0)
 }
 
-/// Generate dependsOn clause for setup job
-pub fn generate_agentic_depends_on(setup_steps: &[serde_yaml::Value]) -> String {
-    if !setup_steps.is_empty() {
-        "dependsOn: Setup".to_string()
+/// Generate dependsOn clause and condition for setup/gate dependencies.
+///
+/// When PR filters are active, adds a condition that allows non-PR builds to
+/// proceed unconditionally, while PR builds require the gate to pass.
+pub fn generate_agentic_depends_on(
+    setup_steps: &[serde_yaml::Value],
+    has_pr_filters: bool,
+) -> String {
+    let has_setup = !setup_steps.is_empty() || has_pr_filters;
+
+    if !has_setup {
+        return String::new();
+    }
+
+    if has_pr_filters {
+        "dependsOn: Setup\n\
+         \x20   condition: |\n\
+         \x20     and(\n\
+         \x20       succeeded(),\n\
+         \x20       or(\n\
+         \x20         ne(variables['Build.Reason'], 'PullRequest'),\n\
+         \x20         eq(dependencies.Setup.outputs['prGate.SHOULD_RUN'], 'true')\n\
+         \x20       )\n\
+         \x20     )"
+            .to_string()
     } else {
-        String::new()
+        "dependsOn: Setup".to_string()
     }
 }
 
@@ -1870,7 +2165,13 @@ pub async fn compile_shared(
         .unwrap_or_else(|| DEFAULT_POOL.to_string());
 
     // 8. Setup/teardown jobs, parameters, prepare/finalize steps
-    let setup_job = generate_setup_job(&front_matter.setup, &pool);
+    let pr_filters = front_matter
+        .triggers
+        .as_ref()
+        .and_then(|t| t.pr.as_ref())
+        .and_then(|pr| pr.filters.as_ref());
+    let has_pr_filters = pr_filters.is_some();
+    let setup_job = generate_setup_job(&front_matter.setup, &pool, pr_filters);
     let teardown_job = generate_teardown_job(&front_matter.teardown, &pool);
     let has_memory = front_matter
         .tools
@@ -1881,7 +2182,7 @@ pub async fn compile_shared(
     let parameters_yaml = generate_parameters(&parameters)?;
     let prepare_steps = generate_prepare_steps(&front_matter.steps, extensions)?;
     let finalize_steps = generate_finalize_steps(&front_matter.post_steps);
-    let agentic_depends_on = generate_agentic_depends_on(&front_matter.setup);
+    let agentic_depends_on = generate_agentic_depends_on(&front_matter.setup, has_pr_filters);
     let job_timeout = generate_job_timeout(front_matter);
 
     // 9. Token acquisition and env vars
@@ -2541,6 +2842,7 @@ mod tests {
                 project: None,
                 branches: vec![],
             }),
+        pr: None,
         });
         let result = generate_pr_trigger(&triggers, false);
         assert!(result.contains("pr: none"));
@@ -2555,6 +2857,7 @@ mod tests {
                 project: None,
                 branches: vec![],
             }),
+        pr: None,
         });
         let result = generate_pr_trigger(&triggers, true);
         assert!(result.contains("pr: none"));
@@ -2587,6 +2890,7 @@ mod tests {
                 project: None,
                 branches: vec![],
             }),
+        pr: None,
         });
         let result = generate_ci_trigger(&triggers, false);
         assert_eq!(result, "trigger: none");
@@ -2600,6 +2904,7 @@ mod tests {
                 project: None,
                 branches: vec![],
             }),
+        pr: None,
         });
         let result = generate_ci_trigger(&triggers, true);
         assert_eq!(result, "trigger: none");
@@ -2615,7 +2920,7 @@ mod tests {
 
     #[test]
     fn test_generate_pipeline_resources_empty_trigger_config() {
-        let triggers = Some(crate::compile::types::TriggerConfig { pipeline: None });
+        let triggers = Some(crate::compile::types::TriggerConfig { pipeline: None, pr: None });
         let result = generate_pipeline_resources(&triggers).unwrap();
         assert!(result.is_empty());
     }
@@ -2628,6 +2933,7 @@ mod tests {
                 project: Some("OtherProject".into()),
                 branches: vec!["main".into(), "release/*".into()],
             }),
+        pr: None,
         });
         let result = generate_pipeline_resources(&triggers).unwrap();
         assert!(result.contains("source: 'Build Pipeline'"));
@@ -2647,6 +2953,7 @@ mod tests {
                 project: None,
                 branches: vec![],
             }),
+        pr: None,
         });
         let result = generate_pipeline_resources(&triggers).unwrap();
         assert!(result.contains("source: 'My Pipeline'"));
@@ -2663,6 +2970,7 @@ mod tests {
                 project: None,
                 branches: vec![],
             }),
+        pr: None,
         });
         let result = generate_pipeline_resources(&triggers).unwrap();
         // The pipeline resource ID should be snake_case derived from the name
@@ -3574,6 +3882,7 @@ mod tests {
                 project: None,
                 branches: vec![],
             }),
+        pr: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -3589,6 +3898,7 @@ mod tests {
                 project: Some("OtherProject\ninjected: true".to_string()),
                 branches: vec![],
             }),
+        pr: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -3604,6 +3914,7 @@ mod tests {
                 project: None,
                 branches: vec!["main\ninjected: true".to_string()],
             }),
+        pr: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -3628,6 +3939,7 @@ mod tests {
                 project: Some("OtherProject".to_string()),
                 branches: vec!["main".to_string(), "release/*".to_string()],
             }),
+        pr: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_ok());
@@ -3651,6 +3963,7 @@ mod tests {
                 project: None,
                 branches: vec![],
             }),
+        pr: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -3666,6 +3979,7 @@ mod tests {
                 project: Some("$(System.AccessToken)".to_string()),
                 branches: vec![],
             }),
+        pr: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -3681,6 +3995,7 @@ mod tests {
                 project: None,
                 branches: vec!["$[variables['token']]".to_string()],
             }),
+        pr: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -3695,6 +4010,7 @@ mod tests {
                 project: Some("My'Project".to_string()),
                 branches: vec!["main".to_string(), "it's-branch".to_string()],
             }),
+        pr: None,
         });
         let result = generate_pipeline_resources(&triggers).unwrap();
         assert!(result.contains("source: 'Build''s Pipeline'"));
@@ -4772,5 +5088,216 @@ mod tests {
         let headers = HashMap::new();
         let warnings = validate::warn_potential_secrets("my-mcp", &env, &headers);
         assert!(warnings.is_empty(), "non-secret env var should not produce warnings");
+    }
+
+    // ─── PR trigger filter tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_generate_pr_trigger_with_explicit_pr_trigger_overrides_schedule() {
+        let triggers = Some(TriggerConfig {
+            pipeline: None,
+            pr: Some(crate::compile::types::PrTriggerConfig::default()),
+        });
+        // Even with schedule, explicit pr trigger should NOT emit "pr: none"
+        let result = generate_pr_trigger(&triggers, true);
+        assert!(!result.contains("pr: none"), "triggers.pr should override schedule suppression");
+    }
+
+    #[test]
+    fn test_generate_pr_trigger_with_pr_trigger_and_pipeline_trigger() {
+        let triggers = Some(TriggerConfig {
+            pipeline: Some(crate::compile::types::PipelineTrigger {
+                name: "Build".into(),
+                project: None,
+                branches: vec![],
+            }),
+            pr: Some(crate::compile::types::PrTriggerConfig::default()),
+        });
+        let result = generate_pr_trigger(&triggers, false);
+        assert!(!result.contains("pr: none"), "triggers.pr should override pipeline trigger suppression");
+    }
+
+    #[test]
+    fn test_generate_pr_trigger_with_branches() {
+        let triggers = Some(TriggerConfig {
+            pipeline: None,
+            pr: Some(crate::compile::types::PrTriggerConfig {
+                branches: Some(crate::compile::types::BranchFilter {
+                    include: vec!["main".into(), "release/*".into()],
+                    exclude: vec!["test/*".into()],
+                }),
+                paths: None,
+                filters: None,
+            }),
+        });
+        let result = generate_pr_trigger(&triggers, false);
+        assert!(result.contains("pr:"), "should emit pr: block");
+        assert!(result.contains("branches:"), "should include branches");
+        assert!(result.contains("main"), "should include main branch");
+        assert!(result.contains("release/*"), "should include release/* branch");
+        assert!(result.contains("exclude:"), "should include exclude");
+        assert!(result.contains("test/*"), "should include test/* exclusion");
+    }
+
+    #[test]
+    fn test_generate_pr_trigger_with_paths() {
+        let triggers = Some(TriggerConfig {
+            pipeline: None,
+            pr: Some(crate::compile::types::PrTriggerConfig {
+                branches: None,
+                paths: Some(crate::compile::types::PathFilter {
+                    include: vec!["src/*".into()],
+                    exclude: vec!["docs/*".into()],
+                }),
+                filters: None,
+            }),
+        });
+        let result = generate_pr_trigger(&triggers, false);
+        assert!(result.contains("pr:"), "should emit pr: block");
+        assert!(result.contains("paths:"), "should include paths");
+        assert!(result.contains("src/*"), "should include src/* path");
+        assert!(result.contains("docs/*"), "should include docs/* exclusion");
+    }
+
+    #[test]
+    fn test_generate_pr_trigger_with_filters_only_no_pr_block() {
+        let triggers = Some(TriggerConfig {
+            pipeline: None,
+            pr: Some(crate::compile::types::PrTriggerConfig {
+                branches: None,
+                paths: None,
+                filters: Some(crate::compile::types::PrFilters {
+                    title: Some(crate::compile::types::PatternFilter { pattern: "\\[agent\\]".into() }),
+                    ..Default::default()
+                }),
+            }),
+        });
+        let result = generate_pr_trigger(&triggers, false);
+        // No branches/paths → empty string (default PR trigger behavior)
+        assert!(result.is_empty(), "filters-only should not emit a pr: block (use default trigger)");
+    }
+
+    #[test]
+    fn test_generate_setup_job_with_pr_filters_creates_gate() {
+        let filters = crate::compile::types::PrFilters {
+            title: Some(crate::compile::types::PatternFilter { pattern: "\\[review\\]".into() }),
+            ..Default::default()
+        };
+        let result = generate_setup_job(&[], "MyPool", Some(&filters));
+        assert!(result.contains("- job: Setup"), "should create Setup job");
+        assert!(result.contains("name: prGate"), "should include gate step");
+        assert!(result.contains("Evaluate PR filters"), "should have gate displayName");
+        assert!(result.contains("SHOULD_RUN"), "should set SHOULD_RUN variable");
+        assert!(result.contains("\\[review\\]"), "should include title pattern");
+        assert!(result.contains("SYSTEM_ACCESSTOKEN"), "should pass System.AccessToken");
+        assert!(result.contains("cancelling"), "should include self-cancel API call");
+    }
+
+    #[test]
+    fn test_generate_setup_job_with_filters_and_user_steps() {
+        let step: serde_yaml::Value = serde_yaml::from_str("bash: echo hello\ndisplayName: User step").unwrap();
+        let filters = crate::compile::types::PrFilters {
+            title: Some(crate::compile::types::PatternFilter { pattern: "test".into() }),
+            ..Default::default()
+        };
+        let result = generate_setup_job(&[step], "MyPool", Some(&filters));
+        assert!(result.contains("name: prGate"), "should include gate step");
+        assert!(result.contains("User step"), "should include user step");
+        // User steps should be conditioned on gate passing
+        assert!(result.contains("prGate.SHOULD_RUN"), "user steps should reference gate output");
+    }
+
+    #[test]
+    fn test_generate_setup_job_without_filters_unchanged() {
+        let result = generate_setup_job(&[], "MyPool", None);
+        assert!(result.is_empty(), "no setup steps and no filters should produce empty string");
+    }
+
+    #[test]
+    fn test_generate_agentic_depends_on_with_pr_filters() {
+        let result = generate_agentic_depends_on(&[], true);
+        assert!(result.contains("dependsOn: Setup"), "should depend on Setup");
+        assert!(result.contains("condition:"), "should have condition");
+        assert!(result.contains("Build.Reason"), "should check Build.Reason");
+        assert!(result.contains("prGate.SHOULD_RUN"), "should check gate output");
+    }
+
+    #[test]
+    fn test_generate_agentic_depends_on_setup_only_no_condition() {
+        let step: serde_yaml::Value = serde_yaml::from_str("bash: echo hello").unwrap();
+        let result = generate_agentic_depends_on(&[step], false);
+        assert_eq!(result, "dependsOn: Setup");
+        assert!(!result.contains("condition:"), "no condition without PR filters");
+    }
+
+    #[test]
+    fn test_generate_agentic_depends_on_nothing() {
+        let result = generate_agentic_depends_on(&[], false);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_generate_setup_job_gate_author_filter() {
+        let filters = crate::compile::types::PrFilters {
+            author: Some(crate::compile::types::IncludeExcludeFilter {
+                include: vec!["alice@corp.com".into()],
+                exclude: vec!["bot@noreply.com".into()],
+            }),
+            ..Default::default()
+        };
+        let result = generate_setup_job(&[], "MyPool", Some(&filters));
+        assert!(result.contains("alice@corp.com"), "should include author email");
+        assert!(result.contains("bot@noreply.com"), "should include excluded email");
+        assert!(result.contains("Build.RequestedForEmail"), "should check author variable");
+    }
+
+    #[test]
+    fn test_generate_setup_job_gate_branch_filters() {
+        let filters = crate::compile::types::PrFilters {
+            source_branch: Some(crate::compile::types::PatternFilter { pattern: "^feature/.*".into() }),
+            target_branch: Some(crate::compile::types::PatternFilter { pattern: "^main$".into() }),
+            ..Default::default()
+        };
+        let result = generate_setup_job(&[], "MyPool", Some(&filters));
+        assert!(result.contains("SourceBranch"), "should check source branch");
+        assert!(result.contains("TargetBranch"), "should check target branch");
+        assert!(result.contains("^feature/.*"), "should include source pattern");
+        assert!(result.contains("^main$"), "should include target pattern");
+    }
+
+    #[test]
+    fn test_generate_setup_job_gate_non_pr_passthrough() {
+        let filters = crate::compile::types::PrFilters {
+            title: Some(crate::compile::types::PatternFilter { pattern: "test".into() }),
+            ..Default::default()
+        };
+        let result = generate_setup_job(&[], "MyPool", Some(&filters));
+        assert!(result.contains("PullRequest"), "should check for PR build reason");
+        assert!(result.contains("Not a PR build"), "should pass non-PR builds automatically");
+    }
+
+    #[test]
+    fn test_generate_setup_job_gate_build_tags() {
+        let filters = crate::compile::types::PrFilters {
+            title: Some(crate::compile::types::PatternFilter { pattern: "test".into() }),
+            ..Default::default()
+        };
+        let result = generate_setup_job(&[], "MyPool", Some(&filters));
+        assert!(result.contains("pr-gate:passed"), "should tag passed builds");
+        assert!(result.contains("pr-gate:skipped"), "should tag skipped builds");
+        assert!(result.contains("pr-gate:title-mismatch"), "should tag specific filter failures");
+    }
+
+    #[test]
+    fn test_shell_escape_removes_dangerous_chars() {
+        assert_eq!(shell_escape("safe-pattern_123"), "safe-pattern_123");
+        // Semi-colons and backticks are removed (shell injection)
+        assert_eq!(shell_escape("test;echo pwned"), "testecho pwned");
+        assert_eq!(shell_escape("test`echo`"), "testecho");
+        // Regex chars preserved
+        assert_eq!(shell_escape("^feature/.*$"), "^feature/.*$");
+        assert_eq!(shell_escape("\\[agent\\]"), "\\[agent\\]");
+        // Parentheses preserved (needed for regex groups)
+        assert_eq!(shell_escape("(a|b)"), "(a|b)");
     }
 }
