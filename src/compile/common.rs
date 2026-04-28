@@ -648,6 +648,13 @@ pub fn generate_source_path(input_path: &std::path::Path) -> String {
 /// downloads the ado-aw compiler and runs `ado-aw check` against the
 /// pipeline path.
 ///
+/// The step sets `workingDirectory: {{ trigger_repo_directory }}` so that:
+/// 1. The relative `{{ pipeline_path }}` argument resolves correctly when
+///    `checkout:` produces a multi-repo `$(Build.SourcesDirectory)` layout.
+/// 2. `ado-aw check`'s recompile step has access to the trigger repo's
+///    `.git` directory, which is required to infer the ADO org from the
+///    git remote (used by `tools.azure-devops`).
+///
 /// When `skip` is `true` (developer builds with `--skip-integrity`),
 /// returns an empty string and the step is omitted from the pipeline.
 pub fn generate_integrity_check(skip: bool) -> String {
@@ -660,6 +667,7 @@ pub fn generate_integrity_check(skip: bool) -> String {
     AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
     chmod +x "$AGENTIC_PIPELINES_PATH"
     $AGENTIC_PIPELINES_PATH check "{{ pipeline_path }}"
+  workingDirectory: {{ trigger_repo_directory }}
   displayName: "Verify pipeline integrity""#
         .to_string()
 }
@@ -755,9 +763,11 @@ pub fn generate_debug_pipeline_replacements(debug: bool) -> Vec<(String, String)
 
 /// Generate the pipeline YAML path for integrity checking at ADO runtime.
 ///
-/// Returns a path using `{{ trigger_repo_directory }}` as the base. The
-/// compiled pipeline yaml ships in the trigger ("self") repo, so this anchor
-/// is independent of the user's `workspace:` setting.
+/// Returns the path **relative** to the trigger repository root. The integrity
+/// check step itself sets `workingDirectory: {{ trigger_repo_directory }}` so
+/// that the path resolves correctly and so that `ado-aw check`'s recompile
+/// step has access to the trigger repo's `.git` directory (needed to infer
+/// the ADO org for `tools.azure-devops`).
 ///
 /// The full relative path is preserved so that pipelines compiled into
 /// subdirectories (e.g. `agents/ctf.yml`) produce a correct runtime path
@@ -766,15 +776,13 @@ pub fn generate_debug_pipeline_replacements(debug: bool) -> Vec<(String, String)
 /// Absolute paths fall back to using only the filename to avoid embedding
 /// machine-specific paths in the generated pipeline.
 pub fn generate_pipeline_path(output_path: &std::path::Path) -> String {
-    let relative = normalize_relative_path(output_path).unwrap_or_else(|| {
+    normalize_relative_path(output_path).unwrap_or_else(|| {
         output_path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("pipeline.yml")
             .to_string()
-    });
-
-    format!("{{{{ trigger_repo_directory }}}}/{}", relative)
+    })
 }
 
 /// Normalize a path for embedding in a generated pipeline.
@@ -2646,33 +2654,32 @@ mod tests {
     fn test_generate_pipeline_path_preserves_directory() {
         // The original bug: compiling agents/ctf.md produced agents/ctf.yml as
         // output, but the embedded path was only ctf.yml (missing agents/).
+        // Pipeline path is relative to the integrity check's workingDirectory
+        // ({{ trigger_repo_directory }}), so no prefix is embedded here.
         let path = std::path::Path::new("agents/ctf.yml");
         let result = generate_pipeline_path(path);
-        assert_eq!(result, "{{ trigger_repo_directory }}/agents/ctf.yml");
+        assert_eq!(result, "agents/ctf.yml");
     }
 
     #[test]
     fn test_generate_pipeline_path_nested_directory() {
         let path = std::path::Path::new("pipelines/production/review.yml");
         let result = generate_pipeline_path(path);
-        assert_eq!(
-            result,
-            "{{ trigger_repo_directory }}/pipelines/production/review.yml"
-        );
+        assert_eq!(result, "pipelines/production/review.yml");
     }
 
     #[test]
     fn test_generate_pipeline_path_strips_dot_slash() {
         let path = std::path::Path::new("./agents/my-agent.yml");
         let result = generate_pipeline_path(path);
-        assert_eq!(result, "{{ trigger_repo_directory }}/agents/my-agent.yml");
+        assert_eq!(result, "agents/my-agent.yml");
     }
 
     #[test]
     fn test_generate_pipeline_path_filename_only() {
         let path = std::path::Path::new("pipeline.yml");
         let result = generate_pipeline_path(path);
-        assert_eq!(result, "{{ trigger_repo_directory }}/pipeline.yml");
+        assert_eq!(result, "pipeline.yml");
     }
 
     #[test]
@@ -2693,7 +2700,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let abs_path = tmp.path().join("agents").join("ctf.yml");
         let result = generate_pipeline_path(&abs_path);
-        assert_eq!(result, "{{ trigger_repo_directory }}/ctf.yml");
+        assert_eq!(result, "ctf.yml");
     }
 
     #[test]
@@ -2721,7 +2728,7 @@ mod tests {
         fs::write(tmp.path().join(".git"), "gitdir: fake").unwrap();
         let abs_path = agents_dir.join("ctf.yml");
         let result = generate_pipeline_path(&abs_path);
-        assert_eq!(result, "{{ trigger_repo_directory }}/agents/ctf.yml");
+        assert_eq!(result, "agents/ctf.yml");
     }
 
     // ─── generate_trigger_repo_directory ─────────────────────────────────────
@@ -2790,6 +2797,12 @@ mod tests {
         assert!(
             result.contains("{{ pipeline_path }}"),
             "Should contain the pipeline_path placeholder for later resolution"
+        );
+        assert!(
+            result.contains("workingDirectory: {{ trigger_repo_directory }}"),
+            "Should set workingDirectory to the trigger repo so `ado-aw check` \
+             can recompile from a directory that contains .git (needed for \
+             ADO org inference when tools.azure-devops is enabled)"
         );
     }
 

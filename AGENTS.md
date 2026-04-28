@@ -807,13 +807,9 @@ Used by the execute command's --source parameter. The agent markdown only ever l
 
 ## {{ pipeline_path }}
 
-Should be replaced with the path to the compiled pipeline YAML file for runtime integrity checking. The path is derived from the output path (preserving any directory structure) and is anchored at the **trigger ("self") repository** via `{{ trigger_repo_directory }}` (see below), independent of the user's `workspace:` setting:
-- No additional checkouts: `$(Build.SourcesDirectory)/<relative-path>.yml`
-- Additional checkouts present: `$(Build.SourcesDirectory)/$(Build.Repository.Name)/<relative-path>.yml`
+Should be replaced with the path to the compiled pipeline YAML file for runtime integrity checking. The path is **relative** to the trigger repository root (e.g. `agents/ctf.yml`, `pipelines/production/review.lock.yml`). The integrity check step itself sets `workingDirectory: {{ trigger_repo_directory }}` so the relative path resolves correctly regardless of whether additional repositories are checked out, and so that `ado-aw check`'s recompile step has access to the trigger repo's `.git` directory (required to infer the ADO org for `tools.azure-devops`).
 
-For example, an output path of `pipelines/production/review.lock.yml` resolves to `$(Build.SourcesDirectory)/pipelines/production/review.lock.yml` when no additional repositories are checked out.
-
-Used by the pipeline's integrity check step to verify the pipeline hasn't been modified outside the compilation process. The compiled yaml only ever lives in the trigger repo, so this is intentionally not affected by `workspace:` pointing at a non-self alias.
+Used by the pipeline's integrity check step to verify the pipeline hasn't been modified outside the compilation process.
 
 ## {{ trigger_repo_directory }}
 
@@ -821,11 +817,13 @@ Should be replaced with the directory where the trigger ("self") repository is c
 - No additional checkouts → `$(Build.SourcesDirectory)` (ADO checks `self` into the root)
 - One or more additional checkouts → `$(Build.SourcesDirectory)/$(Build.Repository.Name)` (ADO puts each checked-out repo, including `self`, into a subfolder named after the repository)
 
-Use this marker (rather than `{{ working_directory }}` / `{{ workspace }}`) for any path that refers to a file shipped in the trigger repo (e.g. the agent markdown source and the compiled pipeline yaml itself).
+Use this marker (rather than `{{ working_directory }}` / `{{ workspace }}`) for any path that refers to a file shipped in the trigger repo (e.g. the agent markdown source) or as a `workingDirectory:` for steps that need access to the trigger repo's `.git` (e.g. the integrity check step).
 
 ## {{ integrity_check }}
 
 Generates the "Verify pipeline integrity" pipeline step that downloads the released ado-aw compiler and runs `ado-aw check` against the compiled pipeline YAML. This step ensures the pipeline file hasn't been modified outside the compilation process.
+
+The step sets `workingDirectory: {{ trigger_repo_directory }}` so that the relative `{{ pipeline_path }}` argument resolves correctly when `checkout:` produces a multi-repo `$(Build.SourcesDirectory)` layout, and so `ado-aw check`'s internal recompile can infer the ADO org from the trigger repo's git remote.
 
 When the compiler is built with `--skip-integrity` (debug builds only), this placeholder is replaced with an empty string and the integrity step is omitted from the generated pipeline.
 
