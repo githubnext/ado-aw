@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.2](https://github.com/githubnext/ado-aw/compare/v0.18.1...v0.18.2) (2026-04-28)
+
+
+### Bug Fixes
+
+* **compile:** use workingDirectory for integrity check instead of absolute path ([#346](https://github.com/githubnext/ado-aw/issues/346)) ([0ce9238](https://github.com/githubnext/ado-aw/commit/0ce9238331d2983cecfc20e9a6a1de96d3bf0938))
+
 ## [0.18.1](https://github.com/githubnext/ado-aw/compare/v0.18.0...v0.18.1) (2026-04-28)
 
 
