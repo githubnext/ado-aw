@@ -8,6 +8,7 @@
 
 mod common;
 pub mod extensions;
+mod gitattributes;
 mod onees;
 mod standalone;
 pub mod types;
@@ -54,6 +55,21 @@ pub async fn compile_pipeline(
     skip_integrity: bool,
     debug_pipeline: bool,
 ) -> Result<()> {
+    compile_pipeline_inner(input_path, output_path, skip_integrity, debug_pipeline, true).await
+}
+
+/// Internal compile entry point that lets the caller opt out of the
+/// per-invocation `.gitattributes` sync. Batch callers
+/// (`compile_all_pipelines`) skip the per-pipeline sync to avoid an
+/// O(N²)-ish series of full-tree scans and instead perform a single sync
+/// after the whole batch completes.
+async fn compile_pipeline_inner(
+    input_path: &str,
+    output_path: Option<&str>,
+    skip_integrity: bool,
+    debug_pipeline: bool,
+    sync_gitattributes: bool,
+) -> Result<()> {
     let input_path = Path::new(input_path);
     info!("Compiling pipeline from: {}", input_path.display());
 
@@ -83,15 +99,18 @@ pub async fn compile_pipeline(
     // Validate checkout list against repositories
     common::validate_checkout_list(&front_matter.repositories, &front_matter.checkout)?;
 
-    // Determine output path. When the caller passes an existing directory,
-    // place the compiled file inside it using the default filename derived
-    // from the input markdown's stem (e.g. `foo.md` -> `<dir>/foo.yml`).
+    // Determine output path. By default use `.lock.yml` to match
+    // gh-aw's convention for compiled-pipeline files (so they can be
+    // marked as generated and merge=ours via `.gitattributes`). When the
+    // caller passes an existing directory, place the compiled file inside
+    // it using the default filename derived from the input markdown's stem
+    // (e.g. `foo.md` -> `<dir>/foo.lock.yml`).
     let yaml_output_path = match output_path {
         Some(p) => {
             let p = PathBuf::from(p);
             if p.is_dir() {
                 let default_filename = input_path
-                    .with_extension("yml")
+                    .with_extension("lock.yml")
                     .file_name()
                     .map(PathBuf::from)
                     .with_context(|| {
@@ -102,7 +121,7 @@ pub async fn compile_pipeline(
                 p
             }
         }
-        None => input_path.with_extension("yml"),
+        None => input_path.with_extension("lock.yml"),
     };
 
     // Select compiler based on target
@@ -137,7 +156,36 @@ pub async fn compile_pipeline(
         yaml_output_path.display()
     );
 
+    // Update .gitattributes at the repo root so every compiled pipeline is
+    // marked as a generated file with `merge=ours`. Best-effort: skip with a
+    // debug-level log when the output is not inside a git repository, since
+    // a non-git workspace is a valid use case (e.g. ad-hoc compilation).
+    // Skipped during batch compilation (callers do one sync at the end).
+    if sync_gitattributes {
+        if let Err(e) = sync_gitattributes_for_output(&yaml_output_path).await {
+            debug!("Skipped .gitattributes update: {}", e);
+        }
+    }
+
     Ok(())
+}
+
+/// Locate the repo root containing `output_path`, scan it for all compiled
+/// pipelines, and write the managed block of `.gitattributes`.
+async fn sync_gitattributes_for_output(output_path: &Path) -> Result<()> {
+    let abs = if output_path.is_absolute() {
+        output_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(output_path)
+    };
+    let repo_root = find_repo_root(&abs)
+        .with_context(|| format!("no .git directory found above {}", output_path.display()))?;
+
+    let detected = crate::detect::detect_pipelines(&repo_root).await?;
+    let paths: Vec<PathBuf> = detected.into_iter().map(|p| p.yaml_path).collect();
+    gitattributes::update_gitattributes(&repo_root, paths).await
 }
 
 /// Auto-discover and recompile all agentic pipelines in the current directory.
@@ -189,7 +237,7 @@ pub async fn compile_all_pipelines(skip_integrity: bool, debug_pipeline: bool) -
         let source_str = source_path.to_string_lossy();
         let output_str = yaml_output_path.to_string_lossy();
 
-        match compile_pipeline(&source_str, Some(&output_str), skip_integrity, debug_pipeline).await {
+        match compile_pipeline_inner(&source_str, Some(&output_str), skip_integrity, debug_pipeline, false).await {
             Ok(()) => success_count += 1,
             Err(e) => {
                 eprintln!(
@@ -198,6 +246,17 @@ pub async fn compile_all_pipelines(skip_integrity: bool, debug_pipeline: bool) -
                 );
                 fail_count += 1;
             }
+        }
+    }
+
+    // One .gitattributes sync after the whole batch — avoids the N+1 scans
+    // that would happen if each pipeline triggered its own
+    // `sync_gitattributes_for_output` call. We reuse the already-detected
+    // pipeline list rather than re-scanning the tree.
+    if let Some(repo_root) = find_repo_root(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))) {
+        let paths: Vec<PathBuf> = detected.iter().map(|p| p.yaml_path.clone()).collect();
+        if let Err(e) = gitattributes::update_gitattributes(&repo_root, paths).await {
+            debug!("Skipped .gitattributes update: {}", e);
         }
     }
 
@@ -733,7 +792,7 @@ description: "A test agent for directory output"
         .await
         .expect("compile_pipeline should succeed");
 
-        let expected = output_dir.join("my-agent.yml");
+        let expected = output_dir.join("my-agent.lock.yml");
         assert!(
             expected.exists(),
             "expected compiled YAML at {}",

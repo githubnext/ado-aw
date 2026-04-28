@@ -33,7 +33,7 @@ enum Commands {
         /// Optional output path for the generated YAML file. If the path
         /// refers to an existing directory, the compiled YAML is written
         /// inside that directory using the default filename derived from
-        /// the input markdown (e.g. `foo.md` -> `<dir>/foo.yml`).
+        /// the input markdown (e.g. `foo.md` -> `<dir>/foo.lock.yml`).
         #[arg(short, long)]
         output: Option<String>,
         /// Omit the "Verify pipeline integrity" step from the generated pipeline.
