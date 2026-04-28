@@ -86,16 +86,18 @@ pub async fn compile_pipeline(
     // Determine output path. When the caller passes an existing directory,
     // place the compiled file inside it using the default filename derived
     // from the input markdown's stem (e.g. `foo.md` -> `<dir>/foo.yml`).
-    let default_filename = input_path
-        .with_extension("yml")
-        .file_name()
-        .map(PathBuf::from)
-        .with_context(|| format!("Invalid input path: {}", input_path.display()))?;
     let yaml_output_path = match output_path {
         Some(p) => {
             let p = PathBuf::from(p);
             if p.is_dir() {
-                p.join(&default_filename)
+                let default_filename = input_path
+                    .with_extension("yml")
+                    .file_name()
+                    .map(PathBuf::from)
+                    .with_context(|| {
+                        format!("Invalid input path: {}", input_path.display())
+                    })?;
+                p.join(default_filename)
             } else {
                 p
             }
@@ -736,6 +738,11 @@ description: "A test agent for directory output"
             expected.exists(),
             "expected compiled YAML at {}",
             expected.display()
+        );
+        let contents = std::fs::read_to_string(&expected).unwrap();
+        assert!(
+            contents.contains("@ado-aw"),
+            "expected compiled YAML to contain the @ado-aw source header"
         );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
