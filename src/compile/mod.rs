@@ -101,9 +101,26 @@ async fn compile_pipeline_inner(
 
     // Determine output path. By default use `.lock.yml` to match
     // gh-aw's convention for compiled-pipeline files (so they can be
-    // marked as generated and merge=ours via `.gitattributes`).
+    // marked as generated and merge=ours via `.gitattributes`). When the
+    // caller passes an existing directory, place the compiled file inside
+    // it using the default filename derived from the input markdown's stem
+    // (e.g. `foo.md` -> `<dir>/foo.lock.yml`).
     let yaml_output_path = match output_path {
-        Some(p) => PathBuf::from(p),
+        Some(p) => {
+            let p = PathBuf::from(p);
+            if p.is_dir() {
+                let default_filename = input_path
+                    .with_extension("lock.yml")
+                    .file_name()
+                    .map(PathBuf::from)
+                    .with_context(|| {
+                        format!("Invalid input path: {}", input_path.display())
+                    })?;
+                p.join(default_filename)
+            } else {
+                p
+            }
+        }
         None => input_path.with_extension("lock.yml"),
     };
 
@@ -733,5 +750,60 @@ Body
             "summary should report full totals, got:\n{}",
             diff
         );
+    }
+
+    #[tokio::test]
+    async fn test_compile_pipeline_output_is_directory() {
+        // When --output points to an existing directory, the compiled YAML
+        // should be placed inside it using the default filename derived from
+        // the input markdown's stem.
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ado-aw-compile-dir-output-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let input_path = temp_dir.join("my-agent.md");
+        std::fs::write(
+            &input_path,
+            r#"---
+name: "Test Agent"
+description: "A test agent for directory output"
+---
+
+## Body
+"#,
+        )
+        .unwrap();
+
+        let output_dir = temp_dir.join("out");
+        std::fs::create_dir_all(&output_dir).unwrap();
+
+        compile_pipeline(
+            input_path.to_str().unwrap(),
+            Some(output_dir.to_str().unwrap()),
+            true,
+            false,
+        )
+        .await
+        .expect("compile_pipeline should succeed");
+
+        let expected = output_dir.join("my-agent.lock.yml");
+        assert!(
+            expected.exists(),
+            "expected compiled YAML at {}",
+            expected.display()
+        );
+        let contents = std::fs::read_to_string(&expected).unwrap();
+        assert!(
+            contents.contains("@ado-aw"),
+            "expected compiled YAML to contain the @ado-aw source header"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
