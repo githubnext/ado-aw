@@ -94,7 +94,7 @@ When a user interacts with you:
 /tmp/ado-aw compile
 
 # Verify pipeline matches source
-/tmp/ado-aw check <pipeline.yml>
+/tmp/ado-aw check <pipeline.lock.yml>
 ```
 
 ## Key Features

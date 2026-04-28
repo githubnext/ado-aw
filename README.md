@@ -107,22 +107,27 @@ request with a clear description of what changed and why.
 ### 4. Compile to a Pipeline
 
 ```bash
-# Simple form — generates the .yml alongside the source .md
+# Simple form — generates a `.lock.yml` alongside the source `.md`
 ado-aw compile dependency-updater.md
 
 # Or specify a custom output location
-ado-aw compile dependency-updater.md -o path/to/dependency-updater.yml
+ado-aw compile dependency-updater.md -o path/to/dependency-updater.lock.yml
 ```
 
 This generates a complete Azure DevOps pipeline YAML file. The compiler also
 copies the agent markdown body into the output tree so it's available at runtime.
+
+The compiler also writes/updates a `.gitattributes` file at the repository root
+that marks every compiled `.lock.yml` pipeline as `linguist-generated=true merge=ours`,
+so GitHub hides them from PR diffs and merge conflicts in generated YAML resolve
+to the local copy (which can then be rebuilt with `ado-aw compile`).
 
 ### 5. Verify (CI Check)
 
 Ensure pipelines stay in sync with their source:
 
 ```bash
-ado-aw check dependency-updater.yml
+ado-aw check dependency-updater.lock.yml
 ```
 
 This is useful as a CI gate — if someone edits the markdown but forgets to
@@ -134,7 +139,7 @@ recompile, the check will fail.
 
 ### Step 1: Commit both files
 
-Your repo should contain the agent source `.md` and the compiled pipeline `.yml`.
+Your repo should contain the agent source `.md` and the compiled pipeline `.lock.yml`.
 Place them wherever your team's conventions dictate — there is no required directory structure.
 
 Push both files to your Azure DevOps repository.
@@ -144,7 +149,7 @@ Push both files to your Azure DevOps repository.
 1. Go to **Pipelines → New Pipeline**
 2. Select your repository
 3. Choose **Existing Azure Pipelines YAML file**
-4. Point to the compiled `.yml` pipeline file
+4. Point to the compiled `.lock.yml` pipeline file
 5. Save (or Save & Run)
 
 ### Step 3: Set Up ARM Service Connections for Permissions

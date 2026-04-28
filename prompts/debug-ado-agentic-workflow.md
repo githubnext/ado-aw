@@ -44,7 +44,7 @@ Follow this sequence for every debugging session:
 
 3. **Check for compilation drift** — before deep-diving into runtime errors, verify the pipeline YAML is in sync with its source markdown:
    ```bash
-   ado-aw check <pipeline.yml>
+   ado-aw check <pipeline.lock.yml>
    ```
 
 4. **Apply the fix** — make the targeted change to the agent `.md` source file, then recompile:
@@ -178,17 +178,17 @@ network:
 
 **Diagnosis**:
 ```bash
-ado-aw check <pipeline.yml>
+ado-aw check <pipeline.lock.yml>
 ```
 
 If the check fails, the pipeline YAML is out of sync with the source markdown. This happens when:
 - The `.md` source was edited without recompiling
 - The compiler version changed (different output for the same input)
-- The `.yml` was manually edited
+- The `.lock.yml` was manually edited
 
 **Fix**: Recompile and commit both files together:
 ```bash
-ado-aw compile <agent.md> -o <pipeline.yml>
+ado-aw compile <agent.md> -o <pipeline.lock.yml>
 ```
 
 ---
@@ -350,7 +350,7 @@ If downloads fail:
 
 ```bash
 # Verify pipeline YAML matches its source markdown
-ado-aw check <pipeline.yml>
+ado-aw check <pipeline.lock.yml>
 
 # Recompile a single agent
 ado-aw compile <path/to/agent.md>
@@ -371,7 +371,7 @@ ado-aw configure --dry-run
 
 Use this checklist to systematically rule out common issues:
 
-- [ ] **Compilation in sync**: `ado-aw check <pipeline.yml>` passes
+- [ ] **Compilation in sync**: `ado-aw check <pipeline.lock.yml>` passes
 - [ ] **Correct stage identified**: Know which of the 3 jobs failed
 - [ ] **Network allowlist**: All required domains are in `network.allowed` or built-in
 - [ ] **MCP tools allowed**: Every tool the agent needs is in an `allowed:` list

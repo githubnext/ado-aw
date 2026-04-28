@@ -489,14 +489,14 @@ When generating the agent file:
 After creating the agent file, compile it into an Azure DevOps pipeline:
 
 ```bash
-# Simple form — generates the .yml pipeline alongside the .md source
+# Simple form — generates a `.lock.yml` pipeline alongside the `.md` source
 ado-aw compile <path/to/agent.md>
 
 # Or specify a custom output location
-ado-aw compile <path/to/agent.md> -o <path/to/pipeline.yml>
+ado-aw compile <path/to/agent.md> -o <path/to/pipeline.lock.yml>
 ```
 
-This generates a `.yml` pipeline file. Both the source `.md` and generated `.yml` must be committed together.
+This generates a `.lock.yml` pipeline file. Both the source `.md` and generated `.lock.yml` must be committed together. The compiler also writes/updates a `.gitattributes` file at the repository root so compiled pipelines are marked `linguist-generated=true merge=ours`.
 
 If the `ado-aw` CLI is not installed or not available on `PATH`, guide the user to download it from:
 https://github.com/githubnext/ado-aw/releases
@@ -506,8 +506,8 @@ https://github.com/githubnext/ado-aw/releases
 ```
 Next steps:
   1. Review and customize the agent instructions in <filename>.md
-  2. Commit both the .md source and the generated .yml pipeline
-  3. Register the .yml as a pipeline in Azure DevOps
+  2. Commit both the .md source, the generated .lock.yml pipeline, and any .gitattributes changes
+  3. Register the .lock.yml as a pipeline in Azure DevOps
 ```
 
 ---
@@ -595,5 +595,5 @@ safe-outputs:
 - **Minimal permissions**: Default to no permissions; add only what the task requires.
 - **Explicit allow-lists**: Restrict MCP tools to only what the agent needs.
 - **No direct writes**: All mutations go through safe outputs — the agent cannot push code or call write APIs directly.
-- **Compile before committing**: Always compile with `ado-aw compile` and commit both the `.md` source and generated `.yml` together.
+- **Compile before committing**: Always compile with `ado-aw compile` and commit both the `.md` source and generated `.lock.yml` together.
 - **Check validation**: The compiler will error if write safe-outputs are configured without `permissions.write`.
