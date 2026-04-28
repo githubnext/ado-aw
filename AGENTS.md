@@ -144,7 +144,7 @@ schedule: daily around 14:00 # Fuzzy schedule syntax - see Schedule Syntax secti
 #   branches:
 #     - main
 #     - release/*
-workspace: repo # Optional: "root" or "repo". If not specified, defaults based on checkout configuration (see below).
+workspace: repo # Optional: "root", "repo" (alias: "self"), or a checked-out repository alias. If not specified, defaults based on checkout configuration (see below).
 pool: AZS-1ES-L-MMS-ubuntu-22.04 # Agent pool name (string format). Defaults to AZS-1ES-L-MMS-ubuntu-22.04.
 # pool:                        # Alternative object format (required for 1ES if specifying os)
 #   name: AZS-1ES-L-MMS-ubuntu-22.04
@@ -762,15 +762,27 @@ If `timeout-minutes` is not configured, this is replaced with an empty string.
 Should be replaced with the appropriate working directory based on the effective workspace setting.
 
 **Workspace Resolution Logic:**
-1. If `workspace` is explicitly set in front matter, that value is used
+1. If `workspace` is explicitly set in front matter, that value is used (after validation)
 2. If `workspace` is not set and `checkout:` contains additional repositories, defaults to `repo`
 3. If `workspace` is not set and only `self` is checked out, defaults to `root`
 
-**Warning:** If `workspace: repo` is explicitly set but no additional repositories are in `checkout:`, a warning is emitted because when only `self` is checked out, `$(Build.SourcesDirectory)` already contains the repository content directly.
+**Warning:** If `workspace: repo` (or `self`) is explicitly set but no additional repositories are in `checkout:`, a warning is emitted because when only `self` is checked out, `$(Build.SourcesDirectory)` already contains the repository content directly.
 
-**Values:**
-- `root`: `$(Build.SourcesDirectory)` - the checkout root directory
-- `repo`: `$(Build.SourcesDirectory)/$(Build.Repository.Name)` - the repository's subfolder
+**Accepted values:**
+- `root` → `$(Build.SourcesDirectory)` — the checkout root directory
+- `repo` (or `self`) → `$(Build.SourcesDirectory)/$(Build.Repository.Name)` — the trigger repository's subfolder
+- `<alias>` → `$(Build.SourcesDirectory)/<alias>` — a specific checked-out repository's subfolder. The alias must appear in the `checkout:` list (which itself must be a subset of `repositories:`). This form is only valid when at least one additional repository is checked out; otherwise compilation fails.
+
+**Example — pointing the agent's workspace at a checked-out repository:**
+```yaml
+repositories:
+  - repository: exp23-a7-nw
+    type: git
+    name: msazuresphere/exp23-a7-nw
+checkout:
+  - exp23-a7-nw
+workspace: exp23-a7-nw    # Resolves to $(Build.SourcesDirectory)/exp23-a7-nw
+```
 
 This is used for the `workingDirectory` property of the copilot task.
 

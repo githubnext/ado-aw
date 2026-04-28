@@ -15,6 +15,18 @@ use std::collections::HashMap;
 
 // ── Character allowlist validators ──────────────────────────────────────────
 
+/// Validate that a string is safe to embed as a single path segment (e.g. a
+/// repository alias appended to `$(Build.SourcesDirectory)`). Rejects empty
+/// strings, anything containing `..`, path separators (`/`, `\`), or leading
+/// `.` to prevent path traversal / hidden-directory escapes.
+pub fn is_safe_path_segment(s: &str) -> bool {
+    !s.is_empty()
+        && !s.contains("..")
+        && !s.contains('/')
+        && !s.contains('\\')
+        && !s.starts_with('.')
+}
+
 /// Characters allowed in engine.command paths (absolute path chars only).
 /// Prevents shell injection when the path is embedded in AWF single-quoted commands.
 pub fn is_valid_command_path(s: &str) -> bool {
@@ -387,6 +399,20 @@ mod tests {
     use super::*;
 
     // ── Character allowlist validators ──────────────────────────────────
+
+    #[test]
+    fn test_is_safe_path_segment() {
+        assert!(is_safe_path_segment("my-repo"));
+        assert!(is_safe_path_segment("exp23-a7-nw"));
+        assert!(is_safe_path_segment("repo_v2"));
+        assert!(!is_safe_path_segment(""));
+        assert!(!is_safe_path_segment(".."));
+        assert!(!is_safe_path_segment("../sibling"));
+        assert!(!is_safe_path_segment("foo/bar"));
+        assert!(!is_safe_path_segment("foo\\bar"));
+        assert!(!is_safe_path_segment(".hidden"));
+        assert!(!is_safe_path_segment("foo..bar"));
+    }
 
     #[test]
     fn test_is_valid_command_path() {
