@@ -45,9 +45,13 @@ impl CompilerExtension for LeanExtension {
 \n\
 ## Lean 4 Formal Verification\n\
 \n\
-Lean 4 is installed and available. Use `lean` to typecheck `.lean` files, \
-`lake build` to build Lake projects, and `lake env printPaths` to inspect \
-the toolchain. Lean files use the `.lean` extension.\n"
+Lean 4 is installed under `/tmp/awf-tools/elan/` (elan toolchain manager). \
+The wrappers live at `/tmp/awf-tools/elan/bin/{lean,lake,elan}`. This \
+directory is not on the default `PATH` inside the sandbox; either invoke \
+the binaries by absolute path or run \
+`export PATH=\"/tmp/awf-tools/elan/bin:$PATH\"` at the start of a bash \
+session. Use `lean` to typecheck `.lean` files, `lake build` to build Lake \
+projects, and `lake env printPaths` to inspect the toolchain.\n"
                 .to_string(),
         )
     }

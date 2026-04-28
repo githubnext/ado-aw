@@ -83,25 +83,30 @@ pub const LEAN_BASH_COMMANDS: &[&str] = &["lean", "lake", "elan"];
 ///
 /// Installs elan (Lean toolchain manager) and the specified toolchain.
 /// Defaults to "stable" if no toolchain is specified in the front matter.
-/// Symlinks lean tools into `/tmp/awf-tools/` for AWF chroot compatibility.
+///
+/// Installs the entire elan tree under `/tmp/awf-tools/elan/` (by setting
+/// `ELAN_HOME` before running `elan-init.sh`). AWF auto-mounts `/tmp` into
+/// the agent container, so the wrappers (`/tmp/awf-tools/elan/bin/{lean,
+/// lake,elan}`), toolchain binaries, and shared libraries are all reachable
+/// at the same paths inside the sandbox. Installing into `$HOME/.elan/`
+/// (the elan default) does not work for AWF because `$HOME` is not mounted
+/// into the container, so the wrappers cannot re-exec into the toolchain.
 pub fn generate_lean_install(config: &LeanRuntimeConfig) -> String {
     let toolchain = config.toolchain().unwrap_or("stable");
     let script = format!(
         "\
-curl https://elan.lean-lang.org/elan-init.sh -sSf | sh -s -- -y --default-toolchain {toolchain}
-echo \"##vso[task.prependpath]$HOME/.elan/bin\"
-export PATH=\"$HOME/.elan/bin:$PATH\"
-lean --version || echo \"Lean installed via elan\"
-lake --version || echo \"Lake installed via elan\"
-# Symlink lean tools into /tmp/awf-tools/ so they are accessible
-# inside the AWF chroot (AWF mounts /tmp but reconstructs PATH
-# from standard system locations, excluding $HOME/.elan/bin).
-for cmd in lean lake elan; do
-  if command -v \"$cmd\" >/dev/null 2>&1; then
-    ln -sf \"$(command -v \"$cmd\")\" \"/tmp/awf-tools/$cmd\"
-  fi
-done
-echo \"Lean tools symlinked to /tmp/awf-tools/\""
+# Install elan under /tmp/awf-tools/elan so the entire toolchain (wrappers,
+# toolchain binaries, and libleanshared.so) is reachable inside the AWF
+# container, which auto-mounts /tmp but not $HOME.
+mkdir -p /tmp/awf-tools
+export ELAN_HOME=\"/tmp/awf-tools/elan\"
+curl https://elan.lean-lang.org/elan-init.sh -sSf \\
+  | sh -s -- -y --no-modify-path --default-toolchain {toolchain}
+echo \"##vso[task.prependpath]/tmp/awf-tools/elan/bin\"
+export PATH=\"/tmp/awf-tools/elan/bin:$PATH\"
+/tmp/awf-tools/elan/bin/lean --version || echo \"Lean installed via elan\"
+/tmp/awf-tools/elan/bin/lake --version || echo \"Lake installed via elan\"
+echo \"Lean tools installed at /tmp/awf-tools/elan/bin\""
     );
     // Indent each line of the script body by 4 spaces for YAML block scalar
     let indented: String = script
