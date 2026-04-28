@@ -317,7 +317,7 @@ safe-outputs:
     max: 1
 ```
 
-> See `AGENTS.md` → "Available Safe Output Tools" for full configuration reference of every tool.
+> See `docs/safe-outputs.md` → "Available Safe Output Tools" for full configuration reference of every tool.
 
 Diagnostic tools (`noop`, `missing-data`, `missing-tool`, `report-incomplete`) are always available and require no configuration.
 

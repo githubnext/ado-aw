@@ -30,11 +30,12 @@ The project maintains three documentation files, each serving a different audien
 
 | File | Audience | Purpose |
 |------|----------|---------|
-| `AGENTS.md` | AI agents (Copilot coding agent) | Full project reference: architecture, types, template markers, safe outputs, CLI commands |
+| `AGENTS.md` | AI agents (Copilot coding agent) | High-level project overview, architecture, and index of detailed reference docs under `docs/` |
+| `docs/*.md` | AI agents and contributors | Per-concept reference: `docs/front-matter.md`, `docs/schedule-syntax.md`, `docs/engine.md`, `docs/parameters.md`, `docs/tools.md`, `docs/runtimes.md`, `docs/targets.md`, `docs/template-markers.md`, `docs/cli.md`, `docs/safe-outputs.md`, `docs/extending.md`, `docs/mcp.md`, `docs/network.md`, `docs/mcpg.md` |
 | `README.md` | Human developers | Quick start, setup guide, CLI reference, configuration examples |
 | `prompts/create-ado-agentic-workflow.md` | AI agents creating workflows | Step-by-step guide for authoring agent `.md` files with correct front matter |
 
-All three must stay consistent with the codebase and with each other.
+All of these must stay consistent with the codebase and with each other.
 
 ## What to Check
 
@@ -52,25 +53,25 @@ Look for:
 - New source files not reflected in the architecture tree
 - Moved or renamed files
 
-### 2. CLI Commands (`AGENTS.md` + `README.md`)
+### 2. CLI Commands (`docs/cli.md` + `README.md`)
 
-Extract the actual CLI commands from `src/main.rs` (look at the `Commands` enum with clap derive) and compare against documented commands in both `AGENTS.md` (CLI Commands section) and `README.md` (CLI Reference section).
+Extract the actual CLI commands from `src/main.rs` (look at the `Commands` enum with clap derive) and compare against documented commands in both `docs/cli.md` and `README.md` (CLI Reference section).
 
 Check:
 - All subcommands are documented in both files
 - Arguments and flags match what's in the code
 - Default values in docs match actual defaults in code
 
-### 3. Front Matter Fields (`AGENTS.md` + `README.md`)
+### 3. Front Matter Fields (`docs/front-matter.md` + `README.md`)
 
-Compare the `FrontMatter` struct in `src/compile/types.rs` against the documented fields in both `AGENTS.md` and `README.md` (Agent File Reference → Front Matter Fields).
+Compare the `FrontMatter` struct in `src/compile/types.rs` against the documented fields in both `docs/front-matter.md` (and the per-concept docs it links to: `docs/engine.md`, `docs/tools.md`, `docs/runtimes.md`, `docs/parameters.md`, etc.) and `README.md` (Agent File Reference → Front Matter Fields).
 
 - Are all struct fields documented?
 - Do documented defaults match `#[serde(default)]` values?
 - Are new fields missing from the documentation?
 - Are removed fields still documented?
 
-### 4. Template Markers (`AGENTS.md`)
+### 4. Template Markers (`docs/template-markers.md`)
 
 Scan template files for markers:
 
@@ -79,14 +80,14 @@ grep -oP '\{\{[^}]+\}\}' src/data/base.yml
 grep -oP '\{\{[^}]+\}\}' src/data/1es-base.yml
 ```
 
-Compare against documented markers in `AGENTS.md`. Check for:
+Compare against documented markers in `docs/template-markers.md`. Check for:
 - Undocumented markers
 - Documented markers that no longer exist in templates
 - Markers whose documented behavior doesn't match the compiler implementation
 
-### 5. Safe Output Tools (`AGENTS.md` + `README.md`)
+### 5. Safe Output Tools (`docs/safe-outputs.md` + `README.md`)
 
-Compare tools defined in `src/tools/` against what's documented in both `AGENTS.md` and `README.md` (Safe Outputs section):
+Compare tools defined in `src/tools/` against what's documented in both `docs/safe-outputs.md` and `README.md` (Safe Outputs section):
 - Are all tools documented with correct parameters?
 - Do configuration options match the actual implementation?
 - Does `README.md` list all available safe output tools?

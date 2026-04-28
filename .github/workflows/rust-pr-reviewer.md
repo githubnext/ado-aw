@@ -60,7 +60,7 @@ The compiler processes untrusted markdown input. Check for:
 
 - CLI arguments use `clap` derive macros — no manual argument parsing
 - New fields in `FrontMatter` (in `src/compile/types.rs`) have `serde` defaults and are `Option<T>` where appropriate
-- New template markers are documented in `AGENTS.md`
+- New template markers are documented in `docs/template-markers.md`
 - Streaming/efficient parsing preferred — avoid loading entire files into memory unnecessarily
 - New public functions that can fail return `anyhow::Result`, not `panic!`
 
