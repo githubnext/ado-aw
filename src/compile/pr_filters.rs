@@ -84,6 +84,7 @@ pub(super) fn generate_pr_gate_step(filters: &PrFilters) -> String {
     generate_author_check(filters, &mut checks);
     generate_source_branch_check(filters, &mut checks);
     generate_target_branch_check(filters, &mut checks);
+    generate_commit_message_check(filters, &mut checks);
 
     // Tier 2 filters (REST API)
     if has_tier2_filters(filters) {
@@ -255,6 +256,26 @@ fn generate_target_branch_check(filters: &PrFilters, checks: &mut Vec<String>) {
                 "  else\n",
                 "    echo \"##[warning]PR filter target-branch did not match (pattern: {})\"\n",
                 "    echo \"##vso[build.addbuildtag]pr-gate:target-branch-mismatch\"\n",
+                "    SHOULD_RUN=false\n",
+                "  fi",
+            ),
+            pattern, pattern, pattern,
+        ));
+    }
+}
+
+fn generate_commit_message_check(filters: &PrFilters, checks: &mut Vec<String>) {
+    if let Some(cm) = &filters.commit_message {
+        let pattern = shell_escape(&cm.pattern);
+        checks.push(format!(
+            concat!(
+                "  # Commit message filter\n",
+                "  COMMIT_MSG=\"$(Build.SourceVersionMessage)\"\n",
+                "  if echo \"$COMMIT_MSG\" | grep -qE '{}'; then\n",
+                "    echo \"Filter: commit-message | Pattern: {} | Result: PASS\"\n",
+                "  else\n",
+                "    echo \"##[warning]PR filter commit-message did not match (pattern: {})\"\n",
+                "    echo \"##vso[build.addbuildtag]pr-gate:commit-message-mismatch\"\n",
                 "    SHOULD_RUN=false\n",
                 "  fi",
             ),
@@ -1211,5 +1232,66 @@ triggers:
         assert_eq!(filters.max_changes, Some(100));
         assert_eq!(filters.build_reason.as_ref().unwrap().include, vec!["PullRequest", "Manual"]);
         assert_eq!(filters.expression.as_ref().unwrap(), "eq(variables['Custom.Flag'], 'true')");
+    }
+
+    #[test]
+    fn test_gate_step_commit_message() {
+        let filters = PrFilters {
+            commit_message: Some(PatternFilter { pattern: "^(?!.*\\[skip-agent\\])".into() }),
+            ..Default::default()
+        };
+        let result = generate_pr_gate_step(&filters);
+        assert!(result.contains("Build.SourceVersionMessage"), "should check commit message variable");
+        assert!(result.contains("skip-agent"), "should include the pattern");
+        assert!(result.contains("pr-gate:commit-message-mismatch"), "should tag commit-message failures");
+    }
+
+    #[test]
+    fn test_on_config_deserialization_with_schedule() {
+        let yaml = r#"
+on:
+  schedule: daily around 14:00
+  pr:
+    filters:
+      title:
+        match: "\\[review\\]"
+"#;
+        let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let oc: OnConfig = serde_yaml::from_value(val["on"].clone()).unwrap();
+        assert!(oc.schedule.is_some(), "should have schedule");
+        assert!(oc.pr.is_some(), "should have pr");
+        assert!(oc.pipeline.is_none(), "should not have pipeline");
+    }
+
+    #[test]
+    fn test_on_config_deserialization_full() {
+        let yaml = r#"
+on:
+  schedule:
+    run: weekly on monday
+    branches: [main]
+  pipeline:
+    name: "Build Pipeline"
+    project: "OtherProject"
+    branches: [main]
+  pr:
+    branches:
+      include: [main]
+    filters:
+      title:
+        match: "\\[agent\\]"
+      commit-message:
+        match: "^(?!.*\\[skip-agent\\])"
+"#;
+        let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let oc: OnConfig = serde_yaml::from_value(val["on"].clone()).unwrap();
+        let schedule = oc.schedule.unwrap();
+        assert_eq!(schedule.expression(), "weekly on monday");
+        let pipeline = oc.pipeline.unwrap();
+        assert_eq!(pipeline.name, "Build Pipeline");
+        let pr = oc.pr.unwrap();
+        let filters = pr.filters.unwrap();
+        assert_eq!(filters.title.unwrap().pattern, "\\[agent\\]");
+        assert_eq!(filters.commit_message.unwrap().pattern, "^(?!.*\\[skip-agent\\])");
     }
 }
