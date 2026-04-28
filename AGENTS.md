@@ -28,6 +28,7 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 │   │   ├── common.rs     # Shared helpers across targets
 │   │   ├── standalone.rs # Standalone pipeline compiler
 │   │   ├── onees.rs      # 1ES Pipeline Template compiler
+│   │   ├── gitattributes.rs # .gitattributes management for compiled pipelines
 │   │   ├── extensions/   # CompilerExtension trait and infrastructure extensions
 │   │   │   ├── mod.rs    # Trait, Extension enum, collect_extensions(), re-exports
 │   │   │   ├── github.rs # Always-on GitHub MCP extension
@@ -797,16 +798,20 @@ This is used for the `workingDirectory` property of the copilot task.
 ## {{ source_path }}
 
 Should be replaced with the path to the agent markdown source file for Stage 3 execution. The path is relative to the workspace and depends on the effective workspace setting (see `{{ working_directory }}` for resolution logic):
-- `root`: `$(Build.SourcesDirectory)/agents/<filename>.md`
-- `repo`: `$(Build.SourcesDirectory)/$(Build.Repository.Name)/agents/<filename>.md`
+- `root`: `$(Build.SourcesDirectory)/<filename>.md`
+- `repo`: `$(Build.SourcesDirectory)/$(Build.Repository.Name)/<filename>.md`
+
+The path mirrors the relative path used at compile time — if compiled as `agents/my-agent.md`, the runtime path is `$(Build.SourcesDirectory)/agents/my-agent.md` (or the equivalent under `$(Build.Repository.Name)` for the `repo` workspace).
 
 Used by the execute command's --source parameter.
 
 ## {{ pipeline_path }}
 
-Should be replaced with the path to the compiled pipeline YAML file for runtime integrity checking. The path is derived from the output path's filename and uses `{{ working_directory }}` as the base (which gets resolved before this placeholder):
-- `root`: `$(Build.SourcesDirectory)/<filename>.yml`
-- `repo`: `$(Build.SourcesDirectory)/$(Build.Repository.Name)/<filename>.yml`
+Should be replaced with the path to the compiled pipeline YAML file for runtime integrity checking. The path is derived from the output path (preserving any directory structure) and uses `{{ working_directory }}` as the base (which gets resolved before this placeholder):
+- `root`: `$(Build.SourcesDirectory)/<relative-path>.yml`
+- `repo`: `$(Build.SourcesDirectory)/$(Build.Repository.Name)/<relative-path>.yml`
+
+For example, an output path of `pipelines/production/review.lock.yml` resolves to `$(Build.SourcesDirectory)/pipelines/production/review.lock.yml` under the `root` workspace.
 
 Used by the pipeline's integrity check step to verify the pipeline hasn't been modified outside the compilation process.
 
