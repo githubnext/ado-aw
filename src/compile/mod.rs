@@ -55,6 +55,21 @@ pub async fn compile_pipeline(
     skip_integrity: bool,
     debug_pipeline: bool,
 ) -> Result<()> {
+    compile_pipeline_inner(input_path, output_path, skip_integrity, debug_pipeline, true).await
+}
+
+/// Internal compile entry point that lets the caller opt out of the
+/// per-invocation `.gitattributes` sync. Batch callers
+/// (`compile_all_pipelines`) skip the per-pipeline sync to avoid an
+/// O(N²)-ish series of full-tree scans and instead perform a single sync
+/// after the whole batch completes.
+async fn compile_pipeline_inner(
+    input_path: &str,
+    output_path: Option<&str>,
+    skip_integrity: bool,
+    debug_pipeline: bool,
+    sync_gitattributes: bool,
+) -> Result<()> {
     let input_path = Path::new(input_path);
     info!("Compiling pipeline from: {}", input_path.display());
 
@@ -128,8 +143,11 @@ pub async fn compile_pipeline(
     // marked as a generated file with `merge=ours`. Best-effort: skip with a
     // debug-level log when the output is not inside a git repository, since
     // a non-git workspace is a valid use case (e.g. ad-hoc compilation).
-    if let Err(e) = sync_gitattributes_for_output(&yaml_output_path).await {
-        debug!("Skipped .gitattributes update: {}", e);
+    // Skipped during batch compilation (callers do one sync at the end).
+    if sync_gitattributes {
+        if let Err(e) = sync_gitattributes_for_output(&yaml_output_path).await {
+            debug!("Skipped .gitattributes update: {}", e);
+        }
     }
 
     Ok(())
@@ -202,7 +220,7 @@ pub async fn compile_all_pipelines(skip_integrity: bool, debug_pipeline: bool) -
         let source_str = source_path.to_string_lossy();
         let output_str = yaml_output_path.to_string_lossy();
 
-        match compile_pipeline(&source_str, Some(&output_str), skip_integrity, debug_pipeline).await {
+        match compile_pipeline_inner(&source_str, Some(&output_str), skip_integrity, debug_pipeline, false).await {
             Ok(()) => success_count += 1,
             Err(e) => {
                 eprintln!(
@@ -211,6 +229,17 @@ pub async fn compile_all_pipelines(skip_integrity: bool, debug_pipeline: bool) -
                 );
                 fail_count += 1;
             }
+        }
+    }
+
+    // One .gitattributes sync after the whole batch — avoids the N+1 scans
+    // that would happen if each pipeline triggered its own
+    // `sync_gitattributes_for_output` call. We reuse the already-detected
+    // pipeline list rather than re-scanning the tree.
+    if let Some(repo_root) = find_repo_root(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))) {
+        let paths: Vec<PathBuf> = detected.iter().map(|p| p.yaml_path.clone()).collect();
+        if let Err(e) = gitattributes::update_gitattributes(&repo_root, paths).await {
+            debug!("Skipped .gitattributes update: {}", e);
         }
     }
 

@@ -59,13 +59,29 @@ pub async fn update_gitattributes<P: AsRef<Path>>(
 }
 
 /// Normalize a path to forward slashes and strip any leading `./`.
+///
+/// The `.gitattributes` format treats whitespace as a separator between the
+/// pattern and the attributes, so any pattern containing a space, `"`, or `#`
+/// must be wrapped in double quotes (with embedded `"` escaped) for git to
+/// parse it as a single pattern. Paths without those characters are emitted
+/// unquoted to keep the file readable.
 fn normalize_path(p: &Path) -> String {
     let s = p.to_string_lossy().replace('\\', "/");
-    s.trim_start_matches("./").to_string()
+    let s = s.trim_start_matches("./");
+    if s.contains(' ') || s.contains('"') || s.contains('#') {
+        format!("\"{}\"", s.replace('"', "\\\""))
+    } else {
+        s.to_string()
+    }
 }
 
 /// Compute the new file contents given the existing file and the desired
 /// managed entries.
+///
+/// The managed block is always written at the end of the file. If a user has
+/// previously placed the block elsewhere (e.g. between user-managed entries),
+/// the first recompile will move it to EOF; user lines outside the block are
+/// preserved verbatim either way.
 fn render(existing: &str, entries: &BTreeSet<String>) -> String {
     let preserved = strip_managed_block(existing);
 
@@ -230,22 +246,28 @@ mod tests {
         let pipelines = vec![PathBuf::from("agents/x.lock.yml")];
         update_gitattributes(dir.path(), pipelines.clone()).await.unwrap();
         let first = std::fs::read_to_string(dir.path().join(".gitattributes")).unwrap();
-        let mtime_before = std::fs::metadata(dir.path().join(".gitattributes"))
-            .unwrap()
-            .modified()
-            .unwrap();
-
-        // Sleep briefly so a rewrite would change mtime
-        std::thread::sleep(std::time::Duration::from_millis(20));
 
         update_gitattributes(dir.path(), pipelines).await.unwrap();
         let second = std::fs::read_to_string(dir.path().join(".gitattributes")).unwrap();
-        let mtime_after = std::fs::metadata(dir.path().join(".gitattributes"))
-            .unwrap()
-            .modified()
-            .unwrap();
 
+        // Content equality is the contract; the writer additionally
+        // short-circuits the on-disk write when contents already match (see
+        // `update_gitattributes`), but we don't assert mtime here because
+        // mtime granularity varies by filesystem (e.g. 1s on macOS HFS+).
         assert_eq!(first, second);
-        assert_eq!(mtime_before, mtime_after, "file should not be rewritten");
+    }
+
+    #[tokio::test]
+    async fn quotes_paths_containing_spaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let pipelines = vec![PathBuf::from("my agents/pipeline.lock.yml")];
+        update_gitattributes(dir.path(), pipelines).await.unwrap();
+
+        let written = std::fs::read_to_string(dir.path().join(".gitattributes")).unwrap();
+        assert!(
+            written.contains("\"my agents/pipeline.lock.yml\" linguist-generated=true merge=ours"),
+            "expected quoted path entry, got:\n{}",
+            written
+        );
     }
 }
