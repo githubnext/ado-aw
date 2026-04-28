@@ -125,8 +125,9 @@ pub async fn compile_pipeline(
     );
 
     // Update .gitattributes at the repo root so every compiled pipeline is
-    // marked as a generated file with `merge=ours`. Best-effort: silently
-    // skip when the output is not inside a git repository.
+    // marked as a generated file with `merge=ours`. Best-effort: skip with a
+    // debug-level log when the output is not inside a git repository, since
+    // a non-git workspace is a valid use case (e.g. ad-hoc compilation).
     if let Err(e) = sync_gitattributes_for_output(&yaml_output_path).await {
         debug!("Skipped .gitattributes update: {}", e);
     }

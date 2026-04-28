@@ -96,32 +96,28 @@ fn render(existing: &str, entries: &BTreeSet<String>) -> String {
 }
 
 /// Remove any existing managed block (between BEGIN and END markers) from
-/// `content`. Lines outside the markers are preserved verbatim.
+/// `content`. Lines outside the markers are preserved verbatim. If the BEGIN
+/// marker appears without a matching END, everything from BEGIN to EOF is
+/// stripped (treated as a corrupted/truncated managed block).
 fn strip_managed_block(content: &str) -> String {
     let mut out = String::new();
     let mut in_block = false;
-    let mut found_end = true;
 
     for line in content.split_inclusive('\n') {
         let trimmed = line.trim_end_matches(['\n', '\r']);
         if !in_block && trimmed == BEGIN_MARKER {
             in_block = true;
-            found_end = false;
             continue;
         }
         if in_block {
             if trimmed == END_MARKER {
                 in_block = false;
-                found_end = true;
             }
             continue;
         }
         out.push_str(line);
     }
 
-    // If we entered the block and never found the end marker, we've already
-    // stripped to end-of-file, which is the safest behavior.
-    let _ = found_end;
     out
 }
 
