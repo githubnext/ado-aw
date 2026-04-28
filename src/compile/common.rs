@@ -426,6 +426,27 @@ pub fn compute_effective_workspace(
     }
 }
 
+/// Generate the directory where the trigger ("self") repository is checked out.
+///
+/// This is independent of `workspace:` — it depends only on whether any
+/// additional repositories are checked out:
+/// - No additional checkouts → `$(Build.SourcesDirectory)` (ADO checks `self`
+///   into the root).
+/// - One or more additional checkouts → `$(Build.SourcesDirectory)/$(Build.Repository.Name)`
+///   (ADO puts each checked-out repo, including `self`, into a subfolder named
+///   after the repository).
+///
+/// Used to anchor paths to files that ship in the trigger repo (e.g. the agent
+/// markdown source and the compiled pipeline yaml itself), regardless of where
+/// `workspace:` points the agent.
+pub fn generate_trigger_repo_directory(checkout: &[String]) -> String {
+    if checkout.is_empty() {
+        "$(Build.SourcesDirectory)".to_string()
+    } else {
+        "$(Build.SourcesDirectory)/$(Build.Repository.Name)".to_string()
+    }
+}
+
 /// Generate working directory based on workspace setting
 pub fn generate_working_directory(effective_workspace: &str) -> String {
     if let Some(alias) = effective_workspace.strip_prefix(WORKSPACE_ALIAS_PREFIX) {
@@ -596,15 +617,16 @@ pub const ADO_MCP_PACKAGE: &str = "@azure-devops/mcp";
 /// Reserved MCPG server name for the auto-configured ADO MCP.
 pub const ADO_MCP_SERVER_NAME: &str = "azure-devops";
 
-/// Generate source path for the execute command.
+/// Generate the agent markdown source path for Stage 3 execution.
 ///
-/// Returns a path using `{{ workspace }}` as the base, which gets resolved
-/// to the correct ADO working directory before this placeholder is replaced.
+/// Returns a path using `{{ trigger_repo_directory }}` as the base. The agent
+/// markdown lives in the trigger ("self") repo, so this anchor is independent
+/// of the user's `workspace:` setting (which may point at a different
+/// checked-out repo where the agent runs).
 ///
 /// The full relative path of the input file is preserved so that agents compiled
 /// from subdirectories (e.g. `ado-aw compile agents/ctf.md`) produce a correct
-/// runtime path (`$(Build.SourcesDirectory)/agents/ctf.md`) rather than a path
-/// that drops the directory component.
+/// runtime path rather than one that drops the directory component.
 ///
 /// Absolute paths fall back to using only the filename to avoid embedding
 /// machine-specific paths in the generated pipeline.
@@ -617,7 +639,7 @@ pub fn generate_source_path(input_path: &std::path::Path) -> String {
             .to_string()
     });
 
-    format!("{{{{ workspace }}}}/{}", relative)
+    format!("{{{{ trigger_repo_directory }}}}/{}", relative)
 }
 
 /// Generate the "Verify pipeline integrity" step for the pipeline YAML.
@@ -733,13 +755,13 @@ pub fn generate_debug_pipeline_replacements(debug: bool) -> Vec<(String, String)
 
 /// Generate the pipeline YAML path for integrity checking at ADO runtime.
 ///
-/// Returns a path using `{{ workspace }}` as the base, derived from the
-/// output path so it matches whatever `-o` was specified during compilation.
+/// Returns a path using `{{ trigger_repo_directory }}` as the base. The
+/// compiled pipeline yaml ships in the trigger ("self") repo, so this anchor
+/// is independent of the user's `workspace:` setting.
 ///
 /// The full relative path is preserved so that pipelines compiled into
 /// subdirectories (e.g. `agents/ctf.yml`) produce a correct runtime path
-/// (`$(Build.SourcesDirectory)/agents/ctf.yml`) rather than a path that
-/// drops the directory component.
+/// rather than one that drops the directory component.
 ///
 /// Absolute paths fall back to using only the filename to avoid embedding
 /// machine-specific paths in the generated pipeline.
@@ -752,7 +774,7 @@ pub fn generate_pipeline_path(output_path: &std::path::Path) -> String {
             .to_string()
     });
 
-    format!("{{{{ workspace }}}}/{}", relative)
+    format!("{{{{ trigger_repo_directory }}}}/{}", relative)
 }
 
 /// Normalize a path for embedding in a generated pipeline.
@@ -1726,6 +1748,7 @@ pub async fn compile_shared(
         &front_matter.name,
     )?;
     let working_directory = generate_working_directory(&effective_workspace);
+    let trigger_repo_directory = generate_trigger_repo_directory(&front_matter.checkout);
     let pipeline_resources = generate_pipeline_resources(&front_matter.triggers)?;
     let has_schedule = front_matter.schedule.is_some();
     let pr_trigger = generate_pr_trigger(&front_matter.triggers, has_schedule);
@@ -1844,6 +1867,9 @@ pub async fn compile_shared(
         // integrity step content itself contains {{ pipeline_path }}.
         ("{{ integrity_check }}", &integrity_check),
         ("{{ pipeline_path }}", &pipeline_path),
+        // trigger_repo_directory must come after source_path / pipeline_path
+        // because those expansions embed the placeholder.
+        ("{{ trigger_repo_directory }}", &trigger_repo_directory),
         ("{{ working_directory }}", &working_directory),
         ("{{ workspace }}", &working_directory),
         ("{{ agent_content }}", markdown_body),
@@ -2582,32 +2608,36 @@ mod tests {
 
     #[test]
     fn test_generate_source_path_preserves_directory() {
-        // Compiling agents/ctf.md should produce {{ workspace }}/agents/ctf.md,
-        // not {{ workspace }}/agents/ctf.md with a hardcoded agents/ prefix.
+        // Compiling agents/ctf.md should produce the trigger-repo-anchored
+        // path so the integrity check / Stage 3 executor find the file in the
+        // self repo regardless of the user's workspace setting.
         let path = std::path::Path::new("agents/ctf.md");
         let result = generate_source_path(path);
-        assert_eq!(result, "{{ workspace }}/agents/ctf.md");
+        assert_eq!(result, "{{ trigger_repo_directory }}/agents/ctf.md");
     }
 
     #[test]
     fn test_generate_source_path_nested_directory() {
         let path = std::path::Path::new("pipelines/production/review.md");
         let result = generate_source_path(path);
-        assert_eq!(result, "{{ workspace }}/pipelines/production/review.md");
+        assert_eq!(
+            result,
+            "{{ trigger_repo_directory }}/pipelines/production/review.md"
+        );
     }
 
     #[test]
     fn test_generate_source_path_strips_dot_slash() {
         let path = std::path::Path::new("./agents/my-agent.md");
         let result = generate_source_path(path);
-        assert_eq!(result, "{{ workspace }}/agents/my-agent.md");
+        assert_eq!(result, "{{ trigger_repo_directory }}/agents/my-agent.md");
     }
 
     #[test]
     fn test_generate_source_path_filename_only() {
         let path = std::path::Path::new("my-agent.md");
         let result = generate_source_path(path);
-        assert_eq!(result, "{{ workspace }}/my-agent.md");
+        assert_eq!(result, "{{ trigger_repo_directory }}/my-agent.md");
     }
 
     // ─── generate_pipeline_path ──────────────────────────────────────────────
@@ -2618,28 +2648,31 @@ mod tests {
         // output, but the embedded path was only ctf.yml (missing agents/).
         let path = std::path::Path::new("agents/ctf.yml");
         let result = generate_pipeline_path(path);
-        assert_eq!(result, "{{ workspace }}/agents/ctf.yml");
+        assert_eq!(result, "{{ trigger_repo_directory }}/agents/ctf.yml");
     }
 
     #[test]
     fn test_generate_pipeline_path_nested_directory() {
         let path = std::path::Path::new("pipelines/production/review.yml");
         let result = generate_pipeline_path(path);
-        assert_eq!(result, "{{ workspace }}/pipelines/production/review.yml");
+        assert_eq!(
+            result,
+            "{{ trigger_repo_directory }}/pipelines/production/review.yml"
+        );
     }
 
     #[test]
     fn test_generate_pipeline_path_strips_dot_slash() {
         let path = std::path::Path::new("./agents/my-agent.yml");
         let result = generate_pipeline_path(path);
-        assert_eq!(result, "{{ workspace }}/agents/my-agent.yml");
+        assert_eq!(result, "{{ trigger_repo_directory }}/agents/my-agent.yml");
     }
 
     #[test]
     fn test_generate_pipeline_path_filename_only() {
         let path = std::path::Path::new("pipeline.yml");
         let result = generate_pipeline_path(path);
-        assert_eq!(result, "{{ workspace }}/pipeline.yml");
+        assert_eq!(result, "{{ trigger_repo_directory }}/pipeline.yml");
     }
 
     #[test]
@@ -2652,7 +2685,7 @@ mod tests {
         // No .git marker — find_git_root will walk up and find nothing
         // (temp dirs are outside any repo).
         let result = generate_source_path(&abs_path);
-        assert_eq!(result, "{{ workspace }}/ctf.md");
+        assert_eq!(result, "{{ trigger_repo_directory }}/ctf.md");
     }
 
     #[test]
@@ -2660,7 +2693,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let abs_path = tmp.path().join("agents").join("ctf.yml");
         let result = generate_pipeline_path(&abs_path);
-        assert_eq!(result, "{{ workspace }}/ctf.yml");
+        assert_eq!(result, "{{ trigger_repo_directory }}/ctf.yml");
     }
 
     #[test]
@@ -2676,7 +2709,7 @@ mod tests {
         fs::write(tmp.path().join(".git"), "gitdir: fake").unwrap();
         let abs_path = agents_dir.join("ctf.md");
         let result = generate_source_path(&abs_path);
-        assert_eq!(result, "{{ workspace }}/agents/ctf.md");
+        assert_eq!(result, "{{ trigger_repo_directory }}/agents/ctf.md");
     }
 
     #[test]
@@ -2688,7 +2721,57 @@ mod tests {
         fs::write(tmp.path().join(".git"), "gitdir: fake").unwrap();
         let abs_path = agents_dir.join("ctf.yml");
         let result = generate_pipeline_path(&abs_path);
-        assert_eq!(result, "{{ workspace }}/agents/ctf.yml");
+        assert_eq!(result, "{{ trigger_repo_directory }}/agents/ctf.yml");
+    }
+
+    // ─── generate_trigger_repo_directory ─────────────────────────────────────
+
+    #[test]
+    fn test_generate_trigger_repo_directory_no_additional_checkouts() {
+        // With only `self` checked out, ADO places the repository content
+        // directly into $(Build.SourcesDirectory).
+        let result = generate_trigger_repo_directory(&[]);
+        assert_eq!(result, "$(Build.SourcesDirectory)");
+    }
+
+    #[test]
+    fn test_generate_trigger_repo_directory_with_additional_checkouts() {
+        // As soon as any additional repo is checked out, ADO places every
+        // checked-out repo (including `self`) into a subdirectory named
+        // after the repository.
+        let result =
+            generate_trigger_repo_directory(&["exp23-a7-nw".to_string()]);
+        assert_eq!(
+            result,
+            "$(Build.SourcesDirectory)/$(Build.Repository.Name)"
+        );
+    }
+
+    #[test]
+    fn test_trigger_repo_directory_independent_of_workspace_alias() {
+        // Regression: when workspace points at a checked-out alias, the
+        // trigger-repo directory must still anchor at the self repo, NOT at
+        // the alias subfolder. This is what makes the integrity check
+        // (and Stage 3 --source) find the pipeline yaml / agent markdown.
+        let checkout = vec!["exp23-a7-nw".to_string()];
+        let trigger = generate_trigger_repo_directory(&checkout);
+        let workspace = compute_effective_workspace(
+            &Some("exp23-a7-nw".to_string()),
+            &checkout,
+            "ctf",
+        )
+        .unwrap();
+        let working_dir = generate_working_directory(&workspace);
+
+        assert_eq!(
+            trigger,
+            "$(Build.SourcesDirectory)/$(Build.Repository.Name)"
+        );
+        assert_eq!(working_dir, "$(Build.SourcesDirectory)/exp23-a7-nw");
+        assert_ne!(
+            trigger, working_dir,
+            "trigger repo dir must differ from working dir when workspace points at an alias"
+        );
     }
 
     // ─── generate_integrity_check ────────────────────────────────────────────

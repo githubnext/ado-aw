@@ -797,23 +797,31 @@ This is used for the `workingDirectory` property of the copilot task.
 
 ## {{ source_path }}
 
-Should be replaced with the path to the agent markdown source file for Stage 3 execution. The path is relative to the workspace and depends on the effective workspace setting (see `{{ working_directory }}` for resolution logic):
-- `root`: `$(Build.SourcesDirectory)/<filename>.md`
-- `repo`: `$(Build.SourcesDirectory)/$(Build.Repository.Name)/<filename>.md`
+Should be replaced with the path to the agent markdown source file for Stage 3 execution. The path is anchored at the **trigger ("self") repository** via `{{ trigger_repo_directory }}` (see below), independent of the user's `workspace:` setting, and mirrors the relative path used at compile time:
+- No additional checkouts: `$(Build.SourcesDirectory)/<relative-path>.md`
+- Additional checkouts present: `$(Build.SourcesDirectory)/$(Build.Repository.Name)/<relative-path>.md`
 
-The path mirrors the relative path used at compile time — if compiled as `agents/my-agent.md`, the runtime path is `$(Build.SourcesDirectory)/agents/my-agent.md` (or the equivalent under `$(Build.Repository.Name)` for the `repo` workspace).
+For example, compiling `agents/my-agent.md` produces a runtime path of `$(Build.SourcesDirectory)/agents/my-agent.md` (or the equivalent under `$(Build.Repository.Name)` when additional repositories are checked out).
 
-Used by the execute command's --source parameter.
+Used by the execute command's --source parameter. The agent markdown only ever lives in the trigger repo, so this is intentionally not affected by `workspace:` pointing at a non-self alias.
 
 ## {{ pipeline_path }}
 
-Should be replaced with the path to the compiled pipeline YAML file for runtime integrity checking. The path is derived from the output path (preserving any directory structure) and uses `{{ working_directory }}` as the base (which gets resolved before this placeholder):
-- `root`: `$(Build.SourcesDirectory)/<relative-path>.yml`
-- `repo`: `$(Build.SourcesDirectory)/$(Build.Repository.Name)/<relative-path>.yml`
+Should be replaced with the path to the compiled pipeline YAML file for runtime integrity checking. The path is derived from the output path (preserving any directory structure) and is anchored at the **trigger ("self") repository** via `{{ trigger_repo_directory }}` (see below), independent of the user's `workspace:` setting:
+- No additional checkouts: `$(Build.SourcesDirectory)/<relative-path>.yml`
+- Additional checkouts present: `$(Build.SourcesDirectory)/$(Build.Repository.Name)/<relative-path>.yml`
 
-For example, an output path of `pipelines/production/review.lock.yml` resolves to `$(Build.SourcesDirectory)/pipelines/production/review.lock.yml` under the `root` workspace.
+For example, an output path of `pipelines/production/review.lock.yml` resolves to `$(Build.SourcesDirectory)/pipelines/production/review.lock.yml` when no additional repositories are checked out.
 
-Used by the pipeline's integrity check step to verify the pipeline hasn't been modified outside the compilation process.
+Used by the pipeline's integrity check step to verify the pipeline hasn't been modified outside the compilation process. The compiled yaml only ever lives in the trigger repo, so this is intentionally not affected by `workspace:` pointing at a non-self alias.
+
+## {{ trigger_repo_directory }}
+
+Should be replaced with the directory where the trigger ("self") repository is checked out. This is independent of the `workspace:` setting and depends only on whether any additional repositories are listed in `checkout:`:
+- No additional checkouts → `$(Build.SourcesDirectory)` (ADO checks `self` into the root)
+- One or more additional checkouts → `$(Build.SourcesDirectory)/$(Build.Repository.Name)` (ADO puts each checked-out repo, including `self`, into a subfolder named after the repository)
+
+Use this marker (rather than `{{ working_directory }}` / `{{ workspace }}`) for any path that refers to a file shipped in the trigger repo (e.g. the agent markdown source and the compiled pipeline yaml itself).
 
 ## {{ integrity_check }}
 
