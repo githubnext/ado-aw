@@ -305,7 +305,9 @@ jobs:
           # sed -u = unbuffered (line-by-line) so output appears immediately.
           # tee writes to both stdout (ADO pipeline log) and the artifact file.
           # pipefail (set above) ensures AWF's exit code propagates through the pipe.
-          sudo -E "$(Pipeline.Workspace)/awf/awf" \
+          # `env PATH="$PATH"` preserves the caller's PATH across the sudo boundary
+          # (sudo -E alone does not preserve PATH because of secure_path in sudoers).
+          sudo -E env PATH="$PATH" "$(Pipeline.Workspace)/awf/awf" \
             --allow-domains "{{ allowed_domains }}" \
             --skip-pull \
             --env-all \
@@ -470,7 +472,9 @@ jobs:
           THREAT_OUTPUT_FILE="$(Agent.TempDirectory)/threat-analysis-output.txt"
 
           # Stream threat analysis output in real-time with VSO command filtering
-          sudo -E "$(Pipeline.Workspace)/awf/awf" \
+          # `env PATH="$PATH"` preserves the caller's PATH across the sudo boundary
+          # (sudo -E alone does not preserve PATH because of secure_path in sudoers).
+          sudo -E env PATH="$PATH" "$(Pipeline.Workspace)/awf/awf" \
             --allow-domains "{{ allowed_domains }}" \
             --skip-pull \
             --env-all \
