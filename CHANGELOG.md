@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.18.1](https://github.com/githubnext/ado-aw/compare/v0.18.0...v0.18.1) (2026-04-28)
+
+
+### Bug Fixes
+
+* **compile:** anchor source/pipeline paths to trigger repo, not workspace ([#342](https://github.com/githubnext/ado-aw/issues/342)) ([0845490](https://github.com/githubnext/ado-aw/commit/0845490ab874a84d98f6edc33f8482371ca52d73))
+* **compile:** pin LF eol on managed gitattributes entries ([#340](https://github.com/githubnext/ado-aw/issues/340)) ([8efb5fb](https://github.com/githubnext/ado-aw/commit/8efb5fb1bb1b4e73b5b84c5e16ed862ca39c615a))
+
 ## [0.18.0](https://github.com/githubnext/ado-aw/compare/v0.17.1...v0.18.0) (2026-04-28)
 
 
