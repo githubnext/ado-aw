@@ -5,8 +5,13 @@
 //! allowlist, extends the bash command allow-list, and appends a prompt
 //! supplement informing the agent that Lean is available.
 //!
-//! Lean is installed via elan (the Lean toolchain manager) into `$HOME/.elan/bin`,
-//! then symlinked into `/tmp/awf-tools/` for AWF chroot compatibility.
+//! Lean is installed via elan (the Lean toolchain manager) into the default
+//! `$HOME/.elan` location, and `$HOME/.elan/bin` is added to the pipeline `PATH`
+//! via `##vso[task.prependpath]`. AWF captures the host runner's `PATH` (and
+//! any entries written to `$GITHUB_PATH`) into `AWF_HOST_PATH`, which the AWF
+//! agent entrypoint exports as `PATH` inside the chroot — so the lean/lake
+//! wrappers and the toolchain they re-exec into are reachable from the agent
+//! sandbox without any extra mounting or symlinking.
 
 pub mod extension;
 
@@ -81,32 +86,29 @@ pub const LEAN_BASH_COMMANDS: &[&str] = &["lean", "lake", "elan"];
 
 /// Generate the elan installation step for Lean 4.
 ///
-/// Installs elan (Lean toolchain manager) and the specified toolchain.
-/// Defaults to "stable" if no toolchain is specified in the front matter.
+/// Installs elan (Lean toolchain manager) and the specified toolchain into
+/// the default `$HOME/.elan` location, then prepends `$HOME/.elan/bin` to the
+/// pipeline `PATH` via `##vso[task.prependpath]`. AWF captures the host
+/// runner's `PATH` (and `$GITHUB_PATH` entries) into `AWF_HOST_PATH` and
+/// re-exports it as `PATH` inside the chroot, so `lean`/`lake`/`elan` are
+/// reachable from inside the agent sandbox without further configuration.
 ///
-/// Installs the entire elan tree under `/tmp/awf-tools/elan/` (by setting
-/// `ELAN_HOME` before running `elan-init.sh`). AWF auto-mounts `/tmp` into
-/// the agent container, so the wrappers (`/tmp/awf-tools/elan/bin/{lean,
-/// lake,elan}`), toolchain binaries, and shared libraries are all reachable
-/// at the same paths inside the sandbox. Installing into `$HOME/.elan/`
-/// (the elan default) does not work for AWF because `$HOME` is not mounted
-/// into the container, so the wrappers cannot re-exec into the toolchain.
+/// Defaults to "stable" if no toolchain is specified in the front matter.
 pub fn generate_lean_install(config: &LeanRuntimeConfig) -> String {
     let toolchain = config.toolchain().unwrap_or("stable");
     let script = format!(
         "\
-# Install elan under /tmp/awf-tools/elan so the entire toolchain (wrappers,
-# toolchain binaries, and libleanshared.so) is reachable inside the AWF
-# container, which auto-mounts /tmp but not $HOME.
-mkdir -p /tmp/awf-tools
-export ELAN_HOME=\"/tmp/awf-tools/elan\"
+# Install elan (Lean toolchain manager) into the default $HOME/.elan location.
+# Prepending $HOME/.elan/bin to the pipeline PATH via ##vso[task.prependpath]
+# is enough — AWF captures the host PATH into AWF_HOST_PATH and re-exports it
+# as PATH inside the agent chroot, so lean/lake/elan are reachable in the
+# sandbox without any extra mounting.
 curl https://elan.lean-lang.org/elan-init.sh -sSf \\
-  | sh -s -- -y --no-modify-path --default-toolchain {toolchain}
-echo \"##vso[task.prependpath]/tmp/awf-tools/elan/bin\"
-export PATH=\"/tmp/awf-tools/elan/bin:$PATH\"
-/tmp/awf-tools/elan/bin/lean --version || echo \"Lean installed via elan\"
-/tmp/awf-tools/elan/bin/lake --version || echo \"Lake installed via elan\"
-echo \"Lean tools installed at /tmp/awf-tools/elan/bin\""
+  | sh -s -- -y --default-toolchain {toolchain}
+echo \"##vso[task.prependpath]$HOME/.elan/bin\"
+export PATH=\"$HOME/.elan/bin:$PATH\"
+lean --version || echo \"Lean installed via elan\"
+lake --version || echo \"Lake installed via elan\""
     );
     // Indent each line of the script body by 4 spaces for YAML block scalar
     let indented: String = script
