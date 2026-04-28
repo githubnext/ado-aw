@@ -107,15 +107,23 @@ Alongside the correctly generated pipeline yaml, an agent file is generated from
 
 ## Development Guidelines
 
-### Commit Message Convention
+### Commit Message and PR Title Convention
 
-This project uses [Conventional Commits](https://www.conventionalcommits.org/) for automated releases via `release-please`. All commit messages **must** follow the format:
+This project uses [Conventional Commits](https://www.conventionalcommits.org/) for automated releases via `release-please`. **PR titles are the commit messages** — this repo uses squash-merge, so the PR title becomes the commit on `main`.
+
+All PR titles **must** follow the format:
 
 ```
 type(optional scope): description
 ```
 
-Common types: `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `ci`. Commits that don't follow this format will be ignored by release-please and won't trigger a release.
+Common types: `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `ci`. PRs with non-conforming titles will be blocked by CI and, if merged, will be silently dropped from the changelog.
+
+- **`feat`** — triggers a minor version bump and appears under "Features" in the changelog.
+- **`fix`** — triggers a patch version bump and appears under "Bug Fixes".
+- All other types (`chore`, `docs`, `refactor`, etc.) — no version bump, no changelog entry.
+
+A PR titled `Allow workspace to target a repo alias` will be **ignored** by release-please. The correct title is `feat(compile): allow workspace to target a repo alias`.
 
 ### Rust Code Style
 

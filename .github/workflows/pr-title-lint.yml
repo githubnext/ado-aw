@@ -1,0 +1,35 @@
+name: PR Title Lint
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  lint:
+    name: Validate Conventional Commit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # Conventional Commits: type(optional-scope): description
+          PATTERN='^(feat|fix|chore|docs|refactor|test|ci|perf|build|revert)(\([a-zA-Z0-9_-]+\))?!?: .+'
+          if echo "$PR_TITLE" | grep -qE "$PATTERN"; then
+            echo "✅ PR title follows Conventional Commits: $PR_TITLE"
+          else
+            echo "::error::PR title must follow Conventional Commits format: type(scope): description"
+            echo ""
+            echo "  Got:      $PR_TITLE"
+            echo "  Expected: type(scope): description"
+            echo ""
+            echo "  Valid types: feat, fix, chore, docs, refactor, test, ci, perf, build, revert"
+            echo "  Examples:"
+            echo "    feat(compile): add S360 Breeze MCP as first-party tool"
+            echo "    fix: gitattributes writer quote paths with spaces"
+            echo "    chore: update MCPG_VERSION to 0.3.0"
+            exit 1
+          fi
