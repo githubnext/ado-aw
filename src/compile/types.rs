@@ -895,6 +895,21 @@ pub struct PrFilters {
     /// Glob patterns for changed file paths
     #[serde(default, rename = "changed-files")]
     pub changed_files: Option<IncludeExcludeFilter>,
+    /// Only run during a specific time window (UTC)
+    #[serde(default, rename = "time-window")]
+    pub time_window: Option<TimeWindowFilter>,
+    /// Minimum number of changed files required
+    #[serde(default, rename = "min-changes")]
+    pub min_changes: Option<u32>,
+    /// Maximum number of changed files allowed
+    #[serde(default, rename = "max-changes")]
+    pub max_changes: Option<u32>,
+    /// Include/exclude by build reason (e.g., PullRequest, Manual, IndividualCI)
+    #[serde(default, rename = "build-reason")]
+    pub build_reason: Option<IncludeExcludeFilter>,
+    /// Raw ADO condition expression appended to the Agent job condition (escape hatch)
+    #[serde(default)]
+    pub expression: Option<String>,
 }
 
 impl SanitizeConfigTrait for PrFilters {
@@ -917,7 +932,28 @@ impl SanitizeConfigTrait for PrFilters {
         if let Some(ref mut c) = self.changed_files {
             c.sanitize_config_fields();
         }
+        if let Some(ref mut tw) = self.time_window {
+            tw.sanitize_config_fields();
+        }
+        if let Some(ref mut br) = self.build_reason {
+            br.sanitize_config_fields();
+        }
+        if let Some(ref mut e) = self.expression {
+            *e = crate::sanitize::sanitize_config(e);
+        }
     }
+}
+
+/// Time window filter — only run during a specific UTC time range.
+///
+/// Example: `{ start: "09:00", end: "17:00" }` means business hours UTC.
+/// Handles overnight windows (e.g., `{ start: "22:00", end: "06:00" }`).
+#[derive(Debug, Deserialize, Clone, SanitizeConfig)]
+pub struct TimeWindowFilter {
+    /// Start time in HH:MM format (UTC)
+    pub start: String,
+    /// End time in HH:MM format (UTC)
+    pub end: String,
 }
 
 /// A regex pattern filter.

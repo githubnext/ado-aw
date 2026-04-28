@@ -1287,27 +1287,49 @@ pub fn generate_finalize_steps(finalize_steps: &[serde_yaml::Value]) -> String {
 ///
 /// When PR filters are active, adds a condition that allows non-PR builds to
 /// proceed unconditionally, while PR builds require the gate to pass.
+/// When `expression` is provided, it's ANDed into the condition as an escape hatch.
 pub fn generate_agentic_depends_on(
     setup_steps: &[serde_yaml::Value],
     has_pr_filters: bool,
+    expression: Option<&str>,
 ) -> String {
     let has_setup = !setup_steps.is_empty() || has_pr_filters;
 
-    if !has_setup {
+    if !has_setup && expression.is_none() {
         return String::new();
     }
 
-    if has_pr_filters {
-        "dependsOn: Setup\n\
-         \x20   condition: |\n\
-         \x20     and(\n\
-         \x20       succeeded(),\n\
-         \x20       or(\n\
-         \x20         ne(variables['Build.Reason'], 'PullRequest'),\n\
-         \x20         eq(dependencies.Setup.outputs['prGate.SHOULD_RUN'], 'true')\n\
-         \x20       )\n\
-         \x20     )"
-            .to_string()
+    let depends = if has_setup {
+        "dependsOn: Setup\n"
+    } else {
+        ""
+    };
+
+    if has_pr_filters || expression.is_some() {
+        let mut parts = Vec::new();
+        parts.push("succeeded()".to_string());
+
+        if has_pr_filters {
+            parts.push(
+                "or(\n\
+                 \x20         ne(variables['Build.Reason'], 'PullRequest'),\n\
+                 \x20         eq(dependencies.Setup.outputs['prGate.SHOULD_RUN'], 'true')\n\
+                 \x20       )"
+                    .to_string(),
+            );
+        }
+
+        if let Some(expr) = expression {
+            parts.push(expr.to_string());
+        }
+
+        let condition_body = parts.join(",\n       ");
+        format!(
+            "{depends}\x20   condition: |\n\
+             \x20     and(\n\
+             \x20       {condition_body}\n\
+             \x20     )"
+        )
     } else {
         "dependsOn: Setup".to_string()
     }
@@ -1947,7 +1969,8 @@ pub async fn compile_shared(
     let parameters_yaml = generate_parameters(&parameters)?;
     let prepare_steps = generate_prepare_steps(&front_matter.steps, extensions)?;
     let finalize_steps = generate_finalize_steps(&front_matter.post_steps);
-    let agentic_depends_on = generate_agentic_depends_on(&front_matter.setup, has_pr_filters);
+    let expression = pr_filters.and_then(|f| f.expression.as_deref());
+    let agentic_depends_on = generate_agentic_depends_on(&front_matter.setup, has_pr_filters, expression);
     let job_timeout = generate_job_timeout(front_matter);
 
     // 9. Token acquisition and env vars

@@ -94,6 +94,11 @@ pub(super) fn generate_pr_gate_step(filters: &PrFilters) -> String {
         generate_changed_files_check(filters, &mut checks);
     }
 
+    // Tier 3 filters (advanced)
+    generate_time_window_check(filters, &mut checks);
+    generate_change_count_check(filters, &mut checks);
+    generate_build_reason_check(filters, &mut checks);
+
     let filter_checks = checks.join("\n\n");
 
     let mut step = String::new();
@@ -474,6 +479,186 @@ fn generate_changed_files_check(filters: &PrFilters, checks: &mut Vec<String>) {
     ));
 }
 
+// ─── Tier 3 filter generators (advanced) ────────────────────────────────────
+
+fn generate_time_window_check(filters: &PrFilters, checks: &mut Vec<String>) {
+    let Some(window) = &filters.time_window else {
+        return;
+    };
+
+    let start = shell_escape(&window.start);
+    let end = shell_escape(&window.end);
+
+    checks.push(format!(
+        concat!(
+            "  # Time window filter\n",
+            "  CURRENT_HOUR=$(date -u +%H)\n",
+            "  CURRENT_MIN=$(date -u +%M)\n",
+            "  CURRENT_MINUTES=$((CURRENT_HOUR * 60 + CURRENT_MIN))\n",
+            "  START_H=${{{}%%:*}}\n",
+            "  START_M=${{{}##*:}}\n",
+            "  START_MINUTES=$((10#$START_H * 60 + 10#$START_M))\n",
+            "  END_H=${{{}%%:*}}\n",
+            "  END_M=${{{}##*:}}\n",
+            "  END_MINUTES=$((10#$END_H * 60 + 10#$END_M))\n",
+            "  if [ $START_MINUTES -le $END_MINUTES ]; then\n",
+            "    # Same-day window\n",
+            "    if [ $CURRENT_MINUTES -ge $START_MINUTES ] && [ $CURRENT_MINUTES -lt $END_MINUTES ]; then\n",
+            "      IN_WINDOW=true\n",
+            "    else\n",
+            "      IN_WINDOW=false\n",
+            "    fi\n",
+            "  else\n",
+            "    # Overnight window (e.g., 22:00-06:00)\n",
+            "    if [ $CURRENT_MINUTES -ge $START_MINUTES ] || [ $CURRENT_MINUTES -lt $END_MINUTES ]; then\n",
+            "      IN_WINDOW=true\n",
+            "    else\n",
+            "      IN_WINDOW=false\n",
+            "    fi\n",
+            "  fi\n",
+            "  if [ \"$IN_WINDOW\" = \"true\" ]; then\n",
+            "    echo \"Filter: time-window | Window: {}-{} UTC | Result: PASS\"\n",
+            "  else\n",
+            "    echo \"##[warning]PR filter time-window: current time is outside {}-{} UTC\"\n",
+            "    echo \"##vso[build.addbuildtag]pr-gate:time-window-mismatch\"\n",
+            "    SHOULD_RUN=false\n",
+            "  fi",
+        ),
+        // Shell parameter expansion for start/end parsing
+        start, start, end, end,
+        // Diagnostic messages
+        start, end, start, end,
+    ));
+}
+
+fn generate_change_count_check(filters: &PrFilters, checks: &mut Vec<String>) {
+    let has_min = filters.min_changes.is_some();
+    let has_max = filters.max_changes.is_some();
+    if !has_min && !has_max {
+        return;
+    }
+
+    // Ensure we have CHANGED_FILES available (from changed-files filter or fresh fetch)
+    if filters.changed_files.is_none() {
+        // Need to fetch changed files count if not already fetched by changed-files filter
+        if !has_tier2_filters(filters) {
+            checks.push(
+                concat!(
+                    "  # Fetch PR change count (for min/max-changes)\n",
+                    "  PR_ID=\"$(System.PullRequest.PullRequestId)\"\n",
+                    "  ORG_URL=\"$(System.CollectionUri)\"\n",
+                    "  PROJECT=\"$(System.TeamProject)\"\n",
+                    "  REPO_ID=\"$(Build.Repository.ID)\"",
+                )
+                .to_string(),
+            );
+        }
+        checks.push(
+            concat!(
+                "  # Count changed files via iterations API\n",
+                "  if [ -z \"${LAST_ITER:-}\" ]; then\n",
+                "    ITERATIONS=$(curl -s \\\n",
+                "      -H \"Authorization: Bearer $SYSTEM_ACCESSTOKEN\" \\\n",
+                "      \"${ORG_URL}${PROJECT}/_apis/git/repositories/${REPO_ID}/pullRequests/${PR_ID}/iterations?api-version=7.1\")\n",
+                "    LAST_ITER=$(echo \"$ITERATIONS\" | python3 -c \"import sys,json; iters=json.load(sys.stdin).get('value',[]); print(iters[-1]['id'] if iters else '')\" 2>/dev/null || echo '')\n",
+                "  fi\n",
+                "  if [ -n \"$LAST_ITER\" ]; then\n",
+                "    CHANGES_RESP=$(curl -s \\\n",
+                "      -H \"Authorization: Bearer $SYSTEM_ACCESSTOKEN\" \\\n",
+                "      \"${ORG_URL}${PROJECT}/_apis/git/repositories/${REPO_ID}/pullRequests/${PR_ID}/iterations/${LAST_ITER}/changes?api-version=7.1\")\n",
+                "    FILE_COUNT=$(echo \"$CHANGES_RESP\" | python3 -c \"import sys,json; print(len(json.load(sys.stdin).get('changeEntries',[])))\" 2>/dev/null || echo '0')\n",
+                "  else\n",
+                "    FILE_COUNT=0\n",
+                "  fi\n",
+                "  echo \"Changed file count: $FILE_COUNT\"",
+            )
+            .to_string(),
+        );
+    } else {
+        // CHANGED_FILES already available from changed-files filter
+        checks.push(
+            "  # Count changed files (from changed-files data)\n  FILE_COUNT=$(echo \"$CHANGED_FILES\" | grep -c . || echo '0')\n  echo \"Changed file count: $FILE_COUNT\""
+                .to_string(),
+        );
+    }
+
+    if let Some(min) = filters.min_changes {
+        checks.push(format!(
+            concat!(
+                "  # Min changes filter\n",
+                "  if [ \"$FILE_COUNT\" -ge {} ]; then\n",
+                "    echo \"Filter: min-changes | Min: {} | Actual: $FILE_COUNT | Result: PASS\"\n",
+                "  else\n",
+                "    echo \"##[warning]PR filter min-changes: $FILE_COUNT files changed, minimum {} required\"\n",
+                "    echo \"##vso[build.addbuildtag]pr-gate:min-changes-mismatch\"\n",
+                "    SHOULD_RUN=false\n",
+                "  fi",
+            ),
+            min, min, min,
+        ));
+    }
+
+    if let Some(max) = filters.max_changes {
+        checks.push(format!(
+            concat!(
+                "  # Max changes filter\n",
+                "  if [ \"$FILE_COUNT\" -le {} ]; then\n",
+                "    echo \"Filter: max-changes | Max: {} | Actual: $FILE_COUNT | Result: PASS\"\n",
+                "  else\n",
+                "    echo \"##[warning]PR filter max-changes: $FILE_COUNT files changed, maximum {} allowed\"\n",
+                "    echo \"##vso[build.addbuildtag]pr-gate:max-changes-mismatch\"\n",
+                "    SHOULD_RUN=false\n",
+                "  fi",
+            ),
+            max, max, max,
+        ));
+    }
+}
+
+fn generate_build_reason_check(filters: &PrFilters, checks: &mut Vec<String>) {
+    let Some(build_reason) = &filters.build_reason else {
+        return;
+    };
+
+    let mut reason_check = String::from("  # Build reason filter\n  REASON=\"$(Build.Reason)\"\n");
+
+    if !build_reason.include.is_empty() {
+        let reasons: Vec<String> = build_reason.include.iter().map(|r| shell_escape(r)).collect();
+        let pattern = reasons.join("|");
+        reason_check.push_str(&format!(
+            concat!(
+                "  if echo \"$REASON\" | grep -qiE '^({})$'; then\n",
+                "    echo \"Filter: build-reason include | Result: PASS\"\n",
+                "  else\n",
+                "    echo \"##[warning]PR filter build-reason: $REASON not in include list\"\n",
+                "    echo \"##vso[build.addbuildtag]pr-gate:build-reason-mismatch\"\n",
+                "    SHOULD_RUN=false\n",
+                "  fi",
+            ),
+            pattern,
+        ));
+    }
+
+    if !build_reason.exclude.is_empty() {
+        let reasons: Vec<String> = build_reason.exclude.iter().map(|r| shell_escape(r)).collect();
+        let pattern = reasons.join("|");
+        reason_check.push_str(&format!(
+            concat!(
+                "\n  if echo \"$REASON\" | grep -qiE '^({})$'; then\n",
+                "    echo \"##[warning]PR filter build-reason: $REASON in exclude list\"\n",
+                "    echo \"##vso[build.addbuildtag]pr-gate:build-reason-excluded\"\n",
+                "    SHOULD_RUN=false\n",
+                "  else\n",
+                "    echo \"Filter: build-reason exclude | Result: PASS\"\n",
+                "  fi",
+            ),
+            pattern,
+        ));
+    }
+
+    checks.push(reason_check);
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 /// Shell-escape a string for use in a bash script.
@@ -502,6 +687,7 @@ pub(super) fn shell_escape(s: &str) -> String {
                         | '/'
                         | '@'
                         | ' '
+                        | ':'
                 )
         })
         .collect()
@@ -635,7 +821,7 @@ mod tests {
 
     #[test]
     fn test_generate_agentic_depends_on_with_pr_filters() {
-        let result = generate_agentic_depends_on(&[], true);
+        let result = generate_agentic_depends_on(&[], true, None);
         assert!(result.contains("dependsOn: Setup"), "should depend on Setup");
         assert!(result.contains("condition:"), "should have condition");
         assert!(result.contains("Build.Reason"), "should check Build.Reason");
@@ -645,14 +831,14 @@ mod tests {
     #[test]
     fn test_generate_agentic_depends_on_setup_only_no_condition() {
         let step: serde_yaml::Value = serde_yaml::from_str("bash: echo hello").unwrap();
-        let result = generate_agentic_depends_on(&[step], false);
+        let result = generate_agentic_depends_on(&[step], false, None);
         assert_eq!(result, "dependsOn: Setup");
         assert!(!result.contains("condition:"), "no condition without PR filters");
     }
 
     #[test]
     fn test_generate_agentic_depends_on_nothing() {
-        let result = generate_agentic_depends_on(&[], false);
+        let result = generate_agentic_depends_on(&[], false, None);
         assert!(result.is_empty());
     }
 
@@ -857,5 +1043,167 @@ mod tests {
         assert!(result.contains("PR_DATA"), "should make API call");
         assert!(result.contains("isDraft"), "should check draft");
         assert!(result.contains("run-agent"), "should check labels");
+    }
+
+    // ─── Tier 3 filter tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_gate_step_time_window() {
+        let filters = PrFilters {
+            time_window: Some(super::super::types::TimeWindowFilter {
+                start: "09:00".into(),
+                end: "17:00".into(),
+            }),
+            ..Default::default()
+        };
+        let result = generate_pr_gate_step(&filters);
+        assert!(result.contains("CURRENT_HOUR"), "should get current UTC hour");
+        assert!(result.contains("09:00"), "should include start time");
+        assert!(result.contains("17:00"), "should include end time");
+        assert!(result.contains("IN_WINDOW"), "should evaluate time window");
+        assert!(result.contains("pr-gate:time-window-mismatch"), "should tag time-window failures");
+    }
+
+    #[test]
+    fn test_gate_step_min_changes() {
+        let filters = PrFilters {
+            min_changes: Some(5),
+            ..Default::default()
+        };
+        let result = generate_pr_gate_step(&filters);
+        assert!(result.contains("FILE_COUNT"), "should count changed files");
+        assert!(result.contains("-ge 5"), "should check minimum 5 files");
+        assert!(result.contains("pr-gate:min-changes-mismatch"), "should tag min-changes failures");
+    }
+
+    #[test]
+    fn test_gate_step_max_changes() {
+        let filters = PrFilters {
+            max_changes: Some(50),
+            ..Default::default()
+        };
+        let result = generate_pr_gate_step(&filters);
+        assert!(result.contains("FILE_COUNT"), "should count changed files");
+        assert!(result.contains("-le 50"), "should check maximum 50 files");
+        assert!(result.contains("pr-gate:max-changes-mismatch"), "should tag max-changes failures");
+    }
+
+    #[test]
+    fn test_gate_step_min_and_max_changes() {
+        let filters = PrFilters {
+            min_changes: Some(2),
+            max_changes: Some(100),
+            ..Default::default()
+        };
+        let result = generate_pr_gate_step(&filters);
+        assert!(result.contains("-ge 2"), "should check min");
+        assert!(result.contains("-le 100"), "should check max");
+    }
+
+    #[test]
+    fn test_gate_step_build_reason_include() {
+        let filters = PrFilters {
+            build_reason: Some(IncludeExcludeFilter {
+                include: vec!["PullRequest".into(), "Manual".into()],
+                exclude: vec![],
+            }),
+            ..Default::default()
+        };
+        let result = generate_pr_gate_step(&filters);
+        assert!(result.contains("Build.Reason"), "should check build reason");
+        assert!(result.contains("PullRequest"), "should include PullRequest");
+        assert!(result.contains("Manual"), "should include Manual");
+        assert!(result.contains("pr-gate:build-reason-mismatch"), "should tag build-reason failures");
+    }
+
+    #[test]
+    fn test_gate_step_build_reason_exclude() {
+        let filters = PrFilters {
+            build_reason: Some(IncludeExcludeFilter {
+                include: vec![],
+                exclude: vec!["Schedule".into()],
+            }),
+            ..Default::default()
+        };
+        let result = generate_pr_gate_step(&filters);
+        assert!(result.contains("Schedule"), "should check excluded reason");
+        assert!(result.contains("pr-gate:build-reason-excluded"), "should tag excluded builds");
+    }
+
+    #[test]
+    fn test_agentic_depends_on_with_expression() {
+        let result = generate_agentic_depends_on(
+            &[],
+            false,
+            Some("eq(variables['Custom.ShouldRun'], 'true')"),
+        );
+        assert!(result.contains("condition:"), "should have condition");
+        assert!(result.contains("Custom.ShouldRun"), "should include expression");
+        assert!(result.contains("succeeded()"), "should still require succeeded");
+    }
+
+    #[test]
+    fn test_agentic_depends_on_with_pr_filters_and_expression() {
+        let result = generate_agentic_depends_on(
+            &[],
+            true,
+            Some("eq(variables['Custom.Flag'], 'yes')"),
+        );
+        assert!(result.contains("prGate.SHOULD_RUN"), "should check gate output");
+        assert!(result.contains("Custom.Flag"), "should include expression");
+        assert!(result.contains("Build.Reason"), "should check build reason");
+    }
+
+    #[test]
+    fn test_agentic_depends_on_expression_only_no_depends() {
+        let result = generate_agentic_depends_on(
+            &[],
+            false,
+            Some("eq(variables['Run'], 'true')"),
+        );
+        // No setup steps, no PR filters — no dependsOn, but still a condition
+        assert!(!result.contains("dependsOn"), "no dependsOn without setup/filters");
+        assert!(result.contains("condition:"), "should have condition from expression");
+    }
+
+    #[test]
+    fn test_gate_step_change_count_reuses_changed_files_data() {
+        let filters = PrFilters {
+            changed_files: Some(IncludeExcludeFilter {
+                include: vec!["src/**".into()],
+                ..Default::default()
+            }),
+            min_changes: Some(3),
+            ..Default::default()
+        };
+        let result = generate_pr_gate_step(&filters);
+        // Should use CHANGED_FILES from the changed-files filter, not make a new API call
+        assert!(result.contains("grep -c ."), "should count from existing CHANGED_FILES");
+    }
+
+    #[test]
+    fn test_pr_trigger_type_deserialization_tier3() {
+        let yaml = r#"
+triggers:
+  pr:
+    filters:
+      time-window:
+        start: "09:00"
+        end: "17:00"
+      min-changes: 5
+      max-changes: 100
+      build-reason:
+        include: [PullRequest, Manual]
+      expression: "eq(variables['Custom.Flag'], 'true')"
+"#;
+        let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let tc: TriggerConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
+        let filters = tc.pr.unwrap().filters.unwrap();
+        assert_eq!(filters.time_window.as_ref().unwrap().start, "09:00");
+        assert_eq!(filters.time_window.as_ref().unwrap().end, "17:00");
+        assert_eq!(filters.min_changes, Some(5));
+        assert_eq!(filters.max_changes, Some(100));
+        assert_eq!(filters.build_reason.as_ref().unwrap().include, vec!["PullRequest", "Manual"]);
+        assert_eq!(filters.expression.as_ref().unwrap(), "eq(variables['Custom.Flag'], 'true')");
     }
 }
