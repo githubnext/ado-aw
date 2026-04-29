@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.19.0](https://github.com/githubnext/ado-aw/compare/v0.18.2...v0.19.0) (2026-04-29)
+
+
+### Features
+
+* **compile:** add required_awf_mounts to CompilerExtension for Lean runtime ([#354](https://github.com/githubnext/ado-aw/issues/354)) ([f6f437b](https://github.com/githubnext/ado-aw/commit/f6f437bfd38bd2b6ef5665d55a830f2312a48dc2))
+* **engine:** update default model to claude-opus-4.7 ([#355](https://github.com/githubnext/ado-aw/issues/355)) ([dff681b](https://github.com/githubnext/ado-aw/commit/dff681b21ccc6df07d4f9ef7a1642517c933e5dd))
+
 ## [0.18.2](https://github.com/githubnext/ado-aw/compare/v0.18.1...v0.18.2) (2026-04-28)
 
 
