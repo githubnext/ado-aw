@@ -51,7 +51,7 @@ impl Compiler for StandaloneCompiler {
 
         // Standalone-specific values
         let allowed_domains = generate_allowed_domains(front_matter, &extensions)?;
-        let awf_mounts = generate_awf_mounts(&extensions, "            ");
+        let awf_mounts = generate_awf_mounts(&extensions);
         let enabled_tools_args = generate_enabled_tools_args(front_matter);
 
         let config_obj = generate_mcpg_config(front_matter, &ctx, &extensions)?;

@@ -339,7 +339,8 @@ extends:
                       --skip-pull \
                       --env-all \
                       --enable-host-access \
-                      {{ awf_mounts }}--container-workdir "{{ working_directory }}" \
+                      {{ awf_mounts }}
+                      --container-workdir "{{ working_directory }}" \
                       --log-level info \
                       --proxy-logs-dir "$(Agent.TempDirectory)/staging/logs/firewall" \
                       -- '{{ engine_run }}' \
