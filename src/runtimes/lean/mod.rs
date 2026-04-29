@@ -83,7 +83,12 @@ pub const LEAN_BASH_COMMANDS: &[&str] = &["lean", "lake", "elan"];
 ///
 /// Installs elan (Lean toolchain manager) and the specified toolchain.
 /// Defaults to "stable" if no toolchain is specified in the front matter.
-/// Symlinks lean tools into `/tmp/awf-tools/` for AWF chroot compatibility.
+/// Symlinks lean tools into `/tmp/awf-tools/` as a defense-in-depth fallback.
+///
+/// The primary mechanism for AWF chroot access is the `--mount` flag
+/// declared via `LeanExtension::required_awf_mounts()`, which mounts
+/// `$HOME/.elan` into the container. The symlinks here serve as a
+/// secondary fallback in case the mount is unavailable.
 pub fn generate_lean_install(config: &LeanRuntimeConfig) -> String {
     let toolchain = config.toolchain().unwrap_or("stable");
     let script = format!(
@@ -93,9 +98,10 @@ echo \"##vso[task.prependpath]$HOME/.elan/bin\"
 export PATH=\"$HOME/.elan/bin:$PATH\"
 lean --version || echo \"Lean installed via elan\"
 lake --version || echo \"Lake installed via elan\"
-# Symlink lean tools into /tmp/awf-tools/ so they are accessible
-# inside the AWF chroot (AWF mounts /tmp but reconstructs PATH
-# from standard system locations, excluding $HOME/.elan/bin).
+# Symlink lean tools into /tmp/awf-tools/ as a defense-in-depth fallback.
+# The primary mechanism is the --mount flag (via required_awf_mounts)
+# which mounts $HOME/.elan into the AWF container. These symlinks
+# serve as a secondary fallback.
 for cmd in lean lake elan; do
   if command -v \"$cmd\" >/dev/null 2>&1; then
     ln -sf \"$(command -v \"$cmd\")\" \"/tmp/awf-tools/$cmd\"

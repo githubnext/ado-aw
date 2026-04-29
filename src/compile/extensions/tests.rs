@@ -142,6 +142,20 @@ fn test_lean_prepare_steps() {
 }
 
 #[test]
+fn test_lean_required_awf_mounts() {
+    let ext = LeanExtension::new(LeanRuntimeConfig::Enabled(true));
+    let mounts = ext.required_awf_mounts();
+    assert_eq!(mounts.len(), 1);
+    assert_eq!(mounts[0], "$HOME/.elan:$HOME/.elan:ro");
+}
+
+#[test]
+fn test_default_required_awf_mounts_empty() {
+    let ext = GitHubExtension;
+    assert!(ext.required_awf_mounts().is_empty());
+}
+
+#[test]
 fn test_lean_validate_bash_disabled_warning() {
     let (fm, _) =
         parse_markdown("---\nname: test\ndescription: test\ntools:\n  bash: []\n---\n").unwrap();

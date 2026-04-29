@@ -339,7 +339,7 @@ extends:
                       --skip-pull \
                       --env-all \
                       --enable-host-access \
-                      --container-workdir "{{ working_directory }}" \
+                      {{ awf_mounts }}--container-workdir "{{ working_directory }}" \
                       --log-level info \
                       --proxy-logs-dir "$(Agent.TempDirectory)/staging/logs/firewall" \
                       -- '{{ engine_run }}' \
@@ -505,7 +505,7 @@ extends:
                       --allow-domains "{{ allowed_domains }}" \
                       --skip-pull \
                       --env-all \
-                      --container-workdir "{{ working_directory }}" \
+                      {{ awf_mounts }}--container-workdir "{{ working_directory }}" \
                       --log-level info \
                       --proxy-logs-dir "$(Agent.TempDirectory)/threat-analysis-logs/firewall" \
                       -- '{{ engine_run_detection }}' \

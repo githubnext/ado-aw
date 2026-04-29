@@ -284,6 +284,23 @@ pub trait CompilerExtension {
     fn required_pipeline_vars(&self) -> Vec<PipelineEnvMapping> {
         vec![]
     }
+
+    /// AWF volume mounts this extension requires inside the chroot.
+    ///
+    /// Returns mount specifications in AWF `--mount` format:
+    /// `host_path:container_path[:mode]` (e.g., `"$HOME/.elan:$HOME/.elan:ro"`).
+    ///
+    /// AWF replaces `$HOME` with an empty directory overlay for security,
+    /// only mounting specific known subdirectories. Extensions that install
+    /// toolchains under `$HOME` (e.g., elan for Lean 4) must declare mounts
+    /// here so the toolchain is accessible inside the chroot.
+    ///
+    /// Shell variables like `$HOME` are expanded at runtime by bash, not at
+    /// compile time. AWF auto-adjusts container paths for chroot by prefixing
+    /// `/host`.
+    fn required_awf_mounts(&self) -> Vec<String> {
+        vec![]
+    }
 }
 
 /// Maps a container environment variable to a pipeline variable.
@@ -357,6 +374,9 @@ macro_rules! extension_enum {
             }
             fn required_pipeline_vars(&self) -> Vec<PipelineEnvMapping> {
                 match self { $( $Enum::$Variant(e) => e.required_pipeline_vars(), )+ }
+            }
+            fn required_awf_mounts(&self) -> Vec<String> {
+                match self { $( $Enum::$Variant(e) => e.required_awf_mounts(), )+ }
             }
         }
     };

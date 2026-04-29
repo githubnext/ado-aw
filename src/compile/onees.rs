@@ -14,6 +14,7 @@ use super::common::{
     AWF_VERSION, MCPG_VERSION, MCPG_IMAGE, MCPG_PORT, MCPG_DOMAIN,
     CompileConfig, compile_shared,
     generate_allowed_domains,
+    generate_awf_mounts,
     generate_enabled_tools_args,
     generate_mcpg_config, generate_mcpg_docker_env, generate_mcpg_step_env,
     format_steps_yaml_indented,
@@ -49,6 +50,7 @@ impl Compiler for OneESCompiler {
 
         // Generate values shared with standalone that are passed as extra replacements
         let allowed_domains = generate_allowed_domains(front_matter, &extensions)?;
+        let awf_mounts = generate_awf_mounts(&extensions);
         let enabled_tools_args = generate_enabled_tools_args(front_matter);
 
         let mcpg_config = generate_mcpg_config(front_matter, &ctx, &extensions)?;
@@ -72,6 +74,7 @@ impl Compiler for OneESCompiler {
                 ("{{ mcpg_port }}".into(), MCPG_PORT.to_string()),
                 ("{{ mcpg_domain }}".into(), MCPG_DOMAIN.into()),
                 ("{{ allowed_domains }}".into(), allowed_domains),
+                ("{{ awf_mounts }}".into(), awf_mounts),
                 ("{{ enabled_tools_args }}".into(), enabled_tools_args),
                 ("{{ mcpg_config }}".into(), mcpg_config_json),
                 ("{{ mcpg_docker_env }}".into(), mcpg_docker_env),

@@ -56,6 +56,10 @@ the toolchain. Lean files use the `.lean` extension.\n"
         vec![generate_lean_install(&self.config)]
     }
 
+    fn required_awf_mounts(&self) -> Vec<String> {
+        vec!["$HOME/.elan:$HOME/.elan:ro".to_string()]
+    }
+
     fn validate(&self, ctx: &CompileContext) -> Result<Vec<String>> {
         let mut warnings = Vec::new();
 

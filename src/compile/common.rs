@@ -1670,6 +1670,35 @@ pub fn generate_allowed_domains(
     Ok(allowlist.join(","))
 }
 
+/// Generate AWF `--mount` flags from extension-declared volume mounts.
+///
+/// Collects `required_awf_mounts()` from all extensions and formats them
+/// as `--mount "spec"` CLI flags for the AWF invocation. Each mount spec
+/// uses the AWF format: `host_path:container_path[:mode]`.
+///
+/// Returns an empty string if no extensions require mounts, or a string
+/// like `--mount "$HOME/.elan:$HOME/.elan:ro" ` with trailing space for
+/// inline concatenation with subsequent CLI flags.
+pub fn generate_awf_mounts(
+    extensions: &[super::extensions::Extension],
+) -> String {
+    let mounts: Vec<String> = extensions
+        .iter()
+        .flat_map(|ext| ext.required_awf_mounts())
+        .collect();
+
+    if mounts.is_empty() {
+        return String::new();
+    }
+
+    mounts
+        .iter()
+        .map(|m| format!("--mount \"{}\"", m))
+        .collect::<Vec<_>>()
+        .join(" ")
+        + " "
+}
+
 // ==================== Shared compile flow ====================
 
 /// Target-specific overrides for the shared compile flow.
@@ -3717,6 +3746,28 @@ mod tests {
         assert!(result.contains("agent_memory"), "memory steps present");
         assert!(result.contains("elan-init.sh"), "lean install present");
         assert!(result.contains("Lean 4"), "lean prompt present");
+    }
+
+    // ─── generate_awf_mounts ──────────────────────────────────────────────
+
+    #[test]
+    fn test_generate_awf_mounts_no_extensions() {
+        let fm = minimal_front_matter();
+        let exts = crate::compile::extensions::collect_extensions(&fm);
+        let result = generate_awf_mounts(&exts);
+        assert!(result.is_empty(), "no mounts without lean");
+    }
+
+    #[test]
+    fn test_generate_awf_mounts_with_lean() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nruntimes:\n  lean: true\n---\n",
+        ).unwrap();
+        let exts = crate::compile::extensions::collect_extensions(&fm);
+        let result = generate_awf_mounts(&exts);
+        assert!(result.contains("--mount"), "should contain --mount flag");
+        assert!(result.contains(".elan"), "should reference .elan directory");
+        assert!(result.contains(":ro"), "should be read-only");
     }
 
     // ═══════════════════════════════════════════════════════════════════════
