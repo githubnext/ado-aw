@@ -38,7 +38,7 @@ const BLOCKED_ENV_KEYS: &[&str] = &[
 ];
 
 /// Default model used by the Copilot engine when no model is specified in front matter.
-pub const DEFAULT_COPILOT_MODEL: &str = "claude-opus-4.5";
+pub const DEFAULT_COPILOT_MODEL: &str = "claude-opus-4.7";
 
 /// Default pinned version of the Copilot CLI NuGet package.
 /// Override per-agent via `engine: { id: copilot, version: "1.0.35" }` in front matter.
@@ -595,8 +595,8 @@ mod tests {
         let params = Engine::Copilot
             .args(&front_matter, &collect_extensions(&front_matter))
             .unwrap();
-        // Default engine (copilot) uses default model (claude-opus-4.5)
-        assert!(params.contains("--model claude-opus-4.5"));
+        // Default engine (copilot) uses default model (claude-opus-4.7)
+        assert!(params.contains("--model claude-opus-4.7"));
         assert!(params.contains("--disable-builtin-mcps"));
     }
 
@@ -631,7 +631,7 @@ mod tests {
         let params = engine
             .args(&front_matter, &collect_extensions(&front_matter))
             .unwrap();
-        assert!(params.contains("--model claude-opus-4.5"));
+        assert!(params.contains("--model claude-opus-4.7"));
     }
 
     #[test]

@@ -117,7 +117,7 @@ Should be replaced with the full AWF `--` command string for the Agent job. Gene
 The binary path defaults to `/tmp/awf-tools/copilot` but can be overridden via `engine.command`. The engine controls how the prompt is delivered (`--prompt "$(cat ...)"`), and how MCP config is referenced (`--additional-mcp-config @...`).
 
 Engine args include:
-- `--model <model>` - AI model from `engine` front matter field (default: claude-opus-4.5)
+- `--model <model>` - AI model from `engine` front matter field (default: claude-opus-4.7)
 - `--agent <name>` - Custom agent file from `engine.agent` (selects from `.github/agents/`)
 - `--api-target <hostname>` - Custom API endpoint from `engine.api-target` (GHES/GHEC)
 - `--no-ask-user` - Prevents interactive prompts

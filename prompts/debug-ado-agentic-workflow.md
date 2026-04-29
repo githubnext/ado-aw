@@ -141,13 +141,13 @@ network:
   # Correct — engine identifier with model
   engine:
     id: copilot
-    model: claude-opus-4.5
+    model: claude-opus-4.7
   ```
 - **Timeout**: Agent hits the Azure DevOps job timeout (default 60 minutes). Set an explicit timeout:
   ```yaml
   engine:
     id: copilot
-    model: claude-opus-4.5
+    model: claude-opus-4.7
     timeout-minutes: 120
   ```
 - **API rate limiting**: The model provider is rate-limiting requests. Check Copilot CLI logs for 429 responses.

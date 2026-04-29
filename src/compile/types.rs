@@ -156,7 +156,7 @@ pub struct ScheduleOptions {
 /// # Object format (with additional options)
 /// engine:
 ///   id: copilot
-///   model: claude-opus-4.5
+///   model: claude-opus-4.7
 ///   timeout-minutes: 30
 ///   version: latest
 ///   agent: my-custom-agent

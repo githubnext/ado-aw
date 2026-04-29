@@ -13,7 +13,7 @@ engine: copilot
 # Object format with additional options
 engine:
   id: copilot
-  model: claude-opus-4.5
+  model: claude-opus-4.7
   timeout-minutes: 30
 ```
 
@@ -22,7 +22,7 @@ engine:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `id` | string | `copilot` | Engine identifier. Currently only `copilot` (GitHub Copilot CLI) is supported. |
-| `model` | string | `claude-opus-4.5` | AI model to use. Options include `claude-sonnet-4.5`, `gpt-5.2-codex`, `gemini-3-pro-preview`, etc. |
+| `model` | string | `claude-opus-4.7` | AI model to use. Options include `claude-sonnet-4.5`, `gpt-5.2-codex`, `gemini-3-pro-preview`, etc. |
 | `timeout-minutes` | integer | *(none)* | Maximum time in minutes the agent job is allowed to run. Sets `timeoutInMinutes` on the `Agent` job in the generated pipeline. |
 | `version` | string | *(none)* | Engine CLI version to install (e.g., `"0.0.422"`, `"latest"`). Overrides the pinned `COPILOT_CLI_VERSION`. Set to `"latest"` to use the newest available version. |
 | `agent` | string | *(none)* | Custom agent file identifier (Copilot only). Adds `--agent <name>` to the CLI invocation, selecting a custom agent from `.github/agents/`. |
