@@ -50,7 +50,7 @@ impl Compiler for OneESCompiler {
 
         // Generate values shared with standalone that are passed as extra replacements
         let allowed_domains = generate_allowed_domains(front_matter, &extensions)?;
-        let awf_mounts = generate_awf_mounts(&extensions);
+        let awf_mounts = generate_awf_mounts(&extensions, "                      ");
         let enabled_tools_args = generate_enabled_tools_args(front_matter);
 
         let mcpg_config = generate_mcpg_config(front_matter, &ctx, &extensions)?;

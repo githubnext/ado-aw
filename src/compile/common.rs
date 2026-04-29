@@ -1673,16 +1673,24 @@ pub fn generate_allowed_domains(
 /// Generate AWF `--mount` flags from extension-declared volume mounts.
 ///
 /// Collects `required_awf_mounts()` from all extensions and formats them
-/// as `--mount "spec"` CLI flags for the AWF invocation. Each mount spec
-/// uses the AWF format: `host_path:container_path[:mode]`.
+/// as `--mount "spec"` CLI flags for the AWF invocation.
 ///
-/// Returns an empty string if no extensions require mounts, or a string
-/// like `--mount "$HOME/.elan:$HOME/.elan:ro" ` with trailing space for
-/// inline concatenation with subsequent CLI flags.
+/// Each mount spec is rendered using its [`Display`][std::fmt::Display] impl
+/// (Docker bind-mount format: `host_path:container_path[:mode]`).
+///
+/// Returns an empty string if no extensions require mounts.
+/// When mounts are present, each flag occupies its own continuation line:
+/// `--mount "spec" \` followed by a newline and `indent`, ready to precede
+/// the next AWF flag inline in the template.
+///
+/// `indent` should match the whitespace that precedes sibling AWF flags in
+/// the template (e.g. `"            "` for standalone, `"                      "`
+/// for 1ES).
 pub fn generate_awf_mounts(
     extensions: &[super::extensions::Extension],
+    indent: &str,
 ) -> String {
-    let mounts: Vec<String> = extensions
+    let mounts: Vec<super::extensions::AwfMount> = extensions
         .iter()
         .flat_map(|ext| ext.required_awf_mounts())
         .collect();
@@ -1693,10 +1701,9 @@ pub fn generate_awf_mounts(
 
     mounts
         .iter()
-        .map(|m| format!("--mount \"{}\"", m))
+        .map(|m| format!("--mount \"{}\" \\\n{}", m, indent))
         .collect::<Vec<_>>()
-        .join(" ")
-        + " "
+        .join("")
 }
 
 // ==================== Shared compile flow ====================
@@ -3754,7 +3761,7 @@ mod tests {
     fn test_generate_awf_mounts_no_extensions() {
         let fm = minimal_front_matter();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let result = generate_awf_mounts(&exts);
+        let result = generate_awf_mounts(&exts, "            ");
         assert!(result.is_empty(), "no mounts without lean");
     }
 
@@ -3764,10 +3771,12 @@ mod tests {
             "---\nname: test\ndescription: test\nruntimes:\n  lean: true\n---\n",
         ).unwrap();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let result = generate_awf_mounts(&exts);
+        let result = generate_awf_mounts(&exts, "            ");
         assert!(result.contains("--mount"), "should contain --mount flag");
         assert!(result.contains(".elan"), "should reference .elan directory");
         assert!(result.contains(":ro"), "should be read-only");
+        // Each mount ends with ` \` continuation and newline+indent
+        assert!(result.contains("\\\n            "), "mount should be its own continuation line");
     }
 
     // ═══════════════════════════════════════════════════════════════════════

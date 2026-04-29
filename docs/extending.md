@@ -38,7 +38,7 @@ pub trait CompilerExtension: Send {
     fn prompt_supplement(&self) -> Option<String>;              // Agent prompt markdown
     fn prepare_steps(&self) -> Vec<String>;                    // Pipeline steps (install, etc.)
     fn mcpg_servers(&self, ctx) -> Result<Vec<(String, McpgServerConfig)>>; // MCPG entries
-    fn required_awf_mounts(&self) -> Vec<String>;              // AWF Docker volume mounts
+    fn required_awf_mounts(&self) -> Vec<AwfMount>;            // AWF Docker volume mounts
     fn validate(&self, ctx) -> Result<Vec<String>>;            // Compile-time warnings
 }
 ```

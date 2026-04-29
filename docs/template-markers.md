@@ -367,9 +367,9 @@ The output is formatted as a comma-separated string (e.g., `github.com,*.dev.azu
 
 ## {{ awf_mounts }}
 
-Should be replaced with `--mount` flags for the AWF invocation, collected from `CompilerExtension::required_awf_mounts()`. Each extension can declare volume mounts needed inside the AWF chroot (e.g., the Lean runtime mounts `$HOME/.elan` so the elan toolchain is accessible).
+Replaced with `--mount` flags for the **agent job** AWF invocation only (not the detection job), collected from `CompilerExtension::required_awf_mounts()`. Each extension can declare volume mounts needed inside the AWF chroot as [`AwfMount`][AwfMount] values (e.g., the Lean runtime mounts `$HOME/.elan` so the elan toolchain is accessible).
 
-When no extensions declare mounts, this is replaced with an empty string (no `--mount` flags). When mounts are present, each is formatted as `--mount "spec" \` with trailing backslash for shell line continuation.
+When no extensions declare mounts, this is replaced with an empty string (no `--mount` flags). When mounts are present, each is formatted as `--mount "spec" \` on its own continuation line (followed by a newline and appropriate indentation for the next AWF flag).
 
 AWF replaces `$HOME` with an empty directory overlay for security; only explicitly mounted subdirectories are accessible inside the chroot. Shell variables like `$HOME` are expanded at runtime by bash.
 

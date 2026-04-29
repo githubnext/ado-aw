@@ -17,6 +17,8 @@
 use anyhow::Result;
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::fmt;
+use std::str::FromStr;
 
 use super::types::FrontMatter;
 
@@ -287,9 +289,6 @@ pub trait CompilerExtension {
 
     /// AWF volume mounts this extension requires inside the chroot.
     ///
-    /// Returns mount specifications in AWF `--mount` format:
-    /// `host_path:container_path[:mode]` (e.g., `"$HOME/.elan:$HOME/.elan:ro"`).
-    ///
     /// AWF replaces `$HOME` with an empty directory overlay for security,
     /// only mounting specific known subdirectories. Extensions that install
     /// toolchains under `$HOME` (e.g., elan for Lean 4) must declare mounts
@@ -298,8 +297,88 @@ pub trait CompilerExtension {
     /// Shell variables like `$HOME` are expanded at runtime by bash, not at
     /// compile time. AWF auto-adjusts container paths for chroot by prefixing
     /// `/host`.
-    fn required_awf_mounts(&self) -> Vec<String> {
+    fn required_awf_mounts(&self) -> Vec<AwfMount> {
         vec![]
+    }
+}
+
+/// An AWF `--mount` specification in Docker bind-mount format.
+///
+/// The format is `host_path:container_path[:mode]`
+/// (e.g. `"$HOME/.elan:$HOME/.elan:ro"`).
+///
+/// Serializes and deserializes as the Docker format string so it round-trips
+/// cleanly through YAML/JSON configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AwfMount {
+    /// Host path to bind-mount into the container.
+    pub host_path: String,
+    /// Corresponding path inside the container.
+    pub container_path: String,
+    /// Optional mount mode (e.g. `"ro"` for read-only, `"rw"` for read-write).
+    pub mode: Option<String>,
+}
+
+impl AwfMount {
+    /// Creates an `AwfMount` with the given host path, container path, and
+    /// optional mode.
+    pub fn new(
+        host_path: impl Into<String>,
+        container_path: impl Into<String>,
+        mode: Option<impl Into<String>>,
+    ) -> Self {
+        Self {
+            host_path: host_path.into(),
+            container_path: container_path.into(),
+            mode: mode.map(Into::into),
+        }
+    }
+}
+
+impl fmt::Display for AwfMount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(mode) = &self.mode {
+            write!(f, "{}:{}:{}", self.host_path, self.container_path, mode)
+        } else {
+            write!(f, "{}:{}", self.host_path, self.container_path)
+        }
+    }
+}
+
+impl FromStr for AwfMount {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parts: Vec<&str> = s.splitn(3, ':').collect();
+        match parts.as_slice() {
+            [host, container] => Ok(Self {
+                host_path: (*host).to_string(),
+                container_path: (*container).to_string(),
+                mode: None,
+            }),
+            [host, container, mode] => Ok(Self {
+                host_path: (*host).to_string(),
+                container_path: (*container).to_string(),
+                mode: Some((*mode).to_string()),
+            }),
+            _ => anyhow::bail!(
+                "Invalid AWF mount spec '{}': expected 'host:container[:mode]'",
+                s
+            ),
+        }
+    }
+}
+
+impl serde::Serialize for AwfMount {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AwfMount {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
     }
 }
 
@@ -375,7 +454,7 @@ macro_rules! extension_enum {
             fn required_pipeline_vars(&self) -> Vec<PipelineEnvMapping> {
                 match self { $( $Enum::$Variant(e) => e.required_pipeline_vars(), )+ }
             }
-            fn required_awf_mounts(&self) -> Vec<String> {
+            fn required_awf_mounts(&self) -> Vec<AwfMount> {
                 match self { $( $Enum::$Variant(e) => e.required_awf_mounts(), )+ }
             }
         }

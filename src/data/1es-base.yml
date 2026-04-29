@@ -505,7 +505,7 @@ extends:
                       --allow-domains "{{ allowed_domains }}" \
                       --skip-pull \
                       --env-all \
-                      {{ awf_mounts }}--container-workdir "{{ working_directory }}" \
+                      --container-workdir "{{ working_directory }}" \
                       --log-level info \
                       --proxy-logs-dir "$(Agent.TempDirectory)/threat-analysis-logs/firewall" \
                       -- '{{ engine_run_detection }}' \
