@@ -876,119 +876,10 @@ impl Executor for CreatePrResult {
         //   with git apply --3way as fallback
         // - With exclusions: use git apply --3way directly (git am does not support
         //   --exclude flags; git apply does)
-        let use_git_apply = !exclude_args.is_empty();
-        let patch_committed;
-
-        if use_git_apply {
-            debug!("Using git apply --3way (excluded-files configured)");
-            let mut apply_args: Vec<String> = vec!["apply".into(), "--3way".into()];
-            apply_args.extend(exclude_args.iter().cloned());
-            apply_args.push(patch_path.to_string_lossy().into_owned());
-            let apply_output = Command::new("git")
-                .args(&apply_args)
-                .current_dir(&worktree_path)
-                .output()
-                .await
-                .context("Failed to run git apply --3way")?;
-
-            if !apply_output.status.success() {
-                let err_msg = format!(
-                    "Patch could not be applied (conflicts): {}",
-                    String::from_utf8_lossy(&apply_output.stderr)
-                );
-                warn!("{}", err_msg);
-                return Ok(ExecutionResult::failure(err_msg));
-            }
-            debug!("Patch applied with git apply --3way");
-
-            // Scan for unresolved conflict markers in working tree files.
-            // Use specific patterns: <<<<<<< and >>>>>>> always have a trailing space
-            // and marker (e.g., "<<<<<<< HEAD"), while ======= is on its own line.
-            // We require the trailing space on <<<<<<< and >>>>>>> to avoid false
-            // positives from reStructuredText/markdown heading underlines.
-            let conflict_check = Command::new("git")
-                .args(["grep", "-l", "-E", r"^(<<<<<<<\s|>>>>>>>\s)"])
-                .current_dir(&worktree_path)
-                .output()
-                .await
-                .context("Failed to run git grep for conflict markers")?;
-
-            if conflict_check.status.success() {
-                let conflicting_files =
-                    String::from_utf8_lossy(&conflict_check.stdout).trim().to_string();
-                let err_msg = format!(
-                    "Patch applied with unresolved conflict markers in: {}",
-                    conflicting_files
-                );
-                warn!("{}", err_msg);
-                return Ok(ExecutionResult::failure(err_msg));
-            }
-
-            patch_committed = false;
-        } else {
-            // No exclusions — use git am --3way for proper commit metadata preservation
-            debug!("Applying patch with git am --3way");
-            let am_output = Command::new("git")
-                .args(["am", "--3way", &patch_path.to_string_lossy()])
-                .current_dir(&worktree_path)
-                .output()
-                .await
-                .context("Failed to run git am")?;
-
-            patch_committed = am_output.status.success();
-
-            if !patch_committed {
-                let stderr = String::from_utf8_lossy(&am_output.stderr);
-                debug!("git am --3way failed: {}", stderr);
-
-                // Abort the failed am to leave worktree clean
-                let _ = Command::new("git")
-                    .args(["am", "--abort"])
-                    .current_dir(&worktree_path)
-                    .output()
-                    .await;
-
-                // Fallback: try git apply --3way
-                debug!("Falling back to git apply --3way");
-                let apply_output = Command::new("git")
-                    .args(["apply", "--3way", &patch_path.to_string_lossy()])
-                    .current_dir(&worktree_path)
-                    .output()
-                    .await
-                    .context("Failed to run git apply --3way")?;
-
-                if !apply_output.status.success() {
-                    let err_msg = format!(
-                        "Patch could not be applied (conflicts): {}",
-                        String::from_utf8_lossy(&apply_output.stderr)
-                    );
-                    warn!("{}", err_msg);
-                    return Ok(ExecutionResult::failure(err_msg));
-                }
-                debug!("Patch applied with git apply --3way fallback");
-
-                // Scan for unresolved conflict markers
-                let conflict_check = Command::new("git")
-                    .args(["grep", "-l", "-E", r"^(<<<<<<<\s|>>>>>>>\s)"])
-                    .current_dir(&worktree_path)
-                    .output()
-                    .await
-                    .context("Failed to run git grep for conflict markers")?;
-
-                if conflict_check.status.success() {
-                    let conflicting_files =
-                        String::from_utf8_lossy(&conflict_check.stdout).trim().to_string();
-                    let err_msg = format!(
-                        "Patch applied with unresolved conflict markers in: {}",
-                        conflicting_files
-                    );
-                    warn!("{}", err_msg);
-                    return Ok(ExecutionResult::failure(err_msg));
-                }
-            } else {
-                debug!("Patch applied successfully with git am");
-            }
-        }
+        let patch_committed = match apply_patch_to_worktree(&worktree_path, &patch_path, &exclude_args).await? {
+            Ok(committed) => committed,
+            Err(result) => return Ok(result),
+        };
 
         // Collect changed files. The method depends on how the patch was applied:
         // - git am: changes are committed → use git diff-tree to compare base_sha..HEAD
@@ -1408,108 +1299,15 @@ impl Executor for CreatePrResult {
         let pr_web_url = pr_data["url"].as_str().unwrap_or("");
         info!("Pull request created: #{} - {}", pr_id, pr_web_url);
 
-        // Set completion options (delete source branch, squash merge) and optionally auto-complete
-        // completionOptions apply when the PR is completed by anyone, auto_complete makes it complete automatically
-        {
-            debug!(
-                "Setting PR completion options: delete_source_branch={}, squash_merge={}, auto_complete={}",
-                config.delete_source_branch, config.squash_merge, config.auto_complete
-            );
-            let pr_update_url = format!(
-                "{}{}/_apis/git/repositories/{}/pullrequests/{}?api-version=7.1",
-                org_url, project, repo_id, pr_id
-            );
-
-            let mut update_body = serde_json::json!({
-                "completionOptions": {
-                    "deleteSourceBranch": config.delete_source_branch,
-                    "squashMerge": config.squash_merge
-                }
-            });
-
-            // Only set autoCompleteSetBy if auto_complete is enabled and PR is not a draft
-            // (ADO silently ignores auto-complete on draft PRs, so skip the API call)
-            if config.auto_complete && !config.draft {
-                update_body["autoCompleteSetBy"] = serde_json::json!({
-                    "id": pr_data["createdBy"]["id"]
-                });
-            }
-
-            match client
-                .patch(&pr_update_url)
-                .basic_auth("", Some(token))
-                .json(&update_body)
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    debug!("PR completion options set successfully");
-                }
-                Ok(resp) => {
-                    warn!("Failed to set PR completion options: {}", resp.status());
-                }
-                Err(e) => {
-                    warn!("Failed to set PR completion options: {}", e);
-                }
-            }
-        }
-
-        // Add reviewers if configured
-        if !config.reviewers.is_empty() {
-            debug!("Adding {} reviewers", config.reviewers.len());
-            for reviewer in &config.reviewers {
-                debug!("Adding reviewer: {}", reviewer);
-
-                // Resolve reviewer identity (email/name -> ID)
-                let reviewer_id =
-                    match resolve_reviewer_identity(&client, organization, token, reviewer).await {
-                        Some(id) => id,
-                        None => {
-                            warn!(
-                                "Could not resolve reviewer '{}' to an identity ID, skipping",
-                                reviewer
-                            );
-                            continue;
-                        }
-                    };
-
-                let reviewer_url = format!(
-                    "{}{}/_apis/git/repositories/{}/pullrequests/{}/reviewers/{}?api-version=7.1",
-                    org_url, project, repo_id, pr_id, reviewer_id
-                );
-
-                let reviewer_body = serde_json::json!({
-                    "vote": 0,
-                    "isRequired": false
-                });
-
-                match client
-                    .put(&reviewer_url)
-                    .basic_auth("", Some(token))
-                    .json(&reviewer_body)
-                    .send()
-                    .await
-                {
-                    Ok(resp) if resp.status().is_success() => {
-                        debug!(
-                            "Reviewer '{}' (ID: {}) added successfully",
-                            reviewer, reviewer_id
-                        );
-                    }
-                    Ok(resp) => {
-                        warn!(
-                            "Failed to add reviewer '{}' (ID: {}): {}",
-                            reviewer,
-                            reviewer_id,
-                            resp.status()
-                        );
-                    }
-                    Err(e) => {
-                        warn!("Failed to add reviewer '{}': {}", reviewer, e);
-                    }
-                }
-            }
-        }
+        // Set completion options (delete source branch, squash merge, auto-complete)
+        // and add reviewers.
+        set_pr_completion_options(
+            &client, &config, org_url, project, &repo_id, pr_id,
+            pr_data["createdBy"]["id"].as_str(), token,
+        ).await;
+        add_reviewers_to_pr(
+            &client, &config, org_url, project, &repo_id, pr_id, organization, token,
+        ).await;
 
         info!(
             "PR #{} created successfully: {} -> {}{}",
@@ -1527,6 +1325,264 @@ impl Executor for CreatePrResult {
                 "draft": config.draft
             }),
         ))
+    }
+}
+
+/// Check for unresolved conflict markers in the working tree.
+///
+/// Uses `git grep` to look for `<<<<<<<` or `>>>>>>>` markers (with trailing
+/// space to avoid false positives from reStructuredText heading underlines).
+/// Returns `Some(failure)` if conflicts are found, `None` if the tree is clean.
+async fn check_for_conflict_markers(worktree_path: &std::path::Path) -> anyhow::Result<Option<ExecutionResult>> {
+    let conflict_check = Command::new("git")
+        .args(["grep", "-l", "-E", r"^(<<<<<<<\s|>>>>>>>\s)"])
+        .current_dir(worktree_path)
+        .output()
+        .await
+        .context("Failed to run git grep for conflict markers")?;
+
+    if conflict_check.status.success() {
+        let conflicting_files = String::from_utf8_lossy(&conflict_check.stdout).trim().to_string();
+        let err_msg = format!(
+            "Patch applied with unresolved conflict markers in: {}",
+            conflicting_files
+        );
+        warn!("{}", err_msg);
+        return Ok(Some(ExecutionResult::failure(err_msg)));
+    }
+    Ok(None)
+}
+
+/// Apply a patch to a git worktree using `git apply --3way` with `--exclude` flags.
+///
+/// Used when `excluded-files` are configured (git am does not support `--exclude`).
+/// Returns `Ok(false)` on success (`false` = changes are staged, not committed).
+async fn apply_patch_with_exclusions(
+    worktree_path: &std::path::Path,
+    patch_path: &std::path::Path,
+    exclude_args: &[String],
+) -> anyhow::Result<Result<bool, ExecutionResult>> {
+    debug!("Using git apply --3way (excluded-files configured)");
+    let mut apply_args: Vec<String> = vec!["apply".into(), "--3way".into()];
+    apply_args.extend(exclude_args.iter().cloned());
+    apply_args.push(patch_path.to_string_lossy().into_owned());
+
+    let apply_output = Command::new("git")
+        .args(&apply_args)
+        .current_dir(worktree_path)
+        .output()
+        .await
+        .context("Failed to run git apply --3way")?;
+
+    if !apply_output.status.success() {
+        let err_msg = format!(
+            "Patch could not be applied (conflicts): {}",
+            String::from_utf8_lossy(&apply_output.stderr)
+        );
+        warn!("{}", err_msg);
+        return Ok(Err(ExecutionResult::failure(err_msg)));
+    }
+    debug!("Patch applied with git apply --3way");
+
+    if let Some(conflict_result) = check_for_conflict_markers(worktree_path).await? {
+        return Ok(Err(conflict_result));
+    }
+    Ok(Ok(false))
+}
+
+/// Apply a patch to a git worktree using `git am --3way`, with a `git apply` fallback.
+///
+/// Used when no `excluded-files` are configured. Prefers `git am` because it
+/// preserves original commit metadata. Falls back to `git apply --3way` if `git am`
+/// fails. Returns `Ok(true)` when `git am` committed the changes, `Ok(false)` when
+/// `git apply` left them staged.
+async fn apply_patch_without_exclusions(
+    worktree_path: &std::path::Path,
+    patch_path: &std::path::Path,
+) -> anyhow::Result<Result<bool, ExecutionResult>> {
+    // No exclusions — use git am --3way for proper commit metadata preservation
+    debug!("Applying patch with git am --3way");
+    let am_output = Command::new("git")
+        .args(["am", "--3way", &patch_path.to_string_lossy()])
+        .current_dir(worktree_path)
+        .output()
+        .await
+        .context("Failed to run git am")?;
+
+    if am_output.status.success() {
+        debug!("Patch applied successfully with git am");
+        return Ok(Ok(true));
+    }
+
+    let stderr = String::from_utf8_lossy(&am_output.stderr);
+    debug!("git am --3way failed: {}", stderr);
+
+    // Abort the failed am to leave worktree clean
+    let _ = Command::new("git")
+        .args(["am", "--abort"])
+        .current_dir(worktree_path)
+        .output()
+        .await;
+
+    // Fallback: try git apply --3way
+    debug!("Falling back to git apply --3way");
+    let apply_output = Command::new("git")
+        .args(["apply", "--3way", &patch_path.to_string_lossy()])
+        .current_dir(worktree_path)
+        .output()
+        .await
+        .context("Failed to run git apply --3way")?;
+
+    if !apply_output.status.success() {
+        let err_msg = format!(
+            "Patch could not be applied (conflicts): {}",
+            String::from_utf8_lossy(&apply_output.stderr)
+        );
+        warn!("{}", err_msg);
+        return Ok(Err(ExecutionResult::failure(err_msg)));
+    }
+    debug!("Patch applied with git apply --3way fallback");
+
+    if let Some(conflict_result) = check_for_conflict_markers(worktree_path).await? {
+        return Ok(Err(conflict_result));
+    }
+    Ok(Ok(false))
+}
+
+/// Apply a patch to a git worktree, choosing the right strategy automatically.
+///
+/// Delegates to [`apply_patch_with_exclusions`] when `exclude_args` is non-empty
+/// (because `git am` doesn't support `--exclude`), otherwise delegates to
+/// [`apply_patch_without_exclusions`] which prefers `git am` for commit metadata.
+///
+/// Returns `Ok(patch_committed)` on success (`true` = changes are committed via
+/// `git am`, `false` = changes are staged via `git apply`).
+/// Returns `Err(ExecutionResult)` on expected failures (conflicts, patch errors).
+async fn apply_patch_to_worktree(
+    worktree_path: &std::path::Path,
+    patch_path: &std::path::Path,
+    exclude_args: &[String],
+) -> anyhow::Result<Result<bool, ExecutionResult>> {
+    if !exclude_args.is_empty() {
+        apply_patch_with_exclusions(worktree_path, patch_path, exclude_args).await
+    } else {
+        apply_patch_without_exclusions(worktree_path, patch_path).await
+    }
+}
+
+/// Set PR completion options (delete-source-branch, squash-merge) and optionally
+/// enable auto-complete. Logs a warning on failure but does not propagate the error
+/// because these are best-effort settings that do not affect the PR's existence.
+async fn set_pr_completion_options(
+    client: &reqwest::Client,
+    config: &CreatePrConfig,
+    org_url: &str,
+    project: &str,
+    repo_id: &str,
+    pr_id: i64,
+    pr_created_by_id: Option<&str>,
+    token: &str,
+) {
+    debug!(
+        "Setting PR completion options: delete_source_branch={}, squash_merge={}, auto_complete={}",
+        config.delete_source_branch, config.squash_merge, config.auto_complete
+    );
+    let pr_update_url = format!(
+        "{}{}/_apis/git/repositories/{}/pullrequests/{}?api-version=7.1",
+        org_url, project, repo_id, pr_id
+    );
+
+    let mut update_body = serde_json::json!({
+        "completionOptions": {
+            "deleteSourceBranch": config.delete_source_branch,
+            "squashMerge": config.squash_merge
+        }
+    });
+
+    // Only set autoCompleteSetBy if auto_complete is enabled and PR is not a draft
+    // (ADO silently ignores auto-complete on draft PRs, so skip the API call)
+    if config.auto_complete && !config.draft {
+        if let Some(creator_id) = pr_created_by_id {
+            update_body["autoCompleteSetBy"] = serde_json::json!({ "id": creator_id });
+        }
+    }
+
+    match client
+        .patch(&pr_update_url)
+        .basic_auth("", Some(token))
+        .json(&update_body)
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            debug!("PR completion options set successfully");
+        }
+        Ok(resp) => {
+            warn!("Failed to set PR completion options: {}", resp.status());
+        }
+        Err(e) => {
+            warn!("Failed to set PR completion options: {}", e);
+        }
+    }
+}
+
+/// Add configured reviewers to a pull request.
+///
+/// Resolves each reviewer's identity (email/display-name → ADO identity ID) and
+/// issues a `PUT` for each one. Logs a warning if a reviewer cannot be resolved or
+/// if the API call fails; does not abort the overall PR creation.
+async fn add_reviewers_to_pr(
+    client: &reqwest::Client,
+    config: &CreatePrConfig,
+    org_url: &str,
+    project: &str,
+    repo_id: &str,
+    pr_id: i64,
+    organization: &str,
+    token: &str,
+) {
+    if config.reviewers.is_empty() {
+        return;
+    }
+    debug!("Adding {} reviewers", config.reviewers.len());
+    for reviewer in &config.reviewers {
+        debug!("Adding reviewer: {}", reviewer);
+
+        // Resolve reviewer identity (email/name -> ID)
+        let reviewer_id = match resolve_reviewer_identity(client, organization, token, reviewer).await {
+            Some(id) => id,
+            None => {
+                warn!("Could not resolve reviewer '{}' to an identity ID, skipping", reviewer);
+                continue;
+            }
+        };
+
+        let reviewer_url = format!(
+            "{}{}/_apis/git/repositories/{}/pullrequests/{}/reviewers/{}?api-version=7.1",
+            org_url, project, repo_id, pr_id, reviewer_id
+        );
+        let reviewer_body = serde_json::json!({ "vote": 0, "isRequired": false });
+
+        match client
+            .put(&reviewer_url)
+            .basic_auth("", Some(token))
+            .json(&reviewer_body)
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                debug!("Reviewer '{}' (ID: {}) added successfully", reviewer, reviewer_id);
+            }
+            Ok(resp) => {
+                warn!(
+                    "Failed to add reviewer '{}' (ID: {}): {}",
+                    reviewer, reviewer_id, resp.status()
+                );
+            }
+            Err(e) => {
+                warn!("Failed to add reviewer '{}': {}", reviewer, e);
+            }
+        }
     }
 }
 
