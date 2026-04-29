@@ -57,7 +57,7 @@ the toolchain. Lean files use the `.lean` extension.\n"
     }
 
     fn required_awf_mounts(&self) -> Vec<AwfMount> {
-        vec![AwfMount::new("$HOME/.elan", "$HOME/.elan", Some(AwfMountMode::ReadOnly))]
+        vec![AwfMount::new("$HOME/.elan", "$HOME/.elan", AwfMountMode::ReadOnly)]
     }
 
     fn validate(&self, ctx: &CompileContext) -> Result<Vec<String>> {

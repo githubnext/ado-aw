@@ -29,14 +29,14 @@ fn test_awf_mount_mode_parse() {
 
 #[test]
 fn test_awf_mount_display_with_mode() {
-    let m = AwfMount::new("$HOME/.elan", "$HOME/.elan", Some(AwfMountMode::ReadOnly));
+    let m = AwfMount::new("$HOME/.elan", "$HOME/.elan", AwfMountMode::ReadOnly);
     assert_eq!(m.to_string(), "$HOME/.elan:$HOME/.elan:ro");
 }
 
 #[test]
 fn test_awf_mount_display_no_mode() {
-    let m = AwfMount::new("/tmp/foo", "/tmp/foo", None);
-    assert_eq!(m.to_string(), "/tmp/foo:/tmp/foo");
+    let m = AwfMount::new("/tmp/foo", "/tmp/foo", AwfMountMode::ReadOnly);
+    assert_eq!(m.to_string(), "/tmp/foo:/tmp/foo:ro");
 }
 
 #[test]
@@ -44,13 +44,13 @@ fn test_awf_mount_parse_with_mode() {
     let m: AwfMount = "$HOME/.elan:$HOME/.elan:ro".parse().unwrap();
     assert_eq!(m.host_path, "$HOME/.elan");
     assert_eq!(m.container_path, "$HOME/.elan");
-    assert_eq!(m.mode, Some(AwfMountMode::ReadOnly));
+    assert_eq!(m.mode, AwfMountMode::ReadOnly);
 }
 
 #[test]
 fn test_awf_mount_parse_rw_mode() {
     let m: AwfMount = "/tmp/work:/tmp/work:rw".parse().unwrap();
-    assert_eq!(m.mode, Some(AwfMountMode::ReadWrite));
+    assert_eq!(m.mode, AwfMountMode::ReadWrite);
 }
 
 #[test]
@@ -58,7 +58,7 @@ fn test_awf_mount_parse_no_mode() {
     let m: AwfMount = "/tmp/foo:/tmp/foo".parse().unwrap();
     assert_eq!(m.host_path, "/tmp/foo");
     assert_eq!(m.container_path, "/tmp/foo");
-    assert!(m.mode.is_none());
+    assert_eq!(m.mode, AwfMountMode::ReadOnly);
 }
 
 #[test]
@@ -69,7 +69,7 @@ fn test_awf_mount_parse_invalid_mode_errors() {
 
 #[test]
 fn test_awf_mount_serde_roundtrip() {
-    let m = AwfMount::new("$HOME/.elan", "$HOME/.elan", Some(AwfMountMode::ReadOnly));
+    let m = AwfMount::new("$HOME/.elan", "$HOME/.elan", AwfMountMode::ReadOnly);
     let json = serde_json::to_string(&m).unwrap();
     assert_eq!(json, r#""$HOME/.elan:$HOME/.elan:ro""#);
     let parsed: AwfMount = serde_json::from_str(&json).unwrap();
@@ -212,7 +212,7 @@ fn test_lean_required_awf_mounts() {
     assert_eq!(mounts.len(), 1);
     assert_eq!(mounts[0].host_path, "$HOME/.elan");
     assert_eq!(mounts[0].container_path, "$HOME/.elan");
-    assert_eq!(mounts[0].mode, Some(AwfMountMode::ReadOnly));
+    assert_eq!(mounts[0].mode, AwfMountMode::ReadOnly);
     // Round-trips to Docker format string
     assert_eq!(mounts[0].to_string(), "$HOME/.elan:$HOME/.elan:ro");
 }

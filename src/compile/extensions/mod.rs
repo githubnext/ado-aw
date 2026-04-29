@@ -365,18 +365,18 @@ pub struct AwfMount {
     pub host_path: String,
     /// Corresponding path inside the container.
     pub container_path: String,
-    /// Optional mount access mode. When absent the Docker default applies
-    /// (read-write).
-    pub mode: Option<AwfMountMode>,
+    /// Mount access mode. Defaults to [`AwfMountMode::ReadOnly`] when not
+    /// specified in the input — the secure default for AWF chroot mounts.
+    pub mode: AwfMountMode,
 }
 
 impl AwfMount {
     /// Creates an `AwfMount` with the given host path, container path, and
-    /// optional access mode.
+    /// access mode.
     pub fn new(
         host_path: impl Into<String>,
         container_path: impl Into<String>,
-        mode: Option<AwfMountMode>,
+        mode: AwfMountMode,
     ) -> Self {
         Self {
             host_path: host_path.into(),
@@ -388,11 +388,7 @@ impl AwfMount {
 
 impl fmt::Display for AwfMount {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(mode) = &self.mode {
-            write!(f, "{}:{}:{}", self.host_path, self.container_path, mode)
-        } else {
-            write!(f, "{}:{}", self.host_path, self.container_path)
-        }
+        write!(f, "{}:{}:{}", self.host_path, self.container_path, self.mode)
     }
 }
 
@@ -405,12 +401,12 @@ impl FromStr for AwfMount {
             [host, container] => Ok(Self {
                 host_path: (*host).to_string(),
                 container_path: (*container).to_string(),
-                mode: None,
+                mode: AwfMountMode::ReadOnly,
             }),
             [host, container, mode_str] => Ok(Self {
                 host_path: (*host).to_string(),
                 container_path: (*container).to_string(),
-                mode: Some(mode_str.parse()?),
+                mode: mode_str.parse()?,
             }),
             _ => anyhow::bail!(
                 "Invalid AWF mount spec '{}': expected 'host:container[:mode]'",
