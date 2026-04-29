@@ -1,6 +1,6 @@
 // ─── Lean 4 ──────────────────────────────────────────────────────────
 
-use crate::compile::extensions::{AwfMount, CompileContext, CompilerExtension, ExtensionPhase};
+use crate::compile::extensions::{AwfMount, AwfMountMode, CompileContext, CompilerExtension, ExtensionPhase};
 use super::{LEAN_BASH_COMMANDS, LeanRuntimeConfig, generate_lean_install};
 use anyhow::Result;
 
@@ -57,7 +57,7 @@ the toolchain. Lean files use the `.lean` extension.\n"
     }
 
     fn required_awf_mounts(&self) -> Vec<AwfMount> {
-        vec![AwfMount::new("$HOME/.elan", "$HOME/.elan", Some("ro"))]
+        vec![AwfMount::new("$HOME/.elan", "$HOME/.elan", Some(AwfMountMode::ReadOnly))]
     }
 
     fn validate(&self, ctx: &CompileContext) -> Result<Vec<String>> {

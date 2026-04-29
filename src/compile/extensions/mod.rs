@@ -302,6 +302,56 @@ pub trait CompilerExtension {
     }
 }
 
+/// Mount access mode for an AWF bind mount.
+///
+/// Maps to the Docker bind-mount mode string: `ro` (read-only) or `rw`
+/// (read-write, the Docker default when no mode is specified).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AwfMountMode {
+    /// Read-only mount (`ro`). The process inside the container cannot write
+    /// to this path.
+    ReadOnly,
+    /// Read-write mount (`rw`). The container can write to this path.
+    ReadWrite,
+}
+
+impl fmt::Display for AwfMountMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ReadOnly => f.write_str("ro"),
+            Self::ReadWrite => f.write_str("rw"),
+        }
+    }
+}
+
+impl FromStr for AwfMountMode {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "ro" => Ok(Self::ReadOnly),
+            "rw" => Ok(Self::ReadWrite),
+            other => anyhow::bail!(
+                "Unknown AWF mount mode '{}': expected 'ro' or 'rw'",
+                other
+            ),
+        }
+    }
+}
+
+impl serde::Serialize for AwfMountMode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AwfMountMode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
 /// An AWF `--mount` specification in Docker bind-mount format.
 ///
 /// The format is `host_path:container_path[:mode]`
@@ -315,22 +365,23 @@ pub struct AwfMount {
     pub host_path: String,
     /// Corresponding path inside the container.
     pub container_path: String,
-    /// Optional mount mode (e.g. `"ro"` for read-only, `"rw"` for read-write).
-    pub mode: Option<String>,
+    /// Optional mount access mode. When absent the Docker default applies
+    /// (read-write).
+    pub mode: Option<AwfMountMode>,
 }
 
 impl AwfMount {
     /// Creates an `AwfMount` with the given host path, container path, and
-    /// optional mode.
+    /// optional access mode.
     pub fn new(
         host_path: impl Into<String>,
         container_path: impl Into<String>,
-        mode: Option<impl Into<String>>,
+        mode: Option<AwfMountMode>,
     ) -> Self {
         Self {
             host_path: host_path.into(),
             container_path: container_path.into(),
-            mode: mode.map(Into::into),
+            mode,
         }
     }
 }
@@ -356,10 +407,10 @@ impl FromStr for AwfMount {
                 container_path: (*container).to_string(),
                 mode: None,
             }),
-            [host, container, mode] => Ok(Self {
+            [host, container, mode_str] => Ok(Self {
                 host_path: (*host).to_string(),
                 container_path: (*container).to_string(),
-                mode: Some((*mode).to_string()),
+                mode: Some(mode_str.parse()?),
             }),
             _ => anyhow::bail!(
                 "Invalid AWF mount spec '{}': expected 'host:container[:mode]'",
