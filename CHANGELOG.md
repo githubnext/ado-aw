@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.0](https://github.com/githubnext/ado-aw/compare/v0.19.0...v0.20.0) (2026-04-29)
+
+
+### Features
+
+* **compile:** add awf_path_prepends for chroot PATH injection ([#359](https://github.com/githubnext/ado-aw/issues/359)) ([4576bc3](https://github.com/githubnext/ado-aw/commit/4576bc3978543f52f171acf3a1792b6042d4ff33))
+
 ## [0.19.0](https://github.com/githubnext/ado-aw/compare/v0.18.2...v0.19.0) (2026-04-29)
 
 
