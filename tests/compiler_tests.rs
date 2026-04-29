@@ -2764,6 +2764,22 @@ Prove theorems and build Lean 4 projects.
         "Compiled output should mount $HOME/.elan into the AWF sandbox"
     );
 
+    // The Lean runtime must inject $HOME/.elan/bin into the AWF chroot PATH via
+    // a dedicated "Generate GITHUB_PATH file" step and explicit GITHUB_PATH env
+    // passthrough on the AWF invocation step.
+    assert!(
+        compiled.contains("Generate GITHUB_PATH file"),
+        "Compiled output should include the Generate GITHUB_PATH file step"
+    );
+    assert!(
+        compiled.contains("$HOME/.elan/bin"),
+        "Compiled output should write $HOME/.elan/bin to the GITHUB_PATH file"
+    );
+    assert!(
+        compiled.contains("GITHUB_PATH: $(GITHUB_PATH)"),
+        "Compiled output should pass GITHUB_PATH through the AWF step env block"
+    );
+
     // Verify no unreplaced {{ markers }} remain
     for line in compiled.lines() {
         let stripped = line.replace("${{", "");

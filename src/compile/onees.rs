@@ -15,6 +15,8 @@ use super::common::{
     CompileConfig, compile_shared,
     generate_allowed_domains,
     generate_awf_mounts,
+    generate_awf_path_step,
+    collect_awf_path_prepends,
     generate_enabled_tools_args,
     generate_mcpg_config, generate_mcpg_docker_env, generate_mcpg_step_env,
     format_steps_yaml_indented,
@@ -51,6 +53,8 @@ impl Compiler for OneESCompiler {
         // Generate values shared with standalone that are passed as extra replacements
         let allowed_domains = generate_allowed_domains(front_matter, &extensions)?;
         let awf_mounts = generate_awf_mounts(&extensions);
+        let awf_paths = collect_awf_path_prepends(&extensions);
+        let awf_path_step = generate_awf_path_step(&awf_paths);
         let enabled_tools_args = generate_enabled_tools_args(front_matter);
 
         let mcpg_config = generate_mcpg_config(front_matter, &ctx, &extensions)?;
@@ -75,6 +79,7 @@ impl Compiler for OneESCompiler {
                 ("{{ mcpg_domain }}".into(), MCPG_DOMAIN.into()),
                 ("{{ allowed_domains }}".into(), allowed_domains),
                 ("{{ awf_mounts }}".into(), awf_mounts),
+                ("{{ awf_path_step }}".into(), awf_path_step),
                 ("{{ enabled_tools_args }}".into(), enabled_tools_args),
                 ("{{ mcpg_config }}".into(), mcpg_config_json),
                 ("{{ mcpg_docker_env }}".into(), mcpg_docker_env),
@@ -84,6 +89,7 @@ impl Compiler for OneESCompiler {
             ],
             skip_integrity,
             debug_pipeline,
+            has_awf_paths: !awf_paths.is_empty(),
         };
 
         compile_shared(input_path, output_path, front_matter, markdown_body, &extensions, &ctx, config).await
