@@ -10,7 +10,7 @@ The `ado-aw` compiler binary is distributed via [GitHub Releases](https://github
 
 ## Default Allowed Domains
 
-The following domains are always allowed (defined in `allowed_hosts.rs`):
+The following domains are always allowed. Most are defined in `CORE_ALLOWED_HOSTS` in `allowed_hosts.rs`; `host.docker.internal` is the exception — it is added by the standalone compiler in `generate_allowed_domains` (`src/compile/common.rs`) because standalone pipelines always use MCPG, which needs host access from the AWF container:
 
 | Host Pattern | Purpose |
 |-------------|---------|
@@ -46,7 +46,7 @@ The following domains are always allowed (defined in `allowed_hosts.rs`):
 | `dc.services.visualstudio.com` | Visual Studio telemetry |
 | `rt.services.visualstudio.com` | Visual Studio runtime telemetry |
 | `config.edge.skype.com` | Configuration |
-| `host.docker.internal` | MCP Gateway (MCPG) on host |
+| `host.docker.internal` | MCP Gateway (MCPG) on host — added by the standalone compiler, not part of `CORE_ALLOWED_HOSTS` |
 
 ## Adding Additional Hosts
 

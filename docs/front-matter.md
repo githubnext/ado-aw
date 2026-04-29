@@ -22,7 +22,7 @@ schedule: daily around 14:00 # Fuzzy schedule syntax - see docs/schedule-syntax.
 #   branches:
 #     - main
 #     - release/*
-workspace: repo # Optional: "root", "repo" (alias: "self"), or a checked-out repository alias. If not specified, defaults based on checkout configuration (see below).
+workspace: repo # Optional: "root", "repo" (alias: "self"), or a checked-out repository alias. If not specified, defaults to "root" when no additional repositories are listed in `checkout:`, and to "repo" when one or more additional repos are checked out. See "Workspace Defaults" below.
 pool: AZS-1ES-L-MMS-ubuntu-22.04 # Agent pool name (string format). Defaults to AZS-1ES-L-MMS-ubuntu-22.04.
 # pool:                        # Alternative object format (required for 1ES if specifying os)
 #   name: AZS-1ES-L-MMS-ubuntu-22.04
@@ -111,3 +111,19 @@ parameters:                    # optional ADO runtime parameters (surfaced in UI
 
 Build the project and run all tests...
 ```
+
+## Workspace Defaults
+
+The `workspace:` field controls which directory the agent runs in. When it is
+not set explicitly, the compiler chooses a default based on the `checkout:`
+list:
+
+- If `checkout:` is empty (i.e. only the pipeline's own repository is checked
+  out via the implicit `self`), `workspace:` defaults to **`root`** — the
+  agent runs in the pipeline's working directory root.
+- If `checkout:` lists one or more additional repository aliases,
+  `workspace:` defaults to **`repo`** — the agent runs inside the first
+  checked-out repository's directory.
+
+Set `workspace:` explicitly to `root`, `repo` (alias `self`), or a specific
+checked-out repository alias to override this behavior.
