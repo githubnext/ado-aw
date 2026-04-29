@@ -614,46 +614,30 @@ async fn update_pipeline_variable(
 
 // ==================== Command orchestration ====================
 
-/// Run the configure command.
-pub async fn run(
-    token: Option<&str>,
-    org: Option<&str>,
-    project: Option<&str>,
-    pat: Option<&str>,
-    path: Option<&Path>,
-    dry_run: bool,
-    definition_ids: Option<&[u64]>,
-) -> Result<()> {
-    let repo_path = match path {
-        Some(p) => tokio::fs::canonicalize(p)
-            .await
-            .with_context(|| format!("Could not resolve path: {}", p.display()))?,
-        None => tokio::fs::canonicalize(".")
-            .await
-            .context("Could not resolve current directory")?,
-    };
-
-    // Resolve token: CLI flag > env var (handled by clap) > interactive prompt
-    let token = match token {
-        Some(t) => t.to_string(),
+/// Resolves the GitHub token from the CLI flag or an interactive prompt.
+fn resolve_token(token: Option<&str>) -> Result<String> {
+    match token {
+        Some(t) => Ok(t.to_string()),
         None => inquire::Password::new("Enter the new GITHUB_TOKEN:")
             .without_confirmation()
             .prompt()
-            .context("Failed to read token from interactive prompt")?,
-    };
+            .context("Failed to read token from interactive prompt"),
+    }
+}
 
-    // Resolve auth: CLI flag > env var (handled by clap) > Azure CLI > interactive prompt
-    let auth = match pat {
+/// Resolves ADO authentication: PAT flag > Azure CLI > interactive prompt.
+async fn resolve_auth(pat: Option<&str>) -> Result<AdoAuth> {
+    match pat {
         Some(p) => {
             info!("Using PAT from --pat flag or AZURE_DEVOPS_EXT_PAT env var");
-            AdoAuth::Pat(p.to_string())
+            Ok(AdoAuth::Pat(p.to_string()))
         }
         None => {
             info!("No PAT provided, trying Azure CLI authentication...");
             match try_azure_cli_token().await {
                 Ok(token) => {
                     println!("Using Azure CLI authentication (az account get-access-token)");
-                    AdoAuth::Bearer(token)
+                    Ok(AdoAuth::Bearer(token))
                 }
                 Err(e) => {
                     warn!("Azure CLI auth failed: {:#}. Falling back to interactive prompt.", e);
@@ -661,82 +645,77 @@ pub async fn run(
                         .without_confirmation()
                         .prompt()
                         .context("Failed to read PAT from interactive prompt. Set AZURE_DEVOPS_EXT_PAT env var, log in with 'az login', or use --pat flag.")?;
-                    AdoAuth::Pat(pat)
+                    Ok(AdoAuth::Pat(pat))
                 }
             }
         }
-    };
+    }
+}
 
-    // Resolve ADO context from git remote (best-effort), with CLI overrides.
-    // If a git remote exists but isn't an ADO URL (e.g. GitHub), fall back to --org/--project.
-    let ado_ctx = {
-        let remote_ctx = get_git_remote_url(&repo_path)
-            .await
-            .ok()
-            .and_then(|url| {
-                info!("Git remote: {}", url);
-                match parse_ado_remote(&url) {
-                    Ok(ctx) => Some(ctx),
-                    Err(e) => {
-                        debug!("Git remote is not an ADO URL: {:#}", e);
-                        None
-                    }
+/// Resolves the ADO context from the git remote (best-effort) with CLI overrides.
+/// Falls back to explicit `--org`/`--project` when the remote is absent or non-ADO.
+async fn resolve_ado_context(
+    repo_path: &Path,
+    org: Option<&str>,
+    project: Option<&str>,
+) -> Result<AdoContext> {
+    let remote_ctx = get_git_remote_url(repo_path)
+        .await
+        .ok()
+        .and_then(|url| {
+            info!("Git remote: {}", url);
+            match parse_ado_remote(&url) {
+                Ok(ctx) => Some(ctx),
+                Err(e) => {
+                    debug!("Git remote is not an ADO URL: {:#}", e);
+                    None
                 }
-            });
+            }
+        });
 
-        match (remote_ctx, org, project) {
-            // Git remote parsed — apply overrides
-            (Some(mut ctx), org, project) => {
-                if let Some(org) = org {
-                    ctx.org_url = org.to_string();
-                }
-                if let Some(project) = project {
-                    ctx.project = project.to_string();
-                }
-                ctx
+    match (remote_ctx, org, project) {
+        // Git remote parsed — apply overrides
+        (Some(mut ctx), org, project) => {
+            if let Some(org) = org {
+                ctx.org_url = org.to_string();
             }
-            // No usable remote — require explicit --org and --project
-            (None, Some(org), Some(project)) => {
-                info!("No ADO git remote; using --org and --project");
-                AdoContext {
-                    org_url: org.to_string(),
-                    project: project.to_string(),
-                    repo_name: String::new(),
-                }
+            if let Some(project) = project {
+                ctx.project = project.to_string();
             }
-            (None, _, _) => {
-                anyhow::bail!(
-                    "Could not determine ADO context: no ADO git remote found and --org/--project not both provided.\n\
-                     When using --definition-ids outside an ADO repo, both --org and --project are required."
-                );
-            }
+            Ok(ctx)
         }
-    };
-
-    println!(
-        "ADO context: org={}, project={}{}",
-        ado_ctx.org_url,
-        ado_ctx.project,
-        if ado_ctx.repo_name.is_empty() {
-            String::new()
-        } else {
-            format!(", repo={}", ado_ctx.repo_name)
+        // No usable remote — require explicit --org and --project
+        (None, Some(org), Some(project)) => {
+            info!("No ADO git remote; using --org and --project");
+            Ok(AdoContext {
+                org_url: org.to_string(),
+                project: project.to_string(),
+                repo_name: String::new(),
+            })
         }
-    );
-    println!();
+        (None, _, _) => {
+            anyhow::bail!(
+                "Could not determine ADO context: no ADO git remote found and --org/--project not both provided.\n\
+                 When using --definition-ids outside an ADO repo, both --org and --project are required."
+            );
+        }
+    }
+}
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .context("Failed to create HTTP client")?;
-
-    // Build the list of definitions to update — either from explicit IDs or auto-detection
-    let matched = if let Some(ids) = definition_ids {
+/// Builds the list of definitions to update from explicit IDs or auto-detection.
+/// Returns `None` when auto-detection finds no agentic pipelines (caller should exit cleanly).
+async fn resolve_definitions(
+    client: &reqwest::Client,
+    ado_ctx: &AdoContext,
+    auth: &AdoAuth,
+    definition_ids: Option<&[u64]>,
+    repo_path: &Path,
+) -> Result<Option<Vec<MatchedDefinition>>> {
+    if let Some(ids) = definition_ids {
         println!("Using explicit definition IDs: {:?}", ids);
-
         let mut matched = Vec::new();
         for &id in ids {
-            let name = get_definition_name(&client, &ado_ctx, &auth, id)
+            let name = get_definition_name(client, ado_ctx, auth, id)
                 .await
                 .unwrap_or_else(|| format!("definition {}", id));
             matched.push(MatchedDefinition {
@@ -746,81 +725,52 @@ pub async fn run(
                 yaml_path: String::new(),
             });
         }
-        matched
-    } else {
-        // Auto-detect: scan local repo and match to ADO definitions
-        println!("Scanning for agentic pipelines...");
-        let detected = detect::detect_pipelines(&repo_path).await?;
-
-        if detected.is_empty() {
-            println!(
-                "No agentic pipelines found. Make sure your pipelines were compiled with the latest ado-aw."
-            );
-            return Ok(());
-        }
-
-        println!("Found {} agentic pipeline(s):", detected.len());
-        for p in &detected {
-            println!(
-                "  {} (source: {}, version: {})",
-                p.yaml_path.display(),
-                p.source,
-                p.version
-            );
-        }
-        println!();
-
-        println!("Matching to Azure DevOps pipeline definitions...");
-        match_definitions(&client, &ado_ctx, &auth, &detected).await?
-    };
-
-    if matched.is_empty() {
-        println!("No matching ADO pipeline definitions found.");
-        println!("Make sure your pipelines are registered in Azure DevOps and point to the detected YAML files.");
-        return Ok(());
+        return Ok(Some(matched));
     }
 
-    println!("{} definition(s) to update:", matched.len());
-    for m in &matched {
-        if m.yaml_path.is_empty() {
-            println!(
-                "  [{}] '{}' (id={})",
-                m.match_method, m.name, m.id
-            );
-        } else {
-            println!(
-                "  [{}] '{}' (id={}) \u{2190} {}",
-                m.match_method, m.name, m.id, m.yaml_path
-            );
-        }
+    // Auto-detect: scan local repo and match to ADO definitions
+    println!("Scanning for agentic pipelines...");
+    let detected = detect::detect_pipelines(repo_path).await?;
+
+    if detected.is_empty() {
+        println!(
+            "No agentic pipelines found. Make sure your pipelines were compiled with the latest ado-aw."
+        );
+        return Ok(None);
+    }
+
+    println!("Found {} agentic pipeline(s):", detected.len());
+    for p in &detected {
+        println!(
+            "  {} (source: {}, version: {})",
+            p.yaml_path.display(),
+            p.source,
+            p.version
+        );
     }
     println!();
 
-    // Step 4: Update GITHUB_TOKEN
-    if dry_run {
-        println!("Dry run \u{2014} no changes applied.");
-        println!(
-            "Would update GITHUB_TOKEN on {} definition(s).",
-            matched.len()
-        );
-        return Ok(());
-    }
+    println!("Matching to Azure DevOps pipeline definitions...");
+    Ok(Some(
+        match_definitions(client, ado_ctx, auth, &detected).await?,
+    ))
+}
 
+/// Updates the `GITHUB_TOKEN` variable on every matched pipeline definition and
+/// reports per-definition success/failure.
+async fn apply_token_updates(
+    client: &reqwest::Client,
+    ado_ctx: &AdoContext,
+    auth: &AdoAuth,
+    matched: &[MatchedDefinition],
+    token: &str,
+) -> Result<()> {
     println!("Updating GITHUB_TOKEN on matched definitions...");
     let mut success_count = 0;
     let mut failure_count = 0;
 
-    for m in &matched {
-        match update_pipeline_variable(
-            &client,
-            &ado_ctx,
-            &auth,
-            m.id,
-            "GITHUB_TOKEN",
-            &token,
-        )
-        .await
-        {
+    for m in matched {
+        match update_pipeline_variable(client, ado_ctx, auth, m.id, "GITHUB_TOKEN", token).await {
             Ok(()) => {
                 println!("  \u{2713} Updated '{}' (id={})", m.name, m.id);
                 success_count += 1;
@@ -840,6 +790,83 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+/// Run the configure command.
+pub async fn run(
+    token: Option<&str>,
+    org: Option<&str>,
+    project: Option<&str>,
+    pat: Option<&str>,
+    path: Option<&Path>,
+    dry_run: bool,
+    definition_ids: Option<&[u64]>,
+) -> Result<()> {
+    let repo_path = match path {
+        Some(p) => tokio::fs::canonicalize(p)
+            .await
+            .with_context(|| format!("Could not resolve path: {}", p.display()))?,
+        None => tokio::fs::canonicalize(".")
+            .await
+            .context("Could not resolve current directory")?,
+    };
+
+    let token = resolve_token(token)?;
+    let auth = resolve_auth(pat).await?;
+    let ado_ctx = resolve_ado_context(&repo_path, org, project).await?;
+
+    println!(
+        "ADO context: org={}, project={}{}",
+        ado_ctx.org_url,
+        ado_ctx.project,
+        if ado_ctx.repo_name.is_empty() {
+            String::new()
+        } else {
+            format!(", repo={}", ado_ctx.repo_name)
+        }
+    );
+    println!();
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("Failed to create HTTP client")?;
+
+    let Some(matched) =
+        resolve_definitions(&client, &ado_ctx, &auth, definition_ids, &repo_path).await?
+    else {
+        return Ok(());
+    };
+
+    if matched.is_empty() {
+        println!("No matching ADO pipeline definitions found.");
+        println!("Make sure your pipelines are registered in Azure DevOps and point to the detected YAML files.");
+        return Ok(());
+    }
+
+    println!("{} definition(s) to update:", matched.len());
+    for m in &matched {
+        if m.yaml_path.is_empty() {
+            println!("  [{}] '{}' (id={})", m.match_method, m.name, m.id);
+        } else {
+            println!(
+                "  [{}] '{}' (id={}) \u{2190} {}",
+                m.match_method, m.name, m.id, m.yaml_path
+            );
+        }
+    }
+    println!();
+
+    if dry_run {
+        println!("Dry run \u{2014} no changes applied.");
+        println!(
+            "Would update GITHUB_TOKEN on {} definition(s).",
+            matched.len()
+        );
+        return Ok(());
+    }
+
+    apply_token_updates(&client, &ado_ctx, &auth, &matched, &token).await
 }
 
 #[cfg(test)]
