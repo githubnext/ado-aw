@@ -2751,6 +2751,19 @@ Prove theorems and build Lean 4 projects.
         "Compiled output should include --allow-all-tools (default when bash is not specified)"
     );
 
+    // The Lean runtime must contribute an AWF --mount for $HOME/.elan so the
+    // elan-installed toolchain is visible inside the sandbox. This guards against
+    // regressions where generate_awf_mounts is dropped from extra_replacements
+    // or the {{ awf_mounts }} marker is removed from the template.
+    assert!(
+        compiled.contains("--mount"),
+        "Compiled output should contain AWF mount for elan"
+    );
+    assert!(
+        compiled.contains("$HOME/.elan"),
+        "Compiled output should mount $HOME/.elan into the AWF sandbox"
+    );
+
     // Verify no unreplaced {{ markers }} remain
     for line in compiled.lines() {
         let stripped = line.replace("${{", "");
