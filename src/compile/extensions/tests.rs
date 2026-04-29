@@ -68,6 +68,12 @@ fn test_awf_mount_parse_invalid_mode_errors() {
 }
 
 #[test]
+fn test_awf_mount_parse_single_segment_errors() {
+    let result = "elan".parse::<AwfMount>();
+    assert!(result.is_err());
+}
+
+#[test]
 fn test_awf_mount_serde_roundtrip() {
     let m = AwfMount::new("$HOME/.elan", "$HOME/.elan", AwfMountMode::ReadOnly);
     let json = serde_json::to_string(&m).unwrap();
