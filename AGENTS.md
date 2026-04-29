@@ -114,6 +114,7 @@ Every compiled pipeline runs as three sequential jobs:
 │           ├── mod.rs
 │           ├── extension.rs # CompilerExtension impl (compile-time)
 │           └── execute.rs   # Stage 3 runtime (validate/copy)
+├── ado-aw-derive/        # Proc-macro crate: #[derive(SanitizeConfig)], #[derive(SanitizeContent)]
 ├── examples/             # Example agent definitions
 ├── tests/                # Integration tests and fixtures
 ├── docs/                 # Per-concept reference documentation (see index below)
