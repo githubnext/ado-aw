@@ -373,6 +373,30 @@ When no extensions declare mounts, this is replaced with `\` (a bare bash contin
 
 AWF replaces `$HOME` with an empty directory overlay for security; only explicitly mounted subdirectories are accessible inside the chroot. Shell variables like `$HOME` are expanded at runtime by bash.
 
+## {{ awf_path_step }}
+
+Replaced with a dedicated pipeline step that generates a `GITHUB_PATH` file for AWF chroot PATH discovery. The step is collected from `CompilerExtension::awf_path_prepends()` — each extension can declare directories that should be on PATH inside the AWF chroot (e.g., the Lean runtime declares `$HOME/.elan/bin`).
+
+AWF reads the `$GITHUB_PATH` environment variable (a path to a file) at startup, reads path entries from it (one per line), and merges them into `AWF_HOST_PATH` which becomes the chroot PATH. This bypasses the `sudo` `secure_path` reset that strips custom PATH entries.
+
+When no extensions declare path prepends, this is replaced with an empty string and the step is omitted.
+
+Example generated step (with Lean enabled):
+
+```yaml
+- bash: |
+    AWF_PATH_FILE="/tmp/awf-tools/ado-path-entries"
+    cat > "$AWF_PATH_FILE" << AWF_PATH_EOF
+    $HOME/.elan/bin
+    AWF_PATH_EOF
+    echo "##vso[task.setvariable variable=GITHUB_PATH]$AWF_PATH_FILE"
+  displayName: "Generate GITHUB_PATH file"
+```
+
+The heredoc uses an unquoted delimiter so shell variables like `$HOME` are expanded by bash at write time — AWF reads the file as literal resolved paths and does not perform shell expansion itself.
+
+The `GITHUB_PATH` pipeline variable is also explicitly passed through the AWF step's `env:` block (appended to `{{ engine_env }}`) as `GITHUB_PATH: $(GITHUB_PATH)` for robust environment passthrough.
+
 ## {{ enabled_tools_args }}
 
 Should be replaced with `--enabled-tools <name>` CLI arguments for the SafeOutputs MCP HTTP server. The tool list is derived from `safe-outputs:` front matter keys plus always-on diagnostic tools (`noop`, `missing-data`, `missing-tool`, `report-incomplete`).

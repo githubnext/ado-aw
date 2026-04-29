@@ -172,6 +172,8 @@ extends:
 
                 {{ prepare_steps }}
 
+                {{ awf_path_step }}
+
                 # Start SafeOutputs HTTP server on host (MCPG proxies to it)
                 - bash: |
                     SAFE_OUTPUTS_PORT=8100
