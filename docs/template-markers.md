@@ -365,6 +365,14 @@ Should be replaced with the comma-separated domain list for AWF's `--allow-domai
 
 The output is formatted as a comma-separated string (e.g., `github.com,*.dev.azure.com,api.github.com`).
 
+## {{ awf_mounts }}
+
+Replaced with `--mount` flags for the **agent job** AWF invocation only (not the detection job), collected from `CompilerExtension::required_awf_mounts()`. Each extension can declare volume mounts needed inside the AWF chroot as [`AwfMount`][AwfMount] values (e.g., the Lean runtime mounts `$HOME/.elan` so the elan toolchain is accessible).
+
+When no extensions declare mounts, this is replaced with `\` (a bare bash continuation marker) so the surrounding `\`-continuation chain is preserved. When mounts are present, each is formatted as `--mount "spec" \` on its own line; indentation is handled by `replace_with_indent` at the call site.
+
+AWF replaces `$HOME` with an empty directory overlay for security; only explicitly mounted subdirectories are accessible inside the chroot. Shell variables like `$HOME` are expanded at runtime by bash.
+
 ## {{ enabled_tools_args }}
 
 Should be replaced with `--enabled-tools <name>` CLI arguments for the SafeOutputs MCP HTTP server. The tool list is derived from `safe-outputs:` front matter keys plus always-on diagnostic tools (`noop`, `missing-data`, `missing-tool`, `report-incomplete`).

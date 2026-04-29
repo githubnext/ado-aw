@@ -12,6 +12,76 @@ fn ctx_from(fm: &FrontMatter) -> CompileContext<'_> {
     CompileContext::for_test(fm)
 }
 
+// ── AwfMount ────────────────────────────────────────────────────
+
+#[test]
+fn test_awf_mount_mode_display() {
+    assert_eq!(AwfMountMode::ReadOnly.to_string(), "ro");
+    assert_eq!(AwfMountMode::ReadWrite.to_string(), "rw");
+}
+
+#[test]
+fn test_awf_mount_mode_parse() {
+    assert_eq!("ro".parse::<AwfMountMode>().unwrap(), AwfMountMode::ReadOnly);
+    assert_eq!("rw".parse::<AwfMountMode>().unwrap(), AwfMountMode::ReadWrite);
+    assert!("invalid".parse::<AwfMountMode>().is_err());
+}
+
+#[test]
+fn test_awf_mount_display_with_mode() {
+    let m = AwfMount::new("$HOME/.elan", "$HOME/.elan", AwfMountMode::ReadOnly);
+    assert_eq!(m.to_string(), "$HOME/.elan:$HOME/.elan:ro");
+}
+
+#[test]
+fn test_awf_mount_display_no_mode() {
+    let m = AwfMount::new("/tmp/foo", "/tmp/foo", AwfMountMode::ReadOnly);
+    assert_eq!(m.to_string(), "/tmp/foo:/tmp/foo:ro");
+}
+
+#[test]
+fn test_awf_mount_parse_with_mode() {
+    let m: AwfMount = "$HOME/.elan:$HOME/.elan:ro".parse().unwrap();
+    assert_eq!(m.host_path, "$HOME/.elan");
+    assert_eq!(m.container_path, "$HOME/.elan");
+    assert_eq!(m.mode, AwfMountMode::ReadOnly);
+}
+
+#[test]
+fn test_awf_mount_parse_rw_mode() {
+    let m: AwfMount = "/tmp/work:/tmp/work:rw".parse().unwrap();
+    assert_eq!(m.mode, AwfMountMode::ReadWrite);
+}
+
+#[test]
+fn test_awf_mount_parse_no_mode() {
+    let m: AwfMount = "/tmp/foo:/tmp/foo".parse().unwrap();
+    assert_eq!(m.host_path, "/tmp/foo");
+    assert_eq!(m.container_path, "/tmp/foo");
+    assert_eq!(m.mode, AwfMountMode::ReadOnly);
+}
+
+#[test]
+fn test_awf_mount_parse_invalid_mode_errors() {
+    let result = "/tmp/foo:/tmp/foo:invalid".parse::<AwfMount>();
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_awf_mount_parse_single_segment_errors() {
+    let result = "elan".parse::<AwfMount>();
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_awf_mount_serde_roundtrip() {
+    let m = AwfMount::new("$HOME/.elan", "$HOME/.elan", AwfMountMode::ReadOnly);
+    let json = serde_json::to_string(&m).unwrap();
+    assert_eq!(json, r#""$HOME/.elan:$HOME/.elan:ro""#);
+    let parsed: AwfMount = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, m);
+}
+
 // ── collect_extensions ──────────────────────────────────────────
 
 #[test]
@@ -139,6 +209,24 @@ fn test_lean_prepare_steps() {
     let steps = ext.prepare_steps();
     assert_eq!(steps.len(), 1);
     assert!(steps[0].contains("elan-init.sh"));
+}
+
+#[test]
+fn test_lean_required_awf_mounts() {
+    let ext = LeanExtension::new(LeanRuntimeConfig::Enabled(true));
+    let mounts = ext.required_awf_mounts();
+    assert_eq!(mounts.len(), 1);
+    assert_eq!(mounts[0].host_path, "$HOME/.elan");
+    assert_eq!(mounts[0].container_path, "$HOME/.elan");
+    assert_eq!(mounts[0].mode, AwfMountMode::ReadOnly);
+    // Round-trips to Docker format string
+    assert_eq!(mounts[0].to_string(), "$HOME/.elan:$HOME/.elan:ro");
+}
+
+#[test]
+fn test_default_required_awf_mounts_empty() {
+    let ext = GitHubExtension;
+    assert!(ext.required_awf_mounts().is_empty());
 }
 
 #[test]

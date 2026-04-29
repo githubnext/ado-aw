@@ -6,7 +6,7 @@
 //! supplement informing the agent that Lean is available.
 //!
 //! Lean is installed via elan (the Lean toolchain manager) into `$HOME/.elan/bin`,
-//! then symlinked into `/tmp/awf-tools/` for AWF chroot compatibility.
+//! which is mounted read-only into the AWF chroot via the `required_awf_mounts()` mechanism.
 
 pub mod extension;
 
@@ -83,7 +83,10 @@ pub const LEAN_BASH_COMMANDS: &[&str] = &["lean", "lake", "elan"];
 ///
 /// Installs elan (Lean toolchain manager) and the specified toolchain.
 /// Defaults to "stable" if no toolchain is specified in the front matter.
-/// Symlinks lean tools into `/tmp/awf-tools/` for AWF chroot compatibility.
+///
+/// AWF chroot access is provided by the `--mount` flag declared via
+/// `LeanExtension::required_awf_mounts()`, which mounts `$HOME/.elan`
+/// read-only into the container.
 pub fn generate_lean_install(config: &LeanRuntimeConfig) -> String {
     let toolchain = config.toolchain().unwrap_or("stable");
     let script = format!(
@@ -92,16 +95,7 @@ curl https://elan.lean-lang.org/elan-init.sh -sSf | sh -s -- -y --default-toolch
 echo \"##vso[task.prependpath]$HOME/.elan/bin\"
 export PATH=\"$HOME/.elan/bin:$PATH\"
 lean --version || echo \"Lean installed via elan\"
-lake --version || echo \"Lake installed via elan\"
-# Symlink lean tools into /tmp/awf-tools/ so they are accessible
-# inside the AWF chroot (AWF mounts /tmp but reconstructs PATH
-# from standard system locations, excluding $HOME/.elan/bin).
-for cmd in lean lake elan; do
-  if command -v \"$cmd\" >/dev/null 2>&1; then
-    ln -sf \"$(command -v \"$cmd\")\" \"/tmp/awf-tools/$cmd\"
-  fi
-done
-echo \"Lean tools symlinked to /tmp/awf-tools/\""
+lake --version || echo \"Lake installed via elan\""
     );
     // Indent each line of the script body by 4 spaces for YAML block scalar
     let indented: String = script

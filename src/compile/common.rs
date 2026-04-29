@@ -1670,6 +1670,36 @@ pub fn generate_allowed_domains(
     Ok(allowlist.join(","))
 }
 
+/// Generate AWF `--mount` flags from extension-declared volume mounts.
+///
+/// Collects `required_awf_mounts()` from all extensions and formats them
+/// as `--mount "spec"` CLI flags for the AWF invocation.
+///
+/// Each mount spec is rendered using its [`Display`][std::fmt::Display] impl
+/// (Docker bind-mount format: `host_path:container_path[:mode]`).
+///
+/// When no extensions require mounts, returns `\` (a bare bash continuation
+/// marker) so the surrounding `\`-continuation chain in the template is
+/// preserved.  When mounts are present, each flag occupies its own line
+/// (`--mount "spec" \`); indentation is handled by [`replace_with_indent`]
+/// at the call site.
+pub fn generate_awf_mounts(extensions: &[super::extensions::Extension]) -> String {
+    let mounts: Vec<super::extensions::AwfMount> = extensions
+        .iter()
+        .flat_map(|ext| ext.required_awf_mounts())
+        .collect();
+
+    if mounts.is_empty() {
+        return "\\".to_string();
+    }
+
+    mounts
+        .iter()
+        .map(|m| format!("--mount \"{}\" \\", m))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 // ==================== Shared compile flow ====================
 
 /// Target-specific overrides for the shared compile flow.
@@ -3717,6 +3747,32 @@ mod tests {
         assert!(result.contains("agent_memory"), "memory steps present");
         assert!(result.contains("elan-init.sh"), "lean install present");
         assert!(result.contains("Lean 4"), "lean prompt present");
+    }
+
+    // ─── generate_awf_mounts ──────────────────────────────────────────────
+
+    #[test]
+    fn test_generate_awf_mounts_no_extensions() {
+        let fm = minimal_front_matter();
+        let exts = crate::compile::extensions::collect_extensions(&fm);
+        let result = generate_awf_mounts(&exts);
+        assert_eq!(result, "\\", "no mounts should produce bare continuation");
+    }
+
+    #[test]
+    fn test_generate_awf_mounts_with_lean() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nruntimes:\n  lean: true\n---\n",
+        ).unwrap();
+        let exts = crate::compile::extensions::collect_extensions(&fm);
+        let result = generate_awf_mounts(&exts);
+        assert!(result.contains("--mount"), "should contain --mount flag");
+        assert!(result.contains(".elan"), "should reference .elan directory");
+        assert!(result.contains(":ro"), "should be read-only");
+        // Each mount line ends with ` \` continuation
+        assert!(result.ends_with(" \\"), "last mount should end with continuation");
+        // No embedded indent — replace_with_indent handles indentation
+        assert!(!result.contains("            "), "should not contain hard-coded indent");
     }
 
     // ═══════════════════════════════════════════════════════════════════════

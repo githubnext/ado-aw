@@ -28,7 +28,7 @@ When enabled, the compiler:
 - Defaults to the `stable` toolchain; if a `lean-toolchain` file exists in the repo, elan overrides to that version automatically
 - Auto-adds `lean`, `lake`, and `elan` to the bash command allow-list
 - Adds Lean-specific domains to the network allowlist: `elan.lean-lang.org`, `leanprover.github.io`, `lean-lang.org`
-- Symlinks lean tools into `/tmp/awf-tools/` for AWF chroot compatibility
+- Mounts `$HOME/.elan` into the AWF container via `--mount` flag so the elan toolchain is accessible inside the chroot (AWF replaces `$HOME` with an empty overlay for security)
 - Appends a prompt supplement informing the agent about Lean 4 availability and basic commands
 - Emits a compile-time warning if `tools.bash` is empty (Lean requires bash access)
 
