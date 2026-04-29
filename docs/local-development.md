@@ -162,7 +162,7 @@ awk '/^---$/{n++; next} n>=2' "$AGENT_FILE" > "$WORK_DIR/agent-prompt.md"
 copilot \
   --prompt "@$WORK_DIR/agent-prompt.md" \
   --additional-mcp-config "@$WORK_DIR/mcp-config.json" \
-  --model claude-opus-4.5 \
+  --model claude-opus-4.7 \
   --no-ask-user \
   --disable-builtin-mcps \
   --allow-all-tools

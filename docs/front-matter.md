@@ -14,7 +14,7 @@ target: standalone # Optional: "standalone" (default) or "1es". See docs/targets
 engine: copilot # Engine identifier. Defaults to copilot. Currently only 'copilot' (GitHub Copilot CLI) is supported.
 # engine:                        # Alternative object format (with additional options)
 #   id: copilot
-#   model: claude-opus-4.5
+#   model: claude-opus-4.7
 #   timeout-minutes: 30
 schedule: daily around 14:00 # Fuzzy schedule syntax - see docs/schedule-syntax.md
 # schedule:                       # Alternative object format (with branch filtering)

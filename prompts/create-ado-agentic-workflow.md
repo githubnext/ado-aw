@@ -15,14 +15,14 @@ When working with a user in a chat session (e.g., Copilot Chat, Claude, Codex):
 - **Don't overwhelm with options** — introduce advanced features (MCP servers, permissions, multi-repo) only when relevant to the user's task.
 - **Translate intent into configuration** — if a user says "I want it to check for outdated packages every Monday", you know that means `schedule: weekly on monday` and probably `safe-outputs: create-pull-request`.
 - **Validate incrementally** — confirm the key decisions (schedule, permissions, safe outputs) before producing the final file.
-- **Explain trade-offs** when relevant — e.g., `claude-opus-4.5` vs `claude-sonnet-4.5` for cost vs capability.
+- **Explain trade-offs** when relevant — e.g., `claude-opus-4.7` vs `claude-sonnet-4.5` for cost vs capability.
 
 ### Non-Interactive Mode
 
 When triggered automatically (e.g., from a script, CI, or autonomous agent flow):
 
 - **Make reasonable assumptions** based on repository context — inspect `package.json`, `Cargo.toml`, `.csproj`, or other project files to infer what the agent should do.
-- **Use sensible defaults** — `claude-opus-4.5` engine, `standalone` target, `root` workspace, no schedule (manual trigger) unless context suggests otherwise.
+- **Use sensible defaults** — `claude-opus-4.7` engine, `standalone` target, `root` workspace, no schedule (manual trigger) unless context suggests otherwise.
 - **Produce the complete file immediately** without asking questions.
 - **Include a summary comment** at the end explaining the assumptions made.
 
@@ -66,11 +66,11 @@ description: "Checks for outdated dependencies and opens PRs to update them"
 
 Default engine is `copilot` (GitHub Copilot CLI). The `engine:` field is an engine identifier, not a model name. Only include `engine:` if you need to set a non-default model or timeout.
 
-The default model is `claude-opus-4.5`. To use a different model, use the object form:
+The default model is `claude-opus-4.7`. To use a different model, use the object form:
 
 | Model | Use when |
 |---|---|
-| `claude-opus-4.5` | Default. Best reasoning, complex tasks. |
+| `claude-opus-4.7` | Default. Best reasoning, complex tasks. |
 | `claude-sonnet-4.5` | Faster, cheaper, simpler tasks. |
 | `gpt-5.2-codex` | Code-heavy tasks. |
 | `gemini-3-pro-preview` | Google ecosystem tasks. |
@@ -481,7 +481,7 @@ When generating the agent file:
 
 1. **Produce exactly one `.md` file.** Do not create separate documentation, architecture notes, or runbooks.
 2. **Respect existing repository conventions** for file placement. Look at where existing pipeline YAML files or agent markdown files are located in the repo. If no convention exists, ask the user where they'd like the file placed.
-3. **Omit optional fields when they match defaults** — no `engine:` for `claude-opus-4.5`, no `workspace:` for `root`, no `target:` for `standalone`.
+3. **Omit optional fields when they match defaults** — no `engine:` for `claude-opus-4.7`, no `workspace:` for `root`, no `target:` for `standalone`.
 4. **Always validate** that write-requiring safe-outputs (`create-pull-request`, `create-work-item`) have `permissions.write` set.
 
 ## Compilation
