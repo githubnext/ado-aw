@@ -60,6 +60,10 @@ the toolchain. Lean files use the `.lean` extension.\n"
         vec![AwfMount::new("$HOME/.elan", "$HOME/.elan", AwfMountMode::ReadOnly)]
     }
 
+    fn awf_path_prepends(&self) -> Vec<String> {
+        vec!["$HOME/.elan/bin".to_string()]
+    }
+
     fn validate(&self, ctx: &CompileContext) -> Result<Vec<String>> {
         let mut warnings = Vec::new();
 

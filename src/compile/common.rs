@@ -1700,6 +1700,47 @@ pub fn generate_awf_mounts(extensions: &[super::extensions::Extension]) -> Strin
         .join("\n")
 }
 
+/// Generates a dedicated pipeline step that writes a `GITHUB_PATH` file
+/// containing directories collected from `CompilerExtension::awf_path_prepends()`.
+///
+/// AWF reads the `$GITHUB_PATH` environment variable (a path to a file) at
+/// startup and merges its entries into the chroot PATH. This mechanism was
+/// designed for GitHub Actions `setup-*` actions but works identically on
+/// ADO when we compose the file ourselves.
+///
+/// The generated step uses `##vso[task.setvariable]` to set `GITHUB_PATH`
+/// as a pipeline variable visible to subsequent steps (including the AWF
+/// invocation step that runs under `sudo`). This bypasses the `sudo`
+/// `secure_path` reset that strips custom PATH entries.
+///
+/// When no extensions declare path prepends, returns an empty string and
+/// the step is omitted from the pipeline.
+pub fn generate_awf_path_step(extensions: &[super::extensions::Extension]) -> String {
+    let paths: Vec<String> = extensions
+        .iter()
+        .flat_map(|ext| ext.awf_path_prepends())
+        .collect();
+
+    if paths.is_empty() {
+        return String::new();
+    }
+
+    let echo_lines: String = paths
+        .iter()
+        .map(|p| format!("    echo \"{}\" >> \"$AWF_PATH_FILE\"", p))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        "\
+- bash: |
+    AWF_PATH_FILE=\"/tmp/awf-tools/ado-path-entries\"
+{echo_lines}
+    echo \"##vso[task.setvariable variable=GITHUB_PATH]$AWF_PATH_FILE\"
+  displayName: \"Generate GITHUB_PATH file\""
+    )
+}
+
 // ==================== Shared compile flow ====================
 
 /// Target-specific overrides for the shared compile flow.
@@ -3773,6 +3814,29 @@ mod tests {
         assert!(result.ends_with(" \\"), "last mount should end with continuation");
         // No embedded indent — replace_with_indent handles indentation
         assert!(!result.contains("            "), "should not contain hard-coded indent");
+    }
+
+    // ─── generate_awf_path_step ──────────────────────────────────────────────
+
+    #[test]
+    fn test_generate_awf_path_step_no_extensions() {
+        let fm = minimal_front_matter();
+        let exts = crate::compile::extensions::collect_extensions(&fm);
+        let result = generate_awf_path_step(&exts);
+        assert!(result.is_empty(), "no path prepends should produce empty string");
+    }
+
+    #[test]
+    fn test_generate_awf_path_step_with_lean() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nruntimes:\n  lean: true\n---\n",
+        ).unwrap();
+        let exts = crate::compile::extensions::collect_extensions(&fm);
+        let result = generate_awf_path_step(&exts);
+        assert!(result.contains("ado-path-entries"), "should reference path entries file");
+        assert!(result.contains(".elan/bin"), "should include elan bin path");
+        assert!(result.contains("GITHUB_PATH"), "should set GITHUB_PATH variable");
+        assert!(result.contains("displayName"), "should be a complete pipeline step");
     }
 
     // ═══════════════════════════════════════════════════════════════════════

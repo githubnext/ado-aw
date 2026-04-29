@@ -17,6 +17,7 @@ use super::common::{
     CompileConfig, compile_shared,
     generate_allowed_domains,
     generate_awf_mounts,
+    generate_awf_path_step,
     generate_enabled_tools_args,
     generate_mcpg_config, generate_mcpg_docker_env, generate_mcpg_step_env,
 };
@@ -52,6 +53,7 @@ impl Compiler for StandaloneCompiler {
         // Standalone-specific values
         let allowed_domains = generate_allowed_domains(front_matter, &extensions)?;
         let awf_mounts = generate_awf_mounts(&extensions);
+        let awf_path_step = generate_awf_path_step(&extensions);
         let enabled_tools_args = generate_enabled_tools_args(front_matter);
 
         let config_obj = generate_mcpg_config(front_matter, &ctx, &extensions)?;
@@ -70,6 +72,7 @@ impl Compiler for StandaloneCompiler {
                 ("{{ mcpg_domain }}".into(), MCPG_DOMAIN.into()),
                 ("{{ allowed_domains }}".into(), allowed_domains),
                 ("{{ awf_mounts }}".into(), awf_mounts),
+                ("{{ awf_path_step }}".into(), awf_path_step),
                 ("{{ enabled_tools_args }}".into(), enabled_tools_args),
                 ("{{ mcpg_config }}".into(), mcpg_config_json),
                 ("{{ mcpg_docker_env }}".into(), mcpg_docker_env),

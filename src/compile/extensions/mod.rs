@@ -300,6 +300,20 @@ pub trait CompilerExtension {
     fn required_awf_mounts(&self) -> Vec<AwfMount> {
         vec![]
     }
+
+    /// Directories to prepend to `PATH` inside the AWF chroot.
+    ///
+    /// Extensions that install toolchains outside standard system paths
+    /// (e.g., elan installs Lean to `$HOME/.elan/bin`) should declare their
+    /// bin directories here. The compiler collects these and generates a
+    /// `GITHUB_PATH` file that AWF reads at startup to merge into the chroot
+    /// PATH — bypassing the `sudo` PATH reset.
+    ///
+    /// Shell variables like `$HOME` are expanded at runtime by bash, not at
+    /// compile time.
+    fn awf_path_prepends(&self) -> Vec<String> {
+        vec![]
+    }
 }
 
 /// Mount access mode for an AWF bind mount.
@@ -503,6 +517,9 @@ macro_rules! extension_enum {
             }
             fn required_awf_mounts(&self) -> Vec<AwfMount> {
                 match self { $( $Enum::$Variant(e) => e.required_awf_mounts(), )+ }
+            }
+            fn awf_path_prepends(&self) -> Vec<String> {
+                match self { $( $Enum::$Variant(e) => e.awf_path_prepends(), )+ }
             }
         }
     };

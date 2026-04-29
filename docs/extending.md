@@ -39,6 +39,7 @@ pub trait CompilerExtension: Send {
     fn prepare_steps(&self) -> Vec<String>;                    // Pipeline steps (install, etc.)
     fn mcpg_servers(&self, ctx) -> Result<Vec<(String, McpgServerConfig)>>; // MCPG entries
     fn required_awf_mounts(&self) -> Vec<AwfMount>;            // AWF Docker volume mounts
+    fn awf_path_prepends(&self) -> Vec<String>;                // Directories to add to chroot PATH
     fn validate(&self, ctx) -> Result<Vec<String>>;            // Compile-time warnings
 }
 ```

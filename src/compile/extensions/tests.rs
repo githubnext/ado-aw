@@ -230,6 +230,20 @@ fn test_default_required_awf_mounts_empty() {
 }
 
 #[test]
+fn test_lean_awf_path_prepends() {
+    let ext = LeanExtension::new(LeanRuntimeConfig::Enabled(true));
+    let paths = ext.awf_path_prepends();
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0], "$HOME/.elan/bin");
+}
+
+#[test]
+fn test_default_awf_path_prepends_empty() {
+    let ext = GitHubExtension;
+    assert!(ext.awf_path_prepends().is_empty());
+}
+
+#[test]
 fn test_lean_validate_bash_disabled_warning() {
     let (fm, _) =
         parse_markdown("---\nname: test\ndescription: test\ntools:\n  bash: []\n---\n").unwrap();
