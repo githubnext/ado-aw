@@ -1746,8 +1746,8 @@ pub fn generate_awf_path_step(awf_paths: &[String]) -> String {
 /// `GITHUB_PATH` via the `env:` block for clarity and robustness.
 ///
 /// When no path prepends exist, returns an empty string.
-pub fn generate_awf_path_env(awf_paths: &[String]) -> String {
-    if awf_paths.is_empty() {
+pub fn generate_awf_path_env(has_awf_paths: bool) -> String {
+    if !has_awf_paths {
         return String::new();
     }
 
@@ -1781,6 +1781,10 @@ pub struct CompileConfig {
     /// backend probe step) are included in the generated pipeline.
     /// Gated behind `cfg(debug_assertions)` at the CLI level.
     pub debug_pipeline: bool,
+    /// Whether any extension declared AWF path prepends. Used by `compile_shared`
+    /// to append `GITHUB_PATH: $(GITHUB_PATH)` to the engine env block without
+    /// re-collecting path prepends from extensions.
+    pub has_awf_paths: bool,
 }
 
 /// Shared compilation flow used by both standalone and 1ES compilers.
@@ -1891,8 +1895,7 @@ pub async fn compile_shared(
     let mut engine_env = ctx.engine.env(&front_matter.engine)?;
 
     // Append GITHUB_PATH env mapping when extensions declare path prepends
-    let awf_paths = collect_awf_path_prepends(extensions);
-    let awf_path_env = generate_awf_path_env(&awf_paths);
+    let awf_path_env = generate_awf_path_env(config.has_awf_paths);
     if !awf_path_env.is_empty() {
         engine_env = format!("{engine_env}\n{awf_path_env}");
     }
@@ -3887,13 +3890,13 @@ mod tests {
 
     #[test]
     fn test_generate_awf_path_env_no_paths() {
-        let result = generate_awf_path_env(&[]);
+        let result = generate_awf_path_env(false);
         assert!(result.is_empty(), "no path prepends should produce empty string");
     }
 
     #[test]
     fn test_generate_awf_path_env_with_paths() {
-        let result = generate_awf_path_env(&["$HOME/.elan/bin".to_string()]);
+        let result = generate_awf_path_env(true);
         assert_eq!(result, "GITHUB_PATH: $(GITHUB_PATH)");
     }
 

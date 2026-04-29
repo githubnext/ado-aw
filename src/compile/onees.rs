@@ -55,7 +55,7 @@ impl Compiler for OneESCompiler {
         let awf_mounts = generate_awf_mounts(&extensions);
         let awf_paths = collect_awf_path_prepends(&extensions);
         let awf_path_step = generate_awf_path_step(&awf_paths);
-        let enabled_tools_args= generate_enabled_tools_args(front_matter);
+        let enabled_tools_args = generate_enabled_tools_args(front_matter);
 
         let mcpg_config = generate_mcpg_config(front_matter, &ctx, &extensions)?;
         let mcpg_config_json = serde_json::to_string_pretty(&mcpg_config)
@@ -89,6 +89,7 @@ impl Compiler for OneESCompiler {
             ],
             skip_integrity,
             debug_pipeline,
+            has_awf_paths: !awf_paths.is_empty(),
         };
 
         compile_shared(input_path, output_path, front_matter, markdown_body, &extensions, &ctx, config).await
