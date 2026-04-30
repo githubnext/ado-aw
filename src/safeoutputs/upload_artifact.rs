@@ -76,21 +76,67 @@ impl Validate for UploadArtifactParams {
     }
 }
 
+/// Internal params struct mirroring `UploadArtifactResult` fields for the
+/// `tool_result!` macro's `TryFrom` plumbing. The actual MCP parameters come
+/// from `UploadArtifactParams`; this struct only exists so the macro can wire
+/// up `Validate`/`TryFrom` while the real construction happens in MCP via
+/// `UploadArtifactResult::new()` after the file is staged into the safe
+/// outputs directory.
+#[derive(Deserialize, JsonSchema)]
+struct UploadArtifactResultFields {
+    artifact_name: String,
+    file_path: String,
+    staged_file: String,
+    file_size: u64,
+}
+
+impl Validate for UploadArtifactResultFields {}
+
 tool_result! {
     name = "upload-artifact",
     write = true,
-    params = UploadArtifactParams,
+    params = UploadArtifactResultFields,
     /// Result of publishing a workspace file as a pipeline artifact.
     pub struct UploadArtifactResult {
+        /// Artifact name as proposed by the agent (pre-prefix).
         artifact_name: String,
+        /// Original file path proposed by the agent (used for display and the
+        /// extension-allowlist check).
         file_path: String,
+        /// Filename of the staged copy inside the safe-outputs directory.
+        /// Stage 1 (MCP) copies the agent's file into the safe-outputs dir
+        /// under this name; Stage 3 reads it back from
+        /// `ctx.working_directory.join(staged_file)` because the agent's
+        /// sandbox workspace is no longer accessible by then.
+        staged_file: String,
+        /// Size in bytes of the staged file at copy time.
+        file_size: u64,
     }
 }
 
 impl SanitizeContent for UploadArtifactResult {
     fn sanitize_content_fields(&mut self) {
-        // Both fields are strictly validated to a safe charset above; no
+        // All textual fields are strictly validated to safe charsets; no
         // additional textual sanitization is required.
+    }
+}
+
+impl UploadArtifactResult {
+    /// Construct a result after the agent's file has been staged into the
+    /// safe-outputs directory.
+    pub fn new(
+        artifact_name: String,
+        file_path: String,
+        staged_file: String,
+        file_size: u64,
+    ) -> Self {
+        Self {
+            name: <Self as crate::safeoutputs::ToolResult>::NAME.to_string(),
+            artifact_name,
+            file_path,
+            staged_file,
+            file_size,
+        }
     }
 }
 
@@ -221,33 +267,36 @@ impl Executor for UploadArtifactResult {
             }
         }
 
-        // Resolve file path relative to source_directory, then canonicalize
-        // and verify it stays inside the workspace (symlink-escape guard).
-        let resolved_path = ctx.source_directory.join(&self.file_path);
-        debug!("Resolved file path: {}", resolved_path.display());
+        // Resolve the staged file inside the safe-outputs working directory.
+        // Stage 1 (MCP) copied the agent's file there under `self.staged_file`;
+        // the sandbox workspace where the original lived is no longer
+        // accessible. Canonicalize and verify it stays inside
+        // `working_directory` so a malicious staged_file value can't escape
+        // (defense in depth — MCP generates the name itself).
+        let staged_path = ctx.working_directory.join(&self.staged_file);
+        debug!("Staged file path: {}", staged_path.display());
 
-        let canonical = resolved_path.canonicalize().context(
-            "Failed to canonicalize file path — file may not exist or contains broken symlinks",
+        let canonical = staged_path.canonicalize().context(
+            "Failed to canonicalize staged file path — file may be missing or contains broken symlinks",
         )?;
         let canonical_base = ctx
-            .source_directory
+            .working_directory
             .canonicalize()
-            .context("Failed to canonicalize source directory")?;
+            .context("Failed to canonicalize working directory")?;
         if !canonical.starts_with(&canonical_base) {
             return Ok(ExecutionResult::failure(format!(
-                "File path '{}' resolves outside the workspace (symlink escape)",
-                self.file_path
+                "Staged file '{}' resolves outside the safe-outputs directory",
+                self.staged_file
             )));
         }
 
-        // Reject directories — the ##vso[artifact.upload] command takes a
-        // single file path. Directory uploads can be added later by emitting
-        // multiple commands or switching to ##vso[artifact.upload]+containerfolder.
+        // Reject directories defensively — the staged entry must always be a
+        // single file (Stage 1 only copies single files).
         let metadata = std::fs::metadata(&canonical).context("Failed to read file metadata")?;
         if metadata.is_dir() {
             return Ok(ExecutionResult::failure(format!(
-                "File path '{}' is a directory; the upload-artifact tool only supports single files",
-                self.file_path
+                "Staged path '{}' is a directory; the upload-artifact tool only supports single files",
+                self.staged_file
             )));
         }
         let file_size = metadata.len();
@@ -343,6 +392,13 @@ mod tests {
         assert_eq!(UploadArtifactResult::NAME, "upload-artifact");
     }
 
+    fn make_params(artifact_name: &str, file_path: &str) -> UploadArtifactParams {
+        UploadArtifactParams {
+            artifact_name: artifact_name.to_string(),
+            file_path: file_path.to_string(),
+        }
+    }
+
     #[test]
     fn test_params_deserializes() {
         let json = r#"{"artifact_name": "agent-report", "file_path": "out/report.pdf"}"#;
@@ -352,118 +408,73 @@ mod tests {
     }
 
     #[test]
-    fn test_params_converts_to_result() {
-        let params = UploadArtifactParams {
-            artifact_name: "agent-report".to_string(),
-            file_path: "out/report.pdf".to_string(),
-        };
-        let result: UploadArtifactResult = params.try_into().unwrap();
-        assert_eq!(result.name, "upload-artifact");
-        assert_eq!(result.artifact_name, "agent-report");
-        assert_eq!(result.file_path, "out/report.pdf");
+    fn test_params_validate_accepts_valid() {
+        assert!(make_params("agent-report", "out/report.pdf").validate().is_ok());
     }
 
     #[test]
     fn test_validation_rejects_empty_artifact_name() {
-        let params = UploadArtifactParams {
-            artifact_name: String::new(),
-            file_path: "out/report.pdf".to_string(),
-        };
-        assert!(<UploadArtifactParams as TryInto<UploadArtifactResult>>::try_into(params).is_err());
+        assert!(make_params("", "out/report.pdf").validate().is_err());
     }
 
     #[test]
     fn test_validation_rejects_artifact_name_starting_with_dot() {
-        let params = UploadArtifactParams {
-            artifact_name: ".hidden".to_string(),
-            file_path: "out/report.pdf".to_string(),
-        };
-        assert!(<UploadArtifactParams as TryInto<UploadArtifactResult>>::try_into(params).is_err());
+        assert!(make_params(".hidden", "out/report.pdf").validate().is_err());
     }
 
     #[test]
     fn test_validation_rejects_artifact_name_with_space() {
-        let params = UploadArtifactParams {
-            artifact_name: "my artifact".to_string(),
-            file_path: "out/report.pdf".to_string(),
-        };
-        assert!(<UploadArtifactParams as TryInto<UploadArtifactResult>>::try_into(params).is_err());
+        assert!(make_params("my artifact", "out/report.pdf").validate().is_err());
     }
 
     #[test]
     fn test_validation_rejects_artifact_name_with_slash() {
-        let params = UploadArtifactParams {
-            artifact_name: "my/artifact".to_string(),
-            file_path: "out/report.pdf".to_string(),
-        };
-        assert!(<UploadArtifactParams as TryInto<UploadArtifactResult>>::try_into(params).is_err());
+        assert!(make_params("my/artifact", "out/report.pdf").validate().is_err());
     }
 
     #[test]
     fn test_validation_accepts_dotted_artifact_name() {
-        let params = UploadArtifactParams {
-            artifact_name: "agent.report.v2".to_string(),
-            file_path: "out/report.pdf".to_string(),
-        };
-        assert!(<UploadArtifactParams as TryInto<UploadArtifactResult>>::try_into(params).is_ok());
+        assert!(make_params("agent.report.v2", "out/report.pdf").validate().is_ok());
     }
 
     #[test]
     fn test_validation_rejects_empty_file_path() {
-        let params = UploadArtifactParams {
-            artifact_name: "agent-report".to_string(),
-            file_path: String::new(),
-        };
-        assert!(<UploadArtifactParams as TryInto<UploadArtifactResult>>::try_into(params).is_err());
+        assert!(make_params("agent-report", "").validate().is_err());
     }
 
     #[test]
     fn test_validation_rejects_path_traversal() {
-        let params = UploadArtifactParams {
-            artifact_name: "agent-report".to_string(),
-            file_path: "../etc/passwd".to_string(),
-        };
-        assert!(<UploadArtifactParams as TryInto<UploadArtifactResult>>::try_into(params).is_err());
+        assert!(make_params("agent-report", "../etc/passwd").validate().is_err());
     }
 
     #[test]
     fn test_validation_rejects_absolute_path() {
-        let params = UploadArtifactParams {
-            artifact_name: "agent-report".to_string(),
-            file_path: "/etc/passwd".to_string(),
-        };
-        assert!(<UploadArtifactParams as TryInto<UploadArtifactResult>>::try_into(params).is_err());
+        assert!(make_params("agent-report", "/etc/passwd").validate().is_err());
     }
 
     #[test]
     fn test_validation_rejects_backslash_traversal() {
-        let params = UploadArtifactParams {
-            artifact_name: "agent-report".to_string(),
-            file_path: "src\\..\\secret.txt".to_string(),
-        };
-        assert!(<UploadArtifactParams as TryInto<UploadArtifactResult>>::try_into(params).is_err());
+        assert!(make_params("agent-report", "src\\..\\secret.txt").validate().is_err());
     }
 
     #[test]
     fn test_validation_rejects_dotgit_component() {
-        let params = UploadArtifactParams {
-            artifact_name: "agent-report".to_string(),
-            file_path: ".git/config".to_string(),
-        };
-        assert!(<UploadArtifactParams as TryInto<UploadArtifactResult>>::try_into(params).is_err());
+        assert!(make_params("agent-report", ".git/config").validate().is_err());
     }
 
     #[test]
     fn test_result_serializes_correctly() {
-        let params = UploadArtifactParams {
-            artifact_name: "agent-report".to_string(),
-            file_path: "out/report.pdf".to_string(),
-        };
-        let result: UploadArtifactResult = params.try_into().unwrap();
+        let result = UploadArtifactResult::new(
+            "agent-report".to_string(),
+            "out/report.pdf".to_string(),
+            "upload-artifact-agent-report-1234.bin".to_string(),
+            42,
+        );
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains(r#""name":"upload-artifact""#));
         assert!(json.contains(r#""artifact_name":"agent-report""#));
         assert!(json.contains(r#""file_path":"out/report.pdf""#));
+        assert!(json.contains(r#""staged_file":"upload-artifact-agent-report-1234.bin""#));
     }
 
     #[test]
@@ -492,5 +503,81 @@ name-prefix: "agent-"
         assert_eq!(config.allowed_extensions, vec![".png", ".pdf"]);
         assert_eq!(config.allowed_artifact_names, vec!["agent-*", "report"]);
         assert_eq!(config.name_prefix, Some("agent-".to_string()));
+    }
+
+    fn make_ctx(working_directory: std::path::PathBuf) -> ExecutionContext {
+        ExecutionContext {
+            ado_org_url: None,
+            ado_organization: None,
+            ado_project: None,
+            access_token: None,
+            source_directory: working_directory.clone(),
+            working_directory,
+            tool_configs: std::collections::HashMap::new(),
+            repository_id: None,
+            repository_name: None,
+            allowed_repositories: std::collections::HashMap::new(),
+            agent_stats: None,
+            dry_run: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_executor_reads_staged_file_from_working_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = "upload-artifact-agent-report-deadbeef.pdf";
+        std::fs::write(dir.path().join(staged), b"%PDF-1.4 hello").unwrap();
+
+        let result = UploadArtifactResult::new(
+            "agent-report".to_string(),
+            "out/report.pdf".to_string(),
+            staged.to_string(),
+            14,
+        );
+        let ctx = make_ctx(dir.path().to_path_buf());
+        let outcome = result.execute_impl(&ctx).await.unwrap();
+        assert!(outcome.success, "expected success, got: {:?}", outcome);
+        assert!(outcome.message.contains("[dry-run]"));
+        assert!(outcome.message.contains("agent-report"));
+    }
+
+    #[tokio::test]
+    async fn test_executor_rejects_missing_staged_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = UploadArtifactResult::new(
+            "agent-report".to_string(),
+            "out/report.pdf".to_string(),
+            "does-not-exist.pdf".to_string(),
+            0,
+        );
+        let ctx = make_ctx(dir.path().to_path_buf());
+        let err = result.execute_impl(&ctx).await.unwrap_err();
+        assert!(
+            err.to_string().contains("canonicalize"),
+            "expected canonicalize error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_executor_rejects_pipeline_command_in_text_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = "upload-artifact-agent-report-cafef00d.log";
+        std::fs::write(dir.path().join(staged), b"hello\n##vso[task.setvariable]x").unwrap();
+
+        let result = UploadArtifactResult::new(
+            "agent-report".to_string(),
+            "out/report.log".to_string(),
+            staged.to_string(),
+            32,
+        );
+        let ctx = make_ctx(dir.path().to_path_buf());
+        let outcome = result.execute_impl(&ctx).await.unwrap();
+        assert!(!outcome.success);
+        assert!(
+            outcome.message.contains("##vso["),
+            "expected ##vso[ rejection, got: {}",
+            outcome.message
+        );
     }
 }

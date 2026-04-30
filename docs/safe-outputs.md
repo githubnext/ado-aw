@@ -438,13 +438,17 @@ safe-outputs:
     max: 1                               # Maximum per run (default: 1)
 ```
 
-**Validation performed at Stage 3:**
-- The `file_path` is resolved against `BUILD_SOURCESDIRECTORY`, canonicalized, and rejected if it escapes the workspace via symlinks.
+**Validation performed at Stage 1 (MCP / sandbox):**
+- `file_path` is resolved against the agent's workspace, canonicalized, and rejected if it escapes via symlinks.
 - Directories are rejected — only single files are supported.
+- The accepted file is **copied** into the safe-outputs working directory under a generated unique name. This staged copy is what Stage 3 reads — the agent's sandbox workspace is no longer accessible at execution time, mirroring how `create-pull-request` stages the patch file.
+
+**Validation performed at Stage 3:**
+- The staged file is re-canonicalized inside the safe-outputs working directory (defense in depth).
 - Files larger than `max-file-size` are rejected.
-- When `allowed-extensions` is non-empty, the file extension must match (case-insensitive).
+- When `allowed-extensions` is non-empty, the original `file_path` extension must match (case-insensitive).
 - When `allowed-artifact-names` is non-empty, the resolved artifact name (after `name-prefix`) must match an allow-list entry.
-- Text files containing `##vso[` sequences are rejected to prevent pipeline-logging-command injection. Binary files skip this check (the agent does not parse logging commands out of binary content).
+- Text files containing `##vso[` or `##[` sequences are rejected to prevent pipeline-logging-command injection. Binary files skip this check (the agent does not parse logging commands out of binary content).
 
 ### cache-memory (moved to `tools:`)
 Memory is now configured as a first-class tool under `tools: cache-memory:` instead of `safe-outputs: memory:`. See the [Cache Memory section](./tools.md#cache-memory-cache-memory) in `docs/tools.md` for details.
