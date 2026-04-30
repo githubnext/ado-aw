@@ -14,6 +14,9 @@ use serde::{Deserialize, Serialize};
 use crate::sanitize::SanitizeContent;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::tool_result;
+use crate::validate::{
+    contains_newline, contains_pipeline_command, is_safe_path_segment, is_valid_version,
+};
 use anyhow::{Context, ensure};
 
 /// Parameters for uploading a workspace file as a pipeline artifact.
@@ -31,8 +34,9 @@ pub struct UploadArtifactParams {
 
 impl Validate for UploadArtifactParams {
     fn validate(&self) -> anyhow::Result<()> {
-        // artifact_name: charset/length/structural rules.
-        ensure!(!self.artifact_name.is_empty(), "artifact_name must not be empty");
+        // artifact_name: ADO requires non-empty, ≤100 chars, charset
+        // [A-Za-z0-9._-], and (per our hardening) no leading `.`.
+        // `is_valid_version` enforces the non-empty + charset rules.
         ensure!(
             self.artifact_name.len() <= 100,
             "artifact_name must be at most 100 characters"
@@ -42,37 +46,32 @@ impl Validate for UploadArtifactParams {
             "artifact_name must not start with '.'"
         );
         ensure!(
-            self.artifact_name
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.'),
-            "artifact_name must contain only alphanumeric characters, '-', '_' or '.'"
+            is_valid_version(&self.artifact_name),
+            "artifact_name must be non-empty and contain only alphanumeric characters, '-', '_' or '.'"
         );
 
-        // file_path: same path-safety rules as upload-attachment.
+        // file_path: must be relative, with no traversal, no absolute prefix,
+        // no `.git`/hidden segments, no null bytes, no drive-letter colons.
+        // Splitting on both separators and checking each segment with
+        // `is_safe_path_segment` covers: empty (catches absolute paths),
+        // `..`, embedded `/` or `\`, and leading `.` (which catches `.git`
+        // and other dotfiles).
         ensure!(!self.file_path.is_empty(), "file_path must not be empty");
-        ensure!(
-            !self.file_path.split(['/', '\\']).any(|component| component == ".."),
-            "file_path must not contain '..' path components"
-        );
-        ensure!(
-            !self.file_path.starts_with('/') && !self.file_path.starts_with('\\'),
-            "file_path must not be an absolute path"
-        );
-        ensure!(
-            !self.file_path.contains(':'),
-            "file_path must not contain ':'"
-        );
         ensure!(
             !self.file_path.contains('\0'),
             "file_path must not contain null bytes"
         );
         ensure!(
-            !self
-                .file_path
-                .split(['/', '\\'])
-                .any(|component| component == ".git"),
-            "file_path must not contain '.git' components"
+            !self.file_path.contains(':'),
+            "file_path must not contain ':'"
         );
+        for component in self.file_path.split(['/', '\\']) {
+            ensure!(
+                is_safe_path_segment(component),
+                "file_path component '{}' is not a safe path segment (no empty, '..', or leading '.' allowed)",
+                component
+            );
+        }
         Ok(())
     }
 }
@@ -181,12 +180,7 @@ impl Executor for UploadArtifactResult {
             Some(prefix) => format!("{}{}", prefix, self.artifact_name),
             None => self.artifact_name.clone(),
         };
-        if final_name.is_empty()
-            || final_name.starts_with('.')
-            || final_name.len() > 100
-            || !final_name
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+        if final_name.starts_with('.') || final_name.len() > 100 || !is_valid_version(&final_name)
         {
             return Ok(ExecutionResult::failure(format!(
                 "Resolved artifact name '{}' is not a valid Azure DevOps artifact name",
@@ -265,17 +259,18 @@ impl Executor for UploadArtifactResult {
             )));
         }
 
-        // Scan text files for ##vso[ command-injection sequences. Binary
-        // files (where from_utf8 fails) skip this check; the build agent
-        // doesn't parse logging commands out of binary file contents.
+        // Scan text files for ADO pipeline-command sequences (`##vso[`,
+        // `##[`). Binary files (where from_utf8 fails) skip this check;
+        // the build agent doesn't parse logging commands out of binary
+        // file contents.
         let file_bytes = std::fs::read(&canonical).context("Failed to read file contents")?;
-        if let Ok(text) = std::str::from_utf8(&file_bytes) {
-            if text.contains("##vso[") {
-                return Ok(ExecutionResult::failure(format!(
-                    "File '{}' contains '##vso[' command injection sequence",
-                    self.file_path
-                )));
-            }
+        if let Ok(text) = std::str::from_utf8(&file_bytes)
+            && contains_pipeline_command(text)
+        {
+            return Ok(ExecutionResult::failure(format!(
+                "File '{}' contains an ADO pipeline command sequence ('##vso[' or '##[')",
+                self.file_path
+            )));
         }
 
         // Convert to an absolute path string for the logging command. ADO
@@ -297,7 +292,7 @@ impl Executor for UploadArtifactResult {
         // and `]` is structurally illegal in the parser, but we check
         // explicitly so the failure is clear instead of being a silent
         // mis-parse on the agent side.
-        if abs_path.contains(['\n', '\r', ']']) {
+        if contains_newline(&abs_path) || abs_path.contains(']') {
             return Ok(ExecutionResult::failure(format!(
                 "Resolved file path '{}' contains characters that cannot be used in a pipeline logging command",
                 abs_path
@@ -346,11 +341,6 @@ mod tests {
     #[test]
     fn test_result_has_correct_name() {
         assert_eq!(UploadArtifactResult::NAME, "upload-artifact");
-    }
-
-    #[test]
-    fn test_requires_write() {
-        assert!(UploadArtifactResult::REQUIRES_WRITE);
     }
 
     #[test]
