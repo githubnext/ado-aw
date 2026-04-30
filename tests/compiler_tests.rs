@@ -3317,3 +3317,84 @@ fn test_debug_pipeline_probe_step_indentation_1es() {
         }
     }
 }
+
+
+// ─── PR Filter Integration Tests ────────────────────────────────────────────
+
+/// Tier 1 PR filter fixture produces valid YAML with inline gate step.
+#[test]
+fn test_pr_filter_tier1_compiled_output_is_valid_yaml() {
+    let compiled = compile_fixture("pr-filter-tier1-agent.md");
+    assert_valid_yaml(&compiled, "pr-filter-tier1-agent.md");
+}
+
+/// Tier 1 PR filters produce a Setup job with an inline bash gate step.
+#[test]
+fn test_pr_filter_tier1_has_inline_gate() {
+    let compiled = compile_fixture("pr-filter-tier1-agent.md");
+
+    assert!(compiled.contains("- job: Setup"), "Should create Setup job for PR filters");
+    assert!(compiled.contains("name: prGate"), "Should include prGate step");
+    assert!(compiled.contains("SHOULD_RUN"), "Should set SHOULD_RUN variable");
+    assert!(compiled.contains("Evaluate PR filters"), "Should have gate displayName");
+
+    // Tier 1 inline path: bash if/grep checks, no GATE_SPEC
+    assert!(compiled.contains("grep"), "Tier 1 should use inline grep checks");
+    assert!(!compiled.contains("scripts.zip"), "Tier 1 should not download scripts");
+}
+
+/// Tier 2 PR filter fixture produces valid YAML.
+#[test]
+fn test_pr_filter_tier2_compiled_output_is_valid_yaml() {
+    let compiled = compile_fixture("pr-filter-tier2-agent.md");
+    assert_valid_yaml(&compiled, "pr-filter-tier2-agent.md");
+}
+
+/// Tier 2 PR filters produce a Setup job with extension-based gate step.
+#[test]
+fn test_pr_filter_tier2_has_extension_gate() {
+    let compiled = compile_fixture("pr-filter-tier2-agent.md");
+
+    assert!(compiled.contains("- job: Setup"), "Should create Setup job for PR filters");
+    assert!(compiled.contains("scripts.zip"), "Tier 2 should download scripts bundle");
+    assert!(compiled.contains("GATE_SPEC"), "Tier 2 should include base64-encoded spec");
+    assert!(compiled.contains("python3"), "Tier 2 should invoke python evaluator");
+    assert!(compiled.contains("name: prGate"), "Should have prGate step");
+}
+
+/// Pipeline filter fixture produces valid YAML.
+#[test]
+fn test_pipeline_filter_compiled_output_is_valid_yaml() {
+    let compiled = compile_fixture("pipeline-filter-agent.md");
+    assert_valid_yaml(&compiled, "pipeline-filter-agent.md");
+}
+
+/// Pipeline filter fixture produces correct pipeline resource + gate.
+#[test]
+fn test_pipeline_filter_has_resources_and_gate() {
+    let compiled = compile_fixture("pipeline-filter-agent.md");
+
+    assert!(compiled.contains("pipelines:"), "Should have pipeline resource");
+    assert!(compiled.contains("trigger: none"), "Should disable CI trigger");
+    assert!(compiled.contains("pr: none"), "Should disable PR trigger");
+    assert!(compiled.contains("- job: Setup"), "Should create Setup job for pipeline filters");
+}
+
+/// Agent job depends on Setup when filters are active.
+#[test]
+fn test_pr_filter_agent_depends_on_setup() {
+    let compiled = compile_fixture("pr-filter-tier1-agent.md");
+
+    assert!(compiled.contains("dependsOn: Setup"), "Agent job should depend on Setup");
+    assert!(compiled.contains("prGate.SHOULD_RUN"), "Agent job condition should reference gate output");
+}
+
+/// Native ADO PR trigger block is emitted for branch/path filters.
+#[test]
+fn test_pr_filter_tier1_has_native_pr_trigger() {
+    let compiled = compile_fixture("pr-filter-tier1-agent.md");
+
+    assert!(compiled.contains("pr:"), "Should have native pr: block");
+    assert!(compiled.contains("branches:"), "Should have branches filter");
+    assert!(compiled.contains("main"), "Should include main branch");
+}

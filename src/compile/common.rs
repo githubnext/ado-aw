@@ -1381,21 +1381,21 @@ pub fn generate_agentic_depends_on(
 
         if has_pr_filters {
             parts.push(
-                "or(\n\
-                 \x20         ne(variables['Build.Reason'], 'PullRequest'),\n\
-                 \x20         eq(dependencies.Setup.outputs['prGate.SHOULD_RUN'], 'true')\n\
-                 \x20       )"
-                    .to_string(),
+                r"or(
+         ne(variables['Build.Reason'], 'PullRequest'),
+         eq(dependencies.Setup.outputs['prGate.SHOULD_RUN'], 'true')
+       )"
+                .to_string(),
             );
         }
 
         if has_pipeline_filters {
             parts.push(
-                "or(\n\
-                 \x20         ne(variables['Build.Reason'], 'ResourceTrigger'),\n\
-                 \x20         eq(dependencies.Setup.outputs['pipelineGate.SHOULD_RUN'], 'true')\n\
-                 \x20       )"
-                    .to_string(),
+                r"or(
+         ne(variables['Build.Reason'], 'ResourceTrigger'),
+         eq(dependencies.Setup.outputs['pipelineGate.SHOULD_RUN'], 'true')
+       )"
+                .to_string(),
             );
         }
 
@@ -1404,12 +1404,7 @@ pub fn generate_agentic_depends_on(
         }
 
         let condition_body = parts.join(",\n       ");
-        format!(
-            "{depends}\x20   condition: |\n\
-             \x20     and(\n\
-             \x20       {condition_body}\n\
-             \x20     )"
-        )
+        format!("{depends}condition: |\n and(\n   {condition_body}\n )")
     } else {
         "dependsOn: Setup".to_string()
     }

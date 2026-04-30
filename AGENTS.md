@@ -53,10 +53,13 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   ├── standalone.rs # Standalone pipeline compiler
 │   │   ├── onees.rs      # 1ES Pipeline Template compiler
 │   │   ├── gitattributes.rs # .gitattributes management for compiled pipelines
+│   │   ├── filter_ir.rs  # Filter expression IR: Fact/Predicate types, lowering, validation, codegen
+│   │   ├── pr_filters.rs # PR trigger filter generation (native ADO + gate steps)
 │   │   ├── extensions/   # CompilerExtension trait and infrastructure extensions
 │   │   │   ├── mod.rs    # Trait, Extension enum, collect_extensions(), re-exports
 │   │   │   ├── github.rs # Always-on GitHub MCP extension
 │   │   │   ├── safe_outputs.rs # Always-on SafeOutputs MCP extension
+│   │   │   ├── trigger_filters.rs # Trigger filter extension (gate evaluator delivery)
 │   │   │   └── tests.rs  # Extension integration tests
 │   │   └── types.rs      # Front matter grammar and types
 │   ├── init.rs           # Repository initialization for AI-first authoring
@@ -116,6 +119,9 @@ Every compiled pipeline runs as three sequential jobs:
 │           └── execute.rs   # Stage 3 runtime (validate/copy)
 ├── ado-aw-derive/        # Proc-macro crate: #[derive(SanitizeConfig)], #[derive(SanitizeContent)]
 ├── examples/             # Example agent definitions
+├── scripts/              # Supporting scripts shipped as release artifacts
+│   ├── gate-eval.py      # Python gate evaluator (data-driven filter evaluation)
+│   └── gate-spec.schema.json # JSON Schema for gate spec (generated from Rust types)
 ├── tests/                # Integration tests and fixtures
 ├── docs/                 # Per-concept reference documentation (see index below)
 ├── Cargo.toml            # Rust dependencies

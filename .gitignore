@@ -1,2 +1,4 @@
 target
 examples/sample-agent.yml
+*.pyc
+__pycache__/

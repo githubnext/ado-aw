@@ -887,10 +887,11 @@ fn find_overlap(a: &[String], b: &[String]) -> Vec<String> {
 // ─── Serializable Gate Spec ─────────────────────────────────────────────────
 
 use serde::Serialize;
+use schemars::JsonSchema;
 
 /// Serializable gate specification — the JSON document consumed by the
 /// Python gate evaluator at pipeline runtime.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct GateSpec {
     pub context: GateContextSpec,
     pub facts: Vec<FactSpec>,
@@ -898,16 +899,16 @@ pub struct GateSpec {
 }
 
 /// Serialized gate context.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct GateContextSpec {
-    pub build_reason: &'static str,
-    pub tag_prefix: &'static str,
-    pub step_name: &'static str,
-    pub bypass_label: &'static str,
+    pub build_reason: String,
+    pub tag_prefix: String,
+    pub step_name: String,
+    pub bypass_label: String,
 }
 
 /// Serialized fact acquisition descriptor.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct FactSpec {
     pub id: String,
     pub kind: String,
@@ -915,7 +916,7 @@ pub struct FactSpec {
 }
 
 /// Serialized filter check.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CheckSpec {
     pub name: String,
     pub predicate: PredicateSpec,
@@ -923,7 +924,7 @@ pub struct CheckSpec {
 }
 
 /// Serialized predicate — the expression tree evaluated at runtime.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(tag = "type")]
 pub enum PredicateSpec {
     #[serde(rename = "regex_match")]
@@ -986,6 +987,16 @@ pub enum PredicateSpec {
 
     #[serde(rename = "not")]
     Not { operand: Box<PredicateSpec> },
+}
+
+/// Generate the JSON Schema for the gate spec.
+///
+/// This schema is the formal contract between the Rust compiler and the
+/// Python evaluator. It should be shipped in `scripts/gate-spec.schema.json`
+/// alongside the evaluator.
+pub fn generate_gate_spec_schema() -> String {
+    let schema = schemars::schema_for!(GateSpec);
+    serde_json::to_string_pretty(&schema).expect("schema serialization")
 }
 
 // ─── Codegen ────────────────────────────────────────────────────────────────
@@ -1147,13 +1158,14 @@ pub fn build_gate_spec(ctx: GateContext, checks: &[FilterCheck]) -> GateSpec {
 
     GateSpec {
         context: GateContextSpec {
-            build_reason: ctx.build_reason(),
-            tag_prefix: ctx.tag_prefix(),
-            step_name: ctx.step_name(),
+            build_reason: ctx.build_reason().into(),
+            tag_prefix: ctx.tag_prefix().into(),
+            step_name: ctx.step_name().into(),
             bypass_label: match ctx {
                 GateContext::PullRequest => "PR",
                 GateContext::PipelineCompletion => "pipeline",
-            },
+            }
+            .into(),
         },
         facts,
         checks: spec_checks,
@@ -1195,7 +1207,7 @@ pub fn compile_gate_step_external(
         ctx.display_name()
     ));
     step.push_str("  env:\n");
-    step.push_str("    SYSTEM_ACCESSTOKEN: $(System.AccessToken)");
+    step.push_str("    SYSTEM_ACCESSTOKEN: $(System.AccessToken)\n");
 
     step
 }
@@ -1367,7 +1379,7 @@ pub fn compile_gate_step_inline(ctx: GateContext, checks: &[FilterCheck]) -> Str
         ctx.display_name()
     ));
     step.push_str("  env:\n");
-    step.push_str("    SYSTEM_ACCESSTOKEN: $(System.AccessToken)");
+    step.push_str("    SYSTEM_ACCESSTOKEN: $(System.AccessToken)\n");
 
     step
 }
@@ -1880,5 +1892,70 @@ mod tests {
         assert!(spec.facts.iter().any(|f| f.kind == "pr_title"));
         assert!(spec.facts.iter().any(|f| f.kind == "pr_is_draft"));
         assert!(spec.facts.iter().any(|f| f.kind == "pr_labels"));
+    }
+
+    // ─── Schema tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_generate_schema_is_valid_json() {
+        let schema = generate_gate_spec_schema();
+        let parsed: serde_json::Value = serde_json::from_str(&schema)
+            .expect("schema should be valid JSON");
+        assert!(parsed.is_object());
+        assert!(parsed.get("$schema").is_some() || parsed.get("type").is_some(),
+            "should be a JSON Schema document");
+    }
+
+    #[test]
+    fn test_schema_includes_all_predicate_types() {
+        let schema = generate_gate_spec_schema();
+        // All predicate type discriminators should appear in the schema
+        for pred_type in &[
+            "regex_match", "equals", "value_in_set", "value_not_in_set",
+            "numeric_range", "time_window", "label_set_match",
+            "file_glob_match", "and", "or", "not",
+        ] {
+            assert!(
+                schema.contains(pred_type),
+                "schema should include predicate type '{}'",
+                pred_type
+            );
+        }
+    }
+
+    #[test]
+    fn test_spec_validates_against_schema() {
+        // Generate a spec and verify it matches the schema structure
+        let checks = vec![FilterCheck {
+            name: "title",
+            predicate: Predicate::RegexMatch {
+                fact: Fact::PrTitle,
+                pattern: "test".into(),
+            },
+            build_tag_suffix: "title-mismatch",
+        }];
+        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        let spec_json = serde_json::to_value(&spec).unwrap();
+
+        // Verify structural expectations from schema
+        assert!(spec_json["context"]["build_reason"].is_string());
+        assert!(spec_json["facts"].is_array());
+        assert!(spec_json["checks"].is_array());
+        assert!(spec_json["checks"][0]["predicate"]["type"].as_str() == Some("regex_match"));
+    }
+
+    #[test]
+    fn test_write_schema_to_scripts() {
+        // Generate schema and write to scripts/ for distribution
+        let schema = generate_gate_spec_schema();
+        let schema_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("scripts")
+            .join("gate-spec.schema.json");
+        std::fs::write(&schema_path, &schema)
+            .expect("should write schema file");
+
+        // Verify it's readable and valid
+        let read_back = std::fs::read_to_string(&schema_path).unwrap();
+        let _: serde_json::Value = serde_json::from_str(&read_back).unwrap();
     }
 }

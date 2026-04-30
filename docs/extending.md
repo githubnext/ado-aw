@@ -33,15 +33,18 @@ Runtimes and first-party tools declare their compilation requirements via the `C
 ```rust
 pub trait CompilerExtension: Send {
     fn name(&self) -> &str;                                    // Display name
+    fn phase(&self) -> ExtensionPhase;                         // Runtime (0) < Tool (1)
     fn required_hosts(&self) -> Vec<String>;                   // AWF network allowlist
     fn required_bash_commands(&self) -> Vec<String>;           // Agent bash allow-list
     fn prompt_supplement(&self) -> Option<String>;              // Agent prompt markdown
     fn prepare_steps(&self) -> Vec<String>;                    // Execution job steps (install, etc.)
-    fn setup_steps(&self) -> Vec<String>;                      // Setup job steps (gates, pre-checks)
-    fn mcpg_servers(&self, ctx) -> Result<Vec<(String, McpgServerConfig)>>; // MCPG entries
+    fn setup_steps(&self, ctx: &CompileContext) -> Vec<String>; // Setup job steps (gates, pre-checks)
+    fn mcpg_servers(&self, ctx: &CompileContext) -> Result<Vec<(String, McpgServerConfig)>>; // MCPG entries
+    fn allowed_copilot_tools(&self) -> Vec<String>;            // --allow-tool values
+    fn validate(&self, ctx: &CompileContext) -> Result<Vec<String>>; // Compile-time warnings/errors
+    fn required_pipeline_vars(&self) -> Vec<PipelineEnvMapping>; // Container env var mappings
     fn required_awf_mounts(&self) -> Vec<AwfMount>;            // AWF Docker volume mounts
     fn awf_path_prepends(&self) -> Vec<String>;                // Directories to add to chroot PATH
-    fn validate(&self, ctx) -> Result<Vec<String>>;            // Compile-time warnings
 }
 ```
 
@@ -49,6 +52,11 @@ pub trait CompilerExtension: Send {
 Execution job (before the agent runs). `setup_steps()` injects into the Setup
 job (before the Execution job starts). Use `setup_steps()` for pre-activation
 gates or checks that must complete before the agent is launched.
+
+**Phase ordering**: Extensions are sorted by phase — runtimes
+(`ExtensionPhase::Runtime`) execute before tools (`ExtensionPhase::Tool`).
+This guarantees runtime install steps run before tool steps that may depend
+on them.
 
 To add a new runtime or tool: (1) create a directory under `src/tools/` or `src/runtimes/`, (2) implement `CompilerExtension` in `extension.rs`, (3) add a variant to the `Extension` enum and a collection check in `collect_extensions()` in `src/compile/extensions/mod.rs`.
 
