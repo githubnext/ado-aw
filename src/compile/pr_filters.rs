@@ -802,11 +802,11 @@ triggers:
         let spec = build_gate_spec(GateContext::PullRequest, &checks);
         assert!(spec.facts.iter().any(|f| f.kind == "commit_message"), "should include commit_message fact");
         match &spec.checks[0].predicate {
-            PredicateSpec::RegexMatch { fact, pattern } => {
+            PredicateSpec::GlobMatch { fact, pattern } => {
                 assert_eq!(fact, "commit_message");
                 assert!(pattern.contains("skip-agent"));
             }
-            other => panic!("expected RegexMatch, got {:?}", other),
+            other => panic!("expected GlobMatch, got {:?}", other),
         }
         assert_eq!(spec.checks[0].tag_suffix, "commit-message-mismatch");
     }
@@ -818,8 +818,7 @@ on:
   schedule: daily around 14:00
   pr:
     filters:
-      title:
-        match: "\\[review\\]"
+      title: "*[review]*"
 "#;
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let oc: OnConfig = serde_yaml::from_value(val["on"].clone()).unwrap();
@@ -843,10 +842,8 @@ on:
     branches:
       include: [main]
     filters:
-      title:
-        match: "\\[agent\\]"
-      commit-message:
-        match: "^(?!.*\\[skip-agent\\])"
+      title: "*[agent]*"
+      commit-message: "*[skip-agent]*"
 "#;
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let oc: OnConfig = serde_yaml::from_value(val["on"].clone()).unwrap();
@@ -856,7 +853,7 @@ on:
         assert_eq!(pipeline.name, "Build Pipeline");
         let pr = oc.pr.unwrap();
         let filters = pr.filters.unwrap();
-        assert_eq!(filters.title.unwrap().pattern, "\\[agent\\]");
-        assert_eq!(filters.commit_message.unwrap().pattern, "^(?!.*\\[skip-agent\\])");
+        assert_eq!(filters.title.unwrap().pattern, "*[agent]*");
+        assert_eq!(filters.commit_message.unwrap().pattern, "*[skip-agent]*");
     }
 }

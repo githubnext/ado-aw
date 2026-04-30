@@ -26,19 +26,34 @@ predicate_facts = gate_eval.predicate_facts
 # ─── Predicate evaluation tests ─────────────────────────────────────────────
 
 
-class TestRegexMatch:
+class TestGlobMatch:
     def test_match(self):
-        pred = {"type": "regex_match", "fact": "pr_title", "pattern": r"\[review\]"}
+        pred = {"type": "glob_match", "fact": "pr_title", "pattern": "*[review]*"}
         facts = {"pr_title": "feat: add feature [review]"}
         assert evaluate(pred, facts) is True
 
     def test_no_match(self):
-        pred = {"type": "regex_match", "fact": "pr_title", "pattern": r"\[review\]"}
+        pred = {"type": "glob_match", "fact": "pr_title", "pattern": "*[review]*"}
         facts = {"pr_title": "feat: add feature"}
         assert evaluate(pred, facts) is False
 
+    def test_wildcard(self):
+        pred = {"type": "glob_match", "fact": "source_branch", "pattern": "feature/*"}
+        facts = {"source_branch": "feature/my-branch"}
+        assert evaluate(pred, facts) is True
+
+    def test_exact(self):
+        pred = {"type": "glob_match", "fact": "target_branch", "pattern": "main"}
+        facts = {"target_branch": "main"}
+        assert evaluate(pred, facts) is True
+
+    def test_exact_no_match(self):
+        pred = {"type": "glob_match", "fact": "target_branch", "pattern": "main"}
+        facts = {"target_branch": "develop"}
+        assert evaluate(pred, facts) is False
+
     def test_empty_value(self):
-        pred = {"type": "regex_match", "fact": "pr_title", "pattern": ".*"}
+        pred = {"type": "glob_match", "fact": "pr_title", "pattern": "*"}
         facts = {"pr_title": ""}
         assert evaluate(pred, facts) is True
 
@@ -302,7 +317,7 @@ class TestLogicalCombinators:
 
 class TestPredicateFacts:
     def test_simple(self):
-        pred = {"type": "regex_match", "fact": "pr_title", "pattern": "test"}
+        pred = {"type": "glob_match", "fact": "pr_title", "pattern": "test"}
         assert predicate_facts(pred) == {"pr_title"}
 
     def test_compound(self):
@@ -310,7 +325,7 @@ class TestPredicateFacts:
             "type": "and",
             "operands": [
                 {"type": "equals", "fact": "a", "value": "1"},
-                {"type": "regex_match", "fact": "b", "pattern": "x"},
+                {"type": "glob_match", "fact": "b", "pattern": "x"},
             ],
         }
         assert predicate_facts(pred) == {"a", "b"}

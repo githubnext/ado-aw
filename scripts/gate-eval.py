@@ -8,7 +8,7 @@ ADO logging commands.
 This script is embedded by the ado-aw compiler into pipeline gate steps.
 It should not be modified directly — changes belong in src/compile/filter_ir.rs.
 """
-import base64, json, os, re, sys
+import base64, fnmatch, json, os, sys
 from datetime import datetime, timezone
 
 # ─── Fact dependencies ───────────────────────────────────────────────────────
@@ -119,9 +119,15 @@ def evaluate(pred, facts):
     """Evaluate a predicate against acquired facts. Returns True if passed."""
     t = pred["type"]
 
-    if t == "regex_match":
+    if t == "glob_match":
         value = str(facts.get(pred["fact"], ""))
-        return bool(re.search(pred["pattern"], value))
+        # Simple glob: * matches anything, ? matches single char.
+        # Brackets are NOT character classes (treated literally).
+        import re as _re
+        pattern = pred["pattern"]
+        # Escape everything except * and ?, then convert * → .* and ? → .
+        regex = _re.escape(pattern).replace(r"\*", ".*").replace(r"\?", ".")
+        return bool(_re.fullmatch(regex, value))
 
     if t == "equals":
         value = str(facts.get(pred["fact"], ""))
@@ -179,7 +185,6 @@ def evaluate(pred, facts):
         return True
 
     if t == "file_glob_match":
-        import fnmatch
         files = facts.get(pred["fact"], [])
         if isinstance(files, str):
             files = [f.strip() for f in files.split("\n") if f.strip()]

@@ -6,8 +6,7 @@ on:
     branches:
       include: [main]
     filters:
-      title:
-        match: "\\[review\\]"
+      title: "*[review]*"
       labels:
         any-of: ["run-agent", "needs-review"]
         none-of: ["do-not-run"]

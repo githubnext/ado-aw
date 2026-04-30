@@ -8,8 +8,7 @@ on:
     branches:
       - main
     filters:
-      source-pipeline:
-        match: "Build.*"
+      source-pipeline: "Build*"
       time-window:
         start: "08:00"
         end: "20:00"

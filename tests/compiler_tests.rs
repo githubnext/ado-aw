@@ -3367,7 +3367,7 @@ fn test_pr_filter_tier1_has_inline_gate() {
     assert!(compiled.contains("Evaluate PR filters"), "Should have gate displayName");
 
     // Tier 1 inline path: bash if/grep checks, no GATE_SPEC
-    assert!(compiled.contains("grep"), "Tier 1 should use inline grep checks");
+    assert!(compiled.contains("case"), "Tier 1 should use inline case/glob checks");
     assert!(!compiled.contains("scripts.zip"), "Tier 1 should not download scripts");
 }
 

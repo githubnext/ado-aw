@@ -1055,11 +1055,17 @@ pub struct TimeWindowFilter {
     pub end: String,
 }
 
-/// A regex pattern filter.
+/// A glob pattern filter. Supports `*` (any chars) and `?` (single char).
+///
+/// ```yaml
+/// title: "*[review]*"
+/// source-branch: "feature/*"
+/// target-branch: "main"
+/// ```
 #[derive(Debug, Deserialize, Clone)]
+#[serde(transparent)]
 pub struct PatternFilter {
-    /// Regex pattern to match against
-    #[serde(rename = "match")]
+    /// Glob pattern to match against
     pub pattern: String,
 }
 
@@ -1694,14 +1700,13 @@ Body
 triggers:
   pr:
     filters:
-      title:
-        match: "\\[agent\\]"
+      title: "*[agent]*"
 "#;
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
         let pr = tc.pr.unwrap();
         let filters = pr.filters.unwrap();
-        assert_eq!(filters.title.unwrap().pattern, "\\[agent\\]");
+        assert_eq!(filters.title.unwrap().pattern, "*[agent]*");
     }
 
     #[test]
@@ -1731,10 +1736,8 @@ triggers:
       include: [main, "release/*"]
       exclude: ["test/*"]
     filters:
-      source-branch:
-        match: "^feature/.*"
-      target-branch:
-        match: "^main$"
+      source-branch: "feature/*"
+      target-branch: "main"
 "#;
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
@@ -1743,8 +1746,8 @@ triggers:
         assert_eq!(branches.include, vec!["main", "release/*"]);
         assert_eq!(branches.exclude, vec!["test/*"]);
         let filters = pr.filters.unwrap();
-        assert_eq!(filters.source_branch.unwrap().pattern, "^feature/.*");
-        assert_eq!(filters.target_branch.unwrap().pattern, "^main$");
+        assert_eq!(filters.source_branch.unwrap().pattern, "feature/*");
+        assert_eq!(filters.target_branch.unwrap().pattern, "main");
     }
 
     #[test]
@@ -1818,14 +1821,13 @@ triggers:
     name: "Build Pipeline"
   pr:
     filters:
-      title:
-        match: "\\[review\\]"
+      title: "*[review]*"
 "#;
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
         assert!(tc.pipeline.is_some());
         assert!(tc.pr.is_some());
-        assert_eq!(tc.pr.unwrap().filters.unwrap().title.unwrap().pattern, "\\[review\\]");
+        assert_eq!(tc.pr.unwrap().filters.unwrap().title.unwrap().pattern, "*[review]*");
     }
 
     #[test]
@@ -1853,8 +1855,7 @@ on:
     branches:
       include: [main]
     filters:
-      title:
-        match: "\\[agent\\]"
+      title: "*[agent]*"
       draft: false
 ---
 
@@ -1864,7 +1865,7 @@ Body
         let pr = fm.on_config.unwrap().pr.unwrap();
         assert_eq!(pr.branches.unwrap().include, vec!["main"]);
         let filters = pr.filters.unwrap();
-        assert_eq!(filters.title.unwrap().pattern, "\\[agent\\]");
+        assert_eq!(filters.title.unwrap().pattern, "*[agent]*");
         assert_eq!(filters.draft, Some(false));
     }
 }

@@ -290,8 +290,8 @@ pub enum FailurePolicy {
 /// A boolean test over one or more acquired facts.
 #[derive(Debug, Clone)]
 pub enum Predicate {
-    /// Regex match: `echo "$var" | grep -qE 'pattern'`
-    RegexMatch { fact: Fact, pattern: String },
+    /// Glob match: `fnmatch(value, pattern)` — `*` any chars, `?` single char
+    GlobMatch { fact: Fact, pattern: String },
 
     /// Exact equality: `[ "$var" = "value" ]`
     Equality { fact: Fact, value: String },
@@ -352,7 +352,7 @@ impl Predicate {
 
     fn collect_facts(&self, facts: &mut BTreeSet<Fact>) {
         match self {
-            Predicate::RegexMatch { fact, .. }
+            Predicate::GlobMatch { fact, .. }
             | Predicate::Equality { fact, .. }
             | Predicate::ValueInSet { fact, .. }
             | Predicate::ValueNotInSet { fact, .. }
@@ -511,7 +511,7 @@ pub fn lower_pr_filters(
     if let Some(title) = &filters.title {
         checks.push(FilterCheck {
             name: "title",
-            predicate: Predicate::RegexMatch {
+            predicate: Predicate::GlobMatch {
                 fact: Fact::PrTitle,
                 pattern: title.pattern.clone(),
             },
@@ -547,7 +547,7 @@ pub fn lower_pr_filters(
     if let Some(source) = &filters.source_branch {
         checks.push(FilterCheck {
             name: "source-branch",
-            predicate: Predicate::RegexMatch {
+            predicate: Predicate::GlobMatch {
                 fact: Fact::SourceBranch,
                 pattern: source.pattern.clone(),
             },
@@ -558,7 +558,7 @@ pub fn lower_pr_filters(
     if let Some(target) = &filters.target_branch {
         checks.push(FilterCheck {
             name: "target-branch",
-            predicate: Predicate::RegexMatch {
+            predicate: Predicate::GlobMatch {
                 fact: Fact::TargetBranch,
                 pattern: target.pattern.clone(),
             },
@@ -569,7 +569,7 @@ pub fn lower_pr_filters(
     if let Some(cm) = &filters.commit_message {
         checks.push(FilterCheck {
             name: "commit-message",
-            predicate: Predicate::RegexMatch {
+            predicate: Predicate::GlobMatch {
                 fact: Fact::CommitMessage,
                 pattern: cm.pattern.clone(),
             },
@@ -677,7 +677,7 @@ pub fn lower_pipeline_filters(
     if let Some(sp) = &filters.source_pipeline {
         checks.push(FilterCheck {
             name: "source-pipeline",
-            predicate: Predicate::RegexMatch {
+            predicate: Predicate::GlobMatch {
                 fact: Fact::TriggeredByPipeline,
                 pattern: sp.pattern.clone(),
             },
@@ -688,7 +688,7 @@ pub fn lower_pipeline_filters(
     if let Some(branch) = &filters.branch {
         checks.push(FilterCheck {
             name: "branch",
-            predicate: Predicate::RegexMatch {
+            predicate: Predicate::GlobMatch {
                 fact: Fact::TriggeringBranch,
                 pattern: branch.pattern.clone(),
             },
@@ -927,8 +927,8 @@ pub struct CheckSpec {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(tag = "type")]
 pub enum PredicateSpec {
-    #[serde(rename = "regex_match")]
-    RegexMatch { fact: String, pattern: String },
+    #[serde(rename = "glob_match")]
+    GlobMatch { fact: String, pattern: String },
 
     #[serde(rename = "equals")]
     Equals { fact: String, value: String },
@@ -1072,7 +1072,7 @@ impl FailurePolicy {
 /// Convert a `Predicate` to its serializable spec form.
 fn predicate_to_spec(pred: &Predicate) -> PredicateSpec {
     match pred {
-        Predicate::RegexMatch { fact, pattern } => PredicateSpec::RegexMatch {
+        Predicate::GlobMatch { fact, pattern } => PredicateSpec::GlobMatch {
             fact: fact.kind().into(),
             pattern: pattern.clone(),
         },
@@ -1251,19 +1251,20 @@ pub fn compile_gate_step_inline(ctx: GateContext, checks: &[FilterCheck]) -> Str
     for check in checks {
         let tag = format!("{}:{}", ctx.tag_prefix(), check.build_tag_suffix);
         match &check.predicate {
-            Predicate::RegexMatch { fact, pattern } => {
+            Predicate::GlobMatch { fact, pattern } => {
                 let escaped = shell_escape(pattern);
                 let (var_name, ado_macro) = fact_inline_var(*fact);
                 step.push_str(&format!("    {}=\"{}\"\n", var_name, ado_macro));
                 step.push_str(&format!(
-                    "    if echo \"${}\" | grep -qE '{}'; then\n",
+                    "    case \"${}\" in {})\n",
                     var_name, escaped
                 ));
                 step.push_str(&format!(
                     "      echo \"Filter: {} | Result: PASS\"\n",
                     check.name
                 ));
-                step.push_str("    else\n");
+                step.push_str("      ;;\n");
+                step.push_str("    *)\n");
                 step.push_str(&format!(
                     "      echo \"##[warning]Filter {} did not match\"\n",
                     check.name
@@ -1273,7 +1274,8 @@ pub fn compile_gate_step_inline(ctx: GateContext, checks: &[FilterCheck]) -> Str
                     tag
                 ));
                 step.push_str("      SHOULD_RUN=false\n");
-                step.push_str("    fi\n\n");
+                step.push_str("      ;;\n");
+                step.push_str("    esac\n\n");
             }
             Predicate::ValueInSet {
                 fact,
@@ -1544,7 +1546,7 @@ mod tests {
         assert_eq!(checks[0].name, "title");
         assert!(matches!(
             &checks[0].predicate,
-            Predicate::RegexMatch { fact: Fact::PrTitle, pattern } if pattern == "\\[review\\]"
+            Predicate::GlobMatch { fact: Fact::PrTitle, pattern } if pattern == "\\[review\\]"
         ));
     }
 
@@ -1737,7 +1739,7 @@ mod tests {
     fn test_compile_gate_step_structure() {
         let checks = vec![FilterCheck {
             name: "title",
-            predicate: Predicate::RegexMatch {
+            predicate: Predicate::GlobMatch {
                 fact: Fact::PrTitle,
                 pattern: "test".into(),
             },
@@ -1755,7 +1757,7 @@ mod tests {
     fn test_compile_gate_step_exports_ado_macros() {
         let checks = vec![FilterCheck {
             name: "title",
-            predicate: Predicate::RegexMatch {
+            predicate: Predicate::GlobMatch {
                 fact: Fact::PrTitle,
                 pattern: "test".into(),
             },
@@ -1771,7 +1773,7 @@ mod tests {
     fn test_compile_gate_step_pipeline_context() {
         let checks = vec![FilterCheck {
             name: "source-pipeline",
-            predicate: Predicate::RegexMatch {
+            predicate: Predicate::GlobMatch {
                 fact: Fact::TriggeredByPipeline,
                 pattern: "Build.*".into(),
             },
@@ -1802,7 +1804,7 @@ mod tests {
     fn test_compile_gate_step_no_pr_api_vars_for_tier1() {
         let checks = vec![FilterCheck {
             name: "title",
-            predicate: Predicate::RegexMatch {
+            predicate: Predicate::GlobMatch {
                 fact: Fact::PrTitle,
                 pattern: "test".into(),
             },
@@ -1819,7 +1821,7 @@ mod tests {
         let checks = vec![
             FilterCheck {
                 name: "title",
-                predicate: Predicate::RegexMatch {
+                predicate: Predicate::GlobMatch {
                     fact: Fact::PrTitle,
                     pattern: "test".into(),
                 },
@@ -1854,7 +1856,7 @@ mod tests {
     fn test_gate_spec_serializes_to_valid_json() {
         let checks = vec![FilterCheck {
             name: "title",
-            predicate: Predicate::RegexMatch {
+            predicate: Predicate::GlobMatch {
                 fact: Fact::PrTitle,
                 pattern: "\\[review\\]".into(),
             },
@@ -1866,7 +1868,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["context"]["build_reason"], "PullRequest");
         assert_eq!(parsed["checks"][0]["name"], "title");
-        assert_eq!(parsed["checks"][0]["predicate"]["type"], "regex_match");
+        assert_eq!(parsed["checks"][0]["predicate"]["type"], "glob_match");
         assert_eq!(parsed["checks"][0]["predicate"]["pattern"], "\\[review\\]");
     }
 
@@ -1922,7 +1924,7 @@ mod tests {
         let schema = generate_gate_spec_schema();
         // All predicate type discriminators should appear in the schema
         for pred_type in &[
-            "regex_match", "equals", "value_in_set", "value_not_in_set",
+            "glob_match", "equals", "value_in_set", "value_not_in_set",
             "numeric_range", "time_window", "label_set_match",
             "file_glob_match", "and", "or", "not",
         ] {
@@ -1939,7 +1941,7 @@ mod tests {
         // Generate a spec and verify it matches the schema structure
         let checks = vec![FilterCheck {
             name: "title",
-            predicate: Predicate::RegexMatch {
+            predicate: Predicate::GlobMatch {
                 fact: Fact::PrTitle,
                 pattern: "test".into(),
             },
@@ -1952,7 +1954,7 @@ mod tests {
         assert!(spec_json["context"]["build_reason"].is_string());
         assert!(spec_json["facts"].is_array());
         assert!(spec_json["checks"].is_array());
-        assert!(spec_json["checks"][0]["predicate"]["type"].as_str() == Some("regex_match"));
+        assert!(spec_json["checks"][0]["predicate"]["type"].as_str() == Some("glob_match"));
     }
 
     #[test]

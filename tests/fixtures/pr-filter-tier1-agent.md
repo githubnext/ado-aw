@@ -6,17 +6,13 @@ on:
     branches:
       include: [main]
     filters:
-      title:
-        match: "\\[agent\\]"
+      title: "*[agent]*"
       author:
         include: ["dev@corp.com"]
         exclude: ["bot@noreply.com"]
-      source-branch:
-        match: "^feature/.*"
-      target-branch:
-        match: "^main$"
-      commit-message:
-        match: "^(?!.*\\[skip-agent\\])"
+      source-branch: "feature/*"
+      target-branch: "main"
+      commit-message: "*[skip-agent]*"
       build-reason:
         include: [PullRequest, Manual]
 ---

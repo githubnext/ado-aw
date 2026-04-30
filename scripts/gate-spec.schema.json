@@ -104,7 +104,7 @@
             },
             "type": {
               "type": "string",
-              "const": "regex_match"
+              "const": "glob_match"
             }
           },
           "required": [
