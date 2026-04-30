@@ -11,25 +11,22 @@ ado-aw compiles human-friendly markdown files with YAML front matter into secure
 
 ## Setup
 
-Before creating or compiling workflows, ensure the ado-aw compiler is available. Download the pinned release and verify its checksum:
+Before creating or compiling workflows, ensure the ado-aw compiler is available. Download the latest release and verify its checksum:
 
 ```bash
 # Linux
-VERSION="{{ compiler_version }}"
-curl -fsSL -o /tmp/ado-aw "https://github.com/githubnext/ado-aw/releases/download/v${VERSION}/ado-aw-linux-x64"
-curl -fsSL -o /tmp/checksums.txt "https://github.com/githubnext/ado-aw/releases/download/v${VERSION}/checksums.txt"
+curl -fsSL -o /tmp/ado-aw "https://github.com/githubnext/ado-aw/releases/latest/download/ado-aw-linux-x64"
+curl -fsSL -o /tmp/checksums.txt "https://github.com/githubnext/ado-aw/releases/latest/download/checksums.txt"
 cd /tmp && grep "ado-aw-linux-x64" checksums.txt | sha256sum -c - && chmod +x /tmp/ado-aw
 
 # macOS (Apple Silicon)
-VERSION="{{ compiler_version }}"
-curl -fsSL -o /tmp/ado-aw "https://github.com/githubnext/ado-aw/releases/download/v${VERSION}/ado-aw-darwin-arm64"
-curl -fsSL -o /tmp/checksums.txt "https://github.com/githubnext/ado-aw/releases/download/v${VERSION}/checksums.txt"
+curl -fsSL -o /tmp/ado-aw "https://github.com/githubnext/ado-aw/releases/latest/download/ado-aw-darwin-arm64"
+curl -fsSL -o /tmp/checksums.txt "https://github.com/githubnext/ado-aw/releases/latest/download/checksums.txt"
 cd /tmp && grep "ado-aw-darwin-arm64" checksums.txt | shasum -a 256 -c - && chmod +x /tmp/ado-aw
 
 # Windows (PowerShell)
-$VERSION = "{{ compiler_version }}"
-Invoke-WebRequest -Uri "https://github.com/githubnext/ado-aw/releases/download/v$VERSION/ado-aw-windows-x64.exe" -OutFile "$env:TEMP\ado-aw.exe"
-Invoke-WebRequest -Uri "https://github.com/githubnext/ado-aw/releases/download/v$VERSION/checksums.txt" -OutFile "$env:TEMP\checksums.txt"
+Invoke-WebRequest -Uri "https://github.com/githubnext/ado-aw/releases/latest/download/ado-aw-windows-x64.exe" -OutFile "$env:TEMP\ado-aw.exe"
+Invoke-WebRequest -Uri "https://github.com/githubnext/ado-aw/releases/latest/download/checksums.txt" -OutFile "$env:TEMP\checksums.txt"
 # Verify: compare the SHA256 hash of ado-aw-windows-x64.exe against checksums.txt
 ```
 
