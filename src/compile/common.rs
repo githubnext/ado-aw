@@ -4773,4 +4773,116 @@ mod tests {
         let warnings = validate::warn_potential_secrets("my-mcp", &env, &headers);
         assert!(warnings.is_empty(), "non-secret env var should not produce warnings");
     }
+
+    // ─── standalone setup/teardown/finalize/checkout/repositories generators ───
+
+    #[test]
+    fn test_generate_setup_job_empty_returns_empty() {
+        assert!(generate_setup_job(&[], "MyPool").is_empty());
+    }
+
+    #[test]
+    fn test_generate_setup_job_with_steps() {
+        let step: serde_yaml::Value = serde_yaml::from_str("bash: echo setup").unwrap();
+        let out = generate_setup_job(&[step], "MyPool");
+        assert!(out.contains("- job: Setup"), "out: {out}");
+        assert!(out.contains("displayName: \"Setup\""), "out: {out}");
+        assert!(out.contains("name: MyPool"), "out: {out}");
+        assert!(out.contains("- checkout: self"), "out: {out}");
+        assert!(out.contains("echo setup"), "out: {out}");
+    }
+
+    #[test]
+    fn test_generate_teardown_job_empty_returns_empty() {
+        assert!(generate_teardown_job(&[], "MyPool").is_empty());
+    }
+
+    #[test]
+    fn test_generate_teardown_job_with_steps() {
+        let step: serde_yaml::Value = serde_yaml::from_str("bash: echo td").unwrap();
+        let out = generate_teardown_job(&[step], "MyPool");
+        assert!(out.contains("- job: Teardown"), "out: {out}");
+        assert!(out.contains("dependsOn: Execution"), "out: {out}");
+        assert!(out.contains("name: MyPool"), "out: {out}");
+        assert!(out.contains("echo td"), "out: {out}");
+    }
+
+    #[test]
+    fn test_generate_agentic_depends_on_empty_steps() {
+        assert!(generate_agentic_depends_on(&[]).is_empty());
+    }
+
+    #[test]
+    fn test_generate_agentic_depends_on_with_steps() {
+        let step: serde_yaml::Value = serde_yaml::from_str("bash: x").unwrap();
+        assert_eq!(generate_agentic_depends_on(&[step]), "dependsOn: Setup");
+    }
+
+    #[test]
+    fn test_generate_finalize_steps_empty() {
+        assert!(generate_finalize_steps(&[]).is_empty());
+    }
+
+    #[test]
+    fn test_generate_finalize_steps_with_step() {
+        let step: serde_yaml::Value = serde_yaml::from_str("bash: echo done").unwrap();
+        let out = generate_finalize_steps(&[step]);
+        assert!(out.contains("echo done"), "out: {out}");
+    }
+
+    #[test]
+    fn test_generate_checkout_steps_empty() {
+        assert!(generate_checkout_steps(&[]).is_empty());
+    }
+
+    #[test]
+    fn test_generate_checkout_steps_multiple() {
+        let aliases = vec!["repo-a".to_string(), "repo-b".to_string()];
+        let out = generate_checkout_steps(&aliases);
+        assert!(out.contains("- checkout: repo-a"), "out: {out}");
+        assert!(out.contains("- checkout: repo-b"), "out: {out}");
+    }
+
+    #[test]
+    fn test_generate_repositories_empty() {
+        assert!(generate_repositories(&[]).is_empty());
+    }
+
+    #[test]
+    fn test_generate_repositories_single() {
+        let repos = vec![Repository {
+            repository: "my-repo".to_string(),
+            repo_type: "git".to_string(),
+            name: "org/my-repo".to_string(),
+            repo_ref: "refs/heads/main".to_string(),
+        }];
+        let out = generate_repositories(&repos);
+        assert!(out.contains("- repository: my-repo"), "out: {out}");
+        assert!(out.contains("type: git"), "out: {out}");
+        assert!(out.contains("name: org/my-repo"), "out: {out}");
+        assert!(out.contains("ref: refs/heads/main"), "out: {out}");
+    }
+
+    #[test]
+    fn test_generate_repositories_multiple() {
+        let repos = vec![
+            Repository {
+                repository: "repo-a".to_string(),
+                repo_type: "git".to_string(),
+                name: "org/repo-a".to_string(),
+                repo_ref: "refs/heads/main".to_string(),
+            },
+            Repository {
+                repository: "repo-b".to_string(),
+                repo_type: "git".to_string(),
+                name: "org/repo-b".to_string(),
+                repo_ref: "refs/heads/develop".to_string(),
+            },
+        ];
+        let out = generate_repositories(&repos);
+        assert!(out.contains("- repository: repo-a"), "out: {out}");
+        assert!(out.contains("- repository: repo-b"), "out: {out}");
+        assert!(out.contains("name: org/repo-a"), "out: {out}");
+        assert!(out.contains("ref: refs/heads/develop"), "out: {out}");
+    }
 }
