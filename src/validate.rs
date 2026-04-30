@@ -92,6 +92,24 @@ pub fn is_safe_tool_name(name: &str) -> bool {
     !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
+/// Shell-escape a glob pattern for use in a bash `case` statement.
+///
+/// Strips all characters except alphanumerics and glob-safe characters
+/// (`*`, `?`, `[`, `]`, `.`, `-`, `_`, `/`, `@`, ` `, `:`).
+/// Notably rejects `$` (shell expansion), `` ` `` (command substitution),
+/// `;` (command chaining), and `{`/`}` (brace expansion).
+pub fn shell_escape_glob(s: &str) -> String {
+    s.chars()
+        .filter(|c| {
+            c.is_alphanumeric()
+                || matches!(
+                    c,
+                    '.' | '*' | '?' | '[' | ']' | '-' | '_' | '/' | '@' | ' ' | ':'
+                )
+        })
+        .collect()
+}
+
 // ── Injection detectors ─────────────────────────────────────────────────────
 
 /// Returns true if the string contains an ADO template expression (`${{`),

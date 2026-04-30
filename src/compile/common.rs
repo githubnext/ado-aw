@@ -1192,7 +1192,7 @@ pub fn generate_setup_job(
     pipeline_filters: Option<&super::types::PipelineFilters>,
     extensions: &[super::extensions::Extension],
     ctx: &super::extensions::CompileContext,
-) -> String {
+) -> anyhow::Result<String> {
     use super::extensions::CompilerExtension;
 
     let has_filters = pr_filters.is_some() || pipeline_filters.is_some();
@@ -1205,7 +1205,7 @@ pub fn generate_setup_job(
     let has_ext_setup = !ext_setup_steps.is_empty();
 
     if setup_steps.is_empty() && !has_filters && !has_ext_setup {
-        return String::new();
+        return Ok(String::new());
     }
 
     let mut steps_parts = Vec::new();
@@ -1218,10 +1218,10 @@ pub fn generate_setup_job(
     // Tier 1 inline gate steps — only when no extension provided gate steps
     if !has_ext_setup {
         if let Some(filters) = pr_filters {
-            steps_parts.push(super::pr_filters::generate_pr_gate_step(filters));
+            steps_parts.push(super::pr_filters::generate_pr_gate_step(filters)?);
         }
         if let Some(filters) = pipeline_filters {
-            steps_parts.push(generate_pipeline_gate_step(filters));
+            steps_parts.push(generate_pipeline_gate_step(filters)?);
         }
     }
 
@@ -1246,12 +1246,12 @@ pub fn generate_setup_job(
     }
 
     if steps_parts.is_empty() {
-        return String::new();
+        return Ok(String::new());
     }
 
     let combined_steps = steps_parts.join("\n\n");
 
-    format!(
+    Ok(format!(
         r#"- job: Setup
   displayName: "Setup"
   pool:
@@ -1261,11 +1261,11 @@ pub fn generate_setup_job(
 {}
 "#,
         pool, combined_steps
-    )
+    ))
 }
 
 /// Generate a pipeline gate step using the filter IR.
-fn generate_pipeline_gate_step(filters: &super::types::PipelineFilters) -> String {
+fn generate_pipeline_gate_step(filters: &super::types::PipelineFilters) -> anyhow::Result<String> {
     use super::filter_ir::{
         compile_gate_step_inline, lower_pipeline_filters, validate_pipeline_filters, GateContext,
         Severity,
@@ -1279,17 +1279,12 @@ fn generate_pipeline_gate_step(filters: &super::types::PipelineFilters) -> Strin
             Severity::Info => eprintln!("info: {}", diag),
         }
     }
-    if diags.iter().any(|d| d.severity == Severity::Error) {
-        let errors: Vec<String> = diags
-            .iter()
-            .filter(|d| d.severity == Severity::Error)
-            .map(|d| format!("# FILTER ERROR: {}", d))
-            .collect();
-        return errors.join("\n");
+    if let Some(err) = diags.iter().find(|d| d.severity == Severity::Error) {
+        anyhow::bail!("filter validation failed: {}", err);
     }
 
     let checks = lower_pipeline_filters(filters);
-    compile_gate_step_inline(GateContext::PipelineCompletion, &checks)
+    Ok(compile_gate_step_inline(GateContext::PipelineCompletion, &checks))
 }
 
 /// Generate the teardown job YAML
@@ -2031,7 +2026,7 @@ pub async fn compile_shared(
     let has_pr_filters = pr_filters.is_some();
     let pipeline_filters = front_matter.pipeline_filters();
     let has_pipeline_filters = pipeline_filters.is_some();
-    let setup_job = generate_setup_job(&front_matter.setup, &pool, pr_filters, pipeline_filters, extensions, ctx);
+    let setup_job = generate_setup_job(&front_matter.setup, &pool, pr_filters, pipeline_filters, extensions, ctx)?;
     let teardown_job = generate_teardown_job(&front_matter.teardown, &pool);
     let has_memory = front_matter
         .tools
@@ -4994,7 +4989,7 @@ mod tests {
     fn test_generate_setup_job_empty_returns_empty() {
         let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
         let ctx = CompileContext::for_test(&fm);
-        assert!(generate_setup_job(&[], "MyPool", None, None, &[], &ctx).is_empty());
+        assert!(generate_setup_job(&[], "MyPool", None, None, &[], &ctx).unwrap().is_empty());
     }
 
     #[test]
@@ -5002,7 +4997,7 @@ mod tests {
         let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
         let ctx = CompileContext::for_test(&fm);
         let step: serde_yaml::Value = serde_yaml::from_str("bash: echo setup").unwrap();
-        let out = generate_setup_job(&[step], "MyPool", None, None, &[], &ctx);
+        let out = generate_setup_job(&[step], "MyPool", None, None, &[], &ctx).unwrap();
         assert!(out.contains("- job: Setup"), "out: {out}");
         assert!(out.contains("displayName: \"Setup\""), "out: {out}");
         assert!(out.contains("name: MyPool"), "out: {out}");

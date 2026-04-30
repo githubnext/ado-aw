@@ -99,7 +99,7 @@ impl Fact {
 
             // Iteration API
             Fact::ChangedFiles => &[],
-            Fact::ChangedFileCount => &[], // may come from ChangedFiles or fresh fetch
+            Fact::ChangedFileCount => &[Fact::ChangedFiles],
 
             // Computed
             Fact::CurrentUtcMinutes => &[],
@@ -1214,7 +1214,7 @@ pub fn compile_gate_step_external(
 /// No Python evaluator needed — just inline bash if/grep checks against
 /// pipeline variables.
 pub fn compile_gate_step_inline(ctx: GateContext, checks: &[FilterCheck]) -> String {
-    use super::pr_filters::shell_escape;
+    use crate::validate::shell_escape_glob;
 
     if checks.is_empty() {
         return String::new();
@@ -1252,7 +1252,7 @@ pub fn compile_gate_step_inline(ctx: GateContext, checks: &[FilterCheck]) -> Str
         let tag = format!("{}:{}", ctx.tag_prefix(), check.build_tag_suffix);
         match &check.predicate {
             Predicate::GlobMatch { fact, pattern } => {
-                let escaped = shell_escape(pattern);
+                let escaped = shell_escape_glob(pattern);
                 let (var_name, ado_macro) = fact_inline_var(*fact);
                 step.push_str(&format!("    {}=\"{}\"\n", var_name, ado_macro));
                 step.push_str(&format!(
@@ -1284,7 +1284,7 @@ pub fn compile_gate_step_inline(ctx: GateContext, checks: &[FilterCheck]) -> Str
             } => {
                 let (var_name, ado_macro) = fact_inline_var(*fact);
                 let escaped: Vec<String> =
-                    values.iter().map(|v| shell_escape(v)).collect();
+                    values.iter().map(|v| shell_escape_glob(v)).collect();
                 let pattern = escaped.join("|");
                 let flag = if *case_insensitive { "i" } else { "" };
                 step.push_str(&format!("    {}=\"{}\"\n", var_name, ado_macro));
@@ -1315,7 +1315,7 @@ pub fn compile_gate_step_inline(ctx: GateContext, checks: &[FilterCheck]) -> Str
             } => {
                 let (var_name, ado_macro) = fact_inline_var(*fact);
                 let escaped: Vec<String> =
-                    values.iter().map(|v| shell_escape(v)).collect();
+                    values.iter().map(|v| shell_escape_glob(v)).collect();
                 let pattern = escaped.join("|");
                 let flag = if *case_insensitive { "i" } else { "" };
                 step.push_str(&format!("    {}=\"{}\"\n", var_name, ado_macro));
@@ -1537,7 +1537,7 @@ mod tests {
     fn test_lower_pr_filters_title() {
         let filters = PrFilters {
             title: Some(PatternFilter {
-                pattern: "\\[review\\]".into(),
+                pattern: "*[review]*".into(),
             }),
             ..Default::default()
         };
@@ -1546,7 +1546,7 @@ mod tests {
         assert_eq!(checks[0].name, "title");
         assert!(matches!(
             &checks[0].predicate,
-            Predicate::GlobMatch { fact: Fact::PrTitle, pattern } if pattern == "\\[review\\]"
+            Predicate::GlobMatch { fact: Fact::PrTitle, pattern } if pattern == "*[review]*"
         ));
     }
 
@@ -1709,7 +1709,7 @@ mod tests {
     fn test_validate_no_errors_for_valid_filters() {
         let filters = PrFilters {
             title: Some(PatternFilter {
-                pattern: "\\[review\\]".into(),
+                pattern: "*[review]*".into(),
             }),
             min_changes: Some(1),
             max_changes: Some(50),
@@ -1858,7 +1858,7 @@ mod tests {
             name: "title",
             predicate: Predicate::GlobMatch {
                 fact: Fact::PrTitle,
-                pattern: "\\[review\\]".into(),
+                pattern: "*[review]*".into(),
             },
             build_tag_suffix: "title-mismatch",
         }];
@@ -1869,7 +1869,7 @@ mod tests {
         assert_eq!(parsed["context"]["build_reason"], "PullRequest");
         assert_eq!(parsed["checks"][0]["name"], "title");
         assert_eq!(parsed["checks"][0]["predicate"]["type"], "glob_match");
-        assert_eq!(parsed["checks"][0]["predicate"]["pattern"], "\\[review\\]");
+        assert_eq!(parsed["checks"][0]["predicate"]["pattern"], "*[review]*");
     }
 
     // ─── End-to-end lowering + codegen ──────────────────────────────────
@@ -1878,7 +1878,7 @@ mod tests {
     fn test_roundtrip_pr_filters_to_gate_step() {
         let filters = PrFilters {
             title: Some(PatternFilter {
-                pattern: "\\[review\\]".into(),
+                pattern: "*[review]*".into(),
             }),
             draft: Some(false),
             labels: Some(LabelFilter {
@@ -1972,3 +1972,4 @@ mod tests {
         let _: serde_json::Value = serde_json::from_str(&read_back).unwrap();
     }
 }
+
