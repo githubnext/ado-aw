@@ -1173,8 +1173,8 @@ pub fn build_gate_spec(ctx: GateContext, checks: &[FilterCheck]) -> GateSpec {
 }
 
 /// Compile filter checks into a bash gate step using an external evaluator
-/// script. The generated step exports ADO macros, base64-encodes the spec,
-/// and invokes the evaluator at the given path.
+/// script. ADO variables are passed via the step's `env:` block (idiomatic
+/// ADO pattern), and the gate spec is base64-encoded in GATE_SPEC.
 pub fn compile_gate_step_external(
     ctx: GateContext,
     checks: &[FilterCheck],
@@ -1193,14 +1193,7 @@ pub fn compile_gate_step_external(
     let exports = collect_ado_exports(checks);
 
     let mut step = String::new();
-    step.push_str("- bash: |\n");
-
-    for (env_var, ado_macro) in &exports {
-        step.push_str(&format!("    export {}=\"{}\"\n", env_var, ado_macro));
-    }
-    step.push_str(&format!("    export GATE_SPEC=\"{}\"\n", spec_b64));
-    step.push_str("    export ADO_SYSTEM_ACCESS_TOKEN=\"$SYSTEM_ACCESSTOKEN\"\n");
-    step.push_str(&format!("    python3 {}\n", evaluator_path));
+    step.push_str(&format!("- bash: python3 {}\n", evaluator_path));
     step.push_str(&format!("  name: {}\n", ctx.step_name()));
     step.push_str(&format!(
         "  displayName: \"{}\"\n",
@@ -1208,6 +1201,12 @@ pub fn compile_gate_step_external(
     ));
     step.push_str("  env:\n");
     step.push_str("    SYSTEM_ACCESSTOKEN: $(System.AccessToken)\n");
+    step.push_str("    ADO_SYSTEM_ACCESS_TOKEN: $(System.AccessToken)\n");
+    step.push_str(&format!("    GATE_SPEC: \"{}\"\n", spec_b64));
+
+    for (env_var, ado_macro) in &exports {
+        step.push_str(&format!("    {}: {}\n", env_var, ado_macro));
+    }
 
     step
 }
@@ -1404,10 +1403,20 @@ fn fact_inline_var(fact: Fact) -> (&'static str, &'static str) {
 fn collect_ado_exports(checks: &[FilterCheck]) -> Vec<(&'static str, &'static str)> {
     let facts_set = collect_ordered_facts(checks);
     let mut exports: Vec<(&str, &str)> = Vec::new();
-    exports.push(("ADO_BUILD_REASON", "$(Build.Reason)"));
-    exports.push(("ADO_COLLECTION_URI", "$(System.CollectionUri)"));
-    exports.push(("ADO_PROJECT", "$(System.TeamProject)"));
-    exports.push(("ADO_BUILD_ID", "$(Build.BuildId)"));
+    let mut seen = BTreeSet::new();
+
+    // Always-needed infra vars
+    let infra: Vec<(&str, &str)> = vec![
+        ("ADO_BUILD_REASON", "$(Build.Reason)"),
+        ("ADO_COLLECTION_URI", "$(System.CollectionUri)"),
+        ("ADO_PROJECT", "$(System.TeamProject)"),
+        ("ADO_BUILD_ID", "$(Build.BuildId)"),
+    ];
+    for (k, v) in &infra {
+        if seen.insert(*k) {
+            exports.push((k, v));
+        }
+    }
 
     let needs_pr_api = facts_set.iter().any(|f| {
         matches!(
@@ -1416,11 +1425,14 @@ fn collect_ado_exports(checks: &[FilterCheck]) -> Vec<(&'static str, &'static st
         )
     });
     if needs_pr_api {
-        exports.push(("ADO_REPO_ID", "$(Build.Repository.ID)"));
-        exports.push(("ADO_PR_ID", "$(System.PullRequest.PullRequestId)"));
+        if seen.insert("ADO_REPO_ID") {
+            exports.push(("ADO_REPO_ID", "$(Build.Repository.ID)"));
+        }
+        if seen.insert("ADO_PR_ID") {
+            exports.push(("ADO_PR_ID", "$(System.PullRequest.PullRequestId)"));
+        }
     }
 
-    let mut seen = BTreeSet::new();
     for fact in &facts_set {
         for (env_var, ado_macro) in fact.ado_exports() {
             if seen.insert(env_var) {
@@ -1733,11 +1745,11 @@ mod tests {
             build_tag_suffix: "title-mismatch",
         }];
         let result = compile_gate_step_external(GateContext::PullRequest, &checks, "/tmp/ado-aw-scripts/gate-eval.py");
-        assert!(result.contains("- bash: |"), "should be a bash step");
-        assert!(result.contains("GATE_SPEC"), "should include base64 spec");
+        assert!(result.contains("- bash:"), "should be a bash step");
+        assert!(result.contains("GATE_SPEC"), "should include base64 spec in env");
         assert!(result.contains("python3 /tmp/ado-aw-scripts/gate-eval.py"), "should reference external evaluator script");
         assert!(result.contains("name: prGate"), "should set step name");
-        assert!(result.contains("SYSTEM_ACCESSTOKEN"), "should pass access token");
+        assert!(result.contains("SYSTEM_ACCESSTOKEN"), "should pass access token via env block");
     }
 
     #[test]
