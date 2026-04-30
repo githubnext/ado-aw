@@ -2367,4 +2367,34 @@ new file mode 100755
         assert!(config.auto_complete);
     }
 
+    // ─── truncate_error_body ────────────────────────────────────────────────
+
+    #[test]
+    fn test_truncate_error_body_shorter_than_max() {
+        assert_eq!(truncate_error_body("hello", 100), "hello");
+    }
+
+    #[test]
+    fn test_truncate_error_body_exact_max() {
+        assert_eq!(truncate_error_body("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_error_body_longer_than_max() {
+        assert_eq!(truncate_error_body("hello world", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_error_body_multibyte_boundary() {
+        // "héllo" — é is 2 bytes; truncation must not split a multi-byte char.
+        // max_len is char count: 3 chars = "hél".
+        let s = "héllo";
+        let result = truncate_error_body(s, 3);
+        assert_eq!(result, "hél");
+    }
+
+    #[test]
+    fn test_truncate_error_body_empty_input() {
+        assert_eq!(truncate_error_body("", 5), "");
+    }
 }
