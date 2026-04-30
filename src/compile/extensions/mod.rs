@@ -252,6 +252,16 @@ pub trait CompilerExtension {
         vec![]
     }
 
+    /// Pipeline steps (YAML strings) to inject into the Setup job.
+    ///
+    /// Unlike `prepare_steps()` which injects into the Execution job,
+    /// these steps run in the Setup job (before the Execution job starts).
+    /// Used by extensions that need to run gate logic or pre-activation
+    /// checks before the agent is launched.
+    fn setup_steps(&self) -> Vec<String> {
+        vec![]
+    }
+
     /// MCPG server entries this extension contributes.
     ///
     /// Returns `(server_name, config)` pairs inserted into the MCPG
@@ -503,6 +513,9 @@ macro_rules! extension_enum {
             fn prepare_steps(&self) -> Vec<String> {
                 match self { $( $Enum::$Variant(e) => e.prepare_steps(), )+ }
             }
+            fn setup_steps(&self) -> Vec<String> {
+                match self { $( $Enum::$Variant(e) => e.setup_steps(), )+ }
+            }
             fn mcpg_servers(&self, ctx: &CompileContext) -> Result<Vec<(String, McpgServerConfig)>> {
                 match self { $( $Enum::$Variant(e) => e.mcpg_servers(ctx), )+ }
             }
@@ -527,6 +540,7 @@ macro_rules! extension_enum {
 
 mod github;
 mod safe_outputs;
+pub(crate) mod trigger_filters;
 
 // Re-export tool/runtime extensions from their colocated homes
 pub use crate::tools::azure_devops::AzureDevOpsExtension;
@@ -534,6 +548,7 @@ pub use crate::tools::cache_memory::CacheMemoryExtension;
 pub use github::GitHubExtension;
 pub use crate::runtimes::lean::LeanExtension;
 pub use safe_outputs::SafeOutputsExtension;
+pub use trigger_filters::TriggerFiltersExtension;
 
 extension_enum! {
     /// All known compiler extensions, collected via [`collect_extensions`].
@@ -546,6 +561,7 @@ extension_enum! {
         Lean(LeanExtension),
         AzureDevOps(AzureDevOpsExtension),
         CacheMemory(CacheMemoryExtension),
+        TriggerFilters(TriggerFiltersExtension),
     }
 }
 // ──────────────────────────────────────────────────────────────────────
@@ -594,6 +610,21 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
                 )));
             }
         }
+    }
+
+    // ── Trigger filters (ExtensionPhase::Tool) ──
+    // Activated when Tier 2/3 filters require the Python evaluator.
+    let pr_filters = front_matter.pr_filters().cloned();
+    let pipeline_filters = front_matter.pipeline_filters().cloned();
+    if TriggerFiltersExtension::is_needed(
+        pr_filters.as_ref(),
+        pipeline_filters.as_ref(),
+    ) {
+        extensions.push(Extension::TriggerFilters(TriggerFiltersExtension::new(
+            pr_filters,
+            pipeline_filters,
+            crate::engine::COPILOT_CLI_VERSION.to_string(),
+        )));
     }
 
     // Enforce phase ordering: runtimes before tools.

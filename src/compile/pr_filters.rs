@@ -272,7 +272,7 @@ mod tests {
             title: Some(PatternFilter { pattern: "\\[review\\]".into() }),
             ..Default::default()
         };
-        let result = generate_setup_job(&[], "MyPool", Some(&filters), None);
+        let result = generate_setup_job(&[], "MyPool", Some(&filters), None, &[]);
         assert!(result.contains("- job: Setup"), "should create Setup job");
         assert!(result.contains("name: prGate"), "should include gate step");
         assert!(result.contains("Evaluate PR filters"), "should have gate displayName");
@@ -288,7 +288,7 @@ mod tests {
             title: Some(PatternFilter { pattern: "test".into() }),
             ..Default::default()
         };
-        let result = generate_setup_job(&[step], "MyPool", Some(&filters), None);
+        let result = generate_setup_job(&[step], "MyPool", Some(&filters), None, &[]);
         assert!(result.contains("name: prGate"), "should include gate step");
         assert!(result.contains("User step"), "should include user step");
         assert!(result.contains("prGate.SHOULD_RUN"), "user steps should reference gate output");
@@ -296,7 +296,7 @@ mod tests {
 
     #[test]
     fn test_generate_setup_job_without_filters_unchanged() {
-        let result = generate_setup_job(&[], "MyPool", None, None);
+        let result = generate_setup_job(&[], "MyPool", None, None, &[]);
         assert!(result.is_empty(), "no setup steps and no filters should produce empty string");
     }
 
@@ -332,7 +332,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let result = generate_setup_job(&[], "MyPool", Some(&filters), None);
+        let result = generate_setup_job(&[], "MyPool", Some(&filters), None, &[]);
         assert!(result.contains("ADO_AUTHOR_EMAIL"), "should export author email ADO macro");
         assert!(result.contains("Build.RequestedForEmail"), "should reference ADO author variable");
     }
@@ -344,7 +344,7 @@ mod tests {
             target_branch: Some(PatternFilter { pattern: "^main$".into() }),
             ..Default::default()
         };
-        let result = generate_setup_job(&[], "MyPool", Some(&filters), None);
+        let result = generate_setup_job(&[], "MyPool", Some(&filters), None, &[]);
         assert!(result.contains("ADO_SOURCE_BRANCH"), "should export source branch");
         assert!(result.contains("ADO_TARGET_BRANCH"), "should export target branch");
         assert!(result.contains("PullRequest.SourceBranch"), "should reference source branch ADO var");
@@ -357,7 +357,7 @@ mod tests {
             title: Some(PatternFilter { pattern: "test".into() }),
             ..Default::default()
         };
-        let result = generate_setup_job(&[], "MyPool", Some(&filters), None);
+        let result = generate_setup_job(&[], "MyPool", Some(&filters), None, &[]);
         // The evaluator handles bypass — bash just exports build reason
         assert!(result.contains("ADO_BUILD_REASON"), "should export build reason");
         assert!(result.contains("Build.Reason"), "should reference Build.Reason ADO macro");

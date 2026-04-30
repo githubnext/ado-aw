@@ -1181,37 +1181,49 @@ pub fn validate_resolve_pr_thread_statuses(front_matter: &FrontMatter) -> Result
 
 /// Generate the setup job YAML.
 ///
-/// When `pr_filters` is `Some`, injects a pre-activation gate step that evaluates
-/// PR filters and self-cancels the build if they don't match. When `pipeline_filters`
-/// is `Some`, injects a similar gate step for pipeline completion triggers.
-/// The Setup job is created even if `setup_steps` is empty (solely for the gate).
+/// Extension `setup_steps()` are injected first (download + gate steps for
+/// Tier 2/3 filters). For Tier-1-only filters (no extension activated), the
+/// inline gate step is generated directly. User `setup_steps` are appended
+/// last, conditioned on the gate if filters are active.
 pub fn generate_setup_job(
     setup_steps: &[serde_yaml::Value],
     pool: &str,
     pr_filters: Option<&super::types::PrFilters>,
     pipeline_filters: Option<&super::types::PipelineFilters>,
+    extensions: &[super::extensions::Extension],
 ) -> String {
-    if setup_steps.is_empty() && pr_filters.is_none() && pipeline_filters.is_none() {
+    // Check if the TriggerFiltersExtension is active (Tier 2/3)
+    let has_trigger_ext = extensions.iter().any(|e| e.name() == "trigger-filters");
+    let has_filters = pr_filters.is_some() || pipeline_filters.is_some();
+
+    if setup_steps.is_empty() && !has_filters && !has_trigger_ext {
         return String::new();
     }
 
-    let has_gate = pr_filters.is_some() || pipeline_filters.is_some();
     let mut steps_parts = Vec::new();
 
-    // PR gate step
-    if let Some(filters) = pr_filters {
-        steps_parts.push(super::pr_filters::generate_pr_gate_step(filters));
+    if has_trigger_ext {
+        // Extension handles download + gate step(s) via setup_steps()
+        for ext in extensions {
+            for step in ext.setup_steps() {
+                steps_parts.push(step);
+            }
+        }
+    } else {
+        // Tier 1 inline gate steps (no extension needed)
+        if let Some(filters) = pr_filters {
+            steps_parts.push(super::pr_filters::generate_pr_gate_step(filters));
+        }
+        if let Some(filters) = pipeline_filters {
+            steps_parts.push(generate_pipeline_gate_step(filters));
+        }
     }
 
-    // Pipeline gate step
-    if let Some(filters) = pipeline_filters {
-        steps_parts.push(generate_pipeline_gate_step(filters));
-    }
+    let has_gate = has_filters;
 
     // User setup steps (conditioned on gate passing when filters are active)
     if !setup_steps.is_empty() {
         if has_gate {
-            // Determine which gate step name to reference
             let gate_var = if pr_filters.is_some() {
                 "prGate.SHOULD_RUN"
             } else {
@@ -1225,6 +1237,10 @@ pub fn generate_setup_job(
         } else {
             steps_parts.push(format_steps_yaml_indented(setup_steps, 4));
         }
+    }
+
+    if steps_parts.is_empty() {
+        return String::new();
     }
 
     let combined_steps = steps_parts.join("\n\n");
@@ -2014,7 +2030,7 @@ pub async fn compile_shared(
     let has_pr_filters = pr_filters.is_some();
     let pipeline_filters = front_matter.pipeline_filters();
     let has_pipeline_filters = pipeline_filters.is_some();
-    let setup_job = generate_setup_job(&front_matter.setup, &pool, pr_filters, pipeline_filters);
+    let setup_job = generate_setup_job(&front_matter.setup, &pool, pr_filters, pipeline_filters, extensions);
     let teardown_job = generate_teardown_job(&front_matter.teardown, &pool);
     let has_memory = front_matter
         .tools
