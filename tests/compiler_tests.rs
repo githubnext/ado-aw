@@ -3110,6 +3110,34 @@ fn test_standalone_complete_compiled_output_is_valid_yaml() {
     assert_valid_yaml(&compiled, "complete-agent.md");
 }
 
+/// Test that the complete standalone fixture emits Setup/Teardown jobs and
+/// that the agentic task waits on Setup. The fixture has `setup:`,
+/// `teardown:`, and `post-steps:` sections so all three should appear.
+#[test]
+fn test_standalone_complete_agent_has_setup_and_teardown_jobs() {
+    let compiled = compile_fixture("complete-agent.md");
+    assert!(
+        compiled.contains("- job: Setup"),
+        "Should generate Setup job: {compiled}"
+    );
+    assert!(
+        compiled.contains("- job: Teardown"),
+        "Should generate Teardown job"
+    );
+    assert!(
+        compiled.contains("dependsOn: Setup"),
+        "Agentic task should depend on Setup job"
+    );
+    assert!(
+        compiled.contains("echo \"Setup step\"") || compiled.contains("echo 'Setup step'"),
+        "Should include setup step content"
+    );
+    assert!(
+        compiled.contains("echo \"Teardown step\"") || compiled.contains("echo 'Teardown step'"),
+        "Should include teardown step content"
+    );
+}
+
 /// Test that the pipeline-trigger fixture produces valid YAML
 #[test]
 fn test_standalone_pipeline_trigger_compiled_output_is_valid_yaml() {

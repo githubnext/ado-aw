@@ -215,7 +215,7 @@ pub(crate) fn validate_git_ref_name(name: &str, label: &str) -> anyhow::Result<(
 
     ensure!(!name.is_empty(), "{label} must not be empty");
     ensure!(!name.contains(".."), "{label} must not contain '..'");
-    ensure!(!name.contains("@{{"), "{label} must not contain '@{{'");
+    ensure!(!name.contains("@{"), "{label} must not contain '@{{'");
     ensure!(!name.ends_with('.'), "{label} must not end with '.'");
     ensure!(!name.ends_with(".lock"), "{label} must not end with '.lock'");
     ensure!(
@@ -390,5 +390,65 @@ mod tests {
             expected,
             "ALL_KNOWN_SAFE_OUTPUTS should be the union of write + diagnostic + non-MCP lists"
         );
+    }
+
+    // ─── validate_git_ref_name ──────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_git_ref_name_rejects_at_brace() {
+        assert!(validate_git_ref_name("branch@{0}", "b").is_err());
+    }
+
+    #[test]
+    fn test_validate_git_ref_name_rejects_dotlock_suffix() {
+        assert!(validate_git_ref_name("my-branch.lock", "b").is_err());
+    }
+
+    #[test]
+    fn test_validate_git_ref_name_rejects_consecutive_slashes() {
+        assert!(validate_git_ref_name("feat//thing", "b").is_err());
+    }
+
+    #[test]
+    fn test_validate_git_ref_name_rejects_backslash() {
+        assert!(validate_git_ref_name("feat\\evil", "b").is_err());
+    }
+
+    #[test]
+    fn test_validate_git_ref_name_rejects_special_chars() {
+        for ch in ['~', '^', ':', '?', '*', '['] {
+            let name = format!("feat{ch}bad");
+            assert!(
+                validate_git_ref_name(&name, "b").is_err(),
+                "should reject '{ch}'"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_git_ref_name_rejects_component_starting_with_dot() {
+        assert!(validate_git_ref_name("feat/.hidden", "b").is_err());
+    }
+
+    #[test]
+    fn test_validate_git_ref_name_rejects_trailing_dot() {
+        assert!(validate_git_ref_name("my-branch.", "b").is_err());
+    }
+
+    #[test]
+    fn test_validate_git_ref_name_rejects_double_dot() {
+        assert!(validate_git_ref_name("foo..bar", "b").is_err());
+    }
+
+    #[test]
+    fn test_validate_git_ref_name_rejects_empty() {
+        assert!(validate_git_ref_name("", "b").is_err());
+    }
+
+    #[test]
+    fn test_validate_git_ref_name_accepts_valid_refs() {
+        assert!(validate_git_ref_name("feature/add-login", "b").is_ok());
+        assert!(validate_git_ref_name("v1.2.3", "b").is_ok());
+        assert!(validate_git_ref_name("release/2026-04-17", "b").is_ok());
     }
 }

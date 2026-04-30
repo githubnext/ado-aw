@@ -356,6 +356,14 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_for_markdown_strips_shorthand_pipeline_command() {
+        assert_eq!(
+            sanitize_for_markdown("##[error]Something bad"),
+            "[filtered][error]Something bad"
+        );
+    }
+
+    #[test]
     fn test_internal_tools_excluded_from_count() {
         let entries = vec![
             serde_json::json!({"type": "span", "name": "execute_tool report_intent"}),

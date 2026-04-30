@@ -461,6 +461,54 @@ mod tests {
     }
 
     #[test]
+    fn test_validation_rejects_branch_starting_with_dash() {
+        let params = CreateBranchParams {
+            branch_name: "-bad".to_string(),
+            source_branch: None,
+            source_commit: None,
+            repository: None,
+        };
+        let result: Result<CreateBranchResult, _> = params.try_into();
+        assert!(result.is_err(), "branch starting with '-' should be rejected");
+    }
+
+    #[test]
+    fn test_validation_rejects_branch_with_spaces() {
+        let params = CreateBranchParams {
+            branch_name: "my branch".to_string(),
+            source_branch: None,
+            source_commit: None,
+            repository: None,
+        };
+        let result: Result<CreateBranchResult, _> = params.try_into();
+        assert!(result.is_err(), "branch with spaces should be rejected");
+    }
+
+    #[test]
+    fn test_validation_rejects_branch_over_200_chars() {
+        let params = CreateBranchParams {
+            branch_name: "a".repeat(201),
+            source_branch: None,
+            source_commit: None,
+            repository: None,
+        };
+        let result: Result<CreateBranchResult, _> = params.try_into();
+        assert!(result.is_err(), "branch >200 chars should be rejected");
+    }
+
+    #[test]
+    fn test_validation_rejects_source_branch_with_traversal() {
+        let params = CreateBranchParams {
+            branch_name: "feature/valid".to_string(),
+            source_branch: Some("../evil".to_string()),
+            source_commit: None,
+            repository: None,
+        };
+        let result: Result<CreateBranchResult, _> = params.try_into();
+        assert!(result.is_err(), "source_branch with '..' should be rejected");
+    }
+
+    #[test]
     fn test_result_serializes_correctly() {
         let params = CreateBranchParams {
             branch_name: "feature/test-branch".to_string(),
