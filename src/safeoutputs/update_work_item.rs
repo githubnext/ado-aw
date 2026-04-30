@@ -189,6 +189,162 @@ pub struct UpdateWorkItemConfig {
     pub tags: bool,
 }
 
+/// Check that `config.target` permits updating the given work item ID.
+/// Returns `Some(failure)` if the update should be blocked, `None` if it is allowed.
+fn check_target_config(id: u64, config: &UpdateWorkItemConfig) -> Option<ExecutionResult> {
+    let target = config.target.as_ref()?;  // None → missing config handled below
+    let target_allowed = match target {
+        TargetConfig::Pattern(p) if p == "*" => true,
+        TargetConfig::Id(allowed_id) => *allowed_id == id,
+        TargetConfig::Pattern(p) => {
+            log::warn!(
+                "update-work-item: unrecognised target pattern '{}'; \
+                 only \"*\" or an integer ID are valid — all updates are blocked",
+                p
+            );
+            false
+        }
+    };
+    if target_allowed {
+        None
+    } else {
+        Some(ExecutionResult::failure(format!(
+            "Work item #{id} is not permitted by the update-work-item target configuration"
+        )))
+    }
+}
+
+/// Validate that every field the agent requested to update is enabled in the configuration.
+/// Returns `Some(failure)` on the first disabled field, `None` when all are allowed.
+fn check_field_permissions(
+    params: &UpdateWorkItemResult,
+    config: &UpdateWorkItemConfig,
+) -> Option<ExecutionResult> {
+    let checks: &[(&str, bool, bool)] = &[
+        ("Title updates are not enabled in the update-work-item configuration; set 'title: true' in safe-outputs",           params.title.is_some(),          config.title),
+        ("Body/description updates are not enabled in the update-work-item configuration; set 'body: true' in safe-outputs", params.body.is_some(),           config.body),
+        ("State/status updates are not enabled in the update-work-item configuration; set 'status: true' in safe-outputs",  params.state.is_some(),          config.status),
+        ("Area path updates are not enabled in the update-work-item configuration; set 'area-path: true' in safe-outputs",  params.area_path.is_some(),      config.area_path),
+        ("Iteration path updates are not enabled in the update-work-item configuration; set 'iteration-path: true' in safe-outputs", params.iteration_path.is_some(), config.iteration_path),
+        ("Assignee updates are not enabled in the update-work-item configuration; set 'assignee: true' in safe-outputs",    params.assignee.is_some(),       config.assignee),
+        ("Tag updates are not enabled in the update-work-item configuration; set 'tags: true' in safe-outputs",             params.tags.is_some(),           config.tags),
+    ];
+    for (msg, field_set, field_enabled) in checks {
+        if *field_set && !field_enabled {
+            return Some(ExecutionResult::failure(*msg));
+        }
+    }
+    None
+}
+
+/// Fetch the current work item and verify title-prefix / tag-prefix guards when configured.
+/// Returns `Ok(Some(failure))` if a guard blocks the update, `Ok(None)` if all guards pass,
+/// or `Ok(Some(failure))` when the fetch itself fails.
+async fn check_prefix_guards(
+    client: &reqwest::Client,
+    org_url: &str,
+    project: &str,
+    token: &str,
+    id: u64,
+    config: &UpdateWorkItemConfig,
+) -> anyhow::Result<Option<ExecutionResult>> {
+    if config.title_prefix.is_none() && config.tag_prefix.is_none() {
+        return Ok(None);
+    }
+
+    debug!(
+        "Fetching work item #{} to check prefix guards (title_prefix={:?}, tag_prefix={:?})",
+        id, config.title_prefix, config.tag_prefix
+    );
+
+    let wi = match fetch_work_item(client, org_url, project, token, id).await {
+        Ok(wi) => wi,
+        Err(e) => {
+            return Ok(Some(ExecutionResult::failure(format!(
+                "Failed to fetch work item #{id} for prefix validation: {e}"
+            ))));
+        }
+    };
+
+    // title-prefix check
+    if let Some(prefix) = &config.title_prefix {
+        let current_title = wi
+            .get("fields")
+            .and_then(|f| f.get("System.Title"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("");
+        if !current_title.starts_with(prefix.as_str()) {
+            return Ok(Some(ExecutionResult::failure(format!(
+                "Work item #{id} title '{current_title}' does not start with the required prefix '{prefix}' (configured in title-prefix)"
+            ))));
+        }
+        debug!("Title-prefix check passed: '{}'", current_title);
+    }
+
+    // tag-prefix check: ADO stores tags as a semicolon-separated string
+    if let Some(prefix) = &config.tag_prefix {
+        let raw_tags = wi
+            .get("fields")
+            .and_then(|f| f.get("System.Tags"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("");
+        let has_matching_tag = raw_tags
+            .split(';')
+            .map(str::trim)
+            .any(|tag| tag.starts_with(prefix.as_str()));
+        if !has_matching_tag {
+            return Ok(Some(ExecutionResult::failure(format!(
+                "Work item #{id} has no tag starting with '{prefix}' (configured in tag-prefix). Current tags: '{raw_tags}'"
+            ))));
+        }
+        debug!("Tag-prefix check passed; matched in tags: '{}'", raw_tags);
+    }
+
+    Ok(None)
+}
+
+/// Build the JSON Patch document for the PATCH request from the provided fields.
+fn build_patch_document(
+    params: &UpdateWorkItemResult,
+    config: &UpdateWorkItemConfig,
+) -> Vec<serde_json::Value> {
+    let mut patch_doc: Vec<serde_json::Value> = Vec::new();
+
+    if let Some(title) = &params.title {
+        patch_doc.push(replace_field_op("System.Title", title));
+    }
+    if let Some(body) = &params.body {
+        patch_doc.push(replace_field_op("System.Description", body));
+        // Only add the markdown format hint when explicitly opted in.
+        // This op is only supported on ADO Services and Server 2022+; omitting it
+        // keeps the body update working on older on-premises deployments.
+        if config.markdown_body {
+            patch_doc.push(serde_json::json!({
+                "op": "replace",
+                "path": "/multilineFieldsFormat/System.Description",
+                "value": "Markdown"
+            }));
+        }
+    }
+    if let Some(state) = &params.state {
+        patch_doc.push(replace_field_op("System.State", state));
+    }
+    if let Some(area_path) = &params.area_path {
+        patch_doc.push(replace_field_op("System.AreaPath", area_path));
+    }
+    if let Some(iteration_path) = &params.iteration_path {
+        patch_doc.push(replace_field_op("System.IterationPath", iteration_path));
+    }
+    if let Some(assignee) = &params.assignee {
+        patch_doc.push(replace_field_op("System.AssignedTo", assignee));
+    }
+    if let Some(tags) = &params.tags {
+        patch_doc.push(replace_field_op("System.Tags", tags.join("; ")));
+    }
+
+    patch_doc
+}
+
 /// Build a replace-field patch operation for work item updates
 fn replace_field_op(field: &str, value: impl Into<String>) -> serde_json::Value {
     serde_json::json!({
@@ -285,164 +441,32 @@ impl Executor for UpdateWorkItemResult {
             config.tag_prefix,
         );
 
-        // Validate the target constraint
-        let target = match &config.target {
-            Some(t) => t,
-            None => {
-                return Ok(ExecutionResult::failure(
-                    "update-work-item target is not configured. \
-                     This is required to scope which work items the agent can update."
-                        .to_string(),
-                ));
-            }
-        };
-        let target_allowed = match target {
-            TargetConfig::Pattern(p) if p == "*" => true,
-            TargetConfig::Id(allowed_id) => *allowed_id == self.id,
-            TargetConfig::Pattern(p) => {
-                log::warn!(
-                    "update-work-item: unrecognised target pattern '{}'; \
-                     only \"*\" or an integer ID are valid — all updates are blocked",
-                    p
-                );
-                false
-            }
-        };
-        if !target_allowed {
-            return Ok(ExecutionResult::failure(format!(
-                "Work item #{} is not permitted by the update-work-item target configuration",
-                self.id
-            )));
-        }
-
-        // Validate that each provided field is enabled in the configuration
-        if self.title.is_some() && !config.title {
+        // Validate target and field-permission guards; return early on first failure
+        if config.target.is_none() {
             return Ok(ExecutionResult::failure(
-                "Title updates are not enabled in the update-work-item configuration; set 'title: true' in safe-outputs",
+                "update-work-item target is not configured. \
+                 This is required to scope which work items the agent can update."
+                    .to_string(),
             ));
         }
-        if self.body.is_some() && !config.body {
-            return Ok(ExecutionResult::failure(
-                "Body/description updates are not enabled in the update-work-item configuration; set 'body: true' in safe-outputs",
-            ));
+        if let Some(result) = check_target_config(self.id, &config) {
+            return Ok(result);
         }
-        if self.state.is_some() && !config.status {
-            return Ok(ExecutionResult::failure(
-                "State/status updates are not enabled in the update-work-item configuration; set 'status: true' in safe-outputs",
-            ));
-        }
-        if self.area_path.is_some() && !config.area_path {
-            return Ok(ExecutionResult::failure(
-                "Area path updates are not enabled in the update-work-item configuration; set 'area-path: true' in safe-outputs",
-            ));
-        }
-        if self.iteration_path.is_some() && !config.iteration_path {
-            return Ok(ExecutionResult::failure(
-                "Iteration path updates are not enabled in the update-work-item configuration; set 'iteration-path: true' in safe-outputs",
-            ));
-        }
-        if self.assignee.is_some() && !config.assignee {
-            return Ok(ExecutionResult::failure(
-                "Assignee updates are not enabled in the update-work-item configuration; set 'assignee: true' in safe-outputs",
-            ));
-        }
-        if self.tags.is_some() && !config.tags {
-            return Ok(ExecutionResult::failure(
-                "Tag updates are not enabled in the update-work-item configuration; set 'tags: true' in safe-outputs",
-            ));
+        if let Some(result) = check_field_permissions(self, &config) {
+            return Ok(result);
         }
 
         let client = reqwest::Client::new();
 
-        // If either prefix guard is configured, fetch the current work item once and check both
-        if config.title_prefix.is_some() || config.tag_prefix.is_some() {
-            debug!(
-                "Fetching work item #{} to check prefix guards (title_prefix={:?}, tag_prefix={:?})",
-                self.id, config.title_prefix, config.tag_prefix
-            );
-            match fetch_work_item(&client, org_url, project, token, self.id).await {
-                Ok(wi) => {
-                    // title-prefix check
-                    if let Some(prefix) = &config.title_prefix {
-                        let current_title = wi
-                            .get("fields")
-                            .and_then(|f| f.get("System.Title"))
-                            .and_then(|t| t.as_str())
-                            .unwrap_or("");
-                        if !current_title.starts_with(prefix.as_str()) {
-                            return Ok(ExecutionResult::failure(format!(
-                                "Work item #{} title '{}' does not start with the required prefix '{}' (configured in title-prefix)",
-                                self.id, current_title, prefix
-                            )));
-                        }
-                        debug!("Title-prefix check passed: '{}'", current_title);
-                    }
-
-                    // tag-prefix check: ADO stores tags as a semicolon-separated string
-                    if let Some(prefix) = &config.tag_prefix {
-                        let raw_tags = wi
-                            .get("fields")
-                            .and_then(|f| f.get("System.Tags"))
-                            .and_then(|t| t.as_str())
-                            .unwrap_or("");
-                        let has_matching_tag = raw_tags
-                            .split(';')
-                            .map(str::trim)
-                            .any(|tag| tag.starts_with(prefix.as_str()));
-                        if !has_matching_tag {
-                            return Ok(ExecutionResult::failure(format!(
-                                "Work item #{} has no tag starting with '{}' (configured in tag-prefix). Current tags: '{}'",
-                                self.id, prefix, raw_tags
-                            )));
-                        }
-                        debug!("Tag-prefix check passed; matched in tags: '{}'", raw_tags);
-                    }
-                }
-                Err(e) => {
-                    return Ok(ExecutionResult::failure(format!(
-                        "Failed to fetch work item #{} for prefix validation: {}",
-                        self.id, e
-                    )));
-                }
-            }
+        // Enforce title-prefix / tag-prefix guards (requires a GET if either is set)
+        if let Some(result) =
+            check_prefix_guards(&client, org_url, project, token, self.id, &config).await?
+        {
+            return Ok(result);
         }
 
-        // Build the JSON Patch document for the update
-        let mut patch_doc: Vec<serde_json::Value> = Vec::new();
-
-        if let Some(title) = &self.title {
-            patch_doc.push(replace_field_op("System.Title", title));
-        }
-        if let Some(body) = &self.body {
-            patch_doc.push(replace_field_op("System.Description", body));
-            // Only add the markdown format hint when explicitly opted in.
-            // This op is only supported on ADO Services and Server 2022+; omitting it
-            // keeps the body update working on older on-premises deployments.
-            if config.markdown_body {
-                patch_doc.push(serde_json::json!({
-                    "op": "replace",
-                    "path": "/multilineFieldsFormat/System.Description",
-                    "value": "Markdown"
-                }));
-            }
-        }
-        if let Some(state) = &self.state {
-            patch_doc.push(replace_field_op("System.State", state));
-        }
-        if let Some(area_path) = &self.area_path {
-            patch_doc.push(replace_field_op("System.AreaPath", area_path));
-        }
-        if let Some(iteration_path) = &self.iteration_path {
-            patch_doc.push(replace_field_op("System.IterationPath", iteration_path));
-        }
-        if let Some(assignee) = &self.assignee {
-            patch_doc.push(replace_field_op("System.AssignedTo", assignee));
-        }
-        if let Some(tags) = &self.tags {
-            patch_doc.push(replace_field_op("System.Tags", tags.join("; ")));
-        }
-
-        // Make the PATCH API call
+        // Build and send the PATCH request
+        let patch_doc = build_patch_document(self, &config);
         let url = format!(
             "{}/{}/_apis/wit/workitems/{}?api-version=7.0",
             org_url.trim_end_matches('/'),
