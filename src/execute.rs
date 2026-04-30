@@ -17,7 +17,8 @@ use crate::safeoutputs::{
     ExecutionContext, ExecutionResult, Executor, LinkWorkItemsResult, MissingDataResult,
     MissingToolResult, NoopResult, QueueBuildResult, ReplyToPrCommentResult,
     ReportIncompleteResult, ResolvePrThreadResult, SubmitPrReviewResult, ToolResult,
-    UpdatePrResult, UpdateWikiPageResult, UpdateWorkItemResult, UploadAttachmentResult,
+    UpdatePrResult, UpdateWikiPageResult, UpdateWorkItemResult, UploadArtifactResult,
+    UploadAttachmentResult,
 };
 
 // Re-export memory types for use by main.rs
@@ -92,6 +93,7 @@ pub async fn execute_safe_outputs(
         CreateBranchResult,
         UpdatePrResult,
         UploadAttachmentResult,
+        UploadArtifactResult,
         SubmitPrReviewResult,
         ReplyToPrCommentResult,
         ResolvePrThreadResult,
@@ -263,6 +265,7 @@ pub async fn execute_safe_output(
         "create-branch" => CreateBranchResult,
         "update-pr" => UpdatePrResult,
         "upload-attachment" => UploadAttachmentResult,
+        "upload-artifact" => UploadArtifactResult,
         "submit-pr-review" => SubmitPrReviewResult,
         "reply-to-pr-review-comment" => ReplyToPrCommentResult,
         "resolve-pr-thread" => ResolvePrThreadResult,

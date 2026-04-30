@@ -28,6 +28,7 @@ use crate::safeoutputs::{
     UpdatePrParams, UpdatePrResult,
     UpdateWorkItemParams, UpdateWorkItemResult,
     UploadAttachmentParams, UploadAttachmentResult,
+    UploadArtifactParams, UploadArtifactResult,
     anyhow_to_mcp_error,
 };
 
@@ -980,6 +981,29 @@ uploaded and linked during safe output processing. File size and type restrictio
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Attachment '{}' queued for work item #{}. The file will be uploaded during safe output processing.",
             result.file_path, result.work_item_id
+        ))]))
+    }
+
+    #[tool(
+        name = "upload-artifact",
+        description = "Publish a workspace file as a pipeline artifact attached to the current \
+Azure DevOps build run. The file will be uploaded during safe output processing. File size, \
+extension, and artifact-name restrictions may apply per the workflow's safe-outputs config."
+    )]
+    async fn upload_artifact(
+        &self,
+        params: Parameters<UploadArtifactParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!(
+            "Tool called: upload-artifact - artifact '{}' file '{}'",
+            params.0.artifact_name, params.0.file_path
+        );
+        let result: UploadArtifactResult = params.0.try_into()?;
+        self.write_safe_output_file(&result).await
+            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Artifact '{}' queued from file '{}'. The file will be published during safe output processing.",
+            result.artifact_name, result.file_path
         ))]))
     }
 

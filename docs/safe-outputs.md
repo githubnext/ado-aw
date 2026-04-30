@@ -418,6 +418,34 @@ safe-outputs:
     max: 1                       # Maximum per run (default: 1)
 ```
 
+### upload-artifact
+Publishes a workspace file as a pipeline artifact attached to the current Azure DevOps build run. The Stage 3 executor emits an `##vso[artifact.upload]` logging command for each accepted file; the build agent then asynchronously uploads the file under the chosen artifact name and the result appears in the run's **Artifacts** list. This is the closest ADO equivalent to `actions/upload-artifact` in GitHub Actions.
+
+Use `upload-artifact` for build outputs, generated reports, screenshots, logs, and other files that should be available to download from the run summary. For files that should be linked from a specific work item instead, use [`upload-attachment`](#upload-attachment).
+
+**Agent parameters:**
+- `artifact_name` - Name to publish the artifact under in the run (required; 1-100 chars; alphanumerics, `-`, `_`, `.`; must not start with `.`)
+- `file_path` - Relative path to the file in the workspace (required; no directory traversal, no absolute paths, no `.git` segments)
+
+**Configuration options (front matter):**
+```yaml
+safe-outputs:
+  upload-artifact:
+    max-file-size: 52428800              # Maximum file size in bytes (default: 50 MB)
+    allowed-extensions: []               # Optional — restrict file types (e.g., [".png", ".pdf", ".log"])
+    allowed-artifact-names: []           # Optional — allow-list of artifact names; entries ending with `*` match by prefix
+    name-prefix: "agent-"                # Optional — prefix prepended to the agent-supplied artifact name
+    max: 1                               # Maximum per run (default: 1)
+```
+
+**Validation performed at Stage 3:**
+- The `file_path` is resolved against `BUILD_SOURCESDIRECTORY`, canonicalized, and rejected if it escapes the workspace via symlinks.
+- Directories are rejected — only single files are supported.
+- Files larger than `max-file-size` are rejected.
+- When `allowed-extensions` is non-empty, the file extension must match (case-insensitive).
+- When `allowed-artifact-names` is non-empty, the resolved artifact name (after `name-prefix`) must match an allow-list entry.
+- Text files containing `##vso[` sequences are rejected to prevent pipeline-logging-command injection. Binary files skip this check (the agent does not parse logging commands out of binary content).
+
 ### cache-memory (moved to `tools:`)
 Memory is now configured as a first-class tool under `tools: cache-memory:` instead of `safe-outputs: memory:`. See the [Cache Memory section](./tools.md#cache-memory-cache-memory) in `docs/tools.md` for details.
 
