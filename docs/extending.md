@@ -45,3 +45,30 @@ pub trait CompilerExtension: Send {
 ```
 
 To add a new runtime or tool: (1) create a directory under `src/tools/` or `src/runtimes/`, (2) implement `CompilerExtension` in `extension.rs`, (3) add a variant to the `Extension` enum and a collection check in `collect_extensions()` in `src/compile/extensions/mod.rs`.
+
+### Filter IR (`src/compile/filter_ir.rs`)
+
+Trigger filter expressions (PR filters, pipeline filters) are compiled to bash
+gate steps via a three-pass IR pipeline:
+
+1. **Lower** — `PrFilters` / `PipelineFilters` → `Vec<FilterCheck>` (typed
+   predicates over typed facts)
+2. **Validate** — detect conflicts at compile time (impossible combinations,
+   redundant checks)
+3. **Codegen** — dependency-ordered fact acquisition + predicate evaluation →
+   bash gate step
+
+To add a new filter type:
+
+1. **Add a `Fact` variant** (if the filter needs a new data source) — implement
+   `dependencies()`, `shell_var()`, `acquisition_bash()`, and
+   `failure_policy()` on the new variant
+2. **Add a `Predicate` variant** (if the filter needs a new test shape) —
+   implement the codegen match arm in `emit_predicate_check()`
+3. **Extend lowering** — add the filter field to `PrFilters` or
+   `PipelineFilters` in `types.rs`, then add the lowering logic in
+   `lower_pr_filters()` or `lower_pipeline_filters()` in `filter_ir.rs`
+4. **Add validation rules** — check for conflicts with other filters in
+   `validate_pr_filters()` or `validate_pipeline_filters()`
+5. **Write tests** — lowering test, validation test, and codegen test in
+   `filter_ir.rs`

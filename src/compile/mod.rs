@@ -8,6 +8,7 @@
 
 mod common;
 pub mod extensions;
+pub(crate) mod filter_ir;
 mod gitattributes;
 mod onees;
 pub(crate) mod pr_filters;

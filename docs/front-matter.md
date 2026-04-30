@@ -71,13 +71,49 @@ safe-outputs:                  # optional per-tool configuration for safe output
     artifact-link:             # optional: link work item to repository branch
       enabled: true
       branch: main
-triggers:                      # optional pipeline triggers
+on:                            # trigger configuration (unified under on: key)
+  schedule: daily around 14:00 # fuzzy schedule - see docs/schedule-syntax.md
   pipeline:
     name: "Build Pipeline"     # source pipeline name
     project: "OtherProject"    # optional: project name if different
     branches:                  # optional: branches to trigger on
       - main
       - release/*
+    filters:                   # optional runtime filters (compiled to gate step)
+      source-pipeline:
+        match: "Build.*"
+      time-window:
+        start: "09:00"
+        end: "17:00"
+  pr:                          # PR trigger
+    branches:
+      include: [main]
+    paths:
+      include: [src/*]
+    filters:                   # runtime PR filters (compiled to gate step)
+      title:
+        match: "\\[review\\]"
+      author:
+        include: ["alice@corp.com"]
+      draft: false
+      labels:
+        any-of: ["run-agent"]
+      source-branch:
+        match: "^feature/.*"
+      target-branch:
+        match: "^main$"
+      commit-message:
+        match: "^(?!.*\\[skip-agent\\])"
+      changed-files:
+        include: ["src/**/*.rs"]
+      min-changes: 5
+      max-changes: 100
+      time-window:
+        start: "09:00"
+        end: "17:00"
+      build-reason:
+        include: [PullRequest]
+      expression: "eq(variables['Custom.Flag'], 'true')"  # raw ADO condition
 steps:                         # inline steps before agent runs (same job, generate context)
   - bash: echo "Preparing context for agent"
     displayName: "Prepare context"
@@ -127,3 +163,21 @@ list:
 
 Set `workspace:` explicitly to `root`, `repo` (alias `self`), or a specific
 checked-out repository alias to override this behavior.
+
+## Filter Validation
+
+The compiler validates filter configurations at compile time and will emit
+errors for impossible or conflicting combinations:
+
+| Condition | Severity | Message |
+|-----------|----------|---------|
+| `min-changes` > `max-changes` | Error | No PR can satisfy both constraints |
+| `time-window.start` = `time-window.end` | Error | Zero-width window never matches |
+| Same value in `author.include` and `author.exclude` | Error | Conflicting include/exclude |
+| Same value in `build-reason.include` and `build-reason.exclude` | Error | Conflicting include/exclude |
+| Label in both `labels.any-of` and `labels.none-of` | Error | Label both required and blocked |
+| Label in both `labels.all-of` and `labels.none-of` | Error | Label both required and blocked |
+| Empty `labels` filter (no any-of/all-of/none-of) | Warning | No label checks applied |
+
+Errors cause compilation to fail. Fix the conflicting filter configuration
+before recompiling.

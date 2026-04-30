@@ -1182,28 +1182,45 @@ pub fn validate_resolve_pr_thread_statuses(front_matter: &FrontMatter) -> Result
 /// Generate the setup job YAML.
 ///
 /// When `pr_filters` is `Some`, injects a pre-activation gate step that evaluates
-/// PR filters and self-cancels the build if they don't match. The Setup job is
-/// created even if `setup_steps` is empty (solely for the gate).
+/// PR filters and self-cancels the build if they don't match. When `pipeline_filters`
+/// is `Some`, injects a similar gate step for pipeline completion triggers.
+/// The Setup job is created even if `setup_steps` is empty (solely for the gate).
 pub fn generate_setup_job(
     setup_steps: &[serde_yaml::Value],
     pool: &str,
     pr_filters: Option<&super::types::PrFilters>,
+    pipeline_filters: Option<&super::types::PipelineFilters>,
 ) -> String {
-    if setup_steps.is_empty() && pr_filters.is_none() {
+    if setup_steps.is_empty() && pr_filters.is_none() && pipeline_filters.is_none() {
         return String::new();
     }
 
+    let has_gate = pr_filters.is_some() || pipeline_filters.is_some();
     let mut steps_parts = Vec::new();
 
-    // Gate step (if PR filters are configured)
+    // PR gate step
     if let Some(filters) = pr_filters {
         steps_parts.push(super::pr_filters::generate_pr_gate_step(filters));
     }
 
-    // User setup steps (conditioned on gate passing when PR filters are active)
+    // Pipeline gate step
+    if let Some(filters) = pipeline_filters {
+        steps_parts.push(generate_pipeline_gate_step(filters));
+    }
+
+    // User setup steps (conditioned on gate passing when filters are active)
     if !setup_steps.is_empty() {
-        if pr_filters.is_some() {
-            let conditioned = super::pr_filters::add_condition_to_steps(setup_steps, "eq(variables['prGate.SHOULD_RUN'], 'true')");
+        if has_gate {
+            // Determine which gate step name to reference
+            let gate_var = if pr_filters.is_some() {
+                "prGate.SHOULD_RUN"
+            } else {
+                "pipelineGate.SHOULD_RUN"
+            };
+            let conditioned = super::pr_filters::add_condition_to_steps(
+                setup_steps,
+                &format!("eq(variables['{gate_var}'], 'true')"),
+            );
             steps_parts.push(format_steps_yaml_indented(&conditioned, 4));
         } else {
             steps_parts.push(format_steps_yaml_indented(setup_steps, 4));
@@ -1223,6 +1240,34 @@ pub fn generate_setup_job(
 "#,
         pool, combined_steps
     )
+}
+
+/// Generate a pipeline gate step using the filter IR.
+fn generate_pipeline_gate_step(filters: &super::types::PipelineFilters) -> String {
+    use super::filter_ir::{
+        compile_gate_step, lower_pipeline_filters, validate_pipeline_filters, GateContext,
+        Severity,
+    };
+
+    let diags = validate_pipeline_filters(filters);
+    for diag in &diags {
+        match diag.severity {
+            Severity::Error => eprintln!("error: {}", diag),
+            Severity::Warning => eprintln!("warning: {}", diag),
+            Severity::Info => eprintln!("info: {}", diag),
+        }
+    }
+    if diags.iter().any(|d| d.severity == Severity::Error) {
+        let errors: Vec<String> = diags
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| format!("# FILTER ERROR: {}", d))
+            .collect();
+        return errors.join("\n");
+    }
+
+    let checks = lower_pipeline_filters(filters);
+    compile_gate_step(GateContext::PipelineCompletion, &checks)
 }
 
 /// Generate the teardown job YAML
@@ -1285,15 +1330,18 @@ pub fn generate_finalize_steps(finalize_steps: &[serde_yaml::Value]) -> String {
 
 /// Generate dependsOn clause and condition for setup/gate dependencies.
 ///
-/// When PR filters are active, adds a condition that allows non-PR builds to
-/// proceed unconditionally, while PR builds require the gate to pass.
+/// When PR or pipeline filters are active, adds a condition that allows
+/// non-matching trigger types to proceed unconditionally, while matching
+/// builds require the gate to pass.
 /// When `expression` is provided, it's ANDed into the condition as an escape hatch.
 pub fn generate_agentic_depends_on(
     setup_steps: &[serde_yaml::Value],
     has_pr_filters: bool,
+    has_pipeline_filters: bool,
     expression: Option<&str>,
 ) -> String {
-    let has_setup = !setup_steps.is_empty() || has_pr_filters;
+    let has_gate = has_pr_filters || has_pipeline_filters;
+    let has_setup = !setup_steps.is_empty() || has_gate;
 
     if !has_setup && expression.is_none() {
         return String::new();
@@ -1305,7 +1353,7 @@ pub fn generate_agentic_depends_on(
         ""
     };
 
-    if has_pr_filters || expression.is_some() {
+    if has_gate || expression.is_some() {
         let mut parts = Vec::new();
         parts.push("succeeded()".to_string());
 
@@ -1314,6 +1362,16 @@ pub fn generate_agentic_depends_on(
                 "or(\n\
                  \x20         ne(variables['Build.Reason'], 'PullRequest'),\n\
                  \x20         eq(dependencies.Setup.outputs['prGate.SHOULD_RUN'], 'true')\n\
+                 \x20       )"
+                    .to_string(),
+            );
+        }
+
+        if has_pipeline_filters {
+            parts.push(
+                "or(\n\
+                 \x20         ne(variables['Build.Reason'], 'ResourceTrigger'),\n\
+                 \x20         eq(dependencies.Setup.outputs['pipelineGate.SHOULD_RUN'], 'true')\n\
                  \x20       )"
                     .to_string(),
             );
@@ -1954,7 +2012,9 @@ pub async fn compile_shared(
     // 8. Setup/teardown jobs, parameters, prepare/finalize steps
     let pr_filters = front_matter.pr_filters();
     let has_pr_filters = pr_filters.is_some();
-    let setup_job = generate_setup_job(&front_matter.setup, &pool, pr_filters);
+    let pipeline_filters = front_matter.pipeline_filters();
+    let has_pipeline_filters = pipeline_filters.is_some();
+    let setup_job = generate_setup_job(&front_matter.setup, &pool, pr_filters, pipeline_filters);
     let teardown_job = generate_teardown_job(&front_matter.teardown, &pool);
     let has_memory = front_matter
         .tools
@@ -1965,8 +2025,15 @@ pub async fn compile_shared(
     let parameters_yaml = generate_parameters(&parameters)?;
     let prepare_steps = generate_prepare_steps(&front_matter.steps, extensions)?;
     let finalize_steps = generate_finalize_steps(&front_matter.post_steps);
-    let expression = pr_filters.and_then(|f| f.expression.as_deref());
-    let agentic_depends_on = generate_agentic_depends_on(&front_matter.setup, has_pr_filters, expression);
+    let pr_expression = pr_filters.and_then(|f| f.expression.as_deref());
+    let pipeline_expression = pipeline_filters.and_then(|f| f.expression.as_deref());
+    let expression = pr_expression.or(pipeline_expression);
+    let agentic_depends_on = generate_agentic_depends_on(
+        &front_matter.setup,
+        has_pr_filters,
+        has_pipeline_filters,
+        expression,
+    );
     let job_timeout = generate_job_timeout(front_matter);
 
     // 9. Token acquisition and env vars

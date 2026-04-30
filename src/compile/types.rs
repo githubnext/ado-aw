@@ -641,6 +641,12 @@ impl FrontMatter {
     pub fn pr_filters(&self) -> Option<&PrFilters> {
         self.pr_trigger().and_then(|pr| pr.filters.as_ref())
     }
+
+    /// Get the pipeline runtime filters (if any).
+    pub fn pipeline_filters(&self) -> Option<&PipelineFilters> {
+        self.pipeline_trigger()
+            .and_then(|pt| pt.filters.as_ref())
+    }
 }
 
 impl SanitizeConfigTrait for FrontMatter {
