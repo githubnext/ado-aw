@@ -1504,6 +1504,8 @@ async fn set_pr_completion_options(
     if config.auto_complete && !config.draft {
         if let Some(creator_id) = pr_created_by_id {
             update_body["autoCompleteSetBy"] = serde_json::json!({ "id": creator_id });
+        } else {
+            warn!("auto_complete requested but creator ID is unavailable; skipping autoCompleteSetBy");
         }
     }
 
