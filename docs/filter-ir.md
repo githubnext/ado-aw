@@ -349,14 +349,38 @@ The bash shim exports only the ADO macros needed by the spec's facts:
 
 ## Integration Points
 
+### TriggerFiltersExtension
+
+When Tier 2/3 filters are configured, the `TriggerFiltersExtension`
+(`src/compile/extensions/trigger_filters.rs`) activates via
+`collect_extensions()`. It implements `CompilerExtension` and controls:
+
+1. **Download step** — fetches `gate-eval.py` from the ado-aw release
+   artifacts to `/tmp/ado-aw-scripts/gate-eval.py`
+2. **Gate step** — calls `compile_gate_step_external()` to generate a step
+   that references the downloaded script (no inline heredoc)
+3. **Validation** — runs `validate_pr_filters()` / `validate_pipeline_filters()`
+   during compilation via the `validate()` trait method
+
+The extension uses the `setup_steps()` trait method (not `prepare_steps()`)
+because the gate must run in the **Setup job** (before the Execution job).
+
+### Tier 1 Inline Path
+
+When only Tier 1 filters are configured (pipeline variables — title, author,
+branch, commit-message, build-reason), the extension is NOT activated.
+`generate_pr_gate_step()` generates an inline bash gate step directly, with
+no Python evaluator and no download step.
+
 ### Gate Step Injection
 
-The compiled gate step is injected into the Setup job by
-`generate_setup_job()` in `common.rs`. When filters are active:
+Gate steps are injected into the Setup job by `generate_setup_job()` in
+`common.rs`. When the `TriggerFiltersExtension` is active, its
+`setup_steps()` are collected and injected first (download + gate). When
+only Tier 1 filters are present, the inline gate step is injected directly.
 
-- The gate step runs first in the Setup job
-- User setup steps are conditioned on the gate output:
-  `condition: eq(variables['{stepName}.SHOULD_RUN'], 'true')`
+User setup steps are conditioned on the gate output:
+`condition: eq(variables['{stepName}.SHOULD_RUN'], 'true')`
 
 ### Agent Job Condition
 
@@ -378,15 +402,25 @@ condition: |
 When both PR and pipeline filters are active, both `or()` clauses are ANDed.
 The `expression` escape hatch is also ANDed if present.
 
+### Scripts Distribution
+
+`gate-eval.py` lives at `scripts/gate-eval.py` in the repository and is
+shipped as a release artifact alongside the ado-aw binary. The download URL
+is deterministic based on the ado-aw version:
+`https://github.com/githubnext/ado-aw/releases/download/v{VERSION}/gate-eval.py`
+
 ## Adding New Filter Types
 
 See [extending.md](extending.md#filter-ir-srccompilefilter_irrs) for the
 step-by-step guide. In summary:
 
-1. Add a `Fact` variant if a new data source is needed
+1. Add a `Fact` variant if a new data source is needed (with `kind()`,
+   `ado_exports()`, `dependencies()`, `failure_policy()`)
 2. Add a `Predicate` variant if a new test shape is needed
-3. Extend the lowering function (`lower_pr_filters` or
+3. Add a `PredicateSpec` variant for serialization
+4. Add an evaluator handler in `scripts/gate-eval.py` for the new predicate
+   type
+5. Extend the lowering function (`lower_pr_filters` or
    `lower_pipeline_filters`)
-4. Add validation rules if the new filter can conflict with existing ones
-5. Add codegen in `emit_predicate_check()` for the new predicate variant
-6. Write tests: lowering, validation, and codegen
+6. Add validation rules if the new filter can conflict with existing ones
+7. Write tests: lowering, validation, spec serialization, and evaluator

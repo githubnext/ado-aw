@@ -36,13 +36,19 @@ pub trait CompilerExtension: Send {
     fn required_hosts(&self) -> Vec<String>;                   // AWF network allowlist
     fn required_bash_commands(&self) -> Vec<String>;           // Agent bash allow-list
     fn prompt_supplement(&self) -> Option<String>;              // Agent prompt markdown
-    fn prepare_steps(&self) -> Vec<String>;                    // Pipeline steps (install, etc.)
+    fn prepare_steps(&self) -> Vec<String>;                    // Execution job steps (install, etc.)
+    fn setup_steps(&self) -> Vec<String>;                      // Setup job steps (gates, pre-checks)
     fn mcpg_servers(&self, ctx) -> Result<Vec<(String, McpgServerConfig)>>; // MCPG entries
     fn required_awf_mounts(&self) -> Vec<AwfMount>;            // AWF Docker volume mounts
     fn awf_path_prepends(&self) -> Vec<String>;                // Directories to add to chroot PATH
     fn validate(&self, ctx) -> Result<Vec<String>>;            // Compile-time warnings
 }
 ```
+
+**`prepare_steps()` vs `setup_steps()`**: `prepare_steps()` injects into the
+Execution job (before the agent runs). `setup_steps()` injects into the Setup
+job (before the Execution job starts). Use `setup_steps()` for pre-activation
+gates or checks that must complete before the agent is launched.
 
 To add a new runtime or tool: (1) create a directory under `src/tools/` or `src/runtimes/`, (2) implement `CompilerExtension` in `extension.rs`, (3) add a variant to the `Extension` enum and a collection check in `collect_extensions()` in `src/compile/extensions/mod.rs`.
 
