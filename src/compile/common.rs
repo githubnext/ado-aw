@@ -1193,25 +1193,30 @@ pub fn generate_setup_job(
     extensions: &[super::extensions::Extension],
     ctx: &super::extensions::CompileContext,
 ) -> String {
-    // Check if the TriggerFiltersExtension is active (Tier 2/3)
-    let has_trigger_ext = extensions.iter().any(|e| e.name() == "trigger-filters");
+    use super::extensions::CompilerExtension;
+
     let has_filters = pr_filters.is_some() || pipeline_filters.is_some();
 
-    if setup_steps.is_empty() && !has_filters && !has_trigger_ext {
+    // Collect setup_steps from ALL extensions
+    let ext_setup_steps: Vec<String> = extensions
+        .iter()
+        .flat_map(|ext| ext.setup_steps(ctx))
+        .collect();
+    let has_ext_setup = !ext_setup_steps.is_empty();
+
+    if setup_steps.is_empty() && !has_filters && !has_ext_setup {
         return String::new();
     }
 
     let mut steps_parts = Vec::new();
 
-    if has_trigger_ext {
-        // Extension handles download + gate step(s) via setup_steps()
-        for ext in extensions {
-            for step in ext.setup_steps(ctx) {
-                steps_parts.push(step);
-            }
-        }
-    } else {
-        // Tier 1 inline gate steps (no extension needed)
+    // Extension setup steps (any extension can contribute)
+    for step in ext_setup_steps {
+        steps_parts.push(step);
+    }
+
+    // Tier 1 inline gate steps — only when no extension provided gate steps
+    if !has_ext_setup {
         if let Some(filters) = pr_filters {
             steps_parts.push(super::pr_filters::generate_pr_gate_step(filters));
         }
