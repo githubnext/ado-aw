@@ -258,7 +258,7 @@ pub trait CompilerExtension {
     /// these steps run in the Setup job (before the Execution job starts).
     /// Used by extensions that need to run gate logic or pre-activation
     /// checks before the agent is launched.
-    fn setup_steps(&self) -> Vec<String> {
+    fn setup_steps(&self, _ctx: &CompileContext) -> Vec<String> {
         vec![]
     }
 
@@ -513,8 +513,8 @@ macro_rules! extension_enum {
             fn prepare_steps(&self) -> Vec<String> {
                 match self { $( $Enum::$Variant(e) => e.prepare_steps(), )+ }
             }
-            fn setup_steps(&self) -> Vec<String> {
-                match self { $( $Enum::$Variant(e) => e.setup_steps(), )+ }
+            fn setup_steps(&self, ctx: &CompileContext) -> Vec<String> {
+                match self { $( $Enum::$Variant(e) => e.setup_steps(ctx), )+ }
             }
             fn mcpg_servers(&self, ctx: &CompileContext) -> Result<Vec<(String, McpgServerConfig)>> {
                 match self { $( $Enum::$Variant(e) => e.mcpg_servers(ctx), )+ }
@@ -623,7 +623,6 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
         extensions.push(Extension::TriggerFilters(TriggerFiltersExtension::new(
             pr_filters,
             pipeline_filters,
-            crate::engine::COPILOT_CLI_VERSION.to_string(),
         )));
     }
 

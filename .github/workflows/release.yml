@@ -56,6 +56,12 @@ jobs:
           cd target/release
           cp ado-aw ado-aw-linux-x64
 
+      - name: Package scripts bundle
+        run: |
+          set -euo pipefail
+          cd scripts
+          zip -r ../scripts.zip .
+
       - name: Upload release assets
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -63,6 +69,7 @@ jobs:
           TAG="${{ needs.release-please.outputs.tag_name || github.event.inputs.tag_name }}"
           gh release upload "$TAG" \
             target/release/ado-aw-linux-x64 \
+            scripts.zip \
             --clobber
 
   build-windows:
@@ -152,11 +159,13 @@ jobs:
           TAG="${{ needs.release-please.outputs.tag_name || github.event.inputs.tag_name }}"
           gh release download "$TAG" \
             --pattern "ado-aw-*" \
+            --pattern "scripts.zip" \
             --repo "${{ github.repository }}"
           test -f ado-aw-linux-x64 || { echo "Missing ado-aw-linux-x64"; exit 1; }
           test -f ado-aw-windows-x64.exe || { echo "Missing ado-aw-windows-x64.exe"; exit 1; }
           test -f ado-aw-darwin-arm64 || { echo "Missing ado-aw-darwin-arm64"; exit 1; }
-          sha256sum ado-aw-linux-x64 ado-aw-windows-x64.exe ado-aw-darwin-arm64 > checksums.txt
+          test -f scripts.zip || { echo "Missing scripts.zip"; exit 1; }
+          sha256sum ado-aw-linux-x64 ado-aw-windows-x64.exe ado-aw-darwin-arm64 scripts.zip > checksums.txt
 
       - name: Upload checksums
         env:

@@ -77,7 +77,7 @@ pub(super) fn generate_native_pr_trigger(pr: &PrTriggerConfig) -> String {
 /// Returns an error string as a comment in the output if validation fails.
 pub(super) fn generate_pr_gate_step(filters: &PrFilters) -> String {
     use super::filter_ir::{
-        compile_gate_step, lower_pr_filters, validate_pr_filters, GateContext, Severity,
+        compile_gate_step_inline, lower_pr_filters, validate_pr_filters, GateContext, Severity,
     };
 
     // Validate filters at compile time
@@ -105,9 +105,9 @@ pub(super) fn generate_pr_gate_step(filters: &PrFilters) -> String {
         return errors.join("\n");
     }
 
-    // Lower filters to IR and compile to bash
+    // Lower filters to IR and compile to inline bash (Tier 1 path)
     let checks = lower_pr_filters(filters);
-    compile_gate_step(GateContext::PullRequest, &checks)
+    compile_gate_step_inline(GateContext::PullRequest, &checks)
 }
 
 /// Returns true if any Tier 2 filter (requiring REST API) is configured.
@@ -175,7 +175,16 @@ pub(super) fn shell_escape(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::compile::common::{generate_agentic_depends_on, generate_pr_trigger, generate_setup_job};
+    use crate::compile::extensions::CompileContext;
     use crate::compile::types::*;
+
+    fn make_ctx(fm: &FrontMatter) -> CompileContext<'_> {
+        CompileContext::for_test(fm)
+    }
+
+    fn test_fm() -> FrontMatter {
+        serde_yaml::from_str("name: test\ndescription: test").unwrap()
+    }
 
     #[test]
     fn test_generate_pr_trigger_with_explicit_pr_trigger_overrides_schedule() {
@@ -268,27 +277,31 @@ mod tests {
 
     #[test]
     fn test_generate_setup_job_with_pr_filters_creates_gate() {
+        let fm = test_fm();
+        let ctx = make_ctx(&fm);
         let filters = PrFilters {
             title: Some(PatternFilter { pattern: "\\[review\\]".into() }),
             ..Default::default()
         };
-        let result = generate_setup_job(&[], "MyPool", Some(&filters), None, &[]);
+        let result = generate_setup_job(&[], "MyPool", Some(&filters), None, &[], &ctx);
         assert!(result.contains("- job: Setup"), "should create Setup job");
         assert!(result.contains("name: prGate"), "should include gate step");
         assert!(result.contains("Evaluate PR filters"), "should have gate displayName");
-        assert!(result.contains("GATE_SPEC"), "should include base64-encoded spec");
-        assert!(result.contains("python3"), "should invoke python evaluator");
+        assert!(result.contains("SHOULD_RUN"), "should set SHOULD_RUN variable");
+        assert!(result.contains("\\[review\\]"), "should include title pattern");
         assert!(result.contains("SYSTEM_ACCESSTOKEN"), "should pass System.AccessToken");
     }
 
     #[test]
     fn test_generate_setup_job_with_filters_and_user_steps() {
+        let fm = test_fm();
+        let ctx = make_ctx(&fm);
         let step: serde_yaml::Value = serde_yaml::from_str("bash: echo hello\ndisplayName: User step").unwrap();
         let filters = PrFilters {
             title: Some(PatternFilter { pattern: "test".into() }),
             ..Default::default()
         };
-        let result = generate_setup_job(&[step], "MyPool", Some(&filters), None, &[]);
+        let result = generate_setup_job(&[step], "MyPool", Some(&filters), None, &[], &ctx);
         assert!(result.contains("name: prGate"), "should include gate step");
         assert!(result.contains("User step"), "should include user step");
         assert!(result.contains("prGate.SHOULD_RUN"), "user steps should reference gate output");
@@ -296,7 +309,9 @@ mod tests {
 
     #[test]
     fn test_generate_setup_job_without_filters_unchanged() {
-        let result = generate_setup_job(&[], "MyPool", None, None, &[]);
+        let fm = test_fm();
+        let ctx = make_ctx(&fm);
+        let result = generate_setup_job(&[], "MyPool", None, None, &[], &ctx);
         assert!(result.is_empty(), "no setup steps and no filters should produce empty string");
     }
 
@@ -325,6 +340,8 @@ mod tests {
 
     #[test]
     fn test_generate_setup_job_gate_author_filter() {
+        let fm = test_fm();
+        let ctx = make_ctx(&fm);
         let filters = PrFilters {
             author: Some(IncludeExcludeFilter {
                 include: vec!["alice@corp.com".into()],
@@ -332,35 +349,39 @@ mod tests {
             }),
             ..Default::default()
         };
-        let result = generate_setup_job(&[], "MyPool", Some(&filters), None, &[]);
-        assert!(result.contains("ADO_AUTHOR_EMAIL"), "should export author email ADO macro");
+        let result = generate_setup_job(&[], "MyPool", Some(&filters), None, &[], &ctx);
+        assert!(result.contains("alice@corp.com"), "should include author email in grep pattern");
+        assert!(result.contains("bot@noreply.com"), "should include excluded email");
         assert!(result.contains("Build.RequestedForEmail"), "should reference ADO author variable");
     }
 
     #[test]
     fn test_generate_setup_job_gate_branch_filters() {
+        let fm = test_fm();
+        let ctx = make_ctx(&fm);
         let filters = PrFilters {
             source_branch: Some(PatternFilter { pattern: "^feature/.*".into() }),
             target_branch: Some(PatternFilter { pattern: "^main$".into() }),
             ..Default::default()
         };
-        let result = generate_setup_job(&[], "MyPool", Some(&filters), None, &[]);
-        assert!(result.contains("ADO_SOURCE_BRANCH"), "should export source branch");
-        assert!(result.contains("ADO_TARGET_BRANCH"), "should export target branch");
-        assert!(result.contains("PullRequest.SourceBranch"), "should reference source branch ADO var");
-        assert!(result.contains("PullRequest.TargetBranch"), "should reference target branch ADO var");
+        let result = generate_setup_job(&[], "MyPool", Some(&filters), None, &[], &ctx);
+        assert!(result.contains("SourceBranch"), "should reference source branch variable");
+        assert!(result.contains("TargetBranch"), "should reference target branch variable");
+        assert!(result.contains("^feature/.*"), "should include source pattern");
+        assert!(result.contains("^main$"), "should include target pattern");
     }
 
     #[test]
     fn test_generate_setup_job_gate_non_pr_passthrough() {
+        let fm = test_fm();
+        let ctx = make_ctx(&fm);
         let filters = PrFilters {
             title: Some(PatternFilter { pattern: "test".into() }),
             ..Default::default()
         };
-        let result = generate_setup_job(&[], "MyPool", Some(&filters), None, &[]);
-        // The evaluator handles bypass — bash just exports build reason
-        assert!(result.contains("ADO_BUILD_REASON"), "should export build reason");
-        assert!(result.contains("Build.Reason"), "should reference Build.Reason ADO macro");
+        let result = generate_setup_job(&[], "MyPool", Some(&filters), None, &[], &ctx);
+        assert!(result.contains("PullRequest"), "should check Build.Reason");
+        assert!(result.contains("Not a PR build"), "should pass non-PR builds automatically");
     }
 
     #[test]

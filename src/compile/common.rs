@@ -1191,6 +1191,7 @@ pub fn generate_setup_job(
     pr_filters: Option<&super::types::PrFilters>,
     pipeline_filters: Option<&super::types::PipelineFilters>,
     extensions: &[super::extensions::Extension],
+    ctx: &super::extensions::CompileContext,
 ) -> String {
     // Check if the TriggerFiltersExtension is active (Tier 2/3)
     let has_trigger_ext = extensions.iter().any(|e| e.name() == "trigger-filters");
@@ -1205,7 +1206,7 @@ pub fn generate_setup_job(
     if has_trigger_ext {
         // Extension handles download + gate step(s) via setup_steps()
         for ext in extensions {
-            for step in ext.setup_steps() {
+            for step in ext.setup_steps(ctx) {
                 steps_parts.push(step);
             }
         }
@@ -1261,7 +1262,7 @@ pub fn generate_setup_job(
 /// Generate a pipeline gate step using the filter IR.
 fn generate_pipeline_gate_step(filters: &super::types::PipelineFilters) -> String {
     use super::filter_ir::{
-        compile_gate_step, lower_pipeline_filters, validate_pipeline_filters, GateContext,
+        compile_gate_step_inline, lower_pipeline_filters, validate_pipeline_filters, GateContext,
         Severity,
     };
 
@@ -1283,7 +1284,7 @@ fn generate_pipeline_gate_step(filters: &super::types::PipelineFilters) -> Strin
     }
 
     let checks = lower_pipeline_filters(filters);
-    compile_gate_step(GateContext::PipelineCompletion, &checks)
+    compile_gate_step_inline(GateContext::PipelineCompletion, &checks)
 }
 
 /// Generate the teardown job YAML
@@ -2030,7 +2031,7 @@ pub async fn compile_shared(
     let has_pr_filters = pr_filters.is_some();
     let pipeline_filters = front_matter.pipeline_filters();
     let has_pipeline_filters = pipeline_filters.is_some();
-    let setup_job = generate_setup_job(&front_matter.setup, &pool, pr_filters, pipeline_filters, extensions);
+    let setup_job = generate_setup_job(&front_matter.setup, &pool, pr_filters, pipeline_filters, extensions, ctx);
     let teardown_job = generate_teardown_job(&front_matter.teardown, &pool);
     let has_memory = front_matter
         .tools

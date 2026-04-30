@@ -20,24 +20,24 @@ use crate::compile::types::{PipelineFilters, PrFilters};
 /// The path where the gate evaluator is downloaded at pipeline runtime.
 const GATE_EVAL_PATH: &str = "/tmp/ado-aw-scripts/gate-eval.py";
 
+/// Base URL for ado-aw release artifacts.
+const RELEASE_BASE_URL: &str = "https://github.com/githubnext/ado-aw/releases/download";
+
 /// Compiler extension that delivers and runs the gate evaluator for
 /// complex trigger filters.
 pub struct TriggerFiltersExtension {
     pr_filters: Option<PrFilters>,
     pipeline_filters: Option<PipelineFilters>,
-    version: String,
 }
 
 impl TriggerFiltersExtension {
     pub fn new(
         pr_filters: Option<PrFilters>,
         pipeline_filters: Option<PipelineFilters>,
-        version: String,
     ) -> Self {
         Self {
             pr_filters,
             pipeline_filters,
-            version,
         }
     }
 
@@ -60,13 +60,6 @@ impl TriggerFiltersExtension {
         }
         false
     }
-
-    fn download_url(&self) -> String {
-        format!(
-            "https://github.com/githubnext/ado-aw/releases/download/v{}/gate-eval.py",
-            self.version
-        )
-    }
 }
 
 impl CompilerExtension for TriggerFiltersExtension {
@@ -78,21 +71,18 @@ impl CompilerExtension for TriggerFiltersExtension {
         ExtensionPhase::Tool
     }
 
-    fn setup_steps(&self) -> Vec<String> {
+    fn setup_steps(&self, _ctx: &CompileContext) -> Vec<String> {
+        let version = env!("CARGO_PKG_VERSION");
         let mut steps = Vec::new();
 
-        // Download the gate evaluator script
+        // Download the scripts bundle from ado-aw release
         steps.push(format!(
             r#"- bash: |
     mkdir -p /tmp/ado-aw-scripts
-    curl -sL "{}" -o {}
-    chmod +x {}
-  displayName: "Download gate evaluator (v{})"
+    curl -fsSL "{RELEASE_BASE_URL}/v{version}/scripts.zip" -o /tmp/ado-aw-scripts/scripts.zip
+    cd /tmp/ado-aw-scripts && unzip -o scripts.zip
+  displayName: "Download ado-aw scripts (v{version})"
   condition: succeeded()"#,
-            self.download_url(),
-            GATE_EVAL_PATH,
-            GATE_EVAL_PATH,
-            self.version,
         ));
 
         // PR gate step
@@ -229,14 +219,16 @@ mod tests {
         let ext = TriggerFiltersExtension::new(
             Some(filters),
             None,
-            "1.0.0".into(),
         );
-        let steps = ext.setup_steps();
+        let yaml = "name: test\ndescription: test";
+        let fm: FrontMatter = serde_yaml::from_str(yaml).unwrap();
+        let ctx = CompileContext::for_test(&fm);
+        let steps = ext.setup_steps(&ctx);
         assert_eq!(steps.len(), 2, "should have download + gate step");
         assert!(steps[0].contains("curl"), "first step should download");
         assert!(
-            steps[0].contains("gate-eval.py"),
-            "should download gate-eval.py"
+            steps[0].contains("scripts.zip"),
+            "should download scripts.zip"
         );
         assert!(steps[1].contains("prGate"), "second step should be PR gate");
         assert!(
@@ -247,7 +239,7 @@ mod tests {
 
     #[test]
     fn test_extension_name_and_phase() {
-        let ext = TriggerFiltersExtension::new(None, None, "1.0.0".into());
+        let ext = TriggerFiltersExtension::new(None, None);
         assert_eq!(ext.name(), "trigger-filters");
         assert_eq!(ext.phase(), ExtensionPhase::Tool);
     }
@@ -262,7 +254,6 @@ mod tests {
         let ext = TriggerFiltersExtension::new(
             Some(filters),
             None,
-            "1.0.0".into(),
         );
         let yaml = r#"
 name: test

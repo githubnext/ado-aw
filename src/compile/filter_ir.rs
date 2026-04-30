@@ -990,8 +990,8 @@ pub enum PredicateSpec {
 
 // ─── Codegen ────────────────────────────────────────────────────────────────
 
-/// The embedded Python gate evaluator script.
-const GATE_EVALUATOR: &str = include_str!("../../scripts/gate-eval.py");
+// The inline heredoc evaluator has been removed in favor of external script delivery.
+// See TriggerFiltersExtension for the external path and compile_gate_step_inline for Tier 1.
 
 impl Fact {
     /// ADO macro exports required by this fact.
@@ -1387,47 +1387,6 @@ fn fact_inline_var(fact: Fact) -> (&'static str, &'static str) {
     }
 }
 
-/// Compile filter checks into a bash gate step (backward-compatible wrapper).
-///
-/// Uses the inline heredoc evaluator. Prefer `compile_gate_step_external()`
-/// for production pipelines.
-pub fn compile_gate_step(ctx: GateContext, checks: &[FilterCheck]) -> String {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-
-    if checks.is_empty() {
-        return String::new();
-    }
-
-    let spec = build_gate_spec(ctx, checks);
-    let spec_json = serde_json::to_string(&spec).expect("gate spec serialization");
-    let spec_b64 = STANDARD.encode(spec_json.as_bytes());
-
-    let exports = collect_ado_exports(checks);
-
-    let mut step = String::new();
-    step.push_str("- bash: |\n");
-
-    for (env_var, ado_macro) in &exports {
-        step.push_str(&format!("    export {}=\"{}\"\n", env_var, ado_macro));
-    }
-    step.push_str(&format!("    export GATE_SPEC=\"{}\"\n", spec_b64));
-    step.push_str("    export ADO_SYSTEM_ACCESS_TOKEN=\"$SYSTEM_ACCESSTOKEN\"\n");
-    step.push_str("    python3 << 'GATE_EVAL_EOF'\n");
-    step.push_str(GATE_EVALUATOR);
-    if !GATE_EVALUATOR.ends_with('\n') {
-        step.push('\n');
-    }
-    step.push_str("GATE_EVAL_EOF\n");
-    step.push_str(&format!("  name: {}\n", ctx.step_name()));
-    step.push_str(&format!(
-        "  displayName: \"{}\"\n",
-        ctx.display_name()
-    ));
-    step.push_str("  env:\n");
-    step.push_str("    SYSTEM_ACCESSTOKEN: $(System.AccessToken)");
-
-    step
-}
 
 /// Collect ADO macro exports needed by the given checks.
 fn collect_ado_exports(checks: &[FilterCheck]) -> Vec<(&'static str, &'static str)> {
@@ -1747,7 +1706,7 @@ mod tests {
 
     #[test]
     fn test_compile_gate_step_empty() {
-        let result = compile_gate_step(GateContext::PullRequest, &[]);
+        let result = compile_gate_step_external(GateContext::PullRequest, &[], "/tmp/ado-aw-scripts/gate-eval.py");
         assert!(result.is_empty());
     }
 
@@ -1761,11 +1720,10 @@ mod tests {
             },
             build_tag_suffix: "title-mismatch",
         }];
-        let result = compile_gate_step(GateContext::PullRequest, &checks);
+        let result = compile_gate_step_external(GateContext::PullRequest, &checks, "/tmp/ado-aw-scripts/gate-eval.py");
         assert!(result.contains("- bash: |"), "should be a bash step");
         assert!(result.contains("GATE_SPEC"), "should include base64 spec");
-        assert!(result.contains("python3"), "should invoke python evaluator");
-        assert!(result.contains("GATE_EVAL_EOF"), "should use heredoc for evaluator");
+        assert!(result.contains("python3 /tmp/ado-aw-scripts/gate-eval.py"), "should reference external evaluator script");
         assert!(result.contains("name: prGate"), "should set step name");
         assert!(result.contains("SYSTEM_ACCESSTOKEN"), "should pass access token");
     }
@@ -1780,7 +1738,7 @@ mod tests {
             },
             build_tag_suffix: "title-mismatch",
         }];
-        let result = compile_gate_step(GateContext::PullRequest, &checks);
+        let result = compile_gate_step_external(GateContext::PullRequest, &checks, "/tmp/ado-aw-scripts/gate-eval.py");
         assert!(result.contains("ADO_BUILD_REASON"), "should export build reason");
         assert!(result.contains("ADO_PR_TITLE"), "should export PR title");
         assert!(result.contains("$(System.PullRequest.Title)"), "should reference ADO macro");
@@ -1796,7 +1754,7 @@ mod tests {
             },
             build_tag_suffix: "source-pipeline-mismatch",
         }];
-        let result = compile_gate_step(GateContext::PipelineCompletion, &checks);
+        let result = compile_gate_step_external(GateContext::PipelineCompletion, &checks, "/tmp/ado-aw-scripts/gate-eval.py");
         assert!(result.contains("name: pipelineGate"), "should set pipeline gate name");
         assert!(result.contains("Evaluate pipeline filters"), "should set display name");
         assert!(result.contains("ADO_TRIGGERED_BY_PIPELINE"), "should export pipeline macro");
@@ -1812,7 +1770,7 @@ mod tests {
             },
             build_tag_suffix: "draft-mismatch",
         }];
-        let result = compile_gate_step(GateContext::PullRequest, &checks);
+        let result = compile_gate_step_external(GateContext::PullRequest, &checks, "/tmp/ado-aw-scripts/gate-eval.py");
         assert!(result.contains("ADO_REPO_ID"), "should export repo ID for API calls");
         assert!(result.contains("ADO_PR_ID"), "should export PR ID for API calls");
     }
@@ -1827,7 +1785,7 @@ mod tests {
             },
             build_tag_suffix: "title-mismatch",
         }];
-        let result = compile_gate_step(GateContext::PullRequest, &checks);
+        let result = compile_gate_step_external(GateContext::PullRequest, &checks, "/tmp/ado-aw-scripts/gate-eval.py");
         // Check export lines only (evaluator script always contains these strings)
         assert!(!result.contains("export ADO_REPO_ID"), "should not export repo ID for title-only");
         assert!(!result.contains("export ADO_PR_ID"), "should not export PR ID for title-only");
@@ -1909,7 +1867,7 @@ mod tests {
         let diags = validate_pr_filters(&filters);
         assert!(diags.iter().all(|d| d.severity != Severity::Error));
 
-        let step = compile_gate_step(GateContext::PullRequest, &checks);
+        let step = compile_gate_step_external(GateContext::PullRequest, &checks, "/tmp/ado-aw-scripts/gate-eval.py");
         // Step structure
         assert!(step.contains("ADO_PR_TITLE"));
         assert!(step.contains("ADO_REPO_ID")); // for API-derived facts
