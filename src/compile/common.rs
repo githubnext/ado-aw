@@ -4992,13 +4992,17 @@ mod tests {
 
     #[test]
     fn test_generate_setup_job_empty_returns_empty() {
-        assert!(generate_setup_job(&[], "MyPool").is_empty());
+        let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
+        let ctx = CompileContext::for_test(&fm);
+        assert!(generate_setup_job(&[], "MyPool", None, None, &[], &ctx).is_empty());
     }
 
     #[test]
     fn test_generate_setup_job_with_steps() {
+        let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
+        let ctx = CompileContext::for_test(&fm);
         let step: serde_yaml::Value = serde_yaml::from_str("bash: echo setup").unwrap();
-        let out = generate_setup_job(&[step], "MyPool");
+        let out = generate_setup_job(&[step], "MyPool", None, None, &[], &ctx);
         assert!(out.contains("- job: Setup"), "out: {out}");
         assert!(out.contains("displayName: \"Setup\""), "out: {out}");
         assert!(out.contains("name: MyPool"), "out: {out}");
@@ -5023,13 +5027,13 @@ mod tests {
 
     #[test]
     fn test_generate_agentic_depends_on_empty_steps() {
-        assert!(generate_agentic_depends_on(&[]).is_empty());
+        assert!(generate_agentic_depends_on(&[], false, false, None).is_empty());
     }
 
     #[test]
     fn test_generate_agentic_depends_on_with_steps() {
         let step: serde_yaml::Value = serde_yaml::from_str("bash: x").unwrap();
-        assert_eq!(generate_agentic_depends_on(&[step]), "dependsOn: Setup");
+        assert_eq!(generate_agentic_depends_on(&[step], false, false, None), "dependsOn: Setup");
     }
 
     #[test]
