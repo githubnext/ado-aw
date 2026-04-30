@@ -174,6 +174,9 @@ index to jump to the right page.
 - [`docs/extending.md`](docs/extending.md) — adding new CLI commands, compile
   targets, front-matter fields, template markers, safe-output tools,
   first-class tools, and runtimes; the `CompilerExtension` trait.
+- [`docs/filter-ir.md`](docs/filter-ir.md) — filter expression IR
+  specification: `Fact`/`Predicate` types, three-pass compilation (lower →
+  validate → codegen), gate step generation, adding new filter types.
 - [`docs/local-development.md`](docs/local-development.md) — local development
   setup notes.
 

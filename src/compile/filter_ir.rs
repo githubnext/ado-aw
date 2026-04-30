@@ -32,8 +32,6 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use super::pr_filters::shell_escape;
-
 // ─── Fact Sources ───────────────────────────────────────────────────────────
 
 /// A typed runtime fact that can be acquired and referenced by predicates.
@@ -886,89 +884,344 @@ fn find_overlap(a: &[String], b: &[String]) -> Vec<String> {
     a_lower.intersection(&b_lower).cloned().collect()
 }
 
+// ─── Serializable Gate Spec ─────────────────────────────────────────────────
+
+use serde::Serialize;
+
+/// Serializable gate specification — the JSON document consumed by the
+/// Python gate evaluator at pipeline runtime.
+#[derive(Debug, Clone, Serialize)]
+pub struct GateSpec {
+    pub context: GateContextSpec,
+    pub facts: Vec<FactSpec>,
+    pub checks: Vec<CheckSpec>,
+}
+
+/// Serialized gate context.
+#[derive(Debug, Clone, Serialize)]
+pub struct GateContextSpec {
+    pub build_reason: &'static str,
+    pub tag_prefix: &'static str,
+    pub step_name: &'static str,
+    pub bypass_label: &'static str,
+}
+
+/// Serialized fact acquisition descriptor.
+#[derive(Debug, Clone, Serialize)]
+pub struct FactSpec {
+    pub id: String,
+    pub kind: String,
+    pub failure_policy: String,
+}
+
+/// Serialized filter check.
+#[derive(Debug, Clone, Serialize)]
+pub struct CheckSpec {
+    pub name: String,
+    pub predicate: PredicateSpec,
+    pub tag_suffix: String,
+}
+
+/// Serialized predicate — the expression tree evaluated at runtime.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type")]
+pub enum PredicateSpec {
+    #[serde(rename = "regex_match")]
+    RegexMatch { fact: String, pattern: String },
+
+    #[serde(rename = "equals")]
+    Equals { fact: String, value: String },
+
+    #[serde(rename = "value_in_set")]
+    ValueInSet {
+        fact: String,
+        values: Vec<String>,
+        case_insensitive: bool,
+    },
+
+    #[serde(rename = "value_not_in_set")]
+    ValueNotInSet {
+        fact: String,
+        values: Vec<String>,
+        case_insensitive: bool,
+    },
+
+    #[serde(rename = "numeric_range")]
+    NumericRange {
+        fact: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        min: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max: Option<u32>,
+    },
+
+    #[serde(rename = "time_window")]
+    TimeWindow { start: String, end: String },
+
+    #[serde(rename = "label_set_match")]
+    LabelSetMatch {
+        fact: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        any_of: Vec<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        all_of: Vec<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        none_of: Vec<String>,
+    },
+
+    #[serde(rename = "file_glob_match")]
+    FileGlobMatch {
+        fact: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        include: Vec<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        exclude: Vec<String>,
+    },
+
+    #[serde(rename = "and")]
+    And { operands: Vec<PredicateSpec> },
+
+    #[serde(rename = "or")]
+    Or { operands: Vec<PredicateSpec> },
+
+    #[serde(rename = "not")]
+    Not { operand: Box<PredicateSpec> },
+}
+
 // ─── Codegen ────────────────────────────────────────────────────────────────
+
+/// The embedded Python gate evaluator script.
+const GATE_EVALUATOR: &str = include_str!("../data/gate-eval.py");
+
+impl Fact {
+    /// ADO macro exports required by this fact.
+    ///
+    /// Returns `(env_var_name, ado_macro)` pairs that must be exported in
+    /// the bash shim for the Python evaluator to read.
+    pub fn ado_exports(&self) -> Vec<(&'static str, &'static str)> {
+        match self {
+            Fact::PrTitle => vec![("ADO_PR_TITLE", "$(System.PullRequest.Title)")],
+            Fact::AuthorEmail => vec![("ADO_AUTHOR_EMAIL", "$(Build.RequestedForEmail)")],
+            Fact::SourceBranch => {
+                vec![("ADO_SOURCE_BRANCH", "$(System.PullRequest.SourceBranch)")]
+            }
+            Fact::TargetBranch => {
+                vec![("ADO_TARGET_BRANCH", "$(System.PullRequest.TargetBranch)")]
+            }
+            Fact::CommitMessage => {
+                vec![("ADO_COMMIT_MESSAGE", "$(Build.SourceVersionMessage)")]
+            }
+            Fact::BuildReason => vec![("ADO_BUILD_REASON", "$(Build.Reason)")],
+            Fact::TriggeredByPipeline => vec![(
+                "ADO_TRIGGERED_BY_PIPELINE",
+                "$(Build.TriggeredBy.DefinitionName)",
+            )],
+            Fact::TriggeringBranch => {
+                vec![("ADO_TRIGGERING_BRANCH", "$(Build.SourceBranch)")]
+            }
+            // API-derived and computed facts don't need ADO macro exports —
+            // the evaluator handles acquisition internally.
+            Fact::PrMetadata | Fact::PrIsDraft | Fact::PrLabels => vec![],
+            Fact::ChangedFiles | Fact::ChangedFileCount => vec![],
+            Fact::CurrentUtcMinutes => vec![],
+        }
+    }
+
+    /// The fact kind string used in the serialized spec.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Fact::PrTitle => "pr_title",
+            Fact::AuthorEmail => "author_email",
+            Fact::SourceBranch => "source_branch",
+            Fact::TargetBranch => "target_branch",
+            Fact::CommitMessage => "commit_message",
+            Fact::BuildReason => "build_reason",
+            Fact::TriggeredByPipeline => "triggered_by_pipeline",
+            Fact::TriggeringBranch => "triggering_branch",
+            Fact::PrMetadata => "pr_metadata",
+            Fact::PrIsDraft => "pr_is_draft",
+            Fact::PrLabels => "pr_labels",
+            Fact::ChangedFiles => "changed_files",
+            Fact::ChangedFileCount => "changed_file_count",
+            Fact::CurrentUtcMinutes => "current_utc_minutes",
+        }
+    }
+}
+
+impl FailurePolicy {
+    fn as_str(&self) -> &'static str {
+        match self {
+            FailurePolicy::FailClosed => "fail_closed",
+            FailurePolicy::FailOpen => "fail_open",
+            FailurePolicy::SkipDependents => "skip_dependents",
+        }
+    }
+}
+
+/// Convert a `Predicate` to its serializable spec form.
+fn predicate_to_spec(pred: &Predicate) -> PredicateSpec {
+    match pred {
+        Predicate::RegexMatch { fact, pattern } => PredicateSpec::RegexMatch {
+            fact: fact.kind().into(),
+            pattern: pattern.clone(),
+        },
+        Predicate::Equality { fact, value } => PredicateSpec::Equals {
+            fact: fact.kind().into(),
+            value: value.clone(),
+        },
+        Predicate::ValueInSet {
+            fact,
+            values,
+            case_insensitive,
+        } => PredicateSpec::ValueInSet {
+            fact: fact.kind().into(),
+            values: values.clone(),
+            case_insensitive: *case_insensitive,
+        },
+        Predicate::ValueNotInSet {
+            fact,
+            values,
+            case_insensitive,
+        } => PredicateSpec::ValueNotInSet {
+            fact: fact.kind().into(),
+            values: values.clone(),
+            case_insensitive: *case_insensitive,
+        },
+        Predicate::NumericRange { fact, min, max } => PredicateSpec::NumericRange {
+            fact: fact.kind().into(),
+            min: *min,
+            max: *max,
+        },
+        Predicate::TimeWindow { start, end } => PredicateSpec::TimeWindow {
+            start: start.clone(),
+            end: end.clone(),
+        },
+        Predicate::LabelSetMatch {
+            any_of,
+            all_of,
+            none_of,
+        } => PredicateSpec::LabelSetMatch {
+            fact: Fact::PrLabels.kind().into(),
+            any_of: any_of.clone(),
+            all_of: all_of.clone(),
+            none_of: none_of.clone(),
+        },
+        Predicate::FileGlobMatch { include, exclude } => PredicateSpec::FileGlobMatch {
+            fact: Fact::ChangedFiles.kind().into(),
+            include: include.clone(),
+            exclude: exclude.clone(),
+        },
+        Predicate::And(preds) => PredicateSpec::And {
+            operands: preds.iter().map(predicate_to_spec).collect(),
+        },
+        Predicate::Or(preds) => PredicateSpec::Or {
+            operands: preds.iter().map(predicate_to_spec).collect(),
+        },
+        Predicate::Not(inner) => PredicateSpec::Not {
+            operand: Box::new(predicate_to_spec(inner)),
+        },
+    }
+}
+
+/// Build a `GateSpec` from a gate context and filter checks.
+pub fn build_gate_spec(ctx: GateContext, checks: &[FilterCheck]) -> GateSpec {
+    let facts_set = collect_ordered_facts(checks);
+
+    let facts: Vec<FactSpec> = facts_set
+        .iter()
+        .map(|f| FactSpec {
+            id: f.kind().into(),
+            kind: f.kind().into(),
+            failure_policy: f.failure_policy().as_str().into(),
+        })
+        .collect();
+
+    let spec_checks: Vec<CheckSpec> = checks
+        .iter()
+        .map(|c| CheckSpec {
+            name: c.name.into(),
+            predicate: predicate_to_spec(&c.predicate),
+            tag_suffix: c.build_tag_suffix.into(),
+        })
+        .collect();
+
+    GateSpec {
+        context: GateContextSpec {
+            build_reason: ctx.build_reason(),
+            tag_prefix: ctx.tag_prefix(),
+            step_name: ctx.step_name(),
+            bypass_label: match ctx {
+                GateContext::PullRequest => "PR",
+                GateContext::PipelineCompletion => "pipeline",
+            },
+        },
+        facts,
+        checks: spec_checks,
+    }
+}
 
 /// Compile filter checks into a bash gate step.
 ///
-/// The generated step:
-/// 1. Bypasses non-matching trigger types automatically
-/// 2. Acquires all required facts (dependency-ordered)
-/// 3. Evaluates each predicate, setting SHOULD_RUN=false on failure
-/// 4. Self-cancels the build via ADO REST API if any filter fails
+/// The generated step exports ADO pipeline variables, base64-encodes the
+/// gate spec, and runs the embedded Python evaluator. All filter logic
+/// (bypass, fact acquisition, predicate evaluation, self-cancel) lives in
+/// the evaluator — bash is just a thin ADO-macro shim.
 pub fn compile_gate_step(ctx: GateContext, checks: &[FilterCheck]) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
     if checks.is_empty() {
         return String::new();
     }
 
-    // Collect and topo-sort required facts
-    let facts = collect_ordered_facts(checks);
+    let spec = build_gate_spec(ctx, checks);
+    let spec_json = serde_json::to_string(&spec).expect("gate spec serialization");
+    let spec_b64 = STANDARD.encode(spec_json.as_bytes());
 
+    // Collect ADO macro exports (deduplicated, ordered)
+    let facts_set = collect_ordered_facts(checks);
+    let mut exports: Vec<(&str, &str)> = Vec::new();
+    // Always export build reason and API infra vars
+    exports.push(("ADO_BUILD_REASON", "$(Build.Reason)"));
+    exports.push(("ADO_COLLECTION_URI", "$(System.CollectionUri)"));
+    exports.push(("ADO_PROJECT", "$(System.TeamProject)"));
+    exports.push(("ADO_BUILD_ID", "$(Build.BuildId)"));
+
+    let needs_pr_api = facts_set.iter().any(|f| {
+        matches!(
+            f,
+            Fact::PrMetadata | Fact::PrIsDraft | Fact::PrLabels | Fact::ChangedFiles
+        )
+    });
+    if needs_pr_api {
+        exports.push(("ADO_REPO_ID", "$(Build.Repository.ID)"));
+        exports.push(("ADO_PR_ID", "$(System.PullRequest.PullRequestId)"));
+    }
+
+    // Fact-specific exports
+    let mut seen = BTreeSet::new();
+    for fact in &facts_set {
+        for (env_var, ado_macro) in fact.ado_exports() {
+            if seen.insert(env_var) {
+                exports.push((env_var, ado_macro));
+            }
+        }
+    }
+
+    // Build the step
     let mut step = String::new();
     step.push_str("- bash: |\n");
 
-    // Bypass for non-matching trigger types
-    step.push_str(&format!(
-        "    if [ \"$(Build.Reason)\" != \"{}\" ]; then\n",
-        ctx.build_reason()
-    ));
-    step.push_str(&format!(
-        "      echo \"Not a {} build -- gate passes automatically\"\n",
-        match ctx {
-            GateContext::PullRequest => "PR",
-            GateContext::PipelineCompletion => "pipeline",
-        }
-    ));
-    step.push_str(
-        "      echo \"##vso[task.setvariable variable=SHOULD_RUN;isOutput=true]true\"\n",
-    );
-    step.push_str(&format!(
-        "      echo \"##vso[build.addbuildtag]{}:passed\"\n",
-        ctx.tag_prefix()
-    ));
-    step.push_str("      exit 0\n");
-    step.push_str("    fi\n");
-    step.push('\n');
-    step.push_str("    SHOULD_RUN=true\n");
-
-    // Acquire all facts
-    for fact in &facts {
-        step.push('\n');
-        step.push_str(&fact.acquisition_bash());
+    for (env_var, ado_macro) in &exports {
+        step.push_str(&format!("    export {}=\"{}\"\n", env_var, ado_macro));
+    }
+    step.push_str(&format!("    export GATE_SPEC=\"{}\"\n", spec_b64));
+    step.push_str("    export ADO_SYSTEM_ACCESS_TOKEN=\"$SYSTEM_ACCESSTOKEN\"\n");
+    step.push_str("    python3 << 'GATE_EVAL_EOF'\n");
+    step.push_str(GATE_EVALUATOR);
+    if !GATE_EVALUATOR.ends_with('\n') {
         step.push('\n');
     }
-
-    // Evaluate each predicate
-    for check in checks {
-        step.push('\n');
-        emit_predicate_check(&mut step, check, ctx.tag_prefix());
-    }
-
-    step.push('\n');
-
-    // Result handling
-    step.push_str(
-        "    echo \"##vso[task.setvariable variable=SHOULD_RUN;isOutput=true]$SHOULD_RUN\"\n",
-    );
-    step.push_str("    if [ \"$SHOULD_RUN\" = \"true\" ]; then\n");
-    step.push_str("      echo \"All filters passed -- agent will run\"\n");
-    step.push_str(&format!(
-        "      echo \"##vso[build.addbuildtag]{}:passed\"\n",
-        ctx.tag_prefix()
-    ));
-    step.push_str("    else\n");
-    step.push_str("      echo \"Filters not matched -- cancelling build\"\n");
-    step.push_str(&format!(
-        "      echo \"##vso[build.addbuildtag]{}:skipped\"\n",
-        ctx.tag_prefix()
-    ));
-    step.push_str("      curl -s -X PATCH \\\n");
-    step.push_str(
-        "        -H \"Authorization: Bearer $SYSTEM_ACCESSTOKEN\" \\\n",
-    );
-    step.push_str("        -H \"Content-Type: application/json\" \\\n");
-    step.push_str("        -d '{\"status\": \"cancelling\"}' \\\n");
-    step.push_str("        \"$(System.CollectionUri)$(System.TeamProject)/_apis/build/builds/$(Build.BuildId)?api-version=7.1\"\n");
-    step.push_str("    fi\n");
+    step.push_str("GATE_EVAL_EOF\n");
     step.push_str(&format!("  name: {}\n", ctx.step_name()));
     step.push_str(&format!(
         "  displayName: \"{}\"\n",
@@ -988,380 +1241,7 @@ fn collect_ordered_facts(checks: &[FilterCheck]) -> Vec<Fact> {
             all_facts.insert(fact);
         }
     }
-
-    // Topo-sort: pipeline vars first, then API, then computed.
-    // BTreeSet gives us Ord-based ordering which matches our enum variant order
-    // (pipeline vars < API-derived < computed), so just collect.
     all_facts.into_iter().collect()
-}
-
-/// Emit bash for a single predicate check.
-fn emit_predicate_check(out: &mut String, check: &FilterCheck, tag_prefix: &str) {
-    let tag = format!("{}:{}", tag_prefix, check.build_tag_suffix);
-    match &check.predicate {
-        Predicate::RegexMatch { fact, pattern } => {
-            let escaped = shell_escape(pattern);
-            let var = fact.shell_var();
-            out.push_str(&format!("    # {} filter\n", capitalize(check.name)));
-            out.push_str(&format!(
-                "    if echo \"${}\" | grep -qE '{}'; then\n",
-                var, escaped
-            ));
-            out.push_str(&format!(
-                "      echo \"Filter: {} | Pattern: {} | Result: PASS\"\n",
-                check.name, escaped
-            ));
-            out.push_str("    else\n");
-            out.push_str(&format!(
-                "      echo \"##[warning]Filter {} did not match (pattern: {})\"\n",
-                check.name, escaped
-            ));
-            out.push_str(&format!(
-                "      echo \"##vso[build.addbuildtag]{}\"\n",
-                tag
-            ));
-            out.push_str("      SHOULD_RUN=false\n");
-            out.push_str("    fi\n");
-        }
-
-        Predicate::Equality { fact, value } => {
-            let var = fact.shell_var();
-            out.push_str(&format!("    # {} filter\n", capitalize(check.name)));
-            out.push_str(&format!(
-                "    if [ \"${}\" = \"{}\" ]; then\n",
-                var, value
-            ));
-            out.push_str(&format!(
-                "      echo \"Filter: {} | Expected: {} | Actual: ${}  | Result: PASS\"\n",
-                check.name, value, var
-            ));
-            out.push_str("    else\n");
-            out.push_str(&format!(
-                "      echo \"##[warning]Filter {} did not match (expected: {}, actual: ${})\"\n",
-                check.name, value, var
-            ));
-            out.push_str(&format!(
-                "      echo \"##vso[build.addbuildtag]{}\"\n",
-                tag
-            ));
-            out.push_str("      SHOULD_RUN=false\n");
-            out.push_str("    fi\n");
-        }
-
-        Predicate::ValueInSet {
-            fact,
-            values,
-            case_insensitive,
-        } => {
-            let var = fact.shell_var();
-            let escaped: Vec<String> = values.iter().map(|v| shell_escape(v)).collect();
-            let pattern = escaped.join("|");
-            let flag = if *case_insensitive { "i" } else { "" };
-            out.push_str(&format!("    # {} filter\n", capitalize(check.name)));
-            out.push_str(&format!(
-                "    if echo \"${}\" | grep -q{}E '^({})$'; then\n",
-                var, flag, pattern
-            ));
-            out.push_str(&format!(
-                "      echo \"Filter: {} | Result: PASS\"\n",
-                check.name
-            ));
-            out.push_str("    else\n");
-            out.push_str(&format!(
-                "      echo \"##[warning]Filter {} did not match include list\"\n",
-                check.name
-            ));
-            out.push_str(&format!(
-                "      echo \"##vso[build.addbuildtag]{}\"\n",
-                tag
-            ));
-            out.push_str("      SHOULD_RUN=false\n");
-            out.push_str("    fi\n");
-        }
-
-        Predicate::ValueNotInSet {
-            fact,
-            values,
-            case_insensitive,
-        } => {
-            let var = fact.shell_var();
-            let escaped: Vec<String> = values.iter().map(|v| shell_escape(v)).collect();
-            let pattern = escaped.join("|");
-            let flag = if *case_insensitive { "i" } else { "" };
-            out.push_str(&format!("    # {} filter\n", capitalize(check.name)));
-            out.push_str(&format!(
-                "    if echo \"${}\" | grep -q{}E '^({})$'; then\n",
-                var, flag, pattern
-            ));
-            out.push_str(&format!(
-                "      echo \"##[warning]Filter {} matched exclude list\"\n",
-                check.name
-            ));
-            out.push_str(&format!(
-                "      echo \"##vso[build.addbuildtag]{}\"\n",
-                tag
-            ));
-            out.push_str("      SHOULD_RUN=false\n");
-            out.push_str("    else\n");
-            out.push_str(&format!(
-                "      echo \"Filter: {} | Result: PASS (not in exclude list)\"\n",
-                check.name
-            ));
-            out.push_str("    fi\n");
-        }
-
-        Predicate::NumericRange { fact: _, min, max } => {
-            out.push_str(&format!("    # {} filter\n", capitalize(check.name)));
-            if let Some(min_val) = min {
-                out.push_str(&format!(
-                    "    if [ \"$FILE_COUNT\" -ge {} ]; then\n",
-                    min_val
-                ));
-                out.push_str(&format!(
-                    "      echo \"Filter: min-changes | Min: {} | Actual: $FILE_COUNT | Result: PASS\"\n",
-                    min_val
-                ));
-                out.push_str("    else\n");
-                out.push_str(&format!(
-                    "      echo \"##[warning]Filter min-changes: $FILE_COUNT files changed, minimum {} required\"\n",
-                    min_val
-                ));
-                out.push_str(&format!(
-                    "      echo \"##vso[build.addbuildtag]{}:min-{}\"\n",
-                    tag_prefix, check.build_tag_suffix
-                ));
-                out.push_str("      SHOULD_RUN=false\n");
-                out.push_str("    fi\n");
-            }
-            if let Some(max_val) = max {
-                out.push_str(&format!(
-                    "    if [ \"$FILE_COUNT\" -le {} ]; then\n",
-                    max_val
-                ));
-                out.push_str(&format!(
-                    "      echo \"Filter: max-changes | Max: {} | Actual: $FILE_COUNT | Result: PASS\"\n",
-                    max_val
-                ));
-                out.push_str("    else\n");
-                out.push_str(&format!(
-                    "      echo \"##[warning]Filter max-changes: $FILE_COUNT files changed, maximum {} allowed\"\n",
-                    max_val
-                ));
-                out.push_str(&format!(
-                    "      echo \"##vso[build.addbuildtag]{}:max-{}\"\n",
-                    tag_prefix, check.build_tag_suffix
-                ));
-                out.push_str("      SHOULD_RUN=false\n");
-                out.push_str("    fi\n");
-            }
-        }
-
-        Predicate::TimeWindow { start, end } => {
-            let s = shell_escape(start);
-            let e = shell_escape(end);
-            out.push_str(&format!("    # {} filter\n", capitalize(check.name)));
-            out.push_str(&format!("    START_H=${{{}%%:*}}\n", s));
-            out.push_str(&format!("    START_M=${{{}##*:}}\n", s));
-            out.push_str(
-                "    START_MINUTES=$((10#$START_H * 60 + 10#$START_M))\n",
-            );
-            out.push_str(&format!("    END_H=${{{}%%:*}}\n", e));
-            out.push_str(&format!("    END_M=${{{}##*:}}\n", e));
-            out.push_str("    END_MINUTES=$((10#$END_H * 60 + 10#$END_M))\n");
-            out.push_str("    if [ $START_MINUTES -le $END_MINUTES ]; then\n");
-            out.push_str("      # Same-day window\n");
-            out.push_str("      if [ $CURRENT_MINUTES -ge $START_MINUTES ] && [ $CURRENT_MINUTES -lt $END_MINUTES ]; then\n");
-            out.push_str("        IN_WINDOW=true\n");
-            out.push_str("      else\n");
-            out.push_str("        IN_WINDOW=false\n");
-            out.push_str("      fi\n");
-            out.push_str("    else\n");
-            out.push_str("      # Overnight window (e.g., 22:00-06:00)\n");
-            out.push_str("      if [ $CURRENT_MINUTES -ge $START_MINUTES ] || [ $CURRENT_MINUTES -lt $END_MINUTES ]; then\n");
-            out.push_str("        IN_WINDOW=true\n");
-            out.push_str("      else\n");
-            out.push_str("        IN_WINDOW=false\n");
-            out.push_str("      fi\n");
-            out.push_str("    fi\n");
-            out.push_str("    if [ \"$IN_WINDOW\" = \"true\" ]; then\n");
-            out.push_str(&format!(
-                "      echo \"Filter: time-window | Window: {}-{} UTC | Result: PASS\"\n",
-                s, e
-            ));
-            out.push_str("    else\n");
-            out.push_str(&format!(
-                "      echo \"##[warning]Filter time-window: current time is outside {}-{} UTC\"\n",
-                s, e
-            ));
-            out.push_str(&format!(
-                "      echo \"##vso[build.addbuildtag]{}\"\n",
-                tag
-            ));
-            out.push_str("      SHOULD_RUN=false\n");
-            out.push_str("    fi\n");
-        }
-
-        Predicate::LabelSetMatch {
-            any_of,
-            all_of,
-            none_of,
-        } => {
-            out.push_str("    # Labels filter\n");
-
-            if !any_of.is_empty() {
-                let escaped: Vec<String> =
-                    any_of.iter().map(|l| shell_escape(l)).collect();
-                out.push_str("    LABEL_MATCH=false\n");
-                for label in &escaped {
-                    out.push_str(&format!(
-                        "    if echo \"$PR_LABELS\" | grep -qiF '{}'; then\n",
-                        label
-                    ));
-                    out.push_str("      LABEL_MATCH=true\n");
-                    out.push_str("    fi\n");
-                }
-                out.push_str("    if [ \"$LABEL_MATCH\" = \"true\" ]; then\n");
-                out.push_str(
-                    "      echo \"Filter: labels any-of | Result: PASS\"\n"
-                );
-                out.push_str("    else\n");
-                out.push_str(&format!(
-                    "      echo \"##[warning]Filter labels any-of did not match (required one of: {})\"\n",
-                    escaped.join(", ")
-                ));
-                out.push_str(&format!(
-                    "      echo \"##vso[build.addbuildtag]{}\"\n",
-                    tag
-                ));
-                out.push_str("      SHOULD_RUN=false\n");
-                out.push_str("    fi\n");
-            }
-
-            if !all_of.is_empty() {
-                let escaped: Vec<String> =
-                    all_of.iter().map(|l| shell_escape(l)).collect();
-                out.push_str("    ALL_LABELS_MATCH=true\n");
-                for label in &escaped {
-                    out.push_str(&format!(
-                        "    if ! echo \"$PR_LABELS\" | grep -qiF '{}'; then\n",
-                        label
-                    ));
-                    out.push_str("      ALL_LABELS_MATCH=false\n");
-                    out.push_str("    fi\n");
-                }
-                out.push_str("    if [ \"$ALL_LABELS_MATCH\" = \"true\" ]; then\n");
-                out.push_str("      echo \"Filter: labels all-of | Result: PASS\"\n");
-                out.push_str("    else\n");
-                out.push_str(&format!(
-                    "      echo \"##[warning]Filter labels all-of did not match (required all of: {})\"\n",
-                    escaped.join(", ")
-                ));
-                out.push_str(&format!(
-                    "      echo \"##vso[build.addbuildtag]{}\"\n",
-                    tag
-                ));
-                out.push_str("      SHOULD_RUN=false\n");
-                out.push_str("    fi\n");
-            }
-
-            if !none_of.is_empty() {
-                let escaped: Vec<String> =
-                    none_of.iter().map(|l| shell_escape(l)).collect();
-                out.push_str("    BLOCKED_LABEL_FOUND=false\n");
-                for label in &escaped {
-                    out.push_str(&format!(
-                        "    if echo \"$PR_LABELS\" | grep -qiF '{}'; then\n",
-                        label
-                    ));
-                    out.push_str("      BLOCKED_LABEL_FOUND=true\n");
-                    out.push_str("    fi\n");
-                }
-                out.push_str("    if [ \"$BLOCKED_LABEL_FOUND\" = \"false\" ]; then\n");
-                out.push_str("      echo \"Filter: labels none-of | Result: PASS\"\n");
-                out.push_str("    else\n");
-                out.push_str(&format!(
-                    "      echo \"##[warning]Filter labels none-of matched a blocked label (blocked: {})\"\n",
-                    escaped.join(", ")
-                ));
-                out.push_str(&format!(
-                    "      echo \"##vso[build.addbuildtag]{}\"\n",
-                    tag
-                ));
-                out.push_str("      SHOULD_RUN=false\n");
-                out.push_str("    fi\n");
-            }
-        }
-
-        Predicate::FileGlobMatch { include, exclude } => {
-            let include_patterns: Vec<String> =
-                include.iter().map(|p| format!("\"{}\"", shell_escape(p))).collect();
-            let exclude_patterns: Vec<String> =
-                exclude.iter().map(|p| format!("\"{}\"", shell_escape(p))).collect();
-            let include_list = if include_patterns.is_empty() {
-                "[]".to_string()
-            } else {
-                format!("[{}]", include_patterns.join(", "))
-            };
-            let exclude_list = if exclude_patterns.is_empty() {
-                "[]".to_string()
-            } else {
-                format!("[{}]", exclude_patterns.join(", "))
-            };
-
-            out.push_str("    # Changed files filter\n");
-            out.push_str(&format!(
-                concat!(
-                    "    FILES_MATCH=$(echo \"$CHANGED_FILES\" | python3 -c \"\n",
-                    "import sys, fnmatch\n",
-                    "includes = {}\n",
-                    "excludes = {}\n",
-                    "files = [l.strip() for l in sys.stdin if l.strip()]\n",
-                    "matched = []\n",
-                    "for f in files:\n",
-                    "    inc = not includes or any(fnmatch.fnmatch(f, p) for p in includes)\n",
-                    "    exc = any(fnmatch.fnmatch(f, p) for p in excludes)\n",
-                    "    if inc and not exc:\n",
-                    "        matched.append(f)\n",
-                    "print('true' if matched else 'false')\n",
-                    "\" 2>/dev/null || echo 'true')\n",
-                ),
-                include_list, exclude_list,
-            ));
-            out.push_str("    if [ \"$FILES_MATCH\" = \"true\" ]; then\n");
-            out.push_str(
-                "      echo \"Filter: changed-files | Result: PASS\"\n",
-            );
-            out.push_str("    else\n");
-            out.push_str(
-                "      echo \"##[warning]Filter changed-files did not match any relevant files\"\n",
-            );
-            out.push_str(&format!(
-                "      echo \"##vso[build.addbuildtag]{}\"\n",
-                tag
-            ));
-            out.push_str("      SHOULD_RUN=false\n");
-            out.push_str("    fi\n");
-        }
-
-        // Logical combinators — these are internal and not expected at the
-        // top level of a FilterCheck. If encountered, evaluate inline.
-        Predicate::And(_) | Predicate::Or(_) | Predicate::Not(_) => {
-            // Currently unused at top level. Reserved for future compound filters.
-            out.push_str(&format!(
-                "    # {} filter (compound — not yet implemented)\n",
-                check.name
-            ));
-        }
-    }
-}
-
-/// Capitalize the first letter of a string.
-fn capitalize(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
-    }
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -1638,7 +1518,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compile_gate_step_pr_bypass() {
+    fn test_compile_gate_step_structure() {
         let checks = vec![FilterCheck {
             name: "title",
             predicate: Predicate::RegexMatch {
@@ -1648,13 +1528,32 @@ mod tests {
             build_tag_suffix: "title-mismatch",
         }];
         let result = compile_gate_step(GateContext::PullRequest, &checks);
-        assert!(result.contains("PullRequest"));
-        assert!(result.contains("gate passes automatically"));
-        assert!(result.contains("SHOULD_RUN"));
+        assert!(result.contains("- bash: |"), "should be a bash step");
+        assert!(result.contains("GATE_SPEC"), "should include base64 spec");
+        assert!(result.contains("python3"), "should invoke python evaluator");
+        assert!(result.contains("GATE_EVAL_EOF"), "should use heredoc for evaluator");
+        assert!(result.contains("name: prGate"), "should set step name");
+        assert!(result.contains("SYSTEM_ACCESSTOKEN"), "should pass access token");
     }
 
     #[test]
-    fn test_compile_gate_step_pipeline_bypass() {
+    fn test_compile_gate_step_exports_ado_macros() {
+        let checks = vec![FilterCheck {
+            name: "title",
+            predicate: Predicate::RegexMatch {
+                fact: Fact::PrTitle,
+                pattern: "test".into(),
+            },
+            build_tag_suffix: "title-mismatch",
+        }];
+        let result = compile_gate_step(GateContext::PullRequest, &checks);
+        assert!(result.contains("ADO_BUILD_REASON"), "should export build reason");
+        assert!(result.contains("ADO_PR_TITLE"), "should export PR title");
+        assert!(result.contains("$(System.PullRequest.Title)"), "should reference ADO macro");
+    }
+
+    #[test]
+    fn test_compile_gate_step_pipeline_context() {
         let checks = vec![FilterCheck {
             name: "source-pipeline",
             predicate: Predicate::RegexMatch {
@@ -1664,13 +1563,44 @@ mod tests {
             build_tag_suffix: "source-pipeline-mismatch",
         }];
         let result = compile_gate_step(GateContext::PipelineCompletion, &checks);
-        assert!(result.contains("ResourceTrigger"));
-        assert!(result.contains("pipeline-gate"));
-        assert!(result.contains("pipelineGate"));
+        assert!(result.contains("name: pipelineGate"), "should set pipeline gate name");
+        assert!(result.contains("Evaluate pipeline filters"), "should set display name");
+        assert!(result.contains("ADO_TRIGGERED_BY_PIPELINE"), "should export pipeline macro");
     }
 
     #[test]
-    fn test_compile_gate_step_acquires_facts() {
+    fn test_compile_gate_step_exports_pr_api_vars_for_tier2() {
+        let checks = vec![FilterCheck {
+            name: "draft",
+            predicate: Predicate::Equality {
+                fact: Fact::PrIsDraft,
+                value: "false".into(),
+            },
+            build_tag_suffix: "draft-mismatch",
+        }];
+        let result = compile_gate_step(GateContext::PullRequest, &checks);
+        assert!(result.contains("ADO_REPO_ID"), "should export repo ID for API calls");
+        assert!(result.contains("ADO_PR_ID"), "should export PR ID for API calls");
+    }
+
+    #[test]
+    fn test_compile_gate_step_no_pr_api_vars_for_tier1() {
+        let checks = vec![FilterCheck {
+            name: "title",
+            predicate: Predicate::RegexMatch {
+                fact: Fact::PrTitle,
+                pattern: "test".into(),
+            },
+            build_tag_suffix: "title-mismatch",
+        }];
+        let result = compile_gate_step(GateContext::PullRequest, &checks);
+        // Check export lines only (evaluator script always contains these strings)
+        assert!(!result.contains("export ADO_REPO_ID"), "should not export repo ID for title-only");
+        assert!(!result.contains("export ADO_PR_ID"), "should not export PR ID for title-only");
+    }
+
+    #[test]
+    fn test_build_gate_spec_structure() {
         let checks = vec![
             FilterCheck {
                 name: "title",
@@ -1681,119 +1611,54 @@ mod tests {
                 build_tag_suffix: "title-mismatch",
             },
             FilterCheck {
-                name: "draft",
-                predicate: Predicate::Equality {
-                    fact: Fact::PrIsDraft,
-                    value: "false".into(),
+                name: "labels",
+                predicate: Predicate::LabelSetMatch {
+                    any_of: vec!["run-agent".into()],
+                    all_of: vec![],
+                    none_of: vec!["do-not-run".into()],
                 },
-                build_tag_suffix: "draft-mismatch",
+                build_tag_suffix: "labels-mismatch",
             },
         ];
-        let result = compile_gate_step(GateContext::PullRequest, &checks);
-        // Should acquire PrTitle and PrMetadata (dependency of PrIsDraft)
-        assert!(
-            result.contains("TITLE=\"$(System.PullRequest.Title)\""),
-            "should acquire PrTitle"
-        );
-        assert!(
-            result.contains("pullRequests"),
-            "should acquire PrMetadata for draft check"
-        );
-        assert!(result.contains("isDraft"), "should acquire PrIsDraft");
+        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        assert_eq!(spec.context.build_reason, "PullRequest");
+        assert_eq!(spec.context.tag_prefix, "pr-gate");
+        assert_eq!(spec.context.step_name, "prGate");
+        assert_eq!(spec.context.bypass_label, "PR");
+        // Facts should include pr_title, pr_metadata (dep of pr_labels), pr_labels
+        assert!(spec.facts.iter().any(|f| f.kind == "pr_title"));
+        assert!(spec.facts.iter().any(|f| f.kind == "pr_metadata"));
+        assert!(spec.facts.iter().any(|f| f.kind == "pr_labels"));
+        // Checks
+        assert_eq!(spec.checks.len(), 2);
+        assert_eq!(spec.checks[0].name, "title");
+        assert_eq!(spec.checks[1].name, "labels");
     }
 
     #[test]
-    fn test_compile_gate_step_self_cancel() {
+    fn test_gate_spec_serializes_to_valid_json() {
         let checks = vec![FilterCheck {
             name: "title",
             predicate: Predicate::RegexMatch {
                 fact: Fact::PrTitle,
-                pattern: "test".into(),
+                pattern: "\\[review\\]".into(),
             },
             build_tag_suffix: "title-mismatch",
         }];
-        let result = compile_gate_step(GateContext::PullRequest, &checks);
-        assert!(result.contains("cancelling"), "should include self-cancel");
-        assert!(
-            result.contains("SYSTEM_ACCESSTOKEN"),
-            "should pass access token"
-        );
-    }
-
-    #[test]
-    fn test_compile_gate_step_labels() {
-        let checks = vec![FilterCheck {
-            name: "labels",
-            predicate: Predicate::LabelSetMatch {
-                any_of: vec!["run-agent".into()],
-                all_of: vec![],
-                none_of: vec!["do-not-run".into()],
-            },
-            build_tag_suffix: "labels-mismatch",
-        }];
-        let result = compile_gate_step(GateContext::PullRequest, &checks);
-        assert!(result.contains("run-agent"), "should check for run-agent");
-        assert!(result.contains("do-not-run"), "should check for blocked label");
-        assert!(result.contains("LABEL_MATCH"), "should use any-of matching");
-        assert!(
-            result.contains("BLOCKED_LABEL_FOUND"),
-            "should use none-of matching"
-        );
-    }
-
-    #[test]
-    fn test_compile_gate_step_changed_files() {
-        let checks = vec![FilterCheck {
-            name: "changed-files",
-            predicate: Predicate::FileGlobMatch {
-                include: vec!["src/**/*.rs".into()],
-                exclude: vec!["docs/**".into()],
-            },
-            build_tag_suffix: "changed-files-mismatch",
-        }];
-        let result = compile_gate_step(GateContext::PullRequest, &checks);
-        assert!(result.contains("iterations"), "should fetch iteration changes");
-        assert!(result.contains("fnmatch"), "should use fnmatch");
-        assert!(result.contains("src/**/*.rs"), "should include pattern");
-    }
-
-    #[test]
-    fn test_compile_gate_step_time_window() {
-        let checks = vec![FilterCheck {
-            name: "time-window",
-            predicate: Predicate::TimeWindow {
-                start: "09:00".into(),
-                end: "17:00".into(),
-            },
-            build_tag_suffix: "time-window-mismatch",
-        }];
-        let result = compile_gate_step(GateContext::PullRequest, &checks);
-        assert!(result.contains("CURRENT_HOUR"), "should get current UTC hour");
-        assert!(result.contains("09:00"), "should include start time");
-        assert!(result.contains("17:00"), "should include end time");
-        assert!(result.contains("IN_WINDOW"), "should evaluate time window");
-    }
-
-    #[test]
-    fn test_compile_gate_step_numeric_range() {
-        let checks = vec![FilterCheck {
-            name: "change-count",
-            predicate: Predicate::NumericRange {
-                fact: Fact::ChangedFileCount,
-                min: Some(5),
-                max: Some(100),
-            },
-            build_tag_suffix: "changes-mismatch",
-        }];
-        let result = compile_gate_step(GateContext::PullRequest, &checks);
-        assert!(result.contains("-ge 5"), "should check min");
-        assert!(result.contains("-le 100"), "should check max");
+        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        let json = serde_json::to_string(&spec).unwrap();
+        // Should roundtrip
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["context"]["build_reason"], "PullRequest");
+        assert_eq!(parsed["checks"][0]["name"], "title");
+        assert_eq!(parsed["checks"][0]["predicate"]["type"], "regex_match");
+        assert_eq!(parsed["checks"][0]["predicate"]["pattern"], "\\[review\\]");
     }
 
     // ─── End-to-end lowering + codegen ──────────────────────────────────
 
     #[test]
-    fn test_roundtrip_pr_filters_to_bash() {
+    fn test_roundtrip_pr_filters_to_gate_step() {
         let filters = PrFilters {
             title: Some(PatternFilter {
                 pattern: "\\[review\\]".into(),
@@ -1810,10 +1675,18 @@ mod tests {
         let diags = validate_pr_filters(&filters);
         assert!(diags.iter().all(|d| d.severity != Severity::Error));
 
-        let bash = compile_gate_step(GateContext::PullRequest, &checks);
-        assert!(bash.contains("System.PullRequest.Title"));
-        assert!(bash.contains("isDraft"));
-        assert!(bash.contains("run-agent"));
-        assert!(bash.contains("prGate"));
+        let step = compile_gate_step(GateContext::PullRequest, &checks);
+        // Step structure
+        assert!(step.contains("ADO_PR_TITLE"));
+        assert!(step.contains("ADO_REPO_ID")); // for API-derived facts
+        assert!(step.contains("python3"));
+        assert!(step.contains("prGate"));
+
+        // Spec content
+        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        assert_eq!(spec.checks.len(), 3);
+        assert!(spec.facts.iter().any(|f| f.kind == "pr_title"));
+        assert!(spec.facts.iter().any(|f| f.kind == "pr_is_draft"));
+        assert!(spec.facts.iter().any(|f| f.kind == "pr_labels"));
     }
 }

@@ -276,10 +276,9 @@ mod tests {
         assert!(result.contains("- job: Setup"), "should create Setup job");
         assert!(result.contains("name: prGate"), "should include gate step");
         assert!(result.contains("Evaluate PR filters"), "should have gate displayName");
-        assert!(result.contains("SHOULD_RUN"), "should set SHOULD_RUN variable");
-        assert!(result.contains("\\[review\\]"), "should include title pattern");
+        assert!(result.contains("GATE_SPEC"), "should include base64-encoded spec");
+        assert!(result.contains("python3"), "should invoke python evaluator");
         assert!(result.contains("SYSTEM_ACCESSTOKEN"), "should pass System.AccessToken");
-        assert!(result.contains("cancelling"), "should include self-cancel API call");
     }
 
     #[test]
@@ -334,9 +333,8 @@ mod tests {
             ..Default::default()
         };
         let result = generate_setup_job(&[], "MyPool", Some(&filters), None);
-        assert!(result.contains("alice@corp.com"), "should include author email");
-        assert!(result.contains("bot@noreply.com"), "should include excluded email");
-        assert!(result.contains("Build.RequestedForEmail"), "should check author variable");
+        assert!(result.contains("ADO_AUTHOR_EMAIL"), "should export author email ADO macro");
+        assert!(result.contains("Build.RequestedForEmail"), "should reference ADO author variable");
     }
 
     #[test]
@@ -347,10 +345,10 @@ mod tests {
             ..Default::default()
         };
         let result = generate_setup_job(&[], "MyPool", Some(&filters), None);
-        assert!(result.contains("SourceBranch"), "should check source branch");
-        assert!(result.contains("TargetBranch"), "should check target branch");
-        assert!(result.contains("^feature/.*"), "should include source pattern");
-        assert!(result.contains("^main$"), "should include target pattern");
+        assert!(result.contains("ADO_SOURCE_BRANCH"), "should export source branch");
+        assert!(result.contains("ADO_TARGET_BRANCH"), "should export target branch");
+        assert!(result.contains("PullRequest.SourceBranch"), "should reference source branch ADO var");
+        assert!(result.contains("PullRequest.TargetBranch"), "should reference target branch ADO var");
     }
 
     #[test]
@@ -360,8 +358,9 @@ mod tests {
             ..Default::default()
         };
         let result = generate_setup_job(&[], "MyPool", Some(&filters), None);
-        assert!(result.contains("PullRequest"), "should check for PR build reason");
-        assert!(result.contains("Not a PR build"), "should pass non-PR builds automatically");
+        // The evaluator handles bypass — bash just exports build reason
+        assert!(result.contains("ADO_BUILD_REASON"), "should export build reason");
+        assert!(result.contains("Build.Reason"), "should reference Build.Reason ADO macro");
     }
 
     #[test]
@@ -370,10 +369,12 @@ mod tests {
             title: Some(PatternFilter { pattern: "test".into() }),
             ..Default::default()
         };
-        let result = generate_setup_job(&[], "MyPool", Some(&filters), None);
-        assert!(result.contains("pr-gate:passed"), "should tag passed builds");
-        assert!(result.contains("pr-gate:skipped"), "should tag skipped builds");
-        assert!(result.contains("pr-gate:title-mismatch"), "should tag specific filter failures");
+        // Build tags are now in the evaluator, driven by spec. Verify spec content.
+        use crate::compile::filter_ir::{build_gate_spec, lower_pr_filters, GateContext};
+        let checks = lower_pr_filters(&filters);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        assert_eq!(spec.context.tag_prefix, "pr-gate");
+        assert_eq!(spec.checks[0].tag_suffix, "title-mismatch");
     }
 
     #[test]
@@ -428,7 +429,8 @@ mod tests {
     }
 
     #[test]
-    fn test_gate_step_includes_api_call_for_tier2() {
+    fn test_gate_step_includes_api_facts_for_tier2() {
+        use crate::compile::filter_ir::{build_gate_spec, lower_pr_filters, GateContext};
         let filters = PrFilters {
             labels: Some(LabelFilter {
                 any_of: vec!["run-agent".into()],
@@ -436,23 +438,27 @@ mod tests {
             }),
             ..Default::default()
         };
-        let result = generate_pr_gate_step(&filters);
-        assert!(result.contains("pullRequests"), "should include API call for labels filter");
-        assert!(result.contains("PR_DATA"), "should store API response");
+        let checks = lower_pr_filters(&filters);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        assert!(spec.facts.iter().any(|f| f.kind == "pr_metadata"), "should require pr_metadata fact");
+        assert!(spec.facts.iter().any(|f| f.kind == "pr_labels"), "should require pr_labels fact");
     }
 
     #[test]
-    fn test_gate_step_no_api_call_for_tier1_only() {
+    fn test_gate_step_no_api_facts_for_tier1_only() {
+        use crate::compile::filter_ir::{build_gate_spec, lower_pr_filters, GateContext};
         let filters = PrFilters {
             title: Some(PatternFilter { pattern: "test".into() }),
             ..Default::default()
         };
-        let result = generate_pr_gate_step(&filters);
-        assert!(!result.contains("PR_DATA"), "should not make API call for title-only filter");
+        let checks = lower_pr_filters(&filters);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        assert!(!spec.facts.iter().any(|f| f.kind == "pr_metadata"), "should not require pr_metadata for title-only");
     }
 
     #[test]
     fn test_gate_step_labels_any_of() {
+        use crate::compile::filter_ir::{build_gate_spec, lower_pr_filters, GateContext, PredicateSpec};
         let filters = PrFilters {
             labels: Some(LabelFilter {
                 any_of: vec!["run-agent".into(), "needs-review".into()],
@@ -460,14 +466,22 @@ mod tests {
             }),
             ..Default::default()
         };
-        let result = generate_pr_gate_step(&filters);
-        assert!(result.contains("run-agent"), "should check for run-agent label");
-        assert!(result.contains("needs-review"), "should check for needs-review label");
-        assert!(result.contains("LABEL_MATCH"), "should use any-of matching");
+        let checks = lower_pr_filters(&filters);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        let check = &spec.checks[0];
+        assert_eq!(check.name, "labels");
+        match &check.predicate {
+            PredicateSpec::LabelSetMatch { any_of, .. } => {
+                assert!(any_of.contains(&"run-agent".to_string()));
+                assert!(any_of.contains(&"needs-review".to_string()));
+            }
+            other => panic!("expected LabelSetMatch, got {:?}", other),
+        }
     }
 
     #[test]
     fn test_gate_step_labels_none_of() {
+        use crate::compile::filter_ir::{build_gate_spec, lower_pr_filters, GateContext, PredicateSpec};
         let filters = PrFilters {
             labels: Some(LabelFilter {
                 none_of: vec!["do-not-run".into()],
@@ -475,24 +489,39 @@ mod tests {
             }),
             ..Default::default()
         };
-        let result = generate_pr_gate_step(&filters);
-        assert!(result.contains("do-not-run"), "should check for blocked label");
-        assert!(result.contains("BLOCKED_LABEL"), "should use none-of matching");
+        let checks = lower_pr_filters(&filters);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        match &spec.checks[0].predicate {
+            PredicateSpec::LabelSetMatch { none_of, .. } => {
+                assert!(none_of.contains(&"do-not-run".to_string()));
+            }
+            other => panic!("expected LabelSetMatch, got {:?}", other),
+        }
     }
 
     #[test]
     fn test_gate_step_draft_false() {
+        use crate::compile::filter_ir::{build_gate_spec, lower_pr_filters, GateContext, PredicateSpec};
         let filters = PrFilters {
             draft: Some(false),
             ..Default::default()
         };
-        let result = generate_pr_gate_step(&filters);
-        assert!(result.contains("isDraft"), "should check isDraft field");
-        assert!(result.contains("false"), "should expect draft=false");
+        let checks = lower_pr_filters(&filters);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        match &spec.checks[0].predicate {
+            PredicateSpec::Equals { fact, value } => {
+                assert_eq!(fact, "pr_is_draft");
+                assert_eq!(value, "false");
+            }
+            other => panic!("expected Equals, got {:?}", other),
+        }
+        assert!(spec.facts.iter().any(|f| f.kind == "pr_is_draft"), "should include pr_is_draft fact");
+        assert!(spec.facts.iter().any(|f| f.kind == "pr_metadata"), "should include pr_metadata dependency");
     }
 
     #[test]
     fn test_gate_step_changed_files() {
+        use crate::compile::filter_ir::{build_gate_spec, lower_pr_filters, GateContext, PredicateSpec};
         let filters = PrFilters {
             changed_files: Some(IncludeExcludeFilter {
                 include: vec!["src/**/*.rs".into()],
@@ -500,15 +529,21 @@ mod tests {
             }),
             ..Default::default()
         };
-        let result = generate_pr_gate_step(&filters);
-        assert!(result.contains("iterations"), "should fetch iteration changes");
-        assert!(result.contains("fnmatch"), "should use fnmatch for glob matching");
-        assert!(result.contains("src/**/*.rs"), "should include the include pattern");
-        assert!(result.contains("docs/**"), "should include the exclude pattern");
+        let checks = lower_pr_filters(&filters);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        match &spec.checks[0].predicate {
+            PredicateSpec::FileGlobMatch { include, exclude, .. } => {
+                assert!(include.contains(&"src/**/*.rs".to_string()));
+                assert!(exclude.contains(&"docs/**".to_string()));
+            }
+            other => panic!("expected FileGlobMatch, got {:?}", other),
+        }
+        assert!(spec.facts.iter().any(|f| f.kind == "changed_files"), "should include changed_files fact");
     }
 
     #[test]
     fn test_gate_step_combined_tier1_and_tier2() {
+        use crate::compile::filter_ir::{build_gate_spec, lower_pr_filters, GateContext};
         let filters = PrFilters {
             title: Some(PatternFilter { pattern: "\\[review\\]".into() }),
             draft: Some(false),
@@ -518,19 +553,23 @@ mod tests {
             }),
             ..Default::default()
         };
-        let result = generate_pr_gate_step(&filters);
-        // Tier 1
-        assert!(result.contains("System.PullRequest.Title"), "should check title");
-        // Tier 2
-        assert!(result.contains("PR_DATA"), "should make API call");
-        assert!(result.contains("isDraft"), "should check draft");
-        assert!(result.contains("run-agent"), "should check labels");
+        let checks = lower_pr_filters(&filters);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        // Tier 1 fact
+        assert!(spec.facts.iter().any(|f| f.kind == "pr_title"), "should include pr_title");
+        // Tier 2 facts
+        assert!(spec.facts.iter().any(|f| f.kind == "pr_metadata"), "should include pr_metadata");
+        assert!(spec.facts.iter().any(|f| f.kind == "pr_is_draft"), "should include pr_is_draft");
+        assert!(spec.facts.iter().any(|f| f.kind == "pr_labels"), "should include pr_labels");
+        // Checks
+        assert_eq!(spec.checks.len(), 3, "should have 3 checks (title, draft, labels)");
     }
 
     // ─── Tier 3 filter tests ────────────────────────────────────────────────
 
     #[test]
     fn test_gate_step_time_window() {
+        use crate::compile::filter_ir::{build_gate_spec, lower_pr_filters, GateContext, PredicateSpec};
         let filters = PrFilters {
             time_window: Some(super::super::types::TimeWindowFilter {
                 start: "09:00".into(),
@@ -538,52 +577,76 @@ mod tests {
             }),
             ..Default::default()
         };
-        let result = generate_pr_gate_step(&filters);
-        assert!(result.contains("CURRENT_HOUR"), "should get current UTC hour");
-        assert!(result.contains("09:00"), "should include start time");
-        assert!(result.contains("17:00"), "should include end time");
-        assert!(result.contains("IN_WINDOW"), "should evaluate time window");
-        assert!(result.contains("pr-gate:time-window-mismatch"), "should tag time-window failures");
+        let checks = lower_pr_filters(&filters);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        match &spec.checks[0].predicate {
+            PredicateSpec::TimeWindow { start, end } => {
+                assert_eq!(start, "09:00");
+                assert_eq!(end, "17:00");
+            }
+            other => panic!("expected TimeWindow, got {:?}", other),
+        }
+        assert_eq!(spec.checks[0].tag_suffix, "time-window-mismatch");
     }
 
     #[test]
     fn test_gate_step_min_changes() {
+        use crate::compile::filter_ir::{build_gate_spec, lower_pr_filters, GateContext, PredicateSpec};
         let filters = PrFilters {
             min_changes: Some(5),
             ..Default::default()
         };
-        let result = generate_pr_gate_step(&filters);
-        assert!(result.contains("FILE_COUNT"), "should count changed files");
-        assert!(result.contains("-ge 5"), "should check minimum 5 files");
-        assert!(result.contains("pr-gate:min-changes-mismatch"), "should tag min-changes failures");
+        let checks = lower_pr_filters(&filters);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        match &spec.checks[0].predicate {
+            PredicateSpec::NumericRange { min, max, .. } => {
+                assert_eq!(*min, Some(5));
+                assert_eq!(*max, None);
+            }
+            other => panic!("expected NumericRange, got {:?}", other),
+        }
     }
 
     #[test]
     fn test_gate_step_max_changes() {
+        use crate::compile::filter_ir::{build_gate_spec, lower_pr_filters, GateContext, PredicateSpec};
         let filters = PrFilters {
             max_changes: Some(50),
             ..Default::default()
         };
-        let result = generate_pr_gate_step(&filters);
-        assert!(result.contains("FILE_COUNT"), "should count changed files");
-        assert!(result.contains("-le 50"), "should check maximum 50 files");
-        assert!(result.contains("pr-gate:max-changes-mismatch"), "should tag max-changes failures");
+        let checks = lower_pr_filters(&filters);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        match &spec.checks[0].predicate {
+            PredicateSpec::NumericRange { min, max, .. } => {
+                assert_eq!(*min, None);
+                assert_eq!(*max, Some(50));
+            }
+            other => panic!("expected NumericRange, got {:?}", other),
+        }
     }
 
     #[test]
     fn test_gate_step_min_and_max_changes() {
+        use crate::compile::filter_ir::{build_gate_spec, lower_pr_filters, GateContext, PredicateSpec};
         let filters = PrFilters {
             min_changes: Some(2),
             max_changes: Some(100),
             ..Default::default()
         };
-        let result = generate_pr_gate_step(&filters);
-        assert!(result.contains("-ge 2"), "should check min");
-        assert!(result.contains("-le 100"), "should check max");
+        let checks = lower_pr_filters(&filters);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        match &spec.checks[0].predicate {
+            PredicateSpec::NumericRange { min, max, .. } => {
+                assert_eq!(*min, Some(2));
+                assert_eq!(*max, Some(100));
+            }
+            other => panic!("expected NumericRange, got {:?}", other),
+        }
     }
 
     #[test]
     fn test_gate_step_build_reason_include() {
+        use crate::compile::filter_ir::{build_gate_spec, lower_pr_filters, GateContext, PredicateSpec};
         let filters = PrFilters {
             build_reason: Some(IncludeExcludeFilter {
                 include: vec!["PullRequest".into(), "Manual".into()],
@@ -591,15 +654,21 @@ mod tests {
             }),
             ..Default::default()
         };
-        let result = generate_pr_gate_step(&filters);
-        assert!(result.contains("Build.Reason"), "should check build reason");
-        assert!(result.contains("PullRequest"), "should include PullRequest");
-        assert!(result.contains("Manual"), "should include Manual");
-        assert!(result.contains("pr-gate:build-reason-mismatch"), "should tag build-reason failures");
+        let checks = lower_pr_filters(&filters);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        match &spec.checks[0].predicate {
+            PredicateSpec::ValueInSet { values, .. } => {
+                assert!(values.contains(&"PullRequest".to_string()));
+                assert!(values.contains(&"Manual".to_string()));
+            }
+            other => panic!("expected ValueInSet, got {:?}", other),
+        }
+        assert_eq!(spec.checks[0].tag_suffix, "build-reason-mismatch");
     }
 
     #[test]
     fn test_gate_step_build_reason_exclude() {
+        use crate::compile::filter_ir::{build_gate_spec, lower_pr_filters, GateContext, PredicateSpec};
         let filters = PrFilters {
             build_reason: Some(IncludeExcludeFilter {
                 include: vec![],
@@ -607,9 +676,15 @@ mod tests {
             }),
             ..Default::default()
         };
-        let result = generate_pr_gate_step(&filters);
-        assert!(result.contains("Schedule"), "should check excluded reason");
-        assert!(result.contains("pr-gate:build-reason-excluded"), "should tag excluded builds");
+        let checks = lower_pr_filters(&filters);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        match &spec.checks[0].predicate {
+            PredicateSpec::ValueNotInSet { values, .. } => {
+                assert!(values.contains(&"Schedule".to_string()));
+            }
+            other => panic!("expected ValueNotInSet, got {:?}", other),
+        }
+        assert_eq!(spec.checks[0].tag_suffix, "build-reason-excluded");
     }
 
     #[test]
@@ -652,7 +727,8 @@ mod tests {
     }
 
     #[test]
-    fn test_gate_step_change_count_reuses_changed_files_data() {
+    fn test_gate_step_change_count_includes_changed_files_fact() {
+        use crate::compile::filter_ir::{build_gate_spec, lower_pr_filters, GateContext};
         let filters = PrFilters {
             changed_files: Some(IncludeExcludeFilter {
                 include: vec!["src/**".into()],
@@ -661,9 +737,11 @@ mod tests {
             min_changes: Some(3),
             ..Default::default()
         };
-        let result = generate_pr_gate_step(&filters);
-        // Should use CHANGED_FILES from the changed-files filter, not make a new API call
-        assert!(result.contains("grep -c ."), "should count from existing CHANGED_FILES");
+        let checks = lower_pr_filters(&filters);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        // Both changed_files and changed_file_count facts should be present
+        assert!(spec.facts.iter().any(|f| f.kind == "changed_files"));
+        assert!(spec.facts.iter().any(|f| f.kind == "changed_file_count"));
     }
 
     #[test]
@@ -694,14 +772,22 @@ triggers:
 
     #[test]
     fn test_gate_step_commit_message() {
+        use crate::compile::filter_ir::{build_gate_spec, lower_pr_filters, GateContext, PredicateSpec};
         let filters = PrFilters {
             commit_message: Some(PatternFilter { pattern: "^(?!.*\\[skip-agent\\])".into() }),
             ..Default::default()
         };
-        let result = generate_pr_gate_step(&filters);
-        assert!(result.contains("Build.SourceVersionMessage"), "should check commit message variable");
-        assert!(result.contains("skip-agent"), "should include the pattern");
-        assert!(result.contains("pr-gate:commit-message-mismatch"), "should tag commit-message failures");
+        let checks = lower_pr_filters(&filters);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        assert!(spec.facts.iter().any(|f| f.kind == "commit_message"), "should include commit_message fact");
+        match &spec.checks[0].predicate {
+            PredicateSpec::RegexMatch { fact, pattern } => {
+                assert_eq!(fact, "commit_message");
+                assert!(pattern.contains("skip-agent"));
+            }
+            other => panic!("expected RegexMatch, got {:?}", other),
+        }
+        assert_eq!(spec.checks[0].tag_suffix, "commit-message-mismatch");
     }
 
     #[test]
