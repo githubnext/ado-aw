@@ -70,7 +70,7 @@ def acquire_fact(kind, acquired):
 def _fetch_pr_metadata():
     """Fetch PR metadata from ADO REST API."""
     from urllib.request import Request, urlopen
-    token = os.environ.get("ADO_SYSTEM_ACCESS_TOKEN", "")
+    token = os.environ.get("SYSTEM_ACCESSTOKEN", "")
     org_url = os.environ.get("ADO_COLLECTION_URI", "")
     project = os.environ.get("ADO_PROJECT", "")
     repo_id = os.environ.get("ADO_REPO_ID", "")
@@ -86,7 +86,7 @@ def _fetch_pr_metadata():
 def _fetch_changed_files():
     """Fetch changed files via PR iterations API."""
     from urllib.request import Request, urlopen
-    token = os.environ.get("ADO_SYSTEM_ACCESS_TOKEN", "")
+    token = os.environ.get("SYSTEM_ACCESSTOKEN", "")
     org_url = os.environ.get("ADO_COLLECTION_URI", "")
     project = os.environ.get("ADO_PROJECT", "")
     repo_id = os.environ.get("ADO_REPO_ID", "")
@@ -232,7 +232,7 @@ def vso_tag(tag):
 
 def self_cancel():
     from urllib.request import Request, urlopen
-    token = os.environ.get("ADO_SYSTEM_ACCESS_TOKEN", "")
+    token = os.environ.get("SYSTEM_ACCESSTOKEN", "")
     org_url = os.environ.get("ADO_COLLECTION_URI", "")
     project = os.environ.get("ADO_PROJECT", "")
     build_id = os.environ.get("ADO_BUILD_ID", "")

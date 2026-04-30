@@ -1201,7 +1201,6 @@ pub fn compile_gate_step_external(
     ));
     step.push_str("  env:\n");
     step.push_str("    SYSTEM_ACCESSTOKEN: $(System.AccessToken)\n");
-    step.push_str("    ADO_SYSTEM_ACCESS_TOKEN: $(System.AccessToken)\n");
     step.push_str(&format!("    GATE_SPEC: \"{}\"\n", spec_b64));
 
     for (env_var, ado_macro) in &exports {
