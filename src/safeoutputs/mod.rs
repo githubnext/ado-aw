@@ -42,6 +42,7 @@ pub const WRITE_REQUIRING_SAFE_OUTPUTS: &[&str] = tool_names![
     AddBuildTagResult,
     CreateBranchResult,
     UpdatePrResult,
+    UploadBuildArtifactResult,
     UploadWorkitemAttachmentResult,
     SubmitPrReviewResult,
     ReplyToPrCommentResult,
@@ -75,6 +76,7 @@ pub const ALL_KNOWN_SAFE_OUTPUTS: &[&str] = all_safe_output_names![
     AddBuildTagResult,
     CreateBranchResult,
     UpdatePrResult,
+    UploadBuildArtifactResult,
     UploadWorkitemAttachmentResult,
     SubmitPrReviewResult,
     ReplyToPrCommentResult,
@@ -262,6 +264,7 @@ mod submit_pr_review;
 mod update_pr;
 mod update_wiki_page;
 mod update_work_item;
+mod upload_build_artifact;
 mod upload_workitem_attachment;
 
 pub use add_build_tag::*;
@@ -287,6 +290,7 @@ pub use submit_pr_review::*;
 pub use update_pr::*;
 pub use update_wiki_page::*;
 pub use update_work_item::*;
+pub use upload_build_artifact::*;
 pub use upload_workitem_attachment::*;
 
 #[cfg(test)]
@@ -344,6 +348,7 @@ mod tests {
         assert!(AddBuildTagResult::REQUIRES_WRITE);
         assert!(CreateBranchResult::REQUIRES_WRITE);
         assert!(UpdatePrResult::REQUIRES_WRITE);
+        assert!(UploadBuildArtifactResult::REQUIRES_WRITE);
         assert!(UploadWorkitemAttachmentResult::REQUIRES_WRITE);
         assert!(SubmitPrReviewResult::REQUIRES_WRITE);
         assert!(ReplyToPrCommentResult::REQUIRES_WRITE);

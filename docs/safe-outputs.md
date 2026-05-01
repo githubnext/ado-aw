@@ -418,7 +418,43 @@ safe-outputs:
     max: 1                       # Maximum per run (default: 1)
 ```
 
-### cache-memory (moved to `tools:`)
+### upload-build-artifact
+Attaches a workspace file to an Azure DevOps build as a build attachment via the
+ADO build attachments REST API
+(`PUT /_apis/build/builds/{buildId}/attachments/{type}/{name}`).
+
+**Omit `build_id` to target the current pipeline run** — the executor resolves
+the build ID from the `BUILD_BUILDID` environment variable automatically. When
+`build_id` is provided, the file is attached to that specific build — useful for
+posthumously decorating a finished build with a generated report, screenshot, or
+log bundle.
+
+The tool stages the file during Stage 1 (MCP) by copying it into the
+safe-outputs directory; Stage 3 reads the staged copy and uploads it via the REST
+API.
+
+**Agent parameters:**
+- `build_id` *(optional)* - Target build ID. Omit to attach to the current pipeline run. Must be positive when specified.
+- `artifact_name` - Artifact name (1–100 chars, alphanumeric / `-` / `_` / `.`, no leading `.`)
+- `file_path` - Relative path to the file in the workspace (no directory traversal)
+
+**Configuration options (front matter):**
+```yaml
+safe-outputs:
+  upload-build-artifact:
+    max-file-size: 52428800              # Maximum file size in bytes (default: 50 MB)
+    allowed-extensions: []               # Optional — restrict file types (e.g., [".png", ".pdf", ".log"])
+    allowed-artifact-names: []           # Optional — restrict names (suffix `*` = prefix match)
+    allowed-build-ids: []                # Optional — restrict target builds (skipped when targeting current build)
+    name-prefix: ""                      # Optional — prepended to the agent-supplied artifact name
+    attachment-type: "agent-artifact"    # Optional — {type} segment in the attachments URL (default: "agent-artifact")
+    max: 3                               # Maximum per run (default: 3)
+```
+
+**Notes:**
+- Single-file only; directory uploads are not supported.
+- When `build_id` is omitted and `allowed-build-ids` is configured, the allow-list check is skipped — the current build is implicitly trusted.
+- The default `attachment-type` is `agent-artifact` so executor contributions are visually distinguishable from the build's own artifacts.
 Memory is now configured as a first-class tool under `tools: cache-memory:` instead of `safe-outputs: memory:`. See the [Cache Memory section](./tools.md#cache-memory-cache-memory) in `docs/tools.md` for details.
 
 ### create-wiki-page

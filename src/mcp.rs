@@ -27,6 +27,7 @@ use crate::safeoutputs::{
     QueueBuildResult, SubmitPrReviewParams, SubmitPrReviewResult, ToolResult,
     UpdatePrParams, UpdatePrResult,
     UpdateWorkItemParams, UpdateWorkItemResult,
+    UploadBuildArtifactParams, UploadBuildArtifactResult,
     UploadWorkitemAttachmentParams, UploadWorkitemAttachmentResult,
     anyhow_to_mcp_error,
 };
@@ -980,6 +981,125 @@ uploaded and linked during safe output processing. File size and type restrictio
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Attachment '{}' queued for work item #{}. The file will be uploaded during safe output processing.",
             result.file_path, result.work_item_id
+        ))]))
+    }
+
+    #[tool(
+        name = "upload-build-artifact",
+        description = "Attach a workspace file to an Azure DevOps build as a build attachment. \
+Omit `build_id` to target the current pipeline run (the executor resolves it from the \
+BUILD_BUILDID environment variable automatically). When `build_id` is provided, the file is \
+attached to that specific build — useful for posthumously decorating a finished build with a \
+generated report, screenshot, or log bundle. The file will be staged now and uploaded via the \
+ADO build attachments REST API during safe output processing. File size, extension, \
+artifact-name and build-id restrictions may apply per the workflow's safe-outputs config."
+    )]
+    async fn upload_build_artifact(
+        &self,
+        params: Parameters<UploadBuildArtifactParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!(
+            "Tool called: upload-build-artifact - artifact '{}' file '{}' build {:?}",
+            params.0.artifact_name, params.0.file_path, params.0.build_id
+        );
+
+        // Validate the agent-supplied params (build id, artifact name charset,
+        // path traversal / absolute / null bytes, etc.) before touching the
+        // filesystem.
+        crate::safeoutputs::Validate::validate(&params.0).map_err(anyhow_to_mcp_error)?;
+
+        // Resolve the agent-supplied file path against the bounding directory
+        // (the agent's workspace root inside the sandbox) and verify it
+        // canonicalises to a location *inside* that directory — guarding
+        // against symlink escapes.
+        let resolved = self.bounding_directory.join(&params.0.file_path);
+        let canonical = resolved.canonicalize().map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!(
+                "File '{}' could not be located inside the workspace: {}",
+                params.0.file_path,
+                e
+            ))
+        })?;
+        let canonical_root = self.bounding_directory.canonicalize().map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!(
+                "Failed to canonicalize bounding directory: {}",
+                e
+            ))
+        })?;
+        if !canonical.starts_with(&canonical_root) {
+            return Err(anyhow_to_mcp_error(anyhow::anyhow!(
+                "File '{}' resolves outside the workspace (symlink escape)",
+                params.0.file_path
+            )));
+        }
+
+        // Reject directories — upload-build-artifact is single-file only.
+        let metadata = tokio::fs::metadata(&canonical).await.map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!("Failed to stat '{}': {}", params.0.file_path, e))
+        })?;
+        if metadata.is_dir() {
+            return Err(anyhow_to_mcp_error(anyhow::anyhow!(
+                "File '{}' is a directory; upload-build-artifact only supports single files",
+                params.0.file_path
+            )));
+        }
+        let file_size = metadata.len();
+
+        // Generate a unique staged filename and copy the file into the
+        // safe-outputs directory. Stage 3 reads it back from there because
+        // the agent's sandbox workspace is no longer accessible by then.
+        // The staged name preserves the original extension and embeds a
+        // short random suffix to avoid collisions across multiple calls.
+        let extension = std::path::Path::new(&params.0.file_path)
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| {
+                s.chars()
+                    .filter(|c| c.is_ascii_alphanumeric())
+                    .take(16)
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
+        let staged_filename = if extension.is_empty() {
+            format!(
+                "upload-build-artifact-{}-{}",
+                params.0.artifact_name,
+                generate_short_id()
+            )
+        } else {
+            format!(
+                "upload-build-artifact-{}-{}.{}",
+                params.0.artifact_name,
+                generate_short_id(),
+                extension
+            )
+        };
+        let staged_path = self.output_directory.join(&staged_filename);
+        tokio::fs::copy(&canonical, &staged_path).await.map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!(
+                "Failed to stage file '{}' into safe-outputs directory: {}",
+                params.0.file_path,
+                e
+            ))
+        })?;
+
+        let result = UploadBuildArtifactResult::new(
+            params.0.build_id,
+            params.0.artifact_name.clone(),
+            params.0.file_path.clone(),
+            staged_filename.clone(),
+            file_size,
+        );
+        self.write_safe_output_file(&result).await
+            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+
+        let build_desc = match params.0.build_id {
+            Some(id) => format!("build #{}", id),
+            None => "the current build".to_string(),
+        };
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Artifact '{}' queued from file '{}' ({} bytes) for {}. The file will be uploaded during safe output processing.",
+            result.artifact_name, result.file_path, file_size, build_desc
         ))]))
     }
 
