@@ -133,15 +133,15 @@ impl Executor for AddBuildTagResult {
         let config: AddBuildTagConfig = ctx.get_tool_config("add-build-tag");
         debug!("Config: {:?}", config);
 
-        // 2b. Scope check: by default only the current build can be tagged
+        // 2b. Scope check: by default only the current build can be tagged.
+        // Compare in u64 space so that ADO build IDs larger than i32::MAX are
+        // still enforced (the agent-supplied i32 simply cannot match such
+        // values, which is the desired behavior).
         if !config.allow_any_build {
-            // Pulled from ctx (sourced from BUILD_BUILDID); narrowed to i32 to
-            // match the agent-supplied build_id type.
-            let current_build_id: Option<i32> = ctx
-                .build_id
-                .and_then(|id| i32::try_from(id).ok());
-            if let Some(current_id) = current_build_id {
-                if self.build_id != current_id {
+            if let Some(current_id) = ctx.build_id {
+                // self.build_id is validated > 0, so the cast to u64 is exact;
+                // values that don't fit in i32 simply cannot match current_id.
+                if self.build_id as u64 != current_id {
                     return Ok(ExecutionResult::failure(format!(
                         "Build #{} cannot be tagged: only the current build (#{}) is \
                          allowed unless 'allow-any-build: true' is configured",
