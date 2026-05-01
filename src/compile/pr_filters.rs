@@ -245,7 +245,7 @@ mod tests {
 
     #[test]
     fn test_generate_agentic_depends_on_with_pr_filters() {
-        let result = generate_agentic_depends_on(&[], true, false, None);
+        let result = generate_agentic_depends_on(&[], true, false, &[]);
         assert!(result.contains("dependsOn: Setup"), "should depend on Setup");
         assert!(result.contains("condition:"), "should have condition");
         assert!(result.contains("Build.Reason"), "should check Build.Reason");
@@ -255,14 +255,14 @@ mod tests {
     #[test]
     fn test_generate_agentic_depends_on_setup_only_no_condition() {
         let step: serde_yaml::Value = serde_yaml::from_str("bash: echo hello").unwrap();
-        let result = generate_agentic_depends_on(&[step], false, false, None);
+        let result = generate_agentic_depends_on(&[step], false, false, &[]);
         assert_eq!(result, "dependsOn: Setup");
         assert!(!result.contains("condition:"), "no condition without PR filters");
     }
 
     #[test]
     fn test_generate_agentic_depends_on_nothing() {
-        let result = generate_agentic_depends_on(&[], false, false, None);
+        let result = generate_agentic_depends_on(&[], false, false, &[]);
         assert!(result.is_empty());
     }
 
@@ -581,7 +581,7 @@ mod tests {
             &[],
             false,
             false,
-            Some("eq(variables['Custom.ShouldRun'], 'true')"),
+            &["eq(variables['Custom.ShouldRun'], 'true')"],
         );
         assert!(result.contains("condition:"), "should have condition");
         assert!(result.contains("Custom.ShouldRun"), "should include expression");
@@ -594,7 +594,7 @@ mod tests {
             &[],
             true,
             false,
-            Some("eq(variables['Custom.Flag'], 'yes')"),
+            &["eq(variables['Custom.Flag'], 'yes')"],
         );
         assert!(result.contains("prGate.SHOULD_RUN"), "should check gate output");
         assert!(result.contains("Custom.Flag"), "should include expression");
@@ -607,7 +607,7 @@ mod tests {
             &[],
             false,
             false,
-            Some("eq(variables['Run'], 'true')"),
+            &["eq(variables['Run'], 'true')"],
         );
         // No setup steps, no PR filters — no dependsOn, but still a condition
         assert!(!result.contains("dependsOn"), "no dependsOn without setup/filters");
@@ -724,3 +724,4 @@ on:
         assert_eq!(filters.commit_message.unwrap().pattern, "*[skip-agent]*");
     }
 }
+

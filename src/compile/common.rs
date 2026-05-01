@@ -1332,12 +1332,12 @@ pub fn generate_agentic_depends_on(
     setup_steps: &[serde_yaml::Value],
     has_pr_filters: bool,
     has_pipeline_filters: bool,
-    expression: Option<&str>,
+    expressions: &[&str],
 ) -> String {
     let has_gate = has_pr_filters || has_pipeline_filters;
     let has_setup = !setup_steps.is_empty() || has_gate;
 
-    if !has_setup && expression.is_none() {
+    if !has_setup && expressions.is_empty() {
         return String::new();
     }
 
@@ -1347,7 +1347,7 @@ pub fn generate_agentic_depends_on(
         ""
     };
 
-    if has_gate || expression.is_some() {
+    if has_gate || !expressions.is_empty() {
         let mut parts = Vec::new();
         parts.push("succeeded()".to_string());
 
@@ -1371,7 +1371,7 @@ pub fn generate_agentic_depends_on(
             );
         }
 
-        if let Some(expr) = expression {
+        for expr in expressions {
             parts.push(expr.to_string());
         }
 
@@ -2047,16 +2047,11 @@ pub async fn compile_shared(
         }
     }
 
-    let combined_expression = if expressions.is_empty() {
-        None
-    } else {
-        Some(expressions.join(", "))
-    };
     let agentic_depends_on = generate_agentic_depends_on(
         &front_matter.setup,
         has_pr_filters,
         has_pipeline_filters,
-        combined_expression.as_deref(),
+        &expressions,
     );
     let job_timeout = generate_job_timeout(front_matter);
 
@@ -5034,13 +5029,13 @@ mod tests {
 
     #[test]
     fn test_generate_agentic_depends_on_empty_steps() {
-        assert!(generate_agentic_depends_on(&[], false, false, None).is_empty());
+        assert!(generate_agentic_depends_on(&[], false, false, &[]).is_empty());
     }
 
     #[test]
     fn test_generate_agentic_depends_on_with_steps() {
         let step: serde_yaml::Value = serde_yaml::from_str("bash: x").unwrap();
-        assert_eq!(generate_agentic_depends_on(&[step], false, false, None), "dependsOn: Setup");
+        assert_eq!(generate_agentic_depends_on(&[step], false, false, &[]), "dependsOn: Setup");
     }
 
     #[test]

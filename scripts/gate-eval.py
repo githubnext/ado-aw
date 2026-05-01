@@ -148,9 +148,11 @@ def _glob(value, pattern):
     Brackets are literal (NOT character classes) — consistent across
     all filter types (title, branch, changed-files, etc.).
     """
-    pattern = _strip_ref_prefix(pattern)
     regex = _re.escape(pattern).replace(r"\*", ".*").replace(r"\?", ".")
     return bool(_re.fullmatch(regex, value))
+
+# Facts where ref prefixes should be stripped from patterns
+_BRANCH_FACTS = {"source_branch", "target_branch", "triggering_branch"}
 
 
 def evaluate(pred, facts):
@@ -159,7 +161,11 @@ def evaluate(pred, facts):
 
     if t == "glob_match":
         value = str(facts.get(pred["fact"], ""))
-        return _glob(value, pred["pattern"])
+        pattern = pred["pattern"]
+        # Only strip refs/heads/ prefix from branch-related patterns
+        if pred["fact"] in _BRANCH_FACTS:
+            pattern = _strip_ref_prefix(pattern)
+        return _glob(value, pattern)
 
     if t == "equals":
         value = str(facts.get(pred["fact"], ""))

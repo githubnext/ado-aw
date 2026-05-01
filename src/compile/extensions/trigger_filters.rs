@@ -41,12 +41,18 @@ impl TriggerFiltersExtension {
         }
     }
 
-    /// Returns true if any filter configuration is present.
+    /// Returns true if any filter configuration produces actual checks.
     pub fn is_needed(
         pr_filters: Option<&PrFilters>,
         pipeline_filters: Option<&PipelineFilters>,
     ) -> bool {
-        pr_filters.is_some() || pipeline_filters.is_some()
+        let has_pr = pr_filters
+            .map(|f| !lower_pr_filters(f).is_empty())
+            .unwrap_or(false);
+        let has_pipeline = pipeline_filters
+            .map(|f| !lower_pipeline_filters(f).is_empty())
+            .unwrap_or(false);
+        has_pr || has_pipeline
     }
 }
 
@@ -61,23 +67,13 @@ impl CompilerExtension for TriggerFiltersExtension {
 
     fn setup_steps(&self, _ctx: &CompileContext) -> Result<Vec<String>> {
         let version = env!("CARGO_PKG_VERSION");
-        let mut steps = Vec::new();
-
-        // Download the scripts bundle from ado-aw release
-        steps.push(format!(
-            r#"- bash: |
-    mkdir -p /tmp/ado-aw-scripts
-    curl -fsSL "{RELEASE_BASE_URL}/v{version}/scripts.zip" -o /tmp/ado-aw-scripts/scripts.zip
-    cd /tmp/ado-aw-scripts && unzip -o scripts.zip
-  displayName: "Download ado-aw scripts (v{version})"
-  condition: succeeded()"#,
-        ));
+        let mut gate_steps = Vec::new();
 
         // PR gate step
         if let Some(filters) = &self.pr_filters {
             let checks = lower_pr_filters(filters);
             if !checks.is_empty() {
-                steps.push(compile_gate_step_external(
+                gate_steps.push(compile_gate_step_external(
                     GateContext::PullRequest,
                     &checks,
                     GATE_EVAL_PATH,
@@ -89,13 +85,29 @@ impl CompilerExtension for TriggerFiltersExtension {
         if let Some(filters) = &self.pipeline_filters {
             let checks = lower_pipeline_filters(filters);
             if !checks.is_empty() {
-                steps.push(compile_gate_step_external(
+                gate_steps.push(compile_gate_step_external(
                     GateContext::PipelineCompletion,
                     &checks,
                     GATE_EVAL_PATH,
                 )?);
             }
         }
+
+        // Only download scripts when we actually have gate steps
+        if gate_steps.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut steps = Vec::new();
+        steps.push(format!(
+            r#"- bash: |
+    mkdir -p /tmp/ado-aw-scripts
+    curl -fsSL "{RELEASE_BASE_URL}/v{version}/scripts.zip" -o /tmp/ado-aw-scripts/scripts.zip
+    cd /tmp/ado-aw-scripts && unzip -o scripts.zip
+  displayName: "Download ado-aw scripts (v{version})"
+  condition: succeeded()"#,
+        ));
+        steps.extend(gate_steps);
 
         Ok(steps)
     }
