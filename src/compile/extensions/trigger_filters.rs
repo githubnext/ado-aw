@@ -214,7 +214,7 @@ mod tests {
         );
         assert!(steps[1].contains("prGate"), "second step should be PR gate");
         assert!(
-            steps[1].contains("python3 /tmp/ado-aw-scripts/gate-eval.py"),
+            steps[1].contains("python3 '/tmp/ado-aw-scripts/gate-eval.py'"),
             "gate step should reference external script"
         );
     }

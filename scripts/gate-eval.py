@@ -189,16 +189,21 @@ def evaluate(pred, facts):
         files = facts.get(pred["fact"]) or []
         if isinstance(files, str):
             files = [f.strip() for f in files.split("\n") if f.strip()]
-        if not files:
-            log("  (changed-files: no files in PR — filter will not match)")
         includes = pred.get("include", [])
         excludes = pred.get("exclude", [])
+        # Empty file list: exclude-only filters pass (no excluded files present),
+        # include filters fail (nothing to match against)
+        if not files:
+            if not includes:
+                return True  # exclude-only: vacuously true (no bad files)
+            log("  (changed-files: no files in PR — filter will not match)")
+            return False
         for f in files:
             inc = not includes or any(fnmatch.fnmatch(f, p) for p in includes)
             exc = any(fnmatch.fnmatch(f, p) for p in excludes)
             if inc and not exc:
                 return True
-        return False  # no file matched the include/exclude criteria
+        return False
 
     if t == "and":
         return all(evaluate(p, facts) for p in pred["operands"])

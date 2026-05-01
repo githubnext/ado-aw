@@ -212,10 +212,13 @@ pub enum Predicate {
     },
 
     /// Logical AND — all must pass.
+    /// Not yet produced by lowering; reserved for future compound filters.
     And(Vec<Predicate>),
     /// Logical OR — at least one must pass.
+    /// Not yet produced by lowering; reserved for future compound filters.
     Or(Vec<Predicate>),
     /// Logical NOT — inner must fail.
+    /// Not yet produced by lowering; reserved for future compound filters.
     Not(Box<Predicate>),
 }
 
@@ -1117,7 +1120,7 @@ pub fn compile_gate_step_external(
     let exports = collect_ado_exports(checks);
 
     let mut step = String::new();
-    step.push_str(&format!("- bash: python3 {}\n", evaluator_path));
+    step.push_str(&format!("- bash: python3 '{}'\n", evaluator_path));
     step.push_str(&format!("  name: {}\n", ctx.step_name()));
     step.push_str(&format!(
         "  displayName: \"{}\"\n",
@@ -1214,7 +1217,10 @@ fn collect_ordered_facts(checks: &[FilterCheck]) -> Vec<Fact> {
                 true // keep for next pass
             }
         });
-        assert_ne!(
+        // The Fact dependency graph is hardcoded (no user input can create cycles),
+        // so this is unreachable in practice. Use debug_assert to avoid panicking
+        // in the compilation codegen path in release builds.
+        debug_assert_ne!(
             remaining.len(),
             before,
             "circular dependency detected in Facts"
@@ -1510,7 +1516,7 @@ mod tests {
         let result = compile_gate_step_external(GateContext::PullRequest, &checks, "/tmp/ado-aw-scripts/gate-eval.py");
         assert!(result.contains("- bash:"), "should be a bash step");
         assert!(result.contains("GATE_SPEC"), "should include base64 spec in env");
-        assert!(result.contains("python3 /tmp/ado-aw-scripts/gate-eval.py"), "should reference external evaluator script");
+        assert!(result.contains("python3 '/tmp/ado-aw-scripts/gate-eval.py'"), "should reference external evaluator script");
         assert!(result.contains("name: prGate"), "should set step name");
         assert!(result.contains("SYSTEM_ACCESSTOKEN"), "should pass access token via env block");
     }

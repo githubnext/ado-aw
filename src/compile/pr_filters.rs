@@ -74,11 +74,6 @@ pub(super) fn generate_native_pr_trigger(pr: &PrTriggerConfig) -> String {
 // Gate step generation is now handled entirely by TriggerFiltersExtension.
 // See src/compile/extensions/trigger_filters.rs.
 
-/// Returns true if any Tier 2 filter (requiring REST API) is configured.
-pub(super) fn has_tier2_filters(filters: &PrFilters) -> bool {
-    filters.labels.is_some() || filters.draft.is_some() || filters.changed_files.is_some()
-}
-
 /// Add a `condition:` to each step in a list of serde_yaml::Value steps.
 pub(super) fn add_condition_to_steps(
     steps: &[serde_yaml::Value],
@@ -320,46 +315,6 @@ mod tests {
         assert_eq!(spec.checks[0].tag_suffix, "title-mismatch");
     }
 
-    // ─── Tier 2 filter tests ────────────────────────────────────────────────
-
-    #[test]
-    fn test_has_tier2_filters_none() {
-        let filters = PrFilters::default();
-        assert!(!has_tier2_filters(&filters));
-    }
-
-    #[test]
-    fn test_has_tier2_filters_labels() {
-        let filters = PrFilters {
-            labels: Some(LabelFilter {
-                any_of: vec!["run-agent".into()],
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        assert!(has_tier2_filters(&filters));
-    }
-
-    #[test]
-    fn test_has_tier2_filters_draft() {
-        let filters = PrFilters {
-            draft: Some(false),
-            ..Default::default()
-        };
-        assert!(has_tier2_filters(&filters));
-    }
-
-    #[test]
-    fn test_has_tier2_filters_changed_files() {
-        let filters = PrFilters {
-            changed_files: Some(IncludeExcludeFilter {
-                include: vec!["src/**".into()],
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        assert!(has_tier2_filters(&filters));
-    }
 
     #[test]
     fn test_gate_step_includes_api_facts_for_tier2() {

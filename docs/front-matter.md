@@ -198,6 +198,15 @@ All times are evaluated in **UTC**.
 ### Changed Files
 
 The `changed-files` filter checks the list of files modified in the PR.
-If the PR has no changed files (empty diff), the filter will not match
-and the build will be cancelled. Use an explicit `include: ["*"]` if you
-want the filter to match any non-empty set of changes.
+If the PR has no changed files (empty diff) and an `include` pattern is
+set, the filter will not match. An exclude-only filter (no `include`)
+with no changed files passes vacuously (no excluded files are present).
+
+### Expression Escape Hatch
+
+The `expression` field on `pr.filters` and `pipeline.filters` is an
+**advanced, unsafe escape hatch**. Its value is inserted verbatim into
+the Agent job's ADO `condition:` field. It can reference any ADO
+pipeline variable, including secrets. The compiler validates against
+`##vso[` injection and `${{` template markers, but otherwise trusts the
+value. Only use this if the built-in filters are insufficient.
