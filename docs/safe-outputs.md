@@ -418,6 +418,40 @@ safe-outputs:
     max: 1                       # Maximum per run (default: 1)
 ```
 
+### upload-build-artifact
+Attaches a workspace file to an existing Azure DevOps build (typically one that has **already finished**) using the [build attachments REST API](https://learn.microsoft.com/en-us/rest/api/azure/devops/build/attachments/) (`PUT /_apis/build/builds/{buildId}/attachments/{type}/{name}`). Use this when an agent needs to decorate a previously-finished build run with a generated report, screenshot, or log bundle. Unlike `upload-artifact` (which targets the *current* run via a `##vso[artifact.upload]` logging command), `upload-build-artifact` can target *any* build the executor's token has access to.
+
+**Agent parameters:**
+- `build_id` - The ID of the build to attach the file to (required, must be positive)
+- `artifact_name` - Name to attach the file under (required; 1-100 chars; alphanumerics, `-`, `_`, `.`; must not start with `.`)
+- `file_path` - Relative path to the file in the workspace (required; no directory traversal, no absolute paths, no `.git` segments)
+
+**Configuration options (front matter):**
+```yaml
+safe-outputs:
+  upload-build-artifact:
+    max-file-size: 52428800              # Maximum file size in bytes (default: 50 MB)
+    allowed-extensions: []               # Optional — restrict file types (e.g., [".png", ".pdf", ".log"])
+    allowed-artifact-names: []           # Optional — allow-list of artifact names; entries ending with `*` match by prefix
+    allowed-build-ids: []                # Optional — allow-list of build IDs the agent may attach to
+    name-prefix: "agent-"                # Optional — prefix prepended to the agent-supplied artifact name
+    attachment-type: "agent-artifact"    # Optional — value used for the `{type}` segment of the attachments URL (default: "agent-artifact")
+    max: 3                               # Maximum per run (default: 3)
+```
+
+**Validation performed at Stage 1 (MCP / sandbox):**
+- `file_path` is resolved against the agent's workspace, canonicalized, and rejected if it escapes via symlinks.
+- Directories are rejected — only single files are supported.
+- The accepted file is **copied** into the safe-outputs working directory under a generated unique name. This staged copy is what Stage 3 reads — the agent's sandbox workspace is no longer accessible at execution time, mirroring how `create-pull-request` stages its patch file.
+
+**Validation performed at Stage 3:**
+- The staged file is re-canonicalized inside the safe-outputs working directory (defense in depth).
+- When `allowed-build-ids` is non-empty, the requested `build_id` must match an entry.
+- Files larger than `max-file-size` are rejected.
+- When `allowed-extensions` is non-empty, the original `file_path` extension must match (case-insensitive).
+- When `allowed-artifact-names` is non-empty, the resolved artifact name (after `name-prefix`) must match an allow-list entry.
+- The configured `attachment-type` is re-validated against the same charset rules as an artifact name before being used in the URL.
+
 ### cache-memory (moved to `tools:`)
 Memory is now configured as a first-class tool under `tools: cache-memory:` instead of `safe-outputs: memory:`. See the [Cache Memory section](./tools.md#cache-memory-cache-memory) in `docs/tools.md` for details.
 

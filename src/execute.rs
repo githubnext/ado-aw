@@ -12,10 +12,10 @@ use std::path::Path;
 
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
 use crate::safeoutputs::{
-    AddBuildTagResult, AddPrCommentResult, CreateBranchResult, CreateGitTagResult,
-    CreatePrResult, CreateWikiPageResult, CreateWorkItemResult, CommentOnWorkItemResult,
-    ExecutionContext, ExecutionResult, Executor, LinkWorkItemsResult, MissingDataResult,
-    MissingToolResult, NoopResult, QueueBuildResult, ReplyToPrCommentResult,
+    AddBuildTagResult, AddPrCommentResult, UploadBuildArtifactResult, CreateBranchResult,
+    CreateGitTagResult, CreatePrResult, CreateWikiPageResult, CreateWorkItemResult,
+    CommentOnWorkItemResult, ExecutionContext, ExecutionResult, Executor, LinkWorkItemsResult,
+    MissingDataResult, MissingToolResult, NoopResult, QueueBuildResult, ReplyToPrCommentResult,
     ReportIncompleteResult, ResolvePrThreadResult, SubmitPrReviewResult, ToolResult,
     UpdatePrResult, UpdateWikiPageResult, UpdateWorkItemResult, UploadAttachmentResult,
 };
@@ -92,6 +92,7 @@ pub async fn execute_safe_outputs(
         CreateBranchResult,
         UpdatePrResult,
         UploadAttachmentResult,
+        UploadBuildArtifactResult,
         SubmitPrReviewResult,
         ReplyToPrCommentResult,
         ResolvePrThreadResult,
@@ -263,6 +264,7 @@ pub async fn execute_safe_output(
         "create-branch" => CreateBranchResult,
         "update-pr" => UpdatePrResult,
         "upload-attachment" => UploadAttachmentResult,
+        "upload-build-artifact" => UploadBuildArtifactResult,
         "submit-pr-review" => SubmitPrReviewResult,
         "reply-to-pr-review-comment" => ReplyToPrCommentResult,
         "resolve-pr-thread" => ResolvePrThreadResult,

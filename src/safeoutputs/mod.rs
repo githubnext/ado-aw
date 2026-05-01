@@ -43,6 +43,7 @@ pub const WRITE_REQUIRING_SAFE_OUTPUTS: &[&str] = tool_names![
     CreateBranchResult,
     UpdatePrResult,
     UploadAttachmentResult,
+    UploadBuildArtifactResult,
     SubmitPrReviewResult,
     ReplyToPrCommentResult,
     ResolvePrThreadResult,
@@ -76,6 +77,7 @@ pub const ALL_KNOWN_SAFE_OUTPUTS: &[&str] = all_safe_output_names![
     CreateBranchResult,
     UpdatePrResult,
     UploadAttachmentResult,
+    UploadBuildArtifactResult,
     SubmitPrReviewResult,
     ReplyToPrCommentResult,
     ResolvePrThreadResult,
@@ -243,6 +245,7 @@ pub(crate) fn validate_git_ref_name(name: &str, label: &str) -> anyhow::Result<(
 
 mod add_build_tag;
 mod add_pr_comment;
+mod upload_build_artifact;
 mod comment_on_work_item;
 mod create_branch;
 mod create_git_tag;
@@ -266,6 +269,7 @@ mod upload_attachment;
 
 pub use add_build_tag::*;
 pub use add_pr_comment::*;
+pub use upload_build_artifact::*;
 pub use comment_on_work_item::*;
 pub use create_branch::*;
 pub use create_git_tag::*;
@@ -345,6 +349,7 @@ mod tests {
         assert!(CreateBranchResult::REQUIRES_WRITE);
         assert!(UpdatePrResult::REQUIRES_WRITE);
         assert!(UploadAttachmentResult::REQUIRES_WRITE);
+        assert!(UploadBuildArtifactResult::REQUIRES_WRITE);
         assert!(SubmitPrReviewResult::REQUIRES_WRITE);
         assert!(ReplyToPrCommentResult::REQUIRES_WRITE);
         assert!(ResolvePrThreadResult::REQUIRES_WRITE);
