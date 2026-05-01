@@ -691,6 +691,10 @@ Use 'self' for the pipeline's own repository, or a repository alias from the che
                 anyhow_to_mcp_error(anyhow::anyhow!("Failed to write patch file: {}", e))
             })?;
 
+        // Compute SHA-256 of the patch for cross-stage integrity verification.
+        let patch_sha256 =
+            crate::safeoutputs::upload_build_artifact::sha256_hex(patch_content.as_bytes());
+
         // Generate source branch name from sanitized title + short unique suffix
         let title_slug = slugify_title(&sanitized.title);
         let short_id = generate_short_id();
@@ -700,8 +704,8 @@ Use 'self' for the pipeline's own repository, or a repository alias from the che
             format!("agent/{}-{}", title_slug, short_id)
         };
 
-        // Create the result with patch file reference
-        let result = CreatePrResult::new(
+        // Create the result with patch file reference and integrity hash
+        let result = CreatePrResult::new_with_hash(
             sanitized.title.clone(),
             sanitized.description.clone(),
             source_branch,
@@ -709,6 +713,7 @@ Use 'self' for the pipeline's own repository, or a repository alias from the che
             repository.to_string(),
             sanitized.labels,
             Some(merge_base),
+            patch_sha256,
         );
 
         // Write to safe outputs
@@ -1059,7 +1064,7 @@ artifact-name and build-id restrictions may apply per the workflow's safe-output
             )));
         }
 
-        // Generate a unique staged filenameand copy the file into the
+        // Generate a unique staged filename and copy the file into the
         // safe-outputs directory. Stage 3 reads it back from there because
         // the agent's sandbox workspace is no longer accessible by then.
         // The staged name preserves the original extension and embeds a
@@ -1100,12 +1105,23 @@ artifact-name and build-id restrictions may apply per the workflow's safe-output
             ))
         })?;
 
+        // Compute SHA-256 of the staged copy for cross-stage integrity
+        // verification. Stage 3 re-hashes and rejects mismatches.
+        let staged_bytes = tokio::fs::read(&staged_path).await.map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!(
+                "Failed to read staged file for hashing: {}",
+                e
+            ))
+        })?;
+        let staged_sha256 = crate::safeoutputs::upload_build_artifact::sha256_hex(&staged_bytes);
+
         let result = UploadBuildArtifactResult::new(
             params.0.build_id,
             params.0.artifact_name.clone(),
             params.0.file_path.clone(),
             staged_filename.clone(),
             file_size,
+            staged_sha256,
         );
         self.write_safe_output_file(&result).await
             .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;

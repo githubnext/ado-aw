@@ -27,6 +27,13 @@ use log::{debug, info, warn};
 use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+/// Compute the SHA-256 hex digest of a byte slice.
+pub(crate) fn sha256_hex(data: &[u8]) -> String {
+    let hash = Sha256::digest(data);
+    hash.iter().map(|b| format!("{:02x}", b)).collect()
+}
 
 use super::PATH_SEGMENT;
 use crate::sanitize::SanitizeContent;
@@ -114,6 +121,7 @@ struct UploadBuildArtifactResultFields {
     file_path: String,
     staged_file: String,
     file_size: u64,
+    staged_sha256: String,
 }
 
 impl Validate for UploadBuildArtifactResultFields {}
@@ -141,6 +149,10 @@ tool_result! {
         staged_file: String,
         /// Size in bytes of the staged file at copy time.
         file_size: u64,
+        /// SHA-256 hex digest of the staged file recorded at copy time.
+        /// Stage 3 re-hashes the file and rejects mismatches — catches
+        /// same-size file swaps between stages.
+        staged_sha256: String,
     }
 }
 
@@ -160,6 +172,7 @@ impl UploadBuildArtifactResult {
         file_path: String,
         staged_file: String,
         file_size: u64,
+        staged_sha256: String,
     ) -> Self {
         Self {
             name: <Self as crate::safeoutputs::ToolResult>::NAME.to_string(),
@@ -168,6 +181,7 @@ impl UploadBuildArtifactResult {
             file_path,
             staged_file,
             file_size,
+            staged_sha256,
         }
     }
 }
@@ -306,6 +320,18 @@ impl Executor for UploadBuildArtifactResult {
                 "Build ID {} is not in the allowed-build-ids list",
                 effective_build_id
             )));
+        }
+
+        // Validate name-prefix length before applying. A long prefix would
+        // be caught later by the final_name.len() > 100 check, but rejecting
+        // early gives operators a clearer error message.
+        if let Some(prefix) = &config.name_prefix {
+            if prefix.len() > 50 {
+                return Ok(ExecutionResult::failure(format!(
+                    "name-prefix '{}...' is too long ({} chars, max 50)",
+                    &prefix[..20], prefix.len()
+                )));
+            }
         }
 
         // Apply name-prefix and re-validate the resulting name's charset (the
@@ -452,6 +478,18 @@ impl Executor for UploadBuildArtifactResult {
         // to avoid blocking the tokio runtime for large files.
         let file_bytes = tokio::fs::read(&canonical).await.context("Failed to read file contents")?;
 
+        // SHA-256 integrity check: verify the staged file hasn't been swapped
+        // between stages.  This catches same-size replacements that the size
+        // check alone would miss.
+        let live_hash = sha256_hex(&file_bytes);
+        if live_hash != self.staged_sha256 {
+            return Ok(ExecutionResult::failure(format!(
+                "Staged file SHA-256 mismatch: expected {} (recorded at Stage 1), got {} — \
+                 the file may have been tampered with between stages",
+                self.staged_sha256, live_hash
+            )));
+        }
+
         // Resolve the ADO API context (org URL, project, token).
         let org_url = ctx
             .ado_org_url
@@ -560,6 +598,16 @@ mod tests {
             file_path: file_path.to_string(),
         }
     }
+
+    /// Compute SHA-256 hex digest of a byte slice (test helper, delegates
+    /// to the crate-level helper).
+    fn test_sha256(data: &[u8]) -> String {
+        sha256_hex(data)
+    }
+
+    /// Dummy SHA-256 hash for tests that use dry_run=true (hash check is
+    /// skipped on the dry-run path).
+    const DUMMY_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
     #[test]
     fn test_params_deserializes_with_build_id() {
@@ -686,6 +734,7 @@ mod tests {
             "out/report.pdf".to_string(),
             "upload-build-artifact-agent-report-1234.bin".to_string(),
             42,
+            DUMMY_HASH.to_string(),
         );
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains(r#""name":"upload-build-artifact""#));
@@ -703,6 +752,7 @@ mod tests {
             "out/report.pdf".to_string(),
             "upload-build-artifact-agent-report-1234.bin".to_string(),
             42,
+            DUMMY_HASH.to_string(),
         );
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains(r#""name":"upload-build-artifact""#));
@@ -789,6 +839,7 @@ attachment-type: "agent-artifact"
             "out/report.pdf".to_string(),
             staged.to_string(),
             14,
+            DUMMY_HASH.to_string(),
         );
         let ctx = make_ctx(dir.path().to_path_buf(), true);
         let outcome = result.execute_impl(&ctx).await.unwrap();
@@ -810,6 +861,7 @@ attachment-type: "agent-artifact"
             "out/report.pdf".to_string(),
             staged.to_string(),
             14,
+            DUMMY_HASH.to_string(),
         );
         let mut ctx = make_ctx(dir.path().to_path_buf(), true);
         ctx.build_id = Some(5678);
@@ -832,6 +884,7 @@ attachment-type: "agent-artifact"
             "out/report.pdf".to_string(),
             staged.to_string(),
             5,
+            DUMMY_HASH.to_string(),
         );
         let ctx = make_ctx(dir.path().to_path_buf(), true);
         // ctx.build_id is None — no BUILD_BUILDID
@@ -852,6 +905,7 @@ attachment-type: "agent-artifact"
             "out/report.pdf".to_string(),
             "does-not-exist.pdf".to_string(),
             0,
+            DUMMY_HASH.to_string(),
         );
         let ctx = make_ctx(dir.path().to_path_buf(), true);
         let err = result.execute_impl(&ctx).await.unwrap_err();
@@ -874,6 +928,7 @@ attachment-type: "agent-artifact"
             "out/report.pdf".to_string(),
             staged.to_string(),
             5,
+            DUMMY_HASH.to_string(),
         );
         let mut ctx = make_ctx(dir.path().to_path_buf(), true);
         ctx.tool_configs.insert(
@@ -901,6 +956,7 @@ attachment-type: "agent-artifact"
             "out/report.pdf".to_string(),
             staged.to_string(),
             5,
+            DUMMY_HASH.to_string(),
         );
         let mut ctx = make_ctx(dir.path().to_path_buf(), true);
         ctx.build_id = Some(999); // current build not in allowed list
@@ -928,6 +984,7 @@ attachment-type: "agent-artifact"
             "out/report.pdf".to_string(),
             staged.to_string(),
             5,
+            DUMMY_HASH.to_string(),
         );
         let mut ctx = make_ctx(dir.path().to_path_buf(), true);
         ctx.tool_configs.insert(
@@ -950,6 +1007,7 @@ attachment-type: "agent-artifact"
             "out/big.bin".to_string(),
             staged.to_string(),
             1024,
+            DUMMY_HASH.to_string(),
         );
         let mut ctx = make_ctx(dir.path().to_path_buf(), true);
         ctx.tool_configs.insert(
@@ -977,6 +1035,7 @@ attachment-type: "agent-artifact"
             "out/report.exe".to_string(),
             staged.to_string(),
             8,
+            DUMMY_HASH.to_string(),
         );
         let mut ctx = make_ctx(dir.path().to_path_buf(), true);
         ctx.tool_configs.insert(
@@ -1004,6 +1063,7 @@ attachment-type: "agent-artifact"
             "out/report.pdf".to_string(),
             staged.to_string(),
             5,
+            DUMMY_HASH.to_string(),
         );
         let mut ctx = make_ctx(dir.path().to_path_buf(), true);
         ctx.tool_configs.insert(
@@ -1031,6 +1091,7 @@ attachment-type: "agent-artifact"
             "out/report.pdf".to_string(),
             staged.to_string(),
             5,
+            DUMMY_HASH.to_string(),
         );
         let mut ctx = make_ctx(dir.path().to_path_buf(), true);
         ctx.tool_configs.insert(
@@ -1060,6 +1121,7 @@ attachment-type: "agent-artifact"
             "out/report.pdf".to_string(),
             staged.to_string(),
             50, // mismatched size
+            DUMMY_HASH.to_string(),
         );
         let ctx = make_ctx(dir.path().to_path_buf(), true);
         let outcome = result.execute_impl(&ctx).await.unwrap();
@@ -1079,6 +1141,7 @@ attachment-type: "agent-artifact"
             "out/report.pdf".to_string(),
             "staged.pdf".to_string(),
             100,
+            DUMMY_HASH.to_string(),
         );
         let summary = result.dry_run_summary();
         assert!(summary.contains("#42"));
@@ -1093,6 +1156,7 @@ attachment-type: "agent-artifact"
             "out/report.pdf".to_string(),
             "staged.pdf".to_string(),
             100,
+            DUMMY_HASH.to_string(),
         );
         let summary = result.dry_run_summary();
         assert!(summary.contains("current build"));

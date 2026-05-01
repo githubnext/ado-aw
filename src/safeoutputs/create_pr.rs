@@ -272,6 +272,9 @@ struct CreatePrResultFields {
     agent_labels: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     base_commit: Option<String>,
+    /// SHA-256 hex digest of the patch file, recorded at staging time.
+    #[serde(default)]
+    patch_sha256: Option<String>,
 }
 
 impl Validate for CreatePrResultFields {}
@@ -307,6 +310,11 @@ tool_result! {
         /// branches and is resolved when the PR is merged.
         #[serde(skip_serializing_if = "Option::is_none")]
         base_commit: Option<String>,
+        /// SHA-256 hex digest of the patch file recorded at Stage 1.
+        /// Stage 3 re-hashes the file and rejects mismatches — catches
+        /// patch file tampering between stages.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        patch_sha256: Option<String>,
     }
 }
 
@@ -340,6 +348,31 @@ impl CreatePrResult {
             repository,
             agent_labels,
             base_commit,
+            patch_sha256: None,
+        }
+    }
+
+    /// Create a new CreatePrResult with SHA-256 integrity hash.
+    pub fn new_with_hash(
+        title: String,
+        description: String,
+        source_branch: String,
+        patch_file: String,
+        repository: String,
+        agent_labels: Vec<String>,
+        base_commit: Option<String>,
+        patch_sha256: String,
+    ) -> Self {
+        Self {
+            name: Self::NAME.to_string(),
+            title,
+            description,
+            source_branch,
+            patch_file,
+            repository,
+            agent_labels,
+            base_commit,
+            patch_sha256: Some(patch_sha256),
         }
     }
 }
@@ -673,6 +706,22 @@ impl Executor for CreatePrResult {
             .await
             .context("Failed to read patch file")?;
         debug!("Patch content size: {} bytes", patch_content.len());
+
+        // SHA-256 integrity check: verify the patch file hasn't been tampered
+        // with between Stage 1 and Stage 3. The hash is optional for backward
+        // compatibility with NDJSON records created before this field existed.
+        if let Some(expected_hash) = &self.patch_sha256 {
+            let live_hash =
+                crate::safeoutputs::upload_build_artifact::sha256_hex(patch_content.as_bytes());
+            if live_hash != *expected_hash {
+                return Ok(ExecutionResult::failure(format!(
+                    "Patch file SHA-256 mismatch: expected {}, got {} — \
+                     the file may have been tampered with between stages",
+                    expected_hash, live_hash
+                )));
+            }
+            debug!("Patch file SHA-256 verified: {}", live_hash);
+        }
 
         // Excluded files are handled via --exclude flags on git am / git apply,
         // which filters them at the git level rather than post-processing patch content.
