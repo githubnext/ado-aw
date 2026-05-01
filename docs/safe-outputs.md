@@ -455,6 +455,8 @@ safe-outputs:
 - Single-file only; directory uploads are not supported.
 - When `build_id` is omitted and `allowed-build-ids` is configured, the allow-list check is skipped — the current build is implicitly trusted.
 - The default `attachment-type` is `agent-artifact` so executor contributions are visually distinguishable from the build's own artifacts.
+
+### cache-memory (moved to `tools:`)
 Memory is now configured as a first-class tool under `tools: cache-memory:` instead of `safe-outputs: memory:`. See the [Cache Memory section](./tools.md#cache-memory-cache-memory) in `docs/tools.md` for details.
 
 ### create-wiki-page
