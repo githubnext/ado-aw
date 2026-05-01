@@ -2009,10 +2009,16 @@ pub async fn compile_shared(
     let finalize_steps = generate_finalize_steps(&front_matter.post_steps);
     let pr_expression = pr_filters.and_then(|f| f.expression.as_deref());
     let pipeline_expression = pipeline_filters.and_then(|f| f.expression.as_deref());
-    let expression = pr_expression.or(pipeline_expression);
+    let mut expressions: Vec<&str> = Vec::new();
+    if let Some(e) = pr_expression {
+        expressions.push(e);
+    }
+    if let Some(e) = pipeline_expression {
+        expressions.push(e);
+    }
 
-    // Validate expression escape hatch against injection
-    if let Some(expr) = expression {
+    // Validate expression escape hatches against injection
+    for expr in &expressions {
         if crate::validate::contains_template_marker(expr) {
             anyhow::bail!(
                 "Filter expression contains template marker '{{{{' which could cause injection. Found: '{}'",
@@ -2027,11 +2033,16 @@ pub async fn compile_shared(
         }
     }
 
+    let combined_expression = if expressions.is_empty() {
+        None
+    } else {
+        Some(expressions.join(", "))
+    };
     let agentic_depends_on = generate_agentic_depends_on(
         &front_matter.setup,
         has_pr_filters,
         has_pipeline_filters,
-        expression,
+        combined_expression.as_deref(),
     );
     let job_timeout = generate_job_timeout(front_matter);
 

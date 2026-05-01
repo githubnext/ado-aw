@@ -196,7 +196,7 @@ def evaluate(pred, facts):
             exc = any(fnmatch.fnmatch(f, p) for p in excludes)
             if inc and not exc:
                 return True
-        return not bool(includes)  # no includes = match everything not excluded
+        return False  # no file matched the include/exclude criteria
 
     if t == "and":
         return all(evaluate(p, facts) for p in pred["operands"])
@@ -275,6 +275,7 @@ def main():
     # Acquire facts (dependency-ordered)
     facts = {}
     skip_facts = set()
+    should_run = True
     for fact_spec in spec["facts"]:
         kind = fact_spec["kind"]
         policy = fact_spec.get("failure_policy", "fail_closed")
@@ -293,12 +294,13 @@ def main():
             elif policy == "fail_open":
                 facts[kind] = None
             else:
-                # fail_closed: treat as gate failure
+                # fail_closed: gate fails, skip dependent checks
                 facts[kind] = None
                 skip_facts.add(kind)
+                should_run = False
+                vso_tag(f"{ctx['tag_prefix']}:{kind}-unavailable")
 
     # Evaluate checks
-    should_run = True
     for check in spec["checks"]:
         name = check["name"]
         required = predicate_facts(check["predicate"])

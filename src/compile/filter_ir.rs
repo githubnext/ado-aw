@@ -1182,6 +1182,10 @@ fn collect_ado_exports(checks: &[FilterCheck]) -> Vec<(&'static str, &'static st
 
 
 /// Collect all facts required by checks, topo-sorted by dependencies.
+///
+/// Uses `BTreeSet` ordering which matches enum variant order (pipeline
+/// vars < API-derived < computed). Debug-asserts that no fact appears
+/// before its dependencies.
 fn collect_ordered_facts(checks: &[FilterCheck]) -> Vec<Fact> {
     let mut all_facts = BTreeSet::new();
     for check in checks {
@@ -1189,7 +1193,26 @@ fn collect_ordered_facts(checks: &[FilterCheck]) -> Vec<Fact> {
             all_facts.insert(fact);
         }
     }
-    all_facts.into_iter().collect()
+    let ordered: Vec<Fact> = all_facts.into_iter().collect();
+
+    // Verify dependency ordering: every fact's dependencies must appear
+    // before it in the list.
+    if cfg!(debug_assertions) {
+        let mut seen = BTreeSet::new();
+        for fact in &ordered {
+            for dep in fact.dependencies() {
+                debug_assert!(
+                    seen.contains(dep),
+                    "Fact {:?} appears before its dependency {:?} — \
+                     check Fact enum variant ordering",
+                    fact, dep
+                );
+            }
+            seen.insert(*fact);
+        }
+    }
+
+    ordered
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
