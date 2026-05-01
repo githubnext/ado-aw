@@ -672,10 +672,10 @@ mod tests {
     // ── ADO build variable capture tests (use from_env_lookup so they
     //    don't mutate the process-global environment) ─────────────────────
 
-    fn env_from<'a>(map: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> {
+    fn env_from(map: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
         let owned: HashMap<String, String> = map
             .iter()
-            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         move |k| owned.get(k).cloned()
     }
