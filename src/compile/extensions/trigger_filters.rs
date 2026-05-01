@@ -12,7 +12,7 @@ use anyhow::Result;
 
 use super::{CompileContext, CompilerExtension, ExtensionPhase};
 use crate::compile::filter_ir::{
-    compile_gate_step_external, lower_pipeline_filters, lower_pr_filters, needs_evaluator,
+    compile_gate_step_external, lower_pipeline_filters, lower_pr_filters,
     validate_pipeline_filters, validate_pr_filters, GateContext, Severity,
 };
 use crate::compile::types::{PipelineFilters, PrFilters};
@@ -41,24 +41,12 @@ impl TriggerFiltersExtension {
         }
     }
 
-    /// Returns true if any configured filter requires the evaluator (Tier 2/3).
+    /// Returns true if any filter configuration is present.
     pub fn is_needed(
         pr_filters: Option<&PrFilters>,
         pipeline_filters: Option<&PipelineFilters>,
     ) -> bool {
-        if let Some(f) = pr_filters {
-            let checks = lower_pr_filters(f);
-            if needs_evaluator(&checks) {
-                return true;
-            }
-        }
-        if let Some(f) = pipeline_filters {
-            let checks = lower_pipeline_filters(f);
-            if needs_evaluator(&checks) {
-                return true;
-            }
-        }
-        false
+        pr_filters.is_some() || pipeline_filters.is_some()
     }
 }
 
@@ -152,7 +140,8 @@ mod tests {
     use crate::compile::extensions::CompileContext;
 
     #[test]
-    fn test_is_needed_tier1_only() {
+    fn test_is_needed_any_filters() {
+        // Any filters configuration activates the extension
         let filters = PrFilters {
             title: Some(PatternFilter {
                 pattern: "test".into(),
@@ -160,23 +149,16 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            !TriggerFiltersExtension::is_needed(Some(&filters), None),
-            "Tier 1 only should not need evaluator"
+            TriggerFiltersExtension::is_needed(Some(&filters), None),
+            "Any filters should activate extension"
         );
     }
 
     #[test]
-    fn test_is_needed_tier2() {
-        let filters = PrFilters {
-            labels: Some(LabelFilter {
-                any_of: vec!["run-agent".into()],
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
+    fn test_is_not_needed_without_filters() {
         assert!(
-            TriggerFiltersExtension::is_needed(Some(&filters), None),
-            "Labels filter should need evaluator"
+            !TriggerFiltersExtension::is_needed(None, None),
+            "No filters should not activate extension"
         );
     }
 

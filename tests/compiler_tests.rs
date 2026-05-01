@@ -3356,19 +3356,17 @@ fn test_pr_filter_tier1_compiled_output_is_valid_yaml() {
     assert_valid_yaml(&compiled, "pr-filter-tier1-agent.md");
 }
 
-/// Tier 1 PR filters produce a Setup job with an inline bash gate step.
+/// Tier 1 PR filters now also use the Python evaluator via extension.
 #[test]
-fn test_pr_filter_tier1_has_inline_gate() {
+fn test_pr_filter_tier1_has_evaluator_gate() {
     let compiled = compile_fixture("pr-filter-tier1-agent.md");
 
     assert!(compiled.contains("- job: Setup"), "Should create Setup job for PR filters");
     assert!(compiled.contains("name: prGate"), "Should include prGate step");
-    assert!(compiled.contains("SHOULD_RUN"), "Should set SHOULD_RUN variable");
+    assert!(compiled.contains("GATE_SPEC"), "Should include base64-encoded spec");
+    assert!(compiled.contains("python3"), "Should invoke python evaluator");
+    assert!(compiled.contains("scripts.zip"), "Should download scripts bundle");
     assert!(compiled.contains("Evaluate PR filters"), "Should have gate displayName");
-
-    // Tier 1 inline path: bash if/grep checks, no GATE_SPEC
-    assert!(compiled.contains("case"), "Tier 1 should use inline case/glob checks");
-    assert!(!compiled.contains("scripts.zip"), "Tier 1 should not download scripts");
 }
 
 /// Tier 2 PR filter fixture produces valid YAML.

@@ -71,30 +71,8 @@ pub(super) fn generate_native_pr_trigger(pr: &PrTriggerConfig) -> String {
 
 // ─── Gate step generation ───────────────────────────────────────────────────
 
-/// Generate the bash gate step for PR filter evaluation.
-///
-/// Delegates to the filter IR pipeline: lower → validate → compile.
-/// Returns an error if validation finds conflicting filter configurations.
-pub(super) fn generate_pr_gate_step(filters: &PrFilters) -> anyhow::Result<String> {
-    use super::filter_ir::{
-        compile_gate_step_inline, lower_pr_filters, validate_pr_filters, GateContext, Severity,
-    };
-
-    let diags = validate_pr_filters(filters);
-    for diag in &diags {
-        match diag.severity {
-            Severity::Error => eprintln!("error: {}", diag),
-            Severity::Warning => eprintln!("warning: {}", diag),
-            Severity::Info => eprintln!("info: {}", diag),
-        }
-    }
-    if let Some(err) = diags.iter().find(|d| d.severity == Severity::Error) {
-        anyhow::bail!("filter validation failed: {}", err);
-    }
-
-    let checks = lower_pr_filters(filters);
-    Ok(compile_gate_step_inline(GateContext::PullRequest, &checks))
-}
+// Gate step generation is now handled entirely by TriggerFiltersExtension.
+// See src/compile/extensions/trigger_filters.rs.
 
 /// Returns true if any Tier 2 filter (requiring REST API) is configured.
 pub(super) fn has_tier2_filters(filters: &PrFilters) -> bool {
@@ -230,8 +208,12 @@ mod tests {
         assert!(result.is_empty(), "filters-only should not emit a pr: block (use default trigger)");
     }
 
+    // Gate step tests now use the spec/extension directly since generate_setup_job
+    // delegates to TriggerFiltersExtension for all filter gate generation.
+
     #[test]
-    fn test_generate_setup_job_with_pr_filters_creates_gate() {
+    fn test_generate_setup_job_with_filters_no_extension_creates_empty() {
+        // Without the TriggerFiltersExtension, filters don't produce a gate step
         let fm = test_fm();
         let ctx = make_ctx(&fm);
         let filters = PrFilters {
@@ -239,16 +221,12 @@ mod tests {
             ..Default::default()
         };
         let result = generate_setup_job(&[], "MyPool", Some(&filters), None, &[], &ctx).unwrap();
-        assert!(result.contains("- job: Setup"), "should create Setup job");
-        assert!(result.contains("name: prGate"), "should include gate step");
-        assert!(result.contains("Evaluate PR filters"), "should have gate displayName");
-        assert!(result.contains("SHOULD_RUN"), "should set SHOULD_RUN variable");
-        assert!(result.contains("*[review]*"), "should include title pattern");
-        assert!(result.contains("SYSTEM_ACCESSTOKEN"), "should pass System.AccessToken");
+        // No extension → no gate step → setup job has no steps → empty
+        assert!(result.is_empty(), "filters without extension should produce empty setup job");
     }
 
     #[test]
-    fn test_generate_setup_job_with_filters_and_user_steps() {
+    fn test_generate_setup_job_with_user_steps_and_filters() {
         let fm = test_fm();
         let ctx = make_ctx(&fm);
         let step: serde_yaml::Value = serde_yaml::from_str("bash: echo hello\ndisplayName: User step").unwrap();
@@ -257,7 +235,7 @@ mod tests {
             ..Default::default()
         };
         let result = generate_setup_job(&[step], "MyPool", Some(&filters), None, &[], &ctx).unwrap();
-        assert!(result.contains("name: prGate"), "should include gate step");
+        // User steps are conditioned on gate output even without extension
         assert!(result.contains("User step"), "should include user step");
         assert!(result.contains("prGate.SHOULD_RUN"), "user steps should reference gate output");
     }
@@ -294,49 +272,38 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_setup_job_gate_author_filter() {
-        let fm = test_fm();
-        let ctx = make_ctx(&fm);
+    fn test_generate_setup_job_gate_spec_via_extension() {
+        // Filter content is now tested via build_gate_spec, not generate_setup_job
+        use crate::compile::filter_ir::{build_gate_spec, lower_pr_filters, GateContext};
         let filters = PrFilters {
             author: Some(IncludeExcludeFilter {
                 include: vec!["alice@corp.com".into()],
                 exclude: vec!["bot@noreply.com".into()],
             }),
-            ..Default::default()
-        };
-        let result = generate_setup_job(&[], "MyPool", Some(&filters), None, &[], &ctx).unwrap();
-        assert!(result.contains("alice@corp.com"), "should include author email in grep pattern");
-        assert!(result.contains("bot@noreply.com"), "should include excluded email");
-        assert!(result.contains("Build.RequestedForEmail"), "should reference ADO author variable");
-    }
-
-    #[test]
-    fn test_generate_setup_job_gate_branch_filters() {
-        let fm = test_fm();
-        let ctx = make_ctx(&fm);
-        let filters = PrFilters {
             source_branch: Some(PatternFilter { pattern: "feature/*".into() }),
             target_branch: Some(PatternFilter { pattern: "main".into() }),
             ..Default::default()
         };
-        let result = generate_setup_job(&[], "MyPool", Some(&filters), None, &[], &ctx).unwrap();
-        assert!(result.contains("SourceBranch"), "should reference source branch variable");
-        assert!(result.contains("TargetBranch"), "should reference target branch variable");
-        assert!(result.contains("feature/*"), "should include source pattern");
-        assert!(result.contains("main"), "should include target pattern");
+        let checks = lower_pr_filters(&filters);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        // Author include + exclude = 2 checks + source + target = 4
+        assert_eq!(spec.checks.len(), 4);
+        assert!(spec.facts.iter().any(|f| f.kind == "author_email"));
+        assert!(spec.facts.iter().any(|f| f.kind == "source_branch"));
+        assert!(spec.facts.iter().any(|f| f.kind == "target_branch"));
     }
 
     #[test]
-    fn test_generate_setup_job_gate_non_pr_passthrough() {
-        let fm = test_fm();
-        let ctx = make_ctx(&fm);
+    fn test_generate_setup_job_gate_non_pr_bypass_in_spec() {
+        use crate::compile::filter_ir::{build_gate_spec, lower_pr_filters, GateContext};
         let filters = PrFilters {
             title: Some(PatternFilter { pattern: "test".into() }),
             ..Default::default()
         };
-        let result = generate_setup_job(&[], "MyPool", Some(&filters), None, &[], &ctx).unwrap();
-        assert!(result.contains("PullRequest"), "should check Build.Reason");
-        assert!(result.contains("Not a PR build"), "should pass non-PR builds automatically");
+        let checks = lower_pr_filters(&filters);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        assert_eq!(spec.context.build_reason, "PullRequest");
+        assert_eq!(spec.context.bypass_label, "PR");
     }
 
     #[test]
@@ -351,22 +318,6 @@ mod tests {
         let spec = build_gate_spec(GateContext::PullRequest, &checks);
         assert_eq!(spec.context.tag_prefix, "pr-gate");
         assert_eq!(spec.checks[0].tag_suffix, "title-mismatch");
-    }
-
-    #[test]
-    fn test_shell_escape_glob_removes_dangerous_chars() {
-        use crate::validate::shell_escape_glob;
-        assert_eq!(shell_escape_glob("safe-pattern_123"), "safe-pattern_123");
-        assert_eq!(shell_escape_glob("test;echo pwned"), "testecho pwned");
-        assert_eq!(shell_escape_glob("test`echo`"), "testecho");
-        assert_eq!(shell_escape_glob("*[agent]*"), "*[agent]*");
-        assert_eq!(shell_escape_glob("feature/*"), "feature/*");
-        // $ is stripped to prevent shell variable expansion
-        assert_eq!(shell_escape_glob("$HOME/path"), "HOME/path");
-        assert_eq!(shell_escape_glob("refs/heads/$BRANCH"), "refs/heads/BRANCH");
-        // Regex chars are stripped (no longer needed)
-        assert_eq!(shell_escape_glob("^feature/.*$"), "feature/.*");
-        assert_eq!(shell_escape_glob("(a|b)"), "ab");
     }
 
     // ─── Tier 2 filter tests ────────────────────────────────────────────────

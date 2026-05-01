@@ -1210,19 +1210,9 @@ pub fn generate_setup_job(
 
     let mut steps_parts = Vec::new();
 
-    // Extension setup steps (any extension can contribute)
+    // Extension setup steps (any extension can contribute — includes gate steps)
     for step in ext_setup_steps {
         steps_parts.push(step);
-    }
-
-    // Tier 1 inline gate steps — only when no extension provided gate steps
-    if !has_ext_setup {
-        if let Some(filters) = pr_filters {
-            steps_parts.push(super::pr_filters::generate_pr_gate_step(filters)?);
-        }
-        if let Some(filters) = pipeline_filters {
-            steps_parts.push(generate_pipeline_gate_step(filters)?);
-        }
     }
 
     let has_gate = has_filters;
@@ -1262,29 +1252,6 @@ pub fn generate_setup_job(
 "#,
         pool, combined_steps
     ))
-}
-
-/// Generate a pipeline gate step using the filter IR.
-fn generate_pipeline_gate_step(filters: &super::types::PipelineFilters) -> anyhow::Result<String> {
-    use super::filter_ir::{
-        compile_gate_step_inline, lower_pipeline_filters, validate_pipeline_filters, GateContext,
-        Severity,
-    };
-
-    let diags = validate_pipeline_filters(filters);
-    for diag in &diags {
-        match diag.severity {
-            Severity::Error => eprintln!("error: {}", diag),
-            Severity::Warning => eprintln!("warning: {}", diag),
-            Severity::Info => eprintln!("info: {}", diag),
-        }
-    }
-    if let Some(err) = diags.iter().find(|d| d.severity == Severity::Error) {
-        anyhow::bail!("filter validation failed: {}", err);
-    }
-
-    let checks = lower_pipeline_filters(filters);
-    Ok(compile_gate_step_inline(GateContext::PipelineCompletion, &checks))
 }
 
 /// Generate the teardown job YAML
