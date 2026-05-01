@@ -3424,3 +3424,60 @@ fn test_pr_filter_tier1_has_native_pr_trigger() {
     assert!(compiled.contains("branches:"), "Should have branches filter");
     assert!(compiled.contains("main"), "Should include main branch");
 }
+
+/// Extension gate steps are correctly nested inside the Setup job's steps: block.
+#[test]
+fn test_pr_filter_gate_steps_nested_in_setup_job() {
+    let compiled = compile_fixture("pr-filter-tier1-agent.md");
+
+    // Parse the YAML and verify structural nesting
+    let yaml_content: String = compiled
+        .lines()
+        .skip_while(|line| line.starts_with('#') || line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let doc: serde_yaml::Value = serde_yaml::from_str(&yaml_content)
+        .expect("should parse as valid YAML");
+
+    // Find the Setup job in the jobs list
+    let jobs = doc.get("jobs").expect("should have jobs key");
+    let jobs_seq = jobs.as_sequence().expect("jobs should be a sequence");
+    let setup_job = jobs_seq
+        .iter()
+        .find(|j| {
+            j.get("job")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s == "Setup")
+        })
+        .expect("should have a Setup job");
+
+    // Verify the gate step is INSIDE the Setup job's steps, not a sibling
+    let steps = setup_job
+        .get("steps")
+        .expect("Setup job should have steps")
+        .as_sequence()
+        .expect("steps should be a sequence");
+
+    // Should have: checkout + download + gate = at least 3 steps
+    assert!(
+        steps.len() >= 3,
+        "Setup job should have at least 3 steps (checkout + download + gate), got {}",
+        steps.len()
+    );
+
+    // The gate step (with name: prGate) should be inside the steps list
+    let has_gate = steps.iter().any(|s| {
+        s.get("name")
+            .and_then(|v| v.as_str())
+            .is_some_and(|n| n == "prGate")
+    });
+    assert!(has_gate, "prGate step should be inside Setup job's steps list");
+
+    // The download step should also be inside
+    let has_download = steps.iter().any(|s| {
+        s.get("displayName")
+            .and_then(|v| v.as_str())
+            .is_some_and(|n| n.contains("Download ado-aw scripts"))
+    });
+    assert!(has_download, "Download step should be inside Setup job's steps list");
+}

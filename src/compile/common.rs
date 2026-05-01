@@ -1210,10 +1210,8 @@ pub fn generate_setup_job(
 
     let mut steps_parts = Vec::new();
 
-    // Extension setup steps (any extension can contribute — includes gate steps)
-    for step in ext_setup_steps {
-        steps_parts.push(step);
-    }
+    // Extension setup steps go via marker replacement for correct indentation
+    let ext_steps_combined = ext_setup_steps.join("\n\n");
 
     // User setup steps (conditioned on gate passing when filters are active)
     if !setup_steps.is_empty() {
@@ -1230,29 +1228,40 @@ pub fn generate_setup_job(
                 setup_steps,
                 &condition,
             );
-            steps_parts.push(format_steps_yaml_indented(&conditioned, 4));
+            steps_parts.push(format_steps_yaml_indented(&conditioned, 0));
         } else {
-            steps_parts.push(format_steps_yaml_indented(setup_steps, 4));
+            steps_parts.push(format_steps_yaml_indented(setup_steps, 0));
         }
     }
 
-    if steps_parts.is_empty() {
+    if steps_parts.is_empty() && ext_steps_combined.is_empty() {
         return Ok(String::new());
     }
 
-    let combined_steps = steps_parts.join("\n\n");
+    let user_steps = steps_parts.join("\n\n");
 
-    Ok(format!(
+    // Build the job YAML with markers for proper indentation
+    let mut template = format!(
         r#"- job: Setup
   displayName: "Setup"
   pool:
-    name: {}
+    name: {pool}
   steps:
     - checkout: self
-{}
-"#,
-        pool, combined_steps
-    ))
+"#
+    );
+
+    if !ext_steps_combined.is_empty() {
+        template.push_str("    {{ ext_setup_steps }}\n");
+    }
+    if !user_steps.is_empty() {
+        template.push_str("    {{ user_setup_steps }}\n");
+    }
+
+    let yaml = replace_with_indent(&template, "{{ ext_setup_steps }}", &ext_steps_combined);
+    let yaml = replace_with_indent(&yaml, "{{ user_setup_steps }}", &user_steps);
+
+    Ok(yaml)
 }
 
 /// Generate the teardown job YAML
