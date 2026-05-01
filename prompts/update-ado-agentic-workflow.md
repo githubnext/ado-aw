@@ -193,7 +193,7 @@ permissions:
 | Both | Agent reads; safe-outputs write |
 | Neither | No ADO tokens anywhere |
 
-If adding write-requiring safe outputs (`create-pull-request`, `create-work-item`, `comment-on-work-item`, `update-work-item`, `create-wiki-page`, `update-wiki-page`, `link-work-items`, `upload-attachment`, `create-branch`, `create-git-tag`, `add-build-tag`, `add-pr-comment`, `reply-to-pr-comment`, `resolve-pr-thread`, `submit-pr-review`, `update-pr`, `queue-build`), you **must** also add `permissions.write`. The compiler will error otherwise.
+If adding write-requiring safe outputs (`create-pull-request`, `create-work-item`, `comment-on-work-item`, `update-work-item`, `create-wiki-page`, `update-wiki-page`, `link-work-items`, `upload-workitem-attachment`, `create-branch`, `create-git-tag`, `add-build-tag`, `add-pr-comment`, `reply-to-pr-comment`, `resolve-pr-thread`, `submit-pr-review`, `update-pr`, `queue-build`), you **must** also add `permissions.write`. The compiler will error otherwise.
 
 ### Adding Pre/Post Steps
 

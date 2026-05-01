@@ -14,7 +14,7 @@ use anyhow::{Context, ensure};
 
 /// Parameters for uploading an attachment to a work item
 #[derive(Deserialize, JsonSchema)]
-pub struct UploadAttachmentParams {
+pub struct UploadWorkitemAttachmentParams {
     /// The work item ID to attach the file to
     pub work_item_id: i64,
 
@@ -25,7 +25,7 @@ pub struct UploadAttachmentParams {
     pub comment: Option<String>,
 }
 
-impl Validate for UploadAttachmentParams {
+impl Validate for UploadWorkitemAttachmentParams {
     fn validate(&self) -> anyhow::Result<()> {
         ensure!(self.work_item_id > 0, "work_item_id must be positive");
         ensure!(!self.file_path.is_empty(), "file_path must not be empty");
@@ -63,18 +63,18 @@ impl Validate for UploadAttachmentParams {
 }
 
 tool_result! {
-    name = "upload-attachment",
+    name = "upload-workitem-attachment",
     write = true,
-    params = UploadAttachmentParams,
+    params = UploadWorkitemAttachmentParams,
     /// Result of uploading an attachment to a work item
-    pub struct UploadAttachmentResult {
+    pub struct UploadWorkitemAttachmentResult {
         work_item_id: i64,
         file_path: String,
         comment: Option<String>,
     }
 }
 
-impl SanitizeContent for UploadAttachmentResult {
+impl SanitizeContent for UploadWorkitemAttachmentResult {
     fn sanitize_content_fields(&mut self) {
         if let Some(comment) = &self.comment {
             self.comment = Some(sanitize_text(comment));
@@ -84,12 +84,12 @@ impl SanitizeContent for UploadAttachmentResult {
 
 const DEFAULT_MAX_FILE_SIZE: u64 = 5 * 1024 * 1024; // 5 MB
 
-/// Configuration for the upload-attachment tool (specified in front matter)
+/// Configuration for the upload-workitem-attachment tool (specified in front matter)
 ///
 /// Example front matter:
 /// ```yaml
 /// safe-outputs:
-///   upload-attachment:
+///   upload-workitem-attachment:
 ///     max-file-size: 5242880
 ///     allowed-extensions:
 ///       - .png
@@ -98,7 +98,7 @@ const DEFAULT_MAX_FILE_SIZE: u64 = 5 * 1024 * 1024; // 5 MB
 ///     comment-prefix: "[Agent] "
 /// ```
 #[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
-pub struct UploadAttachmentConfig {
+pub struct UploadWorkitemAttachmentConfig {
     /// Maximum file size in bytes (default: 5 MB)
     #[serde(default = "default_max_file_size", rename = "max-file-size")]
     pub max_file_size: u64,
@@ -116,7 +116,7 @@ fn default_max_file_size() -> u64 {
     DEFAULT_MAX_FILE_SIZE
 }
 
-impl Default for UploadAttachmentConfig {
+impl Default for UploadWorkitemAttachmentConfig {
     fn default() -> Self {
         Self {
             max_file_size: DEFAULT_MAX_FILE_SIZE,
@@ -127,7 +127,7 @@ impl Default for UploadAttachmentConfig {
 }
 
 #[async_trait::async_trait]
-impl Executor for UploadAttachmentResult {
+impl Executor for UploadWorkitemAttachmentResult {
     fn dry_run_summary(&self) -> String {
         format!("upload '{}' to work item #{}", self.file_path, self.work_item_id)
     }
@@ -138,7 +138,7 @@ impl Executor for UploadAttachmentResult {
             self.file_path, self.work_item_id
         );
         debug!(
-            "upload-attachment: work_item_id={}, file_path='{}'",
+            "upload-workitem-attachment: work_item_id={}, file_path='{}'",
             self.work_item_id, self.file_path
         );
 
@@ -156,7 +156,7 @@ impl Executor for UploadAttachmentResult {
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
         debug!("ADO org: {}, project: {}", org_url, project);
 
-        let config: UploadAttachmentConfig = ctx.get_tool_config("upload-attachment");
+        let config: UploadWorkitemAttachmentConfig = ctx.get_tool_config("upload-workitem-attachment");
         debug!("Max file size: {} bytes", config.max_file_size);
         debug!("Allowed extensions: {:?}", config.allowed_extensions);
 
@@ -365,14 +365,14 @@ mod tests {
 
     #[test]
     fn test_result_has_correct_name() {
-        assert_eq!(UploadAttachmentResult::NAME, "upload-attachment");
+        assert_eq!(UploadWorkitemAttachmentResult::NAME, "upload-workitem-attachment");
     }
 
     #[test]
     fn test_params_deserializes() {
         let json =
             r#"{"work_item_id": 42, "file_path": "output/report.pdf", "comment": "Weekly report"}"#;
-        let params: UploadAttachmentParams = serde_json::from_str(json).unwrap();
+        let params: UploadWorkitemAttachmentParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.work_item_id, 42);
         assert_eq!(params.file_path, "output/report.pdf");
         assert_eq!(params.comment, Some("Weekly report".to_string()));
@@ -380,13 +380,13 @@ mod tests {
 
     #[test]
     fn test_params_converts_to_result() {
-        let params = UploadAttachmentParams {
+        let params = UploadWorkitemAttachmentParams {
             work_item_id: 42,
             file_path: "output/report.pdf".to_string(),
             comment: Some("Weekly report".to_string()),
         };
-        let result: UploadAttachmentResult = params.try_into().unwrap();
-        assert_eq!(result.name, "upload-attachment");
+        let result: UploadWorkitemAttachmentResult = params.try_into().unwrap();
+        assert_eq!(result.name, "upload-workitem-attachment");
         assert_eq!(result.work_item_id, 42);
         assert_eq!(result.file_path, "output/report.pdf");
         assert_eq!(result.comment, Some("Weekly report".to_string()));
@@ -394,124 +394,124 @@ mod tests {
 
     #[test]
     fn test_validation_rejects_zero_work_item_id() {
-        let params = UploadAttachmentParams {
+        let params = UploadWorkitemAttachmentParams {
             work_item_id: 0,
             file_path: "output/report.pdf".to_string(),
             comment: None,
         };
-        let result: Result<UploadAttachmentResult, _> = params.try_into();
+        let result: Result<UploadWorkitemAttachmentResult, _> = params.try_into();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_validation_rejects_empty_file_path() {
-        let params = UploadAttachmentParams {
+        let params = UploadWorkitemAttachmentParams {
             work_item_id: 42,
             file_path: "".to_string(),
             comment: None,
         };
-        let result: Result<UploadAttachmentResult, _> = params.try_into();
+        let result: Result<UploadWorkitemAttachmentResult, _> = params.try_into();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_validation_rejects_path_traversal() {
-        let params = UploadAttachmentParams {
+        let params = UploadWorkitemAttachmentParams {
             work_item_id: 42,
             file_path: "../etc/passwd".to_string(),
             comment: None,
         };
-        let result: Result<UploadAttachmentResult, _> = params.try_into();
+        let result: Result<UploadWorkitemAttachmentResult, _> = params.try_into();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_validation_rejects_embedded_traversal() {
         // "src/../secret" has ".." as a standalone component
-        let params = UploadAttachmentParams {
+        let params = UploadWorkitemAttachmentParams {
             work_item_id: 42,
             file_path: "src/../secret".to_string(),
             comment: None,
         };
-        let result: Result<UploadAttachmentResult, _> = params.try_into();
+        let result: Result<UploadWorkitemAttachmentResult, _> = params.try_into();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_validation_rejects_backslash_traversal() {
-        let params = UploadAttachmentParams {
+        let params = UploadWorkitemAttachmentParams {
             work_item_id: 42,
             file_path: "src\\..\\secret.txt".to_string(),
             comment: None,
         };
-        let result: Result<UploadAttachmentResult, _> = params.try_into();
+        let result: Result<UploadWorkitemAttachmentResult, _> = params.try_into();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_validation_rejects_backslash_absolute_path() {
-        let params = UploadAttachmentParams {
+        let params = UploadWorkitemAttachmentParams {
             work_item_id: 42,
             file_path: "\\etc\\passwd".to_string(),
             comment: None,
         };
-        let result: Result<UploadAttachmentResult, _> = params.try_into();
+        let result: Result<UploadWorkitemAttachmentResult, _> = params.try_into();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_validation_accepts_filename_with_dots_in_name() {
         // "report..v2.pdf" has ".." inside a filename, not as a standalone component
-        let params = UploadAttachmentParams {
+        let params = UploadWorkitemAttachmentParams {
             work_item_id: 42,
             file_path: "report..v2.pdf".to_string(),
             comment: None,
         };
-        let result: Result<UploadAttachmentResult, _> = params.try_into();
+        let result: Result<UploadWorkitemAttachmentResult, _> = params.try_into();
         assert!(result.is_ok(), "report..v2.pdf should be a valid filename");
     }
 
     #[test]
     fn test_validation_accepts_directory_with_dots_in_name() {
         // "v2..3/notes.md" — ".." inside a directory name, not a standalone component
-        let params = UploadAttachmentParams {
+        let params = UploadWorkitemAttachmentParams {
             work_item_id: 42,
             file_path: "v2..3/notes.md".to_string(),
             comment: None,
         };
-        let result: Result<UploadAttachmentResult, _> = params.try_into();
+        let result: Result<UploadWorkitemAttachmentResult, _> = params.try_into();
         assert!(result.is_ok(), "v2..3/notes.md should be valid");
     }
 
     #[test]
     fn test_validation_rejects_absolute_path() {
-        let params = UploadAttachmentParams {
+        let params = UploadWorkitemAttachmentParams {
             work_item_id: 42,
             file_path: "/etc/passwd".to_string(),
             comment: None,
         };
-        let result: Result<UploadAttachmentResult, _> = params.try_into();
+        let result: Result<UploadWorkitemAttachmentResult, _> = params.try_into();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_result_serializes_correctly() {
-        let params = UploadAttachmentParams {
+        let params = UploadWorkitemAttachmentParams {
             work_item_id: 42,
             file_path: "output/report.pdf".to_string(),
             comment: Some("Test attachment".to_string()),
         };
-        let result: UploadAttachmentResult = params.try_into().unwrap();
+        let result: UploadWorkitemAttachmentResult = params.try_into().unwrap();
         let json = serde_json::to_string(&result).unwrap();
 
-        assert!(json.contains(r#""name":"upload-attachment""#));
+        assert!(json.contains(r#""name":"upload-workitem-attachment""#));
         assert!(json.contains(r#""work_item_id":42"#));
         assert!(json.contains(r#""file_path":"output/report.pdf""#));
     }
 
     #[test]
     fn test_config_defaults() {
-        let config = UploadAttachmentConfig::default();
+        let config = UploadWorkitemAttachmentConfig::default();
         assert_eq!(config.max_file_size, 5 * 1024 * 1024);
         assert!(config.allowed_extensions.is_empty());
         assert!(config.comment_prefix.is_none());
@@ -527,7 +527,7 @@ allowed-extensions:
   - .log
 comment-prefix: "[Agent] "
 "#;
-        let config: UploadAttachmentConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: UploadWorkitemAttachmentConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.max_file_size, 1_048_576);
         assert_eq!(
             config.allowed_extensions,

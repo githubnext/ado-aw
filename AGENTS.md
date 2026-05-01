@@ -93,7 +93,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   ├── update_pr.rs
 │   │   ├── update_wiki_page.rs
 │   │   ├── update_work_item.rs
-│   │   └── upload_attachment.rs
+│   │   └── upload_workitem_attachment.rs
 │   ├── runtimes/         # Runtime environment implementations (one dir per runtime)
 │   │   ├── mod.rs        # Module entry point
 │   │   └── lean/         # Lean 4 theorem prover runtime
