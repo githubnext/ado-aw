@@ -953,7 +953,8 @@ impl Fact {
             Fact::CommitMessage => {
                 vec![("ADO_COMMIT_MESSAGE", "$(Build.SourceVersionMessage)")]
             }
-            Fact::BuildReason => vec![("ADO_BUILD_REASON", "$(Build.Reason)")],
+            // Always provided by infra vars in collect_ado_exports — no need to duplicate
+            Fact::BuildReason => vec![],
             Fact::TriggeredByPipeline => vec![(
                 "ADO_TRIGGERED_BY_PIPELINE",
                 "$(Build.TriggeredBy.DefinitionName)",

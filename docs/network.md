@@ -110,6 +110,15 @@ network:
 
 ADO does not support fine-grained permissions — there are two access levels: blanket read and blanket write. Tokens are minted from ARM service connections; `System.AccessToken` is never used for agent or executor operations.
 
+**Exception:** The trigger filter gate step (Setup job) uses `System.AccessToken`
+for two purposes: (1) self-cancelling the build when filters don't match
+(`PATCH` to `_apis/build/builds/{id}`), and (2) fetching PR metadata for
+Tier 2 filters (labels, draft status, changed files). This runs in the
+Setup job before the agent starts, outside the AWF sandbox. The pipeline
+must have "Allow scripts to access the OAuth token" enabled for this to
+work. This is a deliberate scoped exception — the token is not passed to
+the agent or executor.
+
 ```yaml
 permissions:
   read: my-read-arm-connection    # Stage 1 agent — read-only ADO access

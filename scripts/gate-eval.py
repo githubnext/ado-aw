@@ -8,7 +8,7 @@ ADO logging commands.
 This script is embedded by the ado-aw compiler into pipeline gate steps.
 It should not be modified directly — changes belong in src/compile/filter_ir.rs.
 """
-import base64, fnmatch, json, os, sys
+import base64, json, os, sys
 from datetime import datetime, timezone
 
 # ─── Fact dependencies ───────────────────────────────────────────────────────
@@ -139,19 +139,27 @@ def _fetch_changed_files():
 
 # ─── Predicate evaluation ───────────────────────────────────────────────────
 
+import re as _re
+
+def _glob(value, pattern):
+    """Match a value against a simple glob pattern.
+
+    * matches any characters, ? matches a single character.
+    Brackets are literal (NOT character classes) — consistent across
+    all filter types (title, branch, changed-files, etc.).
+    """
+    pattern = _strip_ref_prefix(pattern)
+    regex = _re.escape(pattern).replace(r"\*", ".*").replace(r"\?", ".")
+    return bool(_re.fullmatch(regex, value))
+
+
 def evaluate(pred, facts):
     """Evaluate a predicate against acquired facts. Returns True if passed."""
     t = pred["type"]
 
     if t == "glob_match":
         value = str(facts.get(pred["fact"], ""))
-        # Simple glob: * matches anything, ? matches single char.
-        # Brackets are NOT character classes (treated literally).
-        import re as _re
-        pattern = _strip_ref_prefix(pred["pattern"])
-        # Escape everything except * and ?, then convert * → .* and ? → .
-        regex = _re.escape(pattern).replace(r"\*", ".*").replace(r"\?", ".")
-        return bool(_re.fullmatch(regex, value))
+        return _glob(value, pred["pattern"])
 
     if t == "equals":
         value = str(facts.get(pred["fact"], ""))
@@ -222,8 +230,8 @@ def evaluate(pred, facts):
             log("  (changed-files: no files in PR — filter will not match)")
             return False
         for f in files:
-            inc = not includes or any(fnmatch.fnmatch(f, p) for p in includes)
-            exc = any(fnmatch.fnmatch(f, p) for p in excludes)
+            inc = not includes or any(_glob(f, p) for p in includes)
+            exc = any(_glob(f, p) for p in excludes)
             if inc and not exc:
                 return True
         return False
@@ -310,8 +318,8 @@ def main():
     for fact_spec in spec["facts"]:
         kind = fact_spec["kind"]
         policy = fact_spec.get("failure_policy", "fail_closed")
-        assert policy in ("fail_closed", "fail_open", "skip_dependents"), \
-            f"Unknown failure_policy '{policy}' for fact '{kind}'"
+        if policy not in ("fail_closed", "fail_open", "skip_dependents"):
+            raise ValueError(f"Unknown failure_policy '{policy}' for fact '{kind}'")
         deps = FACT_DEPS.get(kind, [])
         if any(d in skip_facts for d in deps):
             skip_facts.add(kind)
