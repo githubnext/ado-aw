@@ -170,7 +170,7 @@ def evaluate(pred, facts):
             return current >= start or current < end
 
     if t == "label_set_match":
-        labels = facts.get(pred["fact"], [])
+        labels = facts.get(pred["fact"]) or []
         if isinstance(labels, str):
             labels = [l.strip() for l in labels.split("\n") if l.strip()]
         labels_lower = [l.lower() for l in labels]
@@ -186,7 +186,7 @@ def evaluate(pred, facts):
         return True
 
     if t == "file_glob_match":
-        files = facts.get(pred["fact"], [])
+        files = facts.get(pred["fact"]) or []
         if isinstance(files, str):
             files = [f.strip() for f in files.split("\n") if f.strip()]
         includes = pred.get("include", [])
@@ -293,7 +293,9 @@ def main():
             elif policy == "fail_open":
                 facts[kind] = None
             else:
+                # fail_closed: treat as gate failure
                 facts[fid] = None
+                skip_facts.add(fid)
 
     # Evaluate checks
     should_run = True

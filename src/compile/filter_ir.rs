@@ -1086,8 +1086,8 @@ pub fn compile_gate_step_external(
 }
 
 /// Compile Tier-1-only filter checks into a self-contained bash gate step.
-/// No Python evaluator needed — just inline bash if/grep checks against
-/// pipeline variables.
+/// No Python evaluator needed — just inline bash checks against env vars.
+/// ADO variables are passed via the step's `env:` block to prevent injection.
 pub fn compile_gate_step_inline(ctx: GateContext, checks: &[FilterCheck]) -> String {
     use crate::validate::shell_escape_glob;
 
@@ -1095,128 +1095,147 @@ pub fn compile_gate_step_inline(ctx: GateContext, checks: &[FilterCheck]) -> Str
         return String::new();
     }
 
-    let mut step = String::new();
-    step.push_str("- bash: |\n");
+    // Collect env vars needed by checks
+    let mut env_vars: Vec<(&str, &str)> = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    // Always need build reason for bypass and infra for self-cancel
+    for (k, v) in &[
+        ("ADO_BUILD_REASON", "$(Build.Reason)"),
+        ("ADO_COLLECTION_URI", "$(System.CollectionUri)"),
+        ("ADO_PROJECT", "$(System.TeamProject)"),
+        ("ADO_BUILD_ID", "$(Build.BuildId)"),
+    ] {
+        if seen.insert(*k) {
+            env_vars.push((k, v));
+        }
+    }
+    for check in checks {
+        for fact in check.predicate.required_facts() {
+            for (k, v) in fact.ado_exports() {
+                if seen.insert(k) {
+                    env_vars.push((k, v));
+                }
+            }
+        }
+    }
+
+    // Bash body — references $ENV_VAR names, not $(ADO.Macros)
+    let mut bash = String::new();
 
     // Bypass for non-matching trigger types
-    step.push_str(&format!(
-        "    if [ \"$(Build.Reason)\" != \"{}\" ]; then\n",
+    bash.push_str(&format!(
+        "    if [ \"$ADO_BUILD_REASON\" != \"{}\" ]; then\n",
         ctx.build_reason()
     ));
-    step.push_str(&format!(
+    bash.push_str(&format!(
         "      echo \"Not a {} build -- gate passes automatically\"\n",
         match ctx {
             GateContext::PullRequest => "PR",
             GateContext::PipelineCompletion => "pipeline",
         }
     ));
-    step.push_str(
+    bash.push_str(
         "      echo \"##vso[task.setvariable variable=SHOULD_RUN;isOutput=true]true\"\n",
     );
-    step.push_str(&format!(
+    bash.push_str(&format!(
         "      echo \"##vso[build.addbuildtag]{}:passed\"\n",
         ctx.tag_prefix()
     ));
-    step.push_str("      exit 0\n");
-    step.push_str("    fi\n");
-    step.push('\n');
-    step.push_str("    SHOULD_RUN=true\n\n");
+    bash.push_str("      exit 0\n");
+    bash.push_str("    fi\n\n");
+    bash.push_str("    SHOULD_RUN=true\n\n");
 
-    // Inline predicate checks (Tier 1 only)
+    // Predicate checks — use env var names from ado_exports()
     for check in checks {
         let tag = format!("{}:{}", ctx.tag_prefix(), check.build_tag_suffix);
         match &check.predicate {
             Predicate::GlobMatch { fact, pattern } => {
                 let escaped = shell_escape_glob(pattern);
-                let (var_name, ado_macro) = fact_inline_var(*fact);
-                step.push_str(&format!("    {}=\"{}\"\n", var_name, ado_macro));
-                step.push_str(&format!(
+                let env_var = fact.ado_exports().first().map(|(k, _)| *k).unwrap_or("UNKNOWN");
+                bash.push_str(&format!(
                     "    case \"${}\" in {})\n",
-                    var_name, escaped
+                    env_var, escaped
                 ));
-                step.push_str(&format!(
+                bash.push_str(&format!(
                     "      echo \"Filter: {} | Result: PASS\"\n",
                     check.name
                 ));
-                step.push_str("      ;;\n");
-                step.push_str("    *)\n");
-                step.push_str(&format!(
+                bash.push_str("      ;;\n");
+                bash.push_str("    *)\n");
+                bash.push_str(&format!(
                     "      echo \"##[warning]Filter {} did not match\"\n",
                     check.name
                 ));
-                step.push_str(&format!(
+                bash.push_str(&format!(
                     "      echo \"##vso[build.addbuildtag]{}\"\n",
                     tag
                 ));
-                step.push_str("      SHOULD_RUN=false\n");
-                step.push_str("      ;;\n");
-                step.push_str("    esac\n\n");
+                bash.push_str("      SHOULD_RUN=false\n");
+                bash.push_str("      ;;\n");
+                bash.push_str("    esac\n\n");
             }
             Predicate::ValueInSet {
                 fact,
                 values,
                 case_insensitive,
             } => {
-                let (var_name, ado_macro) = fact_inline_var(*fact);
+                let env_var = fact.ado_exports().first().map(|(k, _)| *k).unwrap_or("UNKNOWN");
                 let escaped: Vec<String> =
                     values.iter().map(|v| shell_escape_glob(v)).collect();
                 let pattern = escaped.join("|");
                 let flag = if *case_insensitive { "i" } else { "" };
-                step.push_str(&format!("    {}=\"{}\"\n", var_name, ado_macro));
-                step.push_str(&format!(
+                bash.push_str(&format!(
                     "    if echo \"${}\" | grep -q{}E '^({})$'; then\n",
-                    var_name, flag, pattern
+                    env_var, flag, pattern
                 ));
-                step.push_str(&format!(
+                bash.push_str(&format!(
                     "      echo \"Filter: {} | Result: PASS\"\n",
                     check.name
                 ));
-                step.push_str("    else\n");
-                step.push_str(&format!(
+                bash.push_str("    else\n");
+                bash.push_str(&format!(
                     "      echo \"##[warning]Filter {} did not match\"\n",
                     check.name
                 ));
-                step.push_str(&format!(
+                bash.push_str(&format!(
                     "      echo \"##vso[build.addbuildtag]{}\"\n",
                     tag
                 ));
-                step.push_str("      SHOULD_RUN=false\n");
-                step.push_str("    fi\n\n");
+                bash.push_str("      SHOULD_RUN=false\n");
+                bash.push_str("    fi\n\n");
             }
             Predicate::ValueNotInSet {
                 fact,
                 values,
                 case_insensitive,
             } => {
-                let (var_name, ado_macro) = fact_inline_var(*fact);
+                let env_var = fact.ado_exports().first().map(|(k, _)| *k).unwrap_or("UNKNOWN");
                 let escaped: Vec<String> =
                     values.iter().map(|v| shell_escape_glob(v)).collect();
                 let pattern = escaped.join("|");
                 let flag = if *case_insensitive { "i" } else { "" };
-                step.push_str(&format!("    {}=\"{}\"\n", var_name, ado_macro));
-                step.push_str(&format!(
+                bash.push_str(&format!(
                     "    if echo \"${}\" | grep -q{}E '^({})$'; then\n",
-                    var_name, flag, pattern
+                    env_var, flag, pattern
                 ));
-                step.push_str(&format!(
+                bash.push_str(&format!(
                     "      echo \"##[warning]Filter {} matched exclude list\"\n",
                     check.name
                 ));
-                step.push_str(&format!(
+                bash.push_str(&format!(
                     "      echo \"##vso[build.addbuildtag]{}\"\n",
                     tag
                 ));
-                step.push_str("      SHOULD_RUN=false\n");
-                step.push_str("    else\n");
-                step.push_str(&format!(
+                bash.push_str("      SHOULD_RUN=false\n");
+                bash.push_str("    else\n");
+                bash.push_str(&format!(
                     "      echo \"Filter: {} | Result: PASS\"\n",
                     check.name
                 ));
-                step.push_str("    fi\n\n");
+                bash.push_str("    fi\n\n");
             }
             _ => {
-                // Non-Tier-1 predicates should not appear in inline gate steps
-                step.push_str(&format!(
+                bash.push_str(&format!(
                     "    echo \"##[warning]Filter {} requires evaluator (skipped in inline mode)\"\n\n",
                     check.name
                 ));
@@ -1224,30 +1243,35 @@ pub fn compile_gate_step_inline(ctx: GateContext, checks: &[FilterCheck]) -> Str
         }
     }
 
-    // Result handling
-    step.push_str(
+    // Result handling — uses env vars for self-cancel
+    bash.push_str(
         "    echo \"##vso[task.setvariable variable=SHOULD_RUN;isOutput=true]$SHOULD_RUN\"\n",
     );
-    step.push_str("    if [ \"$SHOULD_RUN\" = \"true\" ]; then\n");
-    step.push_str("      echo \"All filters passed -- agent will run\"\n");
-    step.push_str(&format!(
+    bash.push_str("    if [ \"$SHOULD_RUN\" = \"true\" ]; then\n");
+    bash.push_str("      echo \"All filters passed -- agent will run\"\n");
+    bash.push_str(&format!(
         "      echo \"##vso[build.addbuildtag]{}:passed\"\n",
         ctx.tag_prefix()
     ));
-    step.push_str("    else\n");
-    step.push_str("      echo \"Filters not matched -- cancelling build\"\n");
-    step.push_str(&format!(
+    bash.push_str("    else\n");
+    bash.push_str("      echo \"Filters not matched -- cancelling build\"\n");
+    bash.push_str(&format!(
         "      echo \"##vso[build.addbuildtag]{}:skipped\"\n",
         ctx.tag_prefix()
     ));
-    step.push_str("      curl -s -X PATCH \\\n");
-    step.push_str(
+    bash.push_str("      curl -s -X PATCH \\\n");
+    bash.push_str(
         "        -H \"Authorization: Bearer $SYSTEM_ACCESSTOKEN\" \\\n",
     );
-    step.push_str("        -H \"Content-Type: application/json\" \\\n");
-    step.push_str("        -d '{\"status\": \"cancelling\"}' \\\n");
-    step.push_str("        \"$(System.CollectionUri)$(System.TeamProject)/_apis/build/builds/$(Build.BuildId)?api-version=7.1\"\n");
-    step.push_str("    fi\n");
+    bash.push_str("        -H \"Content-Type: application/json\" \\\n");
+    bash.push_str("        -d '{\"status\": \"cancelling\"}' \\\n");
+    bash.push_str("        \"${ADO_COLLECTION_URI}${ADO_PROJECT}/_apis/build/builds/${ADO_BUILD_ID}?api-version=7.1\"\n");
+    bash.push_str("    fi\n");
+
+    // Assemble step with env: block
+    let mut step = String::new();
+    step.push_str("- bash: |\n");
+    step.push_str(&bash);
     step.push_str(&format!("  name: {}\n", ctx.step_name()));
     step.push_str(&format!(
         "  displayName: \"{}\"\n",
@@ -1255,23 +1279,11 @@ pub fn compile_gate_step_inline(ctx: GateContext, checks: &[FilterCheck]) -> Str
     ));
     step.push_str("  env:\n");
     step.push_str("    SYSTEM_ACCESSTOKEN: $(System.AccessToken)\n");
+    for (env_var, ado_macro) in &env_vars {
+        step.push_str(&format!("    {}: {}\n", env_var, ado_macro));
+    }
 
     step
-}
-
-/// Map a Tier 1 fact to its inline bash variable name and ADO macro.
-fn fact_inline_var(fact: Fact) -> (&'static str, &'static str) {
-    match fact {
-        Fact::PrTitle => ("TITLE", "$(System.PullRequest.Title)"),
-        Fact::AuthorEmail => ("AUTHOR", "$(Build.RequestedForEmail)"),
-        Fact::SourceBranch => ("SOURCE_BRANCH", "$(System.PullRequest.SourceBranch)"),
-        Fact::TargetBranch => ("TARGET_BRANCH", "$(System.PullRequest.TargetBranch)"),
-        Fact::CommitMessage => ("COMMIT_MSG", "$(Build.SourceVersionMessage)"),
-        Fact::BuildReason => ("REASON", "$(Build.Reason)"),
-        Fact::TriggeredByPipeline => ("SOURCE_PIPELINE", "$(Build.TriggeredBy.DefinitionName)"),
-        Fact::TriggeringBranch => ("TRIGGER_BRANCH", "$(Build.SourceBranch)"),
-        _ => ("UNKNOWN", ""),
-    }
 }
 
 
