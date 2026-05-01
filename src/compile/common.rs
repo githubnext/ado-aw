@@ -2019,6 +2019,13 @@ pub async fn compile_shared(
 
     // Validate expression escape hatches against injection
     for expr in &expressions {
+        if crate::validate::contains_ado_expression(expr) {
+            anyhow::bail!(
+                "Filter expression contains ADO expression ('${{{{', '$(', or '$[') which could \
+                 exfiltrate secrets or escalate permissions. Found: '{}'",
+                expr
+            );
+        }
         if crate::validate::contains_template_marker(expr) {
             anyhow::bail!(
                 "Filter expression contains template marker '{{{{' which could cause injection. Found: '{}'",

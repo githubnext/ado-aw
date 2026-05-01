@@ -19,6 +19,17 @@ FACT_DEPS = {
     "changed_file_count": ["changed_files"],
 }
 
+# ADO branch variables return refs/heads/... or refs/pull/... prefixed values.
+# Strip the prefix so user patterns like "feature/*" match naturally.
+_REF_PREFIXES = ("refs/heads/", "refs/tags/", "refs/pull/")
+
+def _strip_ref_prefix(value):
+    """Strip refs/heads/ (or similar) prefix from a branch/ref value."""
+    for prefix in _REF_PREFIXES:
+        if value.startswith(prefix):
+            return value[len(prefix):]
+    return value
+
 # ─── Fact acquisition ────────────────────────────────────────────────────────
 
 def acquire_fact(kind, acquired):
@@ -35,7 +46,13 @@ def acquire_fact(kind, acquired):
         "triggering_branch": "ADO_TRIGGERING_BRANCH",
     }
     if kind in env_facts:
-        return os.environ.get(env_facts[kind], "")
+        value = os.environ.get(env_facts[kind], "")
+        # ADO branch variables include refs/heads/ prefix — strip it
+        # so user patterns like "feature/*" match without the prefix.
+        # Also strip from the pattern side in glob_match (below).
+        if kind in ("source_branch", "target_branch", "triggering_branch"):
+            value = _strip_ref_prefix(value)
+        return value
 
     if kind == "pr_metadata":
         return _fetch_pr_metadata()
@@ -125,7 +142,7 @@ def evaluate(pred, facts):
         # Simple glob: * matches anything, ? matches single char.
         # Brackets are NOT character classes (treated literally).
         import re as _re
-        pattern = pred["pattern"]
+        pattern = _strip_ref_prefix(pred["pattern"])
         # Escape everything except * and ?, then convert * → .* and ? → .
         regex = _re.escape(pattern).replace(r"\*", ".*").replace(r"\?", ".")
         return bool(_re.fullmatch(regex, value))

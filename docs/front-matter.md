@@ -80,8 +80,7 @@ on:                            # trigger configuration (unified under on: key)
       - main
       - release/*
     filters:                   # optional runtime filters (compiled to gate step)
-      source-pipeline:
-        match: "Build.*"
+      source-pipeline: "Build*"
       time-window:
         start: "09:00"
         end: "17:00"
@@ -91,19 +90,15 @@ on:                            # trigger configuration (unified under on: key)
     paths:
       include: [src/*]
     filters:                   # runtime PR filters (compiled to gate step)
-      title:
-        match: "\\[review\\]"
+      title: "*[review]*"
       author:
         include: ["alice@corp.com"]
       draft: false
       labels:
         any-of: ["run-agent"]
-      source-branch:
-        match: "^feature/.*"
-      target-branch:
-        match: "^main$"
-      commit-message:
-        match: "^(?!.*\\[skip-agent\\])"
+      source-branch: "feature/*"
+      target-branch: "main"
+      commit-message: "*[skip-agent]*"
       changed-files:
         include: ["src/**/*.rs"]
       min-changes: 5

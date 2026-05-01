@@ -113,7 +113,7 @@ supports these predicate types:
 
 | Predicate | Bash Shape | Example |
 |-----------|-----------|---------|
-| `RegexMatch { fact, pattern }` | `echo "$VAR" \| grep -qE 'pattern'` | Title matches `\[review\]` |
+| `GlobMatch { fact, pattern }` | `fnmatch(value, pattern)` | Title matches `*[review]*` |
 | `Equality { fact, value }` | `[ "$VAR" = "value" ]` | Draft is `false` |
 | `ValueInSet { fact, values, case_insensitive }` | `echo "$VAR" \| grep -q[i]E '^(a\|b)$'` | Author in allow-list |
 | `ValueNotInSet { fact, values, case_insensitive }` | Inverse of `ValueInSet` | Author not in block-list |
@@ -169,12 +169,12 @@ Maps each field of `PrFilters` to a `FilterCheck`:
 
 | Field | Predicate | Fact(s) | Tag Suffix |
 |-------|-----------|---------|------------|
-| `title` | `RegexMatch` | `PrTitle` | `title-mismatch` |
+| `title` | `GlobMatch` | `PrTitle` | `title-mismatch` |
 | `author.include` | `ValueInSet` (case-insensitive) | `AuthorEmail` | `author-mismatch` |
 | `author.exclude` | `ValueNotInSet` (case-insensitive) | `AuthorEmail` | `author-excluded` |
-| `source_branch` | `RegexMatch` | `SourceBranch` | `source-branch-mismatch` |
-| `target_branch` | `RegexMatch` | `TargetBranch` | `target-branch-mismatch` |
-| `commit_message` | `RegexMatch` | `CommitMessage` | `commit-message-mismatch` |
+| `source_branch` | `GlobMatch` | `SourceBranch` | `source-branch-mismatch` |
+| `target_branch` | `GlobMatch` | `TargetBranch` | `target-branch-mismatch` |
+| `commit_message` | `GlobMatch` | `CommitMessage` | `commit-message-mismatch` |
 | `labels` | `LabelSetMatch` | `PrLabels` (→ `PrMetadata`) | `labels-mismatch` |
 | `draft` | `Equality` | `PrIsDraft` (→ `PrMetadata`) | `draft-mismatch` |
 | `changed_files` | `FileGlobMatch` | `ChangedFiles` | `changed-files-mismatch` |
@@ -187,8 +187,8 @@ Maps each field of `PrFilters` to a `FilterCheck`:
 
 | Field | Predicate | Fact(s) | Tag Suffix |
 |-------|-----------|---------|------------|
-| `source_pipeline` | `RegexMatch` | `TriggeredByPipeline` | `source-pipeline-mismatch` |
-| `branch` | `RegexMatch` | `TriggeringBranch` | `branch-mismatch` |
+| `source_pipeline` | `GlobMatch` | `TriggeredByPipeline` | `source-pipeline-mismatch` |
+| `branch` | `GlobMatch` | `TriggeringBranch` | `branch-mismatch` |
 | `time_window` | `TimeWindow` | `CurrentUtcMinutes` | `time-window-mismatch` |
 | `build_reason.include` | `ValueInSet` | `BuildReason` | `build-reason-mismatch` |
 | `build_reason.exclude` | `ValueNotInSet` | `BuildReason` | `build-reason-excluded` |
@@ -286,7 +286,7 @@ quoting issues. Decoded, it contains:
   "checks": [
     {
       "name": "title",
-      "predicate": {"type": "regex_match", "fact": "pr_title", "pattern": "\\[review\\]"},
+      "predicate": {"type": "glob_match", "fact": "pr_title", "pattern": "*[review]*"},
       "tag_suffix": "title-mismatch"
     },
     {
@@ -335,7 +335,7 @@ The bash shim exports only the ADO macros needed by the spec's facts:
 
 | `type` | Fields | Description |
 |--------|--------|-------------|
-| `regex_match` | `fact`, `pattern` | Python `re.search()` |
+| `glob_match` | `fact`, `pattern` | Glob match (`*` any chars, `?` single char) |
 | `equals` | `fact`, `value` | Exact string equality |
 | `value_in_set` | `fact`, `values`, `case_insensitive` | Value membership |
 | `value_not_in_set` | `fact`, `values`, `case_insensitive` | Inverse membership |
@@ -424,3 +424,4 @@ step-by-step guide. In summary:
    `lower_pipeline_filters`)
 6. Add validation rules if the new filter can conflict with existing ones
 7. Write tests: lowering, validation, spec serialization, and evaluator
+

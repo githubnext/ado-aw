@@ -21,6 +21,30 @@ spec.loader.exec_module(gate_eval)
 
 evaluate = gate_eval.evaluate
 predicate_facts = gate_eval.predicate_facts
+_strip_ref_prefix = gate_eval._strip_ref_prefix
+
+
+# ─── Ref prefix stripping tests ─────────────────────────────────────────────
+
+
+class TestStripRefPrefix:
+    def test_refs_heads(self):
+        assert _strip_ref_prefix("refs/heads/feature/my-branch") == "feature/my-branch"
+
+    def test_refs_tags(self):
+        assert _strip_ref_prefix("refs/tags/v1.0.0") == "v1.0.0"
+
+    def test_refs_pull(self):
+        assert _strip_ref_prefix("refs/pull/42/merge") == "42/merge"
+
+    def test_no_prefix(self):
+        assert _strip_ref_prefix("main") == "main"
+
+    def test_pattern_stripping_in_glob(self):
+        """User patterns like refs/heads/feature/* should match feature/my-branch"""
+        pred = {"type": "glob_match", "fact": "source_branch", "pattern": "refs/heads/feature/*"}
+        facts = {"source_branch": "feature/my-branch"}
+        assert evaluate(pred, facts) is True
 
 
 # ─── Predicate evaluation tests ─────────────────────────────────────────────
