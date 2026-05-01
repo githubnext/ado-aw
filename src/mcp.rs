@@ -1060,6 +1060,9 @@ artifact-name and build-id restrictions may apply per the workflow's safe-output
                     .collect::<String>()
             })
             .unwrap_or_default();
+        // Staged filename embeds the artifact name (up to 100 chars validated
+        // above) plus a fixed prefix and 8-char random suffix.  The resulting
+        // max length (~140 chars) is well within filesystem limits.
         let staged_filename = if extension.is_empty() {
             format!(
                 "upload-build-artifact-{}-{}",

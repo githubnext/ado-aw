@@ -65,6 +65,8 @@ impl Validate for UploadBuildArtifactParams {
 
         // artifact_name: ADO requires non-empty, ≤100 chars, charset
         // [A-Za-z0-9._-], and (per our hardening) no leading `.`.
+        // `is_valid_version` is reused here — its charset rule happens to
+        // match ADO's artifact-name requirements exactly.
         ensure!(
             self.artifact_name.len() <= 100,
             "artifact_name must be at most 100 characters"
@@ -362,7 +364,9 @@ impl Executor for UploadBuildArtifactResult {
         // Resolve the attachment type. Operator config wins; otherwise use the
         // default. Re-validate the charset defensively even though
         // `SanitizeConfig` strips control characters, because the type is
-        // interpolated into a URL path segment.
+        // interpolated into a URL path segment. `is_valid_version` is reused
+        // here — its [A-Za-z0-9._-] charset matches the attachment-type
+        // requirements.
         let attachment_type = config
             .attachment_type
             .as_deref()
@@ -412,6 +416,19 @@ impl Executor for UploadBuildArtifactResult {
         }
         let file_size = metadata.len();
         debug!("File size: {} bytes", file_size);
+
+        // Integrity check: compare the live file size against the size
+        // recorded in Stage 1. A mismatch means the staged file was modified
+        // between stages — not exploitable (max_file_size still caps actual
+        // bytes) but worth flagging.
+        if file_size != self.file_size {
+            warn!(
+                "Staged file size ({} bytes) differs from size recorded at Stage 1 ({} bytes) — \
+                 the file may have been modified between stages",
+                file_size, self.file_size
+            );
+        }
+
         if file_size > config.max_file_size {
             return Ok(ExecutionResult::failure(format!(
                 "File size ({} bytes) exceeds maximum allowed size ({} bytes)",
@@ -431,8 +448,9 @@ impl Executor for UploadBuildArtifactResult {
         }
 
         // Read the file bytes for upload (after the dry-run guard to avoid
-        // reading up to 50 MB into memory only to discard it).
-        let file_bytes = std::fs::read(&canonical).context("Failed to read file contents")?;
+        // reading up to 50 MB into memory only to discard it).  Uses async I/O
+        // to avoid blocking the tokio runtime for large files.
+        let file_bytes = tokio::fs::read(&canonical).await.context("Failed to read file contents")?;
 
         // Resolve the ADO API context (org URL, project, token).
         let org_url = ctx
