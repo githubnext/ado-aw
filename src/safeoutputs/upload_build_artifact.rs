@@ -419,14 +419,13 @@ impl Executor for UploadBuildArtifactResult {
 
         // Integrity check: compare the live file size against the size
         // recorded in Stage 1. A mismatch means the staged file was modified
-        // between stages — not exploitable (max_file_size still caps actual
-        // bytes) but worth flagging.
+        // between stages — fail hard rather than uploading tampered content.
         if file_size != self.file_size {
-            warn!(
+            return Ok(ExecutionResult::failure(format!(
                 "Staged file size ({} bytes) differs from size recorded at Stage 1 ({} bytes) — \
                  the file may have been modified between stages",
                 file_size, self.file_size
-            );
+            )));
         }
 
         if file_size > config.max_file_size {
@@ -961,6 +960,30 @@ attachment-type: "agent-artifact"
         assert!(
             outcome.message.contains("exceeds maximum"),
             "expected size rejection, got: {}",
+            outcome.message
+        );
+    }
+
+    #[tokio::test]
+    async fn test_executor_rejects_tampered_staged_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = "upload-build-artifact-agent-report-tampered.pdf";
+        // Write 100 bytes but record 50 in the result — simulates tampering.
+        std::fs::write(dir.path().join(staged), vec![0u8; 100]).unwrap();
+
+        let result = UploadBuildArtifactResult::new(
+            Some(1),
+            "agent-report".to_string(),
+            "out/report.pdf".to_string(),
+            staged.to_string(),
+            50, // mismatched size
+        );
+        let ctx = make_ctx(dir.path().to_path_buf(), true);
+        let outcome = result.execute_impl(&ctx).await.unwrap();
+        assert!(!outcome.success);
+        assert!(
+            outcome.message.contains("differs from size recorded"),
+            "expected integrity failure, got: {}",
             outcome.message
         );
     }
