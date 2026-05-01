@@ -1195,7 +1195,7 @@ pub fn generate_setup_job(
 ) -> anyhow::Result<String> {
     use super::extensions::CompilerExtension;
 
-    let has_filters = pr_filters.is_some() || pipeline_filters.is_some();
+    let has_gate = pr_filters.is_some() || pipeline_filters.is_some();
 
     // Collect setup_steps from ALL extensions
     let ext_setup_steps: Vec<String> = extensions
@@ -1204,7 +1204,7 @@ pub fn generate_setup_job(
         .collect();
     let has_ext_setup = !ext_setup_steps.is_empty();
 
-    if setup_steps.is_empty() && !has_filters && !has_ext_setup {
+    if setup_steps.is_empty() && !has_gate && !has_ext_setup {
         return Ok(String::new());
     }
 
@@ -1214,8 +1214,6 @@ pub fn generate_setup_job(
     for step in ext_setup_steps {
         steps_parts.push(step);
     }
-
-    let has_gate = has_filters;
 
     // User setup steps (conditioned on gate passing when filters are active)
     if !setup_steps.is_empty() {

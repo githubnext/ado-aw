@@ -1127,6 +1127,9 @@ pub fn compile_gate_step_external(
         ctx.display_name()
     ));
     step.push_str("  env:\n");
+    // SYSTEM_ACCESSTOKEN is always needed for self-cancel (PATCH to builds API).
+    // This uses the pipeline's built-in token, not an ARM service connection.
+    // The build must have "Allow scripts to access the OAuth token" enabled.
     step.push_str("    SYSTEM_ACCESSTOKEN: $(System.AccessToken)\n");
     step.push_str(&format!("    GATE_SPEC: \"{}\"\n", spec_b64));
 

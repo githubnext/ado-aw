@@ -304,10 +304,19 @@ def main():
     for fact_spec in spec["facts"]:
         kind = fact_spec["kind"]
         policy = fact_spec.get("failure_policy", "fail_closed")
+        assert policy in ("fail_closed", "fail_open", "skip_dependents"), \
+            f"Unknown failure_policy '{policy}' for fact '{kind}'"
         deps = FACT_DEPS.get(kind, [])
         if any(d in skip_facts for d in deps):
             skip_facts.add(kind)
             log(f"  Fact [{kind}]: skipped (dependency unavailable)")
+            continue
+        # Propagate fail-open from dependencies: if a dependency failed-open,
+        # this fact is also fail-open (e.g. changed_file_count when
+        # changed_files API failed)
+        if any(d in fail_open_facts for d in deps):
+            fail_open_facts.add(kind)
+            log(f"  Fact [{kind}]: fail-open (dependency failed-open)")
             continue
         try:
             facts[kind] = acquire_fact(kind, facts)
