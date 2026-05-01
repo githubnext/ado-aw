@@ -881,10 +881,10 @@ pub struct PipelineFilters {
     /// Only run during a specific time window (UTC)
     #[serde(default, rename = "time-window")]
     pub time_window: Option<TimeWindowFilter>,
-    /// Regex match on upstream pipeline name (Build.TriggeredBy.DefinitionName)
+    /// Glob match on upstream pipeline name (Build.TriggeredBy.DefinitionName)
     #[serde(default, rename = "source-pipeline")]
     pub source_pipeline: Option<PatternFilter>,
-    /// Regex match on triggering branch (Build.SourceBranch)
+    /// Glob match on triggering branch (Build.SourceBranch)
     #[serde(default)]
     pub branch: Option<PatternFilter>,
     /// Include/exclude by build reason
@@ -967,19 +967,19 @@ pub struct PathFilter {
 /// Multiple filters use AND semantics — all must pass for the agent to run.
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct PrFilters {
-    /// Regex match on PR title (System.PullRequest.Title)
+    /// Glob match on PR title (System.PullRequest.Title)
     #[serde(default)]
     pub title: Option<PatternFilter>,
     /// Include/exclude by author email (Build.RequestedForEmail)
     #[serde(default)]
     pub author: Option<IncludeExcludeFilter>,
-    /// Regex match on source branch (System.PullRequest.SourceBranch)
+    /// Glob match on source branch (System.PullRequest.SourceBranch)
     #[serde(default, rename = "source-branch")]
     pub source_branch: Option<PatternFilter>,
-    /// Regex match on target branch (System.PullRequest.TargetBranch)
+    /// Glob match on target branch (System.PullRequest.TargetBranch)
     #[serde(default, rename = "target-branch")]
     pub target_branch: Option<PatternFilter>,
-    /// Regex match on last commit message (Build.SourceVersionMessage)
+    /// Glob match on last commit message (Build.SourceVersionMessage)
     #[serde(default, rename = "commit-message")]
     pub commit_message: Option<PatternFilter>,
     /// PR label matching (any-of, all-of, none-of)

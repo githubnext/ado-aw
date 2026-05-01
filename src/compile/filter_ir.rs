@@ -1181,11 +1181,11 @@ fn collect_ado_exports(checks: &[FilterCheck]) -> Vec<(&'static str, &'static st
 }
 
 
-/// Collect all facts required by checks, topo-sorted by dependencies.
+/// Collect all facts required by checks, topologically sorted so every
+/// fact appears after its dependencies.
 ///
-/// Uses `BTreeSet` ordering which matches enum variant order (pipeline
-/// vars < API-derived < computed). Debug-asserts that no fact appears
-/// before its dependencies.
+/// Uses an explicit topo-sort rather than relying on enum `Ord` ordering,
+/// so the correctness does not depend on variant declaration order.
 fn collect_ordered_facts(checks: &[FilterCheck]) -> Vec<Fact> {
     let mut all_facts = BTreeSet::new();
     for check in checks {
@@ -1193,23 +1193,32 @@ fn collect_ordered_facts(checks: &[FilterCheck]) -> Vec<Fact> {
             all_facts.insert(fact);
         }
     }
-    let ordered: Vec<Fact> = all_facts.into_iter().collect();
 
-    // Verify dependency ordering: every fact's dependencies must appear
-    // before it in the list.
-    if cfg!(debug_assertions) {
-        let mut seen = BTreeSet::new();
-        for fact in &ordered {
-            for dep in fact.dependencies() {
-                debug_assert!(
-                    seen.contains(dep),
-                    "Fact {:?} appears before its dependency {:?} — \
-                     check Fact enum variant ordering",
-                    fact, dep
-                );
+    // Kahn's algorithm: emit facts whose dependencies are already emitted.
+    let mut remaining: Vec<Fact> = all_facts.into_iter().collect();
+    let mut emitted = BTreeSet::new();
+    let mut ordered = Vec::with_capacity(remaining.len());
+
+    while !remaining.is_empty() {
+        let before = remaining.len();
+        remaining.retain(|fact| {
+            let deps_met = fact
+                .dependencies()
+                .iter()
+                .all(|dep| emitted.contains(dep));
+            if deps_met {
+                emitted.insert(*fact);
+                ordered.push(*fact);
+                false // remove from remaining
+            } else {
+                true // keep for next pass
             }
-            seen.insert(*fact);
-        }
+        });
+        assert_ne!(
+            remaining.len(),
+            before,
+            "circular dependency detected in Facts"
+        );
     }
 
     ordered
