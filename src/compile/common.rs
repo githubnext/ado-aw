@@ -2000,9 +2000,16 @@ pub async fn compile_shared(
 
     // 8. Setup/teardown jobs, parameters, prepare/finalize steps
     let pr_filters = front_matter.pr_filters();
-    let has_pr_filters = pr_filters.is_some();
     let pipeline_filters = front_matter.pipeline_filters();
-    let has_pipeline_filters = pipeline_filters.is_some();
+    // Base has_*_filters on whether lowering produces actual checks, not just
+    // struct presence. Empty `filters: {}` must not generate a dangling
+    // dependsOn: Setup reference pointing to a job that was never emitted.
+    let has_pr_filters = pr_filters
+        .map(|f| !super::filter_ir::lower_pr_filters(f).is_empty())
+        .unwrap_or(false);
+    let has_pipeline_filters = pipeline_filters
+        .map(|f| !super::filter_ir::lower_pipeline_filters(f).is_empty())
+        .unwrap_or(false);
     let setup_job = generate_setup_job(&front_matter.setup, &pool, pr_filters, pipeline_filters, extensions, ctx)?;
     let teardown_job = generate_teardown_job(&front_matter.teardown, &pool);
     let has_memory = front_matter
