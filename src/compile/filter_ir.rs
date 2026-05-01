@@ -1063,8 +1063,8 @@ fn predicate_to_spec(pred: &Predicate) -> PredicateSpec {
 }
 
 /// Build a `GateSpec` from a gate context and filter checks.
-pub fn build_gate_spec(ctx: GateContext, checks: &[FilterCheck]) -> GateSpec {
-    let facts_set = collect_ordered_facts(checks);
+pub fn build_gate_spec(ctx: GateContext, checks: &[FilterCheck]) -> anyhow::Result<GateSpec> {
+    let facts_set = collect_ordered_facts(checks)?;
 
     let facts: Vec<FactSpec> = facts_set
         .iter()
@@ -1083,7 +1083,7 @@ pub fn build_gate_spec(ctx: GateContext, checks: &[FilterCheck]) -> GateSpec {
         })
         .collect();
 
-    GateSpec {
+    Ok(GateSpec {
         context: GateContextSpec {
             build_reason: ctx.build_reason().into(),
             tag_prefix: ctx.tag_prefix().into(),
@@ -1096,7 +1096,7 @@ pub fn build_gate_spec(ctx: GateContext, checks: &[FilterCheck]) -> GateSpec {
         },
         facts,
         checks: spec_checks,
-    }
+    })
 }
 
 /// Compile filter checks into a bash gate step using an external evaluator
@@ -1106,18 +1106,18 @@ pub fn compile_gate_step_external(
     ctx: GateContext,
     checks: &[FilterCheck],
     evaluator_path: &str,
-) -> String {
+) -> anyhow::Result<String> {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
 
     if checks.is_empty() {
-        return String::new();
+        return Ok(String::new());
     }
 
-    let spec = build_gate_spec(ctx, checks);
-    let spec_json = serde_json::to_string(&spec).expect("gate spec serialization");
+    let spec = build_gate_spec(ctx, checks)?;
+    let spec_json = serde_json::to_string(&spec)?;
     let spec_b64 = STANDARD.encode(spec_json.as_bytes());
 
-    let exports = collect_ado_exports(checks);
+    let exports = collect_ado_exports(checks)?;
 
     let mut step = String::new();
     step.push_str(&format!("- bash: python3 '{}'\n", evaluator_path));
@@ -1134,14 +1134,14 @@ pub fn compile_gate_step_external(
         step.push_str(&format!("    {}: {}\n", env_var, ado_macro));
     }
 
-    step
+    Ok(step)
 }
 
 
 
 /// Collect ADO macro exports needed by the given checks.
-fn collect_ado_exports(checks: &[FilterCheck]) -> Vec<(&'static str, &'static str)> {
-    let facts_set = collect_ordered_facts(checks);
+fn collect_ado_exports(checks: &[FilterCheck]) -> anyhow::Result<Vec<(&'static str, &'static str)>> {
+    let facts_set = collect_ordered_facts(checks)?;
     let mut exports: Vec<(&str, &str)> = Vec::new();
     let mut seen = BTreeSet::new();
 
@@ -1180,7 +1180,7 @@ fn collect_ado_exports(checks: &[FilterCheck]) -> Vec<(&'static str, &'static st
             }
         }
     }
-    exports
+    Ok(exports)
 }
 
 
@@ -1189,7 +1189,7 @@ fn collect_ado_exports(checks: &[FilterCheck]) -> Vec<(&'static str, &'static st
 ///
 /// Uses an explicit topo-sort rather than relying on enum `Ord` ordering,
 /// so the correctness does not depend on variant declaration order.
-fn collect_ordered_facts(checks: &[FilterCheck]) -> Vec<Fact> {
+fn collect_ordered_facts(checks: &[FilterCheck]) -> anyhow::Result<Vec<Fact>> {
     let mut all_facts = BTreeSet::new();
     for check in checks {
         for fact in check.all_required_facts() {
@@ -1217,17 +1217,13 @@ fn collect_ordered_facts(checks: &[FilterCheck]) -> Vec<Fact> {
                 true // keep for next pass
             }
         });
-        // The Fact dependency graph is hardcoded (no user input can create cycles),
-        // so this is unreachable in practice. Use debug_assert to avoid panicking
-        // in the compilation codegen path in release builds.
-        debug_assert_ne!(
-            remaining.len(),
-            before,
-            "circular dependency detected in Facts"
+        anyhow::ensure!(
+            remaining.len() < before,
+            "circular dependency detected in Fact graph — check Fact::dependencies()"
         );
     }
 
-    ordered
+    Ok(ordered)
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -1499,7 +1495,7 @@ mod tests {
 
     #[test]
     fn test_compile_gate_step_empty() {
-        let result = compile_gate_step_external(GateContext::PullRequest, &[], "/tmp/ado-aw-scripts/gate-eval.py");
+        let result = compile_gate_step_external(GateContext::PullRequest, &[], "/tmp/ado-aw-scripts/gate-eval.py").unwrap();
         assert!(result.is_empty());
     }
 
@@ -1513,7 +1509,7 @@ mod tests {
             },
             build_tag_suffix: "title-mismatch",
         }];
-        let result = compile_gate_step_external(GateContext::PullRequest, &checks, "/tmp/ado-aw-scripts/gate-eval.py");
+        let result = compile_gate_step_external(GateContext::PullRequest, &checks, "/tmp/ado-aw-scripts/gate-eval.py").unwrap();
         assert!(result.contains("- bash:"), "should be a bash step");
         assert!(result.contains("GATE_SPEC"), "should include base64 spec in env");
         assert!(result.contains("python3 '/tmp/ado-aw-scripts/gate-eval.py'"), "should reference external evaluator script");
@@ -1531,7 +1527,7 @@ mod tests {
             },
             build_tag_suffix: "title-mismatch",
         }];
-        let result = compile_gate_step_external(GateContext::PullRequest, &checks, "/tmp/ado-aw-scripts/gate-eval.py");
+        let result = compile_gate_step_external(GateContext::PullRequest, &checks, "/tmp/ado-aw-scripts/gate-eval.py").unwrap();
         assert!(result.contains("ADO_BUILD_REASON"), "should export build reason");
         assert!(result.contains("ADO_PR_TITLE"), "should export PR title");
         assert!(result.contains("$(System.PullRequest.Title)"), "should reference ADO macro");
@@ -1547,7 +1543,7 @@ mod tests {
             },
             build_tag_suffix: "source-pipeline-mismatch",
         }];
-        let result = compile_gate_step_external(GateContext::PipelineCompletion, &checks, "/tmp/ado-aw-scripts/gate-eval.py");
+        let result = compile_gate_step_external(GateContext::PipelineCompletion, &checks, "/tmp/ado-aw-scripts/gate-eval.py").unwrap();
         assert!(result.contains("name: pipelineGate"), "should set pipeline gate name");
         assert!(result.contains("Evaluate pipeline filters"), "should set display name");
         assert!(result.contains("ADO_TRIGGERED_BY_PIPELINE"), "should export pipeline macro");
@@ -1563,7 +1559,7 @@ mod tests {
             },
             build_tag_suffix: "draft-mismatch",
         }];
-        let result = compile_gate_step_external(GateContext::PullRequest, &checks, "/tmp/ado-aw-scripts/gate-eval.py");
+        let result = compile_gate_step_external(GateContext::PullRequest, &checks, "/tmp/ado-aw-scripts/gate-eval.py").unwrap();
         assert!(result.contains("ADO_REPO_ID"), "should export repo ID for API calls");
         assert!(result.contains("ADO_PR_ID"), "should export PR ID for API calls");
     }
@@ -1578,7 +1574,7 @@ mod tests {
             },
             build_tag_suffix: "title-mismatch",
         }];
-        let result = compile_gate_step_external(GateContext::PullRequest, &checks, "/tmp/ado-aw-scripts/gate-eval.py");
+        let result = compile_gate_step_external(GateContext::PullRequest, &checks, "/tmp/ado-aw-scripts/gate-eval.py").unwrap();
         // Check export lines only (evaluator script always contains these strings)
         assert!(!result.contains("ADO_REPO_ID:"), "should not export repo ID for title-only");
         assert!(!result.contains("ADO_PR_ID:"), "should not export PR ID for title-only");
@@ -1605,7 +1601,7 @@ mod tests {
                 build_tag_suffix: "labels-mismatch",
             },
         ];
-        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
         assert_eq!(spec.context.build_reason, "PullRequest");
         assert_eq!(spec.context.tag_prefix, "pr-gate");
         assert_eq!(spec.context.step_name, "prGate");
@@ -1630,7 +1626,7 @@ mod tests {
             },
             build_tag_suffix: "title-mismatch",
         }];
-        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
         let json = serde_json::to_string(&spec).unwrap();
         // Should roundtrip
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1660,7 +1656,7 @@ mod tests {
         let diags = validate_pr_filters(&filters);
         assert!(diags.iter().all(|d| d.severity != Severity::Error));
 
-        let step = compile_gate_step_external(GateContext::PullRequest, &checks, "/tmp/ado-aw-scripts/gate-eval.py");
+        let step = compile_gate_step_external(GateContext::PullRequest, &checks, "/tmp/ado-aw-scripts/gate-eval.py").unwrap();
         // Step structure
         assert!(step.contains("ADO_PR_TITLE"));
         assert!(step.contains("ADO_REPO_ID")); // for API-derived facts
@@ -1668,7 +1664,7 @@ mod tests {
         assert!(step.contains("prGate"));
 
         // Spec content
-        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
         assert_eq!(spec.checks.len(), 3);
         assert!(spec.facts.iter().any(|f| f.kind == "pr_title"));
         assert!(spec.facts.iter().any(|f| f.kind == "pr_is_draft"));
@@ -1715,7 +1711,7 @@ mod tests {
             },
             build_tag_suffix: "title-mismatch",
         }];
-        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
         let spec_json = serde_json::to_value(&spec).unwrap();
 
         // Verify structural expectations from schema

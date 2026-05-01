@@ -77,11 +77,13 @@ impl CompilerExtension for TriggerFiltersExtension {
         if let Some(filters) = &self.pr_filters {
             let checks = lower_pr_filters(filters);
             if !checks.is_empty() {
+                // Validation errors are caught by validate() which runs before
+                // setup_steps(). Codegen errors here are internal bugs.
                 steps.push(compile_gate_step_external(
                     GateContext::PullRequest,
                     &checks,
                     GATE_EVAL_PATH,
-                ));
+                ).expect("PR gate step codegen failed — this is a bug"));
             }
         }
 
@@ -93,7 +95,7 @@ impl CompilerExtension for TriggerFiltersExtension {
                     GateContext::PipelineCompletion,
                     &checks,
                     GATE_EVAL_PATH,
-                ));
+                ).expect("pipeline gate step codegen failed — this is a bug"));
             }
         }
 

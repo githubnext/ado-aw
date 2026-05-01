@@ -282,6 +282,7 @@ def main():
     # Acquire facts (dependency-ordered)
     facts = {}
     skip_facts = set()
+    fail_open_facts = set()
     should_run = True
     for fact_spec in spec["facts"]:
         kind = fact_spec["kind"]
@@ -300,6 +301,7 @@ def main():
                 skip_facts.add(kind)
             elif policy == "fail_open":
                 facts[kind] = None
+                fail_open_facts.add(kind)
             else:
                 # fail_closed: gate fails, skip dependent checks
                 facts[kind] = None
@@ -313,6 +315,9 @@ def main():
         required = predicate_facts(check["predicate"])
         if any(f in skip_facts for f in required):
             log(f"  Filter: {name} | Result: SKIPPED (dependency unavailable)")
+            continue
+        if any(f in fail_open_facts for f in required):
+            log(f"  Filter: {name} | Result: PASS (fail-open)")
             continue
         passed = evaluate(check["predicate"], facts)
         if passed:

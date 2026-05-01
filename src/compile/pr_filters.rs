@@ -280,7 +280,7 @@ mod tests {
             ..Default::default()
         };
         let checks = lower_pr_filters(&filters);
-        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
         // Author include + exclude = 2 checks + source + target = 4
         assert_eq!(spec.checks.len(), 4);
         assert!(spec.facts.iter().any(|f| f.kind == "author_email"));
@@ -296,7 +296,7 @@ mod tests {
             ..Default::default()
         };
         let checks = lower_pr_filters(&filters);
-        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
         assert_eq!(spec.context.build_reason, "PullRequest");
         assert_eq!(spec.context.bypass_label, "PR");
     }
@@ -310,7 +310,7 @@ mod tests {
         // Build tags are now in the evaluator, driven by spec. Verify spec content.
         use crate::compile::filter_ir::{build_gate_spec, lower_pr_filters, GateContext};
         let checks = lower_pr_filters(&filters);
-        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
         assert_eq!(spec.context.tag_prefix, "pr-gate");
         assert_eq!(spec.checks[0].tag_suffix, "title-mismatch");
     }
@@ -327,7 +327,7 @@ mod tests {
             ..Default::default()
         };
         let checks = lower_pr_filters(&filters);
-        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
         assert!(spec.facts.iter().any(|f| f.kind == "pr_metadata"), "should require pr_metadata fact");
         assert!(spec.facts.iter().any(|f| f.kind == "pr_labels"), "should require pr_labels fact");
     }
@@ -340,7 +340,7 @@ mod tests {
             ..Default::default()
         };
         let checks = lower_pr_filters(&filters);
-        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
         assert!(!spec.facts.iter().any(|f| f.kind == "pr_metadata"), "should not require pr_metadata for title-only");
     }
 
@@ -355,7 +355,7 @@ mod tests {
             ..Default::default()
         };
         let checks = lower_pr_filters(&filters);
-        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
         let check = &spec.checks[0];
         assert_eq!(check.name, "labels");
         match &check.predicate {
@@ -378,7 +378,7 @@ mod tests {
             ..Default::default()
         };
         let checks = lower_pr_filters(&filters);
-        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
         match &spec.checks[0].predicate {
             PredicateSpec::LabelSetMatch { none_of, .. } => {
                 assert!(none_of.contains(&"do-not-run".to_string()));
@@ -395,7 +395,7 @@ mod tests {
             ..Default::default()
         };
         let checks = lower_pr_filters(&filters);
-        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
         match &spec.checks[0].predicate {
             PredicateSpec::Equals { fact, value } => {
                 assert_eq!(fact, "pr_is_draft");
@@ -418,7 +418,7 @@ mod tests {
             ..Default::default()
         };
         let checks = lower_pr_filters(&filters);
-        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
         match &spec.checks[0].predicate {
             PredicateSpec::FileGlobMatch { include, exclude, .. } => {
                 assert!(include.contains(&"src/**/*.rs".to_string()));
@@ -442,7 +442,7 @@ mod tests {
             ..Default::default()
         };
         let checks = lower_pr_filters(&filters);
-        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
         // Tier 1 fact
         assert!(spec.facts.iter().any(|f| f.kind == "pr_title"), "should include pr_title");
         // Tier 2 facts
@@ -466,7 +466,7 @@ mod tests {
             ..Default::default()
         };
         let checks = lower_pr_filters(&filters);
-        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
         match &spec.checks[0].predicate {
             PredicateSpec::TimeWindow { start, end } => {
                 assert_eq!(start, "09:00");
@@ -485,7 +485,7 @@ mod tests {
             ..Default::default()
         };
         let checks = lower_pr_filters(&filters);
-        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
         match &spec.checks[0].predicate {
             PredicateSpec::NumericRange { min, max, .. } => {
                 assert_eq!(*min, Some(5));
@@ -503,7 +503,7 @@ mod tests {
             ..Default::default()
         };
         let checks = lower_pr_filters(&filters);
-        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
         match &spec.checks[0].predicate {
             PredicateSpec::NumericRange { min, max, .. } => {
                 assert_eq!(*min, None);
@@ -522,7 +522,7 @@ mod tests {
             ..Default::default()
         };
         let checks = lower_pr_filters(&filters);
-        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
         match &spec.checks[0].predicate {
             PredicateSpec::NumericRange { min, max, .. } => {
                 assert_eq!(*min, Some(2));
@@ -543,7 +543,7 @@ mod tests {
             ..Default::default()
         };
         let checks = lower_pr_filters(&filters);
-        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
         match &spec.checks[0].predicate {
             PredicateSpec::ValueInSet { values, .. } => {
                 assert!(values.contains(&"PullRequest".to_string()));
@@ -565,7 +565,7 @@ mod tests {
             ..Default::default()
         };
         let checks = lower_pr_filters(&filters);
-        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
         match &spec.checks[0].predicate {
             PredicateSpec::ValueNotInSet { values, .. } => {
                 assert!(values.contains(&"Schedule".to_string()));
@@ -626,7 +626,7 @@ mod tests {
             ..Default::default()
         };
         let checks = lower_pr_filters(&filters);
-        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
         // Both changed_files and changed_file_count facts should be present
         assert!(spec.facts.iter().any(|f| f.kind == "changed_files"));
         assert!(spec.facts.iter().any(|f| f.kind == "changed_file_count"));
@@ -666,7 +666,7 @@ triggers:
             ..Default::default()
         };
         let checks = lower_pr_filters(&filters);
-        let spec = build_gate_spec(GateContext::PullRequest, &checks);
+        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
         assert!(spec.facts.iter().any(|f| f.kind == "commit_message"), "should include commit_message fact");
         match &spec.checks[0].predicate {
             PredicateSpec::GlobMatch { fact, pattern } => {
