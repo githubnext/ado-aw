@@ -400,7 +400,7 @@ safe-outputs:
     max: 1                             # Maximum per run (default: 1)
 ```
 
-### upload-attachment
+### upload-workitem-attachment
 Uploads a workspace file as an attachment to an Azure DevOps work item.
 
 **Agent parameters:**
@@ -411,7 +411,7 @@ Uploads a workspace file as an attachment to an Azure DevOps work item.
 **Configuration options (front matter):**
 ```yaml
 safe-outputs:
-  upload-attachment:
+  upload-workitem-attachment:
     max-file-size: 5242880       # Maximum file size in bytes (default: 5 MB)
     allowed-extensions: []       # Optional — restrict file types (e.g., [".png", ".pdf"])
     comment-prefix: "[Agent] "   # Optional — prefix prepended to the comment

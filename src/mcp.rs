@@ -27,7 +27,7 @@ use crate::safeoutputs::{
     QueueBuildResult, SubmitPrReviewParams, SubmitPrReviewResult, ToolResult,
     UpdatePrParams, UpdatePrResult,
     UpdateWorkItemParams, UpdateWorkItemResult,
-    UploadAttachmentParams, UploadAttachmentResult,
+    UploadWorkitemAttachmentParams, UploadWorkitemAttachmentResult,
     anyhow_to_mcp_error,
 };
 
@@ -960,21 +960,21 @@ Changes will be applied during safe output processing."
     }
 
     #[tool(
-        name = "upload-attachment",
+        name = "upload-workitem-attachment",
         description = "Upload a file attachment to an Azure DevOps work item. The file will be \
 uploaded and linked during safe output processing. File size and type restrictions may apply."
     )]
-    async fn upload_attachment(
+    async fn upload_workitem_attachment(
         &self,
-        params: Parameters<UploadAttachmentParams>,
+        params: Parameters<UploadWorkitemAttachmentParams>,
     ) -> Result<CallToolResult, McpError> {
         info!(
-            "Tool called: upload-attachment - work item #{} file '{}'",
+            "Tool called: upload-workitem-attachment - work item #{} file '{}'",
             params.0.work_item_id, params.0.file_path
         );
         let mut sanitized = params.0;
         sanitized.comment = sanitized.comment.map(|c| sanitize_text(&c));
-        let result: UploadAttachmentResult = sanitized.try_into()?;
+        let result: UploadWorkitemAttachmentResult = sanitized.try_into()?;
         self.write_safe_output_file(&result).await
             .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
         Ok(CallToolResult::success(vec![Content::text(format!(

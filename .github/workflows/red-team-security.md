@@ -68,7 +68,7 @@ grep -n 'replace\|replace_with_indent' src/compile/standalone.rs src/compile/one
 
 ### Category B: Path Traversal & File System
 
-Audit `src/execute.rs`, `src/tools/create_pr.rs`, `src/tools/memory.rs`, `src/tools/upload_attachment.rs` for:
+Audit `src/execute.rs`, `src/tools/create_pr.rs`, `src/tools/memory.rs`, `src/tools/upload_workitem_attachment.rs` for:
 
 - **Directory traversal**: Are `..` sequences fully blocked in all path inputs? Check safe output file paths, memory file paths, wiki page paths, attachment paths.
 - **Bounding directory escape**: Can the MCP server's bounding directory check be bypassed via symlinks, null bytes, or Unicode normalization?
@@ -79,7 +79,7 @@ Focus files:
 ```bash
 cat src/tools/memory.rs
 cat src/tools/create_pr.rs
-cat src/tools/upload_attachment.rs
+cat src/tools/upload_workitem_attachment.rs
 grep -rn 'Path\|PathBuf\|canonicalize\|starts_with' src/tools/
 grep -rn '\.\./' src/
 ```

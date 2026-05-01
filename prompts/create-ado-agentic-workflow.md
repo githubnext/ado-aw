@@ -277,7 +277,7 @@ tools:
 | `update-work-item` | Update fields on existing work items (each field requires opt-in) | ✅ |
 | `comment-on-work-item` | Add comments to work items (requires `target` scoping) | ✅ |
 | `link-work-items` | Link two work items (parent/child, related, etc.) | ✅ |
-| `upload-attachment` | Upload a workspace file to a work item | ✅ |
+| `upload-workitem-attachment` | Upload a workspace file to a work item | ✅ |
 | **Pull Requests** | | |
 | `create-pull-request` | Create PRs from agent code changes | ✅ |
 | `add-pr-comment` | Add a comment thread to a PR | ✅ |
