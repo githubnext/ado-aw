@@ -705,7 +705,7 @@ Use 'self' for the pipeline's own repository, or a repository alias from the che
         };
 
         // Create the result with patch file reference and integrity hash
-        let result = CreatePrResult::new_with_hash(
+        let result = CreatePrResult::new(
             sanitized.title.clone(),
             sanitized.description.clone(),
             source_branch,
