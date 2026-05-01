@@ -61,6 +61,53 @@ pub struct ExecutionContext {
     pub agent_stats: Option<crate::agent_stats::AgentStats>,
     /// When true, executors validate inputs but skip network calls
     pub dry_run: bool,
+
+    // ── ADO build variables (from BUILD_*/SYSTEM_*) ───────────────────────
+    /// Numeric build ID (`BUILD_BUILDID`)
+    pub build_id: Option<u64>,
+    /// Human-readable build number (`BUILD_BUILDNUMBER`)
+    #[allow(dead_code)]
+    pub build_number: Option<String>,
+    /// What kicked off this run, e.g. `Manual`, `Schedule`, `ResourceTrigger`,
+    /// `PullRequest` (`BUILD_REASON`)
+    pub build_reason: Option<String>,
+    /// Pipeline definition name (`BUILD_DEFINITIONNAME`)
+    #[allow(dead_code)]
+    pub definition_name: Option<String>,
+    /// Full source ref, e.g. `refs/heads/main` (`BUILD_SOURCEBRANCH`)
+    #[allow(dead_code)]
+    pub source_branch: Option<String>,
+    /// Short branch name, e.g. `main` (`BUILD_SOURCEBRANCHNAME`)
+    #[allow(dead_code)]
+    pub source_branch_name: Option<String>,
+    /// Source commit SHA (`BUILD_SOURCEVERSION`)
+    #[allow(dead_code)]
+    pub source_version: Option<String>,
+
+    // ── ResourceTrigger upstream-pipeline variables ───────────────────────
+    /// Upstream build ID when triggered by another pipeline
+    /// (`BUILD_TRIGGEREDBY_BUILDID`)
+    #[allow(dead_code)]
+    pub triggered_by_build_id: Option<String>,
+    /// Upstream pipeline definition name (`BUILD_TRIGGEREDBY_DEFINITIONNAME`)
+    pub triggered_by_definition_name: Option<String>,
+    /// Upstream pipeline build number (`BUILD_TRIGGEREDBY_BUILDNUMBER`)
+    #[allow(dead_code)]
+    pub triggered_by_build_number: Option<String>,
+    /// Project hosting the upstream pipeline (`BUILD_TRIGGEREDBY_PROJECTID`)
+    #[allow(dead_code)]
+    pub triggered_by_project_id: Option<String>,
+
+    // ── PullRequest variables ─────────────────────────────────────────────
+    /// PR ID when `BUILD_REASON=PullRequest` (`SYSTEM_PULLREQUEST_PULLREQUESTID`)
+    #[allow(dead_code)]
+    pub pull_request_id: Option<String>,
+    /// PR source branch (`SYSTEM_PULLREQUEST_SOURCEBRANCH`)
+    #[allow(dead_code)]
+    pub pull_request_source_branch: Option<String>,
+    /// PR target branch (`SYSTEM_PULLREQUEST_TARGETBRANCH`)
+    #[allow(dead_code)]
+    pub pull_request_target_branch: Option<String>,
 }
 
 impl ExecutionContext {
@@ -80,12 +127,19 @@ impl ExecutionContext {
     }
 }
 
-impl Default for ExecutionContext {
-    fn default() -> Self {
+impl ExecutionContext {
+    /// Build an `ExecutionContext` from an arbitrary env-var lookup function.
+    ///
+    /// `Default::default()` calls this with `|k| std::env::var(k).ok()`. Tests
+    /// can pass a closure backed by a `HashMap` so they exercise field
+    /// population without mutating the (process-global) environment.
+    pub fn from_env_lookup<F>(env: F) -> Self
+    where
+        F: Fn(&str) -> Option<String>,
+    {
         // Try AZURE_DEVOPS_ORG_URL first, then fall back to Azure DevOps built-in var
-        let ado_org_url = std::env::var("AZURE_DEVOPS_ORG_URL")
-            .ok()
-            .or_else(|| std::env::var("SYSTEM_TEAMFOUNDATIONCOLLECTIONURI").ok());
+        let ado_org_url = env("AZURE_DEVOPS_ORG_URL")
+            .or_else(|| env("SYSTEM_TEAMFOUNDATIONCOLLECTIONURI"));
 
         // Extract organization name from URL (e.g., "https://dev.azure.com/myorg/" -> "myorg")
         let ado_organization = ado_org_url.as_ref().and_then(|url| {
@@ -97,26 +151,50 @@ impl Default for ExecutionContext {
         });
 
         // Source directory is where git repos are checked out (BUILD_SOURCESDIRECTORY)
-        let source_directory = std::env::var("BUILD_SOURCESDIRECTORY")
+        let source_directory = env("BUILD_SOURCESDIRECTORY")
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default());
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
         Self {
             ado_org_url,
             ado_organization,
-            ado_project: std::env::var("SYSTEM_TEAMPROJECT").ok(),
-            access_token: std::env::var("SYSTEM_ACCESSTOKEN")
-                .ok()
-                .or_else(|| std::env::var("AZURE_DEVOPS_EXT_PAT").ok()),
+            ado_project: env("SYSTEM_TEAMPROJECT"),
+            access_token: env("SYSTEM_ACCESSTOKEN").or_else(|| env("AZURE_DEVOPS_EXT_PAT")),
             working_directory: std::env::current_dir().unwrap_or_default(),
             source_directory,
             tool_configs: HashMap::new(),
-            repository_id: std::env::var("BUILD_REPOSITORY_ID").ok(),
-            repository_name: std::env::var("BUILD_REPOSITORY_NAME").ok(),
+            repository_id: env("BUILD_REPOSITORY_ID"),
+            repository_name: env("BUILD_REPOSITORY_NAME"),
             allowed_repositories: HashMap::new(),
             agent_stats: None,
             dry_run: false,
+
+            // Build identification
+            build_id: env("BUILD_BUILDID").and_then(|s| s.parse().ok()),
+            build_number: env("BUILD_BUILDNUMBER"),
+            build_reason: env("BUILD_REASON"),
+            definition_name: env("BUILD_DEFINITIONNAME"),
+            source_branch: env("BUILD_SOURCEBRANCH"),
+            source_branch_name: env("BUILD_SOURCEBRANCHNAME"),
+            source_version: env("BUILD_SOURCEVERSION"),
+
+            // ResourceTrigger upstream-pipeline variables
+            triggered_by_build_id: env("BUILD_TRIGGEREDBY_BUILDID"),
+            triggered_by_definition_name: env("BUILD_TRIGGEREDBY_DEFINITIONNAME"),
+            triggered_by_build_number: env("BUILD_TRIGGEREDBY_BUILDNUMBER"),
+            triggered_by_project_id: env("BUILD_TRIGGEREDBY_PROJECTID"),
+
+            // Pull request variables
+            pull_request_id: env("SYSTEM_PULLREQUEST_PULLREQUESTID"),
+            pull_request_source_branch: env("SYSTEM_PULLREQUEST_SOURCEBRANCH"),
+            pull_request_target_branch: env("SYSTEM_PULLREQUEST_TARGETBRANCH"),
         }
+    }
+}
+
+impl Default for ExecutionContext {
+    fn default() -> Self {
+        Self::from_env_lookup(|k| std::env::var(k).ok())
     }
 }
 
@@ -589,5 +667,109 @@ mod tests {
             "Pipeline command should be wrapped in backticks; got: {}",
             config.value
         );
+    }
+
+    // ── ADO build variable capture tests (use from_env_lookup so they
+    //    don't mutate the process-global environment) ─────────────────────
+
+    fn env_from(map: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let owned: HashMap<String, String> = map
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |k| owned.get(k).cloned()
+    }
+
+    #[test]
+    fn test_from_env_lookup_populates_build_fields() {
+        let ctx = ExecutionContext::from_env_lookup(env_from(&[
+            ("BUILD_BUILDID", "12345"),
+            ("BUILD_BUILDNUMBER", "20240101.1"),
+            ("BUILD_REASON", "Manual"),
+            ("BUILD_DEFINITIONNAME", "My Pipeline"),
+            ("BUILD_SOURCEBRANCH", "refs/heads/main"),
+            ("BUILD_SOURCEBRANCHNAME", "main"),
+            ("BUILD_SOURCEVERSION", "abc1234"),
+        ]));
+        assert_eq!(ctx.build_id, Some(12345));
+        assert_eq!(ctx.build_number.as_deref(), Some("20240101.1"));
+        assert_eq!(ctx.build_reason.as_deref(), Some("Manual"));
+        assert_eq!(ctx.definition_name.as_deref(), Some("My Pipeline"));
+        assert_eq!(ctx.source_branch.as_deref(), Some("refs/heads/main"));
+        assert_eq!(ctx.source_branch_name.as_deref(), Some("main"));
+        assert_eq!(ctx.source_version.as_deref(), Some("abc1234"));
+    }
+
+    #[test]
+    fn test_from_env_lookup_build_id_parses_numeric() {
+        let ctx = ExecutionContext::from_env_lookup(env_from(&[("BUILD_BUILDID", "987654")]));
+        assert_eq!(ctx.build_id, Some(987654));
+    }
+
+    #[test]
+    fn test_from_env_lookup_build_id_none_for_non_numeric() {
+        let ctx = ExecutionContext::from_env_lookup(env_from(&[("BUILD_BUILDID", "not-a-number")]));
+        assert!(ctx.build_id.is_none());
+    }
+
+    #[test]
+    fn test_from_env_lookup_build_id_none_when_unset() {
+        let ctx = ExecutionContext::from_env_lookup(env_from(&[]));
+        assert!(ctx.build_id.is_none());
+    }
+
+    #[test]
+    fn test_from_env_lookup_populates_triggered_by_fields() {
+        let ctx = ExecutionContext::from_env_lookup(env_from(&[
+            ("BUILD_REASON", "ResourceTrigger"),
+            ("BUILD_TRIGGEREDBY_BUILDID", "42"),
+            ("BUILD_TRIGGEREDBY_DEFINITIONNAME", "Upstream Build"),
+            ("BUILD_TRIGGEREDBY_BUILDNUMBER", "20240101.7"),
+            ("BUILD_TRIGGEREDBY_PROJECTID", "proj-guid"),
+        ]));
+        assert_eq!(ctx.build_reason.as_deref(), Some("ResourceTrigger"));
+        assert_eq!(ctx.triggered_by_build_id.as_deref(), Some("42"));
+        assert_eq!(
+            ctx.triggered_by_definition_name.as_deref(),
+            Some("Upstream Build")
+        );
+        assert_eq!(ctx.triggered_by_build_number.as_deref(), Some("20240101.7"));
+        assert_eq!(ctx.triggered_by_project_id.as_deref(), Some("proj-guid"));
+    }
+
+    #[test]
+    fn test_from_env_lookup_triggered_by_none_when_unset() {
+        let ctx = ExecutionContext::from_env_lookup(env_from(&[]));
+        assert!(ctx.triggered_by_build_id.is_none());
+        assert!(ctx.triggered_by_definition_name.is_none());
+        assert!(ctx.triggered_by_build_number.is_none());
+        assert!(ctx.triggered_by_project_id.is_none());
+    }
+
+    #[test]
+    fn test_from_env_lookup_populates_pull_request_fields() {
+        let ctx = ExecutionContext::from_env_lookup(env_from(&[
+            ("BUILD_REASON", "PullRequest"),
+            ("SYSTEM_PULLREQUEST_PULLREQUESTID", "789"),
+            ("SYSTEM_PULLREQUEST_SOURCEBRANCH", "refs/heads/feature"),
+            ("SYSTEM_PULLREQUEST_TARGETBRANCH", "refs/heads/main"),
+        ]));
+        assert_eq!(ctx.pull_request_id.as_deref(), Some("789"));
+        assert_eq!(
+            ctx.pull_request_source_branch.as_deref(),
+            Some("refs/heads/feature")
+        );
+        assert_eq!(
+            ctx.pull_request_target_branch.as_deref(),
+            Some("refs/heads/main")
+        );
+    }
+
+    #[test]
+    fn test_from_env_lookup_pull_request_none_when_unset() {
+        let ctx = ExecutionContext::from_env_lookup(env_from(&[]));
+        assert!(ctx.pull_request_id.is_none());
+        assert!(ctx.pull_request_source_branch.is_none());
+        assert!(ctx.pull_request_target_branch.is_none());
     }
 }

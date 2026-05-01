@@ -135,9 +135,11 @@ impl Executor for AddBuildTagResult {
 
         // 2b. Scope check: by default only the current build can be tagged
         if !config.allow_any_build {
-            let current_build_id: Option<i32> = std::env::var("BUILD_BUILDID")
-                .ok()
-                .and_then(|s| s.parse().ok());
+            // Pulled from ctx (sourced from BUILD_BUILDID); narrowed to i32 to
+            // match the agent-supplied build_id type.
+            let current_build_id: Option<i32> = ctx
+                .build_id
+                .and_then(|id| i32::try_from(id).ok());
             if let Some(current_id) = current_build_id {
                 if self.build_id != current_id {
                     return Ok(ExecutionResult::failure(format!(
@@ -147,7 +149,7 @@ impl Executor for AddBuildTagResult {
                     )));
                 }
             }
-            // If BUILD_BUILDID is not set (e.g. local execution), allow any build
+            // If build_id is not set (e.g. local execution), allow any build
         }
 
         // 3. Apply tag prefix if configured

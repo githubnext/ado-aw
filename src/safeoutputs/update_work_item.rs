@@ -749,6 +749,7 @@ target: 42
             allowed_repositories: HashMap::new(),
             agent_stats: None,
             dry_run: false,
+            ..Default::default()
         };
 
         let exec_result = result.execute_sanitized(&ctx).await;
@@ -800,6 +801,7 @@ target: 42
             allowed_repositories: HashMap::new(),
             agent_stats: None,
             dry_run: false,
+            ..Default::default()
         };
 
         let exec_result = result.execute_sanitized(&ctx).await.unwrap();
@@ -847,6 +849,7 @@ target: 42
             allowed_repositories: HashMap::new(),
             agent_stats: None,
             dry_run: false,
+            ..Default::default()
         };
 
         let exec_result = result.execute_sanitized(&ctx).await.unwrap();
@@ -896,6 +899,7 @@ target: 42
             allowed_repositories: HashMap::new(),
             agent_stats: None,
             dry_run: false,
+            ..Default::default()
         };
 
         let exec_result = result.execute_sanitized(&ctx).await.unwrap();
