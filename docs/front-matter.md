@@ -181,3 +181,23 @@ errors for impossible or conflicting combinations:
 
 Errors cause compilation to fail. Fix the conflicting filter configuration
 before recompiling.
+
+## Filter Behavior Notes
+
+### Time Windows
+
+Time windows use **half-open intervals**: `[start, end)`. A window of
+`start: "09:00", end: "17:00"` matches from 09:00 up to but **not
+including** 17:00. A build triggered at exactly 17:00 UTC will not match.
+
+Overnight windows are supported: `start: "22:00", end: "06:00"` matches
+from 22:00 through midnight to 05:59.
+
+All times are evaluated in **UTC**.
+
+### Changed Files
+
+The `changed-files` filter checks the list of files modified in the PR.
+If the PR has no changed files (empty diff), the filter will not match
+and the build will be cancelled. Use an explicit `include: ["*"]` if you
+want the filter to match any non-empty set of changes.
