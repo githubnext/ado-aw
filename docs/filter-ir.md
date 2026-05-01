@@ -46,8 +46,8 @@ execution. Each fact has:
 | Property | Type | Purpose |
 |----------|------|---------|
 | `dependencies()` | `&[Fact]` | Facts that must be acquired first |
-| `shell_var()` | `&str` | Shell variable the value is stored in |
-| `acquisition_bash()` | `String` | Bash snippet that acquires the value |
+| `kind()` | `&str` | Unique identifier used in the serialized spec |
+| `ado_exports()` | `Vec<(&str, &str)>` | ADO macro → env var mappings for the bash shim |
 | `failure_policy()` | `FailurePolicy` | What happens if acquisition fails |
 | `is_pipeline_var()` | `bool` | Whether this is a free ADO pipeline variable |
 

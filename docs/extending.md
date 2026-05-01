@@ -75,7 +75,7 @@ gate steps via a three-pass IR pipeline:
 To add a new filter type:
 
 1. **Add a `Fact` variant** (if the filter needs a new data source) — implement
-   `dependencies()`, `shell_var()`, `acquisition_bash()`, and
+   `dependencies()`, `kind()`, `ado_exports()`, and
    `failure_policy()` on the new variant
 2. **Add a `Predicate` variant** (if the filter needs a new test shape) —
    implement the codegen match arm in `emit_predicate_check()`

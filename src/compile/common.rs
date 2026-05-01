@@ -2040,6 +2040,23 @@ pub async fn compile_shared(
     let pr_expression = pr_filters.and_then(|f| f.expression.as_deref());
     let pipeline_expression = pipeline_filters.and_then(|f| f.expression.as_deref());
     let expression = pr_expression.or(pipeline_expression);
+
+    // Validate expression escape hatch against injection
+    if let Some(expr) = expression {
+        if crate::validate::contains_template_marker(expr) {
+            anyhow::bail!(
+                "Filter expression contains template marker '{{{{' which could cause injection. Found: '{}'",
+                expr
+            );
+        }
+        if crate::validate::contains_pipeline_command(expr) {
+            anyhow::bail!(
+                "Filter expression contains pipeline command ('##vso[' or '##[') which is not allowed. Found: '{}'",
+                expr
+            );
+        }
+    }
+
     let agentic_depends_on = generate_agentic_depends_on(
         &front_matter.setup,
         has_pr_filters,

@@ -106,129 +106,6 @@ impl Fact {
         }
     }
 
-    /// Shell variable name this fact is stored in.
-    pub fn shell_var(&self) -> &'static str {
-        match self {
-            Fact::PrTitle => "TITLE",
-            Fact::AuthorEmail => "AUTHOR",
-            Fact::SourceBranch => "SOURCE_BRANCH",
-            Fact::TargetBranch => "TARGET_BRANCH",
-            Fact::CommitMessage => "COMMIT_MSG",
-            Fact::BuildReason => "REASON",
-            Fact::TriggeredByPipeline => "SOURCE_PIPELINE",
-            Fact::TriggeringBranch => "TRIGGER_BRANCH",
-            Fact::PrMetadata => "PR_DATA",
-            Fact::PrIsDraft => "IS_DRAFT",
-            Fact::PrLabels => "PR_LABELS",
-            Fact::ChangedFiles => "CHANGED_FILES",
-            Fact::ChangedFileCount => "FILE_COUNT",
-            Fact::CurrentUtcMinutes => "CURRENT_MINUTES",
-        }
-    }
-
-    /// Bash snippet to acquire this fact. Indented with 4 spaces for
-    /// embedding inside the gate step.
-    pub fn acquisition_bash(&self) -> String {
-        match self {
-            // Pipeline variables — simple assignment from ADO macro
-            Fact::PrTitle => "    TITLE=\"$(System.PullRequest.Title)\"".into(),
-            Fact::AuthorEmail => "    AUTHOR=\"$(Build.RequestedForEmail)\"".into(),
-            Fact::SourceBranch => {
-                "    SOURCE_BRANCH=\"$(System.PullRequest.SourceBranch)\"".into()
-            }
-            Fact::TargetBranch => {
-                "    TARGET_BRANCH=\"$(System.PullRequest.TargetBranch)\"".into()
-            }
-            Fact::CommitMessage => "    COMMIT_MSG=\"$(Build.SourceVersionMessage)\"".into(),
-            Fact::BuildReason => "    REASON=\"$(Build.Reason)\"".into(),
-            Fact::TriggeredByPipeline => {
-                "    SOURCE_PIPELINE=\"$(Build.TriggeredBy.DefinitionName)\"".into()
-            }
-            Fact::TriggeringBranch => "    TRIGGER_BRANCH=\"$(Build.SourceBranch)\"".into(),
-
-            // REST API — fetch full PR metadata
-            Fact::PrMetadata => concat!(
-                "    # Fetch PR metadata via REST API\n",
-                "    PR_ID=\"$(System.PullRequest.PullRequestId)\"\n",
-                "    ORG_URL=\"$(System.CollectionUri)\"\n",
-                "    PROJECT=\"$(System.TeamProject)\"\n",
-                "    REPO_ID=\"$(Build.Repository.ID)\"\n",
-                "    PR_DATA=$(curl -s \\\n",
-                "      -H \"Authorization: Bearer $SYSTEM_ACCESSTOKEN\" \\\n",
-                "      \"${ORG_URL}${PROJECT}/_apis/git/repositories/${REPO_ID}/pullRequests/${PR_ID}?api-version=7.1\")\n",
-                "    if [ -z \"$PR_DATA\" ] || echo \"$PR_DATA\" | python3 -c \"import sys,json; json.load(sys.stdin)\" 2>/dev/null; [ $? -ne 0 ] 2>/dev/null; then\n",
-                "      echo \"##[warning]Failed to fetch PR data from API — skipping API-based filters\"\n",
-                "    fi",
-            )
-            .into(),
-
-            // Extract isDraft from PR metadata
-            Fact::PrIsDraft => concat!(
-                "    IS_DRAFT=$(echo \"$PR_DATA\" | python3 -c ",
-                "\"import sys,json; print(str(json.load(sys.stdin).get('isDraft',False)).lower())\" ",
-                "2>/dev/null || echo 'unknown')",
-            )
-            .into(),
-
-            // Extract labels from PR metadata
-            Fact::PrLabels => concat!(
-                "    # Extract PR labels\n",
-                "    PR_LABELS=$(echo \"$PR_DATA\" | python3 -c ",
-                "\"import sys,json; data=json.load(sys.stdin); print('\\n'.join(l.get('name','') for l in data.get('labels',[])))\" ",
-                "2>/dev/null || echo '')\n",
-                "    echo \"PR labels: $PR_LABELS\"",
-            )
-            .into(),
-
-            // Changed files via iterations API
-            Fact::ChangedFiles => concat!(
-                "    # Fetch changed files via PR iterations API\n",
-                "    if [ -z \"${PR_ID:-}\" ]; then\n",
-                "      PR_ID=\"$(System.PullRequest.PullRequestId)\"\n",
-                "      ORG_URL=\"$(System.CollectionUri)\"\n",
-                "      PROJECT=\"$(System.TeamProject)\"\n",
-                "      REPO_ID=\"$(Build.Repository.ID)\"\n",
-                "    fi\n",
-                "    ITERATIONS=$(curl -s \\\n",
-                "      -H \"Authorization: Bearer $SYSTEM_ACCESSTOKEN\" \\\n",
-                "      \"${ORG_URL}${PROJECT}/_apis/git/repositories/${REPO_ID}/pullRequests/${PR_ID}/iterations?api-version=7.1\")\n",
-                "    LAST_ITER=$(echo \"$ITERATIONS\" | python3 -c \"import sys,json; iters=json.load(sys.stdin).get('value',[]); print(iters[-1]['id'] if iters else '')\" 2>/dev/null || echo '')\n",
-                "    if [ -n \"$LAST_ITER\" ]; then\n",
-                "      CHANGES=$(curl -s \\\n",
-                "        -H \"Authorization: Bearer $SYSTEM_ACCESSTOKEN\" \\\n",
-                "        \"${ORG_URL}${PROJECT}/_apis/git/repositories/${REPO_ID}/pullRequests/${PR_ID}/iterations/${LAST_ITER}/changes?api-version=7.1\")\n",
-                "      CHANGED_FILES=$(echo \"$CHANGES\" | python3 -c \"\n",
-                "import sys, json\n",
-                "data = json.load(sys.stdin)\n",
-                "for entry in data.get('changeEntries', []):\n",
-                "    item = entry.get('item', {})\n",
-                "    path = item.get('path', '')\n",
-                "    if path:\n",
-                "        print(path.lstrip('/'))\n",
-                "\" 2>/dev/null || echo '')\n",
-                "    else\n",
-                "      CHANGED_FILES=''\n",
-                "      echo \"##[warning]Could not determine PR iterations for changed-files filter\"\n",
-                "    fi\n",
-                "    echo \"Changed files: $(echo \"$CHANGED_FILES\" | head -20)\"",
-            )
-            .into(),
-
-            // Count from changed files data
-            Fact::ChangedFileCount => {
-                "    FILE_COUNT=$(echo \"$CHANGED_FILES\" | grep -c . || echo '0')\n    echo \"Changed file count: $FILE_COUNT\"".into()
-            }
-
-            // Current UTC time in minutes
-            Fact::CurrentUtcMinutes => concat!(
-                "    CURRENT_HOUR=$(date -u +%H)\n",
-                "    CURRENT_MIN=$(date -u +%M)\n",
-                "    CURRENT_MINUTES=$((CURRENT_HOUR * 60 + CURRENT_MIN))",
-            )
-            .into(),
-        }
-    }
-
     /// What to do if acquisition fails at runtime.
     pub fn failure_policy(&self) -> FailurePolicy {
         match self {
@@ -910,7 +787,6 @@ pub struct GateContextSpec {
 /// Serialized fact acquisition descriptor.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct FactSpec {
-    pub id: String,
     pub kind: String,
     pub failure_policy: String,
 }
@@ -1141,7 +1017,6 @@ pub fn build_gate_spec(ctx: GateContext, checks: &[FilterCheck]) -> GateSpec {
     let facts: Vec<FactSpec> = facts_set
         .iter()
         .map(|f| FactSpec {
-            id: f.kind().into(),
             kind: f.kind().into(),
             failure_policy: f.failure_policy().as_str().into(),
         })
@@ -1502,7 +1377,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fact_shell_vars_are_unique() {
+    fn test_fact_kinds_are_unique() {
         let all_facts = [
             Fact::PrTitle,
             Fact::AuthorEmail,
@@ -1519,9 +1394,9 @@ mod tests {
             Fact::ChangedFileCount,
             Fact::CurrentUtcMinutes,
         ];
-        let vars: BTreeSet<&str> =
-            all_facts.iter().map(|f| f.shell_var()).collect();
-        assert_eq!(vars.len(), all_facts.len(), "shell variable names must be unique");
+        let kinds: BTreeSet<&str> =
+            all_facts.iter().map(|f| f.kind()).collect();
+        assert_eq!(kinds.len(), all_facts.len(), "fact kind strings must be unique");
     }
 
     // ─── Lowering tests ────────────────────────────────────────────────
@@ -1812,8 +1687,8 @@ mod tests {
         }];
         let result = compile_gate_step_external(GateContext::PullRequest, &checks, "/tmp/ado-aw-scripts/gate-eval.py");
         // Check export lines only (evaluator script always contains these strings)
-        assert!(!result.contains("export ADO_REPO_ID"), "should not export repo ID for title-only");
-        assert!(!result.contains("export ADO_PR_ID"), "should not export PR ID for title-only");
+        assert!(!result.contains("ADO_REPO_ID:"), "should not export repo ID for title-only");
+        assert!(!result.contains("ADO_PR_ID:"), "should not export PR ID for title-only");
     }
 
     #[test]
@@ -1958,6 +1833,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Writes to source tree — run manually with `cargo test test_write_schema -- --ignored`
     fn test_write_schema_to_scripts() {
         // Generate schema and write to scripts/ for distribution
         let schema = generate_gate_spec_schema();

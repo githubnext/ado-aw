@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 FACT_DEPS = {
     "pr_is_draft": ["pr_metadata"],
     "pr_labels": ["pr_metadata"],
+    "changed_file_count": ["changed_files"],
 }
 
 # ─── Fact acquisition ────────────────────────────────────────────────────────
@@ -275,23 +276,22 @@ def main():
     facts = {}
     skip_facts = set()
     for fact_spec in spec["facts"]:
-        fid = fact_spec["id"]
         kind = fact_spec["kind"]
         policy = fact_spec.get("failure_policy", "fail_closed")
         deps = FACT_DEPS.get(kind, [])
         if any(d in skip_facts for d in deps):
-            skip_facts.add(fid)
-            log(f"  Fact [{fid}]: skipped (dependency unavailable)")
+            skip_facts.add(kind)
+            log(f"  Fact [{kind}]: skipped (dependency unavailable)")
             continue
         try:
-            facts[fid] = acquire_fact(kind, facts)
-            log(f"  Fact [{fid}]: acquired")
+            facts[kind] = acquire_fact(kind, facts)
+            log(f"  Fact [{kind}]: acquired")
         except Exception as e:
-            log(f"##[warning]Fact [{fid}]: acquisition failed ({e})")
+            log(f"##[warning]Fact [{kind}]: acquisition failed ({e})")
             if policy == "skip_dependents":
-                skip_facts.add(fid)
+                skip_facts.add(kind)
             elif policy == "fail_open":
-                facts[fid] = None
+                facts[kind] = None
             else:
                 facts[fid] = None
 
