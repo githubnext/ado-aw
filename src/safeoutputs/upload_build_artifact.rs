@@ -340,11 +340,16 @@ impl Executor for UploadBuildArtifactResult {
         }
 
         // Validate file extension against allowed-extensions (if configured).
+        // Uses Path::extension() for a precise match rather than suffix
+        // matching on the full path — this prevents "log" from matching
+        // filenames like "catalog" when the operator omits the leading dot.
         if !config.allowed_extensions.is_empty() {
+            let file_ext = std::path::Path::new(&self.file_path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
             let has_valid_ext = config.allowed_extensions.iter().any(|ext| {
-                self.file_path
-                    .to_lowercase()
-                    .ends_with(&ext.to_lowercase())
+                ext.trim_start_matches('.').eq_ignore_ascii_case(file_ext)
             });
             if !has_valid_ext {
                 return Ok(ExecutionResult::failure(format!(
@@ -414,9 +419,6 @@ impl Executor for UploadBuildArtifactResult {
             )));
         }
 
-        // Read the file bytes for upload.
-        let file_bytes = std::fs::read(&canonical).context("Failed to read file contents")?;
-
         if ctx.dry_run {
             return Ok(ExecutionResult::success(format!(
                 "[dry-run] would attach '{}' ({} bytes) as artifact '{}' to build #{}{}",
@@ -427,6 +429,10 @@ impl Executor for UploadBuildArtifactResult {
                 if self.build_id.is_none() { " (current build)" } else { "" }
             )));
         }
+
+        // Read the file bytes for upload (after the dry-run guard to avoid
+        // reading up to 50 MB into memory only to discard it).
+        let file_bytes = std::fs::read(&canonical).context("Failed to read file contents")?;
 
         // Resolve the ADO API context (org URL, project, token).
         let org_url = ctx
