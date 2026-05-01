@@ -102,7 +102,13 @@ def _fetch_pr_metadata():
 
 
 def _fetch_changed_files():
-    """Fetch changed files via PR iterations API."""
+    """Fetch changed files via PR iterations API.
+
+    Returns the files changed in the *last iteration* (latest push) of the PR.
+    This reflects the current diff against the target branch, not the cumulative
+    history of all pushes. Files added in earlier iterations and later removed
+    will NOT appear in this list.
+    """
     from urllib.request import Request, urlopen
     token = os.environ.get("SYSTEM_ACCESSTOKEN", "")
     org_url = os.environ.get("ADO_COLLECTION_URI", "")

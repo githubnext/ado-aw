@@ -1198,10 +1198,10 @@ pub fn generate_setup_job(
     let has_gate = pr_filters.is_some() || pipeline_filters.is_some();
 
     // Collect setup_steps from ALL extensions
-    let ext_setup_steps: Vec<String> = extensions
-        .iter()
-        .flat_map(|ext| ext.setup_steps(ctx))
-        .collect();
+    let mut ext_setup_steps: Vec<String> = Vec::new();
+    for ext in extensions {
+        ext_setup_steps.extend(ext.setup_steps(ctx)?);
+    }
     let has_ext_setup = !ext_setup_steps.is_empty();
 
     if setup_steps.is_empty() && !has_gate && !has_ext_setup {

@@ -9,7 +9,7 @@
 //! entirely. Cancelled builds are invisible to `DownloadPipelineArtifact@2`,
 //! naturally preserving the cache-memory artifact chain.
 
-use super::types::{PrFilters, PrTriggerConfig};
+use super::types::PrTriggerConfig;
 
 // ─── Native ADO PR trigger ──────────────────────────────────────────────────
 

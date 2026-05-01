@@ -213,12 +213,15 @@ pub enum Predicate {
 
     /// Logical AND — all must pass.
     /// Not yet produced by lowering; reserved for future compound filters.
+    #[allow(dead_code)]
     And(Vec<Predicate>),
     /// Logical OR — at least one must pass.
     /// Not yet produced by lowering; reserved for future compound filters.
+    #[allow(dead_code)]
     Or(Vec<Predicate>),
     /// Logical NOT — inner must fail.
     /// Not yet produced by lowering; reserved for future compound filters.
+    #[allow(dead_code)]
     Not(Box<Predicate>),
 }
 

@@ -258,8 +258,8 @@ pub trait CompilerExtension {
     /// these steps run in the Setup job (before the Execution job starts).
     /// Used by extensions that need to run gate logic or pre-activation
     /// checks before the agent is launched.
-    fn setup_steps(&self, _ctx: &CompileContext) -> Vec<String> {
-        vec![]
+    fn setup_steps(&self, _ctx: &CompileContext) -> Result<Vec<String>> {
+        Ok(vec![])
     }
 
     /// MCPG server entries this extension contributes.
@@ -513,7 +513,7 @@ macro_rules! extension_enum {
             fn prepare_steps(&self) -> Vec<String> {
                 match self { $( $Enum::$Variant(e) => e.prepare_steps(), )+ }
             }
-            fn setup_steps(&self, ctx: &CompileContext) -> Vec<String> {
+            fn setup_steps(&self, ctx: &CompileContext) -> Result<Vec<String>> {
                 match self { $( $Enum::$Variant(e) => e.setup_steps(ctx), )+ }
             }
             fn mcpg_servers(&self, ctx: &CompileContext) -> Result<Vec<(String, McpgServerConfig)>> {

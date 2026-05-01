@@ -59,7 +59,7 @@ impl CompilerExtension for TriggerFiltersExtension {
         ExtensionPhase::Tool
     }
 
-    fn setup_steps(&self, _ctx: &CompileContext) -> Vec<String> {
+    fn setup_steps(&self, _ctx: &CompileContext) -> Result<Vec<String>> {
         let version = env!("CARGO_PKG_VERSION");
         let mut steps = Vec::new();
 
@@ -77,13 +77,11 @@ impl CompilerExtension for TriggerFiltersExtension {
         if let Some(filters) = &self.pr_filters {
             let checks = lower_pr_filters(filters);
             if !checks.is_empty() {
-                // Validation errors are caught by validate() which runs before
-                // setup_steps(). Codegen errors here are internal bugs.
                 steps.push(compile_gate_step_external(
                     GateContext::PullRequest,
                     &checks,
                     GATE_EVAL_PATH,
-                ).expect("PR gate step codegen failed — this is a bug"));
+                )?);
             }
         }
 
@@ -95,11 +93,11 @@ impl CompilerExtension for TriggerFiltersExtension {
                     GateContext::PipelineCompletion,
                     &checks,
                     GATE_EVAL_PATH,
-                ).expect("pipeline gate step codegen failed — this is a bug"));
+                )?);
             }
         }
 
-        steps
+        Ok(steps)
     }
 
     fn validate(&self, _ctx: &CompileContext) -> Result<Vec<String>> {
@@ -207,7 +205,7 @@ mod tests {
         let yaml = "name: test\ndescription: test";
         let fm: FrontMatter = serde_yaml::from_str(yaml).unwrap();
         let ctx = CompileContext::for_test(&fm);
-        let steps = ext.setup_steps(&ctx);
+        let steps = ext.setup_steps(&ctx).unwrap();
         assert_eq!(steps.len(), 2, "should have download + gate step");
         assert!(steps[0].contains("curl"), "first step should download");
         assert!(
