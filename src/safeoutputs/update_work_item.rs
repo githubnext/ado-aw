@@ -274,8 +274,9 @@ async fn check_prefix_guards(
             .and_then(|t| t.as_str())
             .unwrap_or("");
         if !current_title.starts_with(prefix.as_str()) {
+            let safe_title = sanitize_text(current_title);
             return Ok(Some(ExecutionResult::failure(format!(
-                "Work item #{id} title '{current_title}' does not start with the required prefix '{prefix}' (configured in title-prefix)"
+                "Work item #{id} title '{safe_title}' does not start with the required prefix '{prefix}' (configured in title-prefix)"
             ))));
         }
         debug!("Title-prefix check passed: '{}'", current_title);
@@ -293,8 +294,9 @@ async fn check_prefix_guards(
             .map(str::trim)
             .any(|tag| tag.starts_with(prefix.as_str()));
         if !has_matching_tag {
+            let safe_tags = sanitize_text(raw_tags);
             return Ok(Some(ExecutionResult::failure(format!(
-                "Work item #{id} has no tag starting with '{prefix}' (configured in tag-prefix). Current tags: '{raw_tags}'"
+                "Work item #{id} has no tag starting with '{prefix}' (configured in tag-prefix). Current tags: '{safe_tags}'"
             ))));
         }
         debug!("Tag-prefix check passed; matched in tags: '{}'", raw_tags);
