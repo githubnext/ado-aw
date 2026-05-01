@@ -1045,7 +1045,21 @@ artifact-name and build-id restrictions may apply per the workflow's safe-output
         }
         let file_size = metadata.len();
 
-        // Generate a unique staged filename and copy the file into the
+        // Defense-in-depth: reject files exceeding the default max size at
+        // Stage 1 to prevent a misbehaving agent from filling the staging
+        // disk before Stage 3 gets a chance to enforce the operator's limit.
+        // The operator's configured max-file-size may be lower, but that is
+        // only available at Stage 3; here we use the hardcoded default cap.
+        if file_size > crate::safeoutputs::upload_build_artifact::DEFAULT_MAX_FILE_SIZE {
+            return Err(anyhow_to_mcp_error(anyhow::anyhow!(
+                "File '{}' is {} bytes, exceeding the maximum staging size of {} bytes",
+                params.0.file_path,
+                file_size,
+                crate::safeoutputs::upload_build_artifact::DEFAULT_MAX_FILE_SIZE
+            )));
+        }
+
+        // Generate a unique staged filenameand copy the file into the
         // safe-outputs directory. Stage 3 reads it back from there because
         // the agent's sandbox workspace is no longer accessible by then.
         // The staged name preserves the original extension and embeds a

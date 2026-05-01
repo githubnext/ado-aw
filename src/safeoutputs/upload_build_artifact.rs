@@ -172,7 +172,7 @@ impl UploadBuildArtifactResult {
     }
 }
 
-const DEFAULT_MAX_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50 MB
+pub(crate) const DEFAULT_MAX_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50 MB
 const DEFAULT_ATTACHMENT_TYPE: &str = "agent-artifact";
 
 /// Configuration for the upload-build-artifact tool (specified in front
@@ -372,11 +372,12 @@ impl Executor for UploadBuildArtifactResult {
             .as_deref()
             .unwrap_or(DEFAULT_ATTACHMENT_TYPE);
         if attachment_type.is_empty()
+            || attachment_type.starts_with('.')
             || attachment_type.len() > 100
             || !is_valid_version(attachment_type)
         {
             return Ok(ExecutionResult::failure(format!(
-                "attachment-type '{}' is not a valid value (must be non-empty, ≤100 chars, alphanumeric/'-'/'_'/'.')",
+                "attachment-type '{}' is not a valid value (must be non-empty, ≤100 chars, no leading '.', alphanumeric/'-'/'_'/'.')",
                 attachment_type
             )));
         }
@@ -960,6 +961,88 @@ attachment-type: "agent-artifact"
         assert!(
             outcome.message.contains("exceeds maximum"),
             "expected size rejection, got: {}",
+            outcome.message
+        );
+    }
+
+    #[tokio::test]
+    async fn test_executor_rejects_disallowed_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = "upload-build-artifact-agent-report-aabb1122.exe";
+        std::fs::write(dir.path().join(staged), b"MZ hello").unwrap();
+
+        let result = UploadBuildArtifactResult::new(
+            Some(1),
+            "agent-report".to_string(),
+            "out/report.exe".to_string(),
+            staged.to_string(),
+            8,
+        );
+        let mut ctx = make_ctx(dir.path().to_path_buf(), true);
+        ctx.tool_configs.insert(
+            "upload-build-artifact".to_string(),
+            serde_json::json!({ "allowed-extensions": [".pdf", ".png"] }),
+        );
+        let outcome = result.execute_impl(&ctx).await.unwrap();
+        assert!(!outcome.success);
+        assert!(
+            outcome.message.contains("extension not in the allowed list"),
+            "expected extension rejection, got: {}",
+            outcome.message
+        );
+    }
+
+    #[tokio::test]
+    async fn test_executor_rejects_disallowed_artifact_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = "upload-build-artifact-evil-report-ccdd3344.pdf";
+        std::fs::write(dir.path().join(staged), b"hello").unwrap();
+
+        let result = UploadBuildArtifactResult::new(
+            Some(1),
+            "evil-report".to_string(),
+            "out/report.pdf".to_string(),
+            staged.to_string(),
+            5,
+        );
+        let mut ctx = make_ctx(dir.path().to_path_buf(), true);
+        ctx.tool_configs.insert(
+            "upload-build-artifact".to_string(),
+            serde_json::json!({ "allowed-artifact-names": ["agent-*", "safe-report"] }),
+        );
+        let outcome = result.execute_impl(&ctx).await.unwrap();
+        assert!(!outcome.success);
+        assert!(
+            outcome.message.contains("not in the allowed list"),
+            "expected artifact-name rejection, got: {}",
+            outcome.message
+        );
+    }
+
+    #[tokio::test]
+    async fn test_executor_applies_name_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = "upload-build-artifact-report-eeff5566.pdf";
+        std::fs::write(dir.path().join(staged), b"hello").unwrap();
+
+        let result = UploadBuildArtifactResult::new(
+            Some(1),
+            "report".to_string(),
+            "out/report.pdf".to_string(),
+            staged.to_string(),
+            5,
+        );
+        let mut ctx = make_ctx(dir.path().to_path_buf(), true);
+        ctx.tool_configs.insert(
+            "upload-build-artifact".to_string(),
+            serde_json::json!({ "name-prefix": "agent-" }),
+        );
+        let outcome = result.execute_impl(&ctx).await.unwrap();
+        assert!(outcome.success, "expected success, got: {:?}", outcome);
+        // The dry-run message should contain the prefixed name.
+        assert!(
+            outcome.message.contains("agent-report"),
+            "expected prefixed name 'agent-report' in message, got: {}",
             outcome.message
         );
     }

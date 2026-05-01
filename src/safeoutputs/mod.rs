@@ -264,7 +264,7 @@ mod submit_pr_review;
 mod update_pr;
 mod update_wiki_page;
 mod update_work_item;
-mod upload_build_artifact;
+pub(crate) mod upload_build_artifact;
 mod upload_workitem_attachment;
 
 pub use add_build_tag::*;
