@@ -23,7 +23,7 @@
 //!   bytes to the ADO build attachments endpoint.
 
 use ado_aw_derive::SanitizeConfig;
-use log::{debug, info};
+use log::{debug, info, warn};
 use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -434,8 +434,13 @@ impl Executor for UploadBuildArtifactResult {
             .context("Failed to send attachment upload request to Azure DevOps")?;
 
         if response.status().is_success() {
-            let resp_body: serde_json::Value =
-                response.json().await.unwrap_or(serde_json::Value::Null);
+            let resp_body: serde_json::Value = response.json().await.unwrap_or_else(|e| {
+                warn!(
+                    "Build attachment uploaded for build #{} but the response JSON could not be parsed: {} — proceeding without attachment URL",
+                    self.build_id, e
+                );
+                serde_json::Value::Null
+            });
             let attachment_url = resp_body
                 .get("url")
                 .and_then(|v| v.as_str())
