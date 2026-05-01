@@ -685,7 +685,7 @@ impl Executor for CreatePrResult {
         // SHA-256 integrity check: verify the patch file hasn't been tampered
         // with between Stage 1 and Stage 3.
         let live_hash =
-            crate::safeoutputs::upload_build_artifact::sha256_hex(patch_content.as_bytes());
+            crate::hash::sha256_hex(patch_content.as_bytes());
         if live_hash != self.patch_sha256 {
             return Ok(ExecutionResult::failure(format!(
                 "Patch file SHA-256 mismatch: expected {}, got {} — \

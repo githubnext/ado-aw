@@ -27,13 +27,6 @@ use log::{debug, info, warn};
 use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-
-/// Compute the SHA-256 hex digest of a byte slice.
-pub(crate) fn sha256_hex(data: &[u8]) -> String {
-    let hash = Sha256::digest(data);
-    hash.iter().map(|b| format!("{:02x}", b)).collect()
-}
 
 use super::PATH_SEGMENT;
 use crate::sanitize::SanitizeContent;
@@ -186,7 +179,7 @@ impl UploadBuildArtifactResult {
     }
 }
 
-pub(crate) const DEFAULT_MAX_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50 MB
+const DEFAULT_MAX_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50 MB
 const DEFAULT_ATTACHMENT_TYPE: &str = "agent-artifact";
 
 /// Configuration for the upload-build-artifact tool (specified in front
@@ -329,7 +322,8 @@ impl Executor for UploadBuildArtifactResult {
             if prefix.len() > 50 {
                 return Ok(ExecutionResult::failure(format!(
                     "name-prefix '{}...' is too long ({} chars, max 50)",
-                    &prefix[..20], prefix.len()
+                    prefix.chars().take(20).collect::<String>(),
+                    prefix.len()
                 )));
             }
         }
@@ -481,7 +475,7 @@ impl Executor for UploadBuildArtifactResult {
         // SHA-256 integrity check: verify the staged file hasn't been swapped
         // between stages.  This catches same-size replacements that the size
         // check alone would miss.
-        let live_hash = sha256_hex(&file_bytes);
+        let live_hash = crate::hash::sha256_hex(&file_bytes);
         if live_hash != self.staged_sha256 {
             return Ok(ExecutionResult::failure(format!(
                 "Staged file SHA-256 mismatch: expected {} (recorded at Stage 1), got {} — \
@@ -602,7 +596,7 @@ mod tests {
     /// Compute SHA-256 hex digest of a byte slice (test helper, delegates
     /// to the crate-level helper).
     fn test_sha256(data: &[u8]) -> String {
-        sha256_hex(data)
+        crate::hash::sha256_hex(data)
     }
 
     /// Dummy SHA-256 hash for tests that use dry_run=true (hash check is

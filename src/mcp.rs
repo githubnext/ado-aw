@@ -693,7 +693,7 @@ Use 'self' for the pipeline's own repository, or a repository alias from the che
 
         // Compute SHA-256 of the patch for cross-stage integrity verification.
         let patch_sha256 =
-            crate::safeoutputs::upload_build_artifact::sha256_hex(patch_content.as_bytes());
+            crate::hash::sha256_hex(patch_content.as_bytes());
 
         // Generate source branch name from sanitized title + short unique suffix
         let title_slug = slugify_title(&sanitized.title);
@@ -1055,12 +1055,13 @@ artifact-name and build-id restrictions may apply per the workflow's safe-output
         // disk before Stage 3 gets a chance to enforce the operator's limit.
         // The operator's configured max-file-size may be lower, but that is
         // only available at Stage 3; here we use the hardcoded default cap.
-        if file_size > crate::safeoutputs::upload_build_artifact::DEFAULT_MAX_FILE_SIZE {
+        const STAGE1_MAX_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50 MB — matches DEFAULT_MAX_FILE_SIZE
+        if file_size > STAGE1_MAX_FILE_SIZE {
             return Err(anyhow_to_mcp_error(anyhow::anyhow!(
                 "File '{}' is {} bytes, exceeding the maximum staging size of {} bytes",
                 params.0.file_path,
                 file_size,
-                crate::safeoutputs::upload_build_artifact::DEFAULT_MAX_FILE_SIZE
+                STAGE1_MAX_FILE_SIZE
             )));
         }
 
@@ -1113,7 +1114,7 @@ artifact-name and build-id restrictions may apply per the workflow's safe-output
                 e
             ))
         })?;
-        let staged_sha256 = crate::safeoutputs::upload_build_artifact::sha256_hex(&staged_bytes);
+        let staged_sha256 = crate::hash::sha256_hex(&staged_bytes);
 
         let result = UploadBuildArtifactResult::new(
             params.0.build_id,
