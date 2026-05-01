@@ -294,8 +294,8 @@ def main():
                 facts[kind] = None
             else:
                 # fail_closed: treat as gate failure
-                facts[fid] = None
-                skip_facts.add(fid)
+                facts[kind] = None
+                skip_facts.add(kind)
 
     # Evaluate checks
     should_run = True

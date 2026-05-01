@@ -1,12 +1,12 @@
 //! Trigger filters compiler extension.
 //!
-//! Activates when Tier 2/3 filters are configured (labels, draft,
-//! changed-files, time-window, min/max-changes). Injects into the Setup
-//! job: (1) a download step for the gate evaluator script and (2) the
-//! gate step that evaluates the filter spec.
+//! Activates when any `filters:` configuration is present under `on.pr`
+//! or `on.pipeline`. Injects into the Setup job: (1) a download step for
+//! the gate evaluator scripts bundle and (2) the gate step that evaluates
+//! the filter spec via the Python evaluator.
 //!
-//! Tier 1 filters (title, author, branch, commit-message, build-reason)
-//! are handled inline without this extension.
+//! All filter types (simple and complex) are evaluated by the Python
+//! evaluator — there is no inline bash codegen path.
 
 use anyhow::Result;
 

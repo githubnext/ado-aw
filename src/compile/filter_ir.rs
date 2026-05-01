@@ -635,8 +635,28 @@ pub fn validate_pr_filters(filters: &super::types::PrFilters) -> Vec<Diagnostic>
         }
     }
 
-    // Time window start == end
+    // Time window validation
     if let Some(tw) = &filters.time_window {
+        if !is_valid_time(tw.start.as_str()) {
+            diags.push(Diagnostic {
+                severity: Severity::Error,
+                filter: "time-window".into(),
+                message: format!(
+                    "start '{}' is not valid HH:MM format",
+                    tw.start
+                ),
+            });
+        }
+        if !is_valid_time(tw.end.as_str()) {
+            diags.push(Diagnostic {
+                severity: Severity::Error,
+                filter: "time-window".into(),
+                message: format!(
+                    "end '{}' is not valid HH:MM format",
+                    tw.end
+                ),
+            });
+        }
         if tw.start == tw.end {
             diags.push(Diagnostic {
                 severity: Severity::Error,
@@ -725,6 +745,20 @@ pub fn validate_pipeline_filters(
     let mut diags = Vec::new();
 
     if let Some(tw) = &filters.time_window {
+        if !is_valid_time(tw.start.as_str()) {
+            diags.push(Diagnostic {
+                severity: Severity::Error,
+                filter: "time-window".into(),
+                message: format!("start '{}' is not valid HH:MM format", tw.start),
+            });
+        }
+        if !is_valid_time(tw.end.as_str()) {
+            diags.push(Diagnostic {
+                severity: Severity::Error,
+                filter: "time-window".into(),
+                message: format!("end '{}' is not valid HH:MM format", tw.end),
+            });
+        }
         if tw.start == tw.end {
             diags.push(Diagnostic {
                 severity: Severity::Error,
@@ -759,6 +793,21 @@ fn find_overlap(a: &[String], b: &[String]) -> Vec<String> {
     let a_lower: BTreeSet<String> = a.iter().map(|s| s.to_lowercase()).collect();
     let b_lower: BTreeSet<String> = b.iter().map(|s| s.to_lowercase()).collect();
     a_lower.intersection(&b_lower).cloned().collect()
+}
+
+/// Validate that a string is in HH:MM format (00:00–23:59).
+fn is_valid_time(s: &str) -> bool {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 2 {
+        return false;
+    }
+    let Ok(h) = parts[0].parse::<u32>() else {
+        return false;
+    };
+    let Ok(m) = parts[1].parse::<u32>() else {
+        return false;
+    };
+    h < 24 && m < 60
 }
 
 // ─── Serializable Gate Spec ─────────────────────────────────────────────────

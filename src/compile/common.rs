@@ -1220,14 +1220,17 @@ pub fn generate_setup_job(
     // User setup steps (conditioned on gate passing when filters are active)
     if !setup_steps.is_empty() {
         if has_gate {
-            let gate_var = if pr_filters.is_some() {
-                "prGate.SHOULD_RUN"
-            } else {
-                "pipelineGate.SHOULD_RUN"
+            let condition = match (pr_filters.is_some(), pipeline_filters.is_some()) {
+                (true, true) => {
+                    "and(eq(variables['prGate.SHOULD_RUN'], 'true'), eq(variables['pipelineGate.SHOULD_RUN'], 'true'))".to_string()
+                }
+                (true, false) => "eq(variables['prGate.SHOULD_RUN'], 'true')".to_string(),
+                (false, true) => "eq(variables['pipelineGate.SHOULD_RUN'], 'true')".to_string(),
+                (false, false) => unreachable!(),
             };
             let conditioned = super::pr_filters::add_condition_to_steps(
                 setup_steps,
-                &format!("eq(variables['{gate_var}'], 'true')"),
+                &condition,
             );
             steps_parts.push(format_steps_yaml_indented(&conditioned, 4));
         } else {
