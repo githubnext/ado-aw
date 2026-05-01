@@ -139,8 +139,9 @@ impl Executor for AddBuildTagResult {
         // values, which is the desired behavior).
         if !config.allow_any_build {
             if let Some(current_id) = ctx.build_id {
-                let agent_id_u64 = u64::try_from(self.build_id).ok();
-                if agent_id_u64 != Some(current_id) {
+                // self.build_id is validated > 0, so the cast to u64 is exact;
+                // values that don't fit in i32 simply cannot match current_id.
+                if self.build_id as u64 != current_id {
                     return Ok(ExecutionResult::failure(format!(
                         "Build #{} cannot be tagged: only the current build (#{}) is \
                          allowed unless 'allow-any-build: true' is configured",
