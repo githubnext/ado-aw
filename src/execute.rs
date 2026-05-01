@@ -145,6 +145,17 @@ fn log_execution_context(safe_output_dir: &Path, ctx: &ExecutionContext) {
     debug!("ADO project: {}", ctx.ado_project.as_deref().unwrap_or("<not set>"));
     debug!("Repository ID: {}", ctx.repository_id.as_deref().unwrap_or("<not set>"));
     debug!("Repository name: {}", ctx.repository_name.as_deref().unwrap_or("<not set>"));
+    debug!(
+        "Build ID: {}",
+        ctx.build_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "<not set>".to_string())
+    );
+    debug!("Build reason: {}", ctx.build_reason.as_deref().unwrap_or("<not set>"));
+    debug!(
+        "Triggered by definition: {}",
+        ctx.triggered_by_definition_name.as_deref().unwrap_or("<not set>")
+    );
     if !ctx.allowed_repositories.is_empty() {
         debug!(
             "Allowed repositories: {}",
@@ -376,6 +387,7 @@ mod tests {
             allowed_repositories: HashMap::new(),
             agent_stats: None,
             dry_run: false,
+            ..Default::default()
         };
 
         let result = execute_safe_output(&entry, &ctx).await;
@@ -410,6 +422,7 @@ mod tests {
             allowed_repositories: HashMap::new(),
             agent_stats: None,
             dry_run: false,
+            ..Default::default()
         };
 
         let result = execute_safe_output(&entry, &ctx).await;
@@ -560,6 +573,7 @@ mod tests {
             allowed_repositories: HashMap::new(),
             agent_stats: None,
             dry_run: false,
+            ..Default::default()
         };
 
         let result = execute_safe_output(&entry, &ctx).await;
@@ -604,6 +618,7 @@ mod tests {
             allowed_repositories: HashMap::new(),
             agent_stats: None,
             dry_run: false,
+            ..Default::default()
         };
 
         let result = execute_safe_output(&entry, &ctx).await;
@@ -648,6 +663,7 @@ mod tests {
             allowed_repositories: HashMap::new(),
             agent_stats: None,
             dry_run: false,
+            ..Default::default()
         };
 
         let result = execute_safe_output(&entry, &ctx).await;
@@ -697,6 +713,7 @@ mod tests {
             allowed_repositories: HashMap::new(),
             agent_stats: None,
             dry_run: false,
+            ..Default::default()
         };
 
         let results = execute_safe_outputs(temp_dir.path(), &ctx).await;
@@ -907,6 +924,7 @@ mod tests {
             allowed_repositories: HashMap::new(),
             agent_stats: None,
             dry_run: false,
+            ..Default::default()
         };
 
         let results = execute_safe_outputs(temp_dir.path(), &ctx).await;
@@ -952,6 +970,7 @@ mod tests {
             allowed_repositories: HashMap::new(),
             agent_stats: None,
             dry_run: false,
+            ..Default::default()
         };
 
         let results = execute_safe_outputs(temp_dir.path(), &ctx).await.unwrap();
@@ -1055,6 +1074,7 @@ mod tests {
             allowed_repositories: HashMap::new(),
             agent_stats: None,
             dry_run: false,
+            ..Default::default()
         };
 
         let result = execute_safe_output(&entry, &ctx).await;
@@ -1084,6 +1104,7 @@ mod tests {
             allowed_repositories: HashMap::new(),
             agent_stats: None,
             dry_run: true,
+            ..Default::default()
         };
 
         let result = execute_safe_output(&entry, &ctx).await;
