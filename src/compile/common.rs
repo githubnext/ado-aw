@@ -156,6 +156,26 @@ pub fn validate_front_matter_identity(front_matter: &FrontMatter) -> Result<()> 
                 validate::reject_pipeline_injection(branch, &format!("on.pipeline.branches entry {:?}", branch))?;
             }
         }
+
+        // Validate on.pr branch/path filters for newlines and ADO expressions
+        if let Some(pr) = &trigger_config.pr {
+            if let Some(branches) = &pr.branches {
+                for b in &branches.include {
+                    validate::reject_pipeline_injection(b, "on.pr.branches.include")?;
+                }
+                for b in &branches.exclude {
+                    validate::reject_pipeline_injection(b, "on.pr.branches.exclude")?;
+                }
+            }
+            if let Some(paths) = &pr.paths {
+                for p in &paths.include {
+                    validate::reject_pipeline_injection(p, "on.pr.paths.include")?;
+                }
+                for p in &paths.exclude {
+                    validate::reject_pipeline_injection(p, "on.pr.paths.exclude")?;
+                }
+            }
+        }
     }
 
     Ok(())
@@ -3823,6 +3843,128 @@ mod tests {
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("on.pipeline.branches"));
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_newline_in_pr_branch_include() {
+        let mut fm = minimal_front_matter();
+        fm.on_config = Some(OnConfig {
+            pipeline: None,
+            pr: Some(crate::compile::types::PrTriggerConfig {
+                branches: Some(crate::compile::types::BranchFilter {
+                    include: vec!["main\ninjected: true".to_string()],
+                    exclude: vec![],
+                }),
+                paths: None,
+                filters: None,
+            }),
+            schedule: None,
+        });
+        let result = validate_front_matter_identity(&fm);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("on.pr.branches.include"));
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_newline_in_pr_branch_exclude() {
+        let mut fm = minimal_front_matter();
+        fm.on_config = Some(OnConfig {
+            pipeline: None,
+            pr: Some(crate::compile::types::PrTriggerConfig {
+                branches: Some(crate::compile::types::BranchFilter {
+                    include: vec![],
+                    exclude: vec!["feature\ninjected: true".to_string()],
+                }),
+                paths: None,
+                filters: None,
+            }),
+            schedule: None,
+        });
+        let result = validate_front_matter_identity(&fm);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("on.pr.branches.exclude"));
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_newline_in_pr_path_include() {
+        let mut fm = minimal_front_matter();
+        fm.on_config = Some(OnConfig {
+            pipeline: None,
+            pr: Some(crate::compile::types::PrTriggerConfig {
+                branches: None,
+                paths: Some(crate::compile::types::PathFilter {
+                    include: vec!["src/\ninjected: true".to_string()],
+                    exclude: vec![],
+                }),
+                filters: None,
+            }),
+            schedule: None,
+        });
+        let result = validate_front_matter_identity(&fm);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("on.pr.paths.include"));
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_newline_in_pr_path_exclude() {
+        let mut fm = minimal_front_matter();
+        fm.on_config = Some(OnConfig {
+            pipeline: None,
+            pr: Some(crate::compile::types::PrTriggerConfig {
+                branches: None,
+                paths: Some(crate::compile::types::PathFilter {
+                    include: vec![],
+                    exclude: vec!["tests/\ninjected: true".to_string()],
+                }),
+                filters: None,
+            }),
+            schedule: None,
+        });
+        let result = validate_front_matter_identity(&fm);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("on.pr.paths.exclude"));
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_ado_expression_in_pr_branch_include() {
+        let mut fm = minimal_front_matter();
+        fm.on_config = Some(OnConfig {
+            pipeline: None,
+            pr: Some(crate::compile::types::PrTriggerConfig {
+                branches: Some(crate::compile::types::BranchFilter {
+                    include: vec!["$(System.AccessToken)".to_string()],
+                    exclude: vec![],
+                }),
+                paths: None,
+                filters: None,
+            }),
+            schedule: None,
+        });
+        let result = validate_front_matter_identity(&fm);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("ADO expression"));
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_allows_valid_pr_branches_and_paths() {
+        let mut fm = minimal_front_matter();
+        fm.on_config = Some(OnConfig {
+            pipeline: None,
+            pr: Some(crate::compile::types::PrTriggerConfig {
+                branches: Some(crate::compile::types::BranchFilter {
+                    include: vec!["main".to_string(), "release/*".to_string()],
+                    exclude: vec!["feature/*".to_string()],
+                }),
+                paths: Some(crate::compile::types::PathFilter {
+                    include: vec!["src/**".to_string()],
+                    exclude: vec!["tests/**".to_string()],
+                }),
+                filters: None,
+            }),
+            schedule: None,
+        });
+        let result = validate_front_matter_identity(&fm);
+        assert!(result.is_ok());
     }
 
     #[test]
