@@ -200,6 +200,10 @@ mod tests {
         schedule: None,
         });
         let result = generate_pr_trigger(&triggers, false);
+        // When only runtime filters are configured (no branches/paths), no native
+        // pr: block is emitted. ADO interprets this as "trigger on all PRs" — the
+        // runtime gate step handles the actual filtering. Do NOT change this to
+        // emit "pr: none" or the gate will never run.
         assert!(result.is_empty(), "filters-only should not emit a pr: block (use default trigger)");
     }
 

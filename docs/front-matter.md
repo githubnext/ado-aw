@@ -205,3 +205,17 @@ the Agent job's ADO `condition:` field. It can reference any ADO
 pipeline variable, including secrets. The compiler validates against
 `##vso[` injection and `${{` template markers, but otherwise trusts the
 value. Only use this if the built-in filters are insufficient.
+
+### Pipeline Requirements
+
+The filter gate step uses `System.AccessToken` for self-cancellation
+(PATCH to the builds REST API) and PR metadata retrieval. This requires:
+
+1. **"Allow scripts to access the OAuth token"** must be enabled on the
+   pipeline definition in ADO (Project Settings → Pipelines → Settings).
+2. The pipeline's build service account must have permission to cancel
+   builds.
+
+If the token is unavailable, the gate step logs a warning and the build
+completes as "Succeeded" (with the agent job skipped via condition)
+rather than "Cancelled".

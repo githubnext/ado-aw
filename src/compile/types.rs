@@ -1693,6 +1693,10 @@ Body
     }
 
     // ─── PrTriggerConfig deserialization ─────────────────────────────────────
+    // NOTE: These tests use `triggers:` as a wrapper key and deserialize
+    // OnConfig directly (not through FrontMatter). They test struct
+    // deserialization in isolation. The `on:` rename is tested via
+    // `test_pr_trigger_in_full_front_matter` at the bottom of this section.
 
     #[test]
     fn test_pr_trigger_config_title_filter() {

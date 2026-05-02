@@ -149,7 +149,7 @@ def _glob(value, pattern):
     all filter types (title, branch, changed-files, etc.).
     """
     regex = _re.escape(pattern).replace(r"\*", ".*").replace(r"\?", ".")
-    return bool(_re.fullmatch(regex, value))
+    return bool(_re.fullmatch(regex, value, flags=_re.DOTALL))
 
 # Facts where ref prefixes should be stripped from patterns
 _BRANCH_FACTS = {"source_branch", "target_branch", "triggering_branch"}
