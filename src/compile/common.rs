@@ -161,18 +161,18 @@ pub fn validate_front_matter_identity(front_matter: &FrontMatter) -> Result<()> 
         if let Some(pr) = &trigger_config.pr {
             if let Some(branches) = &pr.branches {
                 for b in &branches.include {
-                    validate::reject_pipeline_injection(b, "on.pr.branches.include")?;
+                    validate::reject_pipeline_injection(b, &format!("on.pr.branches.include entry {:?}", b))?;
                 }
                 for b in &branches.exclude {
-                    validate::reject_pipeline_injection(b, "on.pr.branches.exclude")?;
+                    validate::reject_pipeline_injection(b, &format!("on.pr.branches.exclude entry {:?}", b))?;
                 }
             }
             if let Some(paths) = &pr.paths {
                 for p in &paths.include {
-                    validate::reject_pipeline_injection(p, "on.pr.paths.include")?;
+                    validate::reject_pipeline_injection(p, &format!("on.pr.paths.include entry {:?}", p))?;
                 }
                 for p in &paths.exclude {
-                    validate::reject_pipeline_injection(p, "on.pr.paths.exclude")?;
+                    validate::reject_pipeline_injection(p, &format!("on.pr.paths.exclude entry {:?}", p))?;
                 }
             }
         }
