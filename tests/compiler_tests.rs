@@ -17,7 +17,8 @@ fn test_compile_pipeline_basic() {
     let test_content = r#"---
 name: "Test Agent"
 description: "A test agent for verification"
-schedule: daily
+on:
+  schedule: daily
 repositories:
   - repository: test-repo
     type: git
@@ -2808,11 +2809,12 @@ fn test_schedule_object_form_with_branches_compiled_output() {
     let input = r#"---
 name: "Scheduled Agent"
 description: "Agent with branch-filtered schedule"
-schedule:
-  run: daily around 14:00
-  branches:
-    - main
-    - release/*
+on:
+  schedule:
+    run: daily around 14:00
+    branches:
+      - main
+      - release/*
 ---
 
 ## Scheduled Agent
@@ -3342,4 +3344,140 @@ fn test_debug_pipeline_probe_step_indentation_1es() {
             break;
         }
     }
+}
+
+
+// ─── PR Filter Integration Tests ────────────────────────────────────────────
+
+/// Tier 1 PR filter fixture produces valid YAML with inline gate step.
+#[test]
+fn test_pr_filter_tier1_compiled_output_is_valid_yaml() {
+    let compiled = compile_fixture("pr-filter-tier1-agent.md");
+    assert_valid_yaml(&compiled, "pr-filter-tier1-agent.md");
+}
+
+/// Tier 1 PR filters now also use the Python evaluator via extension.
+#[test]
+fn test_pr_filter_tier1_has_evaluator_gate() {
+    let compiled = compile_fixture("pr-filter-tier1-agent.md");
+
+    assert!(compiled.contains("- job: Setup"), "Should create Setup job for PR filters");
+    assert!(compiled.contains("name: prGate"), "Should include prGate step");
+    assert!(compiled.contains("GATE_SPEC"), "Should include base64-encoded spec");
+    assert!(compiled.contains("python3"), "Should invoke python evaluator");
+    assert!(compiled.contains("scripts.zip"), "Should download scripts bundle");
+    assert!(compiled.contains("Evaluate PR filters"), "Should have gate displayName");
+}
+
+/// Tier 2 PR filter fixture produces valid YAML.
+#[test]
+fn test_pr_filter_tier2_compiled_output_is_valid_yaml() {
+    let compiled = compile_fixture("pr-filter-tier2-agent.md");
+    assert_valid_yaml(&compiled, "pr-filter-tier2-agent.md");
+}
+
+/// Tier 2 PR filters produce a Setup job with extension-based gate step.
+#[test]
+fn test_pr_filter_tier2_has_extension_gate() {
+    let compiled = compile_fixture("pr-filter-tier2-agent.md");
+
+    assert!(compiled.contains("- job: Setup"), "Should create Setup job for PR filters");
+    assert!(compiled.contains("scripts.zip"), "Tier 2 should download scripts bundle");
+    assert!(compiled.contains("GATE_SPEC"), "Tier 2 should include base64-encoded spec");
+    assert!(compiled.contains("python3"), "Tier 2 should invoke python evaluator");
+    assert!(compiled.contains("name: prGate"), "Should have prGate step");
+}
+
+/// Pipeline filter fixture produces valid YAML.
+#[test]
+fn test_pipeline_filter_compiled_output_is_valid_yaml() {
+    let compiled = compile_fixture("pipeline-filter-agent.md");
+    assert_valid_yaml(&compiled, "pipeline-filter-agent.md");
+}
+
+/// Pipeline filter fixture produces correct pipeline resource + gate.
+#[test]
+fn test_pipeline_filter_has_resources_and_gate() {
+    let compiled = compile_fixture("pipeline-filter-agent.md");
+
+    assert!(compiled.contains("pipelines:"), "Should have pipeline resource");
+    assert!(compiled.contains("trigger: none"), "Should disable CI trigger");
+    assert!(compiled.contains("pr: none"), "Should disable PR trigger");
+    assert!(compiled.contains("- job: Setup"), "Should create Setup job for pipeline filters");
+}
+
+/// Agent job depends on Setup when filters are active.
+#[test]
+fn test_pr_filter_agent_depends_on_setup() {
+    let compiled = compile_fixture("pr-filter-tier1-agent.md");
+
+    assert!(compiled.contains("dependsOn: Setup"), "Agent job should depend on Setup");
+    assert!(compiled.contains("prGate.SHOULD_RUN"), "Agent job condition should reference gate output");
+}
+
+/// Native ADO PR trigger block is emitted for branch/path filters.
+#[test]
+fn test_pr_filter_tier1_has_native_pr_trigger() {
+    let compiled = compile_fixture("pr-filter-tier1-agent.md");
+
+    assert!(compiled.contains("pr:"), "Should have native pr: block");
+    assert!(compiled.contains("branches:"), "Should have branches filter");
+    assert!(compiled.contains("main"), "Should include main branch");
+}
+
+/// Extension gate steps are correctly nested inside the Setup job's steps: block.
+#[test]
+fn test_pr_filter_gate_steps_nested_in_setup_job() {
+    let compiled = compile_fixture("pr-filter-tier1-agent.md");
+
+    // Parse the YAML and verify structural nesting
+    let yaml_content: String = compiled
+        .lines()
+        .skip_while(|line| line.starts_with('#') || line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let doc: serde_yaml::Value = serde_yaml::from_str(&yaml_content)
+        .expect("should parse as valid YAML");
+
+    // Find the Setup job in the jobs list
+    let jobs = doc.get("jobs").expect("should have jobs key");
+    let jobs_seq = jobs.as_sequence().expect("jobs should be a sequence");
+    let setup_job = jobs_seq
+        .iter()
+        .find(|j| {
+            j.get("job")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s == "Setup")
+        })
+        .expect("should have a Setup job");
+
+    // Verify the gate step is INSIDE the Setup job's steps, not a sibling
+    let steps = setup_job
+        .get("steps")
+        .expect("Setup job should have steps")
+        .as_sequence()
+        .expect("steps should be a sequence");
+
+    // Should have: checkout + download + gate = at least 3 steps
+    assert!(
+        steps.len() >= 3,
+        "Setup job should have at least 3 steps (checkout + download + gate), got {}",
+        steps.len()
+    );
+
+    // The gate step (with name: prGate) should be inside the steps list
+    let has_gate = steps.iter().any(|s| {
+        s.get("name")
+            .and_then(|v| v.as_str())
+            .is_some_and(|n| n == "prGate")
+    });
+    assert!(has_gate, "prGate step should be inside Setup job's steps list");
+
+    // The download step should also be inside
+    let has_download = steps.iter().any(|s| {
+        s.get("displayName")
+            .and_then(|v| v.as_str())
+            .is_some_and(|n| n.contains("Download ado-aw scripts"))
+    });
+    assert!(has_download, "Download step should be inside Setup job's steps list");
 }

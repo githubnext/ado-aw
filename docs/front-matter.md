@@ -71,13 +71,44 @@ safe-outputs:                  # optional per-tool configuration for safe output
     artifact-link:             # optional: link work item to repository branch
       enabled: true
       branch: main
-triggers:                      # optional pipeline triggers
+on:                            # trigger configuration (unified under on: key)
+  schedule: daily around 14:00 # fuzzy schedule - see docs/schedule-syntax.md
   pipeline:
     name: "Build Pipeline"     # source pipeline name
     project: "OtherProject"    # optional: project name if different
     branches:                  # optional: branches to trigger on
       - main
       - release/*
+    filters:                   # optional runtime filters (compiled to gate step)
+      source-pipeline: "Build*"
+      time-window:
+        start: "09:00"
+        end: "17:00"
+  pr:                          # PR trigger
+    branches:
+      include: [main]
+    paths:
+      include: [src/*]
+    filters:                   # runtime PR filters (compiled to gate step)
+      title: "*[review]*"
+      author:
+        include: ["alice@corp.com"]
+      draft: false
+      labels:
+        any-of: ["run-agent"]
+      source-branch: "feature/*"
+      target-branch: "main"
+      commit-message: "*[skip-agent]*"
+      changed-files:
+        include: ["src/**/*.rs"]
+      min-changes: 5
+      max-changes: 100
+      time-window:
+        start: "09:00"
+        end: "17:00"
+      build-reason:
+        include: [PullRequest]
+      expression: "eq(variables['Custom.Flag'], 'true')"  # raw ADO condition
 steps:                         # inline steps before agent runs (same job, generate context)
   - bash: echo "Preparing context for agent"
     displayName: "Prepare context"
@@ -127,3 +158,64 @@ list:
 
 Set `workspace:` explicitly to `root`, `repo` (alias `self`), or a specific
 checked-out repository alias to override this behavior.
+
+## Filter Validation
+
+The compiler validates filter configurations at compile time and will emit
+errors for impossible or conflicting combinations:
+
+| Condition | Severity | Message |
+|-----------|----------|---------|
+| `min-changes` > `max-changes` | Error | No PR can satisfy both constraints |
+| `time-window.start` = `time-window.end` | Error | Zero-width window never matches |
+| Same value in `author.include` and `author.exclude` | Error | Conflicting include/exclude |
+| Same value in `build-reason.include` and `build-reason.exclude` | Error | Conflicting include/exclude |
+| Label in both `labels.any-of` and `labels.none-of` | Error | Label both required and blocked |
+| Label in both `labels.all-of` and `labels.none-of` | Error | Label both required and blocked |
+| Empty `labels` filter (no any-of/all-of/none-of) | Warning | No label checks applied |
+
+Errors cause compilation to fail. Fix the conflicting filter configuration
+before recompiling.
+
+## Filter Behavior Notes
+
+### Time Windows
+
+Time windows use **half-open intervals**: `[start, end)`. A window of
+`start: "09:00", end: "17:00"` matches from 09:00 up to but **not
+including** 17:00. A build triggered at exactly 17:00 UTC will not match.
+
+Overnight windows are supported: `start: "22:00", end: "06:00"` matches
+from 22:00 through midnight to 05:59.
+
+All times are evaluated in **UTC**.
+
+### Changed Files
+
+The `changed-files` filter checks the list of files modified in the PR.
+If the PR has no changed files (empty diff) and an `include` pattern is
+set, the filter will not match. An exclude-only filter (no `include`)
+with no changed files passes vacuously (no excluded files are present).
+
+### Expression Escape Hatch
+
+The `expression` field on `pr.filters` and `pipeline.filters` is an
+**advanced, unsafe escape hatch**. Its value is inserted verbatim into
+the Agent job's ADO `condition:` field. It can reference any ADO
+pipeline variable, including secrets. The compiler validates against
+`##vso[` injection and `${{` template markers, but otherwise trusts the
+value. Only use this if the built-in filters are insufficient.
+
+### Pipeline Requirements
+
+The filter gate step uses `System.AccessToken` for self-cancellation
+(PATCH to the builds REST API) and PR metadata retrieval. This requires:
+
+1. **"Allow scripts to access the OAuth token"** must be enabled on the
+   pipeline definition in ADO (Project Settings → Pipelines → Settings).
+2. The pipeline's build service account must have permission to cancel
+   builds.
+
+If the token is unavailable, the gate step logs a warning and the build
+completes as "Succeeded" (with the agent job skipped via condition)
+rather than "Cancelled".

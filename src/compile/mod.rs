@@ -8,8 +8,10 @@
 
 mod common;
 pub mod extensions;
+pub(crate) mod filter_ir;
 mod gitattributes;
 mod onees;
+pub(crate) mod pr_filters;
 mod standalone;
 pub mod types;
 
@@ -92,7 +94,7 @@ async fn compile_pipeline_inner(
     debug!("Description: {}", front_matter.description);
     debug!("Target: {:?}", front_matter.target);
     debug!("Engine: {} (model: {})", front_matter.engine.engine_id(), front_matter.engine.model().unwrap_or("default"));
-    debug!("Schedule: {:?}", front_matter.schedule);
+    debug!("Schedule: {:?}", front_matter.schedule());
     debug!("Repositories: {}", front_matter.repositories.len());
     debug!("MCP servers configured: {}", front_matter.mcp_servers.len());
 
@@ -604,12 +606,13 @@ Body
         let content = r#"---
 name: "Agent"
 description: "Test"
-schedule: daily around 14:00
+on:
+  schedule: daily around 14:00
 ---
 Body
 "#;
         let (fm, _) = parse_markdown(content).unwrap();
-        let schedule = fm.schedule.unwrap();
+        let schedule = fm.schedule().unwrap();
         assert_eq!(schedule.expression(), "daily around 14:00");
         assert!(schedule.branches().is_empty());
     }
@@ -619,16 +622,17 @@ Body
         let content = r#"---
 name: "Agent"
 description: "Test"
-schedule:
-  run: weekly on friday around 17:00
-  branches:
-    - main
-    - release/*
+on:
+  schedule:
+    run: weekly on friday around 17:00
+    branches:
+      - main
+      - release/*
 ---
 Body
 "#;
         let (fm, _) = parse_markdown(content).unwrap();
-        let schedule = fm.schedule.unwrap();
+        let schedule = fm.schedule().unwrap();
         assert_eq!(schedule.expression(), "weekly on friday around 17:00");
         assert_eq!(schedule.branches(), &["main", "release/*"]);
     }
@@ -638,13 +642,13 @@ Body
         let content = r#"---
 name: "Agent"
 description: "Test"
-schedule:
-  run: daily
+on:
+  schedule: daily
 ---
 Body
 "#;
         let (fm, _) = parse_markdown(content).unwrap();
-        let schedule = fm.schedule.unwrap();
+        let schedule = fm.schedule().unwrap();
         assert_eq!(schedule.expression(), "daily");
         assert!(schedule.branches().is_empty());
     }

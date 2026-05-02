@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use super::types::{FrontMatter, PipelineParameter, Repository, TriggerConfig};
+use super::types::{FrontMatter, OnConfig, PipelineParameter, Repository};
 use super::extensions::{CompilerExtension, Extension, McpgServerConfig, McpgGatewayConfig, McpgConfig, CompileContext};
 use crate::compile::types::McpConfig;
 use crate::fuzzy_schedule;
@@ -146,14 +146,34 @@ pub fn validate_front_matter_identity(front_matter: &FrontMatter) -> Result<()> 
     }
 
     // Validate trigger.pipeline fields for newlines and ADO expressions
-    if let Some(trigger_config) = &front_matter.triggers {
+    if let Some(trigger_config) = &front_matter.on_config {
         if let Some(pipeline) = &trigger_config.pipeline {
-            validate::reject_pipeline_injection(&pipeline.name, "triggers.pipeline.name")?;
+            validate::reject_pipeline_injection(&pipeline.name, "on.pipeline.name")?;
             if let Some(project) = &pipeline.project {
-                validate::reject_pipeline_injection(project, "triggers.pipeline.project")?;
+                validate::reject_pipeline_injection(project, "on.pipeline.project")?;
             }
             for branch in &pipeline.branches {
-                validate::reject_pipeline_injection(branch, &format!("triggers.pipeline.branches entry {:?}", branch))?;
+                validate::reject_pipeline_injection(branch, &format!("on.pipeline.branches entry {:?}", branch))?;
+            }
+        }
+
+        // Validate on.pr branch/path filters for newlines and ADO expressions
+        if let Some(pr) = &trigger_config.pr {
+            if let Some(branches) = &pr.branches {
+                for b in &branches.include {
+                    validate::reject_pipeline_injection(b, &format!("on.pr.branches.include entry {:?}", b))?;
+                }
+                for b in &branches.exclude {
+                    validate::reject_pipeline_injection(b, &format!("on.pr.branches.exclude entry {:?}", b))?;
+                }
+            }
+            if let Some(paths) = &pr.paths {
+                for p in &paths.include {
+                    validate::reject_pipeline_injection(p, &format!("on.pr.paths.include entry {:?}", p))?;
+                }
+                for p in &paths.exclude {
+                    validate::reject_pipeline_injection(p, &format!("on.pr.paths.exclude entry {:?}", p))?;
+                }
             }
         }
     }
@@ -197,12 +217,21 @@ pub fn generate_schedule(name: &str, config: &super::types::ScheduleConfig) -> R
     fuzzy_schedule::generate_schedule_yaml(config.expression(), name, effective_branches)
 }
 
-/// Generate PR trigger configuration
-pub fn generate_pr_trigger(triggers: &Option<TriggerConfig>, has_schedule: bool) -> String {
-    let has_pipeline_trigger = triggers
+/// Generate PR trigger configuration.
+///
+/// When `triggers.pr` is explicitly configured, PR triggers stay enabled regardless
+/// of schedule or pipeline triggers (overrides suppression). Native ADO branch/path
+/// filters are emitted if configured.
+pub fn generate_pr_trigger(on_config: &Option<OnConfig>, has_schedule: bool) -> String {
+    let has_pipeline_trigger = on_config
         .as_ref()
         .and_then(|t| t.pipeline.as_ref())
         .is_some();
+
+    // Explicit triggers.pr overrides schedule/pipeline suppression
+    if let Some(pr) = on_config.as_ref().and_then(|o| o.pr.as_ref()) {
+        return super::pr_filters::generate_native_pr_trigger(pr);
+    }
 
     match (has_pipeline_trigger, has_schedule) {
         (true, true) => "# Disable PR triggers - only run on schedule or when upstream pipeline completes\npr: none".to_string(),
@@ -213,8 +242,8 @@ pub fn generate_pr_trigger(triggers: &Option<TriggerConfig>, has_schedule: bool)
 }
 
 /// Generate CI trigger configuration
-pub fn generate_ci_trigger(triggers: &Option<TriggerConfig>, has_schedule: bool) -> String {
-    let has_pipeline_trigger = triggers
+pub fn generate_ci_trigger(on_config: &Option<OnConfig>, has_schedule: bool) -> String {
+    let has_pipeline_trigger = on_config
         .as_ref()
         .and_then(|t| t.pipeline.as_ref())
         .is_some();
@@ -227,8 +256,8 @@ pub fn generate_ci_trigger(triggers: &Option<TriggerConfig>, has_schedule: bool)
 }
 
 /// Generate pipeline resource YAML for pipeline completion triggers
-pub fn generate_pipeline_resources(triggers: &Option<TriggerConfig>) -> Result<String> {
-    let Some(trigger_config) = triggers else {
+pub fn generate_pipeline_resources(on_config: &Option<OnConfig>) -> Result<String> {
+    let Some(trigger_config) = on_config else {
         return Ok(String::new());
     };
 
@@ -1165,25 +1194,95 @@ pub fn validate_resolve_pr_thread_statuses(front_matter: &FrontMatter) -> Result
     Ok(())
 }
 
-/// Generate the setup job YAML
-pub fn generate_setup_job(setup_steps: &[serde_yaml::Value], pool: &str) -> String {
-    if setup_steps.is_empty() {
-        return String::new();
+/// Generate the setup job YAML.
+///
+/// Extension `setup_steps()` are injected first (download + gate steps for
+/// Tier 2/3 filters). For Tier-1-only filters (no extension activated), the
+/// inline gate step is generated directly. User `setup_steps` are appended
+/// last, conditioned on the gate if filters are active.
+pub fn generate_setup_job(
+    setup_steps: &[serde_yaml::Value],
+    pool: &str,
+    pr_filters: Option<&super::types::PrFilters>,
+    pipeline_filters: Option<&super::types::PipelineFilters>,
+    extensions: &[super::extensions::Extension],
+    ctx: &super::extensions::CompileContext,
+) -> anyhow::Result<String> {
+    use super::extensions::CompilerExtension;
+
+    let has_pr_gate = pr_filters
+        .map(|f| !super::filter_ir::lower_pr_filters(f).is_empty())
+        .unwrap_or(false);
+    let has_pipeline_gate = pipeline_filters
+        .map(|f| !super::filter_ir::lower_pipeline_filters(f).is_empty())
+        .unwrap_or(false);
+    let has_gate = has_pr_gate || has_pipeline_gate;
+
+    // Collect setup_steps from ALL extensions
+    let mut ext_setup_steps: Vec<String> = Vec::new();
+    for ext in extensions {
+        ext_setup_steps.extend(ext.setup_steps(ctx)?);
+    }
+    let has_ext_setup = !ext_setup_steps.is_empty();
+
+    if setup_steps.is_empty() && !has_gate && !has_ext_setup {
+        return Ok(String::new());
     }
 
-    let steps_yaml = format_steps_yaml_indented(setup_steps, 4);
+    let mut steps_parts = Vec::new();
 
-    format!(
+    // Extension setup steps go via marker replacement for correct indentation
+    let ext_steps_combined = ext_setup_steps.join("\n\n");
+
+    // User setup steps (conditioned on gate passing when filters are active)
+    if !setup_steps.is_empty() {
+        if has_gate {
+            let condition = match (has_pr_gate, has_pipeline_gate) {
+                (true, true) => {
+                    "and(eq(variables['prGate.SHOULD_RUN'], 'true'), eq(variables['pipelineGate.SHOULD_RUN'], 'true'))".to_string()
+                }
+                (true, false) => "eq(variables['prGate.SHOULD_RUN'], 'true')".to_string(),
+                (false, true) => "eq(variables['pipelineGate.SHOULD_RUN'], 'true')".to_string(),
+                (false, false) => unreachable!(),
+            };
+            let conditioned = super::pr_filters::add_condition_to_steps(
+                setup_steps,
+                &condition,
+            );
+            steps_parts.push(format_steps_yaml_indented(&conditioned, 0));
+        } else {
+            steps_parts.push(format_steps_yaml_indented(setup_steps, 0));
+        }
+    }
+
+    if steps_parts.is_empty() && ext_steps_combined.is_empty() {
+        return Ok(String::new());
+    }
+
+    let user_steps = steps_parts.join("\n\n");
+
+    // Build the job YAML with markers for proper indentation
+    let mut template = format!(
         r#"- job: Setup
   displayName: "Setup"
   pool:
-    name: {}
+    name: {pool}
   steps:
     - checkout: self
-{}
-"#,
-        pool, steps_yaml
-    )
+"#
+    );
+
+    if !ext_steps_combined.is_empty() {
+        template.push_str("    {{ ext_setup_steps }}\n");
+    }
+    if !user_steps.is_empty() {
+        template.push_str("    {{ user_setup_steps }}\n");
+    }
+
+    let yaml = replace_with_indent(&template, "{{ ext_setup_steps }}", &ext_steps_combined);
+    let yaml = replace_with_indent(&yaml, "{{ user_setup_steps }}", &user_steps);
+
+    Ok(yaml)
 }
 
 /// Generate the teardown job YAML
@@ -1244,12 +1343,63 @@ pub fn generate_finalize_steps(finalize_steps: &[serde_yaml::Value]) -> String {
     format_steps_yaml_indented(finalize_steps, 0)
 }
 
-/// Generate dependsOn clause for setup job
-pub fn generate_agentic_depends_on(setup_steps: &[serde_yaml::Value]) -> String {
-    if !setup_steps.is_empty() {
-        "dependsOn: Setup".to_string()
+/// Generate dependsOn clause and condition for setup/gate dependencies.
+///
+/// When PR or pipeline filters are active, adds a condition that allows
+/// non-matching trigger types to proceed unconditionally, while matching
+/// builds require the gate to pass.
+/// When `expression` is provided, it's ANDed into the condition as an escape hatch.
+pub fn generate_agentic_depends_on(
+    setup_steps: &[serde_yaml::Value],
+    has_pr_filters: bool,
+    has_pipeline_filters: bool,
+    expressions: &[&str],
+) -> String {
+    let has_gate = has_pr_filters || has_pipeline_filters;
+    let has_setup = !setup_steps.is_empty() || has_gate;
+
+    if !has_setup && expressions.is_empty() {
+        return String::new();
+    }
+
+    let depends = if has_setup {
+        "dependsOn: Setup\n"
     } else {
-        String::new()
+        ""
+    };
+
+    if has_gate || !expressions.is_empty() {
+        let mut parts = Vec::new();
+        parts.push("succeeded()".to_string());
+
+        if has_pr_filters {
+            parts.push(
+                r"or(
+         ne(variables['Build.Reason'], 'PullRequest'),
+         eq(dependencies.Setup.outputs['prGate.SHOULD_RUN'], 'true')
+       )"
+                .to_string(),
+            );
+        }
+
+        if has_pipeline_filters {
+            parts.push(
+                r"or(
+         ne(variables['Build.Reason'], 'ResourceTrigger'),
+         eq(dependencies.Setup.outputs['pipelineGate.SHOULD_RUN'], 'true')
+       )"
+                .to_string(),
+            );
+        }
+
+        for expr in expressions {
+            parts.push(expr.to_string());
+        }
+
+        let condition_body = parts.join(",\n       ");
+        format!("{depends}condition: |\n and(\n   {condition_body}\n )")
+    } else {
+        "dependsOn: Setup".to_string()
     }
 }
 
@@ -1812,7 +1962,7 @@ pub async fn compile_shared(
     validate_front_matter_identity(front_matter)?;
 
     // 2. Generate schedule
-    let schedule = match &front_matter.schedule {
+    let schedule = match front_matter.schedule() {
         Some(s) => generate_schedule(&front_matter.name, s)
             .with_context(|| format!("Failed to parse schedule '{}'", s.expression()))?,
         None => String::new(),
@@ -1853,10 +2003,10 @@ pub async fn compile_shared(
     )?;
     let working_directory = generate_working_directory(&effective_workspace);
     let trigger_repo_directory = generate_trigger_repo_directory(&front_matter.checkout);
-    let pipeline_resources = generate_pipeline_resources(&front_matter.triggers)?;
-    let has_schedule = front_matter.schedule.is_some();
-    let pr_trigger = generate_pr_trigger(&front_matter.triggers, has_schedule);
-    let ci_trigger = generate_ci_trigger(&front_matter.triggers, has_schedule);
+    let pipeline_resources = generate_pipeline_resources(&front_matter.on_config)?;
+    let has_schedule = front_matter.has_schedule();
+    let pr_trigger = generate_pr_trigger(&front_matter.on_config, has_schedule);
+    let ci_trigger = generate_ci_trigger(&front_matter.on_config, has_schedule);
 
     // 6. Generate source path and pipeline path
     let source_path = generate_source_path(input_path);
@@ -1870,7 +2020,18 @@ pub async fn compile_shared(
         .unwrap_or_else(|| DEFAULT_POOL.to_string());
 
     // 8. Setup/teardown jobs, parameters, prepare/finalize steps
-    let setup_job = generate_setup_job(&front_matter.setup, &pool);
+    let pr_filters = front_matter.pr_filters();
+    let pipeline_filters = front_matter.pipeline_filters();
+    // Base has_*_filters on whether lowering produces actual checks, not just
+    // struct presence. Empty `filters: {}` must not generate a dangling
+    // dependsOn: Setup reference pointing to a job that was never emitted.
+    let has_pr_filters = pr_filters
+        .map(|f| !super::filter_ir::lower_pr_filters(f).is_empty())
+        .unwrap_or(false);
+    let has_pipeline_filters = pipeline_filters
+        .map(|f| !super::filter_ir::lower_pipeline_filters(f).is_empty())
+        .unwrap_or(false);
+    let setup_job = generate_setup_job(&front_matter.setup, &pool, pr_filters, pipeline_filters, extensions, ctx)?;
     let teardown_job = generate_teardown_job(&front_matter.teardown, &pool);
     let has_memory = front_matter
         .tools
@@ -1881,7 +2042,51 @@ pub async fn compile_shared(
     let parameters_yaml = generate_parameters(&parameters)?;
     let prepare_steps = generate_prepare_steps(&front_matter.steps, extensions)?;
     let finalize_steps = generate_finalize_steps(&front_matter.post_steps);
-    let agentic_depends_on = generate_agentic_depends_on(&front_matter.setup);
+    let pr_expression = pr_filters.and_then(|f| f.expression.as_deref());
+    let pipeline_expression = pipeline_filters.and_then(|f| f.expression.as_deref());
+    let mut expressions: Vec<&str> = Vec::new();
+    if let Some(e) = pr_expression {
+        expressions.push(e);
+    }
+    if let Some(e) = pipeline_expression {
+        expressions.push(e);
+    }
+
+    // Validate expression escape hatches against injection
+    for expr in &expressions {
+        if crate::validate::contains_newline(expr) {
+            anyhow::bail!(
+                "Filter expression contains newline characters which could inject YAML keys. Found: '{}'",
+                expr.replace('\n', "\\n").replace('\r', "\\r")
+            );
+        }
+        if crate::validate::contains_ado_expression(expr) {
+            anyhow::bail!(
+                "Filter expression contains ADO expression ('${{{{', '$(', or '$[') which could \
+                 exfiltrate secrets or escalate permissions. Found: '{}'",
+                expr
+            );
+        }
+        if crate::validate::contains_template_marker(expr) {
+            anyhow::bail!(
+                "Filter expression contains template marker '{{{{' which could cause injection. Found: '{}'",
+                expr
+            );
+        }
+        if crate::validate::contains_pipeline_command(expr) {
+            anyhow::bail!(
+                "Filter expression contains pipeline command ('##vso[' or '##[') which is not allowed. Found: '{}'",
+                expr
+            );
+        }
+    }
+
+    let agentic_depends_on = generate_agentic_depends_on(
+        &front_matter.setup,
+        has_pr_filters,
+        has_pipeline_filters,
+        &expressions,
+    );
     let job_timeout = generate_job_timeout(front_matter);
 
     // 9. Token acquisition and env vars
@@ -2535,12 +2740,15 @@ mod tests {
 
     #[test]
     fn test_generate_pr_trigger_pipeline_only() {
-        let triggers = Some(crate::compile::types::TriggerConfig {
+        let triggers = Some(crate::compile::types::OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build".into(),
                 project: None,
                 branches: vec![],
+            filters: None,
             }),
+        pr: None,
+        schedule: None,
         });
         let result = generate_pr_trigger(&triggers, false);
         assert!(result.contains("pr: none"));
@@ -2549,12 +2757,15 @@ mod tests {
 
     #[test]
     fn test_generate_pr_trigger_both_pipeline_and_schedule() {
-        let triggers = Some(crate::compile::types::TriggerConfig {
+        let triggers = Some(crate::compile::types::OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build".into(),
                 project: None,
                 branches: vec![],
+            filters: None,
             }),
+        pr: None,
+        schedule: None,
         });
         let result = generate_pr_trigger(&triggers, true);
         assert!(result.contains("pr: none"));
@@ -2581,12 +2792,15 @@ mod tests {
 
     #[test]
     fn test_generate_ci_trigger_pipeline_only() {
-        let triggers = Some(crate::compile::types::TriggerConfig {
+        let triggers = Some(crate::compile::types::OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build".into(),
                 project: None,
                 branches: vec![],
+            filters: None,
             }),
+        pr: None,
+        schedule: None,
         });
         let result = generate_ci_trigger(&triggers, false);
         assert_eq!(result, "trigger: none");
@@ -2594,12 +2808,15 @@ mod tests {
 
     #[test]
     fn test_generate_ci_trigger_both_pipeline_and_schedule() {
-        let triggers = Some(crate::compile::types::TriggerConfig {
+        let triggers = Some(crate::compile::types::OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build".into(),
                 project: None,
                 branches: vec![],
+            filters: None,
             }),
+        pr: None,
+        schedule: None,
         });
         let result = generate_ci_trigger(&triggers, true);
         assert_eq!(result, "trigger: none");
@@ -2615,19 +2832,22 @@ mod tests {
 
     #[test]
     fn test_generate_pipeline_resources_empty_trigger_config() {
-        let triggers = Some(crate::compile::types::TriggerConfig { pipeline: None });
+        let triggers = Some(crate::compile::types::OnConfig { schedule: None, pipeline: None, pr: None });
         let result = generate_pipeline_resources(&triggers).unwrap();
         assert!(result.is_empty());
     }
 
     #[test]
     fn test_generate_pipeline_resources_with_branches() {
-        let triggers = Some(crate::compile::types::TriggerConfig {
+        let triggers = Some(crate::compile::types::OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build Pipeline".into(),
                 project: Some("OtherProject".into()),
                 branches: vec!["main".into(), "release/*".into()],
+            filters: None,
             }),
+        pr: None,
+        schedule: None,
         });
         let result = generate_pipeline_resources(&triggers).unwrap();
         assert!(result.contains("source: 'Build Pipeline'"));
@@ -2641,12 +2861,15 @@ mod tests {
 
     #[test]
     fn test_generate_pipeline_resources_without_branches_triggers_on_any() {
-        let triggers = Some(crate::compile::types::TriggerConfig {
+        let triggers = Some(crate::compile::types::OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "My Pipeline".into(),
                 project: None,
                 branches: vec![],
+            filters: None,
             }),
+        pr: None,
+        schedule: None,
         });
         let result = generate_pipeline_resources(&triggers).unwrap();
         assert!(result.contains("source: 'My Pipeline'"));
@@ -2657,12 +2880,15 @@ mod tests {
 
     #[test]
     fn test_generate_pipeline_resources_resource_id_is_snake_case() {
-        let triggers = Some(crate::compile::types::TriggerConfig {
+        let triggers = Some(crate::compile::types::OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "My Build Pipeline".into(),
                 project: None,
                 branches: vec![],
+            filters: None,
             }),
+        pr: None,
+        schedule: None,
         });
         let result = generate_pipeline_resources(&triggers).unwrap();
         // The pipeline resource ID should be snake_case derived from the name
@@ -3568,46 +3794,177 @@ mod tests {
     #[test]
     fn test_validate_front_matter_identity_rejects_newline_in_trigger_pipeline_name() {
         let mut fm = minimal_front_matter();
-        fm.triggers = Some(TriggerConfig {
+        fm.on_config = Some(OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build\ninjected: true".to_string(),
                 project: None,
                 branches: vec![],
+            filters: None,
             }),
+        pr: None,
+        schedule: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("triggers.pipeline.name"));
+        assert!(result.unwrap_err().to_string().contains("on.pipeline.name"));
     }
 
     #[test]
     fn test_validate_front_matter_identity_rejects_newline_in_trigger_pipeline_project() {
         let mut fm = minimal_front_matter();
-        fm.triggers = Some(TriggerConfig {
+        fm.on_config = Some(OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build Pipeline".to_string(),
                 project: Some("OtherProject\ninjected: true".to_string()),
                 branches: vec![],
+            filters: None,
             }),
+        pr: None,
+        schedule: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("triggers.pipeline.project"));
+        assert!(result.unwrap_err().to_string().contains("on.pipeline.project"));
     }
 
     #[test]
     fn test_validate_front_matter_identity_rejects_newline_in_trigger_pipeline_branch() {
         let mut fm = minimal_front_matter();
-        fm.triggers = Some(TriggerConfig {
+        fm.on_config = Some(OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build Pipeline".to_string(),
                 project: None,
                 branches: vec!["main\ninjected: true".to_string()],
+            filters: None,
             }),
+        pr: None,
+        schedule: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("triggers.pipeline.branches"));
+        assert!(result.unwrap_err().to_string().contains("on.pipeline.branches"));
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_newline_in_pr_branch_include() {
+        let mut fm = minimal_front_matter();
+        fm.on_config = Some(OnConfig {
+            pipeline: None,
+            pr: Some(crate::compile::types::PrTriggerConfig {
+                branches: Some(crate::compile::types::BranchFilter {
+                    include: vec!["main\ninjected: true".to_string()],
+                    exclude: vec![],
+                }),
+                paths: None,
+                filters: None,
+            }),
+            schedule: None,
+        });
+        let result = validate_front_matter_identity(&fm);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("on.pr.branches.include"));
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_newline_in_pr_branch_exclude() {
+        let mut fm = minimal_front_matter();
+        fm.on_config = Some(OnConfig {
+            pipeline: None,
+            pr: Some(crate::compile::types::PrTriggerConfig {
+                branches: Some(crate::compile::types::BranchFilter {
+                    include: vec![],
+                    exclude: vec!["feature\ninjected: true".to_string()],
+                }),
+                paths: None,
+                filters: None,
+            }),
+            schedule: None,
+        });
+        let result = validate_front_matter_identity(&fm);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("on.pr.branches.exclude"));
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_newline_in_pr_path_include() {
+        let mut fm = minimal_front_matter();
+        fm.on_config = Some(OnConfig {
+            pipeline: None,
+            pr: Some(crate::compile::types::PrTriggerConfig {
+                branches: None,
+                paths: Some(crate::compile::types::PathFilter {
+                    include: vec!["src/\ninjected: true".to_string()],
+                    exclude: vec![],
+                }),
+                filters: None,
+            }),
+            schedule: None,
+        });
+        let result = validate_front_matter_identity(&fm);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("on.pr.paths.include"));
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_newline_in_pr_path_exclude() {
+        let mut fm = minimal_front_matter();
+        fm.on_config = Some(OnConfig {
+            pipeline: None,
+            pr: Some(crate::compile::types::PrTriggerConfig {
+                branches: None,
+                paths: Some(crate::compile::types::PathFilter {
+                    include: vec![],
+                    exclude: vec!["tests/\ninjected: true".to_string()],
+                }),
+                filters: None,
+            }),
+            schedule: None,
+        });
+        let result = validate_front_matter_identity(&fm);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("on.pr.paths.exclude"));
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_ado_expression_in_pr_branch_include() {
+        let mut fm = minimal_front_matter();
+        fm.on_config = Some(OnConfig {
+            pipeline: None,
+            pr: Some(crate::compile::types::PrTriggerConfig {
+                branches: Some(crate::compile::types::BranchFilter {
+                    include: vec!["$(System.AccessToken)".to_string()],
+                    exclude: vec![],
+                }),
+                paths: None,
+                filters: None,
+            }),
+            schedule: None,
+        });
+        let result = validate_front_matter_identity(&fm);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("ADO expression"));
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_allows_valid_pr_branches_and_paths() {
+        let mut fm = minimal_front_matter();
+        fm.on_config = Some(OnConfig {
+            pipeline: None,
+            pr: Some(crate::compile::types::PrTriggerConfig {
+                branches: Some(crate::compile::types::BranchFilter {
+                    include: vec!["main".to_string(), "release/*".to_string()],
+                    exclude: vec!["feature/*".to_string()],
+                }),
+                paths: Some(crate::compile::types::PathFilter {
+                    include: vec!["src/**".to_string()],
+                    exclude: vec!["tests/**".to_string()],
+                }),
+                filters: None,
+            }),
+            schedule: None,
+        });
+        let result = validate_front_matter_identity(&fm);
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -3622,12 +3979,15 @@ mod tests {
     #[test]
     fn test_validate_front_matter_identity_allows_valid_trigger_pipeline_fields() {
         let mut fm = minimal_front_matter();
-        fm.triggers = Some(TriggerConfig {
+        fm.on_config = Some(OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build Pipeline".to_string(),
                 project: Some("OtherProject".to_string()),
                 branches: vec!["main".to_string(), "release/*".to_string()],
+            filters: None,
             }),
+        pr: None,
+        schedule: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_ok());
@@ -3645,12 +4005,15 @@ mod tests {
     #[test]
     fn test_validate_front_matter_identity_rejects_ado_expression_in_trigger_pipeline_name() {
         let mut fm = minimal_front_matter();
-        fm.triggers = Some(TriggerConfig {
+        fm.on_config = Some(OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build $(System.AccessToken)".to_string(),
                 project: None,
                 branches: vec![],
+            filters: None,
             }),
+        pr: None,
+        schedule: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -3660,12 +4023,15 @@ mod tests {
     #[test]
     fn test_validate_front_matter_identity_rejects_ado_expression_in_trigger_pipeline_project() {
         let mut fm = minimal_front_matter();
-        fm.triggers = Some(TriggerConfig {
+        fm.on_config = Some(OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build Pipeline".to_string(),
                 project: Some("$(System.AccessToken)".to_string()),
                 branches: vec![],
+            filters: None,
             }),
+        pr: None,
+        schedule: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -3675,12 +4041,15 @@ mod tests {
     #[test]
     fn test_validate_front_matter_identity_rejects_ado_expression_in_trigger_pipeline_branch() {
         let mut fm = minimal_front_matter();
-        fm.triggers = Some(TriggerConfig {
+        fm.on_config = Some(OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build Pipeline".to_string(),
                 project: None,
                 branches: vec!["$[variables['token']]".to_string()],
+            filters: None,
             }),
+        pr: None,
+        schedule: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -3689,12 +4058,15 @@ mod tests {
 
     #[test]
     fn test_pipeline_resources_escapes_single_quotes() {
-        let triggers = Some(TriggerConfig {
+        let triggers = Some(OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build's Pipeline".to_string(),
                 project: Some("My'Project".to_string()),
                 branches: vec!["main".to_string(), "it's-branch".to_string()],
+            filters: None,
             }),
+        pr: None,
+        schedule: None,
         });
         let result = generate_pipeline_resources(&triggers).unwrap();
         assert!(result.contains("source: 'Build''s Pipeline'"));
@@ -4778,13 +5150,17 @@ mod tests {
 
     #[test]
     fn test_generate_setup_job_empty_returns_empty() {
-        assert!(generate_setup_job(&[], "MyPool").is_empty());
+        let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
+        let ctx = CompileContext::for_test(&fm);
+        assert!(generate_setup_job(&[], "MyPool", None, None, &[], &ctx).unwrap().is_empty());
     }
 
     #[test]
     fn test_generate_setup_job_with_steps() {
+        let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
+        let ctx = CompileContext::for_test(&fm);
         let step: serde_yaml::Value = serde_yaml::from_str("bash: echo setup").unwrap();
-        let out = generate_setup_job(&[step], "MyPool");
+        let out = generate_setup_job(&[step], "MyPool", None, None, &[], &ctx).unwrap();
         assert!(out.contains("- job: Setup"), "out: {out}");
         assert!(out.contains("displayName: \"Setup\""), "out: {out}");
         assert!(out.contains("name: MyPool"), "out: {out}");
@@ -4809,13 +5185,13 @@ mod tests {
 
     #[test]
     fn test_generate_agentic_depends_on_empty_steps() {
-        assert!(generate_agentic_depends_on(&[]).is_empty());
+        assert!(generate_agentic_depends_on(&[], false, false, &[]).is_empty());
     }
 
     #[test]
     fn test_generate_agentic_depends_on_with_steps() {
         let step: serde_yaml::Value = serde_yaml::from_str("bash: x").unwrap();
-        assert_eq!(generate_agentic_depends_on(&[step]), "dependsOn: Setup");
+        assert_eq!(generate_agentic_depends_on(&[step], false, false, &[]), "dependsOn: Setup");
     }
 
     #[test]

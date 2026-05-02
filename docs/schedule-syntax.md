@@ -4,7 +4,14 @@ _Part of the [ado-aw documentation](../AGENTS.md)._
 
 ## Schedule Syntax (Fuzzy Schedule Time Syntax)
 
-The `schedule` field supports a human-friendly fuzzy schedule syntax that automatically distributes execution times to prevent server load spikes. The syntax is based on the [Fuzzy Schedule Time Syntax Specification](https://github.com/githubnext/gh-aw/blob/main/docs/src/content/docs/reference/fuzzy-schedule-specification.md).
+The `on.schedule` field supports a human-friendly fuzzy schedule syntax that automatically distributes execution times to prevent server load spikes. The syntax is based on the [Fuzzy Schedule Time Syntax Specification](https://github.com/githubnext/gh-aw/blob/main/docs/src/content/docs/reference/fuzzy-schedule-specification.md).
+
+Schedule is configured under the `on:` key:
+
+```yaml
+on:
+  schedule: daily around 14:00
+```
 
 ### Daily Schedules
 
