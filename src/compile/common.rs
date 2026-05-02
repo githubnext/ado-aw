@@ -208,14 +208,9 @@ pub fn generate_pr_trigger(on_config: &Option<OnConfig>, has_schedule: bool) -> 
         .and_then(|t| t.pipeline.as_ref())
         .is_some();
 
-    let has_pr_trigger = on_config
-        .as_ref()
-        .and_then(|t| t.pr.as_ref())
-        .is_some();
-
     // Explicit triggers.pr overrides schedule/pipeline suppression
-    if has_pr_trigger {
-        return super::pr_filters::generate_native_pr_trigger(on_config.as_ref().unwrap().pr.as_ref().unwrap());
+    if let Some(pr) = on_config.as_ref().and_then(|o| o.pr.as_ref()) {
+        return super::pr_filters::generate_native_pr_trigger(pr);
     }
 
     match (has_pipeline_trigger, has_schedule) {
@@ -1195,12 +1190,13 @@ pub fn generate_setup_job(
 ) -> anyhow::Result<String> {
     use super::extensions::CompilerExtension;
 
-    let has_gate = pr_filters
+    let has_pr_gate = pr_filters
         .map(|f| !super::filter_ir::lower_pr_filters(f).is_empty())
-        .unwrap_or(false)
-        || pipeline_filters
-            .map(|f| !super::filter_ir::lower_pipeline_filters(f).is_empty())
-            .unwrap_or(false);
+        .unwrap_or(false);
+    let has_pipeline_gate = pipeline_filters
+        .map(|f| !super::filter_ir::lower_pipeline_filters(f).is_empty())
+        .unwrap_or(false);
+    let has_gate = has_pr_gate || has_pipeline_gate;
 
     // Collect setup_steps from ALL extensions
     let mut ext_setup_steps: Vec<String> = Vec::new();
@@ -1221,7 +1217,7 @@ pub fn generate_setup_job(
     // User setup steps (conditioned on gate passing when filters are active)
     if !setup_steps.is_empty() {
         if has_gate {
-            let condition = match (pr_filters.is_some(), pipeline_filters.is_some()) {
+            let condition = match (has_pr_gate, has_pipeline_gate) {
                 (true, true) => {
                     "and(eq(variables['prGate.SHOULD_RUN'], 'true'), eq(variables['pipelineGate.SHOULD_RUN'], 'true'))".to_string()
                 }
