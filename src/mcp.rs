@@ -1097,24 +1097,27 @@ artifact-name and build-id restrictions may apply per the workflow's safe-output
                 extension
             )
         };
+        // Read the source file, compute its SHA-256 for cross-stage integrity
+        // verification, then write it to the staging directory. Hashing the
+        // source before writing (rather than re-reading the staged copy)
+        // eliminates a TOCTOU window between copy and re-read.
+        let source_bytes = tokio::fs::read(&canonical).await.map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!(
+                "Failed to read source file '{}': {}",
+                params.0.file_path,
+                e
+            ))
+        })?;
+        let staged_sha256 = crate::hash::sha256_hex(&source_bytes);
+
         let staged_path = self.output_directory.join(&staged_filename);
-        tokio::fs::copy(&canonical, &staged_path).await.map_err(|e| {
+        tokio::fs::write(&staged_path, &source_bytes).await.map_err(|e| {
             anyhow_to_mcp_error(anyhow::anyhow!(
                 "Failed to stage file '{}' into safe-outputs directory: {}",
                 params.0.file_path,
                 e
             ))
         })?;
-
-        // Compute SHA-256 of the staged copy for cross-stage integrity
-        // verification. Stage 3 re-hashes and rejects mismatches.
-        let staged_bytes = tokio::fs::read(&staged_path).await.map_err(|e| {
-            anyhow_to_mcp_error(anyhow::anyhow!(
-                "Failed to read staged file for hashing: {}",
-                e
-            ))
-        })?;
-        let staged_sha256 = crate::hash::sha256_hex(&staged_bytes);
 
         let result = UploadBuildArtifactResult::new(
             params.0.build_id,

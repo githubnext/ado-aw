@@ -32,7 +32,7 @@ use super::PATH_SEGMENT;
 use crate::sanitize::SanitizeContent;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::tool_result;
-use crate::validate::{is_safe_path_segment, is_valid_version};
+use crate::validate::{is_safe_path_segment, is_valid_artifact_name};
 use anyhow::{Context, ensure};
 
 /// Parameters for attaching a workspace file to an ADO build.
@@ -65,8 +65,6 @@ impl Validate for UploadBuildArtifactParams {
 
         // artifact_name: ADO requires non-empty, ≤100 chars, charset
         // [A-Za-z0-9._-], and (per our hardening) no leading `.`.
-        // `is_valid_version` is reused here — its charset rule happens to
-        // match ADO's artifact-name requirements exactly.
         ensure!(
             self.artifact_name.len() <= 100,
             "artifact_name must be at most 100 characters"
@@ -76,7 +74,7 @@ impl Validate for UploadBuildArtifactParams {
             "artifact_name must not start with '.'"
         );
         ensure!(
-            is_valid_version(&self.artifact_name),
+            is_valid_artifact_name(&self.artifact_name),
             "artifact_name must be non-empty and contain only alphanumeric characters, '-', '_' or '.'"
         );
 
@@ -335,7 +333,7 @@ impl Executor for UploadBuildArtifactResult {
             Some(prefix) => format!("{}{}", prefix, self.artifact_name),
             None => self.artifact_name.clone(),
         };
-        if final_name.starts_with('.') || final_name.len() > 100 || !is_valid_version(&final_name)
+        if final_name.starts_with('.') || final_name.len() > 100 || !is_valid_artifact_name(&final_name)
         {
             return Ok(ExecutionResult::failure(format!(
                 "Resolved artifact name '{}' is not a valid Azure DevOps artifact name",
@@ -384,9 +382,7 @@ impl Executor for UploadBuildArtifactResult {
         // Resolve the attachment type. Operator config wins; otherwise use the
         // default. Re-validate the charset defensively even though
         // `SanitizeConfig` strips control characters, because the type is
-        // interpolated into a URL path segment. `is_valid_version` is reused
-        // here — its [A-Za-z0-9._-] charset matches the attachment-type
-        // requirements.
+        // interpolated into a URL path segment.
         let attachment_type = config
             .attachment_type
             .as_deref()
@@ -394,7 +390,7 @@ impl Executor for UploadBuildArtifactResult {
         if attachment_type.is_empty()
             || attachment_type.starts_with('.')
             || attachment_type.len() > 100
-            || !is_valid_version(attachment_type)
+            || !is_valid_artifact_name(attachment_type)
         {
             return Ok(ExecutionResult::failure(format!(
                 "attachment-type '{}' is not a valid value (must be non-empty, ≤100 chars, no leading '.', alphanumeric/'-'/'_'/'.')",
@@ -1123,6 +1119,40 @@ attachment-type: "agent-artifact"
         assert!(
             outcome.message.contains("differs from size recorded"),
             "expected integrity failure, got: {}",
+            outcome.message
+        );
+    }
+
+    #[tokio::test]
+    async fn test_executor_rejects_sha256_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = "upload-build-artifact-agent-report-sha-mismatch.pdf";
+        let content = b"real file content";
+        std::fs::write(dir.path().join(staged), content).unwrap();
+
+        // Record the hash of different content — same size but wrong hash.
+        let wrong_hash = crate::hash::sha256_hex(b"wrong file content");
+
+        let result = UploadBuildArtifactResult::new(
+            Some(1),
+            "agent-report".to_string(),
+            "out/report.pdf".to_string(),
+            staged.to_string(),
+            content.len() as u64,
+            wrong_hash,
+        );
+        // dry_run = false so the hash check executes (it's after the
+        // dry-run guard). The failure fires before any HTTP call.
+        let mut ctx = make_ctx(dir.path().to_path_buf(), false);
+        ctx.build_id = Some(1);
+        ctx.ado_org_url = Some("https://dev.azure.com/test".to_string());
+        ctx.ado_project = Some("TestProject".to_string());
+        ctx.access_token = Some("fake-token".to_string());
+        let outcome = result.execute_impl(&ctx).await.unwrap();
+        assert!(!outcome.success);
+        assert!(
+            outcome.message.contains("SHA-256 mismatch"),
+            "expected SHA-256 mismatch failure, got: {}",
             outcome.message
         );
     }

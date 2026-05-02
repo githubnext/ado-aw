@@ -56,6 +56,20 @@ pub fn is_valid_version(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
+/// Validate that a string is a valid ADO artifact name or attachment-type
+/// segment: non-empty, composed of `[A-Za-z0-9._-]`.
+///
+/// The allowed charset is identical to [`is_valid_version`], but this function
+/// exists as a separate entry point so that artifact-name validation is
+/// decoupled from version-string validation. If version validation is ever
+/// tightened (e.g. to require a leading digit), artifact names remain
+/// unaffected.
+pub fn is_valid_artifact_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
 /// Characters allowed in individual engine.args entries.
 /// Strict allowlist to prevent shell injection inside AWF single-quoted commands.
 pub fn is_valid_arg(s: &str) -> bool {
