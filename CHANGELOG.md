@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.21.0](https://github.com/githubnext/ado-aw/compare/v0.20.0...v0.21.0) (2026-05-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* **compile:** trigger filter IR with data-driven Python evaluator ([#345](https://github.com/githubnext/ado-aw/issues/345))
+
+### Features
+
+* **compile:** trigger filter IR with data-driven Python evaluator ([#345](https://github.com/githubnext/ado-aw/issues/345)) ([90df351](https://github.com/githubnext/ado-aw/commit/90df351d3ff5a752265c5813f7f5f3ead8256411))
+* **executor:** auto-capture ADO build variables in ExecutionContext ([#378](https://github.com/githubnext/ado-aw/issues/378)) ([7575218](https://github.com/githubnext/ado-aw/commit/7575218d288e081082804a82c9af2ca499fbaff5))
+* **safe-outputs:** add unified upload-build-artifact safe output ([#380](https://github.com/githubnext/ado-aw/issues/380)) ([b66037d](https://github.com/githubnext/ado-aw/commit/b66037d4b093baa18cb04dfa0792f9fca6d2f9e1))
+
+
+### Bug Fixes
+
+* **safeoutputs:** enforce add-build-tag scope for build IDs &gt; i32::MAX ([#379](https://github.com/githubnext/ado-aw/issues/379)) ([c533900](https://github.com/githubnext/ado-aw/commit/c53390002c8d7a9d9fa2e83fdb3e636da8f51250))
+* **safeoutputs:** sanitize ADO-sourced title and tags in prefix-guard error messages to prevent VSO command injection ([#370](https://github.com/githubnext/ado-aw/issues/370)) ([3fa067f](https://github.com/githubnext/ado-aw/commit/3fa067fd6bee4e14142f879a8011cf992f6b7c92))
+
 ## [0.20.0](https://github.com/githubnext/ado-aw/compare/v0.19.0...v0.20.0) (2026-04-29)
 
 
