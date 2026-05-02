@@ -177,7 +177,9 @@ impl UploadBuildArtifactResult {
     }
 }
 
-const DEFAULT_MAX_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50 MB
+/// Default maximum file size for upload-build-artifact (50 MB).
+/// Also used by the MCP handler as the Stage 1 staging cap.
+pub const DEFAULT_MAX_FILE_SIZE: u64 = 50 * 1024 * 1024;
 const DEFAULT_ATTACHMENT_TYPE: &str = "agent-artifact";
 
 /// Configuration for the upload-build-artifact tool (specified in front

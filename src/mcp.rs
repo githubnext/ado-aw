@@ -27,7 +27,7 @@ use crate::safeoutputs::{
     QueueBuildResult, SubmitPrReviewParams, SubmitPrReviewResult, ToolResult,
     UpdatePrParams, UpdatePrResult,
     UpdateWorkItemParams, UpdateWorkItemResult,
-    UploadBuildArtifactParams, UploadBuildArtifactResult,
+    UploadBuildArtifactParams, UploadBuildArtifactResult, DEFAULT_MAX_FILE_SIZE,
     UploadWorkitemAttachmentParams, UploadWorkitemAttachmentResult,
     anyhow_to_mcp_error,
 };
@@ -1053,15 +1053,12 @@ artifact-name and build-id restrictions may apply per the workflow's safe-output
         // Defense-in-depth: reject files exceeding the default max size at
         // Stage 1 to prevent a misbehaving agent from filling the staging
         // disk before Stage 3 gets a chance to enforce the operator's limit.
-        // The operator's configured max-file-size may be lower, but that is
-        // only available at Stage 3; here we use the hardcoded default cap.
-        const STAGE1_MAX_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50 MB — matches DEFAULT_MAX_FILE_SIZE
-        if file_size > STAGE1_MAX_FILE_SIZE {
+        if file_size > DEFAULT_MAX_FILE_SIZE {
             return Err(anyhow_to_mcp_error(anyhow::anyhow!(
                 "File '{}' is {} bytes, exceeding the maximum staging size of {} bytes",
                 params.0.file_path,
                 file_size,
-                STAGE1_MAX_FILE_SIZE
+                DEFAULT_MAX_FILE_SIZE
             )));
         }
 
