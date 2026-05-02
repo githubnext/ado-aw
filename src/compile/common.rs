@@ -1195,7 +1195,12 @@ pub fn generate_setup_job(
 ) -> anyhow::Result<String> {
     use super::extensions::CompilerExtension;
 
-    let has_gate = pr_filters.is_some() || pipeline_filters.is_some();
+    let has_gate = pr_filters
+        .map(|f| !super::filter_ir::lower_pr_filters(f).is_empty())
+        .unwrap_or(false)
+        || pipeline_filters
+            .map(|f| !super::filter_ir::lower_pipeline_filters(f).is_empty())
+            .unwrap_or(false);
 
     // Collect setup_steps from ALL extensions
     let mut ext_setup_steps: Vec<String> = Vec::new();
@@ -2033,6 +2038,12 @@ pub async fn compile_shared(
 
     // Validate expression escape hatches against injection
     for expr in &expressions {
+        if crate::validate::contains_newline(expr) {
+            anyhow::bail!(
+                "Filter expression contains newline characters which could inject YAML keys. Found: '{}'",
+                expr.replace('\n', "\\n").replace('\r', "\\r")
+            );
+        }
         if crate::validate::contains_ado_expression(expr) {
             anyhow::bail!(
                 "Filter expression contains ADO expression ('${{{{', '$(', or '$[') which could \

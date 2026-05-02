@@ -1130,6 +1130,7 @@ pub fn compile_gate_step_external(
         "  displayName: \"{}\"\n",
         ctx.display_name()
     ));
+    step.push_str("  condition: succeeded()\n");
     step.push_str("  env:\n");
     // SYSTEM_ACCESSTOKEN is always needed for self-cancel (PATCH to builds API).
     // This uses the pipeline's built-in token, not an ARM service connection.
