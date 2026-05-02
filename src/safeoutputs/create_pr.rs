@@ -272,6 +272,8 @@ struct CreatePrResultFields {
     agent_labels: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     base_commit: Option<String>,
+    /// SHA-256 hex digest of the patch file, recorded at staging time.
+    patch_sha256: String,
 }
 
 impl Validate for CreatePrResultFields {}
@@ -307,6 +309,10 @@ tool_result! {
         /// branches and is resolved when the PR is merged.
         #[serde(skip_serializing_if = "Option::is_none")]
         base_commit: Option<String>,
+        /// SHA-256 hex digest of the patch file recorded at Stage 1.
+        /// Stage 3 re-hashes the file and rejects mismatches — catches
+        /// patch file tampering between stages.
+        patch_sha256: String,
     }
 }
 
@@ -330,6 +336,7 @@ impl CreatePrResult {
         repository: String,
         agent_labels: Vec<String>,
         base_commit: Option<String>,
+        patch_sha256: String,
     ) -> Self {
         Self {
             name: Self::NAME.to_string(),
@@ -340,6 +347,7 @@ impl CreatePrResult {
             repository,
             agent_labels,
             base_commit,
+            patch_sha256,
         }
     }
 }
@@ -673,6 +681,19 @@ impl Executor for CreatePrResult {
             .await
             .context("Failed to read patch file")?;
         debug!("Patch content size: {} bytes", patch_content.len());
+
+        // SHA-256 integrity check: verify the patch file hasn't been tampered
+        // with between Stage 1 and Stage 3.
+        let live_hash =
+            crate::hash::sha256_hex(patch_content.as_bytes());
+        if live_hash != self.patch_sha256 {
+            return Ok(ExecutionResult::failure(format!(
+                "Patch file SHA-256 mismatch: expected {}, got {} — \
+                 the file may have been tampered with between stages",
+                self.patch_sha256, live_hash
+            )));
+        }
+        debug!("Patch file SHA-256 verified: {}", live_hash);
 
         // Excluded files are handled via --exclude flags on git am / git apply,
         // which filters them at the git level rather than post-processing patch content.
@@ -2396,5 +2417,63 @@ new file mode 100755
     #[test]
     fn test_truncate_error_body_empty_input() {
         assert_eq!(truncate_error_body("", 5), "");
+    }
+
+    #[tokio::test]
+    async fn test_executor_rejects_patch_sha256_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let patch_file = "test-repo-20260501.patch";
+        let patch_content = "diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n";
+        std::fs::write(dir.path().join(patch_file), patch_content).unwrap();
+
+        // Record the hash of different content.
+        let wrong_hash = crate::hash::sha256_hex(b"completely different patch");
+
+        let result = CreatePrResult::new(
+            "Test PR".to_string(),
+            "Description of the PR".to_string(),
+            "agent/test-pr-12345678".to_string(),
+            patch_file.to_string(),
+            "self".to_string(),
+            vec![],
+            None,
+            wrong_hash,
+        );
+
+        let ctx = ExecutionContext {
+            ado_org_url: Some("https://dev.azure.com/test".to_string()),
+            ado_organization: Some("test".to_string()),
+            ado_project: Some("TestProject".to_string()),
+            access_token: Some("fake-token".to_string()),
+            source_directory: dir.path().to_path_buf(),
+            working_directory: dir.path().to_path_buf(),
+            tool_configs: std::collections::HashMap::new(),
+            repository_id: Some("repo-id".to_string()),
+            repository_name: Some("test-repo".to_string()),
+            allowed_repositories: std::collections::HashMap::new(),
+            agent_stats: None,
+            dry_run: false,
+            build_id: None,
+            build_number: None,
+            build_reason: None,
+            definition_name: None,
+            source_branch: None,
+            source_branch_name: None,
+            source_version: None,
+            triggered_by_build_id: None,
+            triggered_by_definition_name: None,
+            triggered_by_build_number: None,
+            triggered_by_project_id: None,
+            pull_request_id: None,
+            pull_request_source_branch: None,
+            pull_request_target_branch: None,
+        };
+        let outcome = result.execute_impl(&ctx).await.unwrap();
+        assert!(!outcome.success);
+        assert!(
+            outcome.message.contains("SHA-256 mismatch"),
+            "expected SHA-256 mismatch failure, got: {}",
+            outcome.message
+        );
     }
 }

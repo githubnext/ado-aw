@@ -7,6 +7,7 @@ mod ecosystem_domains;
 mod engine;
 mod execute;
 mod fuzzy_schedule;
+mod hash;
 mod init;
 mod logging;
 mod mcp;
