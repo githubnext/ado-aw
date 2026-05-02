@@ -42,7 +42,7 @@ pub const DEFAULT_COPILOT_MODEL: &str = "claude-opus-4.7";
 
 /// Default pinned version of the Copilot CLI NuGet package.
 /// Override per-agent via `engine: { id: copilot, version: "1.0.35" }` in front matter.
-pub const COPILOT_CLI_VERSION: &str = "1.0.36";
+pub const COPILOT_CLI_VERSION: &str = "1.0.40";
 
 /// Resolved engine — enum dispatch over supported engine identifiers.
 ///
