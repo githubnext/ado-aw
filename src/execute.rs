@@ -3,7 +3,7 @@
 //! After the agent (Stage 1) generates safe outputs as an NDJSON file,
 //! Stage 3 parses this file and executes the corresponding actions.
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use log::{debug, error, info, warn};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -257,37 +257,96 @@ pub async fn execute_safe_output(
 
     // Dispatch based on tool name. All registered tools go through `dispatch_tool`,
     // which handles deserialization and sanitized execution uniformly.
-    let result = if let Some(dispatched_result) = dispatch_executor_tools!(tool_name, entry, ctx, {
+    // The dispatch is split across category helpers to keep each function's complexity low.
+    let result = find_tool_executor(tool_name, entry, ctx).await?.ok_or_else(|| {
+        error!("Unknown tool type: {}", tool_name);
+        anyhow::anyhow!("Unknown tool type: {}. No executor registered.", tool_name)
+    })?;
+
+    Ok((tool_name.to_string(), result))
+}
+
+/// Try each dispatch category in order and return the first match.
+async fn find_tool_executor(
+    tool_name: &str,
+    entry: &Value,
+    ctx: &ExecutionContext,
+) -> Result<Option<ExecutionResult>> {
+    if let Some(r) = dispatch_meta_tools(tool_name, entry, ctx).await? {
+        return Ok(Some(r));
+    }
+    if let Some(r) = dispatch_work_item_tools(tool_name, entry, ctx).await? {
+        return Ok(Some(r));
+    }
+    if let Some(r) = dispatch_pr_tools(tool_name, entry, ctx).await? {
+        return Ok(Some(r));
+    }
+    if let Some(r) = dispatch_resource_tools(tool_name, entry, ctx).await? {
+        return Ok(Some(r));
+    }
+    Ok(None)
+}
+
+/// Dispatch meta/signal tools: noop, missing-tool, missing-data, report-incomplete.
+async fn dispatch_meta_tools(
+    tool_name: &str,
+    entry: &Value,
+    ctx: &ExecutionContext,
+) -> Result<Option<ExecutionResult>> {
+    dispatch_executor_tools!(tool_name, entry, ctx, {
         "noop" => NoopResult,
         "missing-tool" => MissingToolResult,
         "missing-data" => MissingDataResult,
         "report-incomplete" => ReportIncompleteResult,
+    })
+}
+
+/// Dispatch work-item tools.
+async fn dispatch_work_item_tools(
+    tool_name: &str,
+    entry: &Value,
+    ctx: &ExecutionContext,
+) -> Result<Option<ExecutionResult>> {
+    dispatch_executor_tools!(tool_name, entry, ctx, {
         "create-work-item" => CreateWorkItemResult,
         "comment-on-work-item" => CommentOnWorkItemResult,
         "update-work-item" => UpdateWorkItemResult,
+        "link-work-items" => LinkWorkItemsResult,
+        "upload-workitem-attachment" => UploadWorkitemAttachmentResult,
+    })
+}
+
+/// Dispatch pull-request tools.
+async fn dispatch_pr_tools(
+    tool_name: &str,
+    entry: &Value,
+    ctx: &ExecutionContext,
+) -> Result<Option<ExecutionResult>> {
+    dispatch_executor_tools!(tool_name, entry, ctx, {
         "create-pull-request" => CreatePrResult,
+        "add-pr-comment" => AddPrCommentResult,
+        "update-pr" => UpdatePrResult,
+        "submit-pr-review" => SubmitPrReviewResult,
+        "reply-to-pr-review-comment" => ReplyToPrCommentResult,
+        "resolve-pr-thread" => ResolvePrThreadResult,
+    })
+}
+
+/// Dispatch git, build, and wiki tools.
+async fn dispatch_resource_tools(
+    tool_name: &str,
+    entry: &Value,
+    ctx: &ExecutionContext,
+) -> Result<Option<ExecutionResult>> {
+    dispatch_executor_tools!(tool_name, entry, ctx, {
         "update-wiki-page" => UpdateWikiPageResult,
         "create-wiki-page" => CreateWikiPageResult,
-        "add-pr-comment" => AddPrCommentResult,
-        "link-work-items" => LinkWorkItemsResult,
         "queue-build" => QueueBuildResult,
         "create-git-tag" => CreateGitTagResult,
         "add-build-tag" => AddBuildTagResult,
         "create-branch" => CreateBranchResult,
-        "update-pr" => UpdatePrResult,
         "upload-build-artifact" => UploadBuildArtifactResult,
-        "upload-workitem-attachment" => UploadWorkitemAttachmentResult,
-        "submit-pr-review" => SubmitPrReviewResult,
-        "reply-to-pr-review-comment" => ReplyToPrCommentResult,
-        "resolve-pr-thread" => ResolvePrThreadResult,
-    })? {
-        dispatched_result
-    } else {
-        error!("Unknown tool type: {}", tool_name);
-        bail!("Unknown tool type: {}. No executor registered.", tool_name)
-    };
-
-    Ok((tool_name.to_string(), result))
+    })
 }
 
 /// Read the operator's `max` override from the tool's config JSON, falling back to the
