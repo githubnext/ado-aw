@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { PolicyTracker } from "./policy.js";
-import type { FactSpec } from "./types.gen.js";
+import { PolicyTracker } from "../policy.js";
+import type { FactSpec } from "../types.gen.js";
 
 function spec(kind: string, fp: string): FactSpec {
   return { kind, failure_policy: fp };

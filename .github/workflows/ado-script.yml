@@ -60,7 +60,7 @@ jobs:
 
       - name: Smoke-test bundle
         working-directory: scripts/ado-script
-        run: npx vitest run test/smoke.test.ts
+        run: npx vitest run -c vitest.config.smoke.ts
 
       - name: E2E gate test
         run: cargo test --test gate_e2e -- --ignored --nocapture

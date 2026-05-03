@@ -4,7 +4,7 @@ import {
   stripRefPrefix,
   isPipelineVarFact,
   type FactKind,
-} from "./env-facts.js";
+} from "../env-facts.js";
 
 const ALL: { fact: FactKind; env: string }[] = [
   { fact: "pr_title", env: "ADO_PR_TITLE" },
