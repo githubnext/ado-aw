@@ -76,7 +76,7 @@ export type PredicateSpec =
 
 /**
  * Serializable gate specification — the JSON document consumed by the
- * Python gate evaluator at pipeline runtime.
+ * Node gate evaluator (`scripts/gate.js`) at pipeline runtime.
  */
 export interface GateSpec {
   checks: CheckSpec[];
@@ -107,6 +107,12 @@ export interface GateContextSpec {
  * Serialized fact acquisition descriptor.
  */
 export interface FactSpec {
+  /**
+   * Kinds of other facts that must be acquired before this one.
+   * Mirrors `Fact::dependencies()`. Carried in the spec so the gate
+   * evaluator does not duplicate the dependency graph.
+   */
+  dependencies: string[];
   failure_policy: string;
   kind: string;
   [k: string]: unknown;

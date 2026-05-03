@@ -350,6 +350,34 @@ describe("predicateFacts", () => {
   });
 });
 
+describe("unknown predicate fallback", () => {
+  let stderrWrites: string[];
+
+  beforeEach(() => {
+    stderrWrites = [];
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: any) => {
+      stderrWrites.push(typeof chunk === "string" ? chunk : chunk.toString());
+      return true;
+    });
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("fails closed and emits a warning when the predicate type is unknown", () => {
+    // Forge a spec a future compiler might emit but this gate.js does
+    // not recognise. The default branch should NOT silently auto-pass.
+    const pred = { type: "future_predicate", fact: "x" } as unknown as PredicateSpec;
+    const result = evaluatePredicate(pred, factMap({}));
+    expect(result).toBe(false);
+    expect(
+      stderrWrites.some(
+        (w) =>
+          w.includes("##vso[task.logissue type=warning;]") && w.includes("future_predicate"),
+      ),
+    ).toBe(true);
+  });
+});
+
 describe("evaluatePredicates", () => {
   let writes: string[];
 
@@ -380,8 +408,8 @@ describe("evaluatePredicates", () => {
         },
       ],
       [
-        { kind: "pr_title", failure_policy: "fail_closed" },
-        { kind: "build_reason", failure_policy: "fail_closed" },
+        { kind: "pr_title", failure_policy: "fail_closed", dependencies: [] },
+        { kind: "build_reason", failure_policy: "fail_closed", dependencies: [] },
       ],
     );
     const tracker = new PolicyTracker(spec.facts);
@@ -406,7 +434,7 @@ describe("evaluatePredicates", () => {
           predicate: { type: "equals", fact: "pr_title", value: "ok" },
         },
       ],
-      [{ kind: "pr_title", failure_policy: "fail_closed" }],
+      [{ kind: "pr_title", failure_policy: "fail_closed", dependencies: [] }],
     );
     const tracker = new PolicyTracker(spec.facts);
     tracker.recordFactFailure("pr_title", "test failure");

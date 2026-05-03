@@ -3,17 +3,10 @@ import { logWarning } from "./vso-logger.js";
 
 export type FailurePolicy = "fail_closed" | "fail_open" | "skip_dependents";
 
-/** Hard-coded fact dependency graph — keep in sync with `Fact::dependencies` in
- *  `src/compile/filter_ir.rs`. Encoded here because `FactSpec` does not carry
- *  the dep graph; it's a property of the kind, not the spec instance. */
-const FACT_DEPS = {
-  pr_is_draft: ["pr_metadata"],
-  pr_labels: ["pr_metadata"],
-  changed_file_count: ["changed_files"],
-} as const satisfies Record<string, readonly string[]>;
-
 export class PolicyTracker {
   private readonly policyByKind = new Map<string, FailurePolicy>();
+  /** Fact dependency graph derived from the spec — no manual mirror. */
+  private readonly depsByKind = new Map<string, readonly string[]>();
   private readonly failedFacts = new Set<string>();
   private readonly skippedFacts = new Set<string>();
   private readonly unavailablePoliciesByKind = new Map<string, Set<FailurePolicy>>();
@@ -24,6 +17,7 @@ export class PolicyTracker {
   constructor(facts: FactSpec[]) {
     for (const f of facts) {
       this.policyByKind.set(f.kind, this.parsePolicy(f.failure_policy));
+      this.depsByKind.set(f.kind, f.dependencies ?? []);
     }
   }
 
@@ -108,7 +102,7 @@ export class PolicyTracker {
     let changed = true;
     while (changed) {
       changed = false;
-      for (const [kind, deps] of Object.entries(FACT_DEPS)) {
+      for (const [kind, deps] of this.depsByKind.entries()) {
         if (unavailable.has(kind)) continue;
         if (deps.some((dep) => unavailable.has(dep))) {
           unavailable.add(kind);
@@ -132,5 +126,3 @@ export class PolicyTracker {
     this.unavailablePoliciesByKind.set(factKind, new Set([policy]));
   }
 }
-
-export const _internalForTest = { FACT_DEPS };

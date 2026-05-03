@@ -136,6 +136,8 @@ impl Fact {
     }
 
     /// True if this fact is a free pipeline variable (no API/computation).
+    /// Only used for test assertions; the runtime evaluator has its own
+    /// mirror in `scripts/ado-script/src/shared/env-facts.ts::isPipelineVarFact`.
     #[cfg(test)]
     pub fn is_pipeline_var(&self) -> bool {
         matches!(
@@ -812,7 +814,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 /// Serializable gate specification — the JSON document consumed by the
-/// Python gate evaluator at pipeline runtime.
+/// Node gate evaluator (`scripts/gate.js`) at pipeline runtime.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct GateSpec {
     pub context: GateContextSpec,
@@ -834,6 +836,10 @@ pub struct GateContextSpec {
 pub struct FactSpec {
     pub kind: String,
     pub failure_policy: String,
+    /// Kinds of other facts that must be acquired before this one.
+    /// Mirrors `Fact::dependencies()`. Carried in the spec so the gate
+    /// evaluator does not duplicate the dependency graph.
+    pub dependencies: Vec<String>,
 }
 
 /// Serialized filter check.
@@ -1065,6 +1071,7 @@ pub fn build_gate_spec(ctx: GateContext, checks: &[FilterCheck]) -> anyhow::Resu
         .map(|f| FactSpec {
             kind: f.kind().into(),
             failure_policy: f.failure_policy().as_str().into(),
+            dependencies: f.dependencies().iter().map(|d| d.kind().into()).collect(),
         })
         .collect();
 

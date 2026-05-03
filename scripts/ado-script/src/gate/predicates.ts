@@ -7,7 +7,7 @@
  */
 import type { GateSpec, PredicateSpec } from "../shared/types.gen.js";
 import type { PolicyTracker } from "../shared/policy.js";
-import { addBuildTag } from "../shared/vso-logger.js";
+import { addBuildTag, logWarning } from "../shared/vso-logger.js";
 import { stripRefPrefix } from "../shared/env-facts.js";
 
 type CheckResult = "pass" | "fail" | "skip";
@@ -138,8 +138,18 @@ export function evaluatePredicate(p: PredicateSpec, facts: Map<string, unknown>)
       return p.operands.some((sub) => evaluatePredicate(sub, facts));
     case "not":
       return !evaluatePredicate(p.operand, facts);
-    default:
-      return true;
+    default: {
+      // Unknown predicate type — likely a newer compiler emitted a spec
+      // a bundled gate.js doesn't recognise. Surface in pipeline logs;
+      // fail-closed so the missing logic doesn't silently auto-pass.
+      const unknownType = (p as { type?: unknown }).type;
+      logWarning(
+        `Unknown predicate type '${String(unknownType)}'; failing closed. ` +
+          "Update scripts/gate.js (or the bundled scripts.zip) to a " +
+          "release that supports this predicate.",
+      );
+      return false;
+    }
   }
 }
 
@@ -152,6 +162,12 @@ function stringsFromFact(raw: unknown): string[] {
 }
 
 function globMatch(value: string, pattern: string): boolean {
+  // Glob → regex: only `*` (any chars) and `?` (single char) are
+  // recognised. Bracket expressions like `[abc]` are escaped to literal
+  // characters here. This is a deliberate divergence from Python's
+  // `fnmatch.fnmatch`, which supports `[seq]` ranges. The IR currently
+  // never emits bracket patterns, but if a future predicate needs them,
+  // this builder must be extended (and the parity inventory updated).
   const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const regex = `^${escaped.replace(/\\\*/g, ".*").replace(/\\\?/g, ".")}$`;
   return new RegExp(regex, "s").test(value);
