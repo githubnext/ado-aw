@@ -23,7 +23,7 @@ describe("evaluatePredicates integration ports", () => {
     const predicate = { type: "equals", fact: "pr_title", value: "ok" } satisfies PredicateSpec;
     const spec = gateSpec(
       [{ name: "title", tag_suffix: "title", predicate }],
-      [{ kind: "pr_title", failure_policy: "fail_closed" }],
+      [{ kind: "pr_title", failure_policy: "fail_closed", dependencies: [] }],
     );
     const tracker = new PolicyTracker(spec.facts);
 

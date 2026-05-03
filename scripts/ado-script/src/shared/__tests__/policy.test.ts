@@ -2,8 +2,21 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { PolicyTracker } from "../policy.js";
 import type { FactSpec } from "../types.gen.js";
 
-function spec(kind: string, fp: string): FactSpec {
-  return { kind, failure_policy: fp };
+// Mirror of the real Fact::dependencies() graph. Tests construct
+// FactSpec objects with this map so the dep graph stays implicit at
+// the call sites (matches how the compiler emits it in production).
+const DEFAULT_DEPS: Record<string, readonly string[]> = {
+  pr_is_draft: ["pr_metadata"],
+  pr_labels: ["pr_metadata"],
+  changed_file_count: ["changed_files"],
+};
+
+function spec(kind: string, fp: string, dependencies?: string[]): FactSpec {
+  return {
+    kind,
+    failure_policy: fp,
+    dependencies: dependencies ?? [...(DEFAULT_DEPS[kind] ?? [])],
+  };
 }
 
 describe("PolicyTracker", () => {

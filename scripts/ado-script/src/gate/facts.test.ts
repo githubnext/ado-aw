@@ -30,7 +30,7 @@ vi.mock("../shared/ado-client.js", () => ({
 import { acquireFacts } from "./facts.js";
 
 function fact(kind: string, failure_policy = "fail_closed"): FactSpec {
-  return { kind, failure_policy };
+  return { kind, failure_policy, dependencies: [] };
 }
 
 function gateSpec(facts: FactSpec[]): GateSpec {
