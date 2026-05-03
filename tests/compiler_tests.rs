@@ -177,8 +177,7 @@ fn test_compiled_yaml_structure() {
 
     assert!(template_path.exists(), "Base template should exist");
 
-    let content =
-        fs::read_to_string(&template_path).expect("Should be able to read base template");
+    let content = fs::read_to_string(&template_path).expect("Should be able to read base template");
 
     assert_required_markers(&content);
     assert_pool_config(&content);
@@ -327,19 +326,13 @@ fn test_fixture_complete_agent() {
         content.contains("repositories:"),
         "Should have repositories"
     );
-    assert!(
-        content.contains("mcp-servers:"),
-        "Should have mcp-servers"
-    );
+    assert!(content.contains("mcp-servers:"), "Should have mcp-servers");
 
     // Verify it has MCP configuration and custom MCPs
     assert!(content.contains("container:"), "Should have custom MCP");
 
     // Verify permissions
-    assert!(
-        content.contains("permissions:"),
-        "Should have permissions"
-    );
+    assert!(content.contains("permissions:"), "Should have permissions");
     assert!(
         content.contains("read: my-read-arm-connection"),
         "Should have read service connection"
@@ -367,7 +360,12 @@ fn test_compiled_output_no_unreplaced_markers() {
     // Run the compiler binary
     let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
     let output = std::process::Command::new(&binary_path)
-        .args(["compile", fixture_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .args([
+            "compile",
+            fixture_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
         .output()
         .expect("Failed to run compiler");
 
@@ -563,7 +561,12 @@ Do something.
     let output_path = temp_dir.join("perms-agent.yml");
     let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
     let output = std::process::Command::new(&binary_path)
-        .args(["compile", test_input.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
         .output()
         .expect("Failed to run compiler");
 
@@ -638,7 +641,12 @@ Do something.
     let output_path = temp_dir.join("no-perms-agent.yml");
     let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
     let output = std::process::Command::new(&binary_path)
-        .args(["compile", test_input.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
         .output()
         .expect("Failed to run compiler");
 
@@ -704,7 +712,12 @@ Do something.
     let output_path = temp_dir.join("bad-perms-agent.yml");
     let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
     let output = std::process::Command::new(&binary_path)
-        .args(["compile", test_input.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
         .output()
         .expect("Failed to run compiler");
 
@@ -754,7 +767,12 @@ Do something.
     let output_path = temp_dir.join("good-perms-agent.yml");
     let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
     let output = std::process::Command::new(&binary_path)
-        .args(["compile", test_input.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
         .output()
         .expect("Failed to run compiler");
 
@@ -793,7 +811,12 @@ Do something.
     let output_path = temp_dir.join("read-only-agent.yml");
     let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
     let output = std::process::Command::new(&binary_path)
-        .args(["compile", test_input.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
         .output()
         .expect("Failed to run compiler");
 
@@ -893,10 +916,8 @@ fn test_1es_compiled_output_no_unreplaced_markers() {
 /// Test that update-wiki-page requires a write service connection
 #[test]
 fn test_update_wiki_page_requires_write_sc() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-wiki-fail-{}",
-        std::process::id()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("agentic-pipeline-wiki-fail-{}", std::process::id()));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
     let test_input = temp_dir.join("wiki-agent.md");
@@ -944,10 +965,8 @@ Update the wiki.
 /// Test that update-wiki-page compiles successfully when a write SC is present
 #[test]
 fn test_update_wiki_page_compiles_with_write_sc() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-wiki-pass-{}",
-        std::process::id()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("agentic-pipeline-wiki-pass-{}", std::process::id()));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
     let test_input = temp_dir.join("wiki-agent.md");
@@ -1096,10 +1115,8 @@ Create new wiki pages.
 /// Test that update-work-item requires a write service connection
 #[test]
 fn test_update_work_item_requires_write_sc() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-uwi-fail-{}",
-        std::process::id()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("agentic-pipeline-uwi-fail-{}", std::process::id()));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
     let test_input = temp_dir.join("uwi-agent.md");
@@ -1148,10 +1165,8 @@ Update existing work items.
 /// Test that update-work-item compiles successfully when a write SC is present
 #[test]
 fn test_update_work_item_compiles_with_write_sc() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-uwi-pass-{}",
-        std::process::id()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("agentic-pipeline-uwi-pass-{}", std::process::id()));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
     let test_input = temp_dir.join("uwi-agent.md");
@@ -1258,10 +1273,8 @@ Comment on work items.
 /// Test that comment-on-work-item requires a write service connection
 #[test]
 fn test_comment_on_work_item_requires_write_sc() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-cwi-sc-{}",
-        std::process::id()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("agentic-pipeline-cwi-sc-{}", std::process::id()));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
     let test_input = temp_dir.join("cwi-agent.md");
@@ -1308,10 +1321,8 @@ Comment on work items.
 /// Test that comment-on-work-item compiles successfully with proper config
 #[test]
 fn test_comment_on_work_item_compiles_with_target_and_write_sc() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-cwi-pass-{}",
-        std::process::id()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("agentic-pipeline-cwi-pass-{}", std::process::id()));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
     let test_input = temp_dir.join("cwi-agent.md");
@@ -1481,10 +1492,8 @@ Update existing work items.
 /// Test that compiled output starts with the `@ado-aw` header comment for pipeline detection
 #[test]
 fn test_compiled_output_has_header_comment() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-header-{}",
-        std::process::id()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("agentic-pipeline-header-{}", std::process::id()));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
     let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1583,10 +1592,7 @@ This agent tests the auto-discovery feature.
     // Step 1: Compile the source file to create the initial YAML with header
     let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
     let output = std::process::Command::new(&binary_path)
-        .args([
-            "compile",
-            "agents/my-agent.md",
-        ])
+        .args(["compile", "agents/my-agent.md"])
         .current_dir(&temp_dir)
         .output()
         .expect("Failed to run initial compile");
@@ -1619,7 +1625,8 @@ This agent tests the auto-discovery feature.
     assert!(
         output.status.success(),
         "Auto-discover compile should succeed.\nstdout: {}\nstderr: {}",
-        stdout, stderr
+        stdout,
+        stderr
     );
 
     assert!(
@@ -1682,13 +1689,15 @@ fn test_compile_auto_discover_skips_missing_source() {
     assert!(
         output.status.success(),
         "Should succeed even with missing source.\nstdout: {}\nstderr: {}",
-        stdout, stderr
+        stdout,
+        stderr
     );
 
     assert!(
         stderr.contains("not found") || stdout.contains("skipped"),
         "Should warn about missing source.\nstdout: {}\nstderr: {}",
-        stdout, stderr
+        stdout,
+        stderr
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -1750,10 +1759,8 @@ Submit PR reviews.
 /// Test that submit-pr-review fails compilation when allowed-events is an empty list
 #[test]
 fn test_submit_pr_review_requires_nonempty_allowed_events() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-spr-empty-{}",
-        std::process::id()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("agentic-pipeline-spr-empty-{}", std::process::id()));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
     let test_input = temp_dir.join("spr-agent.md");
@@ -1802,10 +1809,8 @@ Submit PR reviews.
 /// Test that submit-pr-review compiles successfully with proper config
 #[test]
 fn test_submit_pr_review_compiles_with_allowed_events() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-spr-pass-{}",
-        std::process::id()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("agentic-pipeline-spr-pass-{}", std::process::id()));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
     let test_input = temp_dir.join("spr-agent.md");
@@ -1851,10 +1856,8 @@ Submit PR reviews.
 /// Test that update-pr fails compilation when vote is reachable but allowed-votes is missing
 #[test]
 fn test_update_pr_requires_allowed_votes_when_vote_reachable() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-uprvote-{}",
-        std::process::id()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("agentic-pipeline-uprvote-{}", std::process::id()));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
     let test_input = temp_dir.join("upr-agent.md");
@@ -2000,7 +2003,6 @@ Vote on pull requests.
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
-
 /// Integration test: compiling a pipeline with safe-outputs produces --enabled-tools flags
 /// in the rendered YAML. This exercises standalone.rs wiring + generate_enabled_tools_args
 /// + template substitution end-to-end.
@@ -2080,16 +2082,13 @@ Do something.
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
-
 // ==================== Azure DevOps MCP Integration Tests ====================
 
 /// Test that the Azure DevOps MCP fixture compiles successfully with no unreplaced markers
 #[test]
 fn test_fixture_azure_devops_mcp_compiled_output() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-ado-mcp-{}",
-        std::process::id()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("agentic-pipeline-ado-mcp-{}", std::process::id()));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
     let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2194,11 +2193,20 @@ fn test_mcpg_config_container_based_mcp() {
 
     let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
     let output = std::process::Command::new(&binary_path)
-        .args(["compile", input_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
         .output()
         .expect("Failed to run compiler");
 
-    assert!(output.status.success(), "Compiler should succeed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let compiled = fs::read_to_string(&output_path).unwrap();
 
@@ -2217,10 +2225,8 @@ fn test_mcpg_config_container_based_mcp() {
 /// Test that HTTP-based MCPs generate correct MCPG config JSON structure
 #[test]
 fn test_mcpg_config_http_based_mcp() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-mcpg-http-{}",
-        std::process::id()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("agentic-pipeline-mcpg-http-{}", std::process::id()));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
     let input = "---\nname: \"HTTP MCP Test\"\ndescription: \"Tests HTTP MCP\"\nmcp-servers:\n  remote-ado:\n    url: \"https://mcp.dev.azure.com/myorg\"\n    headers:\n      X-MCP-Toolsets: \"repos,wit\"\n    allowed:\n      - wit_get_work_item\n---\n\n## Test\n";
@@ -2231,11 +2237,20 @@ fn test_mcpg_config_http_based_mcp() {
 
     let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
     let output = std::process::Command::new(&binary_path)
-        .args(["compile", input_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
         .output()
         .expect("Failed to run compiler");
 
-    assert!(output.status.success(), "Compiler should succeed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let compiled = fs::read_to_string(&output_path).unwrap();
 
@@ -2250,10 +2265,8 @@ fn test_mcpg_config_http_based_mcp() {
 /// Test that env passthrough generates -e flags in MCPG Docker run
 #[test]
 fn test_mcpg_docker_env_passthrough() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-mcpg-env-{}",
-        std::process::id()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("agentic-pipeline-mcpg-env-{}", std::process::id()));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
     let input = "---\nname: \"Env Test\"\ndescription: \"Tests env passthrough\"\npermissions:\n  read: my-read-sc\n  write: my-write-sc\nmcp-servers:\n  my-tool:\n    container: \"node:20-slim\"\n    env:\n      AZURE_DEVOPS_EXT_PAT: \"\"\n      MY_TOKEN: \"\"\n      STATIC_VAR: \"static-value\"\nsafe-outputs:\n  create-work-item:\n    work-item-type: Task\n---\n\n## Test\n";
@@ -2264,23 +2277,41 @@ fn test_mcpg_docker_env_passthrough() {
 
     let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
     let output = std::process::Command::new(&binary_path)
-        .args(["compile", input_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
         .output()
         .expect("Failed to run compiler");
 
-    assert!(output.status.success(), "Compiler should succeed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let compiled = fs::read_to_string(&output_path).unwrap();
 
     // AZURE_DEVOPS_EXT_PAT with "" is bare passthrough for user-configured MCPs
     // (only tools.azure-devops extension provides SC_READ_TOKEN mapping)
-    assert!(compiled.contains("-e AZURE_DEVOPS_EXT_PAT"), "Should forward AZURE_DEVOPS_EXT_PAT as passthrough");
+    assert!(
+        compiled.contains("-e AZURE_DEVOPS_EXT_PAT"),
+        "Should forward AZURE_DEVOPS_EXT_PAT as passthrough"
+    );
 
     // Should forward passthrough env var MY_TOKEN
-    assert!(compiled.contains("-e MY_TOKEN"), "Should forward passthrough env var");
+    assert!(
+        compiled.contains("-e MY_TOKEN"),
+        "Should forward passthrough env var"
+    );
 
     // Static var should be in config
-    assert!(compiled.contains("\"STATIC_VAR\": \"static-value\""), "Static env var should be in config");
+    assert!(
+        compiled.contains("\"STATIC_VAR\": \"static-value\""),
+        "Static env var should be in config"
+    );
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -2288,10 +2319,8 @@ fn test_mcpg_docker_env_passthrough() {
 /// Test that user-defined parameters are emitted in the compiled pipeline YAML
 #[test]
 fn test_parameters_in_compiled_output() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-params-{}",
-        std::process::id()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("agentic-pipeline-params-{}", std::process::id()));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
     let input = r#"---
@@ -2322,26 +2351,62 @@ Do the thing.
 
     let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
     let output = std::process::Command::new(&binary_path)
-        .args(["compile", input_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
         .output()
         .expect("Failed to run compiler");
 
-    assert!(output.status.success(), "Compiler should succeed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let compiled = fs::read_to_string(&output_path).unwrap();
 
     // Verify parameters block is present
-    assert!(compiled.contains("parameters:"), "Should contain parameters: block");
-    assert!(compiled.contains("name: verbose"), "Should contain verbose parameter");
-    assert!(compiled.contains("name: region"), "Should contain region parameter");
-    assert!(compiled.contains("displayName: Verbose output"), "Should contain displayName");
-    assert!(compiled.contains("default: false"), "Should contain default for verbose");
-    assert!(compiled.contains("default: us-east"), "Should contain default for region");
-    assert!(compiled.contains("- us-east"), "Should contain values for region");
-    assert!(compiled.contains("- eu-west"), "Should contain values for region");
+    assert!(
+        compiled.contains("parameters:"),
+        "Should contain parameters: block"
+    );
+    assert!(
+        compiled.contains("name: verbose"),
+        "Should contain verbose parameter"
+    );
+    assert!(
+        compiled.contains("name: region"),
+        "Should contain region parameter"
+    );
+    assert!(
+        compiled.contains("displayName: Verbose output"),
+        "Should contain displayName"
+    );
+    assert!(
+        compiled.contains("default: false"),
+        "Should contain default for verbose"
+    );
+    assert!(
+        compiled.contains("default: us-east"),
+        "Should contain default for region"
+    );
+    assert!(
+        compiled.contains("- us-east"),
+        "Should contain values for region"
+    );
+    assert!(
+        compiled.contains("- eu-west"),
+        "Should contain values for region"
+    );
 
     // No clearMemory should be injected (no memory configured)
-    assert!(!compiled.contains("clearMemory"), "Should NOT contain clearMemory without memory");
+    assert!(
+        !compiled.contains("clearMemory"),
+        "Should NOT contain clearMemory without memory"
+    );
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -2375,17 +2440,32 @@ Do the thing.
 
     let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
     let output = std::process::Command::new(&binary_path)
-        .args(["compile", input_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
         .output()
         .expect("Failed to run compiler");
 
-    assert!(output.status.success(), "Compiler should succeed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let compiled = fs::read_to_string(&output_path).unwrap();
 
     // Verify clearMemory parameter is auto-injected
-    assert!(compiled.contains("name: clearMemory"), "Should auto-inject clearMemory parameter");
-    assert!(compiled.contains("displayName: Clear agent memory"), "Should have displayName");
+    assert!(
+        compiled.contains("name: clearMemory"),
+        "Should auto-inject clearMemory parameter"
+    );
+    assert!(
+        compiled.contains("displayName: Clear agent memory"),
+        "Should have displayName"
+    );
     assert!(compiled.contains("type: boolean"), "Should be boolean type");
 
     // Verify memory download has condition
@@ -2439,21 +2519,39 @@ Do the thing.
 
     let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
     let output = std::process::Command::new(&binary_path)
-        .args(["compile", input_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
         .output()
         .expect("Failed to run compiler");
 
-    assert!(output.status.success(), "Compiler should succeed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let compiled = fs::read_to_string(&output_path).unwrap();
 
     // Verify user's clearMemory is present (with their custom displayName and default)
-    assert!(compiled.contains("displayName: Reset memory"), "Should use user's displayName");
-    assert!(compiled.contains("default: true"), "Should use user's default value");
+    assert!(
+        compiled.contains("displayName: Reset memory"),
+        "Should use user's displayName"
+    );
+    assert!(
+        compiled.contains("default: true"),
+        "Should use user's default value"
+    );
 
     // Verify clearMemory only appears once (not duplicated)
     let count = compiled.matches("name: clearMemory").count();
-    assert_eq!(count, 1, "clearMemory should appear exactly once, not duplicated");
+    assert_eq!(
+        count, 1,
+        "clearMemory should appear exactly once, not duplicated"
+    );
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -2489,11 +2587,20 @@ tools:
 
     let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
     let output = std::process::Command::new(&binary_path)
-        .args(["compile", input_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
         .output()
         .expect("Failed to run compiler");
 
-    assert!(output.status.success(), "Compiler should succeed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let compiled = fs::read_to_string(&output_path).unwrap();
 
@@ -2537,7 +2644,12 @@ network:
 
     let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
     let output = std::process::Command::new(&binary_path)
-        .args(["compile", input_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
         .output()
         .expect("Failed to run compiler");
 
@@ -2576,7 +2688,12 @@ network:
 
     let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
     let output = std::process::Command::new(&binary_path)
-        .args(["compile", input_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
         .output()
         .expect("Failed to run compiler");
 
@@ -2620,7 +2737,12 @@ network:
 
     let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
     let output = std::process::Command::new(&binary_path)
-        .args(["compile", input_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
         .output()
         .expect("Failed to run compiler");
 
@@ -2664,7 +2786,12 @@ network:
 
     let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
     let output = std::process::Command::new(&binary_path)
-        .args(["compile", input_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
         .output()
         .expect("Failed to run compiler");
 
@@ -2691,10 +2818,8 @@ network:
 /// - No unreplaced `{{ }}` template markers
 #[test]
 fn test_lean_runtime_compiled_output() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-lean-{}",
-        std::process::id()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("agentic-pipeline-lean-{}", std::process::id()));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
     let input = r#"---
@@ -2909,7 +3034,12 @@ network:
 
     let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
     let output = std::process::Command::new(&binary_path)
-        .args(["compile", input_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
         .output()
         .expect("Failed to run compiler");
 
@@ -3061,7 +3191,10 @@ fn test_1es_compiled_output_is_valid_yaml() {
         compiled.contains("ado-aw execute"),
         "1ES output should contain safe output executor step"
     );
-    assert!(compiled.contains("job: Agent"), "1ES output should contain Agent job");
+    assert!(
+        compiled.contains("job: Agent"),
+        "1ES output should contain Agent job"
+    );
     assert!(
         compiled.contains("job: Detection"),
         "1ES output should contain Detection job"
@@ -3261,7 +3394,10 @@ fn test_skip_integrity_and_debug_pipeline_combined() {
         "minimal-agent.md",
         &["--skip-integrity", "--debug-pipeline"],
     );
-    assert_valid_yaml(&compiled, "minimal-agent.md (skip-integrity + debug-pipeline)");
+    assert_valid_yaml(
+        &compiled,
+        "minimal-agent.md (skip-integrity + debug-pipeline)",
+    );
 
     // Debug content present
     assert!(
@@ -3346,7 +3482,6 @@ fn test_debug_pipeline_probe_step_indentation_1es() {
     }
 }
 
-
 // ─── PR Filter Integration Tests ────────────────────────────────────────────
 
 /// Tier 1 PR filter fixture produces valid YAML with inline gate step.
@@ -3361,12 +3496,30 @@ fn test_pr_filter_tier1_compiled_output_is_valid_yaml() {
 fn test_pr_filter_tier1_has_evaluator_gate() {
     let compiled = compile_fixture("pr-filter-tier1-agent.md");
 
-    assert!(compiled.contains("- job: Setup"), "Should create Setup job for PR filters");
-    assert!(compiled.contains("name: prGate"), "Should include prGate step");
-    assert!(compiled.contains("GATE_SPEC"), "Should include base64-encoded spec");
-    assert!(compiled.contains("python3"), "Should invoke python evaluator");
-    assert!(compiled.contains("scripts.zip"), "Should download scripts bundle");
-    assert!(compiled.contains("Evaluate PR filters"), "Should have gate displayName");
+    assert!(
+        compiled.contains("- job: Setup"),
+        "Should create Setup job for PR filters"
+    );
+    assert!(
+        compiled.contains("name: prGate"),
+        "Should include prGate step"
+    );
+    assert!(
+        compiled.contains("GATE_SPEC"),
+        "Should include base64-encoded spec"
+    );
+    assert!(
+        compiled.contains("node '/tmp/ado-aw-scripts/gate.js'"),
+        "Should invoke node gate evaluator"
+    );
+    assert!(
+        compiled.contains("scripts.zip"),
+        "Should download scripts bundle"
+    );
+    assert!(
+        compiled.contains("Evaluate PR filters"),
+        "Should have gate displayName"
+    );
 }
 
 /// Tier 2 PR filter fixture produces valid YAML.
@@ -3381,10 +3534,22 @@ fn test_pr_filter_tier2_compiled_output_is_valid_yaml() {
 fn test_pr_filter_tier2_has_extension_gate() {
     let compiled = compile_fixture("pr-filter-tier2-agent.md");
 
-    assert!(compiled.contains("- job: Setup"), "Should create Setup job for PR filters");
-    assert!(compiled.contains("scripts.zip"), "Tier 2 should download scripts bundle");
-    assert!(compiled.contains("GATE_SPEC"), "Tier 2 should include base64-encoded spec");
-    assert!(compiled.contains("python3"), "Tier 2 should invoke python evaluator");
+    assert!(
+        compiled.contains("- job: Setup"),
+        "Should create Setup job for PR filters"
+    );
+    assert!(
+        compiled.contains("scripts.zip"),
+        "Tier 2 should download scripts bundle"
+    );
+    assert!(
+        compiled.contains("GATE_SPEC"),
+        "Tier 2 should include base64-encoded spec"
+    );
+    assert!(
+        compiled.contains("node '/tmp/ado-aw-scripts/gate.js'"),
+        "Tier 2 should invoke node gate evaluator"
+    );
     assert!(compiled.contains("name: prGate"), "Should have prGate step");
 }
 
@@ -3400,10 +3565,19 @@ fn test_pipeline_filter_compiled_output_is_valid_yaml() {
 fn test_pipeline_filter_has_resources_and_gate() {
     let compiled = compile_fixture("pipeline-filter-agent.md");
 
-    assert!(compiled.contains("pipelines:"), "Should have pipeline resource");
-    assert!(compiled.contains("trigger: none"), "Should disable CI trigger");
+    assert!(
+        compiled.contains("pipelines:"),
+        "Should have pipeline resource"
+    );
+    assert!(
+        compiled.contains("trigger: none"),
+        "Should disable CI trigger"
+    );
     assert!(compiled.contains("pr: none"), "Should disable PR trigger");
-    assert!(compiled.contains("- job: Setup"), "Should create Setup job for pipeline filters");
+    assert!(
+        compiled.contains("- job: Setup"),
+        "Should create Setup job for pipeline filters"
+    );
 }
 
 /// Agent job depends on Setup when filters are active.
@@ -3411,8 +3585,14 @@ fn test_pipeline_filter_has_resources_and_gate() {
 fn test_pr_filter_agent_depends_on_setup() {
     let compiled = compile_fixture("pr-filter-tier1-agent.md");
 
-    assert!(compiled.contains("dependsOn: Setup"), "Agent job should depend on Setup");
-    assert!(compiled.contains("prGate.SHOULD_RUN"), "Agent job condition should reference gate output");
+    assert!(
+        compiled.contains("dependsOn: Setup"),
+        "Agent job should depend on Setup"
+    );
+    assert!(
+        compiled.contains("prGate.SHOULD_RUN"),
+        "Agent job condition should reference gate output"
+    );
 }
 
 /// Native ADO PR trigger block is emitted for branch/path filters.
@@ -3421,7 +3601,10 @@ fn test_pr_filter_tier1_has_native_pr_trigger() {
     let compiled = compile_fixture("pr-filter-tier1-agent.md");
 
     assert!(compiled.contains("pr:"), "Should have native pr: block");
-    assert!(compiled.contains("branches:"), "Should have branches filter");
+    assert!(
+        compiled.contains("branches:"),
+        "Should have branches filter"
+    );
     assert!(compiled.contains("main"), "Should include main branch");
 }
 
@@ -3436,8 +3619,8 @@ fn test_pr_filter_gate_steps_nested_in_setup_job() {
         .skip_while(|line| line.starts_with('#') || line.is_empty())
         .collect::<Vec<_>>()
         .join("\n");
-    let doc: serde_yaml::Value = serde_yaml::from_str(&yaml_content)
-        .expect("should parse as valid YAML");
+    let doc: serde_yaml::Value =
+        serde_yaml::from_str(&yaml_content).expect("should parse as valid YAML");
 
     // Find the Setup job in the jobs list
     let jobs = doc.get("jobs").expect("should have jobs key");
@@ -3471,7 +3654,10 @@ fn test_pr_filter_gate_steps_nested_in_setup_job() {
             .and_then(|v| v.as_str())
             .is_some_and(|n| n == "prGate")
     });
-    assert!(has_gate, "prGate step should be inside Setup job's steps list");
+    assert!(
+        has_gate,
+        "prGate step should be inside Setup job's steps list"
+    );
 
     // The download step should also be inside
     let has_download = steps.iter().any(|s| {
@@ -3479,5 +3665,8 @@ fn test_pr_filter_gate_steps_nested_in_setup_job() {
             .and_then(|v| v.as_str())
             .is_some_and(|n| n.contains("Download ado-aw scripts"))
     });
-    assert!(has_download, "Download step should be inside Setup job's steps list");
+    assert!(
+        has_download,
+        "Download step should be inside Setup job's steps list"
+    );
 }

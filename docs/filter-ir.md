@@ -120,7 +120,7 @@ supports these predicate types:
 | `NumericRange { fact, min, max }` | `[ "$VAR" -ge N ] && [ "$VAR" -le M ]` | Changed file count in range |
 | `TimeWindow { start, end }` | Arithmetic on `CURRENT_MINUTES` | Only during business hours |
 | `LabelSetMatch { any_of, all_of, none_of }` | `grep -qiF` per label | PR labels match criteria |
-| `FileGlobMatch { include, exclude }` | python3 `fnmatch` | Changed files match globs |
+| `FileGlobMatch { include, exclude }` | gate.js minimatch | Changed files match globs |
 | `And(Vec<Predicate>)` | All must pass | *(reserved for compound filters)* |
 | `Or(Vec<Predicate>)` | At least one must pass | *(reserved)* |
 | `Not(Box<Predicate>)` | Inner must fail | *(reserved)* |
@@ -234,8 +234,9 @@ require heuristic analysis and could produce false positives.
 ### `compile_gate_step(ctx: GateContext, checks: &[FilterCheck]) -> String`
 
 Produces a complete ADO pipeline step (`- bash: |`) with a **data-driven
-architecture**: bash is a thin ADO-macro shim, all filter logic lives in a
-generic Python evaluator that reads a JSON gate spec.
+architecture**: bash is a thin ADO-macro shim, all filter logic lives in
+the bundled Node.js gate evaluator (`scripts/gate.js`) that reads a JSON
+gate spec.
 
 #### Generated Step Structure
 
@@ -255,10 +256,8 @@ generic Python evaluator that reads a JSON gate spec.
     # 3. Access token passthrough
     export ADO_SYSTEM_ACCESS_TOKEN="$SYSTEM_ACCESSTOKEN"
 
-    # 4. Embedded Python evaluator (heredoc — never modified)
-    python3 << 'GATE_EVAL_EOF'
-    ...evaluator source...
-    GATE_EVAL_EOF
+    # 4. Run the bundled Node evaluator (downloaded by the Setup job)
+    node '/tmp/ado-aw-scripts/gate.js'
   name: prGate
   displayName: "Evaluate PR filters"
   env:
@@ -267,7 +266,7 @@ generic Python evaluator that reads a JSON gate spec.
 
 #### Gate Spec Format (JSON)
 
-The spec is base64-encoded to prevent ADO macro expansion and heredoc
+The spec is base64-encoded to prevent ADO macro expansion and shell
 quoting issues. Decoded, it contains:
 
 ```json
@@ -299,21 +298,23 @@ quoting issues. Decoded, it contains:
 ```
 
 The spec is declarative — it uses fact *kinds* (e.g., `"pr_title"`,
-`"pr_metadata"`) not raw REST endpoints. The Python evaluator owns
+`"pr_metadata"`) not raw REST endpoints. The Node evaluator owns
 acquisition logic.
 
-#### Python Gate Evaluator (`src/data/gate-eval.py`)
+#### Bundled Gate Evaluator (`scripts/ado-script/src/gate/`)
 
-The evaluator is a self-contained Python script embedded via
-`include_str!()`. It handles:
+The evaluator is a TypeScript program ncc-bundled to a single
+self-contained `scripts/gate.js` (~1.1 MB) that ships as part of the
+`scripts.zip` release asset. See [`ado-script.md`](ado-script.md) for the
+full design and codegen pipeline. It handles:
 
 1. **Bypass logic** — reads `ADO_BUILD_REASON` and exits early for non-matching
    trigger types
 2. **Fact acquisition** — maps fact kinds to acquisition methods:
-   - Pipeline variables → `os.environ.get("ADO_*")`
-   - PR metadata → `urllib` call to ADO REST API
+   - Pipeline variables → `process.env["ADO_*"]`
+   - PR metadata → `azure-devops-node-api` REST call
    - Changed files → iteration API calls
-   - UTC time → `datetime.now(timezone.utc)`
+   - UTC time → `Date.now()`
 3. **Failure policies** — `fail_closed`, `fail_open`, `skip_dependents`
 4. **Predicate evaluation** — recursive evaluator supporting all predicate types
 5. **Result reporting** — `##vso[...]` logging commands, build tags, self-cancel
@@ -342,7 +343,7 @@ The bash shim exports only the ADO macros needed by the spec's facts:
 | `numeric_range` | `fact`, `min?`, `max?` | Integer range check |
 | `time_window` | `start`, `end` | UTC HH:MM window (overnight-aware) |
 | `label_set_match` | `fact`, `any_of?`, `all_of?`, `none_of?` | Label set predicates |
-| `file_glob_match` | `fact`, `include?`, `exclude?` | Python `fnmatch` globs |
+| `file_glob_match` | `fact`, `include?`, `exclude?` | Glob match against changed file paths |
 | `and` | `operands` | All must pass |
 | `or` | `operands` | At least one must pass |
 | `not` | `operand` | Inner must fail |
@@ -355,11 +356,13 @@ When Tier 2/3 filters are configured, the `TriggerFiltersExtension`
 (`src/compile/extensions/trigger_filters.rs`) activates via
 `collect_extensions()`. It implements `CompilerExtension` and controls:
 
-1. **Download step** — fetches `gate-eval.py` from the ado-aw release
-   artifacts to `/tmp/ado-aw-scripts/gate-eval.py`
-2. **Gate step** — calls `compile_gate_step_external()` to generate a step
-   that references the downloaded script (no inline heredoc)
-3. **Validation** — runs `validate_pr_filters()` / `validate_pipeline_filters()`
+1. **Node install step** — emits a `NodeTool@0` step pinned to Node 20.x
+   LTS so `gate.js` has a runtime
+2. **Download step** — fetches `scripts.zip` from the ado-aw release
+   artifacts and extracts `gate.js` to `/tmp/ado-aw-scripts/gate.js`
+3. **Gate step** — calls `compile_gate_step_external()` to generate a step
+   that runs `node /tmp/ado-aw-scripts/gate.js` (no inline heredoc)
+4. **Validation** — runs `validate_pr_filters()` / `validate_pipeline_filters()`
    during compilation via the `validate()` trait method
 
 The extension uses the `setup_steps()` trait method (not `prepare_steps()`)
@@ -370,7 +373,7 @@ because the gate must run in the **Setup job** (before the Execution job).
 When only Tier 1 filters are configured (pipeline variables — title, author,
 branch, commit-message, build-reason), the extension is NOT activated.
 `generate_pr_gate_step()` generates an inline bash gate step directly, with
-no Python evaluator and no download step.
+no Node evaluator and no download step.
 
 ### Gate Step Injection
 
@@ -404,10 +407,17 @@ The `expression` escape hatch is also ANDed if present.
 
 ### Scripts Distribution
 
-`gate-eval.py` lives at `scripts/gate-eval.py` in the repository and is
-shipped as a release artifact alongside the ado-aw binary. The download URL
-is deterministic based on the ado-aw version:
-`https://github.com/githubnext/ado-aw/releases/download/v{VERSION}/gate-eval.py`
+The `gate.js` bundle is built from the TypeScript workspace at
+`scripts/ado-script/` (see [`ado-script.md`](ado-script.md)) and copied to
+`scripts/gate.js` by the release workflow's build step. It ships inside
+the `scripts.zip` release asset, alongside any future bundled helpers
+(e.g. `poll.js`, `stats.js`). The download URL is deterministic based on
+the ado-aw version:
+`https://github.com/githubnext/ado-aw/releases/download/v{VERSION}/scripts.zip`
+
+The Setup-job download step pulls the zip, extracts `gate.js`, and
+discards the rest. New per-use-site bundles follow the same pattern
+(per-bundle ncc entry + per-bundle download step).
 
 ## Adding New Filter Types
 
@@ -418,8 +428,9 @@ step-by-step guide. In summary:
    `ado_exports()`, `dependencies()`, `failure_policy()`)
 2. Add a `Predicate` variant if a new test shape is needed
 3. Add a `PredicateSpec` variant for serialization
-4. Add an evaluator handler in `scripts/gate-eval.py` for the new predicate
-   type
+4. Add an evaluator handler in `scripts/ado-script/src/gate/predicates.ts`
+   for the new predicate type, and add corresponding vitest cases in
+   `scripts/ado-script/src/gate/__tests__/`
 5. Extend the lowering function (`lower_pr_filters` or
    `lower_pipeline_filters`)
 6. Add validation rules if the new filter can conflict with existing ones

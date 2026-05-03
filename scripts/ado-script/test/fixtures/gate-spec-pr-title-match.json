@@ -1,0 +1,22 @@
+{
+  "context": {
+    "build_reason": "PullRequest",
+    "bypass_label": "Pull Request",
+    "step_name": "filter_gate",
+    "tag_prefix": "filter"
+  },
+  "facts": [
+    { "kind": "pr_title", "failure_policy": "fail_closed" }
+  ],
+  "checks": [
+    {
+      "name": "title_starts_with_foo",
+      "tag_suffix": "title",
+      "predicate": {
+        "type": "glob_match",
+        "fact": "pr_title",
+        "pattern": "foo*"
+      }
+    }
+  ]
+}
