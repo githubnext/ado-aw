@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { setOutput, addBuildTag, logWarning, logError, complete } from "./vso-logger.js";
+import { setOutput, addBuildTag, logWarning, logError, complete } from "../vso-logger.js";
 
 describe("vso-logger", () => {
   let writes: string[];

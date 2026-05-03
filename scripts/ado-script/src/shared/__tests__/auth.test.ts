@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { getWebApi, _resetCacheForTesting } from "./auth.js";
+import { getWebApi, _resetCacheForTesting } from "../auth.js";
 
 describe("getWebApi", () => {
   const originalEnv = { ...process.env };

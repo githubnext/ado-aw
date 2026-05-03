@@ -19,7 +19,7 @@ const { mockGitApi, mockBuildApi, mockWebApi, mockGetWebApi } = vi.hoisted(() =>
   return { mockGitApi, mockBuildApi, mockWebApi, mockGetWebApi };
 });
 
-vi.mock("./auth.js", () => ({
+vi.mock("../auth.js", () => ({
   getWebApi: mockGetWebApi,
   _resetCacheForTesting: vi.fn(),
 }));
@@ -30,7 +30,7 @@ import {
   getIterationChanges,
   cancelBuild,
   withRetry,
-} from "./ado-client.js";
+} from "../ado-client.js";
 
 describe("ado-client", () => {
   beforeEach(() => {

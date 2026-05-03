@@ -12,7 +12,7 @@
     "build:check": "ls -lh ../gate.js && wc -c ../gate.js",
     "codegen": "mkdir -p schema && cargo run --quiet --manifest-path ../../Cargo.toml -- export-gate-schema --output schema/gate-spec.schema.json && npx json2ts schema/gate-spec.schema.json -o src/shared/types.gen.ts --bannerComment \"// AUTO-GENERATED from Rust IR via cargo run -- export-gate-schema. Do not edit; run npm run codegen.\"",
     "test": "vitest run",
-    "test:smoke": "npm run build && vitest run test/smoke.test.ts",
+    "test:smoke": "npm run build && vitest run -c vitest.config.smoke.ts",
     "lint": "echo TODO",
     "typecheck": "tsc --noEmit"
   },
