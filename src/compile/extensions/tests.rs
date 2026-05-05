@@ -428,7 +428,7 @@ fn test_python_agent_env_vars_with_feed() {
 }
 
 #[test]
-fn test_python_config_not_yet_supported() {
+fn test_python_config_warns_not_functional() {
     let (fm, _) = parse_markdown(
         "---\nname: test\ndescription: test\nruntimes:\n  python:\n    version: '3.12'\n    config: '/path/to/pip.conf'\n---\n",
     ).unwrap();
@@ -436,8 +436,9 @@ fn test_python_config_not_yet_supported() {
     let ext = crate::runtimes::python::PythonExtension::new(python.clone());
     let ctx = ctx_from(&fm);
     let result = ext.validate(&ctx);
-    assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("not yet supported"));
+    assert!(result.is_ok(), "config: should be accepted (warning, not error)");
+    let warnings = result.unwrap();
+    assert!(warnings.iter().any(|w| w.contains("will not be available")));
 }
 
 // ── NodeExtension ──────────────────────────────────────────────

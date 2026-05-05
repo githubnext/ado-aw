@@ -90,7 +90,7 @@ The `uv` tool is pre-installed and recommended for speed.\n"
             ));
         }
 
-        // Mutual exclusivity: config + feed-url (check before individual field errors)
+        // Mutual exclusivity: config + feed-url (check before individual field warnings)
         if self.config.config().is_some() && self.config.feed_url().is_some() {
             anyhow::bail!(
                 "runtimes.python: 'config' and 'feed-url' are mutually exclusive. \
@@ -98,13 +98,13 @@ The `uv` tool is pre-installed and recommended for speed.\n"
             );
         }
 
-        // Error if config: is set (not yet supported for Python)
+        // Warn if config: is set — accepted but not yet functional inside AWF
         if self.config.config().is_some() {
-            anyhow::bail!(
-                "runtimes.python.config is not yet supported. \
-                 Use feed-url instead to configure an internal package feed. \
-                 Config file support will be added when AWF proxy-auth lands \
-                 (gh-aw-firewall#2547)."
+            warnings.push(
+                "runtimes.python.config is accepted but the config file will not be \
+                 available inside the AWF agent environment yet. Config file passthrough \
+                 requires AWF proxy-auth support (gh-aw-firewall#2547)."
+                    .to_string(),
             );
         }
 
