@@ -142,7 +142,7 @@ fn remove_control_characters(input: &str) -> String {
 ///
 /// Also handles `##[` (the shorthand form used for `##[section]`, `##[error]`,
 /// etc.) which ADO pipelines also interpret.
-fn neutralize_pipeline_commands(input: &str) -> String {
+pub(crate) fn neutralize_pipeline_commands(input: &str) -> String {
     let mut result = String::with_capacity(input.len() + 32);
     let mut rest = input;
 

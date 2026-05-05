@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
+use crate::sanitize::neutralize_pipeline_commands;
 use crate::safeoutputs::{
     AddBuildTagResult, AddPrCommentResult, CreateBranchResult, CreateGitTagResult,
     CreatePrResult, CreateWikiPageResult, CreateWorkItemResult, CommentOnWorkItemResult,
@@ -362,7 +363,7 @@ fn resolve_max(ctx: &ExecutionContext, tool_name: &str, default_max: u32) -> usi
 
 /// Extract a human-readable context identifier from a safe-output entry for log messages.
 /// Called before sanitization, so all string values are stripped of control characters
-/// to prevent log injection.
+/// and ADO pipeline commands are neutralized to prevent log injection via stdout.
 fn extract_entry_context(entry: &Value) -> String {
     if let Some(id) = entry.get("id").and_then(|v| v.as_u64()) {
         return format!(" (work item #{})", id);
@@ -372,6 +373,7 @@ fn extract_entry_context(entry: &Value) -> String {
     }
     if let Some(title) = entry.get("title").and_then(|v| v.as_str()) {
         let clean: String = title.chars().filter(|c| !c.is_control()).collect();
+        let clean = neutralize_pipeline_commands(&clean);
         let truncated: &str = if clean.chars().count() > 40 {
             &clean[..clean.char_indices().nth(40).map(|(i, _)| i).unwrap_or(clean.len())]
         } else {
@@ -381,6 +383,7 @@ fn extract_entry_context(entry: &Value) -> String {
     }
     if let Some(path) = entry.get("path").and_then(|v| v.as_str()) {
         let clean: String = path.chars().filter(|c| !c.is_control()).collect();
+        let clean = neutralize_pipeline_commands(&clean);
         return format!(" (path: {})", clean);
     }
     String::new()
@@ -432,6 +435,52 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::path::PathBuf;
+
+    // ── extract_entry_context ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_extract_entry_context_neutralizes_vso_in_title() {
+        let entry = serde_json::json!({
+            "title": "##vso[task.complete result=Failed]"
+        });
+        let ctx = extract_entry_context(&entry);
+        assert!(
+            !ctx.contains("##vso[task."),
+            "VSO command in title should be neutralized; got: {ctx}"
+        );
+        assert!(
+            ctx.contains("`##vso[`"),
+            "VSO command should be wrapped in backticks; got: {ctx}"
+        );
+    }
+
+    #[test]
+    fn test_extract_entry_context_neutralizes_vso_in_path() {
+        let entry = serde_json::json!({
+            "path": "##vso[task.setvariable variable=X]injected"
+        });
+        let ctx = extract_entry_context(&entry);
+        assert!(
+            !ctx.contains("##vso[task."),
+            "VSO command in path should be neutralized; got: {ctx}"
+        );
+        assert!(
+            ctx.contains("`##vso[`"),
+            "VSO command should be wrapped in backticks; got: {ctx}"
+        );
+    }
+
+    #[test]
+    fn test_extract_entry_context_preserves_normal_title() {
+        let entry = serde_json::json!({"title": "Fix login bug"});
+        assert_eq!(extract_entry_context(&entry), " (\"Fix login bug\")");
+    }
+
+    #[test]
+    fn test_extract_entry_context_prefers_id_over_title() {
+        let entry = serde_json::json!({"id": 42, "title": "should be ignored"});
+        assert_eq!(extract_entry_context(&entry), " (work item #42)");
+    }
 
     #[tokio::test]
     async fn test_execute_unknown_tool_fails() {
