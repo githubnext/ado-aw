@@ -356,3 +356,187 @@ fn test_wrap_prompt_append_rejects_unsafe_display_name() {
     let result = wrap_prompt_append("content", "ext$(rm -rf)");
     assert!(result.is_err());
 }
+
+// ── PythonExtension ────────────────────────────────────────────
+
+#[test]
+fn test_python_required_hosts_returns_python_ecosystem() {
+    use crate::runtimes::python::{PythonExtension, PythonRuntimeConfig};
+    let ext = PythonExtension::new(PythonRuntimeConfig::Enabled(true));
+    let hosts = ext.required_hosts();
+    assert_eq!(hosts, vec!["python".to_string()]);
+}
+
+#[test]
+fn test_python_required_bash_commands() {
+    use crate::runtimes::python::{PythonExtension, PythonRuntimeConfig};
+    let ext = PythonExtension::new(PythonRuntimeConfig::Enabled(true));
+    let cmds = ext.required_bash_commands();
+    assert!(cmds.contains(&"python".to_string()));
+    assert!(cmds.contains(&"python3".to_string()));
+    assert!(cmds.contains(&"pip".to_string()));
+    assert!(cmds.contains(&"pip3".to_string()));
+}
+
+#[test]
+fn test_python_prompt_supplement_contains_python() {
+    use crate::runtimes::python::{PythonExtension, PythonRuntimeConfig};
+    let ext = PythonExtension::new(PythonRuntimeConfig::Enabled(true));
+    let prompt = ext.prompt_supplement().unwrap();
+    assert!(prompt.contains("Python"));
+    assert!(prompt.contains("python3"));
+    assert!(prompt.contains("pip3 install"));
+}
+
+#[test]
+fn test_python_phase_is_runtime() {
+    use crate::runtimes::python::{PythonExtension, PythonRuntimeConfig};
+    let ext = PythonExtension::new(PythonRuntimeConfig::Enabled(true));
+    assert_eq!(ext.phase(), ExtensionPhase::Runtime);
+}
+
+#[test]
+fn test_python_prepare_steps_no_version() {
+    use crate::runtimes::python::{PythonExtension, PythonRuntimeConfig};
+    // Simple `true` enablement — no UsePythonVersion step
+    let ext = PythonExtension::new(PythonRuntimeConfig::Enabled(true));
+    let steps = ext.prepare_steps();
+    assert!(steps.is_empty(), "simple enablement should produce no prepare steps");
+}
+
+#[test]
+fn test_python_prepare_steps_with_version() {
+    use crate::runtimes::python::{PythonExtension, PythonRuntimeConfig, PythonOptions};
+    let ext = PythonExtension::new(PythonRuntimeConfig::WithOptions(PythonOptions {
+        version: Some("3.12".to_string()),
+        index_url: None,
+        extra_index_url: None,
+    }));
+    let steps = ext.prepare_steps();
+    assert_eq!(steps.len(), 1);
+    assert!(steps[0].contains("UsePythonVersion@0"));
+    assert!(steps[0].contains("3.12"));
+    assert!(steps[0].contains("addToPath: true"));
+}
+
+#[test]
+fn test_python_agent_env_vars_no_feeds() {
+    use crate::runtimes::python::{PythonExtension, PythonRuntimeConfig};
+    let ext = PythonExtension::new(PythonRuntimeConfig::Enabled(true));
+    let vars = ext.agent_env_vars();
+    assert!(vars.is_empty(), "no feed config should produce no env vars");
+}
+
+#[test]
+fn test_python_agent_env_vars_with_index_url() {
+    use crate::runtimes::python::{PythonExtension, PythonRuntimeConfig, PythonOptions};
+    let ext = PythonExtension::new(PythonRuntimeConfig::WithOptions(PythonOptions {
+        version: None,
+        index_url: Some("https://pkgs.dev.azure.com/myorg/_packaging/myfeed/pypi/simple/".to_string()),
+        extra_index_url: None,
+    }));
+    let vars = ext.agent_env_vars();
+    let pip_index = vars.iter().find(|(k, _)| k == "PIP_INDEX_URL");
+    let uv_index = vars.iter().find(|(k, _)| k == "UV_DEFAULT_INDEX");
+    assert!(pip_index.is_some(), "PIP_INDEX_URL should be set");
+    assert!(uv_index.is_some(), "UV_DEFAULT_INDEX should be set");
+    assert_eq!(pip_index.unwrap().1, "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/pypi/simple/");
+    assert_eq!(uv_index.unwrap().1, "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/pypi/simple/");
+}
+
+#[test]
+fn test_python_agent_env_vars_with_extra_index_url() {
+    use crate::runtimes::python::{PythonExtension, PythonRuntimeConfig, PythonOptions};
+    let ext = PythonExtension::new(PythonRuntimeConfig::WithOptions(PythonOptions {
+        version: None,
+        index_url: Some("https://internal.example.com/pypi/simple/".to_string()),
+        extra_index_url: Some("https://pypi.org/simple/".to_string()),
+    }));
+    let vars = ext.agent_env_vars();
+    let extra = vars.iter().find(|(k, _)| k == "PIP_EXTRA_INDEX_URL");
+    assert!(extra.is_some(), "PIP_EXTRA_INDEX_URL should be set when extra_index_url is configured");
+    assert_eq!(extra.unwrap().1, "https://pypi.org/simple/");
+}
+
+#[test]
+fn test_python_validate_invalid_version_errors() {
+    use crate::runtimes::python::{PythonExtension, PythonRuntimeConfig, PythonOptions};
+    let fm = minimal_front_matter();
+    let ext = PythonExtension::new(PythonRuntimeConfig::WithOptions(PythonOptions {
+        version: Some("3.12; rm -rf /".to_string()),
+        index_url: None,
+        extra_index_url: None,
+    }));
+    let ctx = ctx_from(&fm);
+    assert!(ext.validate(&ctx).is_err(), "invalid version should fail validation");
+}
+
+#[test]
+fn test_python_validate_ado_expression_in_index_url_rejected() {
+    use crate::runtimes::python::{PythonExtension, PythonRuntimeConfig, PythonOptions};
+    let fm = minimal_front_matter();
+    let ext = PythonExtension::new(PythonRuntimeConfig::WithOptions(PythonOptions {
+        version: None,
+        index_url: Some("https://example.com/$(evil)".to_string()),
+        extra_index_url: None,
+    }));
+    let ctx = ctx_from(&fm);
+    assert!(ext.validate(&ctx).is_err(), "ADO expression in index-url should be rejected");
+}
+
+#[test]
+fn test_python_validate_bash_disabled_emits_warning() {
+    use crate::runtimes::python::{PythonExtension, PythonRuntimeConfig};
+    let (fm, _) =
+        parse_markdown("---\nname: test\ndescription: test\ntools:\n  bash: []\n---\n").unwrap();
+    let ext = PythonExtension::new(PythonRuntimeConfig::Enabled(true));
+    let ctx = ctx_from(&fm);
+    let warnings = ext.validate(&ctx).unwrap();
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("tools.bash is empty"));
+}
+
+#[test]
+fn test_collect_extensions_python_enabled() {
+    let (fm, _) =
+        parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  python: true\n---\n")
+            .unwrap();
+    let exts = collect_extensions(&fm);
+    assert_eq!(exts.len(), 3); // GitHub + SafeOutputs + Python
+    assert!(exts.iter().any(|e| e.name() == "Python"));
+    // Python is a Runtime phase extension — must sort before Tool-phase extensions
+    let python_idx = exts.iter().position(|e| e.name() == "Python").unwrap();
+    assert_eq!(python_idx, 0, "Python should sort first (Runtime phase)");
+}
+
+#[test]
+fn test_collect_extensions_python_disabled() {
+    let (fm, _) =
+        parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  python: false\n---\n")
+            .unwrap();
+    let exts = collect_extensions(&fm);
+    assert_eq!(exts.len(), 2); // Just always-on
+    assert!(!exts.iter().any(|e| e.name() == "Python"));
+}
+
+#[test]
+fn test_collect_extensions_python_and_lean_both_runtime_phase() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  lean: true\n  python: true\n---\n",
+    )
+    .unwrap();
+    let exts = collect_extensions(&fm);
+    // GitHub + SafeOutputs + Lean + Python
+    assert_eq!(exts.len(), 4);
+    // Both Lean and Python are Runtime phase; all Tool-phase extensions come after
+    let tool_phase_start = exts
+        .iter()
+        .position(|e| e.phase() == ExtensionPhase::Tool);
+    let runtime_phase_end = exts
+        .iter()
+        .rposition(|e| e.phase() == ExtensionPhase::Runtime)
+        .unwrap();
+    if let Some(tool_start) = tool_phase_start {
+        assert!(runtime_phase_end < tool_start, "all Runtime extensions before Tool extensions");
+    }
+}

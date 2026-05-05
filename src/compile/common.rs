@@ -1912,6 +1912,32 @@ pub fn collect_awf_path_prepends(extensions: &[super::extensions::Extension]) ->
         .collect()
 }
 
+/// Collects `agent_env_vars()` from all extensions and formats them as YAML
+/// `env:` block lines ready to be appended to the engine env block.
+///
+/// Returns an empty string when no extensions declare env vars.
+/// Each entry is formatted as `KEY: "VALUE"` with backslash and double-quote
+/// escaping applied to the value. Other YAML special characters (newlines,
+/// tabs, control characters) are rejected at validation time by each extension
+/// before this function is called.
+pub fn collect_agent_env_vars(extensions: &[super::extensions::Extension]) -> String {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut lines: Vec<String> = Vec::new();
+
+    for ext in extensions {
+        for (key, value) in ext.agent_env_vars() {
+            if seen.contains(&key) {
+                continue;
+            }
+            seen.insert(key.clone());
+            let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+            lines.push(format!("{key}: \"{escaped}\""));
+        }
+    }
+
+    lines.join("\n")
+}
+
 // ==================== Shared compile flow ====================
 
 /// Target-specific overrides for the shared compile flow.
@@ -2103,6 +2129,12 @@ pub async fn compile_shared(
     let awf_path_env = generate_awf_path_env(config.has_awf_paths);
     if !awf_path_env.is_empty() {
         engine_env = format!("{engine_env}\n{awf_path_env}");
+    }
+
+    // Append extension-contributed agent env vars (e.g., Python feed overrides)
+    let ext_env = collect_agent_env_vars(extensions);
+    if !ext_env.is_empty() {
+        engine_env = format!("{engine_env}\n{ext_env}");
     }
     let engine_log_dir = ctx.engine.log_dir();
     let acquire_write_token = generate_acquire_ado_token(
@@ -2505,6 +2537,7 @@ mod tests {
         });
         fm.runtimes = Some(crate::compile::types::RuntimesConfig {
             lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(true)),
+            python: None,
         });
         let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("shell(lean)"), "lean command should be allowed");
@@ -2525,6 +2558,7 @@ mod tests {
         });
         fm.runtimes = Some(crate::compile::types::RuntimesConfig {
             lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(true)),
+            python: None,
         });
         let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("--allow-all-tools"), "wildcard should use --allow-all-tools");
@@ -4270,6 +4304,69 @@ mod tests {
     fn test_generate_awf_path_env_with_paths() {
         let result = generate_awf_path_env(true);
         assert_eq!(result, "GITHUB_PATH: $(GITHUB_PATH)");
+    }
+
+    // ─── collect_agent_env_vars ──────────────────────────────────────────────
+
+    #[test]
+    fn test_collect_agent_env_vars_no_extensions() {
+        use crate::compile::extensions::collect_extensions;
+        let fm = minimal_front_matter();
+        let exts = collect_extensions(&fm);
+        let result = collect_agent_env_vars(&exts);
+        assert!(result.is_empty(), "no extensions with env vars should produce empty string");
+    }
+
+    #[test]
+    fn test_collect_agent_env_vars_python_index_url() {
+        use crate::compile::extensions::collect_extensions;
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nruntimes:\n  python:\n    index-url: \"https://internal.example.com/pypi/simple/\"\n---\n",
+        ).unwrap();
+        let exts = collect_extensions(&fm);
+        let result = collect_agent_env_vars(&exts);
+        assert!(result.contains("PIP_INDEX_URL"), "should contain PIP_INDEX_URL");
+        assert!(result.contains("UV_DEFAULT_INDEX"), "should contain UV_DEFAULT_INDEX");
+        assert!(result.contains("https://internal.example.com/pypi/simple/"));
+    }
+
+    #[test]
+    fn test_collect_agent_env_vars_deduplicates_keys() {
+        // If two extensions somehow declare the same key, only the first wins.
+        use crate::compile::extensions::{Extension, collect_extensions};
+        use crate::runtimes::python::{PythonExtension, PythonRuntimeConfig, PythonOptions};
+        let ext1 = Extension::Python(PythonExtension::new(PythonRuntimeConfig::WithOptions(PythonOptions {
+            version: None,
+            index_url: Some("https://first.example.com/pypi/simple/".to_string()),
+            extra_index_url: None,
+        })));
+        let ext2 = Extension::Python(PythonExtension::new(PythonRuntimeConfig::WithOptions(PythonOptions {
+            version: None,
+            index_url: Some("https://second.example.com/pypi/simple/".to_string()),
+            extra_index_url: None,
+        })));
+        let exts = vec![ext1, ext2];
+        let result = collect_agent_env_vars(&exts);
+        // Only the first occurrence of each key should appear
+        assert_eq!(result.matches("PIP_INDEX_URL").count(), 1, "each key should appear at most once");
+        assert!(result.contains("first.example.com"), "first value should win");
+        assert!(!result.contains("second.example.com"), "second value should not appear");
+    }
+
+    #[test]
+    fn test_collect_agent_env_vars_quotes_special_chars() {
+        use crate::compile::extensions::Extension;
+        use crate::runtimes::python::{PythonExtension, PythonRuntimeConfig, PythonOptions};
+        let ext = Extension::Python(PythonExtension::new(PythonRuntimeConfig::WithOptions(PythonOptions {
+            version: None,
+            // Value contains a backslash and double-quote that should be YAML-escaped
+            index_url: Some("https://example.com/path\\with\"quotes".to_string()),
+            extra_index_url: None,
+        })));
+        let exts = vec![ext];
+        let result = collect_agent_env_vars(&exts);
+        assert!(result.contains("\\\\"), "backslash should be escaped");
+        assert!(result.contains("\\\""), "double-quote should be escaped");
     }
 
     // ═══════════════════════════════════════════════════════════════════════
