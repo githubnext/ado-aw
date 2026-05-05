@@ -566,6 +566,7 @@ pub struct PipelineParameter {
 
 /// Front matter configuration from the input markdown file
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FrontMatter {
     /// Agent name (required)
     pub name: String,
@@ -1710,6 +1711,64 @@ Body
 "#;
         let result = super::super::common::parse_markdown(content);
         assert!(result.is_err(), "unknown fields in network should be rejected");
+    }
+
+    // ─── FrontMatter deny_unknown_fields ─────────────────────────────────────
+
+    #[test]
+    fn test_front_matter_rejects_unknown_top_level_field() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+safeoutputs:
+  upload-pipeline-artifact: {}
+---
+
+Body
+"#;
+        let result = super::super::common::parse_markdown(content);
+        assert!(result.is_err(), "unknown top-level field 'safeoutputs' should be rejected");
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(
+            err.contains("unknown field `safeoutputs`"),
+            "error should mention unknown field `safeoutputs`, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_front_matter_rejects_top_level_schedule() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+schedule: daily around 14:00
+---
+
+Body
+"#;
+        let result = super::super::common::parse_markdown(content);
+        assert!(result.is_err(), "top-level 'schedule' should be rejected (use on.schedule)");
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(
+            err.contains("unknown field `schedule`"),
+            "error should mention unknown field `schedule`, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_front_matter_accepts_safe_outputs_with_hyphen() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+safe-outputs:
+  upload-pipeline-artifact: {}
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        assert!(fm.safe_outputs.contains_key("upload-pipeline-artifact"));
     }
 
     // ─── PrTriggerConfig deserialization ─────────────────────────────────────

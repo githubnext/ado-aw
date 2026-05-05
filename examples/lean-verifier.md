@@ -1,7 +1,8 @@
 ---
 name: "Lean Formal Verifier"
 description: "Analyzes code and builds formal Lean 4 proofs of critical invariants"
-schedule: weekly on friday around 17:00
+on:
+  schedule: weekly on friday around 17:00
 tools:
   cache-memory: true
 runtimes:

@@ -81,7 +81,8 @@ description: "Checks for outdated dependencies and opens PRs"
 engine:
   id: copilot
   model: claude-sonnet-4.5
-schedule: weekly on monday around 9:00
+on:
+  schedule: weekly on monday around 9:00
 pool: AZS-1ES-L-MMS-ubuntu-22.04
 tools:
   azure-devops: true

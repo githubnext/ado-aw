@@ -1,7 +1,8 @@
 ---
 name: "ADO Work Item Triage"
 description: "Triages work items using the Azure DevOps MCP"
-schedule: daily around 9:00
+on:
+  schedule: daily around 9:00
 tools:
   azure-devops:
     toolsets: [core, work, work-items]

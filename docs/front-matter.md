@@ -16,13 +16,14 @@ engine: copilot # Engine identifier. Defaults to copilot. Currently only 'copilo
 #   id: copilot
 #   model: claude-opus-4.7
 #   timeout-minutes: 30
-schedule: daily around 14:00 # Fuzzy schedule syntax - see docs/schedule-syntax.md
-# schedule:                       # Alternative object format (with branch filtering)
-#   run: daily around 14:00
-#   branches:
-#     - main
-#     - release/*
-workspace: repo # Optional: "root", "repo" (alias: "self"), or a checked-out repository alias. If not specified, defaults to "root" when no additional repositories are listed in `checkout:`, and to "repo" when one or more additional repos are checked out. See "Workspace Defaults" below.
+on:
+  schedule: daily around 14:00 # Fuzzy schedule syntax - see docs/schedule-syntax.md
+  # schedule:                     # Alternative object format (with branch filtering)
+  #   run: daily around 14:00
+  #   branches:
+  #     - main
+  #     - release/*
+workspace: repo# Optional: "root", "repo" (alias: "self"), or a checked-out repository alias. If not specified, defaults to "root" when no additional repositories are listed in `checkout:`, and to "repo" when one or more additional repos are checked out. See "Workspace Defaults" below.
 pool: AZS-1ES-L-MMS-ubuntu-22.04 # Agent pool name (string format). Defaults to AZS-1ES-L-MMS-ubuntu-22.04.
 # pool:                        # Alternative object format (required for 1ES if specifying os)
 #   name: AZS-1ES-L-MMS-ubuntu-22.04
