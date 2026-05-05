@@ -243,7 +243,7 @@ pub async fn compile_all_pipelines(skip_integrity: bool, debug_pipeline: bool) -
             Ok(()) => success_count += 1,
             Err(e) => {
                 eprintln!(
-                    "  Error compiling '{}': {}",
+                    "  Error compiling '{}': {:#}",
                     pipeline.source, e
                 );
                 fail_count += 1;
