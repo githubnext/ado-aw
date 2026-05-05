@@ -992,13 +992,14 @@ uploaded and linked during safe output processing. File size and type restrictio
 
     #[tool(
         name = "upload-build-attachment",
-        description = "Attach a workspace file to an Azure DevOps build as a build attachment. \
-Omit `build_id` to target the current pipeline run (the executor resolves it from the \
-BUILD_BUILDID environment variable automatically). When `build_id` is provided, the file is \
+        description = "Attach a workspace file to an Azure DevOps build as a build attachment via \
+the ADO build attachments REST API. Build attachments are NOT visible in the standard ADO UI — \
+they are only accessible via the REST API or a custom Azure DevOps extension. For files that \
+should appear in the Artifacts tab, use upload-pipeline-artifact instead. \
+Omit `build_id` to target the current pipeline run. When `build_id` is provided, the file is \
 attached to that specific build — useful for posthumously decorating a finished build with a \
-generated report, screenshot, or log bundle. The file will be staged now and uploaded via the \
-ADO build attachments REST API during safe output processing. File size, extension, \
-artifact-name and build-id restrictions may apply per the workflow's safe-outputs config."
+generated report or log bundle. File size, extension, artifact-name and build-id restrictions \
+may apply per the workflow's safe-outputs config."
     )]
     async fn upload_build_attachment(
         &self,
@@ -1039,13 +1040,13 @@ artifact-name and build-id restrictions may apply per the workflow's safe-output
             )));
         }
 
-        // Reject directories — upload-build-artifact is single-file only.
+        // Reject directories — upload-build-attachment is single-file only.
         let metadata = tokio::fs::metadata(&canonical).await.map_err(|e| {
             anyhow_to_mcp_error(anyhow::anyhow!("Failed to stat '{}': {}", params.0.file_path, e))
         })?;
         if metadata.is_dir() {
             return Err(anyhow_to_mcp_error(anyhow::anyhow!(
-                "File '{}' is a directory; upload-build-artifact only supports single files",
+                "File '{}' is a directory; upload-build-attachment only supports single files",
                 params.0.file_path
             )));
         }
@@ -1083,13 +1084,13 @@ artifact-name and build-id restrictions may apply per the workflow's safe-output
         // max length (~140 chars) is well within filesystem limits.
         let staged_filename = if extension.is_empty() {
             format!(
-                "upload-build-artifact-{}-{}",
+                "upload-build-attachment-{}-{}",
                 params.0.artifact_name,
                 generate_short_id()
             )
         } else {
             format!(
-                "upload-build-artifact-{}-{}.{}",
+                "upload-build-attachment-{}-{}.{}",
                 params.0.artifact_name,
                 generate_short_id(),
                 extension
@@ -1140,12 +1141,12 @@ artifact-name and build-id restrictions may apply per the workflow's safe-output
 
     #[tool(
         name = "upload-pipeline-artifact",
-        description = "Publish a workspace file as an Azure DevOps pipeline artifact that appears in \
-the Artifacts tab of the build summary. Omit `build_id` to target the current pipeline run \
-(the executor resolves it from BUILD_BUILDID automatically). When `build_id` is provided, the \
-file is published to that specific build. The file will be staged now and uploaded via the ADO \
-build artifacts REST API during safe output processing. File size, extension, artifact-name and \
-build-id restrictions may apply per the workflow's safe-outputs config."
+        description = "Publish a workspace file as an Azure DevOps pipeline artifact that appears \
+in the Artifacts tab of the build summary page — visible to all users viewing the build. Use \
+this tool when you want users to be able to find and download the file from the ADO UI. \
+Omit `build_id` to target the current pipeline run. When `build_id` is provided, the artifact \
+is published to that specific build. File size, extension, artifact-name and build-id \
+restrictions may apply per the workflow's safe-outputs config."
     )]
     async fn upload_pipeline_artifact(
         &self,

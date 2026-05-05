@@ -19,7 +19,7 @@ use crate::safeoutputs::{
     MissingToolResult, NoopResult, QueueBuildResult, ReplyToPrCommentResult,
     ReportIncompleteResult, ResolvePrThreadResult, SubmitPrReviewResult, ToolResult,
     UpdatePrResult, UpdateWikiPageResult, UpdateWorkItemResult, UploadBuildAttachmentResult,
-    UploadPipelineArtifactResult, UploadWorkitemAttachmentResult, canonical_safe_output_name,
+    UploadPipelineArtifactResult, UploadWorkitemAttachmentResult,
 };
 
 // Re-export memory types for use by main.rs
@@ -192,8 +192,7 @@ fn enforce_budget(
     total: usize,
     i: usize,
 ) -> Option<ExecutionResult> {
-    let raw_name = entry.get("name").and_then(|n| n.as_str())?;
-    let tool_name = canonical_safe_output_name(raw_name);
+    let tool_name = entry.get("name").and_then(|n| n.as_str())?;
     let (executed, max) = budgets.get_mut(tool_name)?;
     let context_id = extract_entry_context(entry);
     if let Some(result) = check_budget(total, i, tool_name, &context_id, *executed, *max) {
@@ -251,13 +250,12 @@ pub async fn execute_safe_output(
     ctx: &ExecutionContext,
 ) -> Result<(String, ExecutionResult)> {
     // First check the name field to dispatch correctly
-    let raw_tool_name = entry
+    let tool_name = entry
         .get("name")
         .and_then(|n| n.as_str())
         .ok_or_else(|| anyhow::anyhow!("Safe output missing 'name' field"))?;
-    let tool_name = canonical_safe_output_name(raw_tool_name);
 
-    debug!("Dispatching tool: {} (raw: {})", tool_name, raw_tool_name);
+    debug!("Dispatching tool: {}", tool_name);
 
     // Dispatch based on tool name. All registered tools go through `dispatch_tool`,
     // which handles deserialization and sanitized execution uniformly.

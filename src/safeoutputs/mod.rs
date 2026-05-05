@@ -55,17 +55,6 @@ pub const WRITE_REQUIRING_SAFE_OUTPUTS: &[&str] = tool_names![
 /// filtered out (the router has no route for them).
 pub const NON_MCP_SAFE_OUTPUT_KEYS: &[&str] = &[];
 
-/// Canonicalize a safe-output tool name, resolving deprecated aliases to their
-/// current names.  Callers should apply this before budget enforcement,
-/// config lookup, and dispatch so that old NDJSON entries / front-matter keys
-/// consume the same budgets and configs as new ones.
-pub fn canonical_safe_output_name(name: &str) -> &str {
-    match name {
-        "upload-build-artifact" => "upload-build-attachment",
-        other => other,
-    }
-}
-
 /// All recognised safe-output keys accepted in front matter `safe-outputs:`.
 /// This is the union of write-requiring tool types and diagnostic tool types.
 ///

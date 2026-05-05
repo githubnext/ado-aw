@@ -420,9 +420,6 @@ safe-outputs:
 
 ### upload-build-attachment
 
-> **Renamed from `upload-build-artifact`** — the old name is accepted as a
-> deprecated alias for backward compatibility.
-
 Attaches a workspace file to an Azure DevOps build as a **build attachment** via
 the ADO build attachments REST API
 (`PUT /_apis/build/builds/{buildId}/attachments/{type}/{name}`).
