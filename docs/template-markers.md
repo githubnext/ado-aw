@@ -444,9 +444,9 @@ If `permissions.write` is not configured, this marker is replaced with an empty 
 
 ## {{ executor_ado_env }}
 
-Generates environment variable entries for the Stage 3 executor step when `permissions.write` is configured. Sets `SYSTEM_ACCESSTOKEN` to the write service connection token (`SC_WRITE_TOKEN`).
+Generates the complete `env:` block (including the `env:` key) for the Stage 3 executor step when `permissions.write` is configured. Sets `SYSTEM_ACCESSTOKEN` to the write service connection token (`SC_WRITE_TOKEN`).
 
-If `permissions.write` is not configured, this marker is replaced with an empty string. Note: `System.AccessToken` is never used directly — all ADO tokens come from explicitly configured service connections.
+If `permissions.write` is not configured, this marker is replaced with an empty string so that no `env:` block is emitted at all. Note: `System.AccessToken` is never used directly — all ADO tokens come from explicitly configured service connections.
 
 ## {{ compiler_version }}
 
