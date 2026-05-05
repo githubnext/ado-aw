@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::PATH_SEGMENT;
 use super::resolve_wiki_branch;
 use ado_aw_derive::SanitizeConfig;
-use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
+use crate::sanitize::{SanitizeContent, neutralize_pipeline_commands, sanitize as sanitize_text};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 
@@ -66,13 +66,17 @@ tool_result! {
 
 impl SanitizeContent for UpdateWikiPageResult {
     fn sanitize_content_fields(&mut self) {
-        // Path is a structural identifier — sanitize lightly (remove control chars)
-        // but do not escape HTML or neutralize patterns that are valid in wiki paths.
-        self.path = self
-            .path
-            .chars()
-            .filter(|c| !c.is_control() || *c == '\t')
-            .collect();
+        // Path is a structural identifier — remove control characters and
+        // neutralize ADO pipeline commands to prevent VSO command injection
+        // via log output, without escaping HTML or corrupting valid path
+        // characters like slashes, spaces, or angle brackets.
+        self.path = neutralize_pipeline_commands(
+            &self
+                .path
+                .chars()
+                .filter(|c| !c.is_control() || *c == '\t')
+                .collect::<String>(),
+        );
         self.content = sanitize_text(&self.content);
         self.comment = self.comment.as_ref().map(|c| sanitize_text(c));
     }
@@ -646,6 +650,27 @@ wiki-name: "MyProject.wiki"
         let mut result: UpdateWikiPageResult = params.try_into().unwrap();
         result.sanitize_content_fields();
         assert_eq!(result.path, "/Folder/My Page");
+    }
+
+    #[test]
+    fn test_sanitize_neutralizes_vso_command_in_path() {
+        let params = UpdateWikiPageParams {
+            path: "/##vso[task.setvariable variable=X]injected".to_string(),
+            content: "Some valid content here.".to_string(),
+            comment: None,
+        };
+        let mut result: UpdateWikiPageResult = params.try_into().unwrap();
+        result.sanitize_content_fields();
+        assert!(
+            !result.path.contains("##vso[task."),
+            "VSO command in path should be neutralized; got: {}",
+            result.path
+        );
+        assert!(
+            result.path.contains("`##vso[`"),
+            "VSO command should be wrapped in backticks; got: {}",
+            result.path
+        );
     }
 
     // ── Executor (no-token failure) ───────────────────────────────────────────
