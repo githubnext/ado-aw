@@ -128,9 +128,8 @@ pub fn generate_node_install(config: &NodeRuntimeConfig) -> String {
 
 /// Generate the `npmAuthenticate@0` pipeline step.
 ///
-/// Emitted unconditionally when the Node.js runtime is enabled — the ADO
-/// build service identity handles authentication. This runs before AWF,
-/// setting up credentials for internal feeds.
+/// Emitted when `feed-url:` or `config:` is set, authenticating the ADO
+/// build service identity for internal npm feeds. This runs before AWF.
 ///
 /// Requires a `.npmrc` file to exist; call [`generate_ensure_npmrc`] first
 /// to create one if the repo doesn't already have one.

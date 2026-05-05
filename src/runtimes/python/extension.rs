@@ -49,8 +49,8 @@ impl CompilerExtension for PythonExtension {
 ## Python\n\
 \n\
 Python is installed and available. Use `python3` or `python` to run scripts, \
-`pip` or `pip3` to install packages, and `uv` for fast package management. \
-The `uv` tool is pre-installed and recommended for speed.\n"
+`pip` or `pip3` to install packages. If you need `uv` for fast package \
+management, install it first with `pip install uv`.\n"
                 .to_string(),
         )
     }
