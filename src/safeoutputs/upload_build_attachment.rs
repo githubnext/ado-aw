@@ -1,4 +1,4 @@
-//! Upload build artifact safe output tool.
+//! Upload build attachment safe output tool.
 //!
 //! Lets an agent propose attaching a workspace file to an Azure DevOps build
 //! via the **build attachments** REST API
@@ -37,7 +37,7 @@ use anyhow::{Context, ensure};
 
 /// Parameters for attaching a workspace file to an ADO build.
 #[derive(Deserialize, JsonSchema)]
-pub struct UploadBuildArtifactParams {
+pub struct UploadBuildAttachmentParams {
     /// The build ID to attach the file to.  **Omit to target the current
     /// pipeline run** — the executor resolves the build ID from the
     /// `BUILD_BUILDID` environment variable automatically.  When provided,
@@ -56,7 +56,7 @@ pub struct UploadBuildArtifactParams {
     pub file_path: String,
 }
 
-impl Validate for UploadBuildArtifactParams {
+impl Validate for UploadBuildAttachmentParams {
     fn validate(&self) -> anyhow::Result<()> {
         // build_id: if present, must be positive.
         if let Some(id) = self.build_id {
@@ -100,13 +100,13 @@ impl Validate for UploadBuildArtifactParams {
     }
 }
 
-/// Internal params struct mirroring `UploadBuildArtifactResult` fields for the
+/// Internal params struct mirroring `UploadBuildAttachmentResult` fields for the
 /// `tool_result!` macro's `TryFrom` plumbing. The actual MCP parameters come
-/// from `UploadBuildArtifactParams`; this struct only exists so the macro can
+/// from `UploadBuildAttachmentParams`; this struct only exists so the macro can
 /// wire up `Validate`/`TryFrom` while the real construction happens in MCP via
-/// `UploadBuildArtifactResult::new()` after the file is staged.
+/// `UploadBuildAttachmentResult::new()` after the file is staged.
 #[derive(Deserialize, JsonSchema)]
-struct UploadBuildArtifactResultFields {
+struct UploadBuildAttachmentResultFields {
     build_id: Option<i64>,
     artifact_name: String,
     file_path: String,
@@ -115,15 +115,15 @@ struct UploadBuildArtifactResultFields {
     staged_sha256: String,
 }
 
-impl Validate for UploadBuildArtifactResultFields {}
+impl Validate for UploadBuildAttachmentResultFields {}
 
 tool_result! {
-    name = "upload-build-artifact",
+    name = "upload-build-attachment",
     write = true,
-    params = UploadBuildArtifactResultFields,
+    params = UploadBuildAttachmentResultFields,
     default_max = 3,
     /// Result of attaching a workspace file to an ADO build.
-    pub struct UploadBuildArtifactResult {
+    pub struct UploadBuildAttachmentResult {
         /// Build ID the file should be attached to.  `None` means "current
         /// build" — resolved at execution time from `BUILD_BUILDID`.
         build_id: Option<i64>,
@@ -147,14 +147,14 @@ tool_result! {
     }
 }
 
-impl SanitizeContent for UploadBuildArtifactResult {
+impl SanitizeContent for UploadBuildAttachmentResult {
     fn sanitize_content_fields(&mut self) {
         // All textual fields are strictly validated to safe charsets; no
         // additional textual sanitization is required.
     }
 }
 
-impl UploadBuildArtifactResult {
+impl UploadBuildAttachmentResult {
     /// Construct a result after the agent's file has been staged into the
     /// safe-outputs directory.
     pub fn new(
@@ -177,18 +177,18 @@ impl UploadBuildArtifactResult {
     }
 }
 
-/// Default maximum file size for upload-build-artifact (50 MB).
+/// Default maximum file size for upload-build-attachment (50 MB).
 /// Also used by the MCP handler as the Stage 1 staging cap.
 pub const DEFAULT_MAX_FILE_SIZE: u64 = 50 * 1024 * 1024;
 const DEFAULT_ATTACHMENT_TYPE: &str = "agent-artifact";
 
-/// Configuration for the upload-build-artifact tool (specified in front
+/// Configuration for the upload-build-attachment tool (specified in front
 /// matter).
 ///
 /// Example front matter:
 /// ```yaml
 /// safe-outputs:
-///   upload-build-artifact:
+///   upload-build-attachment:
 ///     max-file-size: 52428800
 ///     allowed-extensions:
 ///       - .png
@@ -204,7 +204,7 @@ const DEFAULT_ATTACHMENT_TYPE: &str = "agent-artifact";
 ///     max: 5
 /// ```
 #[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
-pub struct UploadBuildArtifactConfig {
+pub struct UploadBuildAttachmentConfig {
     /// Maximum file size in bytes (default: 50 MB).
     #[serde(default = "default_max_file_size", rename = "max-file-size")]
     pub max_file_size: u64,
@@ -241,7 +241,7 @@ fn default_max_file_size() -> u64 {
     DEFAULT_MAX_FILE_SIZE
 }
 
-impl Default for UploadBuildArtifactConfig {
+impl Default for UploadBuildAttachmentConfig {
     fn default() -> Self {
         Self {
             max_file_size: DEFAULT_MAX_FILE_SIZE,
@@ -255,7 +255,7 @@ impl Default for UploadBuildArtifactConfig {
 }
 
 #[async_trait::async_trait]
-impl Executor for UploadBuildArtifactResult {
+impl Executor for UploadBuildAttachmentResult {
     fn dry_run_summary(&self) -> String {
         match self.build_id {
             Some(id) => format!(
@@ -291,11 +291,11 @@ impl Executor for UploadBuildArtifactResult {
             if self.build_id.is_none() { " (current build)" } else { "" }
         );
         debug!(
-            "upload-build-artifact: build_id={}, artifact_name='{}', file_path='{}'",
+            "upload-build-attachment: build_id={}, artifact_name='{}', file_path='{}'",
             effective_build_id, self.artifact_name, self.file_path
         );
 
-        let config: UploadBuildArtifactConfig = ctx.get_tool_config("upload-build-artifact");
+        let config: UploadBuildAttachmentConfig = ctx.get_tool_config("upload-build-attachment");
         debug!("Max file size: {} bytes", config.max_file_size);
         debug!("Allowed extensions: {:?}", config.allowed_extensions);
         debug!("Allowed artifact names: {:?}", config.allowed_artifact_names);
@@ -429,7 +429,7 @@ impl Executor for UploadBuildArtifactResult {
         let metadata = std::fs::metadata(&canonical).context("Failed to read file metadata")?;
         if metadata.is_dir() {
             return Ok(ExecutionResult::failure(format!(
-                "Staged path '{}' is a directory; upload-build-artifact only supports single files",
+                "Staged path '{}' is a directory; upload-build-attachment only supports single files",
                 self.staged_file
             )));
         }
@@ -576,15 +576,15 @@ mod tests {
 
     #[test]
     fn test_result_has_correct_name() {
-        assert_eq!(UploadBuildArtifactResult::NAME, "upload-build-artifact");
+        assert_eq!(UploadBuildAttachmentResult::NAME, "upload-build-attachment");
     }
 
     fn make_params(
         build_id: Option<i64>,
         artifact_name: &str,
         file_path: &str,
-    ) -> UploadBuildArtifactParams {
-        UploadBuildArtifactParams {
+    ) -> UploadBuildAttachmentParams {
+        UploadBuildAttachmentParams {
             build_id,
             artifact_name: artifact_name.to_string(),
             file_path: file_path.to_string(),
@@ -605,7 +605,7 @@ mod tests {
     fn test_params_deserializes_with_build_id() {
         let json =
             r#"{"build_id": 1234, "artifact_name": "agent-report", "file_path": "out/report.pdf"}"#;
-        let params: UploadBuildArtifactParams = serde_json::from_str(json).unwrap();
+        let params: UploadBuildAttachmentParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.build_id, Some(1234));
         assert_eq!(params.artifact_name, "agent-report");
         assert_eq!(params.file_path, "out/report.pdf");
@@ -614,7 +614,7 @@ mod tests {
     #[test]
     fn test_params_deserializes_without_build_id() {
         let json = r#"{"artifact_name": "agent-report", "file_path": "out/report.pdf"}"#;
-        let params: UploadBuildArtifactParams = serde_json::from_str(json).unwrap();
+        let params: UploadBuildAttachmentParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.build_id, None);
         assert_eq!(params.artifact_name, "agent-report");
         assert_eq!(params.file_path, "out/report.pdf");
@@ -720,41 +720,41 @@ mod tests {
 
     #[test]
     fn test_result_serializes_correctly_with_build_id() {
-        let result = UploadBuildArtifactResult::new(
+        let result = UploadBuildAttachmentResult::new(
             Some(1234),
             "agent-report".to_string(),
             "out/report.pdf".to_string(),
-            "upload-build-artifact-agent-report-1234.bin".to_string(),
+            "upload-build-attachment-agent-report-1234.bin".to_string(),
             42,
             DUMMY_HASH.to_string(),
         );
         let json = serde_json::to_string(&result).unwrap();
-        assert!(json.contains(r#""name":"upload-build-artifact""#));
+        assert!(json.contains(r#""name":"upload-build-attachment""#));
         assert!(json.contains(r#""build_id":1234"#));
         assert!(json.contains(r#""artifact_name":"agent-report""#));
         assert!(json.contains(r#""file_path":"out/report.pdf""#));
-        assert!(json.contains(r#""staged_file":"upload-build-artifact-agent-report-1234.bin""#));
+        assert!(json.contains(r#""staged_file":"upload-build-attachment-agent-report-1234.bin""#));
     }
 
     #[test]
     fn test_result_serializes_correctly_without_build_id() {
-        let result = UploadBuildArtifactResult::new(
+        let result = UploadBuildAttachmentResult::new(
             None,
             "agent-report".to_string(),
             "out/report.pdf".to_string(),
-            "upload-build-artifact-agent-report-1234.bin".to_string(),
+            "upload-build-attachment-agent-report-1234.bin".to_string(),
             42,
             DUMMY_HASH.to_string(),
         );
         let json = serde_json::to_string(&result).unwrap();
-        assert!(json.contains(r#""name":"upload-build-artifact""#));
+        assert!(json.contains(r#""name":"upload-build-attachment""#));
         assert!(json.contains(r#""build_id":null"#));
         assert!(json.contains(r#""artifact_name":"agent-report""#));
     }
 
     #[test]
     fn test_config_defaults() {
-        let config = UploadBuildArtifactConfig::default();
+        let config = UploadBuildAttachmentConfig::default();
         assert_eq!(config.max_file_size, 50 * 1024 * 1024);
         assert!(config.allowed_extensions.is_empty());
         assert!(config.allowed_artifact_names.is_empty());
@@ -779,7 +779,7 @@ allowed-build-ids:
 name-prefix: "agent-"
 attachment-type: "agent-artifact"
 "#;
-        let config: UploadBuildArtifactConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: UploadBuildAttachmentConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.max_file_size, 1_048_576);
         assert_eq!(config.allowed_extensions, vec![".png", ".pdf"]);
         assert_eq!(config.allowed_artifact_names, vec!["agent-*", "report"]);
@@ -793,6 +793,7 @@ attachment-type: "agent-artifact"
             ado_org_url: None,
             ado_organization: None,
             ado_project: None,
+            ado_project_id: None,
             access_token: None,
             source_directory: working_directory.clone(),
             working_directory,
@@ -822,10 +823,10 @@ attachment-type: "agent-artifact"
     #[tokio::test]
     async fn test_executor_reads_staged_file_with_explicit_build_id() {
         let dir = tempfile::tempdir().unwrap();
-        let staged = "upload-build-artifact-agent-report-deadbeef.pdf";
+        let staged = "upload-build-attachment-agent-report-deadbeef.pdf";
         std::fs::write(dir.path().join(staged), b"%PDF-1.4 hello").unwrap();
 
-        let result = UploadBuildArtifactResult::new(
+        let result = UploadBuildAttachmentResult::new(
             Some(1234),
             "agent-report".to_string(),
             "out/report.pdf".to_string(),
@@ -844,10 +845,10 @@ attachment-type: "agent-artifact"
     #[tokio::test]
     async fn test_executor_resolves_current_build_when_build_id_omitted() {
         let dir = tempfile::tempdir().unwrap();
-        let staged = "upload-build-artifact-agent-report-feedf00d.pdf";
+        let staged = "upload-build-attachment-agent-report-feedf00d.pdf";
         std::fs::write(dir.path().join(staged), b"%PDF-1.4 hello").unwrap();
 
-        let result = UploadBuildArtifactResult::new(
+        let result = UploadBuildAttachmentResult::new(
             None,
             "agent-report".to_string(),
             "out/report.pdf".to_string(),
@@ -867,10 +868,10 @@ attachment-type: "agent-artifact"
     #[tokio::test]
     async fn test_executor_fails_when_build_id_omitted_and_not_in_env() {
         let dir = tempfile::tempdir().unwrap();
-        let staged = "upload-build-artifact-agent-report-cafef00d.pdf";
+        let staged = "upload-build-attachment-agent-report-cafef00d.pdf";
         std::fs::write(dir.path().join(staged), b"hello").unwrap();
 
-        let result = UploadBuildArtifactResult::new(
+        let result = UploadBuildAttachmentResult::new(
             None,
             "agent-report".to_string(),
             "out/report.pdf".to_string(),
@@ -891,7 +892,7 @@ attachment-type: "agent-artifact"
     #[tokio::test]
     async fn test_executor_rejects_missing_staged_file() {
         let dir = tempfile::tempdir().unwrap();
-        let result = UploadBuildArtifactResult::new(
+        let result = UploadBuildAttachmentResult::new(
             Some(1234),
             "agent-report".to_string(),
             "out/report.pdf".to_string(),
@@ -911,10 +912,10 @@ attachment-type: "agent-artifact"
     #[tokio::test]
     async fn test_executor_rejects_disallowed_build_id() {
         let dir = tempfile::tempdir().unwrap();
-        let staged = "upload-build-artifact-agent-report-cafef00d.pdf";
+        let staged = "upload-build-attachment-agent-report-cafef00d.pdf";
         std::fs::write(dir.path().join(staged), b"hello").unwrap();
 
-        let result = UploadBuildArtifactResult::new(
+        let result = UploadBuildAttachmentResult::new(
             Some(999),
             "agent-report".to_string(),
             "out/report.pdf".to_string(),
@@ -924,7 +925,7 @@ attachment-type: "agent-artifact"
         );
         let mut ctx = make_ctx(dir.path().to_path_buf(), true);
         ctx.tool_configs.insert(
-            "upload-build-artifact".to_string(),
+            "upload-build-attachment".to_string(),
             serde_json::json!({ "allowed-build-ids": [100, 200] }),
         );
         let outcome = result.execute_impl(&ctx).await.unwrap();
@@ -939,10 +940,10 @@ attachment-type: "agent-artifact"
     #[tokio::test]
     async fn test_executor_skips_build_id_allowlist_for_current_build() {
         let dir = tempfile::tempdir().unwrap();
-        let staged = "upload-build-artifact-agent-report-aabbccdd.pdf";
+        let staged = "upload-build-attachment-agent-report-aabbccdd.pdf";
         std::fs::write(dir.path().join(staged), b"hello").unwrap();
 
-        let result = UploadBuildArtifactResult::new(
+        let result = UploadBuildAttachmentResult::new(
             None, // targeting current build
             "agent-report".to_string(),
             "out/report.pdf".to_string(),
@@ -953,7 +954,7 @@ attachment-type: "agent-artifact"
         let mut ctx = make_ctx(dir.path().to_path_buf(), true);
         ctx.build_id = Some(999); // current build not in allowed list
         ctx.tool_configs.insert(
-            "upload-build-artifact".to_string(),
+            "upload-build-attachment".to_string(),
             serde_json::json!({ "allowed-build-ids": [100, 200] }),
         );
         let outcome = result.execute_impl(&ctx).await.unwrap();
@@ -967,10 +968,10 @@ attachment-type: "agent-artifact"
     #[tokio::test]
     async fn test_executor_accepts_allowed_build_id() {
         let dir = tempfile::tempdir().unwrap();
-        let staged = "upload-build-artifact-agent-report-feedf00d.pdf";
+        let staged = "upload-build-attachment-agent-report-feedf00d.pdf";
         std::fs::write(dir.path().join(staged), b"hello").unwrap();
 
-        let result = UploadBuildArtifactResult::new(
+        let result = UploadBuildAttachmentResult::new(
             Some(100),
             "agent-report".to_string(),
             "out/report.pdf".to_string(),
@@ -980,7 +981,7 @@ attachment-type: "agent-artifact"
         );
         let mut ctx = make_ctx(dir.path().to_path_buf(), true);
         ctx.tool_configs.insert(
-            "upload-build-artifact".to_string(),
+            "upload-build-attachment".to_string(),
             serde_json::json!({ "allowed-build-ids": [100, 200] }),
         );
         let outcome = result.execute_impl(&ctx).await.unwrap();
@@ -990,10 +991,10 @@ attachment-type: "agent-artifact"
     #[tokio::test]
     async fn test_executor_rejects_oversized_file() {
         let dir = tempfile::tempdir().unwrap();
-        let staged = "upload-build-artifact-agent-big-deadbeef.bin";
+        let staged = "upload-build-attachment-agent-big-deadbeef.bin";
         std::fs::write(dir.path().join(staged), vec![0u8; 1024]).unwrap();
 
-        let result = UploadBuildArtifactResult::new(
+        let result = UploadBuildAttachmentResult::new(
             Some(1),
             "agent-big".to_string(),
             "out/big.bin".to_string(),
@@ -1003,7 +1004,7 @@ attachment-type: "agent-artifact"
         );
         let mut ctx = make_ctx(dir.path().to_path_buf(), true);
         ctx.tool_configs.insert(
-            "upload-build-artifact".to_string(),
+            "upload-build-attachment".to_string(),
             serde_json::json!({ "max-file-size": 100 }),
         );
         let outcome = result.execute_impl(&ctx).await.unwrap();
@@ -1018,10 +1019,10 @@ attachment-type: "agent-artifact"
     #[tokio::test]
     async fn test_executor_rejects_disallowed_extension() {
         let dir = tempfile::tempdir().unwrap();
-        let staged = "upload-build-artifact-agent-report-aabb1122.exe";
+        let staged = "upload-build-attachment-agent-report-aabb1122.exe";
         std::fs::write(dir.path().join(staged), b"MZ hello").unwrap();
 
-        let result = UploadBuildArtifactResult::new(
+        let result = UploadBuildAttachmentResult::new(
             Some(1),
             "agent-report".to_string(),
             "out/report.exe".to_string(),
@@ -1031,7 +1032,7 @@ attachment-type: "agent-artifact"
         );
         let mut ctx = make_ctx(dir.path().to_path_buf(), true);
         ctx.tool_configs.insert(
-            "upload-build-artifact".to_string(),
+            "upload-build-attachment".to_string(),
             serde_json::json!({ "allowed-extensions": [".pdf", ".png"] }),
         );
         let outcome = result.execute_impl(&ctx).await.unwrap();
@@ -1046,10 +1047,10 @@ attachment-type: "agent-artifact"
     #[tokio::test]
     async fn test_executor_rejects_disallowed_artifact_name() {
         let dir = tempfile::tempdir().unwrap();
-        let staged = "upload-build-artifact-evil-report-ccdd3344.pdf";
+        let staged = "upload-build-attachment-evil-report-ccdd3344.pdf";
         std::fs::write(dir.path().join(staged), b"hello").unwrap();
 
-        let result = UploadBuildArtifactResult::new(
+        let result = UploadBuildAttachmentResult::new(
             Some(1),
             "evil-report".to_string(),
             "out/report.pdf".to_string(),
@@ -1059,7 +1060,7 @@ attachment-type: "agent-artifact"
         );
         let mut ctx = make_ctx(dir.path().to_path_buf(), true);
         ctx.tool_configs.insert(
-            "upload-build-artifact".to_string(),
+            "upload-build-attachment".to_string(),
             serde_json::json!({ "allowed-artifact-names": ["agent-*", "safe-report"] }),
         );
         let outcome = result.execute_impl(&ctx).await.unwrap();
@@ -1074,10 +1075,10 @@ attachment-type: "agent-artifact"
     #[tokio::test]
     async fn test_executor_applies_name_prefix() {
         let dir = tempfile::tempdir().unwrap();
-        let staged = "upload-build-artifact-report-eeff5566.pdf";
+        let staged = "upload-build-attachment-report-eeff5566.pdf";
         std::fs::write(dir.path().join(staged), b"hello").unwrap();
 
-        let result = UploadBuildArtifactResult::new(
+        let result = UploadBuildAttachmentResult::new(
             Some(1),
             "report".to_string(),
             "out/report.pdf".to_string(),
@@ -1087,7 +1088,7 @@ attachment-type: "agent-artifact"
         );
         let mut ctx = make_ctx(dir.path().to_path_buf(), true);
         ctx.tool_configs.insert(
-            "upload-build-artifact".to_string(),
+            "upload-build-attachment".to_string(),
             serde_json::json!({ "name-prefix": "agent-" }),
         );
         let outcome = result.execute_impl(&ctx).await.unwrap();
@@ -1103,11 +1104,11 @@ attachment-type: "agent-artifact"
     #[tokio::test]
     async fn test_executor_rejects_tampered_staged_file() {
         let dir = tempfile::tempdir().unwrap();
-        let staged = "upload-build-artifact-agent-report-tampered.pdf";
+        let staged = "upload-build-attachment-agent-report-tampered.pdf";
         // Write 100 bytes but record 50 in the result — simulates tampering.
         std::fs::write(dir.path().join(staged), vec![0u8; 100]).unwrap();
 
-        let result = UploadBuildArtifactResult::new(
+        let result = UploadBuildAttachmentResult::new(
             Some(1),
             "agent-report".to_string(),
             "out/report.pdf".to_string(),
@@ -1128,14 +1129,14 @@ attachment-type: "agent-artifact"
     #[tokio::test]
     async fn test_executor_rejects_sha256_mismatch() {
         let dir = tempfile::tempdir().unwrap();
-        let staged = "upload-build-artifact-agent-report-sha-mismatch.pdf";
+        let staged = "upload-build-attachment-agent-report-sha-mismatch.pdf";
         let content = b"real file content";
         std::fs::write(dir.path().join(staged), content).unwrap();
 
         // Record the hash of different content — same size but wrong hash.
         let wrong_hash = crate::hash::sha256_hex(b"wrong file content");
 
-        let result = UploadBuildArtifactResult::new(
+        let result = UploadBuildAttachmentResult::new(
             Some(1),
             "agent-report".to_string(),
             "out/report.pdf".to_string(),
@@ -1161,7 +1162,7 @@ attachment-type: "agent-artifact"
 
     #[test]
     fn test_dry_run_summary_with_build_id() {
-        let result = UploadBuildArtifactResult::new(
+        let result = UploadBuildAttachmentResult::new(
             Some(42),
             "report".to_string(),
             "out/report.pdf".to_string(),
@@ -1176,7 +1177,7 @@ attachment-type: "agent-artifact"
 
     #[test]
     fn test_dry_run_summary_without_build_id() {
-        let result = UploadBuildArtifactResult::new(
+        let result = UploadBuildAttachmentResult::new(
             None,
             "report".to_string(),
             "out/report.pdf".to_string(),

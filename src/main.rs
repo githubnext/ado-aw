@@ -20,6 +20,7 @@ pub mod validate;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Subcommand, Debug)]
@@ -248,7 +249,25 @@ async fn build_execution_context(
     ctx.ado_org_url = ado_org_url;
     ctx.ado_project = ado_project;
     ctx.working_directory = safe_output_dir.clone();
-    ctx.tool_configs = front_matter.safe_outputs.clone();
+    // Normalize deprecated safe-output config keys to their canonical names.
+    // This ensures old front matter (e.g. `upload-build-artifact:`) maps to
+    // the new tool name for config lookup at execution time.
+    ctx.tool_configs = {
+        use crate::safeoutputs::canonical_safe_output_name;
+        let mut normalized = HashMap::new();
+        for (key, value) in &front_matter.safe_outputs {
+            let canonical = canonical_safe_output_name(key).to_string();
+            if canonical != *key && normalized.contains_key(&canonical) {
+                eprintln!(
+                    "Warning: both '{}' and '{}' are configured in safe-outputs — using '{}'",
+                    key, canonical, canonical
+                );
+                continue;
+            }
+            normalized.insert(canonical, value.clone());
+        }
+        normalized
+    };
     ctx.allowed_repositories = allowed_repositories;
     ctx.dry_run = dry_run;
 

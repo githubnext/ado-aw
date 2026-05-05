@@ -418,10 +418,20 @@ safe-outputs:
     max: 1                       # Maximum per run (default: 1)
 ```
 
-### upload-build-artifact
-Attaches a workspace file to an Azure DevOps build as a build attachment via the
-ADO build attachments REST API
+### upload-build-attachment
+
+> **Renamed from `upload-build-artifact`** — the old name is accepted as a
+> deprecated alias for backward compatibility.
+
+Attaches a workspace file to an Azure DevOps build as a **build attachment** via
+the ADO build attachments REST API
 (`PUT /_apis/build/builds/{buildId}/attachments/{type}/{name}`).
+
+> **Important:** Build attachments are **not visible** in the standard Azure
+> DevOps build summary UI. They are only accessible via the REST API or through
+> a custom Azure DevOps extension that registers a tab matching the
+> `attachment-type` value. For artifacts that should appear in the **Artifacts
+> tab**, use [`upload-pipeline-artifact`](#upload-pipeline-artifact) instead.
 
 **Omit `build_id` to target the current pipeline run** — the executor resolves
 the build ID from the `BUILD_BUILDID` environment variable automatically. When
@@ -435,13 +445,13 @@ API.
 
 **Agent parameters:**
 - `build_id` *(optional)* - Target build ID. Omit to attach to the current pipeline run. Must be positive when specified.
-- `artifact_name` - Artifact name (1–100 chars, alphanumeric / `-` / `_` / `.`, no leading `.`)
+- `artifact_name` - Attachment name (1–100 chars, alphanumeric / `-` / `_` / `.`, no leading `.`)
 - `file_path` - Relative path to the file in the workspace (no directory traversal)
 
 **Configuration options (front matter):**
 ```yaml
 safe-outputs:
-  upload-build-artifact:
+  upload-build-attachment:
     max-file-size: 52428800              # Maximum file size in bytes (default: 50 MB)
     allowed-extensions: []               # Optional — restrict file types (e.g., [".png", ".pdf", ".log"])
     allowed-artifact-names: []           # Optional — restrict names (suffix `*` = prefix match)
@@ -454,7 +464,53 @@ safe-outputs:
 **Notes:**
 - Single-file only; directory uploads are not supported.
 - When `build_id` is omitted and `allowed-build-ids` is configured, the allow-list check is skipped — the current build is implicitly trusted.
-- The default `attachment-type` is `agent-artifact` so executor contributions are visually distinguishable from the build's own artifacts.
+
+**About `attachment-type`:** This is the `{type}` segment in the ADO build
+attachments URL (`PUT .../attachments/{type}/{name}`). It acts as a category
+label. Azure DevOps extensions can register to display attachments of a specific
+type — for example, the built-in code coverage extension displays attachments
+with type `CodeCoverageSummary`. The default `agent-artifact` is a custom type;
+without a matching ADO extension installed, attachments with this type are only
+accessible via the REST API. Change this only if you have a custom extension
+that displays attachments of a specific type. Most users should use
+[`upload-pipeline-artifact`](#upload-pipeline-artifact) for user-visible
+artifacts instead.
+
+### upload-pipeline-artifact
+
+Publishes a workspace file as an Azure DevOps **pipeline artifact** that appears
+in the **Artifacts tab** of the build summary page. Uses the ADO build artifacts
+REST API (container creation + file upload + artifact association).
+
+**Omit `build_id` to target the current pipeline run** — the executor resolves
+the build ID from the `BUILD_BUILDID` environment variable automatically. When
+`build_id` is provided, the artifact is published to that specific build.
+
+The tool stages the file during Stage 1 (MCP) by copying it into the
+safe-outputs directory; Stage 3 reads the staged copy and executes the three-step
+REST API flow to create the artifact.
+
+**Agent parameters:**
+- `build_id` *(optional)* - Target build ID. Omit to publish to the current pipeline run. Must be positive when specified.
+- `artifact_name` - Artifact name shown in the Artifacts tab (1–100 chars, alphanumeric / `-` / `_` / `.`, no leading `.`)
+- `file_path` - Relative path to the file in the workspace (no directory traversal)
+
+**Configuration options (front matter):**
+```yaml
+safe-outputs:
+  upload-pipeline-artifact:
+    max-file-size: 52428800              # Maximum file size in bytes (default: 50 MB)
+    allowed-extensions: []               # Optional — restrict file types (e.g., [".png", ".pdf", ".log"])
+    allowed-artifact-names: []           # Optional — restrict names (suffix `*` = prefix match)
+    allowed-build-ids: []                # Optional — restrict target builds (skipped when targeting current build)
+    name-prefix: ""                      # Optional — prepended to the agent-supplied artifact name
+    max: 3                               # Maximum per run (default: 3)
+```
+
+**Notes:**
+- Single-file only; directory uploads are not supported.
+- When `build_id` is omitted and `allowed-build-ids` is configured, the allow-list check is skipped — the current build is implicitly trusted.
+- Requires `SYSTEM_TEAMPROJECTID` to be available in the execution environment (set automatically by Azure DevOps).
 
 ### cache-memory (moved to `tools:`)
 Memory is now configured as a first-class tool under `tools: cache-memory:` instead of `safe-outputs: memory:`. See the [Cache Memory section](./tools.md#cache-memory-cache-memory) in `docs/tools.md` for details.

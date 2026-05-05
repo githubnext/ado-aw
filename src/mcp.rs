@@ -27,7 +27,8 @@ use crate::safeoutputs::{
     QueueBuildResult, SubmitPrReviewParams, SubmitPrReviewResult, ToolResult,
     UpdatePrParams, UpdatePrResult,
     UpdateWorkItemParams, UpdateWorkItemResult,
-    UploadBuildArtifactParams, UploadBuildArtifactResult, DEFAULT_MAX_FILE_SIZE,
+    UploadBuildAttachmentParams, UploadBuildAttachmentResult, DEFAULT_MAX_FILE_SIZE,
+    UploadPipelineArtifactParams, UploadPipelineArtifactResult, PIPELINE_ARTIFACT_DEFAULT_MAX_FILE_SIZE,
     UploadWorkitemAttachmentParams, UploadWorkitemAttachmentResult,
     anyhow_to_mcp_error,
 };
@@ -990,7 +991,7 @@ uploaded and linked during safe output processing. File size and type restrictio
     }
 
     #[tool(
-        name = "upload-build-artifact",
+        name = "upload-build-attachment",
         description = "Attach a workspace file to an Azure DevOps build as a build attachment. \
 Omit `build_id` to target the current pipeline run (the executor resolves it from the \
 BUILD_BUILDID environment variable automatically). When `build_id` is provided, the file is \
@@ -999,12 +1000,12 @@ generated report, screenshot, or log bundle. The file will be staged now and upl
 ADO build attachments REST API during safe output processing. File size, extension, \
 artifact-name and build-id restrictions may apply per the workflow's safe-outputs config."
     )]
-    async fn upload_build_artifact(
+    async fn upload_build_attachment(
         &self,
-        params: Parameters<UploadBuildArtifactParams>,
+        params: Parameters<UploadBuildAttachmentParams>,
     ) -> Result<CallToolResult, McpError> {
         info!(
-            "Tool called: upload-build-artifact - artifact '{}' file '{}' build {:?}",
+            "Tool called: upload-build-attachment - artifact '{}' file '{}' build {:?}",
             params.0.artifact_name, params.0.file_path, params.0.build_id
         );
 
@@ -1116,7 +1117,7 @@ artifact-name and build-id restrictions may apply per the workflow's safe-output
             ))
         })?;
 
-        let result = UploadBuildArtifactResult::new(
+        let result = UploadBuildAttachmentResult::new(
             params.0.build_id,
             params.0.artifact_name.clone(),
             params.0.file_path.clone(),
@@ -1133,6 +1134,131 @@ artifact-name and build-id restrictions may apply per the workflow's safe-output
         };
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Artifact '{}' queued from file '{}' ({} bytes) for {}. The file will be uploaded during safe output processing.",
+            result.artifact_name, result.file_path, file_size, build_desc
+        ))]))
+    }
+
+    #[tool(
+        name = "upload-pipeline-artifact",
+        description = "Publish a workspace file as an Azure DevOps pipeline artifact that appears in \
+the Artifacts tab of the build summary. Omit `build_id` to target the current pipeline run \
+(the executor resolves it from BUILD_BUILDID automatically). When `build_id` is provided, the \
+file is published to that specific build. The file will be staged now and uploaded via the ADO \
+build artifacts REST API during safe output processing. File size, extension, artifact-name and \
+build-id restrictions may apply per the workflow's safe-outputs config."
+    )]
+    async fn upload_pipeline_artifact(
+        &self,
+        params: Parameters<UploadPipelineArtifactParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!(
+            "Tool called: upload-pipeline-artifact - artifact '{}' file '{}' build {:?}",
+            params.0.artifact_name, params.0.file_path, params.0.build_id
+        );
+
+        crate::safeoutputs::Validate::validate(&params.0).map_err(anyhow_to_mcp_error)?;
+
+        let resolved = self.bounding_directory.join(&params.0.file_path);
+        let canonical = resolved.canonicalize().map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!(
+                "File '{}' could not be located inside the workspace: {}",
+                params.0.file_path,
+                e
+            ))
+        })?;
+        let canonical_root = self.bounding_directory.canonicalize().map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!(
+                "Failed to canonicalize bounding directory: {}",
+                e
+            ))
+        })?;
+        if !canonical.starts_with(&canonical_root) {
+            return Err(anyhow_to_mcp_error(anyhow::anyhow!(
+                "File '{}' resolves outside the workspace (symlink escape)",
+                params.0.file_path
+            )));
+        }
+
+        let metadata = tokio::fs::metadata(&canonical).await.map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!("Failed to stat '{}': {}", params.0.file_path, e))
+        })?;
+        if metadata.is_dir() {
+            return Err(anyhow_to_mcp_error(anyhow::anyhow!(
+                "File '{}' is a directory; upload-pipeline-artifact only supports single files",
+                params.0.file_path
+            )));
+        }
+        let file_size = metadata.len();
+
+        if file_size > PIPELINE_ARTIFACT_DEFAULT_MAX_FILE_SIZE {
+            return Err(anyhow_to_mcp_error(anyhow::anyhow!(
+                "File '{}' is {} bytes, exceeding the maximum staging size of {} bytes",
+                params.0.file_path,
+                file_size,
+                PIPELINE_ARTIFACT_DEFAULT_MAX_FILE_SIZE
+            )));
+        }
+
+        let extension = std::path::Path::new(&params.0.file_path)
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| {
+                s.chars()
+                    .filter(|c| c.is_ascii_alphanumeric())
+                    .take(16)
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
+        let staged_filename = if extension.is_empty() {
+            format!(
+                "upload-pipeline-artifact-{}-{}",
+                params.0.artifact_name,
+                generate_short_id()
+            )
+        } else {
+            format!(
+                "upload-pipeline-artifact-{}-{}.{}",
+                params.0.artifact_name,
+                generate_short_id(),
+                extension
+            )
+        };
+
+        let source_bytes = tokio::fs::read(&canonical).await.map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!(
+                "Failed to read source file '{}': {}",
+                params.0.file_path,
+                e
+            ))
+        })?;
+        let staged_sha256 = crate::hash::sha256_hex(&source_bytes);
+
+        let staged_path = self.output_directory.join(&staged_filename);
+        tokio::fs::write(&staged_path, &source_bytes).await.map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!(
+                "Failed to stage file '{}' into safe-outputs directory: {}",
+                params.0.file_path,
+                e
+            ))
+        })?;
+
+        let result = UploadPipelineArtifactResult::new(
+            params.0.build_id,
+            params.0.artifact_name.clone(),
+            params.0.file_path.clone(),
+            staged_filename.clone(),
+            file_size,
+            staged_sha256,
+        );
+        self.write_safe_output_file(&result).await
+            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+
+        let build_desc = match params.0.build_id {
+            Some(id) => format!("build #{}", id),
+            None => "the current build".to_string(),
+        };
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Pipeline artifact '{}' queued from file '{}' ({} bytes) for {}. The artifact will appear in the Artifacts tab after safe output processing.",
             result.artifact_name, result.file_path, file_size, build_desc
         ))]))
     }

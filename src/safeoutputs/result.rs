@@ -42,6 +42,8 @@ pub struct ExecutionContext {
     pub ado_organization: Option<String>,
     /// Azure DevOps project name
     pub ado_project: Option<String>,
+    /// Azure DevOps project GUID (`SYSTEM_TEAMPROJECTID`)
+    pub ado_project_id: Option<String>,
     /// Personal access token or system access token
     pub access_token: Option<String>,
     /// Working directory for file operations (safe outputs directory)
@@ -159,6 +161,7 @@ impl ExecutionContext {
             ado_org_url,
             ado_organization,
             ado_project: env("SYSTEM_TEAMPROJECT"),
+            ado_project_id: env("SYSTEM_TEAMPROJECTID"),
             access_token: env("SYSTEM_ACCESSTOKEN").or_else(|| env("AZURE_DEVOPS_EXT_PAT")),
             working_directory: std::env::current_dir().unwrap_or_default(),
             source_directory,

@@ -929,7 +929,7 @@ pub fn generate_executor_ado_env(write_service_connection: Option<&str>) -> Stri
 /// to prevent shell injection when the args are embedded in bash commands.
 /// Unrecognized tool names emit a compile-time warning and are skipped.
 pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
-    use crate::safeoutputs::{ALL_KNOWN_SAFE_OUTPUTS, ALWAYS_ON_TOOLS, NON_MCP_SAFE_OUTPUT_KEYS};
+    use crate::safeoutputs::{ALL_KNOWN_SAFE_OUTPUTS, ALWAYS_ON_TOOLS, NON_MCP_SAFE_OUTPUT_KEYS, canonical_safe_output_name};
     use std::collections::HashSet;
 
     if front_matter.safe_outputs.is_empty() {
@@ -949,7 +949,15 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
             );
             continue;
         }
-        if NON_MCP_SAFE_OUTPUT_KEYS.contains(&key.as_str()) {
+        // Canonicalize deprecated aliases (e.g. upload-build-artifact → upload-build-attachment)
+        let canonical = canonical_safe_output_name(key);
+        if canonical != key {
+            eprintln!(
+                "Warning: safe-output key '{}' is deprecated — use '{}' instead",
+                key, canonical
+            );
+        }
+        if NON_MCP_SAFE_OUTPUT_KEYS.contains(&canonical) {
             continue;
         }
         if key == "memory" {
@@ -960,7 +968,7 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
             );
             continue;
         }
-        if !ALL_KNOWN_SAFE_OUTPUTS.contains(&key.as_str()) {
+        if !ALL_KNOWN_SAFE_OUTPUTS.contains(&canonical) {
             eprintln!(
                 "Warning: unrecognized safe-output tool '{}' — skipping (no registered tool matches this name)",
                 key
@@ -968,8 +976,8 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
             continue;
         }
         effective_mcp_tool_count += 1;
-        if seen.insert(key.clone()) {
-            tools.push(key.clone());
+        if seen.insert(canonical.to_string()) {
+            tools.push(canonical.to_string());
         }
     }
 
@@ -1003,7 +1011,7 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
 
 /// Validate that write-requiring safe-outputs have a write service connection configured.
 pub fn validate_write_permissions(front_matter: &FrontMatter) -> Result<()> {
-    use crate::safeoutputs::WRITE_REQUIRING_SAFE_OUTPUTS;
+    use crate::safeoutputs::{WRITE_REQUIRING_SAFE_OUTPUTS, canonical_safe_output_name};
 
     let has_write_sc = front_matter
         .permissions
@@ -1016,7 +1024,9 @@ pub fn validate_write_permissions(front_matter: &FrontMatter) -> Result<()> {
 
     let missing: Vec<&str> = WRITE_REQUIRING_SAFE_OUTPUTS
         .iter()
-        .filter(|name| front_matter.safe_outputs.contains_key(**name))
+        .filter(|name| {
+            front_matter.safe_outputs.keys().any(|k| canonical_safe_output_name(k) == **name)
+        })
         .copied()
         .collect();
 

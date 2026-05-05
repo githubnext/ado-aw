@@ -2444,6 +2444,7 @@ new file mode 100755
             ado_org_url: Some("https://dev.azure.com/test".to_string()),
             ado_organization: Some("test".to_string()),
             ado_project: Some("TestProject".to_string()),
+            ado_project_id: None,
             access_token: Some("fake-token".to_string()),
             source_directory: dir.path().to_path_buf(),
             working_directory: dir.path().to_path_buf(),
