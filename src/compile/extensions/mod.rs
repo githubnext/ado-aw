@@ -324,6 +324,17 @@ pub trait CompilerExtension {
     fn awf_path_prepends(&self) -> Vec<String> {
         vec![]
     }
+
+    /// Environment variables to inject into the agent execution environment.
+    ///
+    /// Returns `(key, value)` pairs that are emitted as `KEY: "value"` in
+    /// the `{{ engine_env }}` YAML block. Used by runtimes to configure
+    /// package managers via env vars (e.g., `PIP_INDEX_URL`, `NPM_CONFIG_REGISTRY`).
+    ///
+    /// Keys are validated against `BLOCKED_ENV_KEYS` at collection time.
+    fn agent_env_vars(&self) -> Vec<(String, String)> {
+        vec![]
+    }
 }
 
 /// Mount access mode for an AWF bind mount.
@@ -534,6 +545,9 @@ macro_rules! extension_enum {
             fn awf_path_prepends(&self) -> Vec<String> {
                 match self { $( $Enum::$Variant(e) => e.awf_path_prepends(), )+ }
             }
+            fn agent_env_vars(&self) -> Vec<(String, String)> {
+                match self { $( $Enum::$Variant(e) => e.agent_env_vars(), )+ }
+            }
         }
     };
 }
@@ -547,6 +561,8 @@ pub use crate::tools::azure_devops::AzureDevOpsExtension;
 pub use crate::tools::cache_memory::CacheMemoryExtension;
 pub use github::GitHubExtension;
 pub use crate::runtimes::lean::LeanExtension;
+pub use crate::runtimes::node::NodeExtension;
+pub use crate::runtimes::python::PythonExtension;
 pub use safe_outputs::SafeOutputsExtension;
 pub use trigger_filters::TriggerFiltersExtension;
 
@@ -559,6 +575,8 @@ extension_enum! {
         GitHub(GitHubExtension),
         SafeOutputs(SafeOutputsExtension),
         Lean(LeanExtension),
+        Python(PythonExtension),
+        Node(NodeExtension),
         AzureDevOps(AzureDevOpsExtension),
         CacheMemory(CacheMemoryExtension),
         TriggerFilters(TriggerFiltersExtension),
@@ -591,6 +609,16 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
     if let Some(lean) = front_matter.runtimes.as_ref().and_then(|r| r.lean.as_ref()) {
         if lean.is_enabled() {
             extensions.push(Extension::Lean(LeanExtension::new(lean.clone())));
+        }
+    }
+    if let Some(python) = front_matter.runtimes.as_ref().and_then(|r| r.python.as_ref()) {
+        if python.is_enabled() {
+            extensions.push(Extension::Python(PythonExtension::new(python.clone())));
+        }
+    }
+    if let Some(node) = front_matter.runtimes.as_ref().and_then(|r| r.node.as_ref()) {
+        if node.is_enabled() {
+            extensions.push(Extension::Node(NodeExtension::new(node.clone())));
         }
     }
 

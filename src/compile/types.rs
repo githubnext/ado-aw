@@ -499,12 +499,32 @@ pub struct RuntimesConfig {
     /// extends the bash command allow-list, and appends a prompt supplement.
     #[serde(default)]
     pub lean: Option<crate::runtimes::lean::LeanRuntimeConfig>,
+
+    /// Python runtime.
+    /// Auto-installs Python via UsePythonVersion@0, emits PipAuthenticate@1,
+    /// adds Python ecosystem domains to the AWF network allowlist, extends
+    /// the bash command allow-list, and optionally injects feed URL env vars.
+    #[serde(default)]
+    pub python: Option<crate::runtimes::python::PythonRuntimeConfig>,
+
+    /// Node.js runtime.
+    /// Auto-installs Node.js via NodeTool@0, emits npmAuthenticate@0,
+    /// adds Node ecosystem domains to the AWF network allowlist, extends
+    /// the bash command allow-list, and optionally injects feed URL env vars.
+    #[serde(default)]
+    pub node: Option<crate::runtimes::node::NodeRuntimeConfig>,
 }
 
 impl SanitizeConfigTrait for RuntimesConfig {
     fn sanitize_config_fields(&mut self) {
         if let Some(ref mut lean) = self.lean {
             lean.sanitize_config_fields();
+        }
+        if let Some(ref mut python) = self.python {
+            python.sanitize_config_fields();
+        }
+        if let Some(ref mut node) = self.node {
+            node.sanitize_config_fields();
         }
     }
 }

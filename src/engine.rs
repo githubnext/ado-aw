@@ -21,7 +21,7 @@ const BLOCKED_ARG_PREFIXES: &[&str] = &[
 ];
 
 /// Environment variable keys that the compiler controls — users must not override these.
-const BLOCKED_ENV_KEYS: &[&str] = &[
+pub const BLOCKED_ENV_KEYS: &[&str] = &[
     "GITHUB_TOKEN",
     "GITHUB_READ_ONLY",
     "COPILOT_OTEL_ENABLED",

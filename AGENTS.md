@@ -99,8 +99,14 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   └── upload_workitem_attachment.rs
 │   ├── runtimes/         # Runtime environment implementations (one dir per runtime)
 │   │   ├── mod.rs        # Module entry point
-│   │   └── lean/         # Lean 4 theorem prover runtime
-│   │       ├── mod.rs    # Config types, install helpers
+│   │   ├── lean/         # Lean 4 theorem prover runtime
+│   │   │   ├── mod.rs    # Config types, install helpers
+│   │   │   └── extension.rs # CompilerExtension impl
+│   │   ├── python/       # Python runtime
+│   │   │   ├── mod.rs    # Config types, install/auth helpers
+│   │   │   └── extension.rs # CompilerExtension impl
+│   │   └── node/         # Node.js runtime
+│   │       ├── mod.rs    # Config types, install/auth helpers
 │   │       └── extension.rs # CompilerExtension impl
 │   ├── data/
 │   │   ├── base.yml          # Base pipeline template for standalone
@@ -156,8 +162,8 @@ index to jump to the right page.
   in the pipeline UI, including the auto-injected `clearMemory` parameter.
 - [`docs/tools.md`](docs/tools.md) — `tools:` configuration (bash allow-list,
   `edit`, `cache-memory`, `azure-devops` MCP).
-- [`docs/runtimes.md`](docs/runtimes.md) — `runtimes:` configuration (currently
-  Lean 4).
+- [`docs/runtimes.md`](docs/runtimes.md) — `runtimes:` configuration (Lean 4,
+  Python, Node.js).
 - [`docs/targets.md`](docs/targets.md) — target platforms: `standalone` and
   `1es`.
 - [`docs/safe-outputs.md`](docs/safe-outputs.md) — full reference for every

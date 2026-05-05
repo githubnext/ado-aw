@@ -178,6 +178,8 @@ mod tests {
         let mut fm = minimal_front_matter();
         fm.runtimes = Some(crate::compile::types::RuntimesConfig {
             lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(true)),
+            python: None,
+            node: None,
         });
         let exts = super::super::extensions::collect_extensions(&fm);
         let domains = generate_allowed_domains(&fm, &exts).unwrap();
@@ -191,6 +193,8 @@ mod tests {
         let mut fm = minimal_front_matter();
         fm.runtimes = Some(crate::compile::types::RuntimesConfig {
             lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(false)),
+            python: None,
+            node: None,
         });
         let exts = super::super::extensions::collect_extensions(&fm);
         let domains = generate_allowed_domains(&fm, &exts).unwrap();
