@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.22.0](https://github.com/githubnext/ado-aw/compare/v0.21.0...v0.22.0) (2026-05-05)
+
+
+### Features
+
+* **runtimes:** add unified Node.js and Python runtime extensions ([#400](https://github.com/githubnext/ado-aw/issues/400)) ([991621a](https://github.com/githubnext/ado-aw/commit/991621a2843f29e7590a5d033b6a0eecceebdab5))
+* **safe-outputs:** rename upload-build-artifact to upload-build-attachment and add upload-pipeline-artifact ([#404](https://github.com/githubnext/ado-aw/issues/404)) ([d3aad31](https://github.com/githubnext/ado-aw/commit/d3aad31ced47309c7c9388e816f0981e1e769d8d))
+
+
+### Bug Fixes
+
+* **security:** neutralize pipeline commands in execute_safe_outputs Err arm ([#405](https://github.com/githubnext/ado-aw/issues/405)) ([da83c03](https://github.com/githubnext/ado-aw/commit/da83c0312070e7fab2ef3329734c3680b9239210))
+* **security:** neutralize VSO pipeline commands in Stage 3 log output ([#396](https://github.com/githubnext/ado-aw/issues/396)) ([ea76888](https://github.com/githubnext/ado-aw/commit/ea7688812b951c923abaee0514e5e0c46d1826ed))
+
 ## [0.21.0](https://github.com/githubnext/ado-aw/compare/v0.20.0...v0.21.0) (2026-05-02)
 
 
