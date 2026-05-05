@@ -96,6 +96,8 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   ├── update_pr.rs
 │   │   ├── update_wiki_page.rs
 │   │   ├── update_work_item.rs
+│   │   ├── upload_build_attachment.rs
+│   │   ├── upload_pipeline_artifact.rs
 │   │   └── upload_workitem_attachment.rs
 │   ├── runtimes/         # Runtime environment implementations (one dir per runtime)
 │   │   ├── mod.rs        # Module entry point

@@ -389,6 +389,8 @@ actions, and the executor processes them after threat analysis.
 | `create-git-tag` | Creates a git tag on a repository ref |
 | `create-branch` | Creates a new branch from an existing ref |
 | `add-build-tag` | Adds a tag to an ADO build |
+| `upload-build-attachment` | Attaches a file to a build (accessible via REST API or custom extension only) |
+| `upload-pipeline-artifact` | Publishes a file as a pipeline artifact visible in the ADO Artifacts tab |
 | `upload-workitem-attachment` | Uploads a workspace file as an attachment to a work item |
 | `report-incomplete` | Reports that a task could not be completed |
 | `noop` | Reports no action was needed |

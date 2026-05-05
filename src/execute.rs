@@ -18,8 +18,8 @@ use crate::safeoutputs::{
     ExecutionContext, ExecutionResult, Executor, LinkWorkItemsResult, MissingDataResult,
     MissingToolResult, NoopResult, QueueBuildResult, ReplyToPrCommentResult,
     ReportIncompleteResult, ResolvePrThreadResult, SubmitPrReviewResult, ToolResult,
-    UpdatePrResult, UpdateWikiPageResult, UpdateWorkItemResult, UploadBuildArtifactResult,
-    UploadWorkitemAttachmentResult,
+    UpdatePrResult, UpdateWikiPageResult, UpdateWorkItemResult, UploadBuildAttachmentResult,
+    UploadPipelineArtifactResult, UploadWorkitemAttachmentResult,
 };
 
 // Re-export memory types for use by main.rs
@@ -93,7 +93,8 @@ pub async fn execute_safe_outputs(
         AddBuildTagResult,
         CreateBranchResult,
         UpdatePrResult,
-        UploadBuildArtifactResult,
+        UploadBuildAttachmentResult,
+        UploadPipelineArtifactResult,
         UploadWorkitemAttachmentResult,
         SubmitPrReviewResult,
         ReplyToPrCommentResult,
@@ -348,7 +349,8 @@ async fn dispatch_resource_tools(
         "create-git-tag" => CreateGitTagResult,
         "add-build-tag" => AddBuildTagResult,
         "create-branch" => CreateBranchResult,
-        "upload-build-artifact" => UploadBuildArtifactResult,
+        "upload-build-attachment" => UploadBuildAttachmentResult,
+        "upload-pipeline-artifact" => UploadPipelineArtifactResult,
     })
 }
 
