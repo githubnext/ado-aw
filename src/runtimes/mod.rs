@@ -10,3 +10,5 @@
 //! Aligned with gh-aw's `runtimes:` front matter field.
 
 pub mod lean;
+pub mod node;
+pub mod python;

@@ -408,6 +408,30 @@ pub fn warn_potential_secrets(mcp_name: &str, env: &HashMap<String, String>, hea
     warnings
 }
 
+// ── Feed URL validation ─────────────────────────────────────────────────────
+
+/// Validate a package feed URL for use in runtime `feed-url:` fields.
+///
+/// Checks for:
+/// - ADO expression injection (`$(`, `${{`, `$[`)
+/// - Pipeline command injection (`##vso[`, `##[`)
+/// - Template marker injection (`{{`)
+/// - Newline injection
+/// - Missing scheme (must be `https://` or `http://`)
+pub fn validate_feed_url(url: &str, field_name: &str) -> Result<()> {
+    reject_pipeline_injection(url, field_name)?;
+
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        anyhow::bail!(
+            "Front matter '{}' must use https:// or http:// scheme. Found: '{}'",
+            field_name,
+            url,
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -642,5 +666,27 @@ mod tests {
         let empty_env = HashMap::from([("AZURE_DEVOPS_EXT_PAT".to_string(), String::new())]);
         let warnings = warn_potential_secrets("mcp", &empty_env, &HashMap::new());
         assert!(warnings.is_empty());
+    }
+
+    // ── Feed URL validation ────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_feed_url_valid() {
+        assert!(validate_feed_url("https://pkgs.dev.azure.com/org/_packaging/feed/pypi/simple/", "test").is_ok());
+        assert!(validate_feed_url("http://internal.registry.example.com/", "test").is_ok());
+    }
+
+    #[test]
+    fn test_validate_feed_url_missing_scheme() {
+        assert!(validate_feed_url("pkgs.dev.azure.com/org/feed", "test").is_err());
+        assert!(validate_feed_url("ftp://example.com/feed", "test").is_err());
+    }
+
+    #[test]
+    fn test_validate_feed_url_injection() {
+        assert!(validate_feed_url("https://example.com/$(SECRET)", "test").is_err());
+        assert!(validate_feed_url("https://example.com/##vso[task.setvariable]", "test").is_err());
+        assert!(validate_feed_url("https://example.com/{{ marker }}", "test").is_err());
+        assert!(validate_feed_url("https://example.com/\ninjected", "test").is_err());
     }
 }

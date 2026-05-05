@@ -356,3 +356,204 @@ fn test_wrap_prompt_append_rejects_unsafe_display_name() {
     let result = wrap_prompt_append("content", "ext$(rm -rf)");
     assert!(result.is_err());
 }
+
+// ── PythonExtension ────────────────────────────────────────────
+
+#[test]
+fn test_collect_extensions_python_enabled() {
+    let (fm, _) =
+        parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  python: true\n---\n")
+            .unwrap();
+    let exts = collect_extensions(&fm);
+    assert!(exts.iter().any(|e| e.name() == "Python"));
+}
+
+#[test]
+fn test_collect_extensions_python_disabled() {
+    let (fm, _) =
+        parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  python: false\n---\n")
+            .unwrap();
+    let exts = collect_extensions(&fm);
+    assert!(!exts.iter().any(|e| e.name() == "Python"));
+}
+
+#[test]
+fn test_collect_extensions_python_with_version() {
+    let (fm, _) =
+        parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  python:\n    version: '3.12'\n---\n")
+            .unwrap();
+    let exts = collect_extensions(&fm);
+    assert!(exts.iter().any(|e| e.name() == "Python"));
+}
+
+#[test]
+fn test_python_required_hosts() {
+    let ext = crate::runtimes::python::PythonExtension::new(
+        crate::runtimes::python::PythonRuntimeConfig::Enabled(true),
+    );
+    let hosts = ext.required_hosts();
+    assert_eq!(hosts, vec!["python".to_string()]);
+}
+
+#[test]
+fn test_python_prepare_steps() {
+    let ext = crate::runtimes::python::PythonExtension::new(
+        crate::runtimes::python::PythonRuntimeConfig::Enabled(true),
+    );
+    let steps = ext.prepare_steps();
+    assert_eq!(steps.len(), 2);
+    assert!(steps[0].contains("UsePythonVersion@0"));
+    assert!(steps[1].contains("PipAuthenticate@1"));
+}
+
+#[test]
+fn test_python_agent_env_vars_no_feed() {
+    let ext = crate::runtimes::python::PythonExtension::new(
+        crate::runtimes::python::PythonRuntimeConfig::Enabled(true),
+    );
+    assert!(ext.agent_env_vars().is_empty());
+}
+
+#[test]
+fn test_python_agent_env_vars_with_feed() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  python:\n    version: '3.12'\n    feed-url: 'https://pkgs.dev.azure.com/org/_packaging/feed/pypi/simple/'\n---\n",
+    ).unwrap();
+    let python = fm.runtimes.as_ref().unwrap().python.as_ref().unwrap();
+    let ext = crate::runtimes::python::PythonExtension::new(python.clone());
+    let vars = ext.agent_env_vars();
+    assert_eq!(vars.len(), 2);
+    assert_eq!(vars[0].0, "PIP_INDEX_URL");
+    assert_eq!(vars[1].0, "UV_DEFAULT_INDEX");
+}
+
+#[test]
+fn test_python_config_not_yet_supported() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  python:\n    version: '3.12'\n    config: '/path/to/pip.conf'\n---\n",
+    ).unwrap();
+    let python = fm.runtimes.as_ref().unwrap().python.as_ref().unwrap();
+    let ext = crate::runtimes::python::PythonExtension::new(python.clone());
+    let ctx = ctx_from(&fm);
+    let result = ext.validate(&ctx);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("not yet supported"));
+}
+
+// ── NodeExtension ──────────────────────────────────────────────
+
+#[test]
+fn test_collect_extensions_node_enabled() {
+    let (fm, _) =
+        parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  node: true\n---\n")
+            .unwrap();
+    let exts = collect_extensions(&fm);
+    assert!(exts.iter().any(|e| e.name() == "Node.js"));
+}
+
+#[test]
+fn test_collect_extensions_node_disabled() {
+    let (fm, _) =
+        parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  node: false\n---\n")
+            .unwrap();
+    let exts = collect_extensions(&fm);
+    assert!(!exts.iter().any(|e| e.name() == "Node.js"));
+}
+
+#[test]
+fn test_collect_extensions_node_with_version() {
+    let (fm, _) =
+        parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  node:\n    version: '22.x'\n---\n")
+            .unwrap();
+    let exts = collect_extensions(&fm);
+    assert!(exts.iter().any(|e| e.name() == "Node.js"));
+}
+
+#[test]
+fn test_node_required_hosts() {
+    let ext = crate::runtimes::node::NodeExtension::new(
+        crate::runtimes::node::NodeRuntimeConfig::Enabled(true),
+    );
+    let hosts = ext.required_hosts();
+    assert_eq!(hosts, vec!["node".to_string()]);
+}
+
+#[test]
+fn test_node_prepare_steps() {
+    let ext = crate::runtimes::node::NodeExtension::new(
+        crate::runtimes::node::NodeRuntimeConfig::Enabled(true),
+    );
+    let steps = ext.prepare_steps();
+    assert_eq!(steps.len(), 2);
+    assert!(steps[0].contains("NodeTool@0"));
+    assert!(steps[1].contains("npmAuthenticate@0"));
+}
+
+#[test]
+fn test_node_agent_env_vars_no_feed() {
+    let ext = crate::runtimes::node::NodeExtension::new(
+        crate::runtimes::node::NodeRuntimeConfig::Enabled(true),
+    );
+    assert!(ext.agent_env_vars().is_empty());
+}
+
+#[test]
+fn test_node_agent_env_vars_with_feed() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  node:\n    version: '22.x'\n    feed-url: 'https://pkgs.dev.azure.com/ORG/PROJECT/_packaging/FEED/npm/registry/'\n---\n",
+    ).unwrap();
+    let node = fm.runtimes.as_ref().unwrap().node.as_ref().unwrap();
+    let ext = crate::runtimes::node::NodeExtension::new(node.clone());
+    let vars = ext.agent_env_vars();
+    assert_eq!(vars.len(), 1);
+    assert_eq!(vars[0].0, "NPM_CONFIG_REGISTRY");
+}
+
+#[test]
+fn test_node_config_not_yet_supported() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  node:\n    version: '22.x'\n    config: '/path/to/.npmrc'\n---\n",
+    ).unwrap();
+    let node = fm.runtimes.as_ref().unwrap().node.as_ref().unwrap();
+    let ext = crate::runtimes::node::NodeExtension::new(node.clone());
+    let ctx = ctx_from(&fm);
+    let result = ext.validate(&ctx);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("not yet supported"));
+}
+
+// ── Multiple runtimes ──────────────────────────────────────────
+
+#[test]
+fn test_collect_extensions_all_runtimes_enabled() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  lean: true\n  python: true\n  node: true\n---\n",
+    ).unwrap();
+    let exts = collect_extensions(&fm);
+    assert!(exts.iter().any(|e| e.name() == "Lean 4"));
+    assert!(exts.iter().any(|e| e.name() == "Python"));
+    assert!(exts.iter().any(|e| e.name() == "Node.js"));
+    // All are Runtime phase
+    let runtime_exts: Vec<_> = exts.iter().filter(|e| e.phase() == ExtensionPhase::Runtime).collect();
+    assert_eq!(runtime_exts.len(), 3);
+}
+
+#[test]
+fn test_collect_extensions_runtimes_before_tools_with_python_and_node() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\nruntimes:\n  python: true\n  node: true\n---\n",
+    ).unwrap();
+    let exts = collect_extensions(&fm);
+    let last_runtime_idx = exts
+        .iter()
+        .rposition(|e| e.phase() == ExtensionPhase::Runtime)
+        .expect("expected Runtime extension");
+    let first_tool_idx = exts
+        .iter()
+        .position(|e| e.phase() == ExtensionPhase::Tool)
+        .expect("expected Tool extension");
+    assert!(
+        last_runtime_idx < first_tool_idx,
+        "Runtime extensions must come before Tool extensions"
+    );
+}

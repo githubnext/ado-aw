@@ -33,3 +33,83 @@ When enabled, the compiler:
 - Emits a compile-time warning if `tools.bash` is empty (Lean requires bash access)
 
 **Note:** In the 1ES target, the bash command allow-list is updated but elan installation must be done manually via `steps:` front matter. The 1ES target handles network isolation separately.
+
+### Python (`python:`)
+
+Python runtime. Auto-installs Python via `UsePythonVersion@0`, emits `PipAuthenticate@1` for internal feed access, adds Python ecosystem domains to the AWF network allowlist, extends the bash command allow-list, and optionally injects feed URL env vars for pip and uv.
+
+```yaml
+# Simple enablement (installs default Python 3.x)
+runtimes:
+  python: true
+
+# With options (pin version, configure feed)
+runtimes:
+  python:
+    version: "3.12"
+    feed-url: "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/pypi/simple/"
+```
+
+**Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `version` | string | Python version to install (e.g., `"3.12"`, `"3.11"`). Passed to `UsePythonVersion@0` `versionSpec`. Defaults to latest 3.x. |
+| `feed-url` | string | Internal PyPI feed URL. Injects `PIP_INDEX_URL` and `UV_DEFAULT_INDEX` env vars into the agent environment. |
+| `config` | string | _Reserved for future use._ Path to a pip/uv config file. Currently produces a compile error if specified. |
+
+When enabled, the compiler:
+- Injects `UsePythonVersion@0` and `PipAuthenticate@1` steps into `{{ prepare_steps }}` (runs before AWF)
+- Auto-adds `python`, `python3`, `pip`, `pip3`, `uv` to the bash command allow-list
+- Adds Python ecosystem domains to the network allowlist (pypi.org, pythonhosted.org, etc.)
+- If `feed-url` is set, injects `PIP_INDEX_URL` and `UV_DEFAULT_INDEX` env vars into the agent environment
+- Appends a prompt supplement informing the agent about Python availability
+- No AWF mounts or PATH prepends needed — `UsePythonVersion@0` installs to `/opt/hostedtoolcache` (auto-mounted by AWF) and publishes PATH entries that AWF merges via `$GITHUB_PATH`
+
+### Node.js (`node:`)
+
+Node.js runtime. Auto-installs Node.js via `NodeTool@0`, emits `npmAuthenticate@0` for internal feed access, adds Node ecosystem domains to the AWF network allowlist, extends the bash command allow-list, and optionally injects feed URL env vars for npm.
+
+```yaml
+# Simple enablement (installs default Node LTS)
+runtimes:
+  node: true
+
+# With options (pin version, configure feed)
+runtimes:
+  node:
+    version: "22.x"
+    feed-url: "https://pkgs.dev.azure.com/ORG/PROJECT/_packaging/FEED/npm/registry/"
+```
+
+**Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `version` | string | Node.js version to install (e.g., `"22.x"`, `"20.x"`). Passed to `NodeTool@0` `versionSpec`. Defaults to `"22.x"`. |
+| `feed-url` | string | Internal npm registry URL. Injects `NPM_CONFIG_REGISTRY` env var into the agent environment. |
+| `config` | string | _Reserved for future use._ Path to an .npmrc config file. Currently produces a compile error if specified. |
+
+When enabled, the compiler:
+- Injects `NodeTool@0` and `npmAuthenticate@0` steps into `{{ prepare_steps }}` (runs before AWF)
+- Auto-adds `node`, `npm`, `npx` to the bash command allow-list
+- Adds Node ecosystem domains to the network allowlist (npmjs.org, nodejs.org, etc.)
+- If `feed-url` is set, injects `NPM_CONFIG_REGISTRY` env var into the agent environment
+- Appends a prompt supplement informing the agent about Node.js availability
+- No AWF mounts or PATH prepends needed — `NodeTool@0` installs to `/opt/hostedtoolcache` (auto-mounted by AWF) and publishes PATH entries that AWF merges via `$GITHUB_PATH`
+- Note: AWF overlays `~/.npmrc` with `/dev/null` for credential security — the `NPM_CONFIG_REGISTRY` env var approach avoids conflicting with this overlay
+
+### Combining Runtimes
+
+Multiple runtimes can be enabled simultaneously:
+
+```yaml
+runtimes:
+  python:
+    version: "3.12"
+  node:
+    version: "22.x"
+  lean: true
+```
+
+All runtime extensions are sorted into `ExtensionPhase::Runtime` and execute before tool extensions (`ExtensionPhase::Tool`), ensuring language toolchains are available before any tools that depend on them.

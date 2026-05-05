@@ -1912,6 +1912,55 @@ pub fn collect_awf_path_prepends(extensions: &[super::extensions::Extension]) ->
         .collect()
 }
 
+/// Collects `agent_env_vars()` from all extensions, validates keys against
+/// `BLOCKED_ENV_KEYS`, and formats them as YAML `KEY: "value"` lines for
+/// injection into the `{{ engine_env }}` block.
+///
+/// Returns an empty string if no extensions declare env vars.
+pub fn collect_agent_env_vars(extensions: &[super::extensions::Extension]) -> anyhow::Result<String> {
+    use crate::engine::BLOCKED_ENV_KEYS;
+    use crate::validate;
+
+    let mut lines = Vec::new();
+
+    for ext in extensions {
+        for (key, value) in ext.agent_env_vars() {
+            // Validate key is not blocked
+            if BLOCKED_ENV_KEYS.iter().any(|blocked| key.eq_ignore_ascii_case(blocked)) {
+                anyhow::bail!(
+                    "Extension '{}' declares agent env var '{}' which conflicts with a \
+                     compiler-controlled environment variable.",
+                    ext.name(),
+                    key,
+                );
+            }
+
+            // Validate key format
+            if !validate::is_valid_env_var_name(&key) {
+                anyhow::bail!(
+                    "Extension '{}' declares agent env var '{}' with invalid key format. \
+                     Keys must contain only ASCII alphanumerics and underscores.",
+                    ext.name(),
+                    key,
+                );
+            }
+
+            // Validate value for injection
+            if validate::contains_pipeline_command(&value) {
+                anyhow::bail!(
+                    "Extension '{}' agent env var '{}' contains a pipeline command injection.",
+                    ext.name(),
+                    key,
+                );
+            }
+
+            lines.push(format!("{key}: \"{value}\""));
+        }
+    }
+
+    Ok(lines.join("\n"))
+}
+
 // ==================== Shared compile flow ====================
 
 /// Target-specific overrides for the shared compile flow.
@@ -2103,6 +2152,12 @@ pub async fn compile_shared(
     let awf_path_env = generate_awf_path_env(config.has_awf_paths);
     if !awf_path_env.is_empty() {
         engine_env = format!("{engine_env}\n{awf_path_env}");
+    }
+
+    // Append extension-declared agent env vars (e.g., PIP_INDEX_URL, NPM_CONFIG_REGISTRY)
+    let agent_env = collect_agent_env_vars(extensions)?;
+    if !agent_env.is_empty() {
+        engine_env = format!("{engine_env}\n{agent_env}");
     }
     let engine_log_dir = ctx.engine.log_dir();
     let acquire_write_token = generate_acquire_ado_token(
@@ -2505,6 +2560,8 @@ mod tests {
         });
         fm.runtimes = Some(crate::compile::types::RuntimesConfig {
             lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(true)),
+            python: None,
+            node: None,
         });
         let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("shell(lean)"), "lean command should be allowed");
@@ -2525,6 +2582,8 @@ mod tests {
         });
         fm.runtimes = Some(crate::compile::types::RuntimesConfig {
             lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(true)),
+            python: None,
+            node: None,
         });
         let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("--allow-all-tools"), "wildcard should use --allow-all-tools");
