@@ -522,7 +522,7 @@ impl Executor for UploadPipelineArtifactResult {
             Ok(ExecutionResult::success_with_data(
                 format!(
                     "Published '{}' as pipeline artifact '{}' on build #{}",
-                    self.file_path, effective_build_id, final_name
+                    self.file_path, final_name, effective_build_id
                 ),
                 serde_json::json!({
                     "build_id": effective_build_id,

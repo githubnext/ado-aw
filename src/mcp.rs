@@ -1050,16 +1050,16 @@ may apply per the workflow's safe-outputs config."
                 params.0.file_path
             )));
         }
-        let file_size = metadata.len();
+        let metadata_size = metadata.len();
 
         // Defense-in-depth: reject files exceeding the default max size at
         // Stage 1 to prevent a misbehaving agent from filling the staging
         // disk before Stage 3 gets a chance to enforce the operator's limit.
-        if file_size > DEFAULT_MAX_FILE_SIZE {
+        if metadata_size > DEFAULT_MAX_FILE_SIZE {
             return Err(anyhow_to_mcp_error(anyhow::anyhow!(
                 "File '{}' is {} bytes, exceeding the maximum staging size of {} bytes",
                 params.0.file_path,
-                file_size,
+                metadata_size,
                 DEFAULT_MAX_FILE_SIZE
             )));
         }
@@ -1108,6 +1108,10 @@ may apply per the workflow's safe-outputs config."
             ))
         })?;
         let staged_sha256 = crate::hash::sha256_hex(&source_bytes);
+        // Use the actual byte count rather than the earlier metadata.len() so
+        // that the recorded size matches the staged content exactly, closing
+        // a TOCTOU window if the source file changes between stat and read.
+        let file_size = source_bytes.len() as u64;
 
         let staged_path = self.output_directory.join(&staged_filename);
         tokio::fs::write(&staged_path, &source_bytes).await.map_err(|e| {
@@ -1189,13 +1193,13 @@ restrictions may apply per the workflow's safe-outputs config."
                 params.0.file_path
             )));
         }
-        let file_size = metadata.len();
+        let metadata_size = metadata.len();
 
-        if file_size > PIPELINE_ARTIFACT_DEFAULT_MAX_FILE_SIZE {
+        if metadata_size > PIPELINE_ARTIFACT_DEFAULT_MAX_FILE_SIZE {
             return Err(anyhow_to_mcp_error(anyhow::anyhow!(
                 "File '{}' is {} bytes, exceeding the maximum staging size of {} bytes",
                 params.0.file_path,
-                file_size,
+                metadata_size,
                 PIPELINE_ARTIFACT_DEFAULT_MAX_FILE_SIZE
             )));
         }
@@ -1233,6 +1237,10 @@ restrictions may apply per the workflow's safe-outputs config."
             ))
         })?;
         let staged_sha256 = crate::hash::sha256_hex(&source_bytes);
+        // Use the actual byte count rather than the earlier metadata.len() so
+        // that the recorded size matches the staged content exactly, closing
+        // a TOCTOU window if the source file changes between stat and read.
+        let file_size = source_bytes.len() as u64;
 
         let staged_path = self.output_directory.join(&staged_filename);
         tokio::fs::write(&staged_path, &source_bytes).await.map_err(|e| {
