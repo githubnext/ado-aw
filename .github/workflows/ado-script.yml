@@ -39,9 +39,9 @@ jobs:
 
       - name: Verify generated TypeScript is up to date
         run: |
-          if ! git diff --exit-code -- scripts/ado-script/src/shared/types.gen.ts; then
+          if ! git diff --exit-code -- scripts/ado-script/src/shared/types.gen.ts scripts/ado-script/src/shared/types-prompt.gen.ts; then
             echo ""
-            echo "::error::types.gen.ts is out of date with the Rust IR."
+            echo "::error::Generated TS types are out of date with the Rust IR."
             echo "Run 'cd scripts/ado-script && npm run codegen' and commit the result."
             exit 1
           fi

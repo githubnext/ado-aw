@@ -69,8 +69,8 @@ jobs:
           npm ci
           npm run build
         # `npm run build` runs codegen + ncc + copies dist/gate/index.js
-        # to ../gate.js (i.e. scripts/gate.js), which is then included in
-        # scripts.zip by the next step.
+        # to ../gate.js and dist/prompt/index.js to ../prompt.js, both of
+        # which are then included in scripts.zip by the next step.
 
       - name: Package scripts bundle
         run: |

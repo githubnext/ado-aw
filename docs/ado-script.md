@@ -2,8 +2,13 @@
 
 `ado-script` is the umbrella name for **internal**, compiler-targeted
 TypeScript bundles that ado-aw emits into compiled pipelines as runtime
-helpers. The first (and currently only) bundle is **`gate.js`**, the
-trigger-filter gate evaluator.
+helpers. There are currently two bundles:
+
+- **`gate.js`** — the trigger-filter gate evaluator (Setup job).
+- **`prompt.js`** — the runtime prompt renderer that reads the agent
+  `.md` from the workspace, strips front matter, applies variable
+  substitution, and assembles the prompt with extension supplements
+  (Agent job; default behaviour as of v0.22).
 
 > Internal-only: `ado-script` is not a user-facing front-matter feature.
 > Authors do **not** write `ado-script:` blocks in their agent markdown.
@@ -46,26 +51,34 @@ scripts/ado-script/                # TS workspace
 ├── tsconfig.json                  # NodeNext, ESNext target
 ├── src/
 │   ├── shared/                    # Reusable across all bundles
-│   │   ├── types.gen.ts           # AUTO-GENERATED from Rust IR
+│   │   ├── types.gen.ts           # AUTO-GENERATED from Rust IR (gate)
+│   │   ├── types-prompt.gen.ts    # AUTO-GENERATED from Rust IR (prompt)
 │   │   ├── auth.ts                # ADO token / collection URI plumbing
 │   │   ├── ado-client.ts          # azure-devops-node-api wrapper + retries
 │   │   ├── env-facts.ts           # Pipeline-variable readers
 │   │   ├── policy.ts              # Failure-policy state machine
 │   │   └── vso-logger.ts          # ##vso[…] command emitters
-│   └── gate/                      # gate.js entry point
+│   ├── gate/                      # gate.js entry point
+│   │   ├── index.ts               # main()
+│   │   ├── bypass.ts              # build-reason auto-pass
+│   │   ├── facts.ts               # fact acquisition (env + REST)
+│   │   ├── predicates.ts          # 11 predicate evaluators
+│   │   └── selfcancel.ts          # best-effort build cancellation
+│   └── prompt/                    # prompt.js entry point
 │       ├── index.ts               # main()
-│       ├── bypass.ts              # build-reason auto-pass
-│       ├── facts.ts               # fact acquisition (env + REST)
-│       ├── predicates.ts          # 11 predicate evaluators
-│       └── selfcancel.ts          # best-effort build cancellation
-├── test/                          # End-to-end smoke tests
-└── dist/gate/index.js             # ncc-bundled output (gitignored)
+│       ├── frontmatter.ts         # YAML front-matter stripper
+│       └── substitute.ts          # ${{ parameters.* }} / $(VAR) substitution
+├── test/                          # End-to-end smoke tests (gate + prompt)
+└── dist/                          # ncc-bundled output (gitignored)
+    ├── gate/index.js
+    └── prompt/index.js
 ```
 
 The release workflow (`.github/workflows/release.yml`) runs `npm ci &&
-npm run build` and copies `dist/gate/index.js` to `scripts/gate.js`,
-which is then included in the `scripts.zip` release asset that pipelines
-download at runtime.
+npm run build` and copies `dist/gate/index.js` to `scripts/gate.js` and
+`dist/prompt/index.js` to `scripts/prompt.js`, both of which are then
+included in the `scripts.zip` release asset that pipelines download at
+runtime.
 
 ## Schema codegen — preventing drift
 
@@ -91,16 +104,20 @@ The pipeline:
                                         └──────────────────────────────┘
 ```
 
-`npm run codegen` runs both stages. The `ado-script` CI workflow
-(`.github/workflows/ado-script.yml`) regenerates the file and runs
+`npm run codegen` runs the full pipeline: it exports both the
+`gate-spec.schema.json` and `prompt-spec.schema.json` from Rust, then
+runs `json2ts` to regenerate `src/shared/types.gen.ts` (gate) and
+`src/shared/types-prompt.gen.ts` (prompt). The `ado-script` CI workflow
+(`.github/workflows/ado-script.yml`) regenerates both files and runs
 `git diff --exit-code` to fail on drift. If you change the IR shape in
 Rust, you must run `cd scripts/ado-script && npm run codegen` and
-commit the regenerated `types.gen.ts`.
+commit the regenerated `*.gen.ts` files.
 
-The Rust subcommand that emits the schema is intentionally hidden:
+The Rust subcommands that emit the schemas are intentionally hidden:
 
 ```sh
-cargo run -- export-gate-schema --output schema/gate-spec.schema.json
+cargo run -- export-gate-schema   --output schema/gate-spec.schema.json
+cargo run -- export-prompt-schema --output schema/prompt-spec.schema.json
 ```
 
 ## How the gate bundle is wired into emitted pipelines
@@ -120,6 +137,30 @@ steps when any `filters:` block is active:
 The IR-to-bash codegen lives in `compile_gate_step_external`
 (`src/compile/filter_ir.rs:~1100`).
 
+## How the prompt bundle is wired into emitted pipelines
+
+`generate_prepare_agent_prompt` in `src/compile/common.rs` injects a
+parallel three-step bundle into the **Agent job** when
+`inlined-imports: false` (the default):
+
+1. **`NodeTool@0`** — same Node 20.x install as for `gate.js`.
+   Idempotent across multiple invocations in the same job.
+2. **`curl` download** — fetches `scripts.zip` and extracts
+   `prompt.js` to `/tmp/ado-aw-scripts/prompt.js`. Each pool agent
+   downloads its own copy; the Setup and Agent jobs run on independent
+   agents so the download isn't shared.
+3. **`bash: node '/tmp/ado-aw-scripts/prompt.js'`** — runs the renderer
+   with `ADO_AW_PROMPT_SPEC` (base64 JSON of the `PromptSpec`) plus one
+   `ADO_AW_PARAM_<NAME>: ${{ parameters.<NAME> }}` env per declared
+   parameter.
+
+When `inlined-imports: true`, the same helper instead emits the legacy
+heredoc step that embeds the prompt body and supplements directly into
+the YAML; `prompt.js` is not invoked.
+
+Both download steps share the helper `scripts_download_step()` in
+`src/compile/extensions/mod.rs` so URL/version stay in lockstep.
+
 ## Adding a new internal use site
 
 Suppose we want a `poll.js` bundle (e.g. for polling external systems):
@@ -132,17 +173,28 @@ Suppose we want a `poll.js` bundle (e.g. for polling external systems):
    ```
    and extend `build` to also run it and copy `dist/poll/index.js` to
    `../poll.js`.
-3. Add tests under `src/poll/__tests__/`.
+3. Add tests under `src/poll/__tests__/` (unit) and `test/` (smoke,
+   gated on `dist/poll/index.js` existing).
 4. Wire from a new `CompilerExtension` (or extend an existing one) that
-   downloads and invokes `poll.js` as a runtime step.
-5. Update `.github/workflows/release.yml` if the zip exclusion list
+   downloads and invokes `poll.js` as a runtime step. Use the shared
+   `scripts_download_step()` and `node_tool_step()` helpers.
+5. If the contract is non-trivial, follow the `gate.js` /
+   `prompt.js` pattern: define a `Spec` struct in Rust with
+   `#[derive(Serialize, JsonSchema)]`, add a hidden
+   `export-poll-schema` CLI, and extend `npm run codegen` to regenerate
+   `types-poll.gen.ts`. For trivial contracts (a couple of env vars),
+   hand-written types are fine.
+6. Update `.github/workflows/release.yml` if the zip exclusion list
    needs to include the new `dist/poll` directory.
 
 ## Bundle-size budget
 
-Each bundled artifact must stay **under 5 MB**. The current `gate.js` is
-~1.1 MB, dominated by `azure-devops-node-api`. If a future bundle blows
-the budget:
+Each bundled artifact must stay **under 5 MB**. Current sizes:
+
+- `gate.js` is ~1.1 MB, dominated by `azure-devops-node-api`.
+- `prompt.js` is ~5 KB (no SDK dependency).
+
+If a future bundle blows the budget:
 
 - First, check ncc's `--minify` and `--target` flags.
 - If still too large, weigh dropping the SDK in favor of hand-rolled

@@ -135,6 +135,7 @@ parameters:                    # optional ADO runtime parameters (surfaced in UI
     displayName: "Clear agent memory"
     type: boolean
     default: false
+inlined-imports: false         # opt out of dynamic prompt injection (default: false)
 ---
 
 
@@ -142,6 +143,33 @@ parameters:                    # optional ADO runtime parameters (surfaced in UI
 
 Build the project and run all tests...
 ```
+
+## Dynamic Prompt Injection (`inlined-imports`)
+
+By default, the agent's prompt body is **not** embedded in the compiled
+pipeline YAML. Instead, the pipeline reads the source `.md` from the
+checked-out workspace at runtime, strips its front matter, applies
+variable substitution, and assembles the final prompt in a step backed
+by the `prompt.js` ado-script bundle. This means body-only edits to the
+agent's `.md` no longer require recompiling the pipeline.
+
+Set `inlined-imports: true` to opt out and embed the prompt body and
+extension supplements directly into the YAML at compile time (legacy
+behaviour). Use the inlined form when:
+
+- The Agent pool can't reach `github.com` to download `scripts.zip`.
+- You need a fully self-contained pipeline file (offline archival).
+- You want to inspect the exact rendered prompt by reading the YAML.
+
+Substitution patterns recognised at runtime by `prompt.js` (default
+mode only):
+
+| Pattern                       | Resolved via                                        | Notes                                                                                       |
+|-------------------------------|------------------------------------------------------|---------------------------------------------------------------------------------------------|
+| `${{ parameters.NAME }}`      | env `ADO_AW_PARAM_<NAME upper, hyphen→underscore>`   | Only declared parameters substitute; others left verbatim with a warning.                   |
+| `$(VAR)` / `$(VAR.SUB)`       | env `<name upper, dot→underscore>` (ADO native)      | Unset variables left verbatim with a warning. Secrets are not auto-exposed and stay verbatim. |
+| `$[ ... ]`                    | not substituted                                      | Left verbatim with one warning per render.                                                  |
+| `\$(...)`                     | escape                                               | Backslash stripped; `$(...)` left literal.                                                  |
 
 ## Workspace Defaults
 

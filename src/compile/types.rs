@@ -614,6 +614,18 @@ pub struct FrontMatter {
     /// Runtime parameters for the pipeline (surfaced in ADO UI when queuing a run)
     #[serde(default)]
     pub parameters: Vec<PipelineParameter>,
+    /// When true, embed the prompt body and extension supplements directly
+    /// into the compiled YAML at compile time instead of letting prompt.js
+    /// assemble them at runtime. Mirrors gh-aw's `inlined-imports` field.
+    ///
+    /// Default behaviour (false) renders the prompt at pipeline runtime by
+    /// reading the source `.md` from the workspace, which means body-only
+    /// edits to the markdown no longer require recompiling. Set this to
+    /// `true` to opt out — for example, when the Agent pool can't reach
+    /// github.com to download `scripts.zip`, when you need a self-contained
+    /// pipeline file, or when debugging prompt rendering.
+    #[serde(rename = "inlined-imports", default)]
+    pub inlined_imports: bool,
 }
 
 impl FrontMatter {
@@ -1353,6 +1365,49 @@ Body
 "#;
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
         assert!(fm.permissions.is_none());
+    }
+
+    // ─── inlined-imports field ──────────────────────────────────────────
+
+    #[test]
+    fn test_inlined_imports_default_false() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        assert!(!fm.inlined_imports);
+    }
+
+    #[test]
+    fn test_inlined_imports_true() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+inlined-imports: true
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        assert!(fm.inlined_imports);
+    }
+
+    #[test]
+    fn test_inlined_imports_false_explicit() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+inlined-imports: false
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        assert!(!fm.inlined_imports);
     }
 
     // ─── CacheMemoryToolConfig deserialization ──────────────────────────────

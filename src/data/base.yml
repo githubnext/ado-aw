@@ -98,15 +98,7 @@ jobs:
           cp "$(Agent.TempDirectory)/staging/mcpg-config.json" /tmp/awf-tools/staging/mcpg-config.json
         displayName: "Prepare tooling"
 
-      - bash: |
-          # Write agent instructions to /tmp so it's accessible inside AWF container
-          cat > "/tmp/awf-tools/agent-prompt.md" << 'AGENT_PROMPT_EOF'
-          {{ agent_content }}
-          AGENT_PROMPT_EOF
-
-          echo "Agent prompt:"
-          cat "/tmp/awf-tools/agent-prompt.md"
-        displayName: "Prepare agent prompt"
+      {{ prepare_agent_prompt }}
 
       - task: DockerInstaller@0
         displayName: "Install Docker"
