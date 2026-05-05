@@ -100,6 +100,7 @@ impl CompilerExtension for TriggerFiltersExtension {
         // in lockstep on URL/version.
         steps.push(super::node_tool_step(
             "Install Node.js 20.x for gate evaluator",
+            "20.x",
         ));
         steps.push(super::scripts_download_step());
         steps.extend(gate_steps);

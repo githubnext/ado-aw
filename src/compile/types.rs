@@ -499,12 +499,21 @@ pub struct RuntimesConfig {
     /// extends the bash command allow-list, and appends a prompt supplement.
     #[serde(default)]
     pub lean: Option<crate::runtimes::lean::LeanRuntimeConfig>,
+    /// Node.js runtime.
+    /// Installs Node.js via `NodeTool@0`, adds npm registry domains to the
+    /// network allowlist, extends the bash command allow-list, and appends
+    /// a prompt supplement. Supports optional internal-feed configuration.
+    #[serde(default)]
+    pub node: Option<crate::runtimes::node::NodeRuntimeConfig>,
 }
 
 impl SanitizeConfigTrait for RuntimesConfig {
     fn sanitize_config_fields(&mut self) {
         if let Some(ref mut lean) = self.lean {
             lean.sanitize_config_fields();
+        }
+        if let Some(ref mut node) = self.node {
+            node.sanitize_config_fields();
         }
     }
 }

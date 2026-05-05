@@ -1448,6 +1448,7 @@ pub fn generate_prepare_agent_prompt(
 
     let node_step = super::extensions::node_tool_step(
         "Install Node.js 20.x for prompt renderer",
+        "20.x",
     );
     let download_step = super::extensions::scripts_download_step();
 
@@ -2659,6 +2660,7 @@ mod tests {
         });
         fm.runtimes = Some(crate::compile::types::RuntimesConfig {
             lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(true)),
+            node: None,
         });
         let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("shell(lean)"), "lean command should be allowed");
@@ -2679,6 +2681,7 @@ mod tests {
         });
         fm.runtimes = Some(crate::compile::types::RuntimesConfig {
             lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(true)),
+            node: None,
         });
         let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("--allow-all-tools"), "wildcard should use --allow-all-tools");
