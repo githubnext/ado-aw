@@ -499,12 +499,22 @@ pub struct RuntimesConfig {
     /// extends the bash command allow-list, and appends a prompt supplement.
     #[serde(default)]
     pub lean: Option<crate::runtimes::lean::LeanRuntimeConfig>,
+    /// Python runtime.
+    /// Optionally installs a specific Python version via `UsePythonVersion@0`,
+    /// adds PyPI domains to the network allowlist, extends the bash command
+    /// allow-list, and optionally sets package feed env vars (`PIP_INDEX_URL`,
+    /// `UV_DEFAULT_INDEX`, `PIP_EXTRA_INDEX_URL`) for internal feed overrides.
+    #[serde(default)]
+    pub python: Option<crate::runtimes::python::PythonRuntimeConfig>,
 }
 
 impl SanitizeConfigTrait for RuntimesConfig {
     fn sanitize_config_fields(&mut self) {
         if let Some(ref mut lean) = self.lean {
             lean.sanitize_config_fields();
+        }
+        if let Some(ref mut python) = self.python {
+            python.sanitize_config_fields();
         }
     }
 }

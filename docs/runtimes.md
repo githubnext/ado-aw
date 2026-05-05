@@ -33,3 +33,58 @@ When enabled, the compiler:
 - Emits a compile-time warning if `tools.bash` is empty (Lean requires bash access)
 
 **Note:** In the 1ES target, the bash command allow-list is updated but elan installation must be done manually via `steps:` front matter. The 1ES target handles network isolation separately.
+
+### Python (`python:`)
+
+Python runtime. Optionally installs a specific Python version via the `UsePythonVersion@0` ADO task, adds PyPI domains to the network allowlist, extends the bash command allow-list (`python`, `python3`, `pip`, `pip3`), and optionally injects package feed environment variables to override the default PyPI registry with an internal feed.
+
+```yaml
+# Simple enablement (uses system Python, no install step emitted)
+runtimes:
+  python: true
+
+# Install a specific Python version
+runtimes:
+  python:
+    version: "3.12"
+
+# Install a version and redirect pip/uv to an internal ADO Artifacts feed
+runtimes:
+  python:
+    version: "3.12"
+    index-url: "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/pypi/simple/"
+
+# Internal primary feed with a public fallback
+runtimes:
+  python:
+    version: "3.x"
+    index-url: "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/pypi/simple/"
+    extra-index-url: "https://pypi.org/simple/"
+```
+
+When enabled, the compiler:
+- Injects a `UsePythonVersion@0` task step into `{{ prepare_steps }}` when `version:` is specified (runs before AWF network isolation); when only `true` is used, relies on the system Python
+- Auto-adds `python`, `python3`, `pip`, `pip3` to the bash command allow-list
+- Adds the `python` ecosystem identifier to the AWF network allowlist (expands to PyPI domains — `pypi.org`, `files.pythonhosted.org`, etc.)
+- Appends a prompt supplement informing the agent about Python availability
+- Emits a compile-time warning if `tools.bash` is empty (Python requires bash access)
+
+#### Internal feed configuration
+
+When `index-url:` is specified, the compiler injects the following environment variables into the AWF agent step:
+
+| Environment variable | Tool | Purpose |
+|---|---|---|
+| `PIP_INDEX_URL` | pip | Overrides the primary pip package index |
+| `UV_DEFAULT_INDEX` | uv | Overrides the primary uv package index |
+
+When `extra-index-url:` is specified additionally:
+
+| Environment variable | Tool | Purpose |
+|---|---|---|
+| `PIP_EXTRA_INDEX_URL` | pip | Adds a secondary fallback pip package index |
+
+These variables are injected into the `env:` block of the AWF step so they are visible to the agent process inside the network-isolated sandbox. This allows `pip install` and `uv` commands run by the agent to resolve packages from the internal feed.
+
+**Tip:** If you want to prevent the agent from falling back to public PyPI entirely, set `network.blocked` to block `pypi.org` and `files.pythonhosted.org` after pointing the index URL to your internal feed.
+
