@@ -613,7 +613,7 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
     }
 
     // ── Trigger filters (ExtensionPhase::Tool) ──
-    // Activated when Tier 2/3 filters require the Python evaluator.
+    // Activated when filters require the gate evaluator (TypeScript gate.js).
     let pr_filters = front_matter.pr_filters().cloned();
     let pipeline_filters = front_matter.pipeline_filters().cloned();
     if TriggerFiltersExtension::is_needed(
