@@ -158,12 +158,14 @@ pub fn generate_node_feed_config(feed: &NodeInternalFeedConfig) -> String {
 
     if let Some(token_var) = &feed.auth_token_var {
         // Derive the npm per-registry auth key by stripping the URL scheme.
-        // npm expects: //host/path/:_authToken  (no https: prefix)
-        let auth_key = registry
-            .trim_start_matches("https:")
-            .trim_start_matches("http:");
-        // Ensure the key ends with /:_authToken (with a trailing slash on the path)
-        let auth_key = auth_key.trim_end_matches('/');
+        // npm expects: //host/path/:_authToken  (no https: or http: prefix)
+        let without_scheme = registry
+            .strip_prefix("https:")
+            .or_else(|| registry.strip_prefix("http:"))
+            .unwrap_or(registry.as_str());
+        // Strip trailing slashes, then append /:_authToken so the key is
+        // always in the canonical form npm expects (one slash before the colon).
+        let auth_key = without_scheme.trim_end_matches('/');
         let auth_setting = format!("{auth_key}/:_authToken");
 
         format!(
