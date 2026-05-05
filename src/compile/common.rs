@@ -914,7 +914,10 @@ pub fn generate_acquire_ado_token(service_connection: Option<&str>, variable_nam
 /// When not configured, omits ADO access tokens entirely.
 pub fn generate_executor_ado_env(write_service_connection: Option<&str>) -> String {
     match write_service_connection {
-        Some(_) => "SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)".to_string(),
+        // The two-space indent on the value line is the YAML relative indent for a
+        // key nested under `env:`. replace_with_indent prepends the base indentation
+        // from the marker's position in the template to each subsequent line.
+        Some(_) => "env:\n  SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)".to_string(),
         None => String::new(),
     }
 }
@@ -3742,6 +3745,10 @@ mod tests {
     fn test_generate_executor_ado_env_with_connection() {
         let result = generate_executor_ado_env(Some("my-sc"));
         assert!(
+            result.contains("env:"),
+            "Executor env block should include the 'env:' key"
+        );
+        assert!(
             result.contains("SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)"),
             "Executor should use SC_WRITE_TOKEN"
         );
@@ -3756,7 +3763,7 @@ mod tests {
     fn test_generate_executor_ado_env_none_empty() {
         assert!(
             generate_executor_ado_env(None).is_empty(),
-            "None service connection should produce empty env block"
+            "None service connection should produce empty string (no env block)"
         );
     }
 

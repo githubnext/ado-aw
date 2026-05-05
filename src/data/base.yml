@@ -630,8 +630,7 @@ jobs:
           exit $EXIT_CODE
         displayName: Execute safe outputs (Stage 3)
         workingDirectory: {{ working_directory }}
-        env:
-          {{ executor_ado_env }}
+        {{ executor_ado_env }}
 
       - bash: |
           # Copy all logs to output directory for artifact upload

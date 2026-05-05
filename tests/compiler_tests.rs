@@ -3481,3 +3481,60 @@ fn test_pr_filter_gate_steps_nested_in_setup_job() {
     });
     assert!(has_download, "Download step should be inside Setup job's steps list");
 }
+
+/// Test that a pipeline without `permissions.write` does not emit a bare `env:` block
+/// on the "Execute safe outputs" step (i.e. no invalid empty-mapping YAML).
+#[test]
+fn test_executor_step_no_empty_env_block_without_write_permissions() {
+    // minimal-agent.md has no permissions.write — executor env must be absent
+    let compiled = compile_fixture("minimal-agent.md");
+    assert_valid_yaml(&compiled, "minimal-agent.md");
+
+    // Parse structurally: serde_yaml rejects `env:` with no children in strict mode
+    // and the assert_valid_yaml call above already exercises this.
+    // Additionally verify the executor step contains no `env:` key at all.
+    let execute_block_start = compiled
+        .find("Execute safe outputs (Stage 3)")
+        .expect("Should have executor step");
+    // Find the next step after the executor step (to bound our search window)
+    let after_execute = &compiled[execute_block_start..];
+    let next_step_offset = after_execute[1..]
+        .find("- bash:")
+        .map(|i| i + 1)
+        .unwrap_or(after_execute.len());
+    let executor_step_text = &after_execute[..next_step_offset];
+
+    assert!(
+        !executor_step_text.contains("env:"),
+        "Executor step should not contain an 'env:' block when write permissions are absent: {executor_step_text}"
+    );
+}
+
+/// Test that a pipeline with `permissions.write` emits a correctly-indented `env:` block
+/// on the "Execute safe outputs" step.
+#[test]
+fn test_executor_step_has_env_block_with_write_permissions() {
+    // complete-agent.md has permissions.write configured
+    let compiled = compile_fixture("complete-agent.md");
+    assert_valid_yaml(&compiled, "complete-agent.md");
+
+    assert!(
+        compiled.contains("SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)"),
+        "Executor step should have SYSTEM_ACCESSTOKEN when write permissions are configured: {compiled}"
+    );
+
+    // Verify the env key and value appear in the correct block by checking both
+    // are present in the same neighbourhood.
+    let execute_block_start = compiled
+        .find("Execute safe outputs (Stage 3)")
+        .expect("Should have executor step");
+    let after_execute = &compiled[execute_block_start..];
+    assert!(
+        after_execute.contains("env:"),
+        "Executor step should contain 'env:' key after the displayName: {after_execute}"
+    );
+    assert!(
+        after_execute.contains("SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)"),
+        "Executor step should include SYSTEM_ACCESSTOKEN: {after_execute}"
+    );
+}
