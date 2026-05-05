@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.1](https://github.com/githubnext/ado-aw/compare/v0.21.0...v0.21.1) (2026-05-05)
+
+
+### Bug Fixes
+
+* **security:** neutralize VSO pipeline commands in Stage 3 log output ([#396](https://github.com/githubnext/ado-aw/issues/396)) ([ea76888](https://github.com/githubnext/ado-aw/commit/ea7688812b951c923abaee0514e5e0c46d1826ed))
+
 ## [0.21.0](https://github.com/githubnext/ado-aw/compare/v0.20.0...v0.21.0) (2026-05-02)
 
 
