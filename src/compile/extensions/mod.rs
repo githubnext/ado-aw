@@ -547,6 +547,7 @@ pub use crate::tools::azure_devops::AzureDevOpsExtension;
 pub use crate::tools::cache_memory::CacheMemoryExtension;
 pub use github::GitHubExtension;
 pub use crate::runtimes::lean::LeanExtension;
+pub use crate::runtimes::node::NodeExtension;
 pub use safe_outputs::SafeOutputsExtension;
 pub use trigger_filters::TriggerFiltersExtension;
 
@@ -559,6 +560,7 @@ extension_enum! {
         GitHub(GitHubExtension),
         SafeOutputs(SafeOutputsExtension),
         Lean(LeanExtension),
+        Node(NodeExtension),
         AzureDevOps(AzureDevOpsExtension),
         CacheMemory(CacheMemoryExtension),
         TriggerFilters(TriggerFiltersExtension),
@@ -591,6 +593,11 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
     if let Some(lean) = front_matter.runtimes.as_ref().and_then(|r| r.lean.as_ref()) {
         if lean.is_enabled() {
             extensions.push(Extension::Lean(LeanExtension::new(lean.clone())));
+        }
+    }
+    if let Some(node) = front_matter.runtimes.as_ref().and_then(|r| r.node.as_ref()) {
+        if node.is_enabled() {
+            extensions.push(Extension::Node(NodeExtension::new(node.clone())));
         }
     }
 
@@ -692,16 +699,16 @@ pub fn wrap_prompt_append(content: &str, display_name: &str) -> Result<String> {
 /// Base URL for ado-aw release artifacts (used by `scripts_download_step`).
 const SCRIPTS_RELEASE_BASE_URL: &str = "https://github.com/githubnext/ado-aw/releases/download";
 
-/// `NodeTool@0` step that installs Node 20.x. Required by any
-/// `ado-script` bundle (currently `gate.js` and `prompt.js`). Pin to LTS
-/// major; ado-aw only requires basic Node features, so any 20.x patch
-/// release is acceptable. NodeTool@0 is preinstalled on
-/// Microsoft-hosted and 1ES images and idempotent across multiple
-/// invocations in the same job, so emitting it more than once per job
-/// is safe.
-pub fn node_tool_step(display_name: &str) -> String {
+/// `NodeTool@0` step that installs Node.js at the requested version. Required
+/// by any `ado-script` bundle (currently `gate.js` and `prompt.js`) and by
+/// the Node runtime extension when `runtimes.node` is enabled.
+///
+/// NodeTool@0 is preinstalled on Microsoft-hosted and 1ES images and is
+/// idempotent across multiple invocations in the same job, so emitting it
+/// more than once per job is safe.
+pub fn node_tool_step(display_name: &str, version_spec: &str) -> String {
     format!(
-        "- task: NodeTool@0\n  inputs:\n    versionSpec: \"20.x\"\n  displayName: \"{display_name}\"\n  condition: succeeded()"
+        "- task: NodeTool@0\n  inputs:\n    versionSpec: \"{version_spec}\"\n  displayName: \"{display_name}\"\n  condition: succeeded()"
     )
 }
 

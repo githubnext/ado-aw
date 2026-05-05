@@ -100,8 +100,11 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   └── upload_workitem_attachment.rs
 │   ├── runtimes/         # Runtime environment implementations (one dir per runtime)
 │   │   ├── mod.rs        # Module entry point
-│   │   └── lean/         # Lean 4 theorem prover runtime
-│   │       ├── mod.rs    # Config types, install helpers
+│   │   ├── lean/         # Lean 4 theorem prover runtime
+│   │   │   ├── mod.rs    # Config types, install helpers
+│   │   │   └── extension.rs # CompilerExtension impl
+│   │   └── node/         # Node.js runtime
+│   │       ├── mod.rs    # Config types, install/feed helpers
 │   │       └── extension.rs # CompilerExtension impl
 │   ├── data/
 │   │   ├── base.yml          # Base pipeline template for standalone
