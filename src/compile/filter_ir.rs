@@ -919,8 +919,8 @@ pub enum PredicateSpec {
 /// Generate the JSON Schema for the gate spec.
 ///
 /// This schema is the formal contract between the Rust compiler and the
-/// Python evaluator. It should be shipped in `scripts/gate-spec.schema.json`
-/// alongside the evaluator.
+/// TypeScript gate evaluator. It is used to generate `types.gen.ts` in
+/// the `scripts/ado-script` workspace.
 pub fn generate_gate_spec_schema() -> String {
     let schema = schemars::schema_for!(GateSpec);
     serde_json::to_string_pretty(&schema).expect("schema serialization")
@@ -929,13 +929,13 @@ pub fn generate_gate_spec_schema() -> String {
 // ─── Codegen ────────────────────────────────────────────────────────────────
 
 // The inline heredoc evaluator has been removed in favor of external script delivery.
-// See TriggerFiltersExtension for the external path and compile_gate_step_inline for Tier 1.
+// See TriggerFiltersExtension for the external path (bundled TypeScript gate.js).
 
 impl Fact {
     /// ADO macro exports required by this fact.
     ///
-    /// Returns `(env_var_name, ado_macro)` pairs that must be exported in
-    /// the bash shim for the Python evaluator to read.
+    /// Returns `(env_var_name, ado_macro)` pairs that must be set in the
+    /// step's `env:` block for the gate evaluator to read.
     pub fn ado_exports(&self) -> Vec<(&'static str, &'static str)> {
         match self {
             Fact::PrTitle => vec![("ADO_PR_TITLE", "$(System.PullRequest.Title)")],

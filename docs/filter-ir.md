@@ -113,7 +113,7 @@ supports these predicate types:
 
 | Predicate | Bash Shape | Example |
 |-----------|-----------|---------|
-| `GlobMatch { fact, pattern }` | `fnmatch(value, pattern)` | Title matches `*[review]*` |
+| `GlobMatch { fact, pattern }` | Simple glob (`*` any chars, `?` single char) | Title matches `*[review]*` |
 | `Equality { fact, value }` | `[ "$VAR" = "value" ]` | Draft is `false` |
 | `ValueInSet { fact, values, case_insensitive }` | `echo "$VAR" \| grep -q[i]E '^(a\|b)$'` | Author in allow-list |
 | `ValueNotInSet { fact, values, case_insensitive }` | Inverse of `ValueInSet` | Author not in block-list |

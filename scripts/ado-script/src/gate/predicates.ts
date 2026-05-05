@@ -78,15 +78,19 @@ export function evaluatePredicate(p: PredicateSpec, facts: Map<string, unknown>)
       return String(facts.get(p.fact) ?? "") === p.value;
     case "value_in_set": {
       const value = String(facts.get(p.fact) ?? "");
-      return p.case_insensitive
-        ? p.values.map((v) => v.toLowerCase()).includes(value.toLowerCase())
-        : p.values.includes(value);
+      if (p.case_insensitive) {
+        const lower = p.values.map((v) => v.toLowerCase());
+        return lower.includes(value.toLowerCase());
+      }
+      return p.values.includes(value);
     }
     case "value_not_in_set": {
       const value = String(facts.get(p.fact) ?? "");
-      return p.case_insensitive
-        ? !p.values.map((v) => v.toLowerCase()).includes(value.toLowerCase())
-        : !p.values.includes(value);
+      if (p.case_insensitive) {
+        const lower = p.values.map((v) => v.toLowerCase());
+        return !lower.includes(value.toLowerCase());
+      }
+      return !p.values.includes(value);
     }
     case "numeric_range": {
       const value = Number(facts.get(p.fact) ?? 0);
