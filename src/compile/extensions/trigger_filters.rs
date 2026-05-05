@@ -102,7 +102,12 @@ impl CompilerExtension for TriggerFiltersExtension {
         // acceptable. NodeTool@0 is preinstalled on Microsoft-hosted and 1ES
         // images.
         steps.push(
-            "- task: NodeTool@0\n  inputs:\n    versionSpec: \"20.x\"\n  displayName: \"Install Node.js 20.x for gate evaluator\"\n  condition: succeeded()".to_string(),
+            r#"- task: NodeTool@0
+  inputs:
+    versionSpec: "20.x"
+  displayName: "Install Node.js 20.x for gate evaluator"
+  condition: succeeded()"#
+                .to_string(),
         );
 
         steps.push(format!(

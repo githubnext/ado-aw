@@ -167,11 +167,14 @@ function stringsFromFact(raw: unknown): string[] {
 
 function globMatch(value: string, pattern: string): boolean {
   // Glob → regex: only `*` (any chars) and `?` (single char) are
-  // recognised. Bracket expressions like `[abc]` are escaped to literal
-  // characters here. This is a deliberate divergence from Python's
-  // `fnmatch.fnmatch`, which supports `[seq]` ranges. The IR currently
-  // never emits bracket patterns, but if a future predicate needs them,
-  // this builder must be extended (and the parity inventory updated).
+  // recognised. Bracket expressions like `[abc]` are treated as literals.
+  // The IR currently never emits bracket patterns; warn if one appears so
+  // a compiler/evaluator parity drift is caught early.
+  if (/\[/.test(pattern)) {
+    logWarning(
+      `globMatch: pattern "${pattern}" contains "[" which is treated as a literal, not a character class`,
+    );
+  }
   const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const regex = `^${escaped.replace(/\\\*/g, ".*").replace(/\\\?/g, ".")}$`;
   return new RegExp(regex, "s").test(value);

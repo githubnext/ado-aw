@@ -1826,11 +1826,15 @@ mod tests {
     #[test]
     #[ignore] // Writes to source tree — run manually with `cargo test test_write_schema -- --ignored`
     fn test_write_schema_to_scripts() {
-        // Generate schema and write to scripts/ for distribution
+        // Generate schema and write to the canonical location for codegen
         let schema = generate_gate_spec_schema();
         let schema_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("scripts")
+            .join("ado-script")
+            .join("schema")
             .join("gate-spec.schema.json");
+        std::fs::create_dir_all(schema_path.parent().unwrap())
+            .expect("should create schema dir");
         std::fs::write(&schema_path, &schema).expect("should write schema file");
 
         // Verify it's readable and valid
