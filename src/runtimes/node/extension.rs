@@ -55,11 +55,13 @@ Node.js is installed and available. Use `node` to run scripts, \
     }
 
     fn prepare_steps(&self) -> Vec<String> {
-        vec![
-            generate_node_install(&self.config),
-            generate_ensure_npmrc(&self.config),
-            generate_npm_authenticate(),
-        ]
+        let mut steps = vec![generate_node_install(&self.config)];
+        // Emit ensure-npmrc + npmAuthenticate only when an internal feed is configured
+        if self.config.feed_url().is_some() || self.config.config().is_some() {
+            steps.push(generate_ensure_npmrc(&self.config));
+            steps.push(generate_npm_authenticate());
+        }
+        steps
     }
 
     fn agent_env_vars(&self) -> Vec<(String, String)> {

@@ -401,6 +401,18 @@ fn test_python_prepare_steps() {
         crate::runtimes::python::PythonRuntimeConfig::Enabled(true),
     );
     let steps = ext.prepare_steps();
+    assert_eq!(steps.len(), 1, "no auth step without feed-url/config");
+    assert!(steps[0].contains("UsePythonVersion@0"));
+}
+
+#[test]
+fn test_python_prepare_steps_with_feed_url() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  python:\n    feed-url: 'https://pkgs.dev.azure.com/org/_packaging/feed/pypi/simple/'\n---\n",
+    ).unwrap();
+    let python = fm.runtimes.as_ref().unwrap().python.as_ref().unwrap();
+    let ext = crate::runtimes::python::PythonExtension::new(python.clone());
+    let steps = ext.prepare_steps();
     assert_eq!(steps.len(), 2);
     assert!(steps[0].contains("UsePythonVersion@0"));
     assert!(steps[1].contains("PipAuthenticate@1"));
@@ -484,6 +496,18 @@ fn test_node_prepare_steps() {
     let ext = crate::runtimes::node::NodeExtension::new(
         crate::runtimes::node::NodeRuntimeConfig::Enabled(true),
     );
+    let steps = ext.prepare_steps();
+    assert_eq!(steps.len(), 1, "no auth steps without feed-url/config");
+    assert!(steps[0].contains("NodeTool@0"));
+}
+
+#[test]
+fn test_node_prepare_steps_with_feed_url() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  node:\n    feed-url: 'https://pkgs.dev.azure.com/ORG/PROJECT/_packaging/FEED/npm/registry/'\n---\n",
+    ).unwrap();
+    let node = fm.runtimes.as_ref().unwrap().node.as_ref().unwrap();
+    let ext = crate::runtimes::node::NodeExtension::new(node.clone());
     let steps = ext.prepare_steps();
     assert_eq!(steps.len(), 3);
     assert!(steps[0].contains("NodeTool@0"));

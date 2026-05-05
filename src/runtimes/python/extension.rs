@@ -56,10 +56,12 @@ The `uv` tool is pre-installed and recommended for speed.\n"
     }
 
     fn prepare_steps(&self) -> Vec<String> {
-        vec![
-            generate_python_install(&self.config),
-            generate_pip_authenticate(),
-        ]
+        let mut steps = vec![generate_python_install(&self.config)];
+        // Emit PipAuthenticate only when an internal feed is configured
+        if self.config.feed_url().is_some() || self.config.config().is_some() {
+            steps.push(generate_pip_authenticate());
+        }
+        steps
     }
 
     fn agent_env_vars(&self) -> Vec<(String, String)> {
