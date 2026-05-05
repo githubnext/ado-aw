@@ -31,7 +31,7 @@ function emit(line: string): void {
 
 export function setOutput(name: string, value: string): void {
   const safeName = escapeProperty(name);
-  const safeValue = escapeProperty(value);
+  const safeValue = escapeMessage(value);
   emit(`##vso[task.setvariable variable=${safeName};isOutput=true]${safeValue}`);
 }
 

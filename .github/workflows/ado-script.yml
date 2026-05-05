@@ -5,6 +5,7 @@ on:
     paths:
       - "scripts/ado-script/**"
       - "src/compile/filter_ir.rs"
+      - "src/compile/extensions/trigger_filters.rs"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/ado-script.yml"
