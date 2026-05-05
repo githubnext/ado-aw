@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.2](https://github.com/githubnext/ado-aw/compare/v0.22.1...v0.22.2) (2026-05-05)
+
+
+### Bug Fixes
+
+* **compile:** reject unknown front-matter fields with deny_unknown_fields ([#409](https://github.com/githubnext/ado-aw/issues/409)) ([788250d](https://github.com/githubnext/ado-aw/commit/788250d9652a8e227688b3d75b51c2c423017395))
+
 ## [0.22.1](https://github.com/githubnext/ado-aw/compare/v0.22.0...v0.22.1) (2026-05-05)
 
 
