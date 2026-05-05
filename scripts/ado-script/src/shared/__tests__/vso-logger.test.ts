@@ -23,10 +23,11 @@ describe("vso-logger", () => {
     ]);
   });
 
-  it("setOutput escapes ; in name and ] in value", () => {
+  it("setOutput escapes ; in name and passes ] through in value", () => {
     setOutput("a;b", "v]w");
     expect(writes[0]).toContain("variable=a%3Bb");
-    expect(writes[0]).toContain("]v%5Dw\n");
+    // Value is in the message body (after closing ]), so ] is NOT escaped
+    expect(writes[0]).toContain("]v]w\n");
   });
 
   it("addBuildTag emits a build tag command with message escaping", () => {
