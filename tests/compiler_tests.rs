@@ -3490,9 +3490,9 @@ fn test_executor_step_no_empty_env_block_without_write_permissions() {
     let compiled = compile_fixture("minimal-agent.md");
     assert_valid_yaml(&compiled, "minimal-agent.md");
 
-    // Parse structurally: serde_yaml rejects `env:` with no children in strict mode
-    // and the assert_valid_yaml call above already exercises this.
-    // Additionally verify the executor step contains no `env:` key at all.
+    // Verify the executor step contains no `env:` key at all.
+    // Note: a bare `env:` with no children is valid YAML (parsed as null), so
+    // assert_valid_yaml alone would not catch the regression this test guards against.
     let execute_block_start = compiled
         .find("Execute safe outputs (Stage 3)")
         .expect("Should have executor step");
