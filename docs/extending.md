@@ -53,6 +53,18 @@ Execution job (before the agent runs). `setup_steps()` injects into the Setup
 job (before the Execution job starts). Use `setup_steps()` for pre-activation
 gates or checks that must complete before the agent is launched.
 
+**`prompt_supplement()` and runtime substitution**: the markdown returned
+from this method is appended to the agent prompt at runtime by the
+`prompt.js` ado-script bundle. It is rendered through the same
+substitution pipeline as the user's prompt body, so supplements may
+contain `${{ parameters.NAME }}` (for declared parameters) and
+`$(VAR)` / `$(VAR.SUB)` references that will be resolved at pipeline
+runtime. See `docs/template-markers.md` for the full substitution
+contract. When `inlined-imports: true`, the supplement is instead
+embedded into the YAML at compile time via `wrap_prompt_append` and ADO
+substitution rules apply (no parameters, no runtime variable
+substitution).
+
 **Phase ordering**: Extensions are sorted by phase — runtimes
 (`ExtensionPhase::Runtime`) execute before tools (`ExtensionPhase::Tool`).
 This guarantees runtime install steps run before tool steps that may depend

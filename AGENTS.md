@@ -55,6 +55,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   ├── gitattributes.rs # .gitattributes management for compiled pipelines
 │   │   ├── filter_ir.rs  # Filter expression IR: Fact/Predicate types, lowering, validation, codegen
 │   │   ├── pr_filters.rs # PR trigger filter generation (native ADO + gate steps)
+│   │   ├── prompt_ir.rs  # PromptSpec IR: schemars-typed runtime contract for prompt.js
 │   │   ├── extensions/   # CompilerExtension trait and infrastructure extensions
 │   │   │   ├── mod.rs    # Trait, Extension enum, collect_extensions(), re-exports
 │   │   │   ├── github.rs # Always-on GitHub MCP extension
@@ -120,8 +121,9 @@ Every compiled pipeline runs as three sequential jobs:
 ├── ado-aw-derive/        # Proc-macro crate: #[derive(SanitizeConfig)], #[derive(SanitizeContent)]
 ├── examples/             # Example agent definitions
 ├── scripts/              # Supporting scripts shipped as release artifacts
-│   ├── ado-script/       # TypeScript workspace for bundled gate.js (and future bundles)
-│   └── gate.js           # Bundled gate evaluator (built from scripts/ado-script/, see docs/ado-script.md)
+│   ├── ado-script/       # TypeScript workspace for bundled gate.js + prompt.js
+│   ├── gate.js           # Bundled gate evaluator (Setup job; see docs/ado-script.md)
+│   └── prompt.js         # Bundled prompt renderer (Agent job; see docs/ado-script.md)
 ├── tests/                # Integration tests and fixtures
 ├── docs/                 # Per-concept reference documentation (see index below)
 ├── Cargo.toml            # Rust dependencies
@@ -133,7 +135,7 @@ Every compiled pipeline runs as three sequential jobs:
 - **Language**: Rust (2024 edition) - Note: Rust 2024 edition exists and is the edition used by this project
 - **CLI Framework**: clap v4 with derive macros
 - **Error Handling**: anyhow for ergonomic error propagation
-- **Bundled scripts**: TypeScript + ncc (`scripts/ado-script/`) — compiled gate evaluator and future internal helpers; see [`docs/ado-script.md`](docs/ado-script.md).
+- **Bundled scripts**: TypeScript + ncc (`scripts/ado-script/`) — compiled gate evaluator (`gate.js`), prompt renderer (`prompt.js`), and future internal helpers; see [`docs/ado-script.md`](docs/ado-script.md).
 - **Async Runtime**: tokio with full features
 - **YAML Parsing**: serde_yaml
 - **MCP Server**: rmcp with server and transport-io features
@@ -185,8 +187,9 @@ index to jump to the right page.
   specification: `Fact`/`Predicate` types, three-pass compilation (lower →
   validate → codegen), gate step generation, adding new filter types.
 - [`docs/ado-script.md`](docs/ado-script.md) — `ado-script` workspace
-  (`scripts/ado-script/`): the bundled TypeScript runtime helpers (today:
-  `gate.js`), schemars-driven type codegen, and the A2 design decision.
+  (`scripts/ado-script/`): the bundled TypeScript runtime helpers
+  (`gate.js` for trigger gates, `prompt.js` for runtime prompt
+  rendering), schemars-driven type codegen, and the A2 design decision.
 - [`docs/local-development.md`](docs/local-development.md) — local development
   setup notes.
 

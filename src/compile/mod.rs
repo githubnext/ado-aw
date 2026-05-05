@@ -12,6 +12,7 @@ pub(crate) mod filter_ir;
 mod gitattributes;
 mod onees;
 pub(crate) mod pr_filters;
+pub(crate) mod prompt_ir;
 mod standalone;
 pub mod types;
 

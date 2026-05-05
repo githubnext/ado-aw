@@ -1,5 +1,6 @@
 target
 examples/sample-agent.yml
 scripts/gate.js
+scripts/prompt.js
 *.pyc
 __pycache__/

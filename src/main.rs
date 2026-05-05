@@ -140,6 +140,14 @@ enum Commands {
         #[arg(short, long)]
         output: Option<std::path::PathBuf>,
     },
+    /// Export the prompt spec JSON Schema (build-time tool for the
+    /// scripts/ado-script TypeScript workspace).
+    #[command(hide = true)]
+    ExportPromptSchema {
+        /// Output path; if omitted, prints to stdout.
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -343,6 +351,7 @@ async fn main() -> Result<()> {
         Some(Commands::Init { .. }) => "init",
         Some(Commands::Configure { .. }) => "configure",
         Some(Commands::ExportGateSchema { .. }) => "export-gate-schema",
+        Some(Commands::ExportPromptSchema { .. }) => "export-prompt-schema",
         None => "ado-aw",
     };
 
@@ -449,6 +458,21 @@ async fn main() -> Result<()> {
         }
         Commands::ExportGateSchema { output } => {
             let schema = compile::filter_ir::generate_gate_spec_schema();
+            match output {
+                Some(path) => {
+                    if let Some(parent) = path
+                        .parent()
+                        .filter(|parent| !parent.as_os_str().is_empty())
+                    {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::write(&path, &schema)?;
+                }
+                None => print!("{}", schema),
+            }
+        }
+        Commands::ExportPromptSchema { output } => {
+            let schema = compile::prompt_ir::generate_prompt_spec_schema();
             match output {
                 Some(path) => {
                     if let Some(parent) = path

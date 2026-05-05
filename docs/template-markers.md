@@ -305,9 +305,29 @@ resources:
             - release/*
 ```
 
-## {{ agent_content }}
+## {{ prepare_agent_prompt }}
 
-Should be replaced with the markdown body (agent instructions) extracted from the source markdown file, excluding the YAML front matter. This content provides the agent with its task description and guidelines.
+Replaced with the YAML step(s) that prepare `/tmp/awf-tools/agent-prompt.md` for the agent.
+
+The expansion depends on the `inlined-imports` front-matter field:
+
+- **`inlined-imports: false`** (default) — emits a three-step bundle:
+  1. `NodeTool@0` to install Node 20.x.
+  2. A `curl` download of `scripts.zip` from the matching `githubnext/ado-aw` release, extracting `prompt.js` to `/tmp/ado-aw-scripts/prompt.js`.
+  3. A bash step that runs `node /tmp/ado-aw-scripts/prompt.js` with `ADO_AW_PROMPT_SPEC` (a base64-encoded `PromptSpec` JSON) and one `ADO_AW_PARAM_<NAME>: ${{ parameters.<NAME> }}` env entry per declared parameter. The renderer reads the source `.md` from the workspace, strips its front matter, applies variable substitution, appends extension supplements, and writes the result to `/tmp/awf-tools/agent-prompt.md`.
+
+  Substitution patterns recognised at runtime by `prompt.js`:
+
+  | Pattern                       | Resolved via                                        | Notes                                                                                       |
+  |-------------------------------|------------------------------------------------------|---------------------------------------------------------------------------------------------|
+  | `${{ parameters.NAME }}`      | env `ADO_AW_PARAM_<NAME upper, hyphen→underscore>`   | Only declared parameters substitute; others left verbatim with a warning.                   |
+  | `$(VAR)` / `$(VAR.SUB)`       | env `<name upper, dot→underscore>` (ADO native)      | Unset variables left verbatim with a warning. Secrets aren't auto-exposed and stay verbatim. |
+  | `$[ ... ]`                    | not substituted                                      | Left verbatim with one warning per render.                                                  |
+  | `\$(...)`                     | escape                                               | Backslash stripped; `$(...)` left literal.                                                  |
+
+- **`inlined-imports: true`** — emits a single legacy heredoc step that writes the markdown body verbatim into `/tmp/awf-tools/agent-prompt.md`. Extension prompt supplements are emitted as separate `cat >>` heredoc steps via `wrap_prompt_append`. No variable substitution beyond what ADO macros already do natively.
+
+This marker replaces the older `{{ agent_content }}` placeholder, which is no longer emitted by the compiler.
 
 ## {{ mcpg_config }}
 

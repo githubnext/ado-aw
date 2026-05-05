@@ -20,9 +20,6 @@ use crate::compile::types::{PipelineFilters, PrFilters};
 /// The path where the gate evaluator is downloaded at pipeline runtime.
 const GATE_EVAL_PATH: &str = "/tmp/ado-aw-scripts/gate.js";
 
-/// Base URL for ado-aw release artifacts.
-const RELEASE_BASE_URL: &str = "https://github.com/githubnext/ado-aw/releases/download";
-
 /// Compiler extension that delivers and runs the gate evaluator for
 /// complex trigger filters.
 pub struct TriggerFiltersExtension {
@@ -63,7 +60,6 @@ impl CompilerExtension for TriggerFiltersExtension {
     }
 
     fn setup_steps(&self, _ctx: &CompileContext) -> Result<Vec<String>> {
-        let version = env!("CARGO_PKG_VERSION");
         let mut gate_steps = Vec::new();
 
         // PR gate step
@@ -97,22 +93,15 @@ impl CompilerExtension for TriggerFiltersExtension {
 
         let mut steps = Vec::new();
 
-        // Install Node 20.x for the gate evaluator. Pin to LTS major; ado-aw
-        // only requires basic Node features, so any 20.x patch release is
-        // acceptable. NodeTool@0 is preinstalled on Microsoft-hosted and 1ES
-        // images.
-        steps.push(
-            "- task: NodeTool@0\n  inputs:\n    versionSpec: \"20.x\"\n  displayName: \"Install Node.js 20.x for gate evaluator\"\n  condition: succeeded()".to_string(),
-        );
-
-        steps.push(format!(
-            r#"- bash: |
-    mkdir -p /tmp/ado-aw-scripts
-    curl -fsSL "{RELEASE_BASE_URL}/v{version}/scripts.zip" -o /tmp/ado-aw-scripts/scripts.zip
-    cd /tmp/ado-aw-scripts && unzip -o scripts.zip
-  displayName: "Download ado-aw scripts (v{version})"
-  condition: succeeded()"#,
+        // Install Node 20.x for the gate evaluator and download
+        // scripts.zip (which carries gate.js plus any other bundled
+        // ado-script artefacts). Helpers live on the parent module so
+        // other use sites (e.g. the Agent-job prompt renderer) stay
+        // in lockstep on URL/version.
+        steps.push(super::node_tool_step(
+            "Install Node.js 20.x for gate evaluator",
         ));
+        steps.push(super::scripts_download_step());
         steps.extend(gate_steps);
 
         Ok(steps)

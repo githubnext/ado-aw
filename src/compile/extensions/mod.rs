@@ -689,5 +689,39 @@ pub fn wrap_prompt_append(content: &str, display_name: &str) -> Result<String> {
     ))
 }
 
+/// Base URL for ado-aw release artifacts (used by `scripts_download_step`).
+const SCRIPTS_RELEASE_BASE_URL: &str = "https://github.com/githubnext/ado-aw/releases/download";
+
+/// `NodeTool@0` step that installs Node 20.x. Required by any
+/// `ado-script` bundle (currently `gate.js` and `prompt.js`). Pin to LTS
+/// major; ado-aw only requires basic Node features, so any 20.x patch
+/// release is acceptable. NodeTool@0 is preinstalled on
+/// Microsoft-hosted and 1ES images and idempotent across multiple
+/// invocations in the same job, so emitting it more than once per job
+/// is safe.
+pub fn node_tool_step(display_name: &str) -> String {
+    format!(
+        "- task: NodeTool@0\n  inputs:\n    versionSpec: \"20.x\"\n  displayName: \"{display_name}\"\n  condition: succeeded()"
+    )
+}
+
+/// Bash step that downloads `scripts.zip` (the bundled ado-script
+/// artefacts) for the running ado-aw release into
+/// `/tmp/ado-aw-scripts/` and unzips it. Used by any extension or
+/// step that needs runtime-bundled scripts (currently `gate.js` and
+/// `prompt.js`). Each pipeline job that needs scripts emits its own
+/// download because jobs run on independent pool agents.
+pub fn scripts_download_step() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    format!(
+        r#"- bash: |
+    mkdir -p /tmp/ado-aw-scripts
+    curl -fsSL "{SCRIPTS_RELEASE_BASE_URL}/v{version}/scripts.zip" -o /tmp/ado-aw-scripts/scripts.zip
+    cd /tmp/ado-aw-scripts && unzip -o scripts.zip
+  displayName: "Download ado-aw scripts (v{version})"
+  condition: succeeded()"#,
+    )
+}
+
 #[cfg(test)]
 mod tests;
