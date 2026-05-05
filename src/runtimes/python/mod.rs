@@ -125,9 +125,9 @@ pub fn generate_python_install(config: &PythonRuntimeConfig) -> String {
 
 /// Generate the `PipAuthenticate@1` pipeline step.
 ///
-/// Emitted when `feed-url:` or `config:` is set, authenticating the ADO
-/// build service identity for internal package feeds. This runs before AWF,
-/// setting up credentials via `##vso[task.setvariable]`.
+/// Emitted when `feed-url:` is set, authenticating the ADO build service
+/// identity for internal package feeds. This runs before AWF, setting up
+/// credentials via `##vso[task.setvariable]`.
 pub fn generate_pip_authenticate() -> String {
     "\
 - task: PipAuthenticate@1

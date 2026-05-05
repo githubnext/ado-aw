@@ -60,7 +60,7 @@ runtimes:
 
 When enabled, the compiler:
 - Injects `UsePythonVersion@0` into `{{ prepare_steps }}` (runs before AWF)
-- If `feed-url` or `config` is set, also injects `PipAuthenticate@1` to authenticate the ADO build service identity for internal feeds
+- If `feed-url` is set, also injects `PipAuthenticate@1` to authenticate the ADO build service identity for internal feeds
 - Auto-adds `python`, `python3`, `pip`, `pip3`, `uv` to the bash command allow-list
 - Adds Python ecosystem domains to the network allowlist (pypi.org, pythonhosted.org, etc.)
 - If `feed-url` is set, injects `PIP_INDEX_URL` and `UV_DEFAULT_INDEX` env vars into the agent environment

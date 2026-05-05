@@ -57,8 +57,9 @@ management, install it first with `pip install uv`.\n"
 
     fn prepare_steps(&self) -> Vec<String> {
         let mut steps = vec![generate_python_install(&self.config)];
-        // Emit PipAuthenticate only when an internal feed is configured
-        if self.config.feed_url().is_some() || self.config.config().is_some() {
+        // Emit PipAuthenticate only when feed-url is set (config alone is not
+        // sufficient — PipAuthenticate needs a feed to authenticate against)
+        if self.config.feed_url().is_some() {
             steps.push(generate_pip_authenticate());
         }
         steps
