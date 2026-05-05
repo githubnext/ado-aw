@@ -90,21 +90,21 @@ The `uv` tool is pre-installed and recommended for speed.\n"
             ));
         }
 
-        // Error if config: is set (not yet supported)
+        // Mutual exclusivity: config + feed-url (check before individual field errors)
+        if self.config.config().is_some() && self.config.feed_url().is_some() {
+            anyhow::bail!(
+                "runtimes.python: 'config' and 'feed-url' are mutually exclusive. \
+                 Use one or the other."
+            );
+        }
+
+        // Error if config: is set (not yet supported for Python)
         if self.config.config().is_some() {
             anyhow::bail!(
                 "runtimes.python.config is not yet supported. \
                  Use feed-url instead to configure an internal package feed. \
                  Config file support will be added when AWF proxy-auth lands \
                  (gh-aw-firewall#2547)."
-            );
-        }
-
-        // Mutual exclusivity: config + feed-url
-        if self.config.config().is_some() && self.config.feed_url().is_some() {
-            anyhow::bail!(
-                "runtimes.python: 'config' and 'feed-url' are mutually exclusive. \
-                 Use one or the other."
             );
         }
 

@@ -511,7 +511,7 @@ fn test_node_agent_env_vars_with_feed() {
 }
 
 #[test]
-fn test_node_config_not_yet_supported() {
+fn test_node_config_warns_not_functional() {
     let (fm, _) = parse_markdown(
         "---\nname: test\ndescription: test\nruntimes:\n  node:\n    version: '22.x'\n    config: '/path/to/.npmrc'\n---\n",
     ).unwrap();
@@ -519,8 +519,35 @@ fn test_node_config_not_yet_supported() {
     let ext = crate::runtimes::node::NodeExtension::new(node.clone());
     let ctx = ctx_from(&fm);
     let result = ext.validate(&ctx);
+    assert!(result.is_ok(), "config: should be accepted (warning, not error)");
+    let warnings = result.unwrap();
+    assert!(warnings.iter().any(|w| w.contains("will not be available")));
+}
+
+#[test]
+fn test_node_config_and_feed_url_mutually_exclusive() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  node:\n    config: '/path/to/.npmrc'\n    feed-url: 'https://example.com/npm/'\n---\n",
+    ).unwrap();
+    let node = fm.runtimes.as_ref().unwrap().node.as_ref().unwrap();
+    let ext = crate::runtimes::node::NodeExtension::new(node.clone());
+    let ctx = ctx_from(&fm);
+    let result = ext.validate(&ctx);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("not yet supported"));
+    assert!(result.unwrap_err().to_string().contains("mutually exclusive"));
+}
+
+#[test]
+fn test_python_config_and_feed_url_mutually_exclusive() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  python:\n    config: '/path/to/pip.conf'\n    feed-url: 'https://example.com/pypi/'\n---\n",
+    ).unwrap();
+    let python = fm.runtimes.as_ref().unwrap().python.as_ref().unwrap();
+    let ext = crate::runtimes::python::PythonExtension::new(python.clone());
+    let ctx = ctx_from(&fm);
+    let result = ext.validate(&ctx);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("mutually exclusive"));
 }
 
 // ── Multiple runtimes ──────────────────────────────────────────

@@ -89,21 +89,21 @@ Node.js is installed and available. Use `node` to run scripts, \
             ));
         }
 
-        // Error if config: is set (not yet supported)
-        if self.config.config().is_some() {
-            anyhow::bail!(
-                "runtimes.node.config is not yet supported. \
-                 Use feed-url instead to configure an internal npm registry. \
-                 Config file support will be added when AWF proxy-auth lands \
-                 (gh-aw-firewall#2547)."
-            );
-        }
-
-        // Mutual exclusivity: config + feed-url
+        // Mutual exclusivity: config + feed-url (check before individual field warnings)
         if self.config.config().is_some() && self.config.feed_url().is_some() {
             anyhow::bail!(
                 "runtimes.node: 'config' and 'feed-url' are mutually exclusive. \
                  Use one or the other."
+            );
+        }
+
+        // Warn if config: is set — accepted but not yet functional inside AWF
+        if self.config.config().is_some() {
+            warnings.push(
+                "runtimes.node.config is accepted but the .npmrc file will not be \
+                 available inside the AWF agent environment yet. Config file passthrough \
+                 requires AWF proxy-auth support (gh-aw-firewall#2547)."
+                    .to_string(),
             );
         }
 
