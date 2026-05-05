@@ -412,6 +412,7 @@ impl Executor for UploadPipelineArtifactResult {
 
         let container_body = serde_json::json!({
             "name": final_name,
+            "scope": project_id,
         });
         let container_resp = client
             .post(&container_url)
