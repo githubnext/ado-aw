@@ -417,9 +417,19 @@ pub fn warn_potential_secrets(mcp_name: &str, env: &HashMap<String, String>, hea
 /// - Pipeline command injection (`##vso[`, `##[`)
 /// - Template marker injection (`{{`)
 /// - Newline injection
+/// - Double-quote characters (would break YAML quoting)
 /// - Missing scheme (must be `https://` or `http://`)
 pub fn validate_feed_url(url: &str, field_name: &str) -> Result<()> {
     reject_pipeline_injection(url, field_name)?;
+
+    if url.contains('"') {
+        anyhow::bail!(
+            "Front matter '{}' contains a double-quote character which would produce \
+             malformed YAML. Remove quotes from the URL. Found: '{}'",
+            field_name,
+            url,
+        );
+    }
 
     if !url.starts_with("https://") && !url.starts_with("http://") {
         anyhow::bail!(
@@ -688,5 +698,10 @@ mod tests {
         assert!(validate_feed_url("https://example.com/##vso[task.setvariable]", "test").is_err());
         assert!(validate_feed_url("https://example.com/{{ marker }}", "test").is_err());
         assert!(validate_feed_url("https://example.com/\ninjected", "test").is_err());
+    }
+
+    #[test]
+    fn test_validate_feed_url_rejects_double_quote() {
+        assert!(validate_feed_url("https://example.com/feed\"name", "test").is_err());
     }
 }

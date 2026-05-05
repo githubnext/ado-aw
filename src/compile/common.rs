@@ -1953,6 +1953,14 @@ pub fn collect_agent_env_vars(extensions: &[super::extensions::Extension]) -> an
                     key,
                 );
             }
+            if value.contains('"') {
+                anyhow::bail!(
+                    "Extension '{}' agent env var '{}' value contains a double-quote character \
+                     which would produce malformed YAML.",
+                    ext.name(),
+                    key,
+                );
+            }
 
             lines.push(format!("{key}: \"{value}\""));
         }
