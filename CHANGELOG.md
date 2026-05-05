@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.1](https://github.com/githubnext/ado-aw/compare/v0.22.0...v0.22.1) (2026-05-05)
+
+
+### Bug Fixes
+
+* **compile:** remove empty env block from executor step when no write permissions ([#407](https://github.com/githubnext/ado-aw/issues/407)) ([0f25f06](https://github.com/githubnext/ado-aw/commit/0f25f060747c669f2c8b2c9f044c46a5b71ebcc2))
+
 ## [0.22.0](https://github.com/githubnext/ado-aw/compare/v0.21.0...v0.22.0) (2026-05-05)
 
 
