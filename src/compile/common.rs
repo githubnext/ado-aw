@@ -1916,7 +1916,10 @@ pub fn collect_awf_path_prepends(extensions: &[super::extensions::Extension]) ->
 /// `env:` block lines ready to be appended to the engine env block.
 ///
 /// Returns an empty string when no extensions declare env vars.
-/// Each entry is formatted as `KEY: "VALUE"` with double-quote escaping.
+/// Each entry is formatted as `KEY: "VALUE"` with backslash and double-quote
+/// escaping applied to the value. Other YAML special characters (newlines,
+/// tabs, control characters) are rejected at validation time by each extension
+/// before this function is called.
 pub fn collect_agent_env_vars(extensions: &[super::extensions::Extension]) -> String {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut lines: Vec<String> = Vec::new();

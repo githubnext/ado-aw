@@ -129,7 +129,11 @@ to install packages, and `python3 -m venv` to create virtual environments.\n"
 /// Validate a package feed URL for safe embedding in the pipeline YAML.
 ///
 /// Rejects values that could cause ADO expression injection, pipeline command
-/// injection, template marker injection, or YAML-breaking newlines.
+/// injection, template marker injection, or YAML-breaking characters (newlines,
+/// tabs, and ASCII control characters). Package feed URLs should only contain
+/// standard URL characters (`[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]`); the checks
+/// below focus on the specific dangerous sequences rather than allowlisting to
+/// accommodate the variety of valid URL forms used in practice.
 fn validate_feed_url(url: &str, field: &str, agent_name: &str) -> Result<()> {
     if url.is_empty() {
         anyhow::bail!(
@@ -167,8 +171,19 @@ fn validate_feed_url(url: &str, field: &str, agent_name: &str) -> Result<()> {
     }
     if validate::contains_newline(url) {
         anyhow::bail!(
-            "Agent '{}': {} contains a newline character, \
+            "Agent '{}': {} '{}' contains a newline character, \
              which would break YAML formatting.",
+            agent_name,
+            field,
+            url.replace('\n', "\\n").replace('\r', "\\r"),
+        );
+    }
+    // Reject ASCII control characters (tabs, backspace, etc.) that would break
+    // YAML scalar values. Standard URL characters do not include these.
+    if url.chars().any(|c| c.is_ascii_control()) {
+        anyhow::bail!(
+            "Agent '{}': {} contains a control character (tab, backspace, etc.) \
+             which would break YAML formatting. Use a plain URL string.",
             agent_name,
             field,
         );
