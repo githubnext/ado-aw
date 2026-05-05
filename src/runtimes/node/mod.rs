@@ -131,6 +131,9 @@ pub fn generate_node_install(config: &NodeRuntimeConfig) -> String {
 /// Emitted unconditionally when the Node.js runtime is enabled — the ADO
 /// build service identity handles authentication. This runs before AWF,
 /// setting up credentials for internal feeds.
+///
+/// Requires a `.npmrc` file to exist; call [`generate_ensure_npmrc`] first
+/// to create one if the repo doesn't already have one.
 pub fn generate_npm_authenticate() -> String {
     "\
 - task: npmAuthenticate@0
@@ -138,4 +141,29 @@ pub fn generate_npm_authenticate() -> String {
     workingFile: .npmrc
   displayName: 'Authenticate npm (build service identity)'"
         .to_string()
+}
+
+/// Generate a step that ensures `.npmrc` exists before `npmAuthenticate@0`.
+///
+/// `npmAuthenticate@0` requires `workingFile:` to point at an existing file —
+/// unlike `PipAuthenticate@1` it fails if the file is missing. This step
+/// creates a minimal `.npmrc` (with the configured registry or the default
+/// npmjs registry) only when one doesn't already exist, preserving any
+/// repo-checked-in `.npmrc`.
+pub fn generate_ensure_npmrc(config: &NodeRuntimeConfig) -> String {
+    let registry = config
+        .feed_url()
+        .unwrap_or("https://registry.npmjs.org/");
+
+    format!(
+        "\
+- bash: |\n\
+    if [ ! -f .npmrc ]; then\n\
+      echo 'registry={registry}' > .npmrc\n\
+      echo \"Created .npmrc with registry={registry}\"\n\
+    else\n\
+      echo \".npmrc already exists, skipping creation\"\n\
+    fi\n\
+  displayName: 'Ensure .npmrc exists'"
+    )
 }

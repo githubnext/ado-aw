@@ -484,9 +484,10 @@ fn test_node_prepare_steps() {
         crate::runtimes::node::NodeRuntimeConfig::Enabled(true),
     );
     let steps = ext.prepare_steps();
-    assert_eq!(steps.len(), 2);
+    assert_eq!(steps.len(), 3);
     assert!(steps[0].contains("NodeTool@0"));
-    assert!(steps[1].contains("npmAuthenticate@0"));
+    assert!(steps[1].contains("Ensure .npmrc"));
+    assert!(steps[2].contains("npmAuthenticate@0"));
 }
 
 #[test]

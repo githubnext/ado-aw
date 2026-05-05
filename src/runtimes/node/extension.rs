@@ -2,7 +2,7 @@
 
 use crate::compile::extensions::{CompileContext, CompilerExtension, ExtensionPhase};
 use crate::validate;
-use super::{NODE_BASH_COMMANDS, NodeRuntimeConfig, generate_node_install, generate_npm_authenticate};
+use super::{NODE_BASH_COMMANDS, NodeRuntimeConfig, generate_ensure_npmrc, generate_node_install, generate_npm_authenticate};
 use anyhow::Result;
 
 /// Node.js runtime extension.
@@ -57,6 +57,7 @@ Node.js is installed and available. Use `node` to run scripts, \
     fn prepare_steps(&self) -> Vec<String> {
         vec![
             generate_node_install(&self.config),
+            generate_ensure_npmrc(&self.config),
             generate_npm_authenticate(),
         ]
     }
