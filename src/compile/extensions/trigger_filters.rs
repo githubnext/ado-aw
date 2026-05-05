@@ -1,24 +1,24 @@
 //! Trigger filters compiler extension.
 //!
 //! Activates when any `filters:` configuration is present under `on.pr`
-//! or `on.pipeline`. Injects into the Setup job: (1) a download step for
-//! the gate evaluator scripts bundle and (2) the gate step that evaluates
-//! the filter spec via the Python evaluator.
+//! or `on.pipeline`. Injects into the Setup job: (1) a Node install step,
+//! (2) a download step for the gate evaluator scripts bundle, and (3) the
+//! gate step that evaluates the filter spec via the Node evaluator.
 //!
-//! All filter types (simple and complex) are evaluated by the Python
+//! All filter types (simple and complex) are evaluated by the Node
 //! evaluator — there is no inline bash codegen path.
 
 use anyhow::Result;
 
 use super::{CompileContext, CompilerExtension, ExtensionPhase};
 use crate::compile::filter_ir::{
-    compile_gate_step_external, lower_pipeline_filters, lower_pr_filters,
-    validate_pipeline_filters, validate_pr_filters, GateContext, Severity,
+    GateContext, Severity, compile_gate_step_external, lower_pipeline_filters, lower_pr_filters,
+    validate_pipeline_filters, validate_pr_filters,
 };
 use crate::compile::types::{PipelineFilters, PrFilters};
 
 /// The path where the gate evaluator is downloaded at pipeline runtime.
-const GATE_EVAL_PATH: &str = "/tmp/ado-aw-scripts/gate-eval.py";
+const GATE_EVAL_PATH: &str = "/tmp/ado-aw-scripts/gate.js";
 
 /// Base URL for ado-aw release artifacts.
 const RELEASE_BASE_URL: &str = "https://github.com/githubnext/ado-aw/releases/download";
@@ -31,10 +31,7 @@ pub struct TriggerFiltersExtension {
 }
 
 impl TriggerFiltersExtension {
-    pub fn new(
-        pr_filters: Option<PrFilters>,
-        pipeline_filters: Option<PipelineFilters>,
-    ) -> Self {
+    pub fn new(pr_filters: Option<PrFilters>, pipeline_filters: Option<PipelineFilters>) -> Self {
         Self {
             pr_filters,
             pipeline_filters,
@@ -99,6 +96,15 @@ impl CompilerExtension for TriggerFiltersExtension {
         }
 
         let mut steps = Vec::new();
+
+        // Install Node 20.x for the gate evaluator. Pin to LTS major; ado-aw
+        // only requires basic Node features, so any 20.x patch release is
+        // acceptable. NodeTool@0 is preinstalled on Microsoft-hosted and 1ES
+        // images.
+        steps.push(
+            "- task: NodeTool@0\n  inputs:\n    versionSpec: \"20.x\"\n  displayName: \"Install Node.js 20.x for gate evaluator\"\n  condition: succeeded()".to_string(),
+        );
+
         steps.push(format!(
             r#"- bash: |
     mkdir -p /tmp/ado-aw-scripts
@@ -148,8 +154,8 @@ impl CompilerExtension for TriggerFiltersExtension {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compile::types::*;
     use crate::compile::extensions::CompileContext;
+    use crate::compile::types::*;
 
     #[test]
     fn test_is_needed_any_filters() {
@@ -210,23 +216,29 @@ mod tests {
             }),
             ..Default::default()
         };
-        let ext = TriggerFiltersExtension::new(
-            Some(filters),
-            None,
-        );
+        let ext = TriggerFiltersExtension::new(Some(filters), None);
         let yaml = "name: test\ndescription: test";
         let fm: FrontMatter = serde_yaml::from_str(yaml).unwrap();
         let ctx = CompileContext::for_test(&fm);
         let steps = ext.setup_steps(&ctx).unwrap();
-        assert_eq!(steps.len(), 2, "should have download + gate step");
-        assert!(steps[0].contains("curl"), "first step should download");
+        assert_eq!(
+            steps.len(),
+            3,
+            "should have Node install + download + gate step"
+        );
         assert!(
-            steps[0].contains("scripts.zip"),
+            steps[0].contains("NodeTool@0"),
+            "first step should install Node"
+        );
+        assert!(steps[0].contains("20.x"), "should install Node 20.x");
+        assert!(steps[1].contains("curl"), "second step should download");
+        assert!(
+            steps[1].contains("scripts.zip"),
             "should download scripts.zip"
         );
-        assert!(steps[1].contains("prGate"), "second step should be PR gate");
+        assert!(steps[2].contains("prGate"), "third step should be PR gate");
         assert!(
-            steps[1].contains("python3 '/tmp/ado-aw-scripts/gate-eval.py'"),
+            steps[2].contains("node '/tmp/ado-aw-scripts/gate.js'"),
             "gate step should reference external script"
         );
     }
@@ -245,10 +257,7 @@ mod tests {
             max_changes: Some(5),
             ..Default::default()
         };
-        let ext = TriggerFiltersExtension::new(
-            Some(filters),
-            None,
-        );
+        let ext = TriggerFiltersExtension::new(Some(filters), None);
         let yaml = r#"
 name: test
 description: test agent

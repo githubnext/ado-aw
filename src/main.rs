@@ -13,8 +13,8 @@ mod logging;
 mod mcp;
 mod ndjson;
 pub mod runtimes;
-pub mod sanitize;
 mod safeoutputs;
+pub mod sanitize;
 mod tools;
 pub mod validate;
 
@@ -132,6 +132,14 @@ enum Commands {
         #[arg(long, value_delimiter = ',')]
         definition_ids: Option<Vec<u64>>,
     },
+    /// Export the gate spec JSON Schema (build-time tool for the
+    /// scripts/ado-script TypeScript workspace).
+    #[command(hide = true)]
+    ExportGateSchema {
+        /// Output path; if omitted, prints to stdout.
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -161,7 +169,9 @@ async fn run_compile(
     }
 
     match path {
-        Some(p) => compile::compile_pipeline(&p, output.as_deref(), skip_integrity, debug_pipeline).await,
+        Some(p) => {
+            compile::compile_pipeline(&p, output.as_deref(), skip_integrity, debug_pipeline).await
+        }
         None => {
             if output.is_some() {
                 anyhow::bail!(
@@ -259,8 +269,11 @@ async fn build_execution_context(
             Ok(stats) => {
                 log::info!(
                     "Agent stats: {} input / {} output tokens, {}s duration, {} tool calls, {} turns",
-                    stats.input_tokens, stats.output_tokens,
-                    stats.duration_seconds as u64, stats.tool_calls, stats.turns
+                    stats.input_tokens,
+                    stats.output_tokens,
+                    stats.duration_seconds as u64,
+                    stats.tool_calls,
+                    stats.turns
                 );
                 ctx.agent_stats = Some(stats);
             }
@@ -299,7 +312,10 @@ async fn process_cache_memory(
 }
 
 fn print_execution_summary(results: &[crate::safeoutputs::ExecutionResult]) {
-    let success_count = results.iter().filter(|r| r.success && !r.is_warning()).count();
+    let success_count = results
+        .iter()
+        .filter(|r| r.success && !r.is_warning())
+        .count();
     let warning_count = results.iter().filter(|r| r.is_warning()).count();
     let failure_count = results.iter().filter(|r| !r.success).count();
 
@@ -326,6 +342,7 @@ async fn main() -> Result<()> {
         Some(Commands::McpHttp { .. }) => "mcp-http",
         Some(Commands::Init { .. }) => "init",
         Some(Commands::Configure { .. }) => "configure",
+        Some(Commands::ExportGateSchema { .. }) => "export-gate-schema",
         None => "ado-aw",
     };
 
@@ -361,7 +378,11 @@ async fn main() -> Result<()> {
             bounding_directory,
             enabled_tools,
         } => {
-            let filter = if enabled_tools.is_empty() { None } else { Some(enabled_tools) };
+            let filter = if enabled_tools.is_empty() {
+                None
+            } else {
+                Some(enabled_tools)
+            };
             mcp::run(&output_directory, &bounding_directory, filter.as_deref()).await?;
         }
         Commands::Execute {
@@ -372,8 +393,15 @@ async fn main() -> Result<()> {
             ado_project,
             dry_run,
         } => {
-            run_execute(source, safe_output_dir, output_dir, ado_org_url, ado_project, dry_run)
-                .await?;
+            run_execute(
+                source,
+                safe_output_dir,
+                output_dir,
+                ado_org_url,
+                ado_project,
+                dry_run,
+            )
+            .await?;
         }
         Commands::McpHttp {
             port,
@@ -382,7 +410,11 @@ async fn main() -> Result<()> {
             bounding_directory,
             enabled_tools,
         } => {
-            let filter = if enabled_tools.is_empty() { None } else { Some(enabled_tools) };
+            let filter = if enabled_tools.is_empty() {
+                None
+            } else {
+                Some(enabled_tools)
+            };
             mcp::run_http(
                 &output_directory,
                 &bounding_directory,
@@ -414,6 +446,21 @@ async fn main() -> Result<()> {
                 definition_ids.as_deref(),
             )
             .await?;
+        }
+        Commands::ExportGateSchema { output } => {
+            let schema = compile::filter_ir::generate_gate_spec_schema();
+            match output {
+                Some(path) => {
+                    if let Some(parent) = path
+                        .parent()
+                        .filter(|parent| !parent.as_os_str().is_empty())
+                    {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::write(&path, &schema)?;
+                }
+                None => print!("{}", schema),
+            }
         }
     }
     Ok(())

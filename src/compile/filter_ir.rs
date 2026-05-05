@@ -136,6 +136,9 @@ impl Fact {
     }
 
     /// True if this fact is a free pipeline variable (no API/computation).
+    /// Only used for test assertions; the runtime evaluator has its own
+    /// mirror in `scripts/ado-script/src/shared/env-facts.ts::isPipelineVarFact`.
+    #[cfg(test)]
     pub fn is_pipeline_var(&self) -> bool {
         matches!(
             self,
@@ -205,7 +208,7 @@ pub enum Predicate {
         none_of: Vec<String>,
     },
 
-    /// Changed file glob matching via python3 fnmatch.
+    /// Changed file glob matching via the external gate evaluator.
     FileGlobMatch {
         include: Vec<String>,
         exclude: Vec<String>,
@@ -348,6 +351,7 @@ impl GateContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
     /// Informational — compilation continues.
+    #[allow(dead_code)]
     Info,
     /// Warning — compilation continues but user should review.
     Warning,
@@ -385,9 +389,7 @@ impl fmt::Display for Diagnostic {
 // ─── Lowering (Filters → IR) ───────────────────────────────────────────────
 
 /// Lower `PrFilters` into a list of `FilterCheck` IR nodes.
-pub fn lower_pr_filters(
-    filters: &super::types::PrFilters,
-) -> Vec<FilterCheck> {
+pub fn lower_pr_filters(filters: &super::types::PrFilters) -> Vec<FilterCheck> {
     let mut checks = Vec::new();
 
     // Tier 1: Pipeline variables
@@ -552,9 +554,7 @@ pub fn lower_pr_filters(
 }
 
 /// Lower `PipelineFilters` into a list of `FilterCheck` IR nodes.
-pub fn lower_pipeline_filters(
-    filters: &super::types::PipelineFilters,
-) -> Vec<FilterCheck> {
+pub fn lower_pipeline_filters(filters: &super::types::PipelineFilters) -> Vec<FilterCheck> {
     let mut checks = Vec::new();
 
     if let Some(sp) = &filters.source_pipeline {
@@ -647,20 +647,14 @@ pub fn validate_pr_filters(filters: &super::types::PrFilters) -> Vec<Diagnostic>
             diags.push(Diagnostic {
                 severity: Severity::Error,
                 filter: "time-window".into(),
-                message: format!(
-                    "start '{}' is not valid HH:MM format",
-                    tw.start
-                ),
+                message: format!("start '{}' is not valid HH:MM format", tw.start),
             });
         }
         if !is_valid_time(tw.end.as_str()) {
             diags.push(Diagnostic {
                 severity: Severity::Error,
                 filter: "time-window".into(),
-                message: format!(
-                    "end '{}' is not valid HH:MM format",
-                    tw.end
-                ),
+                message: format!("end '{}' is not valid HH:MM format", tw.end),
             });
         }
         if tw.start == tw.end {
@@ -745,9 +739,7 @@ pub fn validate_pr_filters(filters: &super::types::PrFilters) -> Vec<Diagnostic>
 }
 
 /// Validate pipeline filter configuration for conflicts.
-pub fn validate_pipeline_filters(
-    filters: &super::types::PipelineFilters,
-) -> Vec<Diagnostic> {
+pub fn validate_pipeline_filters(filters: &super::types::PipelineFilters) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
 
     if let Some(tw) = &filters.time_window {
@@ -818,11 +810,11 @@ fn is_valid_time(s: &str) -> bool {
 
 // ─── Serializable Gate Spec ─────────────────────────────────────────────────
 
-use serde::Serialize;
 use schemars::JsonSchema;
+use serde::Serialize;
 
 /// Serializable gate specification — the JSON document consumed by the
-/// Python gate evaluator at pipeline runtime.
+/// Node gate evaluator (`scripts/gate.js`) at pipeline runtime.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct GateSpec {
     pub context: GateContextSpec,
@@ -844,6 +836,10 @@ pub struct GateContextSpec {
 pub struct FactSpec {
     pub kind: String,
     pub failure_policy: String,
+    /// Kinds of other facts that must be acquired before this one.
+    /// Mirrors `Fact::dependencies()`. Carried in the spec so the gate
+    /// evaluator does not duplicate the dependency graph.
+    pub dependencies: Vec<String>,
 }
 
 /// Serialized filter check.
@@ -923,8 +919,8 @@ pub enum PredicateSpec {
 /// Generate the JSON Schema for the gate spec.
 ///
 /// This schema is the formal contract between the Rust compiler and the
-/// Python evaluator. It should be shipped in `scripts/gate-spec.schema.json`
-/// alongside the evaluator.
+/// TypeScript gate evaluator. It is used to generate `types.gen.ts` in
+/// the `scripts/ado-script` workspace.
 pub fn generate_gate_spec_schema() -> String {
     let schema = schemars::schema_for!(GateSpec);
     serde_json::to_string_pretty(&schema).expect("schema serialization")
@@ -933,13 +929,13 @@ pub fn generate_gate_spec_schema() -> String {
 // ─── Codegen ────────────────────────────────────────────────────────────────
 
 // The inline heredoc evaluator has been removed in favor of external script delivery.
-// See TriggerFiltersExtension for the external path and compile_gate_step_inline for Tier 1.
+// See TriggerFiltersExtension for the external path (bundled TypeScript gate.js).
 
 impl Fact {
     /// ADO macro exports required by this fact.
     ///
-    /// Returns `(env_var_name, ado_macro)` pairs that must be exported in
-    /// the bash shim for the Python evaluator to read.
+    /// Returns `(env_var_name, ado_macro)` pairs that must be set in the
+    /// step's `env:` block for the gate evaluator to read.
     pub fn ado_exports(&self) -> Vec<(&'static str, &'static str)> {
         match self {
             Fact::PrTitle => vec![("ADO_PR_TITLE", "$(System.PullRequest.Title)")],
@@ -1075,6 +1071,7 @@ pub fn build_gate_spec(ctx: GateContext, checks: &[FilterCheck]) -> anyhow::Resu
         .map(|f| FactSpec {
             kind: f.kind().into(),
             failure_policy: f.failure_policy().as_str().into(),
+            dependencies: f.dependencies().iter().map(|d| d.kind().into()).collect(),
         })
         .collect();
 
@@ -1111,7 +1108,7 @@ pub fn compile_gate_step_external(
     checks: &[FilterCheck],
     evaluator_path: &str,
 ) -> anyhow::Result<String> {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
 
     if checks.is_empty() {
         return Ok(String::new());
@@ -1124,12 +1121,9 @@ pub fn compile_gate_step_external(
     let exports = collect_ado_exports(checks)?;
 
     let mut step = String::new();
-    step.push_str(&format!("- bash: python3 '{}'\n", evaluator_path));
+    step.push_str(&format!("- bash: node '{}'\n", evaluator_path));
     step.push_str(&format!("  name: {}\n", ctx.step_name()));
-    step.push_str(&format!(
-        "  displayName: \"{}\"\n",
-        ctx.display_name()
-    ));
+    step.push_str(&format!("  displayName: \"{}\"\n", ctx.display_name()));
     step.push_str("  condition: succeeded()\n");
     step.push_str("  env:\n");
     // SYSTEM_ACCESSTOKEN is always needed for self-cancel (PATCH to builds API).
@@ -1145,10 +1139,10 @@ pub fn compile_gate_step_external(
     Ok(step)
 }
 
-
-
 /// Collect ADO macro exports needed by the given checks.
-fn collect_ado_exports(checks: &[FilterCheck]) -> anyhow::Result<Vec<(&'static str, &'static str)>> {
+fn collect_ado_exports(
+    checks: &[FilterCheck],
+) -> anyhow::Result<Vec<(&'static str, &'static str)>> {
     let facts_set = collect_ordered_facts(checks)?;
     let mut exports: Vec<(&str, &str)> = Vec::new();
     let mut seen = BTreeSet::new();
@@ -1191,7 +1185,6 @@ fn collect_ado_exports(checks: &[FilterCheck]) -> anyhow::Result<Vec<(&'static s
     Ok(exports)
 }
 
-
 /// Collect all facts required by checks, topologically sorted so every
 /// fact appears after its dependencies.
 ///
@@ -1213,10 +1206,7 @@ fn collect_ordered_facts(checks: &[FilterCheck]) -> anyhow::Result<Vec<Fact>> {
     while !remaining.is_empty() {
         let before = remaining.len();
         remaining.retain(|fact| {
-            let deps_met = fact
-                .dependencies()
-                .iter()
-                .all(|dep| emitted.contains(dep));
+            let deps_met = fact.dependencies().iter().all(|dep| emitted.contains(dep));
             if deps_met {
                 emitted.insert(*fact);
                 ordered.push(*fact);
@@ -1291,9 +1281,12 @@ mod tests {
             Fact::ChangedFileCount,
             Fact::CurrentUtcMinutes,
         ];
-        let kinds: BTreeSet<&str> =
-            all_facts.iter().map(|f| f.kind()).collect();
-        assert_eq!(kinds.len(), all_facts.len(), "fact kind strings must be unique");
+        let kinds: BTreeSet<&str> = all_facts.iter().map(|f| f.kind()).collect();
+        assert_eq!(
+            kinds.len(),
+            all_facts.len(),
+            "fact kind strings must be unique"
+        );
     }
 
     // ─── Lowering tests ────────────────────────────────────────────────
@@ -1349,7 +1342,10 @@ mod tests {
         };
         let checks = lower_pr_filters(&filters);
         assert_eq!(checks.len(), 1);
-        assert!(matches!(&checks[0].predicate, Predicate::LabelSetMatch { .. }));
+        assert!(matches!(
+            &checks[0].predicate,
+            Predicate::LabelSetMatch { .. }
+        ));
     }
 
     #[test]
@@ -1363,7 +1359,11 @@ mod tests {
         assert_eq!(checks.len(), 1);
         assert!(matches!(
             &checks[0].predicate,
-            Predicate::NumericRange { min: Some(5), max: Some(100), .. }
+            Predicate::NumericRange {
+                min: Some(5),
+                max: Some(100),
+                ..
+            }
         ));
     }
 
@@ -1396,8 +1396,11 @@ mod tests {
             ..Default::default()
         };
         let diags = validate_pr_filters(&filters);
-        assert!(diags.iter().any(|d| d.severity == Severity::Error
-            && d.filter.contains("min-changes")));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.severity == Severity::Error && d.filter.contains("min-changes"))
+        );
     }
 
     #[test]
@@ -1410,9 +1413,11 @@ mod tests {
             ..Default::default()
         };
         let diags = validate_pr_filters(&filters);
-        assert!(diags
-            .iter()
-            .any(|d| d.severity == Severity::Error && d.filter == "time-window"));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.severity == Severity::Error && d.filter == "time-window")
+        );
     }
 
     #[test]
@@ -1425,9 +1430,11 @@ mod tests {
             ..Default::default()
         };
         let diags = validate_pr_filters(&filters);
-        assert!(diags
-            .iter()
-            .any(|d| d.severity == Severity::Error && d.filter == "author"));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.severity == Severity::Error && d.filter == "author")
+        );
     }
 
     #[test]
@@ -1441,9 +1448,11 @@ mod tests {
             ..Default::default()
         };
         let diags = validate_pr_filters(&filters);
-        assert!(diags
-            .iter()
-            .any(|d| d.severity == Severity::Error && d.filter == "labels"));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.severity == Severity::Error && d.filter == "labels")
+        );
     }
 
     #[test]
@@ -1457,9 +1466,11 @@ mod tests {
             ..Default::default()
         };
         let diags = validate_pr_filters(&filters);
-        assert!(diags
-            .iter()
-            .any(|d| d.severity == Severity::Error && d.filter == "labels"));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.severity == Severity::Error && d.filter == "labels")
+        );
     }
 
     #[test]
@@ -1472,9 +1483,11 @@ mod tests {
             ..Default::default()
         };
         let diags = validate_pr_filters(&filters);
-        assert!(diags
-            .iter()
-            .any(|d| d.severity == Severity::Error && d.filter == "build-reason"));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.severity == Severity::Error && d.filter == "build-reason")
+        );
     }
 
     #[test]
@@ -1503,7 +1516,12 @@ mod tests {
 
     #[test]
     fn test_compile_gate_step_empty() {
-        let result = compile_gate_step_external(GateContext::PullRequest, &[], "/tmp/ado-aw-scripts/gate-eval.py").unwrap();
+        let result = compile_gate_step_external(
+            GateContext::PullRequest,
+            &[],
+            "/tmp/ado-aw-scripts/gate.js",
+        )
+        .unwrap();
         assert!(result.is_empty());
     }
 
@@ -1517,12 +1535,26 @@ mod tests {
             },
             build_tag_suffix: "title-mismatch",
         }];
-        let result = compile_gate_step_external(GateContext::PullRequest, &checks, "/tmp/ado-aw-scripts/gate-eval.py").unwrap();
+        let result = compile_gate_step_external(
+            GateContext::PullRequest,
+            &checks,
+            "/tmp/ado-aw-scripts/gate.js",
+        )
+        .unwrap();
         assert!(result.contains("- bash:"), "should be a bash step");
-        assert!(result.contains("GATE_SPEC"), "should include base64 spec in env");
-        assert!(result.contains("python3 '/tmp/ado-aw-scripts/gate-eval.py'"), "should reference external evaluator script");
+        assert!(
+            result.contains("GATE_SPEC"),
+            "should include base64 spec in env"
+        );
+        assert!(
+            result.contains("node '/tmp/ado-aw-scripts/gate.js'"),
+            "should reference external evaluator script"
+        );
         assert!(result.contains("name: prGate"), "should set step name");
-        assert!(result.contains("SYSTEM_ACCESSTOKEN"), "should pass access token via env block");
+        assert!(
+            result.contains("SYSTEM_ACCESSTOKEN"),
+            "should pass access token via env block"
+        );
     }
 
     #[test]
@@ -1535,10 +1567,21 @@ mod tests {
             },
             build_tag_suffix: "title-mismatch",
         }];
-        let result = compile_gate_step_external(GateContext::PullRequest, &checks, "/tmp/ado-aw-scripts/gate-eval.py").unwrap();
-        assert!(result.contains("ADO_BUILD_REASON"), "should export build reason");
+        let result = compile_gate_step_external(
+            GateContext::PullRequest,
+            &checks,
+            "/tmp/ado-aw-scripts/gate.js",
+        )
+        .unwrap();
+        assert!(
+            result.contains("ADO_BUILD_REASON"),
+            "should export build reason"
+        );
         assert!(result.contains("ADO_PR_TITLE"), "should export PR title");
-        assert!(result.contains("$(System.PullRequest.Title)"), "should reference ADO macro");
+        assert!(
+            result.contains("$(System.PullRequest.Title)"),
+            "should reference ADO macro"
+        );
     }
 
     #[test]
@@ -1551,10 +1594,24 @@ mod tests {
             },
             build_tag_suffix: "source-pipeline-mismatch",
         }];
-        let result = compile_gate_step_external(GateContext::PipelineCompletion, &checks, "/tmp/ado-aw-scripts/gate-eval.py").unwrap();
-        assert!(result.contains("name: pipelineGate"), "should set pipeline gate name");
-        assert!(result.contains("Evaluate pipeline filters"), "should set display name");
-        assert!(result.contains("ADO_TRIGGERED_BY_PIPELINE"), "should export pipeline macro");
+        let result = compile_gate_step_external(
+            GateContext::PipelineCompletion,
+            &checks,
+            "/tmp/ado-aw-scripts/gate.js",
+        )
+        .unwrap();
+        assert!(
+            result.contains("name: pipelineGate"),
+            "should set pipeline gate name"
+        );
+        assert!(
+            result.contains("Evaluate pipeline filters"),
+            "should set display name"
+        );
+        assert!(
+            result.contains("ADO_TRIGGERED_BY_PIPELINE"),
+            "should export pipeline macro"
+        );
     }
 
     #[test]
@@ -1567,9 +1624,20 @@ mod tests {
             },
             build_tag_suffix: "draft-mismatch",
         }];
-        let result = compile_gate_step_external(GateContext::PullRequest, &checks, "/tmp/ado-aw-scripts/gate-eval.py").unwrap();
-        assert!(result.contains("ADO_REPO_ID"), "should export repo ID for API calls");
-        assert!(result.contains("ADO_PR_ID"), "should export PR ID for API calls");
+        let result = compile_gate_step_external(
+            GateContext::PullRequest,
+            &checks,
+            "/tmp/ado-aw-scripts/gate.js",
+        )
+        .unwrap();
+        assert!(
+            result.contains("ADO_REPO_ID"),
+            "should export repo ID for API calls"
+        );
+        assert!(
+            result.contains("ADO_PR_ID"),
+            "should export PR ID for API calls"
+        );
     }
 
     #[test]
@@ -1582,10 +1650,21 @@ mod tests {
             },
             build_tag_suffix: "title-mismatch",
         }];
-        let result = compile_gate_step_external(GateContext::PullRequest, &checks, "/tmp/ado-aw-scripts/gate-eval.py").unwrap();
+        let result = compile_gate_step_external(
+            GateContext::PullRequest,
+            &checks,
+            "/tmp/ado-aw-scripts/gate.js",
+        )
+        .unwrap();
         // Check export lines only (evaluator script always contains these strings)
-        assert!(!result.contains("ADO_REPO_ID:"), "should not export repo ID for title-only");
-        assert!(!result.contains("ADO_PR_ID:"), "should not export PR ID for title-only");
+        assert!(
+            !result.contains("ADO_REPO_ID:"),
+            "should not export repo ID for title-only"
+        );
+        assert!(
+            !result.contains("ADO_PR_ID:"),
+            "should not export PR ID for title-only"
+        );
     }
 
     #[test]
@@ -1664,11 +1743,16 @@ mod tests {
         let diags = validate_pr_filters(&filters);
         assert!(diags.iter().all(|d| d.severity != Severity::Error));
 
-        let step = compile_gate_step_external(GateContext::PullRequest, &checks, "/tmp/ado-aw-scripts/gate-eval.py").unwrap();
+        let step = compile_gate_step_external(
+            GateContext::PullRequest,
+            &checks,
+            "/tmp/ado-aw-scripts/gate.js",
+        )
+        .unwrap();
         // Step structure
         assert!(step.contains("ADO_PR_TITLE"));
         assert!(step.contains("ADO_REPO_ID")); // for API-derived facts
-        assert!(step.contains("python3"));
+        assert!(step.contains("node"));
         assert!(step.contains("prGate"));
 
         // Spec content
@@ -1684,11 +1768,13 @@ mod tests {
     #[test]
     fn test_generate_schema_is_valid_json() {
         let schema = generate_gate_spec_schema();
-        let parsed: serde_json::Value = serde_json::from_str(&schema)
-            .expect("schema should be valid JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&schema).expect("schema should be valid JSON");
         assert!(parsed.is_object());
-        assert!(parsed.get("$schema").is_some() || parsed.get("type").is_some(),
-            "should be a JSON Schema document");
+        assert!(
+            parsed.get("$schema").is_some() || parsed.get("type").is_some(),
+            "should be a JSON Schema document"
+        );
     }
 
     #[test]
@@ -1696,9 +1782,17 @@ mod tests {
         let schema = generate_gate_spec_schema();
         // All predicate type discriminators should appear in the schema
         for pred_type in &[
-            "glob_match", "equals", "value_in_set", "value_not_in_set",
-            "numeric_range", "time_window", "label_set_match",
-            "file_glob_match", "and", "or", "not",
+            "glob_match",
+            "equals",
+            "value_in_set",
+            "value_not_in_set",
+            "numeric_range",
+            "time_window",
+            "label_set_match",
+            "file_glob_match",
+            "and",
+            "or",
+            "not",
         ] {
             assert!(
                 schema.contains(pred_type),
@@ -1737,12 +1831,10 @@ mod tests {
         let schema_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("scripts")
             .join("gate-spec.schema.json");
-        std::fs::write(&schema_path, &schema)
-            .expect("should write schema file");
+        std::fs::write(&schema_path, &schema).expect("should write schema file");
 
         // Verify it's readable and valid
         let read_back = std::fs::read_to_string(&schema_path).unwrap();
         let _: serde_json::Value = serde_json::from_str(&read_back).unwrap();
     }
 }
-

@@ -56,11 +56,41 @@ jobs:
           cd target/release
           cp ado-aw ado-aw-linux-x64
 
+      - name: Set up Node.js for ado-script bundle
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: scripts/ado-script/package-lock.json
+
+      - name: Build ado-script TypeScript bundle (gate.js)
+        working-directory: scripts/ado-script
+        run: |
+          npm ci
+          npm run build
+        # `npm run build` runs codegen + ncc + copies dist/gate/index.js
+        # to ../gate.js (i.e. scripts/gate.js), which is then included in
+        # scripts.zip by the next step.
+
       - name: Package scripts bundle
         run: |
           set -euo pipefail
           cd scripts
-          zip -r ../scripts.zip .
+          # Only ship the bundled artefacts that pipelines actually
+          # download and execute (currently: gate.js). The TS source,
+          # tests, and tooling under ado-script/ are excluded — they
+          # live in the repo for development and CI, not in the release.
+          zip -r ../scripts.zip . \
+            -x "ado-script/node_modules/*" \
+            -x "ado-script/dist/*" \
+            -x "ado-script/schema/*" \
+            -x "ado-script/src/*" \
+            -x "ado-script/test/*" \
+            -x "ado-script/package*.json" \
+            -x "ado-script/tsconfig.json" \
+            -x "ado-script/vitest.config*.ts" \
+            -x "ado-script/README.md" \
+            -x "ado-script/.gitignore"
 
       - name: Upload release assets
         env:

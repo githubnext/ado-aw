@@ -120,8 +120,8 @@ Every compiled pipeline runs as three sequential jobs:
 ├── ado-aw-derive/        # Proc-macro crate: #[derive(SanitizeConfig)], #[derive(SanitizeContent)]
 ├── examples/             # Example agent definitions
 ├── scripts/              # Supporting scripts shipped as release artifacts
-│   ├── gate-eval.py      # Python gate evaluator (data-driven filter evaluation)
-│   └── gate-spec.schema.json # JSON Schema for gate spec (generated from Rust types)
+│   ├── ado-script/       # TypeScript workspace for bundled gate.js (and future bundles)
+│   └── gate.js           # Bundled gate evaluator (built from scripts/ado-script/, see docs/ado-script.md)
 ├── tests/                # Integration tests and fixtures
 ├── docs/                 # Per-concept reference documentation (see index below)
 ├── Cargo.toml            # Rust dependencies
@@ -133,6 +133,7 @@ Every compiled pipeline runs as three sequential jobs:
 - **Language**: Rust (2024 edition) - Note: Rust 2024 edition exists and is the edition used by this project
 - **CLI Framework**: clap v4 with derive macros
 - **Error Handling**: anyhow for ergonomic error propagation
+- **Bundled scripts**: TypeScript + ncc (`scripts/ado-script/`) — compiled gate evaluator and future internal helpers; see [`docs/ado-script.md`](docs/ado-script.md).
 - **Async Runtime**: tokio with full features
 - **YAML Parsing**: serde_yaml
 - **MCP Server**: rmcp with server and transport-io features
@@ -183,6 +184,9 @@ index to jump to the right page.
 - [`docs/filter-ir.md`](docs/filter-ir.md) — filter expression IR
   specification: `Fact`/`Predicate` types, three-pass compilation (lower →
   validate → codegen), gate step generation, adding new filter types.
+- [`docs/ado-script.md`](docs/ado-script.md) — `ado-script` workspace
+  (`scripts/ado-script/`): the bundled TypeScript runtime helpers (today:
+  `gate.js`), schemars-driven type codegen, and the A2 design decision.
 - [`docs/local-development.md`](docs/local-development.md) — local development
   setup notes.
 

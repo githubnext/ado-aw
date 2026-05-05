@@ -1,0 +1,67 @@
+name: ado-script Workspace
+
+on:
+  pull_request:
+    paths:
+      - "scripts/ado-script/**"
+      - "src/compile/filter_ir.rs"
+      - "src/compile/extensions/trigger_filters.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/ado-script.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ado-script:
+    name: Build, Test & Drift-Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: scripts/ado-script/package-lock.json
+
+      - name: Install workspace dependencies
+        working-directory: scripts/ado-script
+        run: npm ci
+
+      - name: Regenerate types from Rust IR (codegen)
+        working-directory: scripts/ado-script
+        run: npm run codegen
+
+      - name: Verify generated TypeScript is up to date
+        run: |
+          if ! git diff --exit-code -- scripts/ado-script/src/shared/types.gen.ts; then
+            echo ""
+            echo "::error::types.gen.ts is out of date with the Rust IR."
+            echo "Run 'cd scripts/ado-script && npm run codegen' and commit the result."
+            exit 1
+          fi
+
+      - name: Run TypeScript tests
+        working-directory: scripts/ado-script
+        run: npm test
+
+      - name: Type-check
+        working-directory: scripts/ado-script
+        run: npm run typecheck
+
+      - name: Build bundle (gate.js)
+        working-directory: scripts/ado-script
+        run: npm run build
+
+      - name: Smoke-test bundle
+        working-directory: scripts/ado-script
+        run: npx vitest run -c vitest.config.smoke.ts
+
+      - name: E2E gate test
+        run: cargo test --test gate_e2e -- --ignored --nocapture
