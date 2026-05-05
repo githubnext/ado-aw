@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.3](https://github.com/githubnext/ado-aw/compare/v0.22.2...v0.22.3) (2026-05-05)
+
+
+### Bug Fixes
+
+* **compile:** show full error chain in batch compile output ([#411](https://github.com/githubnext/ado-aw/issues/411)) ([157ed02](https://github.com/githubnext/ado-aw/commit/157ed02bde1253cc4e31715187962161cd73b256))
+
 ## [0.22.2](https://github.com/githubnext/ado-aw/compare/v0.22.1...v0.22.2) (2026-05-05)
 
 
