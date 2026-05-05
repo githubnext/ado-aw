@@ -120,7 +120,9 @@ pub async fn execute_safe_outputs(
             }
             Err(e) => {
                 error!("[{}/{}] Execution error: {}", i + 1, entries.len(), e);
-                let result = ExecutionResult::failure(format!("Failed to execute entry: {}", e));
+                let raw_msg = format!("Failed to execute entry: {}", e);
+                let safe_msg = neutralize_pipeline_commands(&raw_msg);
+                let result = ExecutionResult::failure(safe_msg);
                 println!("[{}/{}] ✗ - {}", i + 1, entries.len(), result.message);
                 results.push(result);
             }
@@ -960,6 +962,71 @@ mod tests {
     fn test_extract_entry_context_strips_control_chars_from_path() {
         let entry = serde_json::json!({"name": "create-wiki-page", "path": "/Page\n/Injected"});
         assert_eq!(extract_entry_context(&entry), " (path: /Page/Injected)");
+    }
+
+    #[test]
+    fn test_extract_entry_context_neutralizes_shorthand_pipeline_command_in_title() {
+        let entry = serde_json::json!({
+            "title": "##[error]Build failed – exfiltrate secrets"
+        });
+        let ctx = extract_entry_context(&entry);
+        assert!(
+            !ctx.contains("##[error]"),
+            "##[ shorthand in title should be neutralized; got: {ctx}"
+        );
+        assert!(
+            ctx.contains("`##[`"),
+            "##[ shorthand should be wrapped in backticks; got: {ctx}"
+        );
+    }
+
+    #[test]
+    fn test_extract_entry_context_neutralizes_shorthand_pipeline_command_in_path() {
+        let entry = serde_json::json!({
+            "path": "##[section]My Section"
+        });
+        let ctx = extract_entry_context(&entry);
+        assert!(
+            !ctx.contains("##[section]"),
+            "##[ shorthand in path should be neutralized; got: {ctx}"
+        );
+        assert!(
+            ctx.contains("`##[`"),
+            "##[ shorthand should be wrapped in backticks; got: {ctx}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_safe_outputs_unknown_tool_with_vso_in_name_does_not_echo_raw_command() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let safe_output_path = temp_dir.path().join(SAFE_OUTPUT_FILENAME);
+
+        // Simulate an adversarial NDJSON entry where the agent injects a VSO pipeline command
+        // into the 'name' field, trying to get it echoed to stdout by Stage 3.
+        let ndjson =
+            "{\"name\":\"##vso[task.setvariable variable=PAT;issecret=true]stolen\"}\n";
+        tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
+
+        let ctx = ExecutionContext::default();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx).await.unwrap();
+
+        // One entry processed (as a failure — unknown tool)
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].success);
+
+        // The raw ##vso[task... pattern must not appear — neutralization breaks it at ##vso[
+        // so "##vso[task" cannot appear (it becomes "`##vso[`task").
+        assert!(
+            !results[0].message.contains("##vso[task"),
+            "Raw VSO pipeline command must not appear in Stage 3 output; got: {}",
+            results[0].message
+        );
+        // Confirm the neutralized (backtick-wrapped) form is present.
+        assert!(
+            results[0].message.contains("`##vso[`"),
+            "VSO command should be neutralized (wrapped in backticks); got: {}",
+            results[0].message
+        );
     }
 
     // --- resolve_max and DEFAULT_MAX unit tests ---
