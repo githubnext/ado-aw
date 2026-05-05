@@ -1,7 +1,8 @@
 ---
 name: "Daily Code Review"
 description: "Reviews code changes and creates summary reports"
-schedule: daily
+on:
+  schedule: daily
 repositories:
   - repository: azure-devops-agentic-pipelines
     type: git
