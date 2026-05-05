@@ -1194,6 +1194,42 @@ pub fn validate_resolve_pr_thread_statuses(front_matter: &FrontMatter) -> Result
     Ok(())
 }
 
+/// Warn when `upload-pipeline-artifact` is configured without artifact-name restrictions.
+///
+/// Without `allowed-artifact-names`, agents can publish artifacts under any name, which
+/// makes it easy for an agent to exfiltrate workspace data or to mislead reviewers with a
+/// deceptive artifact name. This is a warning (not an error) because unrestricted names
+/// are still valid — operators may intentionally want no restrictions — but the absence
+/// of configuration deserves a nudge to make an explicit choice.
+///
+/// Returns a list of warning strings (0 or 1 entries) so callers can print them and
+/// tests can inspect the messages without capturing stderr.
+pub fn warn_upload_pipeline_artifact_config(front_matter: &FrontMatter) -> Vec<String> {
+    let Some(config_value) = front_matter.safe_outputs.get("upload-pipeline-artifact") else {
+        return Vec::new();
+    };
+
+    let has_name_restriction = config_value
+        .as_object()
+        .and_then(|obj| obj.get("allowed-artifact-names"))
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| !a.is_empty());
+
+    if has_name_restriction {
+        return Vec::new();
+    }
+
+    vec![format!(
+        "Agent '{}': safe-outputs.upload-pipeline-artifact has no \
+         'allowed-artifact-names' restriction — any artifact name will be \
+         accepted. Consider adding an allow-list to restrict which artifact \
+         names the agent may publish:\n\n  \
+         safe-outputs:\n    upload-pipeline-artifact:\n      \
+         allowed-artifact-names:\n        - my-artifact",
+        front_matter.name
+    )]
+}
+
 /// Generate the setup job YAML.
 ///
 /// Extension `setup_steps()` are injected first (download + gate steps for
@@ -2197,6 +2233,9 @@ pub async fn compile_shared(
     validate_submit_pr_review_events(front_matter)?;
     validate_update_pr_votes(front_matter)?;
     validate_resolve_pr_thread_statuses(front_matter)?;
+    for w in warn_upload_pipeline_artifact_config(front_matter) {
+        eprintln!("Warning: {}", w);
+    }
 
     // 11. Threat analysis prompt
     let threat_analysis_prompt = include_str!("../data/threat-analysis.md");
@@ -3412,6 +3451,64 @@ mod tests {
             "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pr-thread:\n    allowed-statuses:\n      - fixed\n      - wont-fix\n---\n"
         ).unwrap();
         assert!(validate_resolve_pr_thread_statuses(&fm).is_ok());
+    }
+
+    // ─── warn_upload_pipeline_artifact_config ─────────────────────────────────
+
+    #[test]
+    fn test_upload_pipeline_artifact_no_warning_when_not_configured() {
+        let fm = minimal_front_matter();
+        let warnings = warn_upload_pipeline_artifact_config(&fm);
+        assert!(warnings.is_empty(), "no warning expected when tool is not configured");
+    }
+
+    #[test]
+    fn test_upload_pipeline_artifact_warns_when_no_allowed_names() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\npermissions:\n  write: my-sc\nsafe-outputs:\n  upload-pipeline-artifact: {}\n---\n"
+        ).unwrap();
+        let warnings = warn_upload_pipeline_artifact_config(&fm);
+        assert_eq!(warnings.len(), 1, "expected exactly one warning");
+        assert!(warnings[0].contains("allowed-artifact-names"), "message: {}", warnings[0]);
+    }
+
+    #[test]
+    fn test_upload_pipeline_artifact_warns_when_allowed_names_empty_list() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\npermissions:\n  write: my-sc\nsafe-outputs:\n  upload-pipeline-artifact:\n    allowed-artifact-names: []\n---\n"
+        ).unwrap();
+        let warnings = warn_upload_pipeline_artifact_config(&fm);
+        assert_eq!(warnings.len(), 1, "expected exactly one warning");
+        assert!(warnings[0].contains("allowed-artifact-names"), "message: {}", warnings[0]);
+    }
+
+    #[test]
+    fn test_upload_pipeline_artifact_no_warning_when_allowed_names_set() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\npermissions:\n  write: my-sc\nsafe-outputs:\n  upload-pipeline-artifact:\n    allowed-artifact-names:\n      - my-artifact\n---\n"
+        ).unwrap();
+        let warnings = warn_upload_pipeline_artifact_config(&fm);
+        assert!(warnings.is_empty(), "no warning expected when allowed-artifact-names is set");
+    }
+
+    #[test]
+    fn test_upload_pipeline_artifact_warns_when_scalar_value() {
+        // `upload-pipeline-artifact: true` has no config object → no allowed-artifact-names
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\npermissions:\n  write: my-sc\nsafe-outputs:\n  upload-pipeline-artifact: true\n---\n"
+        ).unwrap();
+        let warnings = warn_upload_pipeline_artifact_config(&fm);
+        assert_eq!(warnings.len(), 1, "expected warning for scalar config value");
+    }
+
+    #[test]
+    fn test_upload_pipeline_artifact_warning_includes_agent_name() {
+        let (fm, _) = parse_markdown(
+            "---\nname: my-pipeline\ndescription: test\npermissions:\n  write: my-sc\nsafe-outputs:\n  upload-pipeline-artifact: {}\n---\n"
+        ).unwrap();
+        let warnings = warn_upload_pipeline_artifact_config(&fm);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("my-pipeline"), "warning should include agent name");
     }
 
     // ─── Enabled tools args generation ──────────────────────────────────
