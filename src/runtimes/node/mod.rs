@@ -159,9 +159,9 @@ pub fn generate_ensure_npmrc(config: &NodeRuntimeConfig) -> String {
 - bash: |\n\
     if [ ! -f .npmrc ]; then\n\
       echo 'registry={registry}' > .npmrc\n\
-      echo \"Created .npmrc with registry={registry}\"\n\
+      echo 'Created .npmrc with registry={registry}'\n\
     else\n\
-      echo \".npmrc already exists, skipping creation\"\n\
+      echo '.npmrc already exists, skipping creation'\n\
     fi\n\
   displayName: 'Ensure .npmrc exists'"
     )

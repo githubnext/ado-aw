@@ -1913,18 +1913,30 @@ pub fn collect_awf_path_prepends(extensions: &[super::extensions::Extension]) ->
 }
 
 /// Collects `agent_env_vars()` from all extensions, validates keys against
-/// `BLOCKED_ENV_KEYS`, and formats them as YAML `KEY: "value"` lines for
-/// injection into the `{{ engine_env }}` block.
+/// `BLOCKED_ENV_KEYS`, deduplicates (bails on collision), and formats them
+/// as YAML `KEY: "value"` lines for injection into the `{{ engine_env }}` block.
 ///
 /// Returns an empty string if no extensions declare env vars.
 pub fn collect_agent_env_vars(extensions: &[super::extensions::Extension]) -> anyhow::Result<String> {
     use crate::engine::BLOCKED_ENV_KEYS;
     use crate::validate;
+    use std::collections::HashSet;
 
     let mut lines = Vec::new();
+    let mut seen_keys = HashSet::new();
 
     for ext in extensions {
         for (key, value) in ext.agent_env_vars() {
+            // Deduplicate: bail on collision
+            if !seen_keys.insert(key.clone()) {
+                anyhow::bail!(
+                    "Extension '{}' declares agent env var '{}' which was already declared \
+                     by a previous extension. Each env var key must be unique.",
+                    ext.name(),
+                    key,
+                );
+            }
+
             // Validate key is not blocked
             if BLOCKED_ENV_KEYS.iter().any(|blocked| key.eq_ignore_ascii_case(blocked)) {
                 anyhow::bail!(
@@ -1945,18 +1957,14 @@ pub fn collect_agent_env_vars(extensions: &[super::extensions::Extension]) -> an
                 );
             }
 
-            // Validate value for injection
-            if validate::contains_pipeline_command(&value) {
+            // Validate value for injection (defence in depth — covers ADO expressions,
+            // pipeline commands, template markers, and newlines)
+            validate::reject_pipeline_injection(&value, &format!("agent env var '{key}'"))?;
+
+            if value.contains('"') || value.contains('\'') {
                 anyhow::bail!(
-                    "Extension '{}' agent env var '{}' contains a pipeline command injection.",
-                    ext.name(),
-                    key,
-                );
-            }
-            if value.contains('"') {
-                anyhow::bail!(
-                    "Extension '{}' agent env var '{}' value contains a double-quote character \
-                     which would produce malformed YAML.",
+                    "Extension '{}' agent env var '{}' value contains a quote character \
+                     which would produce malformed YAML or bash syntax.",
                     ext.name(),
                     key,
                 );

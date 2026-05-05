@@ -56,15 +56,18 @@ runtimes:
 |-------|------|-------------|
 | `version` | string | Python version to install (e.g., `"3.12"`, `"3.11"`). Passed to `UsePythonVersion@0` `versionSpec`. Defaults to latest 3.x. |
 | `feed-url` | string | Internal PyPI feed URL. Injects `PIP_INDEX_URL` and `UV_DEFAULT_INDEX` env vars into the agent environment. |
-| `config` | string | _Reserved for future use._ Path to a pip/uv config file. Currently produces a compile error if specified. |
+| `config` | string | Path to a pip/uv config file. Accepted with a warning — the file will not be available inside the AWF agent environment until proxy-auth support lands. |
 
 When enabled, the compiler:
-- Injects `UsePythonVersion@0` and `PipAuthenticate@1` steps into `{{ prepare_steps }}` (runs before AWF)
+- Injects `UsePythonVersion@0` into `{{ prepare_steps }}` (runs before AWF)
+- If `feed-url` or `config` is set, also injects `PipAuthenticate@1` to authenticate the ADO build service identity for internal feeds
 - Auto-adds `python`, `python3`, `pip`, `pip3`, `uv` to the bash command allow-list
 - Adds Python ecosystem domains to the network allowlist (pypi.org, pythonhosted.org, etc.)
 - If `feed-url` is set, injects `PIP_INDEX_URL` and `UV_DEFAULT_INDEX` env vars into the agent environment
 - Appends a prompt supplement informing the agent about Python availability
 - No AWF mounts or PATH prepends needed — `UsePythonVersion@0` installs to `/opt/hostedtoolcache` (auto-mounted by AWF) and publishes PATH entries that AWF merges via `$GITHUB_PATH`
+
+**Note:** `PipAuthenticate@1` is currently emitted with an empty `artifactFeeds` input, which configures credentials for all feeds accessible to the build service identity. If your internal feed requires scoped authentication to a specific Azure Artifacts feed, this may need future refinement.
 
 ### Node.js (`node:`)
 
@@ -88,10 +91,11 @@ runtimes:
 |-------|------|-------------|
 | `version` | string | Node.js version to install (e.g., `"22.x"`, `"20.x"`). Passed to `NodeTool@0` `versionSpec`. Defaults to `"22.x"`. |
 | `feed-url` | string | Internal npm registry URL. Injects `NPM_CONFIG_REGISTRY` env var into the agent environment. |
-| `config` | string | _Reserved for future use._ Path to an .npmrc config file. Currently produces a compile error if specified. |
+| `config` | string | Path to an .npmrc config file. Accepted with a warning — the file will not be available inside the AWF agent environment until proxy-auth support lands. |
 
 When enabled, the compiler:
-- Injects `NodeTool@0` and `npmAuthenticate@0` steps into `{{ prepare_steps }}` (runs before AWF)
+- Injects `NodeTool@0` into `{{ prepare_steps }}` (runs before AWF)
+- If `feed-url` or `config` is set, also injects `npmAuthenticate@0` (and an ensure-`.npmrc` step) to authenticate the ADO build service identity for internal feeds
 - Auto-adds `node`, `npm`, `npx` to the bash command allow-list
 - Adds Node ecosystem domains to the network allowlist (npmjs.org, nodejs.org, etc.)
 - If `feed-url` is set, injects `NPM_CONFIG_REGISTRY` env var into the agent environment
