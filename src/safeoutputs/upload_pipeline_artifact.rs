@@ -404,15 +404,20 @@ impl Executor for UploadPipelineArtifactResult {
             .unwrap_or(&self.staged_file);
 
         // ── Step 1: Create container ─────────────────────────────────────
+        // The `scopeIdentifier` query parameter (project GUID) is required for
+        // the POST to route correctly in ADO.  Omitting it causes a 405 because
+        // the unscoped `_apis/resources/containers` collection does not support
+        // POST.  The body only needs the container name; the project scope must
+        // be in the query string.
         let container_url = format!(
-            "{}/_apis/resources/containers?api-version=7.1-preview.4",
+            "{}/_apis/resources/containers?scopeIdentifier={}&api-version=7.1-preview.4",
             org_url.trim_end_matches('/'),
+            utf8_percent_encode(project_id, PATH_SEGMENT),
         );
         debug!("Creating container for artifact '{}': {}", final_name, container_url);
 
         let container_body = serde_json::json!({
             "name": final_name,
-            "scope": project_id,
         });
         let container_resp = client
             .post(&container_url)
@@ -445,8 +450,9 @@ impl Executor for UploadPipelineArtifactResult {
         debug!("Container created: id={}", container_id);
 
         // ── Step 2: Upload file to container ─────────────────────────────
+        // Use `scopeIdentifier` (not `scope`) to match the ADO containers API.
         let upload_url = format!(
-            "{}/_apis/resources/containers/{}?itemPath={}/{}&scope={}&api-version=7.1-preview.4",
+            "{}/_apis/resources/containers/{}?itemPath={}/{}&scopeIdentifier={}&api-version=7.1-preview.4",
             org_url.trim_end_matches('/'),
             container_id,
             utf8_percent_encode(&final_name, PATH_SEGMENT),
