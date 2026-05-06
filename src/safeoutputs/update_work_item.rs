@@ -187,6 +187,13 @@ pub struct UpdateWorkItemConfig {
     /// Enable tag updates (default: false)
     #[serde(default)]
     pub tags: bool,
+
+    /// Allowlist of tags the agent is permitted to set. Only checked when `tags: true`.
+    /// If empty, any agent-provided tags are accepted.
+    /// Supports prefix wildcards: entries ending with `*` match by prefix
+    /// (e.g., `"agent-*"` matches `"agent-created"`, `"agent-review"`, etc.).
+    #[serde(default, rename = "allowed-tags")]
+    pub allowed_tags: Vec<String>,
 }
 
 /// Check that `config.target` permits updating the given work item ID.
@@ -456,6 +463,27 @@ impl Executor for UpdateWorkItemResult {
         }
         if let Some(result) = check_field_permissions(self, &config) {
             return Ok(result);
+        }
+
+        // Validate agent-provided tags against allowed-tags (if configured)
+        if let Some(tags) = &self.tags {
+            if !config.allowed_tags.is_empty() {
+                let disallowed: Vec<_> = tags
+                    .iter()
+                    .filter(|tag| {
+                        !config
+                            .allowed_tags
+                            .iter()
+                            .any(|pattern| super::tag_matches_pattern(tag, pattern))
+                    })
+                    .collect();
+                if !disallowed.is_empty() {
+                    return Ok(ExecutionResult::failure(format!(
+                        "Agent-provided tags not in allowed-tags: {}",
+                        disallowed.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(", ")
+                    )));
+                }
+            }
         }
 
         let client = reqwest::Client::new();
@@ -1028,5 +1056,131 @@ tag-prefix: "agent-"
         };
         let result: Result<UpdateWorkItemResult, _> = params.try_into();
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_config_allowed_tags_defaults_to_empty() {
+        let config = UpdateWorkItemConfig::default();
+        assert!(config.allowed_tags.is_empty());
+    }
+
+    #[test]
+    fn test_config_allowed_tags_deserializes() {
+        let yaml = r#"
+tags: true
+target: "*"
+allowed-tags:
+  - "agent-*"
+  - automated
+"#;
+        let config: UpdateWorkItemConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.tags);
+        assert_eq!(config.allowed_tags, vec!["agent-*", "automated"]);
+    }
+
+    #[tokio::test]
+    async fn test_execute_rejects_disallowed_tags() {
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+
+        let params = UpdateWorkItemParams {
+            id: 42,
+            title: None,
+            body: None,
+            state: None,
+            area_path: None,
+            iteration_path: None,
+            assignee: None,
+            tags: Some(vec!["disallowed-tag".to_string()]),
+        };
+        let mut result: UpdateWorkItemResult = params.try_into().unwrap();
+
+        let mut tool_configs: HashMap<String, serde_json::Value> = HashMap::new();
+        tool_configs.insert(
+            "update-work-item".to_string(),
+            serde_json::json!({
+                "tags": true,
+                "target": "*",
+                "allowed-tags": ["agent-*", "automated"]
+            }),
+        );
+
+        let ctx = ExecutionContext {
+            ado_org_url: Some("https://dev.azure.com/myorg".to_string()),
+            ado_project: Some("MyProject".to_string()),
+            access_token: Some("token".to_string()),
+            working_directory: PathBuf::from("."),
+            source_directory: PathBuf::from("."),
+            tool_configs,
+            allowed_repositories: HashMap::new(),
+            agent_stats: None,
+            dry_run: false,
+            ..Default::default()
+        };
+
+        let exec_result = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!exec_result.success);
+        assert!(
+            exec_result.message.contains("not in allowed-tags"),
+            "Expected allowed-tags error, got: {}",
+            exec_result.message
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_accepts_tags_matching_wildcard() {
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+
+        let params = UpdateWorkItemParams {
+            id: 42,
+            title: None,
+            body: None,
+            state: None,
+            area_path: None,
+            iteration_path: None,
+            assignee: None,
+            tags: Some(vec!["agent-created".to_string()]),
+        };
+        let mut result: UpdateWorkItemResult = params.try_into().unwrap();
+
+        let mut tool_configs: HashMap<String, serde_json::Value> = HashMap::new();
+        tool_configs.insert(
+            "update-work-item".to_string(),
+            serde_json::json!({
+                "tags": true,
+                "target": "*",
+                "allowed-tags": ["agent-*"]
+            }),
+        );
+
+        // This will fail at the ADO API call, but it should pass the allowed-tags check.
+        // We just verify we don't get the allowed-tags error back.
+        let ctx = ExecutionContext {
+            ado_org_url: Some("https://dev.azure.com/myorg".to_string()),
+            ado_project: Some("MyProject".to_string()),
+            access_token: Some("token".to_string()),
+            working_directory: PathBuf::from("."),
+            source_directory: PathBuf::from("."),
+            tool_configs,
+            allowed_repositories: HashMap::new(),
+            agent_stats: None,
+            dry_run: false,
+            ..Default::default()
+        };
+
+        let exec_result = result.execute_sanitized(&ctx).await;
+        // Should not be an "allowed-tags" error — it will fail at the ADO HTTP call
+        // or succeed. Either way, the allowed-tags guard passed.
+        match exec_result {
+            Ok(r) => assert!(
+                !r.message.contains("not in allowed-tags"),
+                "Should not have failed allowed-tags check"
+            ),
+            Err(e) => assert!(
+                !e.to_string().contains("not in allowed-tags"),
+                "Should not have failed allowed-tags check"
+            ),
+        }
     }
 }

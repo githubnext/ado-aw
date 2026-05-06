@@ -209,6 +209,24 @@ pub(crate) fn resolve_repo_name(
     }
 }
 
+/// Return `true` if `tag` is matched by `pattern`.
+///
+/// Pattern matching rules (consistent with `add-build-tag` and `allowed-labels` in gh-aw):
+/// - Patterns ending with `*` are prefix wildcards: `"agent-*"` matches any tag whose
+///   prefix (before the `*`) case-insensitively equals the start of `tag`.
+/// - All other patterns are compared with case-insensitive exact equality.
+///
+/// Both comparisons are **case-insensitive** so that an operator who writes
+/// `allowed-tags: ["Agent-*"]` correctly matches an agent-provided tag `"agent-created"`.
+pub(crate) fn tag_matches_pattern(tag: &str, pattern: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        tag.to_ascii_lowercase()
+            .starts_with(&prefix.to_ascii_lowercase())
+    } else {
+        pattern.eq_ignore_ascii_case(tag)
+    }
+}
+
 /// Validate a string against `git check-ref-format` rules.
 ///
 /// Returns `Ok(())` if the name is valid, or an `Err` describing the violation.
@@ -461,5 +479,40 @@ mod tests {
         assert!(validate_git_ref_name("feature/add-login", "b").is_ok());
         assert!(validate_git_ref_name("v1.2.3", "b").is_ok());
         assert!(validate_git_ref_name("release/2026-04-17", "b").is_ok());
+    }
+
+    // ─── tag_matches_pattern ───────────────────────────────────────────────
+
+    #[test]
+    fn test_tag_matches_pattern_exact_case_insensitive() {
+        assert!(tag_matches_pattern("Review", "review"));
+        assert!(tag_matches_pattern("AUTOMATED", "Automated"));
+        assert!(tag_matches_pattern("automated", "automated"));
+    }
+
+    #[test]
+    fn test_tag_matches_pattern_exact_mismatch() {
+        assert!(!tag_matches_pattern("other", "review"));
+    }
+
+    #[test]
+    fn test_tag_matches_pattern_prefix_wildcard_case_insensitive() {
+        // Uppercase pattern prefix must match lowercase tag
+        assert!(tag_matches_pattern("agent-created", "Agent-*"));
+        // Lowercase pattern prefix must match mixed-case tag
+        assert!(tag_matches_pattern("Agent-Review", "agent-*"));
+        // Exact prefix boundary
+        assert!(tag_matches_pattern("agent-", "agent-*"));
+    }
+
+    #[test]
+    fn test_tag_matches_pattern_prefix_wildcard_mismatch() {
+        assert!(!tag_matches_pattern("bot-created", "agent-*"));
+    }
+
+    #[test]
+    fn test_tag_matches_pattern_star_only_matches_everything() {
+        assert!(tag_matches_pattern("anything", "*"));
+        assert!(tag_matches_pattern("", "*"));
     }
 }
