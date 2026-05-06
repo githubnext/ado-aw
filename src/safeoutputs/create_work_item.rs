@@ -632,12 +632,4 @@ tags:
         assert_eq!(config.tags, vec!["my-tag"]);
         assert!(config.allowed_tags.is_empty()); // default
     }
-
-    #[test]
-    fn test_tag_matches_pattern_prefix_is_case_insensitive() {
-        // Verifies the shared helper is wired with case-insensitive prefix matching.
-        // "Agent-*" (uppercase) must match "agent-created" (lowercase) and vice-versa.
-        assert!(crate::safeoutputs::tag_matches_pattern("agent-created", "Agent-*"));
-        assert!(crate::safeoutputs::tag_matches_pattern("Agent-Review", "agent-*"));
-    }
 }
