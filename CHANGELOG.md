@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.4](https://github.com/githubnext/ado-aw/compare/v0.22.3...v0.22.4) (2026-05-06)
+
+
+### Bug Fixes
+
+* **execute:** don't overwrite env-derived ADO context with None CLI args ([#413](https://github.com/githubnext/ado-aw/issues/413)) ([aa8a09f](https://github.com/githubnext/ado-aw/commit/aa8a09f294629c78bb10686333b499a2f828a8e0))
+
 ## [0.22.3](https://github.com/githubnext/ado-aw/compare/v0.22.2...v0.22.3) (2026-05-05)
 
 
