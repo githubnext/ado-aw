@@ -288,6 +288,7 @@ pub use report_incomplete::*;
 pub use resolve_pr_thread::*;
 pub use result::{
     ExecutionContext, ExecutionResult, Executor, ToolResult, Validate, anyhow_to_mcp_error,
+    org_from_url,
 };
 pub use submit_pr_review::*;
 pub use update_pr::*;

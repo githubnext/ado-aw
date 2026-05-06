@@ -249,12 +249,7 @@ async fn build_execution_context(
     // otherwise keep the defaults from SYSTEM_TEAMFOUNDATIONCOLLECTIONURI /
     // SYSTEM_TEAMPROJECT that ExecutionContext::default() already resolved.
     if let Some(url) = ado_org_url {
-        ctx.ado_organization = url
-            .trim_end_matches('/')
-            .rsplit('/')
-            .next()
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
+        ctx.ado_organization = crate::safeoutputs::org_from_url(&url);
         ctx.ado_org_url = Some(url);
     }
     if let Some(project) = ado_project {
