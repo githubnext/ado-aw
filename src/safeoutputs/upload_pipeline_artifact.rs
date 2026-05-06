@@ -15,6 +15,17 @@
 //! 3. **Associate artifact** — `POST /_apis/build/builds/{buildId}/artifacts`
 //!    links the container to the build as a named artifact.
 //!
+//! Steps 1 and 2 target the **FileContainer service**, which in Azure DevOps
+//! Services lives at a different host than the main org URL
+//! (`vstmr.dev.azure.com/{org}` rather than `dev.azure.com/{org}`).  Posting
+//! to the main org URL returns HTTP 405 because the routing proxy does not
+//! handle the unscoped `_apis/resources/containers` POST.  The executor
+//! discovers the correct base URL by calling the resource-areas endpoint:
+//! `GET {org}/_apis/resourceAreas/e4f45d1e-c5e5-4112-a594-9d59a8f6c707`
+//! and reading `locationUrl` from the response.  If the lookup fails (e.g.
+//! an on-premises ADO Server instance that doesn't support resource areas),
+//! it falls back to the plain org URL.
+//!
 //! The flow mirrors `upload-build-attachment`:
 //!
 //! * **Stage 1 (MCP, in the agent sandbox):** the MCP server validates the
@@ -212,6 +223,77 @@ impl Default for UploadPipelineArtifactConfig {
     }
 }
 
+/// Resource-area ID for the Azure DevOps FileContainer (distributedtask) service.
+///
+/// Querying `GET {org}/_apis/resourceAreas/{CONTAINER_RESOURCE_AREA_ID}` returns
+/// the `locationUrl` for the service that actually handles `_apis/resources/containers`
+/// requests (e.g. `https://vstmr.dev.azure.com/{org}/` in Azure DevOps Services).
+/// Posting to the main org URL returns HTTP 405 because that routing proxy does not
+/// expose a POST handler for the unscoped containers collection.
+const CONTAINER_RESOURCE_AREA_ID: &str = "e4f45d1e-c5e5-4112-a594-9d59a8f6c707";
+
+/// Returns the base URL to use for `_apis/resources/containers` requests.
+///
+/// Queries the resource-areas endpoint to discover the FileContainer service URL
+/// (which differs from the org URL in Azure DevOps Services).  Falls back to
+/// `org_url` if the lookup fails or returns an unusable response, so the function
+/// is infallible from the caller's perspective.
+async fn resolve_file_container_base_url(
+    client: &reqwest::Client,
+    org_url: &str,
+    token: &str,
+) -> String {
+    let area_url = format!(
+        "{}/_apis/resourceAreas/{}?api-version=7.1",
+        org_url.trim_end_matches('/'),
+        CONTAINER_RESOURCE_AREA_ID,
+    );
+    debug!("Resolving FileContainer service URL via: {}", area_url);
+    match client
+        .get(&area_url)
+        .basic_auth("", Some(token))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            match resp.json::<serde_json::Value>().await {
+                Ok(json) => {
+                    if let Some(location_url) = json
+                        .get("locationUrl")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.trim_end_matches('/').to_string())
+                    {
+                        debug!("FileContainer service URL resolved to: {}", location_url);
+                        return location_url;
+                    }
+                    debug!(
+                        "Resource area response missing 'locationUrl'; falling back to org_url"
+                    );
+                }
+                Err(e) => {
+                    debug!(
+                        "Failed to parse resource area response: {}; falling back to org_url",
+                        e
+                    );
+                }
+            }
+        }
+        Ok(resp) => {
+            debug!(
+                "Resource area lookup returned HTTP {}; falling back to org_url",
+                resp.status()
+            );
+        }
+        Err(e) => {
+            debug!(
+                "Resource area lookup failed: {}; falling back to org_url",
+                e
+            );
+        }
+    }
+    org_url.trim_end_matches('/').to_string()
+}
+
 #[async_trait::async_trait]
 impl Executor for UploadPipelineArtifactResult {
     fn dry_run_summary(&self) -> String {
@@ -403,15 +485,23 @@ impl Executor for UploadPipelineArtifactResult {
             .and_then(|n| n.to_str())
             .unwrap_or(&self.staged_file);
 
+        // ── Resolve FileContainer service URL ────────────────────────────
+        // The `_apis/resources/containers` endpoint is served by the ADO
+        // FileContainer (distributedtask) service, which in Azure DevOps
+        // Services lives at a different host than the main org URL.  Posting
+        // directly to `{org_url}/_apis/resources/containers` returns HTTP 405
+        // because the org routing proxy has no POST handler for that path.
+        // We discover the correct base URL via the resource-areas API and fall
+        // back to org_url for on-premises instances that don't support the
+        // lookup.
+        let container_base_url =
+            resolve_file_container_base_url(&client, org_url, token).await;
+
         // ── Step 1: Create container ─────────────────────────────────────
-        // The `scopeIdentifier` query parameter (project GUID) is required for
-        // the POST to route correctly in ADO.  Omitting it causes a 405 because
-        // the unscoped `_apis/resources/containers` collection does not support
-        // POST.  The body only needs the container name; the project scope must
-        // be in the query string.
+        // `scopeIdentifier` (project GUID) scopes the container to the project.
         let container_url = format!(
             "{}/_apis/resources/containers?scopeIdentifier={}&api-version=7.1-preview.4",
-            org_url.trim_end_matches('/'),
+            container_base_url,
             utf8_percent_encode(project_id, PATH_SEGMENT),
         );
         debug!("Creating container for artifact '{}': {}", final_name, container_url);
@@ -450,10 +540,10 @@ impl Executor for UploadPipelineArtifactResult {
         debug!("Container created: id={}", container_id);
 
         // ── Step 2: Upload file to container ─────────────────────────────
-        // Use `scopeIdentifier` (not `scope`) to match the ADO containers API.
+        // Use the same FileContainer service base URL resolved above.
         let upload_url = format!(
             "{}/_apis/resources/containers/{}?itemPath={}/{}&scopeIdentifier={}&api-version=7.1-preview.4",
-            org_url.trim_end_matches('/'),
+            container_base_url,
             container_id,
             utf8_percent_encode(&final_name, PATH_SEGMENT),
             utf8_percent_encode(filename, PATH_SEGMENT),
@@ -857,5 +947,15 @@ name-prefix: "ci-"
         let exec_result = result.execute_impl(&ctx).await.unwrap();
         assert!(!exec_result.success);
         assert!(exec_result.message.contains("not in the allowed list"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_file_container_base_url_falls_back_on_error() {
+        // Point at a non-listening port so the HTTP request fails;
+        // the function must return the original org_url as fallback.
+        let client = reqwest::Client::new();
+        let org_url = "http://127.0.0.1:1"; // nothing listening here
+        let result = resolve_file_container_base_url(&client, org_url, "token").await;
+        assert_eq!(result, org_url);
     }
 }
