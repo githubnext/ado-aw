@@ -129,6 +129,20 @@ impl ExecutionContext {
     }
 }
 
+/// Extract the organization name from an Azure DevOps org URL.
+///
+/// Handles both hosted (`https://dev.azure.com/myorg`) and on-prem
+/// (`https://server/tfs/myorg`) URLs, with or without a trailing slash.
+///
+/// Returns `None` if the URL is empty or has no meaningful last segment.
+pub fn org_from_url(url: &str) -> Option<String> {
+    url.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
 impl ExecutionContext {
     /// Build an `ExecutionContext` from an arbitrary env-var lookup function.
     ///
@@ -144,13 +158,7 @@ impl ExecutionContext {
             .or_else(|| env("SYSTEM_TEAMFOUNDATIONCOLLECTIONURI"));
 
         // Extract organization name from URL (e.g., "https://dev.azure.com/myorg/" -> "myorg")
-        let ado_organization = ado_org_url.as_ref().and_then(|url| {
-            url.trim_end_matches('/')
-                .rsplit('/')
-                .next()
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-        });
+        let ado_organization = ado_org_url.as_ref().and_then(|url| org_from_url(url));
 
         // Source directory is where git repos are checked out (BUILD_SOURCESDIRECTORY)
         let source_directory = env("BUILD_SOURCESDIRECTORY")

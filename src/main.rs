@@ -245,8 +245,16 @@ async fn build_execution_context(
         .collect();
 
     let mut ctx = crate::safeoutputs::ExecutionContext::default();
-    ctx.ado_org_url = ado_org_url;
-    ctx.ado_project = ado_project;
+    // Only override env-derived values when CLI args are explicitly provided;
+    // otherwise keep the defaults from SYSTEM_TEAMFOUNDATIONCOLLECTIONURI /
+    // SYSTEM_TEAMPROJECT that ExecutionContext::default() already resolved.
+    if let Some(url) = ado_org_url {
+        ctx.ado_organization = crate::safeoutputs::org_from_url(&url);
+        ctx.ado_org_url = Some(url);
+    }
+    if let Some(project) = ado_project {
+        ctx.ado_project = Some(project);
+    }
     ctx.working_directory = safe_output_dir.clone();
     ctx.tool_configs = front_matter.safe_outputs.clone();
     ctx.allowed_repositories = allowed_repositories;
