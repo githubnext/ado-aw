@@ -290,6 +290,8 @@ tools:
 | `create-branch` | Create a new branch from an existing ref | ✅ |
 | `create-git-tag` | Create a git tag on a repository ref | ✅ |
 | `add-build-tag` | Add a tag to an ADO build | ✅ |
+| `upload-build-attachment` | Attach a workspace file to a build (visible via REST/custom extension) | ✅ |
+| `upload-pipeline-artifact` | Publish a workspace file as a pipeline artifact (visible in Artifacts tab) | ✅ |
 | **Wiki** | | |
 | `create-wiki-page` | Create a new ADO wiki page (requires `wiki-name`) | ✅ |
 | `update-wiki-page` | Update an existing ADO wiki page (requires `wiki-name`) | ✅ |
