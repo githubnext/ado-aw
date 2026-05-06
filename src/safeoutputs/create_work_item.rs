@@ -308,13 +308,10 @@ impl Executor for CreateWorkItemResult {
                 .tags
                 .iter()
                 .filter(|tag| {
-                    !config.allowed_tags.iter().any(|pattern| {
-                        if let Some(prefix) = pattern.strip_suffix('*') {
-                            tag.starts_with(prefix)
-                        } else {
-                            pattern.eq_ignore_ascii_case(tag)
-                        }
-                    })
+                    !config
+                        .allowed_tags
+                        .iter()
+                        .any(|pattern| super::tag_matches_pattern(tag, pattern))
                 })
                 .collect();
             if !disallowed.is_empty() {
@@ -634,5 +631,13 @@ tags:
         assert!(config.area_path.is_none()); // default
         assert_eq!(config.tags, vec!["my-tag"]);
         assert!(config.allowed_tags.is_empty()); // default
+    }
+
+    #[test]
+    fn test_tag_matches_pattern_prefix_is_case_insensitive() {
+        // Verifies the shared helper is wired with case-insensitive prefix matching.
+        // "Agent-*" (uppercase) must match "agent-created" (lowercase) and vice-versa.
+        assert!(crate::safeoutputs::tag_matches_pattern("agent-created", "Agent-*"));
+        assert!(crate::safeoutputs::tag_matches_pattern("Agent-Review", "agent-*"));
     }
 }
