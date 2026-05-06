@@ -3,7 +3,8 @@
 use rmcp::ErrorData as McpError;
 use rmcp::model::ErrorCode;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use crate::sanitize::{SanitizeConfig, SanitizeContent};
 
@@ -67,6 +68,11 @@ pub struct ExecutionContext {
     // ── ADO build variables (from BUILD_*/SYSTEM_*) ───────────────────────
     /// Numeric build ID (`BUILD_BUILDID`)
     pub build_id: Option<u64>,
+    /// Numeric file-container ID for the current build (`BUILD_CONTAINERID`).
+    /// Azure DevOps pre-creates one container per build at job initialization;
+    /// all artifacts in the build share this container, differentiated by item path.
+    /// Required by `upload-pipeline-artifact` to know where to upload bytes.
+    pub build_container_id: Option<u64>,
     /// Human-readable build number (`BUILD_BUILDNUMBER`)
     #[allow(dead_code)]
     pub build_number: Option<String>,
@@ -110,6 +116,19 @@ pub struct ExecutionContext {
     /// PR target branch (`SYSTEM_PULLREQUEST_TARGETBRANCH`)
     #[allow(dead_code)]
     pub pull_request_target_branch: Option<String>,
+
+    /// Per-run dedupe set for `upload-pipeline-artifact` when the
+    /// `require-unique-names` config is set. Stores `format!("{}/{}",
+    /// effective_build_id, final_name)` keys; the executor checks-and-inserts
+    /// before any HTTP call so a second call with the same target build /
+    /// artifact name fails fast instead of silently overwriting bytes in
+    /// the agent's shared file container.
+    ///
+    /// Wrapped in `Arc<Mutex<…>>` so all calls in one Stage 3 run see the
+    /// same set even though `ExecutionContext` is shared by reference and
+    /// the `Clone` semantics need to share state. Each `Default` instance
+    /// gets its own fresh empty set, which is correct for tests.
+    pub uploaded_pipeline_artifact_keys: Arc<Mutex<HashSet<String>>>,
 }
 
 impl ExecutionContext {
@@ -182,6 +201,7 @@ impl ExecutionContext {
 
             // Build identification
             build_id: env("BUILD_BUILDID").and_then(|s| s.parse().ok()),
+            build_container_id: env("BUILD_CONTAINERID").and_then(|s| s.parse().ok()),
             build_number: env("BUILD_BUILDNUMBER"),
             build_reason: env("BUILD_REASON"),
             definition_name: env("BUILD_DEFINITIONNAME"),
@@ -199,6 +219,9 @@ impl ExecutionContext {
             pull_request_id: env("SYSTEM_PULLREQUEST_PULLREQUESTID"),
             pull_request_source_branch: env("SYSTEM_PULLREQUEST_SOURCEBRANCH"),
             pull_request_target_branch: env("SYSTEM_PULLREQUEST_TARGETBRANCH"),
+
+            // Per-run state for upload-pipeline-artifact dedupe.
+            uploaded_pipeline_artifact_keys: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 }
@@ -727,6 +750,26 @@ mod tests {
     fn test_from_env_lookup_build_id_none_when_unset() {
         let ctx = ExecutionContext::from_env_lookup(env_from(&[]));
         assert!(ctx.build_id.is_none());
+    }
+
+    #[test]
+    fn test_from_env_lookup_build_container_id_parses_numeric() {
+        let ctx =
+            ExecutionContext::from_env_lookup(env_from(&[("BUILD_CONTAINERID", "112233")]));
+        assert_eq!(ctx.build_container_id, Some(112233));
+    }
+
+    #[test]
+    fn test_from_env_lookup_build_container_id_none_for_non_numeric() {
+        let ctx =
+            ExecutionContext::from_env_lookup(env_from(&[("BUILD_CONTAINERID", "not-numeric")]));
+        assert!(ctx.build_container_id.is_none());
+    }
+
+    #[test]
+    fn test_from_env_lookup_build_container_id_none_when_unset() {
+        let ctx = ExecutionContext::from_env_lookup(env_from(&[]));
+        assert!(ctx.build_container_id.is_none());
     }
 
     #[test]
