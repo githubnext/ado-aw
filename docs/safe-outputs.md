@@ -64,13 +64,15 @@ Creates an Azure DevOps work item.
 **Agent parameters:**
 - `title` - A concise title for the work item (required, must be more than 5 characters)
 - `description` - Work item description in markdown format (required, must be more than 30 characters)
+- `tags` - Tags to apply to the work item (optional list; each tag must not contain a semicolon). May be subject to the `allowed-tags` allowlist. Merged with any static `tags` configured in front matter.
 
 **Configuration options (front matter):**
 - `work-item-type` - Work item type (default: "Task")
 - `area-path` - Area path for the work item
 - `iteration-path` - Iteration path for the work item
 - `assignee` - User to assign (email or display name)
-- `tags` - List of tags to apply
+- `tags` - Static list of tags always applied to the work item (regardless of agent input)
+- `allowed-tags` - Allowlist of tags the agent is permitted to use via the `tags` parameter. If empty, any agent-provided tags are accepted. Supports prefix wildcards: entries ending with `*` match by prefix (e.g., `"agent-*"` matches `"agent-created"`, `"agent-review"`, etc.).
 - `custom-fields` - Map of custom field reference names to values (e.g., `Custom.MyField: "value"`)
 - `max` - Maximum number of create-work-item outputs allowed per run (default: 1)
 - `include-stats` - Whether to append agent execution stats to the work item description (default: true)
@@ -110,6 +112,7 @@ safe-outputs:
     iteration-path: true      # enable iteration path updates (default: false)
     assignee: true            # enable assignee updates (default: false)
     tags: true                # enable tag updates (default: false)
+    allowed-tags: []          # Optional — restrict which tags the agent can set (empty = any; supports prefix wildcards like "agent-*")
 ```
 
 **Security note:** Every field that can be modified requires explicit opt-in (`true`) in the front matter configuration. If the `max` limit is exceeded, additional entries are skipped rather than aborting the entire batch.

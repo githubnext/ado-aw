@@ -20,12 +20,26 @@ pub struct CreateWorkItemParams {
 
     /// Work item description in markdown format. Use headings, lists, code blocks, and other markdown formatting. Ensure adequate content > 30 characters.
     pub description: String,
+
+    /// Tags to apply to the work item. May be subject to an operator-configured
+    /// allowlist (`allowed-tags` in front matter). Each tag must not contain a
+    /// semicolon (ADO uses semicolons as tag separators).
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 impl Validate for CreateWorkItemParams {
     fn validate(&self) -> anyhow::Result<()> {
         ensure!(self.title.len() > 5);
         ensure!(self.description.len() > 30);
+        for tag in &self.tags {
+            ensure!(
+                !tag.contains(';'),
+                "Tag '{}' contains a semicolon, which is not allowed \
+                 (ADO uses semicolons as tag separators)",
+                tag
+            );
+        }
         Ok(())
     }
 }
@@ -38,6 +52,9 @@ tool_result! {
     pub struct CreateWorkItemResult {
         title: String,
         description: String,
+        /// Agent-provided tags (validated against allowed-tags at execution time)
+        #[serde(default)]
+        tags: Vec<String>,
     }
 }
 
@@ -45,6 +62,9 @@ impl SanitizeContent for CreateWorkItemResult {
     fn sanitize_content_fields(&mut self) {
         self.title = sanitize_text(&self.title);
         self.description = sanitize_text(&self.description);
+        for tag in &mut self.tags {
+            *tag = sanitize_text(tag);
+        }
     }
 }
 
@@ -60,6 +80,9 @@ impl SanitizeContent for CreateWorkItemResult {
 ///     assignee: "user@example.com"
 ///     tags:
 ///       - agent-created
+///       - automated
+///     allowed-tags:
+///       - "agent-*"
 ///       - automated
 ///     artifact_link:
 ///       enabled: true
@@ -84,9 +107,16 @@ pub struct CreateWorkItemConfig {
     #[serde(default)]
     pub assignee: Option<String>,
 
-    /// Tags to apply to the work item
+    /// Static tags always applied to the work item (regardless of agent input)
     #[serde(default)]
     pub tags: Vec<String>,
+
+    /// Allowlist of tags the agent is permitted to use via the `tags` parameter.
+    /// If empty, any agent-provided tags are accepted.
+    /// Supports prefix wildcards: entries ending with `*` match by prefix
+    /// (e.g., `"agent-*"` matches `"agent-created"`, `"agent-review"`, etc.).
+    #[serde(default, rename = "allowed-tags")]
+    pub allowed_tags: Vec<String>,
 
     /// Additional custom fields as key-value pairs
     /// Keys should be the full field reference name (e.g., "Custom.MyField")
@@ -143,6 +173,7 @@ impl Default for CreateWorkItemConfig {
             iteration_path: None,
             assignee: None,
             tags: Vec::new(),
+            allowed_tags: Vec::new(),
             custom_fields: std::collections::HashMap::new(),
             artifact_link: ArtifactLinkConfig::default(),
             include_stats: true,
@@ -271,6 +302,29 @@ impl Executor for CreateWorkItemResult {
         debug!("Iteration path: {:?}", config.iteration_path);
         debug!("Assignee: {:?}", config.assignee);
 
+        // Validate agent-provided tags against allowed-tags (if configured)
+        if !self.tags.is_empty() && !config.allowed_tags.is_empty() {
+            let disallowed: Vec<_> = self
+                .tags
+                .iter()
+                .filter(|tag| {
+                    !config.allowed_tags.iter().any(|pattern| {
+                        if let Some(prefix) = pattern.strip_suffix('*') {
+                            tag.starts_with(prefix)
+                        } else {
+                            pattern.eq_ignore_ascii_case(tag)
+                        }
+                    })
+                })
+                .collect();
+            if !disallowed.is_empty() {
+                return Ok(ExecutionResult::failure(format!(
+                    "Agent-provided tags not in allowed-tags: {}",
+                    disallowed.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(", ")
+                )));
+            }
+        }
+
         // Build the Azure DevOps REST API URL for creating work items
         // POST https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/${type}?api-version=7.0
         debug!("Building work item creation request");
@@ -309,8 +363,15 @@ impl Executor for CreateWorkItemResult {
         if let Some(assignee) = &config.assignee {
             patch_doc.push(field_op("System.AssignedTo", assignee));
         }
-        if !config.tags.is_empty() {
-            patch_doc.push(field_op("System.Tags", config.tags.join("; ")));
+        // Merge static config tags with validated agent-provided tags (dedup, case-insensitive)
+        let mut all_tags = config.tags.clone();
+        for tag in &self.tags {
+            if !all_tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
+                all_tags.push(tag.clone());
+            }
+        }
+        if !all_tags.is_empty() {
+            patch_doc.push(field_op("System.Tags", all_tags.join("; ")));
         }
 
         // Add any custom fields
@@ -456,6 +517,7 @@ mod tests {
         let params = CreateWorkItemParams {
             title: "Implement feature".to_string(),
             description: "This is a sufficiently long description for the work item.".to_string(),
+            tags: vec![],
         };
         let result: CreateWorkItemResult = params.try_into().unwrap();
         assert_eq!(result.name, "create-work-item");
@@ -468,6 +530,7 @@ mod tests {
         let params = CreateWorkItemParams {
             title: "Hi".to_string(),
             description: "This is a sufficiently long description for the work item.".to_string(),
+            tags: vec![],
         };
         let result: Result<CreateWorkItemResult, _> = params.try_into();
         assert!(result.is_err());
@@ -478,9 +541,32 @@ mod tests {
         let params = CreateWorkItemParams {
             title: "Valid title here".to_string(),
             description: "Too short".to_string(),
+            tags: vec![],
         };
         let result: Result<CreateWorkItemResult, _> = params.try_into();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validation_rejects_tag_with_semicolon() {
+        let params = CreateWorkItemParams {
+            title: "Valid title here".to_string(),
+            description: "This is a sufficiently long description for the work item.".to_string(),
+            tags: vec!["tag-one; tag-two".to_string()],
+        };
+        let result: Result<CreateWorkItemResult, _> = params.try_into();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_params_with_tags_converts_to_result() {
+        let params = CreateWorkItemParams {
+            title: "Implement feature".to_string(),
+            description: "This is a sufficiently long description for the work item.".to_string(),
+            tags: vec!["agent-created".to_string(), "automated".to_string()],
+        };
+        let result: CreateWorkItemResult = params.try_into().unwrap();
+        assert_eq!(result.tags, vec!["agent-created", "automated"]);
     }
 
     #[test]
@@ -489,6 +575,7 @@ mod tests {
             title: "Test work item".to_string(),
             description: "A description that is definitely longer than thirty characters."
                 .to_string(),
+            tags: vec![],
         };
         let result: CreateWorkItemResult = params.try_into().unwrap();
         let json = serde_json::to_string(&result).unwrap();
@@ -505,6 +592,7 @@ mod tests {
         assert!(config.iteration_path.is_none());
         assert!(config.assignee.is_none());
         assert!(config.tags.is_empty());
+        assert!(config.allowed_tags.is_empty());
         assert!(config.custom_fields.is_empty());
     }
 
@@ -517,6 +605,9 @@ assignee: "user@example.com"
 tags:
   - agent-created
   - automated
+allowed-tags:
+  - "agent-*"
+  - review
 custom-fields:
   Custom.Priority: "High"
 "#;
@@ -525,6 +616,7 @@ custom-fields:
         assert_eq!(config.area_path, Some("MyProject\\MyTeam".to_string()));
         assert_eq!(config.assignee, Some("user@example.com".to_string()));
         assert_eq!(config.tags, vec!["agent-created", "automated"]);
+        assert_eq!(config.allowed_tags, vec!["agent-*", "review"]);
         assert_eq!(
             config.custom_fields.get("Custom.Priority"),
             Some(&"High".to_string())
@@ -541,5 +633,6 @@ tags:
         assert_eq!(config.work_item_type, "Task"); // default
         assert!(config.area_path.is_none()); // default
         assert_eq!(config.tags, vec!["my-tag"]);
+        assert!(config.allowed_tags.is_empty()); // default
     }
 }
