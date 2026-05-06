@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.23.0](https://github.com/githubnext/ado-aw/compare/v0.22.4...v0.23.0) (2026-05-06)
+
+
+### Features
+
+* **safeoutputs:** add dynamic tags with allowed-tags to create/update work item ([#420](https://github.com/githubnext/ado-aw/issues/420)) ([d02997a](https://github.com/githubnext/ado-aw/commit/d02997a1a704df6ac6e0233adb8a9aa5424927cb))
+
+
+### Bug Fixes
+
+* **safeoutputs:** fix upload-pipeline-artifact 405 by adding scopeIdentifier to container API requests ([#421](https://github.com/githubnext/ado-aw/issues/421)) ([2d460fd](https://github.com/githubnext/ado-aw/commit/2d460fdce89ce08927d659f76617668146284bc9))
+
 ## [0.22.4](https://github.com/githubnext/ado-aw/compare/v0.22.3...v0.22.4) (2026-05-06)
 
 
