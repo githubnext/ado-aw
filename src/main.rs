@@ -20,7 +20,7 @@ pub mod validate;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Subcommand, Debug)]
 enum Commands {
@@ -175,6 +175,36 @@ async fn run_compile(
             compile::compile_all_pipelines(skip_integrity, debug_pipeline).await
         }
     }
+}
+
+fn is_github_remote(remote_url: &str) -> bool {
+    let url = remote_url.trim();
+    if url.starts_with("git@github.com:") || url.starts_with("ssh://git@github.com/") {
+        return true;
+    }
+
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .is_some_and(|host| host.eq_ignore_ascii_case("github.com"))
+}
+
+async fn ensure_non_github_remote_for_ado_aw(command_name: &str, repo_path: &Path) -> Result<()> {
+    let Ok(remote_url) = configure::get_git_remote_url(repo_path).await else {
+        return Ok(());
+    };
+
+    if is_github_remote(&remote_url) {
+        anyhow::bail!(
+            "Cannot run `ado-aw {}` in a GitHub repository (origin: {}). \
+             `ado-aw` is for Azure DevOps repositories. \
+             For GitHub repositories, use gh-aw instead: https://github.com/githubnext/gh-aw",
+            command_name,
+            remote_url
+        );
+    }
+
+    Ok(())
 }
 
 async fn run_execute(
@@ -367,6 +397,7 @@ async fn main() -> Result<()> {
             #[cfg(not(debug_assertions))]
             let debug_pipeline = false;
 
+            ensure_non_github_remote_for_ado_aw("compile", Path::new(".")).await?;
             run_compile(path, output, skip_integrity, debug_pipeline).await?;
         }
         Commands::Check { pipeline } => {
@@ -409,6 +440,8 @@ async fn main() -> Result<()> {
             .await?;
         }
         Commands::Init { path, force } => {
+            let init_path = path.as_deref().unwrap_or(Path::new("."));
+            ensure_non_github_remote_for_ado_aw("init", init_path).await?;
             init::run(path.as_deref(), force).await?;
         }
         Commands::Configure {
@@ -433,4 +466,38 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_github_remote;
+
+    #[test]
+    fn detects_github_https_remote() {
+        assert!(is_github_remote("https://github.com/owner/repo.git"));
+    }
+
+    #[test]
+    fn detects_github_ssh_remote() {
+        assert!(is_github_remote("git@github.com:owner/repo.git"));
+    }
+
+    #[test]
+    fn does_not_flag_ado_https_remote() {
+        assert!(!is_github_remote(
+            "https://dev.azure.com/myorg/myproject/_git/myrepo"
+        ));
+    }
+
+    #[test]
+    fn does_not_flag_ado_ssh_remote() {
+        assert!(!is_github_remote(
+            "git@ssh.dev.azure.com:v3/myorg/myproject/myrepo"
+        ));
+    }
+
+    #[test]
+    fn does_not_flag_non_github_remote() {
+        assert!(!is_github_remote("https://gitlab.com/owner/repo.git"));
+    }
 }
