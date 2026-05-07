@@ -218,13 +218,13 @@ pub(crate) fn resolve_repo_name(
 ///
 /// Both comparisons are **case-insensitive** so that an operator who writes
 /// `allowed-tags: ["Agent-*"]` correctly matches an agent-provided tag `"agent-created"`.
+///
+/// Supports `*` wildcards anywhere in the pattern (e.g. `copilot:repo=org/project/*@main`).
 pub(crate) fn tag_matches_pattern(tag: &str, pattern: &str) -> bool {
-    if let Some(prefix) = pattern.strip_suffix('*') {
-        tag.to_ascii_lowercase()
-            .starts_with(&prefix.to_ascii_lowercase())
-    } else {
-        pattern.eq_ignore_ascii_case(tag)
-    }
+    glob_match::glob_match(
+        &pattern.to_ascii_lowercase(),
+        &tag.to_ascii_lowercase(),
+    )
 }
 
 /// Validate a string against `git check-ref-format` rules.
@@ -514,5 +514,31 @@ mod tests {
     fn test_tag_matches_pattern_star_only_matches_everything() {
         assert!(tag_matches_pattern("anything", "*"));
         assert!(tag_matches_pattern("", "*"));
+    }
+
+    #[test]
+    fn test_tag_matches_pattern_middle_wildcard() {
+        // Glob wildcard in the middle of the pattern
+        assert!(tag_matches_pattern(
+            "copilot:repo=msazuresphere/4x4/VsCodeExtension@main",
+            "copilot:repo=msazuresphere/4x4/*@main"
+        ));
+        assert!(tag_matches_pattern(
+            "copilot:repo=msazuresphere/4x4/DevTools@main",
+            "copilot:repo=msazuresphere/4x4/*@main"
+        ));
+        // Wrong suffix should not match
+        assert!(!tag_matches_pattern(
+            "copilot:repo=msazuresphere/4x4/DevTools@dev",
+            "copilot:repo=msazuresphere/4x4/*@main"
+        ));
+    }
+
+    #[test]
+    fn test_tag_matches_pattern_middle_wildcard_case_insensitive() {
+        assert!(tag_matches_pattern(
+            "Copilot:Repo=MSAzureSphere/4x4/Tools@Main",
+            "copilot:repo=msazuresphere/4x4/*@main"
+        ));
     }
 }
