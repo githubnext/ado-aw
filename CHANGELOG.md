@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.25.0](https://github.com/githubnext/ado-aw/compare/v0.24.0...v0.25.0) (2026-05-07)
+
+
+### Features
+
+* **runtimes:** add dotnet runtime extension ([#435](https://github.com/githubnext/ado-aw/issues/435)) ([bdfb21c](https://github.com/githubnext/ado-aw/commit/bdfb21cfeb08544ceea7829e9614d07516cf35e1))
+
+
+### Bug Fixes
+
+* **compile:** fail pipeline step on AWF download errors ([#439](https://github.com/githubnext/ado-aw/issues/439)) ([367dd9d](https://github.com/githubnext/ado-aw/commit/367dd9d0000e4de2cd5b1f4c63c499907e6b70ff))
+
 ## [0.24.0](https://github.com/githubnext/ado-aw/compare/v0.23.1...v0.24.0) (2026-05-07)
 
 
