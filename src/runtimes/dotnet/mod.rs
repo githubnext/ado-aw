@@ -160,6 +160,11 @@ pub fn generate_nuget_authenticate() -> String {
 /// against. This step writes a minimal `nuget.config` (with the configured
 /// feed URL added as a package source) only when one doesn't already exist
 /// at the repo root, preserving any repo-checked-in `nuget.config`.
+///
+/// The existence check covers the three case variations NuGet itself
+/// recognises on case-sensitive filesystems (`nuget.config`, `NuGet.config`,
+/// `NuGet.Config`); the file is always created with the lowercase form,
+/// matching the cross-platform convention.
 pub fn generate_ensure_nuget_config(config: &DotnetRuntimeConfig) -> String {
     let feed_url = config.feed_url().unwrap_or("https://api.nuget.org/v3/index.json");
 
