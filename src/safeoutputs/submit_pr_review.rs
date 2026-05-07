@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{PATH_SEGMENT, resolve_repo_name};
-use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use anyhow::{Context, ensure};
@@ -93,9 +93,9 @@ tool_result! {
 
 impl SanitizeContent for SubmitPrReviewResult {
     fn sanitize_content_fields(&mut self) {
-        self.event = sanitize_text(&self.event);
+        self.event = sanitize_config(&self.event);
         self.body = self.body.as_deref().map(sanitize_text);
-        self.repository = self.repository.as_deref().map(sanitize_text);
+        self.repository = self.repository.as_deref().map(sanitize_config);
     }
 }
 

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
 use ado_aw_derive::SanitizeConfig;
-use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::safeoutputs::comment_on_work_item::CommentTarget;
@@ -94,7 +94,7 @@ tool_result! {
 
 impl SanitizeContent for LinkWorkItemsResult {
     fn sanitize_content_fields(&mut self) {
-        self.link_type = sanitize_text(&self.link_type);
+        self.link_type = sanitize_config(&self.link_type);
         self.comment = self.comment.as_deref().map(sanitize_text);
     }
 }
