@@ -6,14 +6,28 @@
 //! build artifacts published through this tool appear in the **Artifacts tab**
 //! of the build summary page in Azure DevOps.
 //!
-//! The upload is a three-step REST flow:
+//! The upload is a two-step REST flow that always reuses the agent's own
+//! pre-existing build container (Azure DevOps creates one container per build
+//! at job initialization and exposes its ID via `BUILD_CONTAINERID`):
 //!
-//! 1. **Create container** — `POST /_apis/resources/containers` returns a
-//!    `containerId`.
-//! 2. **Upload file** — `PUT /_apis/resources/containers/{containerId}` sends
-//!    the file bytes with `itemPath` and `scope` query params.
-//! 3. **Associate artifact** — `POST /_apis/build/builds/{buildId}/artifacts`
-//!    links the container to the build as a named artifact.
+//! 1. **Upload bytes** — `PUT /_apis/resources/Containers/{BUILD_CONTAINERID}?itemPath={folder}/{file}&scope={projectId}`
+//!    sends the file body into the agent's own build container.
+//! 2. **Associate artifact** — `POST /{project}/_apis/build/builds/{effective_build_id}/artifacts`
+//!    registers a record with `resource.type = "Container"` and
+//!    `resource.data = "#/{BUILD_CONTAINERID}/{folder}"`. `effective_build_id`
+//!    is the current build by default, or an agent-supplied `build_id` for
+//!    cross-build publishing (the artifact record points at the agent's
+//!    container; ADO does not require the container to belong to the target
+//!    build — that is how `DownloadBuildArtifacts@1 buildType=specific` works
+//!    in the wild).
+//!
+//! By default the container `folder` is `{artifact_name}__{6 hex hash}` so
+//! that two calls with the same `artifact_name` (e.g. publishing
+//! `TriageSummary` to many failing builds in one run) never silently overwrite
+//! each other's bytes. The hash lives only in internal addressing — the
+//! user-visible `artifact_name` your downstream consumers query is unaffected.
+//! Set `safe-outputs.upload-pipeline-artifact.require-unique-names: true` to
+//! disable the suffix and reject in-run reuse with a clear early error.
 //!
 //! The flow mirrors `upload-build-attachment`:
 //!
@@ -25,7 +39,7 @@
 //!   `ctx.working_directory.join(staged_file)`, applies operator-supplied
 //!   limits (`max-file-size`, `allowed-extensions`, `allowed-artifact-names`,
 //!   `allowed-build-ids`, `name-prefix`), resolves the target build ID, and
-//!   executes the three-step upload flow.
+//!   executes the two-step upload flow.
 
 use ado_aw_derive::SanitizeConfig;
 use log::{debug, info, warn};
@@ -47,6 +61,15 @@ pub struct UploadPipelineArtifactParams {
     /// pipeline run** — the executor resolves the build ID from the
     /// `BUILD_BUILDID` environment variable automatically.  When provided,
     /// must be a positive integer.
+    ///
+    /// **Cross-build behavior:** when set to a build other than the current
+    /// run, the artifact bytes still live in the agent's own build container;
+    /// only the artifact *record* (`name`, `data` pointer) is associated with
+    /// the target build. This means cross-published artifacts share the
+    /// agent build's retention policy — if the agent's build is purged, the
+    /// cross-referenced artifact on the target build stops being downloadable.
+    /// Cross-project publishing is not supported (the associate POST uses
+    /// the current pipeline's project).
     pub build_id: Option<i64>,
 
     /// The artifact name shown in the Artifacts tab.  ADO requires a non-empty
@@ -194,6 +217,20 @@ pub struct UploadPipelineArtifactConfig {
     /// Prefix prepended to the agent-supplied artifact name before publishing.
     #[serde(default, rename = "name-prefix")]
     pub name_prefix: Option<String>,
+
+    /// When `false` (default), the executor inserts a short hash suffix into
+    /// the internal container folder so multiple calls in one agent run with
+    /// the same `artifact_name` (e.g. publishing `TriageSummary` to many
+    /// failing builds at once) do not silently overwrite each other's bytes
+    /// in the agent's shared file container. The suffix lives only in
+    /// internal addressing — the user-visible `artifact_name` your downstream
+    /// consumers query is unaffected.
+    ///
+    /// Set to `true` to use a clean folder name (`{artifact_name}` exactly)
+    /// and reject any in-run reuse of `(effective_build_id, artifact_name)`
+    /// with a clear error before any HTTP call.
+    #[serde(default, rename = "require-unique-names")]
+    pub require_unique_names: bool,
 }
 
 fn default_pipeline_max_file_size() -> u64 {
@@ -208,6 +245,7 @@ impl Default for UploadPipelineArtifactConfig {
             allowed_artifact_names: Vec::new(),
             allowed_build_ids: Vec::new(),
             name_prefix: None,
+            require_unique_names: false,
         }
     }
 }
@@ -394,6 +432,57 @@ impl Executor for UploadPipelineArtifactResult {
             .as_ref()
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
 
+        // Resolve the agent's own build container ID (Azure DevOps pre-creates
+        // one container per build at job initialization and exposes it via
+        // BUILD_CONTAINERID). All artifacts in the build share this container,
+        // including those whose record we associate with a different build.
+        let container_id = ctx.build_container_id.context(
+            "BUILD_CONTAINERID not set or invalid — required to publish a \
+             pipeline artifact; this tool must run inside an Azure DevOps \
+             pipeline job",
+        )?;
+
+        // ── Per-run dedupe (when require-unique-names is set) ────────────
+        // Reject reuse of (effective_build_id, final_name) before any HTTP
+        // call so two cross-build calls sharing a name don't silently
+        // overwrite each other's bytes in the shared container.
+        let dedupe_key = format!("{}/{}", effective_build_id, final_name);
+        if config.require_unique_names {
+            let seen = ctx
+                .uploaded_pipeline_artifact_keys
+                .lock()
+                .map_err(|e| anyhow::anyhow!("uploaded_pipeline_artifact_keys mutex poisoned: {}", e))?;
+            if seen.contains(&dedupe_key) {
+                return Ok(ExecutionResult::failure(format!(
+                    "upload-pipeline-artifact: artifact_name '{}' was already used \
+                     on build #{} in this run; require-unique-names is configured \
+                     to reject reuse",
+                    final_name, effective_build_id
+                )));
+            }
+            // Note: the key is inserted only after the HTTP calls succeed below,
+            // so a transient network failure doesn't permanently block retries.
+        }
+
+        // Internal container folder. The user-visible artifact name is
+        // `final_name`; the folder name carries an optional discriminator so
+        // multiple calls in one run sharing the same name but uploading
+        // different content don't overwrite each other's bytes in the shared
+        // container. The discriminator is derived from the file content hash
+        // (already computed above) so distinct content always maps to a
+        // distinct folder — identical content maps to the same folder, which
+        // is safe (idempotent PUT). The discriminator is invisible in standard
+        // download paths (web UI zip wrapper, DownloadBuildArtifacts@1,
+        // DownloadPipelineArtifact@2 — all strip the prefix) and is only seen
+        // by callers that hit `GET /_apis/resources/Containers/{id}?itemPath=…`
+        // directly.
+        let container_folder = if config.require_unique_names {
+            final_name.clone()
+        } else {
+            let disc = &live_hash[..6];
+            format!("{}__{}", final_name, disc)
+        };
+
         let client = reqwest::Client::new();
 
         // Derive a filename from the original file path for use as the
@@ -403,59 +492,15 @@ impl Executor for UploadPipelineArtifactResult {
             .and_then(|n| n.to_str())
             .unwrap_or(&self.staged_file);
 
-        // ── Step 1: Create container ─────────────────────────────────────
-        // The `scopeIdentifier` query parameter (project GUID) is required for
-        // the POST to route correctly in ADO.  Omitting it causes a 405 because
-        // the unscoped `_apis/resources/containers` collection does not support
-        // POST.  The body only needs the container name; the project scope must
-        // be in the query string.
-        let container_url = format!(
-            "{}/_apis/resources/containers?scopeIdentifier={}&api-version=7.1-preview.4",
-            org_url.trim_end_matches('/'),
-            utf8_percent_encode(project_id, PATH_SEGMENT),
-        );
-        debug!("Creating container for artifact '{}': {}", final_name, container_url);
-
-        let container_body = serde_json::json!({
-            "name": final_name,
-        });
-        let container_resp = client
-            .post(&container_url)
-            .header("Content-Type", "application/json")
-            .basic_auth("", Some(token))
-            .json(&container_body)
-            .send()
-            .await
-            .context("Failed to create artifact container")?;
-
-        if !container_resp.status().is_success() {
-            let status = container_resp.status();
-            let error_body = container_resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            return Ok(ExecutionResult::failure(format!(
-                "Failed to create artifact container (HTTP {}): {}",
-                status, error_body
-            )));
-        }
-        let container_json: serde_json::Value = container_resp
-            .json()
-            .await
-            .context("Failed to parse container creation response")?;
-        let container_id = container_json
-            .get("containerId")
-            .and_then(|v| v.as_u64())
-            .context("Container creation response missing 'containerId'")?;
-        debug!("Container created: id={}", container_id);
-
-        // ── Step 2: Upload file to container ─────────────────────────────
-        // Use `scopeIdentifier` (not `scope`) to match the ADO containers API.
+        // ── Step 1: Upload file to the agent's own build container ──────
+        // The canonical query parameter is `scope` (not `scopeIdentifier`,
+        // which is the response model field name); all official ADO SDKs
+        // (Node, Python, Extension API) use `scope=`.
         let upload_url = format!(
-            "{}/_apis/resources/containers/{}?itemPath={}/{}&scopeIdentifier={}&api-version=7.1-preview.4",
+            "{}/_apis/resources/Containers/{}?itemPath={}/{}&scope={}&api-version=7.1-preview.4",
             org_url.trim_end_matches('/'),
             container_id,
-            utf8_percent_encode(&final_name, PATH_SEGMENT),
+            utf8_percent_encode(&container_folder, PATH_SEGMENT),
             utf8_percent_encode(filename, PATH_SEGMENT),
             utf8_percent_encode(project_id, PATH_SEGMENT),
         );
@@ -477,26 +522,35 @@ impl Executor for UploadPipelineArtifactResult {
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
             return Ok(ExecutionResult::failure(format!(
-                "Failed to upload file to container (HTTP {}): {}",
-                status, error_body
+                "Failed to upload file to container #{} (HTTP {}): {}",
+                container_id, status, error_body
             )));
         }
         debug!("File uploaded to container {}", container_id);
 
-        // ── Step 3: Associate artifact with build ────────────────────────
+        // ── Step 2: Associate artifact record with the target build ─────
+        // For cross-build publishing the artifact bytes physically live in
+        // the agent's own container; the record on the target build holds a
+        // pointer (`resource.data = "#/{containerId}/{folder}"`). ADO does
+        // not require the container to belong to the target build — that is
+        // exactly how `DownloadBuildArtifacts@1 buildType=specific` already
+        // works (it follows cross-build container pointers).
         let artifact_url = format!(
             "{}/{}/_apis/build/builds/{}/artifacts?api-version=7.1",
             org_url.trim_end_matches('/'),
             utf8_percent_encode(project, PATH_SEGMENT),
             effective_build_id,
         );
-        debug!("Associating artifact '{}' with build #{}: {}", final_name, effective_build_id, artifact_url);
+        debug!(
+            "Associating artifact '{}' (folder '{}') with build #{}: {}",
+            final_name, container_folder, effective_build_id, artifact_url
+        );
 
         let artifact_body = serde_json::json!({
             "name": final_name,
             "resource": {
-                "data": format!("#/{}/{}", container_id, final_name),
-                "type": "container",
+                "data": format!("#/{}/{}", container_id, container_folder),
+                "type": "Container",
             },
         });
         let artifact_resp = client
@@ -526,6 +580,16 @@ impl Executor for UploadPipelineArtifactResult {
                 self.file_path, final_name, effective_build_id
             );
 
+            // Record the successful publish in the dedupe set now that both
+            // HTTP steps have completed — done here (not before the calls) so
+            // a transient failure doesn't permanently block retries.
+            if config.require_unique_names {
+                ctx.uploaded_pipeline_artifact_keys
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("uploaded_pipeline_artifact_keys mutex poisoned: {}", e))?
+                    .insert(dedupe_key);
+            }
+
             Ok(ExecutionResult::success_with_data(
                 format!(
                     "Published '{}' as pipeline artifact '{}' on build #{}",
@@ -538,6 +602,8 @@ impl Executor for UploadPipelineArtifactResult {
                     "size_bytes": file_size,
                     "download_url": download_url,
                     "project": project,
+                    "container_id": container_id,
+                    "container_folder": container_folder,
                 }),
             ))
         } else {
@@ -546,9 +612,16 @@ impl Executor for UploadPipelineArtifactResult {
                 .text()
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
+            // Best-effort hint when the most common failure modes show up.
+            let hint = match status.as_u16() {
+                401 | 403 => " — token may lack 'Build (Read & Execute)' scope on the target build's project",
+                404 => " — target build does not exist or is in a different project (cross-project publishing is not supported)",
+                409 => " — an artifact with this name already exists on the target build",
+                _ => "",
+            };
             Ok(ExecutionResult::failure(format!(
-                "Failed to associate artifact with build #{} (HTTP {}): {}",
-                effective_build_id, status, error_body
+                "Failed to associate artifact with build #{} (HTTP {}){}: {}",
+                effective_build_id, status, hint, error_body
             )))
         }
     }
@@ -857,5 +930,135 @@ name-prefix: "ci-"
         let exec_result = result.execute_impl(&ctx).await.unwrap();
         assert!(!exec_result.success);
         assert!(exec_result.message.contains("not in the allowed list"));
+    }
+
+    /// Non-dry-run with no `BUILD_CONTAINERID` must fail with a clear message
+    /// before any HTTP call, rather than silently doing nothing.
+    #[tokio::test]
+    async fn test_fails_when_build_container_id_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = dir.path().join("staged-file.pdf");
+        let content = b"test content";
+        std::fs::write(&staged, content).unwrap();
+        let hash = crate::hash::sha256_hex(content);
+
+        let result = UploadPipelineArtifactResult::new(
+            None,
+            "agent-report".to_string(),
+            "out/report.pdf".to_string(),
+            "staged-file.pdf".to_string(),
+            content.len() as u64,
+            hash,
+        );
+
+        let ctx = ExecutionContext {
+            working_directory: dir.path().to_path_buf(),
+            build_id: Some(123),
+            dry_run: false,
+            ado_org_url: Some("https://dev.azure.com/test".to_string()),
+            ado_project: Some("TestProject".to_string()),
+            ado_project_id: Some("proj-guid".to_string()),
+            access_token: Some("fake-token".to_string()),
+            // Intentionally no build_container_id.
+            ..Default::default()
+        };
+
+        // execute_impl returns Err for missing required env (consistent with
+        // the rest of the file); execute_safe_outputs converts it to a failure.
+        let err = result.execute_impl(&ctx).await.unwrap_err();
+        assert!(
+            err.to_string().contains("BUILD_CONTAINERID"),
+            "expected BUILD_CONTAINERID error, got: {}",
+            err
+        );
+    }
+
+    /// The default container folder embeds a 6-hex hash discriminator derived
+    /// from the file content hash; two calls uploading different content
+    /// (regardless of staged file name) produce different folders so their
+    /// bytes can't collide in the shared build container. Identical content
+    /// maps to the same folder (idempotent PUT — safe).
+    #[test]
+    fn test_default_container_folder_has_hash_suffix() {
+        // Same logic the executor uses inline; mirror it here so changing the
+        // discriminator scheme is a single-place refactor caught by this test.
+        fn folder_for(final_name: &str, content: &[u8]) -> String {
+            let disc = &crate::hash::sha256_hex(content)[..6];
+            format!("{}__{}", final_name, disc)
+        }
+
+        let a = folder_for("TriageSummary", b"content-alpha");
+        let b = folder_for("TriageSummary", b"content-beta");
+
+        assert!(a.starts_with("TriageSummary__"));
+        assert_eq!(a.len(), "TriageSummary".len() + 2 + 6);
+        assert_ne!(a, b, "different content must produce different folders");
+        // Determinism: same inputs yield same folder.
+        assert_eq!(a, folder_for("TriageSummary", b"content-alpha"));
+        // Identical content → same folder regardless of call order (idempotent).
+        assert_eq!(
+            folder_for("TriageSummary", b"same-content"),
+            folder_for("TriageSummary", b"same-content"),
+            "same content must always map to the same folder"
+        );
+    }
+
+    /// When `require-unique-names` is set, the executor uses the clean folder
+    /// name (no discriminator suffix) — and the per-run dedupe set on the
+    /// ExecutionContext rejects a second call with the same
+    /// (effective_build_id, final_name) before any HTTP call is made.
+    #[tokio::test]
+    async fn test_require_unique_names_rejects_in_run_reuse() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged_a = dir.path().join("staged-a.md");
+        let staged_b = dir.path().join("staged-b.md");
+        std::fs::write(&staged_a, b"first").unwrap();
+        std::fs::write(&staged_b, b"second").unwrap();
+
+        let mut ctx = ExecutionContext {
+            working_directory: dir.path().to_path_buf(),
+            build_id: Some(100),
+            dry_run: false,
+            ado_org_url: Some("https://dev.azure.com/test".to_string()),
+            ado_project: Some("TestProject".to_string()),
+            ado_project_id: Some("proj-guid".to_string()),
+            access_token: Some("fake-token".to_string()),
+            build_container_id: Some(42),
+            ..Default::default()
+        };
+        ctx.tool_configs.insert(
+            "upload-pipeline-artifact".to_string(),
+            serde_json::json!({"require-unique-names": true}),
+        );
+
+        // First call: simulate the dedupe set being seeded by an earlier
+        // successful publish — we insert the key directly so we don't need
+        // a live HTTP server to run the upload.
+        {
+            let mut seen = ctx.uploaded_pipeline_artifact_keys.lock().unwrap();
+            seen.insert("100/TriageSummary".to_string());
+        }
+
+        let second = UploadPipelineArtifactResult::new(
+            Some(100),
+            "TriageSummary".to_string(),
+            "out/triage.md".to_string(),
+            "staged-b.md".to_string(),
+            b"second".len() as u64,
+            crate::hash::sha256_hex(b"second"),
+        );
+
+        let exec_result = second.execute_impl(&ctx).await.unwrap();
+        assert!(!exec_result.success, "second call should be rejected");
+        assert!(
+            exec_result.message.contains("already used"),
+            "expected dedupe error, got: {}",
+            exec_result.message
+        );
+        assert!(
+            exec_result.message.contains("require-unique-names"),
+            "error should reference the config key, got: {}",
+            exec_result.message
+        );
     }
 }

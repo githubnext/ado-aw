@@ -480,15 +480,26 @@ artifacts instead.
 
 Publishes a workspace file as an Azure DevOps **pipeline artifact** that appears
 in the **Artifacts tab** of the build summary page. Uses the ADO build artifacts
-REST API (container creation + file upload + artifact association).
+REST API in two steps:
+
+1. **Upload bytes** to the agent's own per-build file container (Azure DevOps
+   creates one container per build and exposes its ID via `BUILD_CONTAINERID`).
+2. **Associate** the artifact record (`name = artifact_name`) with the target
+   build via `POST /{project}/_apis/build/builds/{effective_build_id}/artifacts`.
 
 **Omit `build_id` to target the current pipeline run** — the executor resolves
 the build ID from the `BUILD_BUILDID` environment variable automatically. When
-`build_id` is provided, the artifact is published to that specific build.
+`build_id` is provided, the artifact record is published to that specific build
+("cross-build publishing"). The artifact bytes still live in the agent's own
+build container; only the record's pointer is associated with the target build.
+This means cross-published artifacts share the agent build's retention — if the
+agent's build is purged, the cross-referenced artifact stops being downloadable.
+Cross-project publishing is not supported (the associate POST uses the current
+pipeline's project).
 
 The tool stages the file during Stage 1 (MCP) by copying it into the
-safe-outputs directory; Stage 3 reads the staged copy and executes the three-step
-REST API flow to create the artifact.
+safe-outputs directory; Stage 3 reads the staged copy and executes the two-step
+REST flow.
 
 **Agent parameters:**
 - `build_id` *(optional)* - Target build ID. Omit to publish to the current pipeline run. Must be positive when specified.
@@ -504,13 +515,37 @@ safe-outputs:
     allowed-artifact-names: []           # Optional — restrict names (suffix `*` = prefix match)
     allowed-build-ids: []                # Optional — restrict target builds (skipped when targeting current build)
     name-prefix: ""                      # Optional — prepended to the agent-supplied artifact name
+    require-unique-names: false          # Optional — see "Reusing artifact names" below
     max: 3                               # Maximum per run (default: 3)
 ```
+
+**Reusing artifact names within one agent run:**
+By default, the same `artifact_name` may be reused across multiple
+`upload-pipeline-artifact` calls in one run (e.g. publishing a `TriageSummary`
+to many failing builds at once). The executor inserts a short hash suffix
+(`{artifact_name}__{6 hex}`) into the **internal container folder name** so
+the calls don't silently overwrite each other's bytes in the agent's shared
+build container. The hash lives only in internal addressing — it does not
+appear in the `record.name` your downstream consumers query for, in the web UI
+"Download as zip" filename, or in the contents of files extracted by the
+`DownloadBuildArtifacts@1` / `DownloadPipelineArtifact@2` tasks (all of which
+strip the container folder prefix).
+
+Set `require-unique-names: true` to use a clean container folder
+(`{artifact_name}` only, no suffix) and reject in-run reuse of
+`(effective_build_id, artifact_name)` with a clear early error before any HTTP
+call. Use this when you guarantee one artifact per name per run and want the
+shortest possible internal addressing.
+
+Two records with the same `name` on the **same** target build still collide at
+the record level (ADO returns 409 from the associate call) regardless of this
+setting; use distinct `artifact_name` values when targeting one build with
+multiple uploads.
 
 **Notes:**
 - Single-file only; directory uploads are not supported.
 - When `build_id` is omitted and `allowed-build-ids` is configured, the allow-list check is skipped — the current build is implicitly trusted.
-- Requires `SYSTEM_TEAMPROJECTID` to be available in the execution environment (set automatically by Azure DevOps).
+- Requires `BUILD_CONTAINERID`, `BUILD_BUILDID`, and `SYSTEM_TEAMPROJECTID` (all set automatically inside an Azure DevOps pipeline job) and `vso.build_execute` scope on the executor's token (the existing write service connection provides this).
 
 ### cache-memory (moved to `tools:`)
 Memory is now configured as a first-class tool under `tools: cache-memory:` instead of `safe-outputs: memory:`. See the [Cache Memory section](./tools.md#cache-memory-cache-memory) in `docs/tools.md` for details.

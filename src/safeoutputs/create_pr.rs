@@ -2468,6 +2468,10 @@ new file mode 100755
             pull_request_id: None,
             pull_request_source_branch: None,
             pull_request_target_branch: None,
+            build_container_id: None,
+            uploaded_pipeline_artifact_keys: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
         };
         let outcome = result.execute_impl(&ctx).await.unwrap();
         assert!(!outcome.success);
