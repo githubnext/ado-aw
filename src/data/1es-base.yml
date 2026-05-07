@@ -188,7 +188,7 @@ extends:
                     # (with trailing space). The value MUST be newline-free; is_safe_tool_name enforces this.
                     # Positional args (output_directory, bounding_directory) MUST come after all named
                     # options — clap parses them positionally and reordering would break the command.
-                    nohup /tmp/awf-tools/ado-aw mcp-http \
+                    nohup /tmp/awf-tools/ado-aw {{ ado_aw_debug_flags }}mcp-http \
                       --port "$SAFE_OUTPUTS_PORT" \
                       --api-key "$SAFE_OUTPUTS_API_KEY" \
                       {{ enabled_tools_args }}"/tmp/awf-tools/staging" \
@@ -395,8 +395,9 @@ extends:
                     if [ -d "{{ engine_log_dir }}" ]; then
                       cp -r "{{ engine_log_dir }}"/* "$(Agent.TempDirectory)/staging/logs/" 2>/dev/null || true
                     fi
-                    if [ -d ~/.ado-aw/logs ]; then
-                      cp -r ~/.ado-aw/logs/* "$(Agent.TempDirectory)/staging/logs/" 2>/dev/null || true
+                    ADO_AW_LOG_DIR="${ADO_AW_LOG_DIR:-$HOME/.ado-aw/logs}"
+                    if [ -d "$ADO_AW_LOG_DIR" ]; then
+                      cp -r "$ADO_AW_LOG_DIR"/* "$(Agent.TempDirectory)/staging/logs/" 2>/dev/null || true
                     fi
                     if [ -d /tmp/gh-aw/mcp-logs ]; then
                       mkdir -p "$(Agent.TempDirectory)/staging/logs/mcpg"
@@ -593,9 +594,10 @@ extends:
                       mkdir -p "$(Agent.TempDirectory)/analyzed_outputs/logs/copilot"
                       cp -r "{{ engine_log_dir }}"/* "$(Agent.TempDirectory)/analyzed_outputs/logs/copilot/" 2>/dev/null || true
                     fi
-                    if [ -d ~/.ado-aw/logs ]; then
+                    ADO_AW_LOG_DIR="${ADO_AW_LOG_DIR:-$HOME/.ado-aw/logs}"
+                    if [ -d "$ADO_AW_LOG_DIR" ]; then
                       mkdir -p "$(Agent.TempDirectory)/analyzed_outputs/logs/ado-aw"
-                      cp -r ~/.ado-aw/logs/* "$(Agent.TempDirectory)/analyzed_outputs/logs/ado-aw/" 2>/dev/null || true
+                      cp -r "$ADO_AW_LOG_DIR"/* "$(Agent.TempDirectory)/analyzed_outputs/logs/ado-aw/" 2>/dev/null || true
                     fi
                     echo "Logs copied to $(Agent.TempDirectory)/analyzed_outputs/logs"
                     ls -laR "$(Agent.TempDirectory)/analyzed_outputs/logs" 2>/dev/null || echo "No logs found"
@@ -653,7 +655,7 @@ extends:
                   displayName: "Prepare output directory"
 
                 - bash: |
-                    ado-aw execute --source "{{ source_path }}" --safe-output-dir "$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)" --output-dir "$(Agent.TempDirectory)/staging"
+                    ado-aw {{ ado_aw_debug_flags }}execute --source "{{ source_path }}" --safe-output-dir "$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)" --output-dir "$(Agent.TempDirectory)/staging"
                     EXIT_CODE=$?
                     if [ $EXIT_CODE -eq 2 ]; then
                       echo "##vso[task.complete result=SucceededWithIssues;]Executor completed with warnings"
@@ -674,9 +676,10 @@ extends:
                       mkdir -p "$(Agent.TempDirectory)/staging/logs/copilot"
                       cp -r "{{ engine_log_dir }}"/* "$(Agent.TempDirectory)/staging/logs/copilot/" 2>/dev/null || true
                     fi
-                    if [ -d ~/.ado-aw/logs ]; then
+                    ADO_AW_LOG_DIR="${ADO_AW_LOG_DIR:-$HOME/.ado-aw/logs}"
+                    if [ -d "$ADO_AW_LOG_DIR" ]; then
                       mkdir -p "$(Agent.TempDirectory)/staging/logs/ado-aw"
-                      cp -r ~/.ado-aw/logs/* "$(Agent.TempDirectory)/staging/logs/ado-aw/" 2>/dev/null || true
+                      cp -r "$ADO_AW_LOG_DIR"/* "$(Agent.TempDirectory)/staging/logs/ado-aw/" 2>/dev/null || true
                     fi
                     echo "Logs copied to $(Agent.TempDirectory)/staging/logs"
                     ls -laR "$(Agent.TempDirectory)/staging/logs" 2>/dev/null || echo "No logs found"

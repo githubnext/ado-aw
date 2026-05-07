@@ -143,6 +143,9 @@ struct Args {
     /// Enable debug logging (debug level, implies verbose)
     #[arg(short, long, global = true)]
     debug: bool,
+    /// Output directory for ado-aw log files (overrides ADO_AW_LOG_DIR)
+    #[arg(long, global = true)]
+    log_output_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -337,8 +340,13 @@ async fn main() -> Result<()> {
         None => "ado-aw",
     };
 
-    // Initialize file-based logging to $HOME/.ado-aw/logs/{command}.log
-    let _log_path = logging::init_logging(command_name, args.debug, args.verbose);
+    // Initialize file-based logging to a daily log file.
+    let _log_path = logging::init_logging(
+        command_name,
+        args.debug,
+        args.verbose,
+        args.log_output_dir.as_deref(),
+    );
 
     let Some(command) = args.command else {
         println!("No subcommand was used. Try `compile <path>`");
