@@ -102,8 +102,10 @@ impl CompilerExtension for TriggerFiltersExtension {
         steps.push(format!(
             r#"- bash: |
     mkdir -p /tmp/ado-aw-scripts
+    curl -fsSL "{RELEASE_BASE_URL}/v{version}/checksums.txt" -o /tmp/ado-aw-scripts/checksums.txt
     curl -fsSL "{RELEASE_BASE_URL}/v{version}/scripts.zip" -o /tmp/ado-aw-scripts/scripts.zip
-    cd /tmp/ado-aw-scripts && unzip -o scripts.zip
+    cd /tmp/ado-aw-scripts && grep "scripts.zip" checksums.txt | sha256sum -c -
+    cd /tmp/ado-aw-scripts && unzip -jo scripts.zip gate-eval.py
   displayName: "Download ado-aw scripts (v{version})"
   condition: succeeded()"#,
         ));
@@ -223,6 +225,18 @@ mod tests {
         assert!(
             steps[0].contains("scripts.zip"),
             "should download scripts.zip"
+        );
+        assert!(
+            steps[0].contains("checksums.txt"),
+            "should download checksums.txt"
+        );
+        assert!(
+            steps[0].contains("sha256sum -c -"),
+            "should verify scripts.zip checksum"
+        );
+        assert!(
+            steps[0].contains("unzip -jo scripts.zip gate-eval.py"),
+            "should extract only gate-eval.py"
         );
         assert!(steps[1].contains("prGate"), "second step should be PR gate");
         assert!(

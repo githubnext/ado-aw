@@ -10,6 +10,7 @@ use super::PATH_SEGMENT;
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::validate::contains_newline;
 use anyhow::{Context, ensure};
 
 /// Parameters for uploading an attachment to a work item
@@ -44,6 +45,10 @@ impl Validate for UploadWorkitemAttachmentParams {
         ensure!(
             !self.file_path.contains('\0'),
             "file_path must not contain null bytes"
+        );
+        ensure!(
+            !contains_newline(&self.file_path),
+            "file_path must not contain newlines or carriage returns"
         );
         ensure!(
             !self
@@ -488,6 +493,28 @@ mod tests {
         let params = UploadWorkitemAttachmentParams {
             work_item_id: 42,
             file_path: "/etc/passwd".to_string(),
+            comment: None,
+        };
+        let result: Result<UploadWorkitemAttachmentResult, _> = params.try_into();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validation_rejects_newline_in_file_path() {
+        let params = UploadWorkitemAttachmentParams {
+            work_item_id: 42,
+            file_path: "output\n/report.pdf".to_string(),
+            comment: None,
+        };
+        let result: Result<UploadWorkitemAttachmentResult, _> = params.try_into();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validation_rejects_carriage_return_in_file_path() {
+        let params = UploadWorkitemAttachmentParams {
+            work_item_id: 42,
+            file_path: "output\r/report.pdf".to_string(),
             comment: None,
         };
         let result: Result<UploadWorkitemAttachmentResult, _> = params.try_into();
