@@ -206,7 +206,7 @@ async fn ensure_non_github_remote_for_ado_aw(command_name: &str, repo_path: &Pat
         anyhow::bail!(
             "Cannot run `ado-aw {}` in a GitHub repository (origin: {}). \
              `ado-aw` is for Azure DevOps repositories. \
-             For GitHub repositories, use gh-aw instead: https://github.com/githubnext/gh-aw",
+             For GitHub repositories, use gh-aw instead: https://github.com/github/gh-aw",
             command_name,
             remote_url
         );
