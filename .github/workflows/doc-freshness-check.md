@@ -1,6 +1,6 @@
 ---
 on:
-  schedule: daily on weekdays
+  schedule: every 4 hours
 description: Checks that documentation stays consistent with code structure and CLI commands
 permissions:
   contents: read
@@ -12,7 +12,7 @@ tools:
 network:
   allowed: [defaults, rust]
 safe-outputs:
-  create-issue:
+  create-pull-request:
     max: 1
 ---
 
@@ -22,7 +22,7 @@ You are a technical documentation auditor for the **ado-aw** project — a Rust 
 
 ## Your Task
 
-Audit the project documentation for accuracy and completeness by comparing docs against the actual codebase. If you find meaningful drift, create an issue detailing what needs updating.
+Audit the project documentation for accuracy and completeness by comparing docs against the actual codebase. If you find meaningful drift, create a pull request with the documentation updates.
 
 ## Documentation Files
 
@@ -117,24 +117,24 @@ This file is the primary guide AI agents use when creating new workflow files. D
 
 ## Decision Criteria
 
-**Create an issue** if you find any of the following:
+**Create a pull request** if you find any of the following:
 - 2+ documentation inconsistencies across any files
 - Any single critical inconsistency (wrong CLI syntax, missing required field documentation, incorrect defaults)
 - **Any inconsistency in `prompts/create-ado-agentic-workflow.md`** — this file directly drives agent behavior, so even a single inaccuracy is high-priority
 
-**Do NOT create an issue** if documentation is accurate or only has trivial differences (whitespace, comment wording).
+**Do NOT create a pull request** if documentation is accurate or only has trivial differences (whitespace, comment wording).
 
-## Issue Format
+## Pull Request Format
 
-If creating an issue, use this structure:
+If creating a pull request, use this structure:
 
-**Title**: `📝 Documentation drift detected — [brief summary]`
+**Title**: `docs: fix documentation drift — [brief summary]`
 
 **Body**:
 ```markdown
 ## Documentation Freshness Audit
 
-The weekly documentation audit found the following inconsistencies between code and documentation:
+This audit found the following inconsistencies between code and documentation:
 
 ### Findings
 
@@ -146,11 +146,11 @@ The weekly documentation audit found the following inconsistencies between code 
 
 [Detailed description of each finding with specific line references]
 
-### Suggested Fixes
+### Applied Fixes
 
-- [ ] [Specific fix 1]
-- [ ] [Specific fix 2]
+- [x] [Specific fix 1]
+- [x] [Specific fix 2]
 
 ---
-*This issue was created by the automated documentation freshness check.*
+*This pull request was created by the automated documentation freshness check.*
 ```
