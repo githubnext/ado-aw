@@ -104,6 +104,11 @@ pub struct CompileContext<'a> {
     pub ado_context: Option<AdoContext>,
     /// Resolved engine based on the front matter `engine:` field.
     pub engine: Engine,
+    /// Directory containing the agent markdown being compiled (i.e. the
+    /// repo-relative dir against which paths like `global.json` /
+    /// `nuget.config` should be resolved). `None` for unit-test contexts
+    /// where no on-disk repo exists.
+    pub compile_dir: Option<&'a Path>,
 }
 
 impl<'a> CompileContext<'a> {
@@ -112,7 +117,7 @@ impl<'a> CompileContext<'a> {
     /// Resolves the engine implementation from front matter and infers ADO
     /// context from the git remote in `compile_dir`. Returns an error if
     /// the engine identifier is unsupported.
-    pub async fn new(front_matter: &'a FrontMatter, compile_dir: &Path) -> Result<Self> {
+    pub async fn new(front_matter: &'a FrontMatter, compile_dir: &'a Path) -> Result<Self> {
         let engine = engine::get_engine(front_matter.engine.engine_id())?;
         let ado_context = Self::infer_ado_context(compile_dir).await;
         Ok(Self {
@@ -120,6 +125,7 @@ impl<'a> CompileContext<'a> {
             front_matter,
             ado_context,
             engine,
+            compile_dir: Some(compile_dir),
         })
     }
 
@@ -168,6 +174,7 @@ impl<'a> CompileContext<'a> {
             front_matter,
             ado_context: None,
             engine: crate::engine::Engine::Copilot,
+            compile_dir: None,
         }
     }
 
@@ -183,6 +190,19 @@ impl<'a> CompileContext<'a> {
                 repo_name: "test-repo".to_string(),
             }),
             engine: crate::engine::Engine::Copilot,
+            compile_dir: None,
+        }
+    }
+
+    /// Create a context for tests with a specific compile directory.
+    #[cfg(test)]
+    pub fn for_test_with_compile_dir(front_matter: &'a FrontMatter, compile_dir: &'a Path) -> Self {
+        Self {
+            agent_name: &front_matter.name,
+            front_matter,
+            ado_context: None,
+            engine: crate::engine::Engine::Copilot,
+            compile_dir: Some(compile_dir),
         }
     }
 }
@@ -560,6 +580,7 @@ pub(crate) mod trigger_filters;
 pub use crate::tools::azure_devops::AzureDevOpsExtension;
 pub use crate::tools::cache_memory::CacheMemoryExtension;
 pub use github::GitHubExtension;
+pub use crate::runtimes::dotnet::DotnetExtension;
 pub use crate::runtimes::lean::LeanExtension;
 pub use crate::runtimes::node::NodeExtension;
 pub use crate::runtimes::python::PythonExtension;
@@ -577,6 +598,7 @@ extension_enum! {
         Lean(LeanExtension),
         Python(PythonExtension),
         Node(NodeExtension),
+        Dotnet(DotnetExtension),
         AzureDevOps(AzureDevOpsExtension),
         CacheMemory(CacheMemoryExtension),
         TriggerFilters(TriggerFiltersExtension),
@@ -619,6 +641,11 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
     if let Some(node) = front_matter.runtimes.as_ref().and_then(|r| r.node.as_ref()) {
         if node.is_enabled() {
             extensions.push(Extension::Node(NodeExtension::new(node.clone())));
+        }
+    }
+    if let Some(dotnet) = front_matter.runtimes.as_ref().and_then(|r| r.dotnet.as_ref()) {
+        if dotnet.is_enabled() {
+            extensions.push(Extension::Dotnet(DotnetExtension::new(dotnet.clone())));
         }
     }
 

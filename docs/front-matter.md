@@ -53,6 +53,10 @@ runtimes:                      # optional runtime configuration (language enviro
   # node:                      # Alternative object format (pin version, configure internal feed)
   #   version: "22.x"
   #   feed-url: "https://pkgs.dev.azure.com/ORG/PROJECT/_packaging/FEED/npm/registry/"
+  # dotnet: true               # .NET runtime — auto-installs via UseDotNet@2 (see docs/runtimes.md)
+  # dotnet:                    # Alternative object format (pin version, configure internal feed via nuget.config)
+  #   version: "8.0.x"          # use "global.json" to pin from the repo's global.json
+  #   feed-url: "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/nuget/v3/index.json"
 # env:                          # RESERVED: workflow-level environment variables (not yet implemented)
 #   CUSTOM_VAR: "value"
 mcp-servers:

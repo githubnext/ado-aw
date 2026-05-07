@@ -513,6 +513,15 @@ pub struct RuntimesConfig {
     /// the bash command allow-list, and optionally injects feed URL env vars.
     #[serde(default)]
     pub node: Option<crate::runtimes::node::NodeRuntimeConfig>,
+
+    /// .NET runtime.
+    /// Auto-installs the .NET SDK via UseDotNet@2, emits NuGetAuthenticate@1,
+    /// adds .NET ecosystem domains to the AWF network allowlist, and extends
+    /// the bash command allow-list. Feed configuration uses `nuget.config`
+    /// (generated or checked in) rather than env vars — NuGet has no env-var
+    /// equivalent for selecting a package source.
+    #[serde(default)]
+    pub dotnet: Option<crate::runtimes::dotnet::DotnetRuntimeConfig>,
 }
 
 impl SanitizeConfigTrait for RuntimesConfig {
@@ -525,6 +534,9 @@ impl SanitizeConfigTrait for RuntimesConfig {
         }
         if let Some(ref mut node) = self.node {
             node.sanitize_config_fields();
+        }
+        if let Some(ref mut dotnet) = self.dotnet {
+            dotnet.sanitize_config_fields();
         }
     }
 }

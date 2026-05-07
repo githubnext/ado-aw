@@ -575,20 +575,241 @@ fn test_python_config_and_feed_url_mutually_exclusive() {
     assert!(result.unwrap_err().to_string().contains("mutually exclusive"));
 }
 
+// ── DotnetExtension ────────────────────────────────────────────
+
+#[test]
+fn test_collect_extensions_dotnet_enabled() {
+    let (fm, _) =
+        parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  dotnet: true\n---\n")
+            .unwrap();
+    let exts = collect_extensions(&fm);
+    assert!(exts.iter().any(|e| e.name() == "dotnet"));
+}
+
+#[test]
+fn test_collect_extensions_dotnet_disabled() {
+    let (fm, _) =
+        parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  dotnet: false\n---\n")
+            .unwrap();
+    let exts = collect_extensions(&fm);
+    assert!(!exts.iter().any(|e| e.name() == "dotnet"));
+}
+
+#[test]
+fn test_collect_extensions_dotnet_with_version() {
+    let (fm, _) =
+        parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: '8.0.x'\n---\n")
+            .unwrap();
+    let exts = collect_extensions(&fm);
+    assert!(exts.iter().any(|e| e.name() == "dotnet"));
+}
+
+#[test]
+fn test_dotnet_required_hosts() {
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(
+        crate::runtimes::dotnet::DotnetRuntimeConfig::Enabled(true),
+    );
+    let hosts = ext.required_hosts();
+    assert_eq!(hosts, vec!["dotnet".to_string()]);
+}
+
+#[test]
+fn test_dotnet_required_bash_commands() {
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(
+        crate::runtimes::dotnet::DotnetRuntimeConfig::Enabled(true),
+    );
+    assert_eq!(ext.required_bash_commands(), vec!["dotnet".to_string()]);
+}
+
+#[test]
+fn test_dotnet_prepare_steps() {
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(
+        crate::runtimes::dotnet::DotnetRuntimeConfig::Enabled(true),
+    );
+    let steps = ext.prepare_steps();
+    assert_eq!(steps.len(), 1, "no auth steps without feed-url/config");
+    assert!(steps[0].contains("UseDotNet@2"));
+    assert!(steps[0].contains("packageType: 'sdk'"));
+}
+
+#[test]
+fn test_dotnet_prepare_steps_with_feed_url() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    feed-url: 'https://pkgs.dev.azure.com/myorg/_packaging/myfeed/nuget/v3/index.json'\n---\n",
+    ).unwrap();
+    let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
+    let steps = ext.prepare_steps();
+    assert_eq!(steps.len(), 3);
+    assert!(steps[0].contains("UseDotNet@2"));
+    assert!(steps[1].contains("Ensure nuget.config"));
+    assert!(steps[2].contains("NuGetAuthenticate@1"));
+}
+
+#[test]
+fn test_dotnet_prepare_steps_with_config_only() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    config: 'nuget.config'\n---\n",
+    ).unwrap();
+    let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
+    let steps = ext.prepare_steps();
+    // config: alone trusts the user-checked-in nuget.config — no shim,
+    // just the auth step.
+    assert_eq!(steps.len(), 2);
+    assert!(steps[0].contains("UseDotNet@2"));
+    assert!(steps[1].contains("NuGetAuthenticate@1"));
+}
+
+#[test]
+fn test_dotnet_agent_env_vars_no_feed() {
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(
+        crate::runtimes::dotnet::DotnetRuntimeConfig::Enabled(true),
+    );
+    assert!(ext.agent_env_vars().is_empty());
+}
+
+#[test]
+fn test_dotnet_agent_env_vars_with_feed() {
+    // Unlike Python (PIP_INDEX_URL) and Node (NPM_CONFIG_REGISTRY), .NET
+    // does NOT inject any env var for feed configuration — it relies on
+    // nuget.config files. This test pins that contract.
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: '8.0.x'\n    feed-url: 'https://pkgs.dev.azure.com/myorg/_packaging/myfeed/nuget/v3/index.json'\n---\n",
+    ).unwrap();
+    let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
+    assert!(ext.agent_env_vars().is_empty());
+}
+
+#[test]
+fn test_dotnet_config_and_feed_url_mutually_exclusive() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    config: 'nuget.config'\n    feed-url: 'https://example.com/nuget/v3/index.json'\n---\n",
+    ).unwrap();
+    let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
+    let ctx = ctx_from(&fm);
+    let result = ext.validate(&ctx);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("mutually exclusive"));
+}
+
+#[test]
+fn test_dotnet_invalid_feed_url_rejected() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    feed-url: 'https://example.com/$(SECRET)/nuget'\n---\n",
+    ).unwrap();
+    let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
+    let ctx = ctx_from(&fm);
+    assert!(ext.validate(&ctx).is_err());
+}
+
+#[test]
+fn test_dotnet_global_json_sentinel_emits_use_global_json() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: 'global.json'\n---\n",
+    ).unwrap();
+    let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+    assert!(dotnet.use_global_json());
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
+    let steps = ext.prepare_steps();
+    assert!(steps[0].contains("useGlobalJson: true"));
+    assert!(!steps[0].contains("version:"), "explicit version must be omitted in global.json mode");
+    assert!(steps[0].contains("from global.json"));
+}
+
+#[test]
+fn test_dotnet_global_json_sentinel_case_insensitive() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: 'Global.JSON'\n---\n",
+    ).unwrap();
+    let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+    assert!(dotnet.use_global_json());
+}
+
+#[test]
+fn test_dotnet_global_json_sentinel_skips_injection_check() {
+    // The sentinel is a literal keyword, not a version — it must not be
+    // rejected by reject_pipeline_injection.
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: 'global.json'\n---\n",
+    ).unwrap();
+    let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
+    let ctx = ctx_from(&fm);
+    assert!(ext.validate(&ctx).is_ok());
+}
+
+#[test]
+fn test_dotnet_version_with_global_json_present_errors() {
+    use std::io::Write;
+    let tmp = tempfile::tempdir().unwrap();
+    let mut f = std::fs::File::create(tmp.path().join("global.json")).unwrap();
+    writeln!(f, r#"{{ "sdk": {{ "version": "8.0.100" }} }}"#).unwrap();
+
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: '9.0.x'\n---\n",
+    ).unwrap();
+    let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
+    let ctx = CompileContext::for_test_with_compile_dir(&fm, tmp.path());
+    let result = ext.validate(&ctx);
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("global.json"), "error must mention global.json: {msg}");
+    assert!(msg.contains("useGlobalJson") || msg.contains("'global.json'"), "error must hint at the sentinel: {msg}");
+}
+
+#[test]
+fn test_dotnet_global_json_sentinel_with_global_json_present_ok() {
+    // Using the sentinel alongside an on-disk global.json is the intended
+    // happy path — no error.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("global.json"), r#"{"sdk":{"version":"8.0.100"}}"#).unwrap();
+
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: 'global.json'\n---\n",
+    ).unwrap();
+    let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
+    let ctx = CompileContext::for_test_with_compile_dir(&fm, tmp.path());
+    assert!(ext.validate(&ctx).is_ok());
+}
+
+#[test]
+fn test_dotnet_no_version_with_global_json_present_ok() {
+    // Without an explicit version, no conflict — the user simply gets the
+    // compiler default. This intentionally does not auto-promote to
+    // useGlobalJson; users opt in with the sentinel.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("global.json"), r#"{"sdk":{"version":"8.0.100"}}"#).unwrap();
+
+    let (fm, _) =
+        parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  dotnet: true\n---\n")
+            .unwrap();
+    let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
+    let ctx = CompileContext::for_test_with_compile_dir(&fm, tmp.path());
+    assert!(ext.validate(&ctx).is_ok());
+}
+
 // ── Multiple runtimes ──────────────────────────────────────────
 
 #[test]
 fn test_collect_extensions_all_runtimes_enabled() {
     let (fm, _) = parse_markdown(
-        "---\nname: test\ndescription: test\nruntimes:\n  lean: true\n  python: true\n  node: true\n---\n",
+        "---\nname: test\ndescription: test\nruntimes:\n  lean: true\n  python: true\n  node: true\n  dotnet: true\n---\n",
     ).unwrap();
     let exts = collect_extensions(&fm);
     assert!(exts.iter().any(|e| e.name() == "Lean 4"));
     assert!(exts.iter().any(|e| e.name() == "Python"));
     assert!(exts.iter().any(|e| e.name() == "Node.js"));
+    assert!(exts.iter().any(|e| e.name() == "dotnet"));
     // All are Runtime phase
     let runtime_exts: Vec<_> = exts.iter().filter(|e| e.phase() == ExtensionPhase::Runtime).collect();
-    assert_eq!(runtime_exts.len(), 3);
+    assert_eq!(runtime_exts.len(), 4);
 }
 
 #[test]

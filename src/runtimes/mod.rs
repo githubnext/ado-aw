@@ -1,7 +1,7 @@
 //! Runtime implementations for the ado-aw compiler.
 //!
 //! Runtimes are language toolchains installed before the agent runs
-//! (e.g., Lean 4, and in future: Python, Node, Go, etc.).
+//! (e.g., Lean 4, Python, Node.js, .NET, and in future: Go, etc.).
 //!
 //! Unlike `tools/` (agent capabilities like edit, bash, memory) or
 //! `safeoutputs/` (MCP tools that serialize to NDJSON), runtimes are
@@ -9,6 +9,7 @@
 //!
 //! Aligned with gh-aw's `runtimes:` front matter field.
 
+pub mod dotnet;
 pub mod lean;
 pub mod node;
 pub mod python;
