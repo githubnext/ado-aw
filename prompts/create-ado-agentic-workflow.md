@@ -346,7 +346,7 @@ permissions:
 
 Trigger from another pipeline:
 ```yaml
-triggers:
+on:
   pipeline:
     name: "Build Pipeline"
     project: "OtherProject"   # optional if same project
@@ -355,7 +355,7 @@ triggers:
       - release/*
 ```
 
-When `triggers.pipeline` is set: `trigger: none` and `pr: none` are generated automatically, and a step to cancel previous queued builds is included.
+When `on.pipeline` is set: `trigger: none` and `pr: none` are generated automatically, and a step to cancel previous queued builds is included.
 
 ### Step 12 — Inline Steps (optional)
 
@@ -538,7 +538,7 @@ safe-outputs:
 Triggered by another pipeline; reviews and comments via ADO.
 
 ```yaml
-triggers:
+on:
   pipeline:
     name: "CI Build"
     branches: [main, feature/*]

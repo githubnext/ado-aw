@@ -234,7 +234,7 @@ the service connections. Approve the permissions and the pipeline is ready.
 | `description` | string | **required** | One-line summary of the agent's purpose |
 | `target` | `standalone` \| `1es` | `standalone` | Pipeline output format |
 | `engine` | string or object | `copilot` | Engine identifier or object with `id`, `model`, `timeout-minutes`, etc. |
-| `schedule` | string or object | — | [Fuzzy schedule expression](#schedule-syntax) |
+| `on` | object | — | Unified trigger configuration (`schedule`, `pipeline` completion, `pr` triggers). See [schedule syntax](#schedule-syntax). |
 | `pool` | string or object | `AZS-1ES-L-MMS-ubuntu-22.04` | Agent pool |
 | `workspace` | `root` \| `repo` | auto | Working directory mode |
 | `repositories` | list | — | Additional repository resources |
@@ -245,7 +245,6 @@ the service connections. Approve the permissions and the pipeline is ready.
 | `parameters` | list | — | ADO runtime parameters surfaced in the pipeline queue UI |
 | `permissions` | object | — | ARM service connections (`read`, `write`) |
 | `safe-outputs` | object | — | Per-tool configuration |
-| `triggers` | object | — | Pipeline trigger configuration |
 | `steps` | list | — | Inline steps before agent runs |
 | `post-steps` | list | — | Inline steps after agent runs |
 | `setup` | list | — | Separate job before agentic task |
@@ -262,32 +261,49 @@ natural language describing the task, constraints, and expected behavior.
 
 ## Schedule Syntax
 
-The `schedule` field uses a fuzzy syntax that deterministically scatters
+The `on.schedule` field uses a fuzzy syntax that deterministically scatters
 execution times based on the agent name, preventing load spikes.
+
+The expressions below are the value of the `schedule:` key under `on:`. For
+example:
+
+```yaml
+on:
+  schedule: daily around 14:00
+```
 
 ```yaml
 # Daily
-schedule: daily                          # Scattered across 24 hours
-schedule: daily around 14:00             # Within ±60 min of 2 PM
-schedule: daily between 9:00 and 17:00   # Business hours
+on:
+  schedule: daily                          # Scattered across 24 hours
+on:
+  schedule: daily around 14:00             # Within ±60 min of 2 PM
+on:
+  schedule: daily between 9:00 and 17:00   # Business hours
 
 # Weekly
-schedule: weekly on monday around 9:00   # Monday morning
+on:
+  schedule: weekly on monday around 9:00   # Monday morning
 
 # Hourly / Minute intervals
-schedule: hourly                         # Every hour, scattered minute
-schedule: every 2h                       # Every 2 hours
-schedule: every 15 minutes               # Fixed, not scattered
+on:
+  schedule: hourly                         # Every hour, scattered minute
+on:
+  schedule: every 2h                       # Every 2 hours
+on:
+  schedule: every 15 minutes               # Fixed, not scattered
 
 # With timezone
-schedule: daily around 14:00 utc+9       # 2 PM JST → 5 AM UTC
+on:
+  schedule: daily around 14:00 utc+9       # 2 PM JST → 5 AM UTC
 
 # With branch filtering
-schedule:
-  run: daily around 14:00
-  branches:
-    - main
-    - release/*
+on:
+  schedule:
+    run: daily around 14:00
+    branches:
+      - main
+      - release/*
 ```
 
 ---
