@@ -209,22 +209,73 @@ pub(crate) fn resolve_repo_name(
     }
 }
 
+/// Match a `value` against a `pattern` where `*` matches zero or more of **any**
+/// character (including `/`).
+///
+/// Unlike file-path glob matching, `/` is **not** treated as a segment separator —
+/// these patterns are used for tags, artifact names, and similar non-path strings.
+///
+/// Only the `*` wildcard is supported; there is no `?`, `[…]`, or `**` syntax.
+/// Literal `*` characters cannot be escaped — this is intentional since the values
+/// being matched (ADO tags, artifact names) cannot contain `*`.
+pub(crate) fn wildcard_match(pattern: &str, value: &str) -> bool {
+    let p = pattern.as_bytes();
+    let v = value.as_bytes();
+    let (pn, vn) = (p.len(), v.len());
+
+    let mut pi = 0;
+    let mut vi = 0;
+    // Saved positions for backtracking on `*`
+    let mut star_p = usize::MAX;
+    let mut star_v: usize = 0;
+
+    while vi < vn {
+        if pi < pn && p[pi] == b'*' {
+            star_p = pi;
+            star_v = vi;
+            pi += 1;
+        } else if pi < pn && p[pi] == v[vi] {
+            pi += 1;
+            vi += 1;
+        } else if star_p != usize::MAX {
+            // Backtrack: let the last `*` consume one more character
+            pi = star_p + 1;
+            star_v += 1;
+            vi = star_v;
+        } else {
+            return false;
+        }
+    }
+
+    // Consume any trailing `*`s in the pattern
+    while pi < pn && p[pi] == b'*' {
+        pi += 1;
+    }
+
+    pi == pn
+}
+
 /// Return `true` if `tag` is matched by `pattern`.
 ///
-/// Pattern matching rules (consistent with `add-build-tag` and `allowed-labels` in gh-aw):
-/// - Patterns ending with `*` are prefix wildcards: `"agent-*"` matches any tag whose
-///   prefix (before the `*`) case-insensitively equals the start of `tag`.
-/// - All other patterns are compared with case-insensitive exact equality.
+/// Uses [`wildcard_match`] with **case-insensitive** comparison. `*` in the
+/// pattern matches zero or more of any character (including `/`), so
+/// `copilot:repo=org/project/*@main` correctly matches
+/// `copilot:repo=org/project/MyRepo@main`.
 ///
-/// Both comparisons are **case-insensitive** so that an operator who writes
-/// `allowed-tags: ["Agent-*"]` correctly matches an agent-provided tag `"agent-created"`.
-///
-/// Supports `*` wildcards anywhere in the pattern (e.g. `copilot:repo=org/project/*@main`).
+/// This is the shared matcher for `allowed-tags` in `create-work-item`,
+/// `update-work-item`, and `add-build-tag`.
 pub(crate) fn tag_matches_pattern(tag: &str, pattern: &str) -> bool {
-    glob_match::glob_match(
+    wildcard_match(
         &pattern.to_ascii_lowercase(),
         &tag.to_ascii_lowercase(),
     )
+}
+
+/// Return `true` if `name` is matched by `pattern` (**case-sensitive**).
+///
+/// Uses [`wildcard_match`] for artifact-name allow-lists where case matters.
+pub(crate) fn name_matches_pattern(name: &str, pattern: &str) -> bool {
+    wildcard_match(pattern, name)
 }
 
 /// Validate a string against `git check-ref-format` rules.
@@ -481,6 +532,55 @@ mod tests {
         assert!(validate_git_ref_name("release/2026-04-17", "b").is_ok());
     }
 
+    // ─── wildcard_match ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_wildcard_match_exact() {
+        assert!(wildcard_match("hello", "hello"));
+        assert!(!wildcard_match("hello", "world"));
+    }
+
+    #[test]
+    fn test_wildcard_match_star_any() {
+        assert!(wildcard_match("*", "anything"));
+        assert!(wildcard_match("*", ""));
+        assert!(wildcard_match("*", "a/b/c"));
+    }
+
+    #[test]
+    fn test_wildcard_match_trailing_star() {
+        assert!(wildcard_match("agent-*", "agent-created"));
+        assert!(wildcard_match("agent-*", "agent-"));
+        assert!(!wildcard_match("agent-*", "bot-created"));
+    }
+
+    #[test]
+    fn test_wildcard_match_middle_star() {
+        assert!(wildcard_match("a*z", "az"));
+        assert!(wildcard_match("a*z", "abcz"));
+        assert!(!wildcard_match("a*z", "abcy"));
+    }
+
+    #[test]
+    fn test_wildcard_match_star_crosses_slash() {
+        // Unlike file-path globs, * matches across /
+        assert!(wildcard_match("team/*", "team/sub/item"));
+        assert!(wildcard_match("prefix/*@main", "prefix/a/b/c@main"));
+    }
+
+    #[test]
+    fn test_wildcard_match_multiple_stars() {
+        assert!(wildcard_match("*-*", "a-b"));
+        assert!(wildcard_match("*-*", "abc-def"));
+        assert!(!wildcard_match("*-*", "abc"));
+    }
+
+    #[test]
+    fn test_wildcard_match_case_sensitive() {
+        // wildcard_match itself is case-sensitive
+        assert!(!wildcard_match("Hello", "hello"));
+    }
+
     // ─── tag_matches_pattern ───────────────────────────────────────────────
 
     #[test]
@@ -540,5 +640,26 @@ mod tests {
             "Copilot:Repo=MSAzureSphere/4x4/Tools@Main",
             "copilot:repo=msazuresphere/4x4/*@main"
         ));
+    }
+
+    #[test]
+    fn test_tag_matches_pattern_star_crosses_slash() {
+        // Hierarchical tags: * must match across /
+        assert!(tag_matches_pattern("team/subgroup/item", "team/*"));
+    }
+
+    // ─── name_matches_pattern ───────────────────────────────────────────────
+
+    #[test]
+    fn test_name_matches_pattern_case_sensitive() {
+        assert!(name_matches_pattern("report", "report"));
+        assert!(!name_matches_pattern("Report", "report"));
+    }
+
+    #[test]
+    fn test_name_matches_pattern_wildcard() {
+        assert!(name_matches_pattern("agent-report-123", "agent-*"));
+        assert!(name_matches_pattern("agent-report", "agent-*"));
+        assert!(!name_matches_pattern("bot-report", "agent-*"));
     }
 }

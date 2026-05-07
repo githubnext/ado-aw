@@ -321,13 +321,10 @@ impl Executor for UploadPipelineArtifactResult {
 
         // ── Artifact-name allow-list ─────────────────────────────────────
         if !config.allowed_artifact_names.is_empty() {
-            let allowed = config.allowed_artifact_names.iter().any(|pattern| {
-                if let Some(prefix) = pattern.strip_suffix('*') {
-                    final_name.starts_with(prefix)
-                } else {
-                    *pattern == final_name
-                }
-            });
+            let allowed = config
+                .allowed_artifact_names
+                .iter()
+                .any(|pattern| super::name_matches_pattern(&final_name, pattern));
             if !allowed {
                 return Ok(ExecutionResult::failure(format!(
                     "Artifact name '{}' is not in the allowed list",
