@@ -137,6 +137,11 @@ parameters:                    # optional ADO runtime parameters (surfaced in UI
     displayName: "Clear agent memory"
     type: boolean
     default: false
+  - name: focusArea            # `prompt-context: true` injects this value
+    displayName: "Focus area"  # into the agent prompt at queue time
+    type: string
+    default: "no specific focus"
+    prompt-context: true       # see docs/parameters.md#prompt-context-parameters
 ---
 
 
