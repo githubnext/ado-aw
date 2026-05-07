@@ -12,18 +12,13 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-/// Get the standard log directory path
+/// Resolve log directory, optionally overriding with a CLI-provided path.
 ///
 /// Resolution order:
 /// 1. CLI override (`--log-output-dir`)
 /// 2. `ADO_AW_LOG_DIR` env var
 /// 3. Default (`$HOME/.ado-aw/logs` or `%USERPROFILE%\.ado-aw\logs`)
-pub fn log_directory() -> Result<PathBuf> {
-    log_directory_with_override(None)
-}
-
-/// Resolve log directory, optionally overriding with a CLI-provided path.
-pub fn log_directory_with_override(output_dir_override: Option<&Path>) -> Result<PathBuf> {
+fn log_directory(output_dir_override: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = output_dir_override {
         return Ok(path.to_path_buf());
     }
@@ -37,24 +32,14 @@ pub fn log_directory_with_override(output_dir_override: Option<&Path>) -> Result
     Ok(home.join(".ado-aw").join("logs"))
 }
 
-/// Get the path for today's log file
-pub fn daily_log_path() -> Result<PathBuf> {
-    daily_log_path_with_override(None)
-}
-
 fn daily_log_path_with_override(output_dir_override: Option<&Path>) -> Result<PathBuf> {
-    let log_dir = log_directory_with_override(output_dir_override)?;
+    let log_dir = log_directory(output_dir_override)?;
     let date = Local::now().format("%Y-%m-%d");
     Ok(log_dir.join(format!("{}.log", date)))
 }
 
-/// Ensure the log directory exists
-pub fn ensure_log_directory() -> Result<PathBuf> {
-    ensure_log_directory_with_override(None)
-}
-
 fn ensure_log_directory_with_override(output_dir_override: Option<&Path>) -> Result<PathBuf> {
-    let log_dir = log_directory_with_override(output_dir_override)?;
+    let log_dir = log_directory(output_dir_override)?;
     fs::create_dir_all(&log_dir).context("Failed to create log directory")?;
     Ok(log_dir)
 }
@@ -235,7 +220,7 @@ mod tests {
 
     #[test]
     fn test_log_directory() {
-        let dir = log_directory().unwrap();
+        let dir = log_directory(None).unwrap();
         assert!(
             dir.ends_with(".ado-aw/logs") || dir.ends_with(".ado-aw\\logs")
         );
@@ -243,7 +228,7 @@ mod tests {
 
     #[test]
     fn test_daily_log_path() {
-        let path = daily_log_path().unwrap();
+        let path = daily_log_path_with_override(None).unwrap();
         let filename = path.file_name().unwrap().to_string_lossy();
         // Should be YYYY-MM-DD.log format
         assert!(filename.ends_with(".log"));
@@ -252,14 +237,14 @@ mod tests {
 
     #[test]
     fn test_ensure_log_directory() {
-        let dir = ensure_log_directory().unwrap();
+        let dir = ensure_log_directory_with_override(None).unwrap();
         assert!(dir.exists());
     }
 
     #[test]
     fn test_log_directory_override() {
         let temp = tempdir().unwrap();
-        let dir = log_directory_with_override(Some(temp.path())).unwrap();
+        let dir = log_directory(Some(temp.path())).unwrap();
         assert_eq!(dir, temp.path());
     }
 
