@@ -1,7 +1,8 @@
 ---
 on:
   schedule: every 6 hours
-description: Compares ado-aw front matter schema with gh-aw and proposes Rust code changes to align the two
+  skip-if-match: "is:issue is:open label:frontmatter-alignment"
+description: Compares ado-aw front matter schema with gh-aw and files an issue with a concrete Rust change proposal to align the two
 permissions:
   contents: read
   pull-requests: read
@@ -10,7 +11,6 @@ tools:
   github:
     toolsets: [default]
   bash: ["*"]
-  edit:
   web-fetch:
 network:
   allowed: [defaults, rust]
@@ -20,8 +20,9 @@ runtimes:
     action-repo: "actions-rust-lang/setup-rust-toolchain"
     action-version: "v1"
 safe-outputs:
-  create-pull-request:
+  create-issue:
     max: 1
+    labels: [frontmatter-alignment]
 ---
 
 # Front Matter Aligner: ado-aw ↔ gh-aw
@@ -33,10 +34,10 @@ You are a Rust engineer maintaining the **ado-aw** compiler — a CLI tool that 
 1. Fetch the current gh-aw front matter schema documentation
 2. Compare it against the ado-aw `FrontMatter` struct in Rust
 3. Identify alignment gaps where ado-aw could adopt gh-aw fields without breaking existing functionality
-4. Implement the most impactful changes in Rust
-5. Validate them and open a pull request
+4. Validate that your proposed Rust code changes compile correctly
+5. File an issue with a concrete, ready-to-apply proposal
 
-If the schemas are already fully aligned (or no non-breaking additions are feasible), do nothing and exit without creating a PR.
+If the schemas are already fully aligned (or no non-breaking additions are feasible), do nothing and exit without creating an issue.
 
 ---
 
@@ -86,71 +87,85 @@ For each field in gh-aw's schema, determine:
 
 ---
 
-## Step 4 — Check for an Existing PR
+## Step 4 — Check for an Existing Open Issue
 
-Before making changes, search open pull requests for one with a title containing `frontmatter-aligner` or `align.*front.matter`. If such a PR is already open and covers the same gap, skip creating a new one.
+Before proceeding, search open issues for one with the label `frontmatter-alignment`. If such an issue already exists, exit without creating a new one.
 
 ---
 
-## Step 5 — Implement the Changes
+## Step 5 — Draft the Rust Changes
 
-For each alignment gap you decide to address:
+For each alignment gap you decide to address, write the exact Rust code additions needed in `src/compile/types.rs`:
 
-1. Add the new field to the appropriate struct in `src/compile/types.rs` with:
+1. Add the new field to the appropriate struct with:
    - `#[serde(default)]` so it is optional and backward-compatible
    - The exact serde field name matching gh-aw (use `#[serde(rename = "...")]` as needed)
    - A doc comment explaining the field and referencing its gh-aw equivalent
    - The correct Rust type (`Option<T>` for optional fields, `bool` with `#[serde(default)]` for flags)
 
-2. If the field needs to be *used* somewhere in the compiler (e.g., `timeout-minutes` already flows through to pipeline generation), wire it up. If it only needs to be *parsed* and stored for future use, adding it to the struct is sufficient.
+2. Note whether the field needs to be *used* anywhere in the compiler (e.g., wired into pipeline generation) or whether parsing and storing it is sufficient for now.
 
-3. Update `docs/front-matter.md` to document any newly added fields.
+3. Write a corresponding `docs/front-matter.md` documentation entry for the field.
 
-After each change, run:
+---
+
+## Step 6 — Validate the Proposal
+
+Apply the proposed changes temporarily to verify they compile:
 
 ```bash
 cargo check 2>&1
 ```
 
-Fix any compilation errors before proceeding to the next field.
-
-When all changes compile cleanly, run the full test suite:
-
-```bash
-cargo test 2>&1
-```
+If `cargo check` fails, fix the errors before proceeding. Once it passes, revert the temporary edits — the issue will carry the proposal, not committed code.
 
 ---
 
-## Step 6 — Open a Pull Request
+## Step 7 — File an Issue
 
-If you made any changes, create a pull request:
+Create an issue with the following structure:
 
-**Title**: `feat(compile): align FrontMatter fields with gh-aw schema`
+**Title**: `feat: align FrontMatter fields with gh-aw schema — [brief summary of gaps found]`
 
 **Body**:
 ```markdown
-## Front Matter Alignment: ado-aw ↔ gh-aw
+## Front Matter Alignment Proposal: ado-aw ↔ gh-aw
 
-This PR was opened automatically by the `frontmatter-aligner` workflow.
-
-### Changes
-
-[List each added/updated field with a brief explanation]
+This issue was filed automatically by the `frontmatter-aligner` workflow after detecting schema drift.
 
 ### Alignment Summary
 
-| Field | gh-aw | ado-aw (before) | ado-aw (after) |
-|-------|-------|-----------------|----------------|
-| `field-name` | ✅ | ❌ | ✅ |
+| Field | gh-aw | ado-aw (current) | Notes |
+|-------|-------|------------------|-------|
+| `field-name` | ✅ | ❌ | [why it's useful for ADO users] |
+
+### Proposed Changes to `src/compile/types.rs`
+
+For each missing field, include the exact Rust snippet to add:
+
+#### `field-name`
+
+**Where to add**: [struct name, after field `existing-field`]
+
+```rust
+/// [doc comment explaining the field]
+/// Aligned with gh-aw's `field-name` frontmatter field.
+#[serde(default, rename = "field-name")]
+pub field_name: Option<FieldType>,
+```
+
+**Does it need compiler wiring?** [Yes — [describe what] / No — parsing only for now]
+
+### Proposed Changes to `docs/front-matter.md`
+
+```markdown
+[documentation entry for the new field(s)]
+```
 
 ### Validation
 
-- `cargo check` passed
-- `cargo test` passed
+`cargo check` passed with the proposed changes applied.
 
 ---
-*Opened automatically by the frontmatter-aligner workflow.*
+*Filed automatically by the frontmatter-aligner workflow.*
 ```
-
-**Base branch**: `main`
