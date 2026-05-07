@@ -560,6 +560,7 @@ pub(crate) mod trigger_filters;
 pub use crate::tools::azure_devops::AzureDevOpsExtension;
 pub use crate::tools::cache_memory::CacheMemoryExtension;
 pub use github::GitHubExtension;
+pub use crate::runtimes::dotnet::DotnetExtension;
 pub use crate::runtimes::lean::LeanExtension;
 pub use crate::runtimes::node::NodeExtension;
 pub use crate::runtimes::python::PythonExtension;
@@ -577,6 +578,7 @@ extension_enum! {
         Lean(LeanExtension),
         Python(PythonExtension),
         Node(NodeExtension),
+        Dotnet(DotnetExtension),
         AzureDevOps(AzureDevOpsExtension),
         CacheMemory(CacheMemoryExtension),
         TriggerFilters(TriggerFiltersExtension),
@@ -619,6 +621,11 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
     if let Some(node) = front_matter.runtimes.as_ref().and_then(|r| r.node.as_ref()) {
         if node.is_enabled() {
             extensions.push(Extension::Node(NodeExtension::new(node.clone())));
+        }
+    }
+    if let Some(dotnet) = front_matter.runtimes.as_ref().and_then(|r| r.dotnet.as_ref()) {
+        if dotnet.is_enabled() {
+            extensions.push(Extension::Dotnet(DotnetExtension::new(dotnet.clone())));
         }
     }
 

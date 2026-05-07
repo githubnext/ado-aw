@@ -180,6 +180,7 @@ mod tests {
             lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(true)),
             python: None,
             node: None,
+            dotnet: None,
         });
         let exts = super::super::extensions::collect_extensions(&fm);
         let domains = generate_allowed_domains(&fm, &exts).unwrap();
@@ -195,6 +196,7 @@ mod tests {
             lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(false)),
             python: None,
             node: None,
+            dotnet: None,
         });
         let exts = super::super::extensions::collect_extensions(&fm);
         let domains = generate_allowed_domains(&fm, &exts).unwrap();

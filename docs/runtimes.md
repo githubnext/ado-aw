@@ -103,6 +103,49 @@ When enabled, the compiler:
 - No AWF mounts or PATH prepends needed — `NodeTool@0` installs to `/opt/hostedtoolcache` (auto-mounted by AWF) and publishes PATH entries that AWF merges via `$GITHUB_PATH`
 - Note: AWF overlays `~/.npmrc` with `/dev/null` for credential security — the `NPM_CONFIG_REGISTRY` env var approach avoids conflicting with this overlay
 
+### .NET (`dotnet:`)
+.NET runtime. Auto-installs the .NET SDK via `UseDotNet@2`, emits `NuGetAuthenticate@1` for internal feed access, adds .NET ecosystem domains to the AWF network allowlist, and extends the bash command allow-list with `dotnet`.
+
+```yaml
+# Simple enablement (installs default .NET SDK, currently 8.0.x)
+runtimes:
+  dotnet: true
+
+# With options (pin version, configure internal feed)
+runtimes:
+  dotnet:
+    version: "8.0.x"
+    feed-url: "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/nuget/v3/index.json"
+
+# Or point at a checked-in nuget.config
+runtimes:
+  dotnet:
+    version: "8.0.x"
+    config: "nuget.config"
+```
+
+**Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `version` | string | .NET SDK version to install (e.g., `"8.0.x"`, `"9.0.x"`). Passed to `UseDotNet@2` `version` with `packageType: 'sdk'`. Defaults to `"8.0.x"`. |
+| `feed-url` | string | Internal NuGet feed URL (typically the v3 `index.json` of an Azure Artifacts feed). When set, the compiler creates a minimal `nuget.config` if none exists and runs `NuGetAuthenticate@1`. |
+| `config` | string | Path to a checked-in `nuget.config` in the repo. When set, the compiler runs `NuGetAuthenticate@1` (which auto-discovers `nuget.config` files in the workspace). Mutually exclusive with `feed-url`. |
+
+When enabled, the compiler:
+- Injects `UseDotNet@2` into `{{ prepare_steps }}` (runs before AWF)
+- If `feed-url` is set, injects an ensure-`nuget.config` step (writes a minimal `nuget.config` referencing the feed only when one doesn't already exist) and `NuGetAuthenticate@1`
+- If `config` is set (and `feed-url` is not), injects `NuGetAuthenticate@1` only — the user-checked-in `nuget.config` is assumed to be present in the workspace
+- Auto-adds `dotnet` to the bash command allow-list
+- Adds .NET ecosystem domains to the network allowlist (nuget.org, dotnet.microsoft.com, pkgs.dev.azure.com, etc.)
+- Appends a prompt supplement informing the agent about .NET availability
+- No AWF mounts or PATH prepends needed — `UseDotNet@2` installs to `/opt/hostedtoolcache` (auto-mounted by AWF) and publishes PATH entries that AWF merges via `$GITHUB_PATH`
+
+**Differences from the Python and Node runtimes** (called out for clarity, since this runtime intentionally diverges):
+- **No agent env var is injected for `feed-url`.** Unlike `pip` (`PIP_INDEX_URL`) and `npm` (`NPM_CONFIG_REGISTRY`), NuGet has no first-class environment-variable equivalent for selecting a package source. Feed configuration always goes through a `nuget.config` file.
+- **`config:` is functional, not a deferred warning.** AWF only overlays files in `$HOME` (e.g., `~/.npmrc` → `/dev/null`); workspace files such as `nuget.config` are preserved inside the agent sandbox, so a checked-in `nuget.config` works today.
+- **`NuGetAuthenticate@1` requires no `workingFile:` input.** It auto-discovers `nuget.config` files anywhere in the workspace, unlike `npmAuthenticate@0` which needs an explicit path.
+
 ### Combining Runtimes
 
 Multiple runtimes can be enabled simultaneously:
@@ -113,6 +156,8 @@ runtimes:
     version: "3.12"
   node:
     version: "22.x"
+  dotnet:
+    version: "8.0.x"
   lean: true
 ```
 

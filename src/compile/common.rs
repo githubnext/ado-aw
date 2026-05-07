@@ -2581,6 +2581,7 @@ mod tests {
             lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(true)),
             python: None,
             node: None,
+            dotnet: None,
         });
         let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("shell(lean)"), "lean command should be allowed");
@@ -2603,6 +2604,7 @@ mod tests {
             lean: Some(crate::runtimes::lean::LeanRuntimeConfig::Enabled(true)),
             python: None,
             node: None,
+            dotnet: None,
         });
         let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
         assert!(params.contains("--allow-all-tools"), "wildcard should use --allow-all-tools");

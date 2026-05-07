@@ -575,20 +575,152 @@ fn test_python_config_and_feed_url_mutually_exclusive() {
     assert!(result.unwrap_err().to_string().contains("mutually exclusive"));
 }
 
+// ── DotnetExtension ────────────────────────────────────────────
+
+#[test]
+fn test_collect_extensions_dotnet_enabled() {
+    let (fm, _) =
+        parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  dotnet: true\n---\n")
+            .unwrap();
+    let exts = collect_extensions(&fm);
+    assert!(exts.iter().any(|e| e.name() == "dotnet"));
+}
+
+#[test]
+fn test_collect_extensions_dotnet_disabled() {
+    let (fm, _) =
+        parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  dotnet: false\n---\n")
+            .unwrap();
+    let exts = collect_extensions(&fm);
+    assert!(!exts.iter().any(|e| e.name() == "dotnet"));
+}
+
+#[test]
+fn test_collect_extensions_dotnet_with_version() {
+    let (fm, _) =
+        parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: '8.0.x'\n---\n")
+            .unwrap();
+    let exts = collect_extensions(&fm);
+    assert!(exts.iter().any(|e| e.name() == "dotnet"));
+}
+
+#[test]
+fn test_dotnet_required_hosts() {
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(
+        crate::runtimes::dotnet::DotnetRuntimeConfig::Enabled(true),
+    );
+    let hosts = ext.required_hosts();
+    assert_eq!(hosts, vec!["dotnet".to_string()]);
+}
+
+#[test]
+fn test_dotnet_required_bash_commands() {
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(
+        crate::runtimes::dotnet::DotnetRuntimeConfig::Enabled(true),
+    );
+    assert_eq!(ext.required_bash_commands(), vec!["dotnet".to_string()]);
+}
+
+#[test]
+fn test_dotnet_prepare_steps() {
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(
+        crate::runtimes::dotnet::DotnetRuntimeConfig::Enabled(true),
+    );
+    let steps = ext.prepare_steps();
+    assert_eq!(steps.len(), 1, "no auth steps without feed-url/config");
+    assert!(steps[0].contains("UseDotNet@2"));
+    assert!(steps[0].contains("packageType: 'sdk'"));
+}
+
+#[test]
+fn test_dotnet_prepare_steps_with_feed_url() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    feed-url: 'https://pkgs.dev.azure.com/myorg/_packaging/myfeed/nuget/v3/index.json'\n---\n",
+    ).unwrap();
+    let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
+    let steps = ext.prepare_steps();
+    assert_eq!(steps.len(), 3);
+    assert!(steps[0].contains("UseDotNet@2"));
+    assert!(steps[1].contains("Ensure nuget.config"));
+    assert!(steps[2].contains("NuGetAuthenticate@1"));
+}
+
+#[test]
+fn test_dotnet_prepare_steps_with_config_only() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    config: 'nuget.config'\n---\n",
+    ).unwrap();
+    let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
+    let steps = ext.prepare_steps();
+    // config: alone trusts the user-checked-in nuget.config — no shim,
+    // just the auth step.
+    assert_eq!(steps.len(), 2);
+    assert!(steps[0].contains("UseDotNet@2"));
+    assert!(steps[1].contains("NuGetAuthenticate@1"));
+}
+
+#[test]
+fn test_dotnet_agent_env_vars_no_feed() {
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(
+        crate::runtimes::dotnet::DotnetRuntimeConfig::Enabled(true),
+    );
+    assert!(ext.agent_env_vars().is_empty());
+}
+
+#[test]
+fn test_dotnet_agent_env_vars_with_feed() {
+    // Unlike Python (PIP_INDEX_URL) and Node (NPM_CONFIG_REGISTRY), .NET
+    // does NOT inject any env var for feed configuration — it relies on
+    // nuget.config files. This test pins that contract.
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: '8.0.x'\n    feed-url: 'https://pkgs.dev.azure.com/myorg/_packaging/myfeed/nuget/v3/index.json'\n---\n",
+    ).unwrap();
+    let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
+    assert!(ext.agent_env_vars().is_empty());
+}
+
+#[test]
+fn test_dotnet_config_and_feed_url_mutually_exclusive() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    config: 'nuget.config'\n    feed-url: 'https://example.com/nuget/v3/index.json'\n---\n",
+    ).unwrap();
+    let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
+    let ctx = ctx_from(&fm);
+    let result = ext.validate(&ctx);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("mutually exclusive"));
+}
+
+#[test]
+fn test_dotnet_invalid_feed_url_rejected() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    feed-url: 'https://example.com/$(SECRET)/nuget'\n---\n",
+    ).unwrap();
+    let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
+    let ctx = ctx_from(&fm);
+    assert!(ext.validate(&ctx).is_err());
+}
+
 // ── Multiple runtimes ──────────────────────────────────────────
 
 #[test]
 fn test_collect_extensions_all_runtimes_enabled() {
     let (fm, _) = parse_markdown(
-        "---\nname: test\ndescription: test\nruntimes:\n  lean: true\n  python: true\n  node: true\n---\n",
+        "---\nname: test\ndescription: test\nruntimes:\n  lean: true\n  python: true\n  node: true\n  dotnet: true\n---\n",
     ).unwrap();
     let exts = collect_extensions(&fm);
     assert!(exts.iter().any(|e| e.name() == "Lean 4"));
     assert!(exts.iter().any(|e| e.name() == "Python"));
     assert!(exts.iter().any(|e| e.name() == "Node.js"));
+    assert!(exts.iter().any(|e| e.name() == "dotnet"));
     // All are Runtime phase
     let runtime_exts: Vec<_> = exts.iter().filter(|e| e.phase() == ExtensionPhase::Runtime).collect();
-    assert_eq!(runtime_exts.len(), 3);
+    assert_eq!(runtime_exts.len(), 4);
 }
 
 #[test]
