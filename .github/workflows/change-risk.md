@@ -14,11 +14,9 @@ tools:
 network:
   allowed: [defaults, rust]
 safe-outputs:
-  submit-pull-request-review:
-    max: 1
-    footer: "if-body"
   add-comment:
     max: 1
+    hide-older-comments: true
 ---
 
 # Change Risk Assessor
@@ -92,7 +90,7 @@ Analyze the PR diff against these risk categories:
 
 ## Output
 
-Submit a PR review with your verdict. Structure the review body as:
+Post a comment on the PR with your verdict using `add-comment`. Structure the comment as:
 
 ```
 ## ⚡ Change Risk Assessment
@@ -111,6 +109,4 @@ Submit a PR review with your verdict. Structure the review body as:
 [List any breaking changes, or "None identified"]
 ```
 
-Keep the review body **concise** — focus on what matters. If approving a clean PR, a short summary is sufficient. Only expand into detailed findings when risks are found.
-
-**Important**: Use `submit-pull-request-review` with event `APPROVE` or `REQUEST_CHANGES` — do not just post a comment. Your review should directly gate the PR.
+Keep the comment **concise** — focus on what matters. If approving a clean PR, a short summary is sufficient. Only expand into detailed findings when risks are found.
