@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.25.1](https://github.com/githubnext/ado-aw/compare/v0.25.0...v0.25.1) (2026-05-07)
+
+
+### Bug Fixes
+
+* **safeoutputs:** support glob wildcards anywhere in allowed-tags patterns ([#442](https://github.com/githubnext/ado-aw/issues/442)) ([17e372c](https://github.com/githubnext/ado-aw/commit/17e372ca42a992aed5a24ef30e89d16977d7bb39))
+* **workflows:** simplify change-risk to use add-comment instead of PR review ([#443](https://github.com/githubnext/ado-aw/issues/443)) ([4f2f188](https://github.com/githubnext/ado-aw/commit/4f2f188f38132cf5151720ffd33e06db12e1c9f4))
+
 ## [0.25.0](https://github.com/githubnext/ado-aw/compare/v0.24.0...v0.25.0) (2026-05-07)
 
 
