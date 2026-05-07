@@ -161,13 +161,10 @@ impl Executor for AddBuildTagResult {
 
         // 4. Validate against allowed tags (if non-empty)
         if !config.allowed_tags.is_empty() {
-            let allowed = config.allowed_tags.iter().any(|pattern| {
-                if let Some(prefix) = pattern.strip_suffix('*') {
-                    final_tag.starts_with(prefix)
-                } else {
-                    *pattern == final_tag
-                }
-            });
+            let allowed = config
+                .allowed_tags
+                .iter()
+                .any(|pattern| super::tag_matches_pattern(&final_tag, pattern));
             if !allowed {
                 return Ok(ExecutionResult::failure(format!(
                     "Tag '{}' is not in the allowed tags list",
