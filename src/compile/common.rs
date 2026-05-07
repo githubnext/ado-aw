@@ -708,9 +708,8 @@ pub fn generate_integrity_check(skip: bool) -> String {
 ///   stderr dump on health-check failure
 /// - `{{ verify_mcp_backends }}`: full pipeline step that probes each MCPG
 ///   backend with MCP initialize + tools/list
-/// - `{{ ado_aw_debug_flags }}`: `--debug ` for ado-aw CLI invocations
 ///
-/// When `debug` is `false`, both markers resolve to empty strings.
+/// When `debug` is `false`, debug markers resolve to empty strings.
 pub fn generate_debug_pipeline_replacements(debug: bool) -> Vec<(String, String)> {
     if !debug {
         return vec![
@@ -718,7 +717,6 @@ pub fn generate_debug_pipeline_replacements(debug: bool) -> Vec<(String, String)
             // generate_mcpg_docker_env when no env flags are needed).
             ("{{ mcpg_debug_flags }}".into(), "\\".into()),
             ("{{ verify_mcp_backends }}".into(), String::new()),
-            ("{{ ado_aw_debug_flags }}".into(), String::new()),
         ];
     }
 
@@ -789,7 +787,6 @@ pub fn generate_debug_pipeline_replacements(debug: bool) -> Vec<(String, String)
     vec![
         ("{{ mcpg_debug_flags }}".into(), mcpg_debug_flags),
         ("{{ verify_mcp_backends }}".into(), verify_mcp_backends),
-        ("{{ ado_aw_debug_flags }}".into(), "--debug ".into()),
     ]
 }
 
@@ -3229,21 +3226,19 @@ mod tests {
     #[test]
     fn test_debug_pipeline_replacements_disabled() {
         let replacements = generate_debug_pipeline_replacements(false);
-        assert_eq!(replacements.len(), 3);
+        assert_eq!(replacements.len(), 2);
         // mcpg_debug_flags returns `\` for bash line continuation
         let flags = replacements.iter().find(|(m, _)| m == "{{ mcpg_debug_flags }}").unwrap();
         assert_eq!(flags.1, "\\", "mcpg_debug_flags should be a bare backslash when disabled");
         // verify_mcp_backends should be empty
         let probe = replacements.iter().find(|(m, _)| m == "{{ verify_mcp_backends }}").unwrap();
         assert!(probe.1.is_empty(), "verify_mcp_backends should be empty when disabled");
-        let ado_aw_flags = replacements.iter().find(|(m, _)| m == "{{ ado_aw_debug_flags }}").unwrap();
-        assert!(ado_aw_flags.1.is_empty(), "ado_aw_debug_flags should be empty when disabled");
     }
 
     #[test]
     fn test_debug_pipeline_replacements_enabled() {
         let replacements = generate_debug_pipeline_replacements(true);
-        assert_eq!(replacements.len(), 3);
+        assert_eq!(replacements.len(), 2);
 
         let flags = replacements.iter().find(|(m, _)| m == "{{ mcpg_debug_flags }}");
         assert!(flags.is_some(), "Should have mcpg_debug_flags marker");
@@ -3257,10 +3252,6 @@ mod tests {
         assert!(probe_value.contains("tools/list"), "Should contain tools/list probe");
         assert!(probe_value.contains("initialize"), "Should contain initialize handshake");
         assert!(probe_value.contains("MCPG_API_KEY"), "Should contain API key env mapping");
-
-        let ado_aw_flags = replacements.iter().find(|(m, _)| m == "{{ ado_aw_debug_flags }}");
-        assert!(ado_aw_flags.is_some(), "Should have ado_aw_debug_flags marker");
-        assert_eq!(&ado_aw_flags.unwrap().1, "--debug ");
     }
 
     // ─── validate_submit_pr_review_events ────────────────────────────────────

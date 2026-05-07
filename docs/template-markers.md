@@ -279,12 +279,6 @@ Generates a pipeline step that probes each configured MCPG backend with an MCP i
 
 When `--debug-pipeline` is not passed (the default), this placeholder is replaced with an empty string.
 
-## {{ ado_aw_debug_flags }}
-
-Generates ado-aw CLI debug flags in runtime script invocations. When `--debug-pipeline` is passed (debug builds only), this inserts `--debug ` so ado-aw writes detailed debug-level logs.
-
-When `--debug-pipeline` is not passed, this placeholder is replaced with an empty string.
-
 ## {{ pr_trigger }}
 
 Generates PR trigger configuration. When a schedule or pipeline trigger is configured, this generates `pr: none` to disable PR triggers. Otherwise, it generates an empty string, allowing the default PR trigger behavior.

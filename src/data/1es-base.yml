@@ -188,7 +188,7 @@ extends:
                     # (with trailing space). The value MUST be newline-free; is_safe_tool_name enforces this.
                     # Positional args (output_directory, bounding_directory) MUST come after all named
                     # options — clap parses them positionally and reordering would break the command.
-                    nohup /tmp/awf-tools/ado-aw {{ ado_aw_debug_flags }}mcp-http \
+                    nohup /tmp/awf-tools/ado-aw mcp-http \
                       --port "$SAFE_OUTPUTS_PORT" \
                       --api-key "$SAFE_OUTPUTS_API_KEY" \
                       {{ enabled_tools_args }}"/tmp/awf-tools/staging" \
@@ -655,7 +655,7 @@ extends:
                   displayName: "Prepare output directory"
 
                 - bash: |
-                    ado-aw {{ ado_aw_debug_flags }}execute --source "{{ source_path }}" --safe-output-dir "$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)" --output-dir "$(Agent.TempDirectory)/staging"
+                    ado-aw execute --source "{{ source_path }}" --safe-output-dir "$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)" --output-dir "$(Agent.TempDirectory)/staging"
                     EXIT_CODE=$?
                     if [ $EXIT_CODE -eq 2 ]; then
                       echo "##vso[task.complete result=SucceededWithIssues;]Executor completed with warnings"
