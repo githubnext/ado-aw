@@ -719,6 +719,20 @@ mod tests {
     }
 
     #[test]
+    fn test_validation_rejects_newline_in_file_path() {
+        assert!(make_params(Some(1), "agent-report", "out\n/report.pdf")
+            .validate()
+            .is_err());
+    }
+
+    #[test]
+    fn test_validation_rejects_carriage_return_in_file_path() {
+        assert!(make_params(Some(1), "agent-report", "out\r/report.pdf")
+            .validate()
+            .is_err());
+    }
+
+    #[test]
     fn test_result_serializes_correctly_with_build_id() {
         let result = UploadBuildAttachmentResult::new(
             Some(1234),

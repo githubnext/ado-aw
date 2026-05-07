@@ -722,6 +722,20 @@ mod tests {
     }
 
     #[test]
+    fn test_validation_rejects_newline_in_file_path() {
+        assert!(make_params(None, "report", "out\n/report.pdf")
+            .validate()
+            .is_err());
+    }
+
+    #[test]
+    fn test_validation_rejects_carriage_return_in_file_path() {
+        assert!(make_params(None, "report", "out\r/report.pdf")
+            .validate()
+            .is_err());
+    }
+
+    #[test]
     fn test_validation_rejects_colon_in_file_path() {
         assert!(make_params(None, "report", "C:\\out\\report.pdf")
             .validate()

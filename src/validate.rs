@@ -25,6 +25,8 @@ pub fn is_safe_path_segment(s: &str) -> bool {
         && !s.contains('/')
         && !s.contains('\\')
         && !s.starts_with('.')
+        && !s.contains('\n')
+        && !s.contains('\r')
 }
 
 /// Characters allowed in engine.command paths (absolute path chars only).
@@ -460,6 +462,8 @@ mod tests {
         assert!(!is_safe_path_segment("foo\\bar"));
         assert!(!is_safe_path_segment(".hidden"));
         assert!(!is_safe_path_segment("foo..bar"));
+        assert!(!is_safe_path_segment("foo\nbar"));
+        assert!(!is_safe_path_segment("foo\rbar"));
     }
 
     #[test]
