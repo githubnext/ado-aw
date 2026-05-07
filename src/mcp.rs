@@ -1370,13 +1370,8 @@ agent attempted work but couldn't finish (e.g., API timeouts, build failures, re
 #[tool_handler]
 impl ServerHandler for SafeOutputs {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            instructions: Some(
-                "A set of tools that generate SafeOutput compatible results.".into(),
-            ),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            ..Default::default()
-        }
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_instructions("A set of tools that generate SafeOutput compatible results.")
     }
 }
 
@@ -1439,10 +1434,7 @@ pub async fn run_http(
 
     info!("Starting SafeOutputs HTTP server on port {}", port);
 
-    let config = StreamableHttpServerConfig {
-        sse_keep_alive: Some(std::time::Duration::from_secs(15)),
-        stateful_mode: true,
-    };
+    let config = StreamableHttpServerConfig::default();
 
     let session_manager = Arc::new(LocalSessionManager::default());
 
