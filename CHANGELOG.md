@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.23.1](https://github.com/githubnext/ado-aw/compare/v0.23.0...v0.23.1) (2026-05-07)
+
+
+### Bug Fixes
+
+* **safeoutputs:** rewrite upload-pipeline-artifact flow to fix HTTP 405 ([#425](https://github.com/githubnext/ado-aw/issues/425)) ([5e4c89e](https://github.com/githubnext/ado-aw/commit/5e4c89eeeb7a401bc677f2a8e3a65832a6aebdf4))
+* **security:** harden upload path validation and trigger filter script integrity ([#428](https://github.com/githubnext/ado-aw/issues/428)) ([84a2031](https://github.com/githubnext/ado-aw/commit/84a203100e935585b805792cb9453dc30955a6c2))
+
 ## [0.23.0](https://github.com/githubnext/ado-aw/compare/v0.22.4...v0.23.0) (2026-05-06)
 
 
