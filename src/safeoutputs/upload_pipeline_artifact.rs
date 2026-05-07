@@ -448,10 +448,10 @@ impl Executor for UploadPipelineArtifactResult {
         // overwrite each other's bytes in the shared container.
         let dedupe_key = format!("{}/{}", effective_build_id, final_name);
         if config.require_unique_names {
-            let mut seen = ctx
+            let seen = ctx
                 .uploaded_pipeline_artifact_keys
                 .lock()
-                .expect("uploaded_pipeline_artifact_keys mutex poisoned");
+                .map_err(|e| anyhow::anyhow!("uploaded_pipeline_artifact_keys mutex poisoned: {}", e))?;
             if seen.contains(&dedupe_key) {
                 return Ok(ExecutionResult::failure(format!(
                     "upload-pipeline-artifact: artifact_name '{}' was already used \
@@ -460,21 +460,26 @@ impl Executor for UploadPipelineArtifactResult {
                     final_name, effective_build_id
                 )));
             }
-            seen.insert(dedupe_key);
+            // Note: the key is inserted only after the HTTP calls succeed below,
+            // so a transient network failure doesn't permanently block retries.
         }
 
         // Internal container folder. The user-visible artifact name is
         // `final_name`; the folder name carries an optional discriminator so
-        // multiple calls in one run (different target builds, same name)
-        // don't collide on the shared container path. The discriminator is
-        // invisible in standard download paths (web UI zip wrapper,
-        // DownloadBuildArtifacts@1, DownloadPipelineArtifact@2 — all strip
-        // the prefix) and is only seen by callers that hit
-        // `GET /_apis/resources/Containers/{id}?itemPath=...` directly.
+        // multiple calls in one run sharing the same name but uploading
+        // different content don't overwrite each other's bytes in the shared
+        // container. The discriminator is derived from the file content hash
+        // (already computed above) so distinct content always maps to a
+        // distinct folder — identical content maps to the same folder, which
+        // is safe (idempotent PUT). The discriminator is invisible in standard
+        // download paths (web UI zip wrapper, DownloadBuildArtifacts@1,
+        // DownloadPipelineArtifact@2 — all strip the prefix) and is only seen
+        // by callers that hit `GET /_apis/resources/Containers/{id}?itemPath=…`
+        // directly.
         let container_folder = if config.require_unique_names {
             final_name.clone()
         } else {
-            let disc = &crate::hash::sha256_hex(self.staged_file.as_bytes())[..6];
+            let disc = &live_hash[..6];
             format!("{}__{}", final_name, disc)
         };
 
@@ -574,6 +579,16 @@ impl Executor for UploadPipelineArtifactResult {
                 "Published '{}' as pipeline artifact '{}' on build #{}",
                 self.file_path, final_name, effective_build_id
             );
+
+            // Record the successful publish in the dedupe set now that both
+            // HTTP steps have completed — done here (not before the calls) so
+            // a transient failure doesn't permanently block retries.
+            if config.require_unique_names {
+                ctx.uploaded_pipeline_artifact_keys
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("uploaded_pipeline_artifact_keys mutex poisoned: {}", e))?
+                    .insert(dedupe_key);
+            }
 
             Ok(ExecutionResult::success_with_data(
                 format!(
@@ -959,26 +974,33 @@ name-prefix: "ci-"
     }
 
     /// The default container folder embeds a 6-hex hash discriminator derived
-    /// from the staged file name; two calls with the same artifact_name but
-    /// different staged_file values produce different folders so their bytes
-    /// can't collide in the shared build container.
+    /// from the file content hash; two calls uploading different content
+    /// (regardless of staged file name) produce different folders so their
+    /// bytes can't collide in the shared build container. Identical content
+    /// maps to the same folder (idempotent PUT — safe).
     #[test]
     fn test_default_container_folder_has_hash_suffix() {
         // Same logic the executor uses inline; mirror it here so changing the
         // discriminator scheme is a single-place refactor caught by this test.
-        fn folder_for(final_name: &str, staged_file: &str) -> String {
-            let disc = &crate::hash::sha256_hex(staged_file.as_bytes())[..6];
+        fn folder_for(final_name: &str, content: &[u8]) -> String {
+            let disc = &crate::hash::sha256_hex(content)[..6];
             format!("{}__{}", final_name, disc)
         }
 
-        let a = folder_for("TriageSummary", "staged-abc.md");
-        let b = folder_for("TriageSummary", "staged-def.md");
+        let a = folder_for("TriageSummary", b"content-alpha");
+        let b = folder_for("TriageSummary", b"content-beta");
 
         assert!(a.starts_with("TriageSummary__"));
         assert_eq!(a.len(), "TriageSummary".len() + 2 + 6);
-        assert_ne!(a, b, "different staged_file must produce different folders");
+        assert_ne!(a, b, "different content must produce different folders");
         // Determinism: same inputs yield same folder.
-        assert_eq!(a, folder_for("TriageSummary", "staged-abc.md"));
+        assert_eq!(a, folder_for("TriageSummary", b"content-alpha"));
+        // Identical content → same folder regardless of call order (idempotent).
+        assert_eq!(
+            folder_for("TriageSummary", b"same-content"),
+            folder_for("TriageSummary", b"same-content"),
+            "same content must always map to the same folder"
+        );
     }
 
     /// When `require-unique-names` is set, the executor uses the clean folder
