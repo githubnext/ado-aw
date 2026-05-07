@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.24.0](https://github.com/githubnext/ado-aw/compare/v0.23.1...v0.24.0) (2026-05-07)
+
+
+### Features
+
+* **workflows:** add /change-risk slash command for PR risk assessment ([#434](https://github.com/githubnext/ado-aw/issues/434)) ([e787956](https://github.com/githubnext/ado-aw/commit/e787956a9f9519368905affaa71ab32e47d907d6))
+
+
+### Bug Fixes
+
+* **logging:** always capture debug logs to file while preserving console verbosity ([#430](https://github.com/githubnext/ado-aw/issues/430)) ([64e9709](https://github.com/githubnext/ado-aw/commit/64e97091c2dd36d08de0315c2c71cc676e9169a1))
+* **safeoutputs:** use sanitize_config for identifier fields instead of sanitize_text ([#433](https://github.com/githubnext/ado-aw/issues/433)) ([ea43b11](https://github.com/githubnext/ado-aw/commit/ea43b11c8b6b63854233289f42667bf621aef3a6))
+
 ## [0.23.1](https://github.com/githubnext/ado-aw/compare/v0.23.0...v0.23.1) (2026-05-07)
 
 
