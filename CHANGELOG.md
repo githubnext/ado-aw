@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.26.0](https://github.com/githubnext/ado-aw/compare/v0.25.1...v0.26.0) (2026-05-07)
+
+
+### Features
+
+* **workflows:** add frontmatter-aligner gh-aw workflow ([#448](https://github.com/githubnext/ado-aw/issues/448)) ([d3af7e6](https://github.com/githubnext/ado-aw/commit/d3af7e667034a42fb534becb820b0dadb7a9118a))
+
+
+### Bug Fixes
+
+* **cli:** direct GitHub repos to gh-aw for compile/init ([#447](https://github.com/githubnext/ado-aw/issues/447)) ([0ca3a25](https://github.com/githubnext/ado-aw/commit/0ca3a2530cfbb64d3d8c7c8cdc4d4213b7b05008))
+
 ## [0.25.1](https://github.com/githubnext/ado-aw/compare/v0.25.0...v0.25.1) (2026-05-07)
 
 
