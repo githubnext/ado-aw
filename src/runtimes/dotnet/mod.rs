@@ -219,7 +219,7 @@ pub fn generate_ensure_nuget_config(config: &DotnetRuntimeConfig) -> String {
       </packageSources>\n\
     </configuration>\n\
     EOF\n\
-      echo \"Created nuget.config with source={feed_url}\"\n\
+      echo 'Created nuget.config with source={feed_url}'\n\
     else\n\
       echo 'nuget.config already exists, skipping creation'\n\
     fi\n\

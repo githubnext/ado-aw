@@ -135,8 +135,11 @@ in the repository.\n"
             }
         }
 
-        // Validate config path (just defend against pipeline injection — the
-        // path itself is user-supplied and ends up in displayName/log output)
+        // Validate config path (defend against pipeline injection). The value
+        // is not currently embedded in any generated YAML — `NuGetAuthenticate@1`
+        // auto-discovers `nuget.config` — but we still validate it as a
+        // defence-in-depth measure in case it is surfaced in displayName or
+        // logs in the future.
         if let Some(config) = self.config.config() {
             validate::reject_pipeline_injection(config, "runtimes.dotnet.config")?;
         }
