@@ -562,12 +562,6 @@ pub struct PipelineParameter {
     /// Allowed values (for string/number parameters)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub values: Option<Vec<serde_yaml::Value>>,
-    /// When true, the parameter's runtime value is appended to the agent
-    /// prompt as additional run context. Restricted to `string` parameters
-    /// with a required string `default`. Always skipped during YAML
-    /// serialization — it is an ado-aw-only flag, unknown to ADO.
-    #[serde(default, rename = "prompt-context", skip_serializing)]
-    pub prompt_context: bool,
 }
 
 /// Front matter configuration from the input markdown file

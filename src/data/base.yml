@@ -104,11 +104,8 @@ jobs:
           {{ agent_content }}
           AGENT_PROMPT_EOF
 
-          {{ prompt_context_append }}
-
           echo "Agent prompt:"
           cat "/tmp/awf-tools/agent-prompt.md"
-        {{ prompt_context_env }}
         displayName: "Prepare agent prompt"
 
       - task: DockerInstaller@0

@@ -30,38 +30,6 @@ parameters:
   default: false
 ```
 
-The ado-aw-only `prompt-context: true` flag (see [`docs/parameters.md`](parameters.md#prompt-context-parameters)) is **stripped** during emission — ADO does not recognise it.
-
-## {{ prompt_context_append }} and {{ prompt_context_env }}
-
-These two markers expand the `prompt-context: true` runtime parameters into the "Prepare agent prompt" step.
-
-- `{{ prompt_context_append }}` — bash that appends an "Additional Run Context" section plus one sub-section per `prompt-context` parameter to `/tmp/awf-tools/agent-prompt.md`. Each sub-section is gated by a presence check on the corresponding `ADO_AW_CTX_*` env var and uses `printf '%s'` to insert the value, so values cannot break out of the bash step.
-- `{{ prompt_context_env }}` — a step-level `env:` block mapping each `ADO_AW_CTX_<UPPER_NAME>` env var to its `${{ parameters.<name> }}` template expression.
-
-Both markers expand to the empty string when no parameters opt in via `prompt-context: true`, leaving the existing pipeline shape unchanged.
-
-Example output (single `prompt-context` parameter named `focusArea`):
-```yaml
-- bash: |
-    cat > "/tmp/awf-tools/agent-prompt.md" << 'AGENT_PROMPT_EOF'
-    # ... agent body ...
-    AGENT_PROMPT_EOF
-
-    # Append additional run context from prompt-context parameters
-    printf '\n\n## Additional Run Context\n\n_The sections below ..._\n\n' >> "/tmp/awf-tools/agent-prompt.md"
-    if [ -n "${ADO_AW_CTX_FOCUSAREA:-}" ]; then
-      printf '### %s (parameter: %s)\n\n%s\n\n' "Focus area for this run" "focusArea" "$ADO_AW_CTX_FOCUSAREA" >> "/tmp/awf-tools/agent-prompt.md"
-    fi
-
-    echo "Agent prompt:"
-    cat "/tmp/awf-tools/agent-prompt.md"
-  env:
-    ADO_AW_CTX_FOCUSAREA: ${{ parameters.focusArea }}
-  displayName: "Prepare agent prompt"
-```
-
-
 ## {{ repositories }}
 For each additional repository specified in the front matter append:
 
