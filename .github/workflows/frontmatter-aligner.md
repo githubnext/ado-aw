@@ -56,7 +56,7 @@ This file documents every gh-aw frontmatter field. Read it carefully and extract
 
 Read `src/compile/types.rs`. Focus on:
 
-- The `FrontMatter` struct (starting around line 580) — this is the root front matter type
+- The `FrontMatter` struct (search for `struct FrontMatter`) — this is the root front matter type
 - Supporting types: `EngineOptions`, `ToolsConfig`, `RuntimesConfig`, `OnConfig`, `NetworkConfig`, `PermissionsConfig`
 - Serde field names (check `#[serde(rename = "...")]` annotations)
 
