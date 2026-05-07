@@ -12,6 +12,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+const FILE_LOG_LEVEL: LevelFilter = LevelFilter::Debug;
+
 /// Resolve log directory, optionally overriding with a CLI-provided path.
 ///
 /// Resolution order:
@@ -75,12 +77,13 @@ fn build_session_marker(command_name: &str) -> String {
 /// A simple file logger that implements log::Log
 struct FileLogger {
     file: Mutex<File>,
-    level: LevelFilter,
+    file_level: LevelFilter,
+    stderr_level: LevelFilter,
 }
 
 impl log::Log for FileLogger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
-        metadata.level() <= self.level
+        metadata.level() <= self.file_level || metadata.level() <= self.stderr_level
     }
 
     fn log(&self, record: &log::Record) {
@@ -94,14 +97,18 @@ impl log::Log for FileLogger {
                 record.args()
             );
 
-            // Write to file
-            if let Ok(mut file) = self.file.lock() {
-                let _ = file.write_all(message.as_bytes());
-                let _ = file.flush();
+            // Write to file (always capture debug+)
+            if record.level() <= self.file_level {
+                if let Ok(mut file) = self.file.lock() {
+                    let _ = file.write_all(message.as_bytes());
+                    let _ = file.flush();
+                }
             }
 
-            // Also write to stderr for immediate visibility
-            eprint!("{}", message);
+            // Write to stderr according to selected runtime verbosity
+            if record.level() <= self.stderr_level {
+                eprint!("{}", message);
+            }
         }
     }
 
@@ -119,14 +126,14 @@ impl log::Log for FileLogger {
 ///
 /// # Arguments
 /// * `command_name` - Name of the command (included in session marker)
-/// * `level` - Minimum log level to capture
+/// * `stderr_level` - Runtime verbosity for stderr output
 /// * `output_dir_override` - Optional directory override for log output
 ///
 /// # Returns
 /// Path to the log file, or error if initialization failed
 pub fn init_file_logging(
     command_name: &str,
-    level: LevelFilter,
+    stderr_level: LevelFilter,
     output_dir_override: Option<&Path>,
 ) -> Result<PathBuf> {
     ensure_log_directory_with_override(output_dir_override)?;
@@ -148,11 +155,12 @@ pub fn init_file_logging(
 
     let logger = FileLogger {
         file: Mutex::new(file),
-        level,
+        file_level: FILE_LOG_LEVEL,
+        stderr_level,
     };
 
     log::set_boxed_logger(Box::new(logger))
-        .map(|()| log::set_max_level(level))
+        .map(|()| log::set_max_level(FILE_LOG_LEVEL.max(stderr_level)))
         .context("Failed to set logger")?;
 
     Ok(log_path)
@@ -170,25 +178,25 @@ pub fn init_file_logging(
 ///
 /// # Returns
 /// Path to the log file if file logging was initialized
+fn selected_stderr_level(debug: bool, verbose: bool, rust_log_set: bool) -> LevelFilter {
+    if debug {
+        LevelFilter::Debug
+    } else if verbose || rust_log_set {
+        LevelFilter::Info
+    } else {
+        LevelFilter::Warn
+    }
+}
+
 pub fn init_logging(
     command_name: &str,
     debug: bool,
     verbose: bool,
     output_dir_override: Option<&Path>,
 ) -> Option<PathBuf> {
-    let level = if debug {
-        LevelFilter::Debug
-    } else if verbose {
-        LevelFilter::Info
-    } else if std::env::var("RUST_LOG").is_ok() {
-        // If RUST_LOG is set, use Info as minimum for file logging
-        LevelFilter::Info
-    } else {
-        // Default: only warnings and errors
-        LevelFilter::Warn
-    };
+    let stderr_level = selected_stderr_level(debug, verbose, std::env::var("RUST_LOG").is_ok());
 
-    match init_file_logging(command_name, level, output_dir_override) {
+    match init_file_logging(command_name, stderr_level, output_dir_override) {
         Ok(path) => {
             log::debug!("Logging to: {}", path.display());
             Some(path)
@@ -199,12 +207,12 @@ pub fn init_logging(
 
             // Use env_logger as fallback
             let mut builder = env_logger::Builder::new();
-            if debug {
-                builder.filter_level(LevelFilter::Debug);
-            } else if verbose {
-                builder.filter_level(LevelFilter::Info);
+            if debug || verbose {
+                builder.filter_level(stderr_level);
             } else if let Ok(rust_log) = std::env::var("RUST_LOG") {
                 builder.parse_filters(&rust_log);
+            } else {
+                builder.filter_level(stderr_level);
             }
             let _ = builder.try_init();
 
@@ -254,5 +262,16 @@ mod tests {
         assert!(marker.starts_with("=== ["));
         assert!(marker.contains("COMMAND=test-command"));
         assert!(marker.ends_with(" ==="));
+    }
+
+    #[test]
+    fn test_selected_stderr_level() {
+        assert_eq!(
+            selected_stderr_level(true, false, false),
+            LevelFilter::Debug
+        );
+        assert_eq!(selected_stderr_level(false, true, false), LevelFilter::Info);
+        assert_eq!(selected_stderr_level(false, false, true), LevelFilter::Info);
+        assert_eq!(selected_stderr_level(false, false, false), LevelFilter::Warn);
     }
 }
