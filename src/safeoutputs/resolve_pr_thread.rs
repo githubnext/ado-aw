@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::resolve_repo_name;
 use super::PATH_SEGMENT;
-use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
+use crate::sanitize::{SanitizeContent, sanitize_config};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use anyhow::{Context, ensure};
@@ -89,9 +89,9 @@ tool_result! {
 
 impl SanitizeContent for ResolvePrThreadResult {
     fn sanitize_content_fields(&mut self) {
-        self.status = sanitize_text(&self.status);
+        self.status = sanitize_config(&self.status);
         if let Some(ref repo) = self.repository {
-            self.repository = Some(sanitize_text(repo));
+            self.repository = Some(sanitize_config(repo));
         }
     }
 }

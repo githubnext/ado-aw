@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{PATH_SEGMENT, validate_git_ref_name};
-use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
+use crate::sanitize::{SanitizeContent, sanitize_config};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use anyhow::{Context, ensure};
@@ -91,7 +91,7 @@ tool_result! {
 
 impl SanitizeContent for CreateBranchResult {
     fn sanitize_content_fields(&mut self) {
-        self.branch_name = sanitize_text(&self.branch_name);
+        self.branch_name = sanitize_config(&self.branch_name);
     }
 }
 

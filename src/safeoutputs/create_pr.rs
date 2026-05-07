@@ -7,7 +7,7 @@ use tokio::process::Command;
 
 use ado_aw_derive::SanitizeConfig;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, ToolResult, Validate};
-use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
 use anyhow::{Context, ensure};
 
@@ -321,7 +321,7 @@ impl SanitizeContent for CreatePrResult {
         self.title = sanitize_text(&self.title);
         self.description = sanitize_text(&self.description);
         for label in &mut self.agent_labels {
-            *label = sanitize_text(label);
+            *label = sanitize_config(label);
         }
     }
 }

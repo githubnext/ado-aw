@@ -9,7 +9,7 @@ use super::PATH_SEGMENT;
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use ado_aw_derive::SanitizeConfig;
-use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use anyhow::{Context, ensure};
 
 /// Parameters for updating a work item
@@ -92,14 +92,14 @@ impl SanitizeContent for UpdateWorkItemResult {
     fn sanitize_content_fields(&mut self) {
         self.title = self.title.as_deref().map(sanitize_text);
         self.body = self.body.as_deref().map(sanitize_text);
-        self.state = self.state.as_deref().map(sanitize_text);
-        self.area_path = self.area_path.as_deref().map(sanitize_text);
-        self.iteration_path = self.iteration_path.as_deref().map(sanitize_text);
-        self.assignee = self.assignee.as_deref().map(sanitize_text);
+        self.state = self.state.as_deref().map(sanitize_config);
+        self.area_path = self.area_path.as_deref().map(sanitize_config);
+        self.iteration_path = self.iteration_path.as_deref().map(sanitize_config);
+        self.assignee = self.assignee.as_deref().map(sanitize_config);
         self.tags = self
             .tags
             .as_ref()
-            .map(|ts| ts.iter().map(|t| sanitize_text(t)).collect());
+            .map(|ts| ts.iter().map(|t| sanitize_config(t)).collect());
     }
 }
 
@@ -954,11 +954,11 @@ target: 42
         let mut result: UpdateWorkItemResult = params.try_into().unwrap();
         result.sanitize_content_fields();
 
-        // @mentions should be neutralized
+        // @mentions should be neutralized in rich-text fields
         assert!(result.title.as_deref().unwrap().contains("`@user`"));
-        // tags should be sanitized
+        // tags are identifiers — @mentions should NOT be backtick-wrapped
         let tags = result.tags.as_ref().unwrap();
-        assert!(tags[1].contains("`@two`"));
+        assert_eq!(tags[1], "tag @two");
     }
 
     // -------------------------------------------------------------------------

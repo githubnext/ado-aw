@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{PATH_SEGMENT, resolve_repo_name};
-use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use anyhow::{Context, ensure};
@@ -150,17 +150,17 @@ tool_result! {
 
 impl SanitizeContent for UpdatePrResult {
     fn sanitize_content_fields(&mut self) {
-        self.repository = self.repository.as_deref().map(sanitize_text);
-        self.operation = sanitize_text(&self.operation);
+        self.repository = self.repository.as_deref().map(sanitize_config);
+        self.operation = sanitize_config(&self.operation);
         self.reviewers = self
             .reviewers
             .as_ref()
-            .map(|rs| rs.iter().map(|r| sanitize_text(r)).collect());
+            .map(|rs| rs.iter().map(|r| sanitize_config(r)).collect());
         self.labels = self
             .labels
             .as_ref()
-            .map(|ls| ls.iter().map(|l| sanitize_text(l)).collect());
-        self.vote = self.vote.as_deref().map(sanitize_text);
+            .map(|ls| ls.iter().map(|l| sanitize_config(l)).collect());
+        self.vote = self.vote.as_deref().map(sanitize_config);
         self.description = self.description.as_deref().map(sanitize_text);
     }
 }

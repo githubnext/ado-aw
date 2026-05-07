@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
 use ado_aw_derive::SanitizeConfig;
-use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use anyhow::{Context, ensure};
@@ -71,13 +71,13 @@ impl SanitizeContent for QueueBuildResult {
             self.reason = Some(sanitize_text(reason));
         }
         if let Some(branch) = &self.branch {
-            self.branch = Some(sanitize_text(branch));
+            self.branch = Some(sanitize_config(branch));
         }
         if let Some(params) = &self.parameters {
             self.parameters = Some(
                 params
                     .iter()
-                    .map(|(k, v)| (sanitize_text(k), sanitize_text(v)))
+                    .map(|(k, v)| (sanitize_config(k), sanitize_config(v)))
                     .collect(),
             );
         }

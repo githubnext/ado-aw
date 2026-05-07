@@ -9,7 +9,7 @@ use super::PATH_SEGMENT;
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use ado_aw_derive::SanitizeConfig;
-use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use anyhow::{Context, ensure};
 
 /// Parameters for creating a work item
@@ -63,7 +63,7 @@ impl SanitizeContent for CreateWorkItemResult {
         self.title = sanitize_text(&self.title);
         self.description = sanitize_text(&self.description);
         for tag in &mut self.tags {
-            *tag = sanitize_text(tag);
+            *tag = sanitize_config(tag);
         }
     }
 }
