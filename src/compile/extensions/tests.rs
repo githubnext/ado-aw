@@ -706,6 +706,95 @@ fn test_dotnet_invalid_feed_url_rejected() {
     assert!(ext.validate(&ctx).is_err());
 }
 
+#[test]
+fn test_dotnet_global_json_sentinel_emits_use_global_json() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: 'global.json'\n---\n",
+    ).unwrap();
+    let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+    assert!(dotnet.use_global_json());
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
+    let steps = ext.prepare_steps();
+    assert!(steps[0].contains("useGlobalJson: true"));
+    assert!(!steps[0].contains("version:"), "explicit version must be omitted in global.json mode");
+    assert!(steps[0].contains("from global.json"));
+}
+
+#[test]
+fn test_dotnet_global_json_sentinel_case_insensitive() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: 'Global.JSON'\n---\n",
+    ).unwrap();
+    let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+    assert!(dotnet.use_global_json());
+}
+
+#[test]
+fn test_dotnet_global_json_sentinel_skips_injection_check() {
+    // The sentinel is a literal keyword, not a version — it must not be
+    // rejected by reject_pipeline_injection.
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: 'global.json'\n---\n",
+    ).unwrap();
+    let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
+    let ctx = ctx_from(&fm);
+    assert!(ext.validate(&ctx).is_ok());
+}
+
+#[test]
+fn test_dotnet_version_with_global_json_present_errors() {
+    use std::io::Write;
+    let tmp = tempfile::tempdir().unwrap();
+    let mut f = std::fs::File::create(tmp.path().join("global.json")).unwrap();
+    writeln!(f, r#"{{ "sdk": {{ "version": "8.0.100" }} }}"#).unwrap();
+
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: '9.0.x'\n---\n",
+    ).unwrap();
+    let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
+    let ctx = CompileContext::for_test_with_compile_dir(&fm, tmp.path());
+    let result = ext.validate(&ctx);
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("global.json"), "error must mention global.json: {msg}");
+    assert!(msg.contains("useGlobalJson") || msg.contains("'global.json'"), "error must hint at the sentinel: {msg}");
+}
+
+#[test]
+fn test_dotnet_global_json_sentinel_with_global_json_present_ok() {
+    // Using the sentinel alongside an on-disk global.json is the intended
+    // happy path — no error.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("global.json"), r#"{"sdk":{"version":"8.0.100"}}"#).unwrap();
+
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: 'global.json'\n---\n",
+    ).unwrap();
+    let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
+    let ctx = CompileContext::for_test_with_compile_dir(&fm, tmp.path());
+    assert!(ext.validate(&ctx).is_ok());
+}
+
+#[test]
+fn test_dotnet_no_version_with_global_json_present_ok() {
+    // Without an explicit version, no conflict — the user simply gets the
+    // compiler default. This intentionally does not auto-promote to
+    // useGlobalJson; users opt in with the sentinel.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("global.json"), r#"{"sdk":{"version":"8.0.100"}}"#).unwrap();
+
+    let (fm, _) =
+        parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  dotnet: true\n---\n")
+            .unwrap();
+    let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
+    let ctx = CompileContext::for_test_with_compile_dir(&fm, tmp.path());
+    assert!(ext.validate(&ctx).is_ok());
+}
+
 // ── Multiple runtimes ──────────────────────────────────────────
 
 #[test]

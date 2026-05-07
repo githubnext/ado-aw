@@ -51,6 +51,11 @@ pub enum DotnetRuntimeConfig {
     WithOptions(DotnetOptions),
 }
 
+/// The sentinel value users can set in `runtimes.dotnet.version` to opt
+/// into `UseDotNet@2`'s `useGlobalJson: true` mode, which installs every
+/// SDK referenced by `global.json` files in the workspace.
+pub const GLOBAL_JSON_SENTINEL: &str = "global.json";
+
 impl DotnetRuntimeConfig {
     /// Whether .NET is enabled.
     pub fn is_enabled(&self) -> bool {
@@ -66,6 +71,13 @@ impl DotnetRuntimeConfig {
             DotnetRuntimeConfig::Enabled(_) => None,
             DotnetRuntimeConfig::WithOptions(opts) => opts.version.as_deref(),
         }
+    }
+
+    /// Whether the user opted into `useGlobalJson: true` by setting
+    /// `version: "global.json"` (case-insensitive).
+    pub fn use_global_json(&self) -> bool {
+        self.version()
+            .is_some_and(|v| v.eq_ignore_ascii_case(GLOBAL_JSON_SENTINEL))
     }
 
     /// Get the NuGet source URL (None = use public nuget.org / repo defaults).
@@ -97,8 +109,18 @@ impl SanitizeConfigTrait for DotnetRuntimeConfig {
 /// .NET runtime options.
 #[derive(Debug, Deserialize, Clone, Default, SanitizeConfig)]
 pub struct DotnetOptions {
-    /// .NET SDK version to install (e.g., "8.0.x", "9.0.x").
+    /// .NET SDK version to install (e.g., `"8.0.x"`, `"9.0.x"`).
     /// Passed to `UseDotNet@2` `version` with `packageType: 'sdk'`.
+    ///
+    /// The special value `"global.json"` (case-insensitive) opts into
+    /// `UseDotNet@2`'s `useGlobalJson: true` mode, which discovers and
+    /// installs every SDK version referenced by `global.json` files in
+    /// the workspace. When this sentinel is used the explicit `version`
+    /// input is omitted from the generated step.
+    ///
+    /// If a `global.json` exists at the agent's compile directory and a
+    /// concrete version is specified here, the compiler errors out — pick
+    /// one source of truth.
     #[serde(default)]
     pub version: Option<String>,
 
@@ -127,7 +149,23 @@ pub struct DotnetOptions {
 pub const DOTNET_BASH_COMMANDS: &[&str] = &["dotnet"];
 
 /// Generate the `UseDotNet@2` pipeline step.
+///
+/// Emits one of three shapes:
+/// - `version: "global.json"` → `useGlobalJson: true` (discovers SDK
+///   versions from `global.json` files in the workspace).
+/// - explicit `version: "8.0.x"` → `version: '8.0.x'`.
+/// - no version → `version: '8.0.x'` (compiler default).
 pub fn generate_dotnet_install(config: &DotnetRuntimeConfig) -> String {
+    if config.use_global_json() {
+        return "\
+- task: UseDotNet@2
+  inputs:
+    packageType: 'sdk'
+    useGlobalJson: true
+  displayName: 'Install .NET SDK (from global.json)'"
+            .to_string();
+    }
+
     let version = config.version().unwrap_or("8.0.x");
     format!(
         "\

@@ -122,15 +122,34 @@ runtimes:
   dotnet:
     version: "8.0.x"
     config: "nuget.config"
+
+# Pin SDK from the repo's global.json (UseDotNet@2 useGlobalJson mode)
+runtimes:
+  dotnet:
+    version: "global.json"
 ```
 
 **Fields:**
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `version` | string | .NET SDK version to install (e.g., `"8.0.x"`, `"9.0.x"`). Passed to `UseDotNet@2` `version` with `packageType: 'sdk'`. Defaults to `"8.0.x"`. |
+| `version` | string | .NET SDK version to install (e.g., `"8.0.x"`, `"9.0.x"`). Passed to `UseDotNet@2` `version` with `packageType: 'sdk'`. Defaults to `"8.0.x"`. The special value `"global.json"` (case-insensitive) emits `useGlobalJson: true` instead, which discovers and installs every SDK referenced by `global.json` files in the workspace. |
 | `feed-url` | string | Internal NuGet feed URL (typically the v3 `index.json` of an Azure Artifacts feed). When set, the compiler creates a minimal `nuget.config` if none exists and runs `NuGetAuthenticate@1`. |
 | `config` | string | Path to a checked-in `nuget.config` in the repo. When set, the compiler runs `NuGetAuthenticate@1` (which auto-discovers `nuget.config` files in the workspace). Mutually exclusive with `feed-url`. |
+
+**`global.json` precedence.** A `global.json` file in the repo is the canonical
+way to pin the .NET SDK. The compiler enforces a single source of truth:
+
+- If a `global.json` exists at the agent's compile directory **and** the front
+  matter sets a concrete `version`, compilation **errors out**. Either remove
+  the front-matter version or set it to the literal string `"global.json"` to
+  opt into `UseDotNet@2`'s `useGlobalJson: true` mode.
+- If `version: "global.json"` is set, the compiler emits
+  `useGlobalJson: true` (no explicit `version:` input) so the install task
+  walks the workspace for `global.json` files itself.
+- If no `version` is set and a `global.json` exists, the compiler does not
+  auto-promote — the default `"8.0.x"` is used. Opt in explicitly with the
+  sentinel.
 
 When enabled, the compiler:
 - Injects `UseDotNet@2` into `{{ prepare_steps }}` (runs before AWF)
