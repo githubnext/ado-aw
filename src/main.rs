@@ -192,7 +192,9 @@ fn is_github_remote(remote_url: &str) -> bool {
 async fn ensure_non_github_remote_for_ado_aw(command_name: &str, repo_path: &Path) -> Result<()> {
     // Integration tests invoke this binary from the ado-aw repository itself,
     // which is intentionally hosted on GitHub.
-    if std::env::var_os("CARGO_BIN_EXE_ado-aw").is_some() {
+    if std::env::var_os("CARGO_BIN_EXE_ado-aw").is_some()
+        || std::env::var_os("CARGO_BIN_EXE_ado_aw").is_some()
+    {
         return Ok(());
     }
 
