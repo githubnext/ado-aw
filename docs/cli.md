@@ -4,7 +4,7 @@ _Part of the [ado-aw documentation](../AGENTS.md)._
 
 ## CLI Commands
 
-Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logging), `--debug, -d` (enable debug-level logging, implies verbose)
+Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logging), `--debug, -d` (enable debug-level logging, implies verbose), `--log-output-dir <path>` (write ado-aw logs to a specific directory; overrides `ADO_AW_LOG_DIR`)
 
 - `init` - Initialize a repository for AI-first agentic pipeline authoring
   - `--path <path>` - Target directory (defaults to current directory)

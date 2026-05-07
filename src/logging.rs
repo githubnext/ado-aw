@@ -9,28 +9,39 @@ use chrono::{Local, Utc};
 use log::LevelFilter;
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-/// Get the standard log directory path
+const FILE_LOG_LEVEL: LevelFilter = LevelFilter::Debug;
+
+/// Resolve log directory, optionally overriding with a CLI-provided path.
 ///
-/// Returns `$HOME/.ado-aw/logs/` on Unix/macOS
-/// Returns `%USERPROFILE%\.ado-aw\logs\` on Windows
-pub fn log_directory() -> Result<PathBuf> {
+/// Resolution order:
+/// 1. CLI override (`--log-output-dir`)
+/// 2. `ADO_AW_LOG_DIR` env var
+/// 3. Default (`$HOME/.ado-aw/logs` or `%USERPROFILE%\.ado-aw\logs`)
+fn log_directory(output_dir_override: Option<&Path>) -> Result<PathBuf> {
+    if let Some(path) = output_dir_override {
+        return Ok(path.to_path_buf());
+    }
+    if let Ok(from_env) = std::env::var("ADO_AW_LOG_DIR") {
+        let trimmed = from_env.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
     let home = dirs::home_dir().context("Could not determine home directory")?;
     Ok(home.join(".ado-aw").join("logs"))
 }
 
-/// Get the path for today's log file
-pub fn daily_log_path() -> Result<PathBuf> {
-    let log_dir = log_directory()?;
+fn daily_log_path_with_override(output_dir_override: Option<&Path>) -> Result<PathBuf> {
+    let log_dir = log_directory(output_dir_override)?;
     let date = Local::now().format("%Y-%m-%d");
     Ok(log_dir.join(format!("{}.log", date)))
 }
 
-/// Ensure the log directory exists
-pub fn ensure_log_directory() -> Result<PathBuf> {
-    let log_dir = log_directory()?;
+fn ensure_log_directory_with_override(output_dir_override: Option<&Path>) -> Result<PathBuf> {
+    let log_dir = log_directory(output_dir_override)?;
     fs::create_dir_all(&log_dir).context("Failed to create log directory")?;
     Ok(log_dir)
 }
@@ -66,12 +77,13 @@ fn build_session_marker(command_name: &str) -> String {
 /// A simple file logger that implements log::Log
 struct FileLogger {
     file: Mutex<File>,
-    level: LevelFilter,
+    file_level: LevelFilter,
+    stderr_level: LevelFilter,
 }
 
 impl log::Log for FileLogger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
-        metadata.level() <= self.level
+        metadata.level() <= self.file_level || metadata.level() <= self.stderr_level
     }
 
     fn log(&self, record: &log::Record) {
@@ -85,14 +97,18 @@ impl log::Log for FileLogger {
                 record.args()
             );
 
-            // Write to file
-            if let Ok(mut file) = self.file.lock() {
-                let _ = file.write_all(message.as_bytes());
-                let _ = file.flush();
+            // Write to file (always capture debug+)
+            if record.level() <= self.file_level {
+                if let Ok(mut file) = self.file.lock() {
+                    let _ = file.write_all(message.as_bytes());
+                    let _ = file.flush();
+                }
             }
 
-            // Also write to stderr for immediate visibility
-            eprint!("{}", message);
+            // Write to stderr according to selected runtime verbosity
+            if record.level() <= self.stderr_level {
+                eprint!("{}", message);
+            }
         }
     }
 
@@ -110,13 +126,18 @@ impl log::Log for FileLogger {
 ///
 /// # Arguments
 /// * `command_name` - Name of the command (included in session marker)
-/// * `level` - Minimum log level to capture
+/// * `stderr_level` - Runtime verbosity for stderr output
+/// * `output_dir_override` - Optional directory override for log output
 ///
 /// # Returns
 /// Path to the log file, or error if initialization failed
-pub fn init_file_logging(command_name: &str, level: LevelFilter) -> Result<PathBuf> {
-    ensure_log_directory()?;
-    let log_path = daily_log_path()?;
+pub fn init_file_logging(
+    command_name: &str,
+    stderr_level: LevelFilter,
+    output_dir_override: Option<&Path>,
+) -> Result<PathBuf> {
+    ensure_log_directory_with_override(output_dir_override)?;
+    let log_path = daily_log_path_with_override(output_dir_override)?;
 
     // Open log file in append mode
     let file = fs::OpenOptions::new()
@@ -134,11 +155,12 @@ pub fn init_file_logging(command_name: &str, level: LevelFilter) -> Result<PathB
 
     let logger = FileLogger {
         file: Mutex::new(file),
-        level,
+        file_level: FILE_LOG_LEVEL,
+        stderr_level,
     };
 
     log::set_boxed_logger(Box::new(logger))
-        .map(|()| log::set_max_level(level))
+        .map(|()| log::set_max_level(FILE_LOG_LEVEL.max(stderr_level)))
         .context("Failed to set logger")?;
 
     Ok(log_path)
@@ -152,23 +174,29 @@ pub fn init_file_logging(command_name: &str, level: LevelFilter) -> Result<PathB
 /// * `command_name` - Name of the command for the session marker
 /// * `debug` - Enable debug level logging
 /// * `verbose` - Enable info level logging (ignored if debug is true)
+/// * `output_dir_override` - Optional directory override for log output
 ///
 /// # Returns
 /// Path to the log file if file logging was initialized
-pub fn init_logging(command_name: &str, debug: bool, verbose: bool) -> Option<PathBuf> {
-    let level = if debug {
+fn selected_stderr_level(debug: bool, verbose: bool, rust_log_set: bool) -> LevelFilter {
+    if debug {
         LevelFilter::Debug
-    } else if verbose {
-        LevelFilter::Info
-    } else if std::env::var("RUST_LOG").is_ok() {
-        // If RUST_LOG is set, use Info as minimum for file logging
+    } else if verbose || rust_log_set {
         LevelFilter::Info
     } else {
-        // Default: only warnings and errors
         LevelFilter::Warn
-    };
+    }
+}
 
-    match init_file_logging(command_name, level) {
+pub fn init_logging(
+    command_name: &str,
+    debug: bool,
+    verbose: bool,
+    output_dir_override: Option<&Path>,
+) -> Option<PathBuf> {
+    let stderr_level = selected_stderr_level(debug, verbose, std::env::var("RUST_LOG").is_ok());
+
+    match init_file_logging(command_name, stderr_level, output_dir_override) {
         Ok(path) => {
             log::debug!("Logging to: {}", path.display());
             Some(path)
@@ -179,12 +207,12 @@ pub fn init_logging(command_name: &str, debug: bool, verbose: bool) -> Option<Pa
 
             // Use env_logger as fallback
             let mut builder = env_logger::Builder::new();
-            if debug {
-                builder.filter_level(LevelFilter::Debug);
-            } else if verbose {
-                builder.filter_level(LevelFilter::Info);
+            if debug || verbose {
+                builder.filter_level(stderr_level);
             } else if let Ok(rust_log) = std::env::var("RUST_LOG") {
                 builder.parse_filters(&rust_log);
+            } else {
+                builder.filter_level(stderr_level);
             }
             let _ = builder.try_init();
 
@@ -196,10 +224,11 @@ pub fn init_logging(command_name: &str, debug: bool, verbose: bool) -> Option<Pa
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn test_log_directory() {
-        let dir = log_directory().unwrap();
+        let dir = log_directory(None).unwrap();
         assert!(
             dir.ends_with(".ado-aw/logs") || dir.ends_with(".ado-aw\\logs")
         );
@@ -207,7 +236,7 @@ mod tests {
 
     #[test]
     fn test_daily_log_path() {
-        let path = daily_log_path().unwrap();
+        let path = daily_log_path_with_override(None).unwrap();
         let filename = path.file_name().unwrap().to_string_lossy();
         // Should be YYYY-MM-DD.log format
         assert!(filename.ends_with(".log"));
@@ -216,8 +245,15 @@ mod tests {
 
     #[test]
     fn test_ensure_log_directory() {
-        let dir = ensure_log_directory().unwrap();
+        let dir = ensure_log_directory_with_override(None).unwrap();
         assert!(dir.exists());
+    }
+
+    #[test]
+    fn test_log_directory_override() {
+        let temp = tempdir().unwrap();
+        let dir = log_directory(Some(temp.path())).unwrap();
+        assert_eq!(dir, temp.path());
     }
 
     #[test]
@@ -226,5 +262,16 @@ mod tests {
         assert!(marker.starts_with("=== ["));
         assert!(marker.contains("COMMAND=test-command"));
         assert!(marker.ends_with(" ==="));
+    }
+
+    #[test]
+    fn test_selected_stderr_level() {
+        assert_eq!(
+            selected_stderr_level(true, false, false),
+            LevelFilter::Debug
+        );
+        assert_eq!(selected_stderr_level(false, true, false), LevelFilter::Info);
+        assert_eq!(selected_stderr_level(false, false, true), LevelFilter::Info);
+        assert_eq!(selected_stderr_level(false, false, false), LevelFilter::Warn);
     }
 }

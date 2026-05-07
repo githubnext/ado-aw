@@ -709,7 +709,7 @@ pub fn generate_integrity_check(skip: bool) -> String {
 /// - `{{ verify_mcp_backends }}`: full pipeline step that probes each MCPG
 ///   backend with MCP initialize + tools/list
 ///
-/// When `debug` is `false`, both markers resolve to empty strings.
+/// When `debug` is `false`, debug markers resolve to empty strings.
 pub fn generate_debug_pipeline_replacements(debug: bool) -> Vec<(String, String)> {
     if !debug {
         return vec![
