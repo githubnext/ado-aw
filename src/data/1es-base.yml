@@ -143,6 +143,8 @@ extends:
                     dockerVersion: 26.1.4
 
                 - bash: |
+                    set -eo pipefail
+
                     AWF_VERSION="{{ firewall_version }}"
                     DOWNLOAD_DIR="$(Pipeline.Workspace)/awf"
                     DOWNLOAD_URL="https://github.com/github/gh-aw-firewall/releases/download/v${AWF_VERSION}/awf-linux-x64"
@@ -159,10 +161,12 @@ extends:
                     mv awf-linux-x64 awf
                     chmod +x awf
                     echo "##vso[task.prependpath]$(Pipeline.Workspace)/awf"
-                    ./awf --version || echo "AWF binary ready"
+                    ./awf --version
                   displayName: "Download AWF (Agentic Workflow Firewall) v{{ firewall_version }}"
 
                 - bash: |
+                    set -eo pipefail
+
                     docker pull ghcr.io/github/gh-aw-firewall/squid:{{ firewall_version }}
                     docker pull ghcr.io/github/gh-aw-firewall/agent:{{ firewall_version }}
                     docker tag ghcr.io/github/gh-aw-firewall/squid:{{ firewall_version }} ghcr.io/github/gh-aw-firewall/squid:latest
@@ -451,6 +455,8 @@ extends:
                     dockerVersion: 26.1.4
 
                 - bash: |
+                    set -eo pipefail
+
                     AWF_VERSION="{{ firewall_version }}"
                     DOWNLOAD_DIR="$(Pipeline.Workspace)/awf"
                     DOWNLOAD_URL="https://github.com/github/gh-aw-firewall/releases/download/v${AWF_VERSION}/awf-linux-x64"
@@ -467,10 +473,12 @@ extends:
                     mv awf-linux-x64 awf
                     chmod +x awf
                     echo "##vso[task.prependpath]$(Pipeline.Workspace)/awf"
-                    ./awf --version || echo "AWF binary ready"
+                    ./awf --version
                   displayName: "Download AWF (Agentic Workflow Firewall) v{{ firewall_version }}"
 
                 - bash: |
+                    set -eo pipefail
+
                     docker pull ghcr.io/github/gh-aw-firewall/squid:{{ firewall_version }}
                     docker pull ghcr.io/github/gh-aw-firewall/agent:{{ firewall_version }}
                     docker tag ghcr.io/github/gh-aw-firewall/squid:{{ firewall_version }} ghcr.io/github/gh-aw-firewall/squid:latest
