@@ -14,7 +14,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_yaml = "0.9.34"
 serde_json = "1.0.149"
 schemars = { version = "1.2", features = ["derive"] }
-rmcp = { version = "0.8.0", features = [
+rmcp = { version = "1.4.0", features = [
     "server",
     "transport-io",
     "transport-streamable-http-server",
