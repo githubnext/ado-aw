@@ -32,9 +32,9 @@ fn test_init_creates_agent_file() {
     );
 }
 
-/// Test that `init` refuses to overwrite without --force
+/// Test that `init` always overwrites an existing agent file (no --force needed)
 #[test]
-fn test_init_refuses_overwrite_without_force() {
+fn test_init_overwrites_by_default() {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
 
     // First run should succeed
@@ -44,21 +44,34 @@ fn test_init_refuses_overwrite_without_force() {
         .expect("Failed to run ado-aw init");
     assert!(output.status.success(), "First init should succeed");
 
-    // Second run without --force should fail
+    let agent_path = temp_dir.path().join(".github/agents/ado-aw.agent.md");
+
+    // Tamper with the file
+    fs::write(&agent_path, "tampered content").expect("Should write tampered content");
+
+    // Second run without --force should still succeed and restore the template
     let output = ado_aw_bin()
         .args(["init", "--path", temp_dir.path().to_str().unwrap()])
         .output()
         .expect("Failed to run ado-aw init");
-    assert!(!output.status.success(), "Second init without --force should fail");
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("already exists"),
-        "Error should mention file already exists: {stderr}"
+        output.status.success(),
+        "Second init should succeed and overwrite: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let content = fs::read_to_string(&agent_path).expect("Should read agent file");
+    assert!(
+        content.contains("ADO Agentic Pipelines Agent"),
+        "Default init should restore the template content"
+    );
+    assert!(
+        !content.contains("tampered"),
+        "Tampered content should be overwritten"
     );
 }
 
-/// Test that `init --force` overwrites an existing agent file
+/// Test that `init --force` also overwrites an existing agent file
 #[test]
 fn test_init_force_overwrites() {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
