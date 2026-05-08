@@ -175,7 +175,17 @@ pub fn migrate_front_matter_with(
     fm: &mut Mapping,
     registry: &[&'static Migration],
 ) -> Result<MigrationReport> {
-    let target_version = 1 + registry.len() as u32;
+    // Use checked arithmetic so we surface a clear error rather than
+    // panic-or-wrap if a registry ever grows past u32::MAX. Realistic
+    // registries are tiny — this is a "no panic in library code" guard.
+    let registry_len: u32 = registry
+        .len()
+        .try_into()
+        .ok()
+        .context("migration registry has more than u32::MAX entries")?;
+    let target_version = 1u32
+        .checked_add(registry_len)
+        .context("migration registry too large: target_version would overflow u32")?;
     let mut current = read_schema_version(fm)?;
     let from_version = current;
 
@@ -202,8 +212,11 @@ pub fn migrate_front_matter_with(
                 current
             )
         })?;
+        let next_version = current
+            .checked_add(1)
+            .context("migration version overflow: current + 1 exceeds u32::MAX")?;
         ensure!(
-            m.from_version == current && m.to_version == current + 1,
+            m.from_version == current && m.to_version == next_version,
             "migration registry corrupt: expected from_version={} at index {}, found from_version={} to_version={}",
             current,
             idx,
