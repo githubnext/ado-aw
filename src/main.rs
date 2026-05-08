@@ -189,39 +189,6 @@ fn is_github_remote(remote_url: &str) -> bool {
         .is_some_and(|host| host.eq_ignore_ascii_case("github.com"))
 }
 
-/// Returns true if the remote URL points at the `githubnext/ado-aw`
-/// repository itself. This is the canonical home of `ado-aw`, and it is
-/// expected that maintainers run `ado-aw compile`/`init` against it (for
-/// example, to regenerate fixtures or examples) even though the origin is on
-/// GitHub rather than Azure DevOps.
-fn is_ado_aw_repo_remote(remote_url: &str) -> bool {
-    let url = remote_url.trim();
-
-    // Strip an optional trailing `.git` and split off the owner/repo path.
-    fn matches_path(path: &str) -> bool {
-        let trimmed = path.trim_matches('/');
-        let trimmed = trimmed.strip_suffix(".git").unwrap_or(trimmed);
-        trimmed.eq_ignore_ascii_case("githubnext/ado-aw")
-    }
-
-    if let Some(rest) = url.strip_prefix("git@github.com:") {
-        return matches_path(rest);
-    }
-    if let Some(rest) = url.strip_prefix("ssh://git@github.com/") {
-        return matches_path(rest);
-    }
-
-    if let Ok(parsed) = url::Url::parse(url)
-        && parsed
-            .host_str()
-            .is_some_and(|host| host.eq_ignore_ascii_case("github.com"))
-    {
-        return matches_path(parsed.path());
-    }
-
-    false
-}
-
 async fn ensure_non_github_remote_for_ado_aw(command_name: &str, repo_path: &Path) -> Result<()> {
     // Integration tests invoke this binary from the ado-aw repository itself,
     // which is intentionally hosted on GitHub.
@@ -236,13 +203,6 @@ async fn ensure_non_github_remote_for_ado_aw(command_name: &str, repo_path: &Pat
     };
 
     if is_github_remote(&remote_url) {
-        if is_ado_aw_repo_remote(&remote_url) {
-            // The `githubnext/ado-aw` repository is the home of this tool.
-            // Allow `ado-aw` commands to run there so maintainers can exercise
-            // the CLI against examples and fixtures in-tree.
-            return Ok(());
-        }
-
         anyhow::bail!(
             "Cannot run `ado-aw {}` in a GitHub repository (origin: {}). \
              `ado-aw` is for Azure DevOps repositories. \
@@ -489,7 +449,12 @@ async fn main() -> Result<()> {
         }
         Commands::Init { path, force } => {
             let init_path = path.as_deref().unwrap_or(Path::new("."));
-            ensure_non_github_remote_for_ado_aw("init", init_path).await?;
+            // `--force` bypasses the GitHub-remote guard so maintainers can
+            // run `ado-aw init` inside this repository (or other GitHub-hosted
+            // forks) for development and example regeneration.
+            if !force {
+                ensure_non_github_remote_for_ado_aw("init", init_path).await?;
+            }
             init::run(path.as_deref(), force).await?;
         }
         Commands::Configure {
@@ -518,7 +483,7 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_ado_aw_repo_remote, is_github_remote};
+    use super::is_github_remote;
 
     #[test]
     fn detects_github_https_remote() {
@@ -547,35 +512,5 @@ mod tests {
     #[test]
     fn does_not_flag_non_github_remote() {
         assert!(!is_github_remote("https://gitlab.com/owner/repo.git"));
-    }
-
-    #[test]
-    fn detects_ado_aw_repo_https_remote() {
-        assert!(is_ado_aw_repo_remote(
-            "https://github.com/githubnext/ado-aw.git"
-        ));
-        assert!(is_ado_aw_repo_remote("https://github.com/githubnext/ado-aw"));
-        assert!(is_ado_aw_repo_remote(
-            "https://github.com/GitHubNext/ADO-AW.git"
-        ));
-    }
-
-    #[test]
-    fn detects_ado_aw_repo_ssh_remote() {
-        assert!(is_ado_aw_repo_remote("git@github.com:githubnext/ado-aw.git"));
-        assert!(is_ado_aw_repo_remote(
-            "ssh://git@github.com/githubnext/ado-aw.git"
-        ));
-    }
-
-    #[test]
-    fn does_not_flag_other_github_repo_as_ado_aw() {
-        assert!(!is_ado_aw_repo_remote(
-            "https://github.com/owner/other-repo.git"
-        ));
-        assert!(!is_ado_aw_repo_remote("git@github.com:owner/ado-aw.git"));
-        assert!(!is_ado_aw_repo_remote(
-            "https://dev.azure.com/myorg/myproject/_git/ado-aw"
-        ));
     }
 }
