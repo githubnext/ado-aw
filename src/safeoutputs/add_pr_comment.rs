@@ -283,7 +283,10 @@ impl Executor for AddPrCommentResult {
                 .context("BUILD_REPOSITORY_NAME not set and repository is 'self'")?
                 .clone()
         } else {
-            match ctx.allowed_repositories.get(&self.repository) {
+            match crate::safeoutputs::lookup_allowed_repository(
+                &self.repository,
+                &ctx.allowed_repositories,
+            ) {
                 Some(name) => name.clone(),
                 None => {
                     return Ok(ExecutionResult::failure(format!(

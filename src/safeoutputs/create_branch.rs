@@ -265,8 +265,7 @@ impl Executor for CreateBranchResult {
                 .context("BUILD_REPOSITORY_NAME not set")?
                 .to_string()
         } else {
-            ctx.allowed_repositories
-                .get(repo_alias)
+            crate::safeoutputs::lookup_allowed_repository(repo_alias, &ctx.allowed_repositories)
                 .cloned()
                 .context(format!(
                     "Repository alias '{}' is not in the allowed checkout list",
