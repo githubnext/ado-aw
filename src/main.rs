@@ -233,11 +233,25 @@ async fn run_execute(
         .await
         .with_context(|| format!("Failed to read source file: {}", source.display()))?;
 
-    let (mut front_matter, _) = compile::parse_markdown(&content)
+    let parsed = compile::parse_markdown_detailed(&content)
         .with_context(|| format!("Failed to parse source file: {}", source.display()))?;
 
-    // Resolve compact repos: syntax into the legacy fields for execution
-    let (resolved_repos, resolved_checkout) = compile::resolve_repos(&front_matter)
+    if parsed.migrations.changed() {
+        log::warn!(
+            "front matter at {} is at schema-version {}; running with in-memory migration to {}. Run `ado-aw compile {}` to update the source.",
+            source.display(),
+            parsed.migrations.from_version,
+            parsed.migrations.to_version,
+            source.display(),
+        );
+    }
+
+    let mut front_matter = parsed.front_matter;
+
+    // Lower compact repos: into the internal Repository/checkout pair used by
+    // build_execution_context. The migration framework has already converted
+    // any legacy `repositories:` + `checkout:` shapes into `repos:`.
+    let (resolved_repos, resolved_checkout) = compile::lower_repos(&front_matter.repos)
         .with_context(|| "Failed to resolve repository configuration")?;
     front_matter.repositories = resolved_repos;
     front_matter.checkout = resolved_checkout;
