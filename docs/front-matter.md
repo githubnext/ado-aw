@@ -8,6 +8,7 @@ The compiler expects markdown files with YAML front matter similar to gh-aw:
 
 ```markdown
 ---
+schema-version: 1               # Optional: front-matter schema version (defaults to 1). The compiler bumps this in place when migrations apply during compilation. See docs/migrations.md.
 name: "name for this agent"
 description: "One line description for this agent"
 target: standalone # Optional: "standalone" (default) or "1es". See docs/targets.md.
