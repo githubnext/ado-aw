@@ -382,7 +382,59 @@ teardown:          # Separate job AFTER Execution
     displayName: "Teardown"
 ```
 
-### Step 13 — Network (standalone target only)
+### Step 13 — Runtimes (optional)
+
+Configure language environments that the compiler auto-installs before the agent runs. Only include `runtimes:` when the agent needs to execute code in a specific language environment.
+
+**Lean 4** — theorem prover:
+```yaml
+runtimes:
+  lean: true          # installs stable toolchain via elan
+  # lean:
+  #   toolchain: "leanprover/lean4:v4.29.1"   # pin version
+```
+
+**Python**:
+```yaml
+runtimes:
+  python: true        # installs Python 3.x (default version)
+  # python:
+  #   version: "3.12"
+  #   feed-url: "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/pypi/simple/"
+```
+
+**Node.js**:
+```yaml
+runtimes:
+  node: true          # installs Node.js LTS
+  # node:
+  #   version: "20"
+  #   feed-url: "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/npm/registry/"
+```
+
+**.NET**:
+```yaml
+runtimes:
+  dotnet: true        # installs .NET 8.0.x SDK (default)
+  # dotnet:
+  #   version: "9.0.x"
+  #   feed-url: "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/nuget/v3/index.json"
+  #   # version: "global.json"   # discover SDK from global.json files in workspace
+```
+
+Multiple runtimes can be combined:
+```yaml
+runtimes:
+  python: true
+  node:
+    version: "20"
+```
+
+Each runtime automatically adds its ecosystem commands to the bash allow-list (`python`/`pip`/`uv`, `node`/`npm`/`npx`, `dotnet`, `lean`/`lake`/`elan`) and adds the relevant package registry domains to the network allowlist.
+
+> See `docs/runtimes.md` for full configuration options per runtime.
+
+### Step 14 — Network (standalone target only)
 
 Additional allowed domains beyond the built-in allowlist:
 ```yaml
