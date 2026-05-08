@@ -340,6 +340,65 @@ pub fn generate_checkout_self() -> String {
 /// wrong working directory. We reject this at compile time instead.
 const RESERVED_WORKSPACE_NAMES: &[&str] = &["root", "repo", "self"];
 
+/// Validate that no entry in `checkout` resolves to the same on-disk
+/// directory as the `self` checkout.
+///
+/// In ADO multi-repo checkout, both `checkout: self` and an additional
+/// `checkout: <alias>` land in `s/<RepositoryName>`, where
+/// `<RepositoryName>` is `Build.Repository.Name` for `self` and the
+/// trailing path segment of the `name:` field for each `repositories:`
+/// entry. When these collide, the second checkout runs `git clean -ffdx`
+/// and resets to its configured ref, silently wiping files that exist on
+/// the trigger branch but not on the workspace ref. Failing fast at
+/// compile time is much more discoverable than the resulting runtime
+/// "file not found" errors downstream.
+///
+/// `self_repo_name` is the trigger repo's `Build.Repository.Name` —
+/// usually the trailing segment of the trigger repo's full name, inferred
+/// from the local git remote. When `None` (e.g. compiling outside an ADO
+/// clone, or in unit tests) the check is skipped because we have no
+/// reliable identity for `self`.
+pub fn validate_checkout_self_collision(
+    repositories: &[Repository],
+    checkout: &[String],
+    self_repo_name: Option<&str>,
+) -> Result<()> {
+    let Some(self_name) = self_repo_name else {
+        return Ok(());
+    };
+    if checkout.is_empty() {
+        return Ok(());
+    }
+
+    for alias in checkout {
+        let Some(repo) = repositories.iter().find(|r| r.repository == *alias) else {
+            // Unknown aliases are reported by `validate_checkout_list`.
+            continue;
+        };
+        let last_segment = repo.name.rsplit('/').next().unwrap_or(&repo.name);
+        // ADO is case-insensitive on Windows agents and case-sensitive on
+        // Linux. Use a case-insensitive comparison so the collision is
+        // caught regardless of agent OS — the resulting pipeline would
+        // break on at least one platform either way.
+        if last_segment.eq_ignore_ascii_case(self_name) {
+            anyhow::bail!(
+                "Checkout entry '{}' (repository name '{}') resolves to the same \
+                directory ('s/{}') as the trigger repository checked out as 'self'. \
+                The second checkout would overwrite the first, replacing files \
+                from the trigger branch with the workspace ref. Remove '{}' from \
+                'checkout:' — the 'self' checkout already provides access to this \
+                repository.",
+                alias,
+                repo.name,
+                self_name,
+                alias,
+            );
+        }
+    }
+
+    Ok(())
+}
+
 /// Validate that all entries in checkout list exist in repositories
 pub fn validate_checkout_list(repositories: &[Repository], checkout: &[String]) -> Result<()> {
     if checkout.is_empty() {
@@ -2029,6 +2088,15 @@ pub async fn compile_shared(
     // 1. Validate
     validate_front_matter_identity(front_matter)?;
 
+    // Detect workspace/self checkout collisions now that we have ado_context
+    // (which provides the trigger repo's name). Skipped when no remote is
+    // available — see `validate_checkout_self_collision` for details.
+    validate_checkout_self_collision(
+        &front_matter.repositories,
+        &front_matter.checkout,
+        ctx.ado_context.as_ref().map(|c| c.repo_name.as_str()),
+    )?;
+
     // 2. Generate schedule
     let schedule = match front_matter.schedule() {
         Some(s) => generate_schedule(&front_matter.name, s)
@@ -2485,6 +2553,84 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("reserved"), "msg: {msg}");
         assert!(msg.contains("'repo'"), "msg: {msg}");
+    }
+
+    // ─── validate_checkout_self_collision ────────────────────────────────────
+
+    #[test]
+    fn test_validate_self_collision_detects_match() {
+        // Workspace repo's name last segment matches the self repo's name,
+        // so both `checkout: self` and `checkout: my-repo` would land in
+        // `s/my-repo`. Must error.
+        let repos = vec![Repository {
+            repository: "my-repo".to_string(),
+            repo_type: "git".to_string(),
+            name: "some-org/my-repo".to_string(),
+            repo_ref: "refs/heads/main".to_string(),
+        }];
+        let checkout = vec!["my-repo".to_string()];
+        let err =
+            validate_checkout_self_collision(&repos, &checkout, Some("my-repo")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("'my-repo'"), "msg: {msg}");
+        assert!(msg.contains("same"), "msg: {msg}");
+        assert!(msg.contains("'self'"), "msg: {msg}");
+    }
+
+    #[test]
+    fn test_validate_self_collision_no_collision_passes() {
+        // Different repo name → different `s/<name>` directory, no collision.
+        let repos = vec![Repository {
+            repository: "other".to_string(),
+            repo_type: "git".to_string(),
+            name: "some-org/other".to_string(),
+            repo_ref: "refs/heads/main".to_string(),
+        }];
+        let checkout = vec!["other".to_string()];
+        let result = validate_checkout_self_collision(&repos, &checkout, Some("my-repo"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_self_collision_case_insensitive() {
+        // ADO is case-insensitive on Windows; treat differing-only-by-case
+        // names as a collision so the pipeline doesn't break on one OS.
+        let repos = vec![Repository {
+            repository: "my-repo".to_string(),
+            repo_type: "git".to_string(),
+            name: "Some-Org/My-Repo".to_string(),
+            repo_ref: "refs/heads/main".to_string(),
+        }];
+        let checkout = vec!["my-repo".to_string()];
+        let err =
+            validate_checkout_self_collision(&repos, &checkout, Some("my-repo")).unwrap_err();
+        assert!(err.to_string().contains("same"));
+    }
+
+    #[test]
+    fn test_validate_self_collision_no_self_name_skipped() {
+        // No git remote / no inferred self name → can't detect, skip.
+        let repos = vec![Repository {
+            repository: "my-repo".to_string(),
+            repo_type: "git".to_string(),
+            name: "org/my-repo".to_string(),
+            repo_ref: "refs/heads/main".to_string(),
+        }];
+        let checkout = vec!["my-repo".to_string()];
+        let result = validate_checkout_self_collision(&repos, &checkout, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_self_collision_empty_checkout_passes() {
+        let repos = vec![Repository {
+            repository: "my-repo".to_string(),
+            repo_type: "git".to_string(),
+            name: "org/my-repo".to_string(),
+            repo_ref: "refs/heads/main".to_string(),
+        }];
+        let result = validate_checkout_self_collision(&repos, &[], Some("my-repo"));
+        assert!(result.is_ok());
     }
 
     // ─── Engine::args (copilot params) ──────────────────────────────────────
