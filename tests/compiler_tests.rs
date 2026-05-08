@@ -2794,6 +2794,171 @@ Prove theorems and build Lean 4 projects.
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
+/// Integration test: `runtimes: python: true` end-to-end compilation
+///
+/// Verifies that a pipeline compiled with `runtimes: python: true` contains
+/// the `UsePythonVersion@0` task and defaults to Python `3.x`.
+#[test]
+fn test_python_runtime_compiled_output() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-python-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = r#"---
+name: "Python Agent"
+description: "Agent with Python runtime"
+runtimes:
+  python: true
+safe-outputs:
+  noop: {}
+---
+
+## Python Agent
+"#;
+
+    let input_path = temp_dir.join("python-agent.md");
+    let output_path = temp_dir.join("python-agent.yml");
+    fs::write(&input_path, input).expect("Failed to write test input");
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+    assert!(
+        compiled.contains("UsePythonVersion@0"),
+        "should have Python install step"
+    );
+    assert!(
+        compiled.contains("versionSpec: '3.x'"),
+        "should default to Python 3.x"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Integration test: `runtimes: python:` with pinned version
+#[test]
+fn test_python_runtime_pinned_version_compiled_output() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-python-pinned-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = r#"---
+name: "Python 3.12 Agent"
+description: "Agent with pinned Python runtime"
+runtimes:
+  python:
+    version: "3.12"
+safe-outputs:
+  noop: {}
+---
+
+## Python Agent
+"#;
+
+    let input_path = temp_dir.join("python-pinned-agent.md");
+    let output_path = temp_dir.join("python-pinned-agent.yml");
+    fs::write(&input_path, input).expect("Failed to write test input");
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+    assert!(
+        compiled.contains("versionSpec: '3.12'"),
+        "should use pinned version"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Integration test: `runtimes: node: true` end-to-end compilation
+#[test]
+fn test_node_runtime_compiled_output() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-node-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = r#"---
+name: "Node Agent"
+description: "Agent with Node runtime"
+runtimes:
+  node: true
+safe-outputs:
+  noop: {}
+---
+
+## Node Agent
+"#;
+
+    let input_path = temp_dir.join("node-agent.md");
+    let output_path = temp_dir.join("node-agent.yml");
+    fs::write(&input_path, input).expect("Failed to write test input");
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+    assert!(
+        compiled.contains("NodeTool@0"),
+        "should have Node install step"
+    );
+    assert!(
+        compiled.contains("versionSpec: '22.x'"),
+        "should default to Node 22.x"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
 /// Integration test: `schedule:` object form with `branches:` end-to-end compilation
 ///
 /// Verifies that a pipeline compiled with the object-form schedule containing

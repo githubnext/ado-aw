@@ -461,7 +461,7 @@ fn test_collect_extensions_node_enabled() {
         parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  node: true\n---\n")
             .unwrap();
     let exts = collect_extensions(&fm);
-    assert!(exts.iter().any(|e| e.name() == "Node.js"));
+    assert!(exts.iter().any(|e| e.name() == "Node"));
 }
 
 #[test]
@@ -470,7 +470,7 @@ fn test_collect_extensions_node_disabled() {
         parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  node: false\n---\n")
             .unwrap();
     let exts = collect_extensions(&fm);
-    assert!(!exts.iter().any(|e| e.name() == "Node.js"));
+    assert!(!exts.iter().any(|e| e.name() == "Node"));
 }
 
 #[test]
@@ -479,7 +479,7 @@ fn test_collect_extensions_node_with_version() {
         parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  node:\n    version: '22.x'\n---\n")
             .unwrap();
     let exts = collect_extensions(&fm);
-    assert!(exts.iter().any(|e| e.name() == "Node.js"));
+    assert!(exts.iter().any(|e| e.name() == "Node"));
 }
 
 #[test]
@@ -805,7 +805,7 @@ fn test_collect_extensions_all_runtimes_enabled() {
     let exts = collect_extensions(&fm);
     assert!(exts.iter().any(|e| e.name() == "Lean 4"));
     assert!(exts.iter().any(|e| e.name() == "Python"));
-    assert!(exts.iter().any(|e| e.name() == "Node.js"));
+    assert!(exts.iter().any(|e| e.name() == "Node"));
     assert!(exts.iter().any(|e| e.name() == "dotnet"));
     // All are Runtime phase
     let runtime_exts: Vec<_> = exts.iter().filter(|e| e.phase() == ExtensionPhase::Runtime).collect();

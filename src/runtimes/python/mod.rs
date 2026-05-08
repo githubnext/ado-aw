@@ -136,3 +136,53 @@ pub fn generate_pip_authenticate() -> String {
   displayName: 'Authenticate pip (build service identity)'"
         .to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_python_install_default_version() {
+        let config = PythonRuntimeConfig::Enabled(true);
+        let step = generate_python_install(&config);
+        assert!(
+            step.contains("versionSpec: '3.x'"),
+            "should default to 3.x, got: {step}"
+        );
+        assert!(
+            step.contains("UsePythonVersion@0"),
+            "should use UsePythonVersion task"
+        );
+        assert!(
+            step.contains("Install Python 3.x"),
+            "should set displayName"
+        );
+    }
+
+    #[test]
+    fn test_generate_python_install_pinned_version() {
+        let config = PythonRuntimeConfig::WithOptions(PythonOptions {
+            version: Some("3.12".into()),
+            ..Default::default()
+        });
+        let step = generate_python_install(&config);
+        assert!(
+            step.contains("versionSpec: '3.12'"),
+            "should use pinned version, got: {step}"
+        );
+        assert!(step.contains("Install Python 3.12"));
+    }
+
+    #[test]
+    fn test_generate_pip_authenticate_emits_task() {
+        let step = generate_pip_authenticate();
+        assert!(
+            step.contains("PipAuthenticate@1"),
+            "should emit PipAuthenticate task"
+        );
+        assert!(
+            step.contains("artifactFeeds"),
+            "should include artifactFeeds input"
+        );
+    }
+}

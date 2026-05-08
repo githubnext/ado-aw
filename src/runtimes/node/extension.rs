@@ -23,7 +23,7 @@ impl NodeExtension {
 
 impl CompilerExtension for NodeExtension {
     fn name(&self) -> &str {
-        "Node.js"
+        "Node"
     }
 
     fn phase(&self) -> ExtensionPhase {
