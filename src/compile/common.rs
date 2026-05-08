@@ -375,7 +375,9 @@ pub fn validate_checkout_self_collision(
             // Unknown aliases are reported by `validate_checkout_list`.
             continue;
         };
-        let last_segment = repo.name.rsplit('/').next().unwrap_or(&repo.name);
+        // `rsplit('/').next()` on any &str always yields `Some` — even for
+        // names without a slash the whole string is returned.
+        let last_segment = repo.name.rsplit('/').next().expect("rsplit always yields one item");
         // ADO is case-insensitive on Windows agents and case-sensitive on
         // Linux. Use a case-insensitive comparison so the collision is
         // caught regardless of agent OS — the resulting pipeline would
