@@ -226,3 +226,114 @@ pub fn generate_ensure_nuget_config(config: &DotnetRuntimeConfig) -> String {
   displayName: 'Ensure nuget.config exists'"
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── generate_dotnet_install ────────────────────────────────────
+
+    #[test]
+    fn test_generate_dotnet_install_default() {
+        let config = DotnetRuntimeConfig::Enabled(true);
+        let step = generate_dotnet_install(&config);
+        assert!(step.contains("UseDotNet@2"), "should use UseDotNet@2 task");
+        assert!(
+            step.contains("packageType: 'sdk'"),
+            "should pin packageType to 'sdk'"
+        );
+        assert!(
+            step.contains("version: '8.0.x'"),
+            "default version should be 8.0.x: {step}"
+        );
+        assert!(
+            !step.contains("useGlobalJson"),
+            "should not emit useGlobalJson for default"
+        );
+    }
+
+    #[test]
+    fn test_generate_dotnet_install_explicit_version() {
+        let config = DotnetRuntimeConfig::WithOptions(DotnetOptions {
+            version: Some("9.0.x".to_string()),
+            ..Default::default()
+        });
+        let step = generate_dotnet_install(&config);
+        assert!(
+            step.contains("version: '9.0.x'"),
+            "should use specified version: {step}"
+        );
+        assert!(
+            !step.contains("useGlobalJson"),
+            "should not emit useGlobalJson with explicit version"
+        );
+    }
+
+    #[test]
+    fn test_generate_dotnet_install_global_json() {
+        let config = DotnetRuntimeConfig::WithOptions(DotnetOptions {
+            version: Some("global.json".to_string()),
+            ..Default::default()
+        });
+        let step = generate_dotnet_install(&config);
+        assert!(
+            step.contains("useGlobalJson: true"),
+            "should emit useGlobalJson: true: {step}"
+        );
+        assert!(
+            !step.contains("version: '"),
+            "should not emit explicit version with useGlobalJson: {step}"
+        );
+    }
+
+    #[test]
+    fn test_generate_dotnet_install_global_json_case_insensitive() {
+        let config = DotnetRuntimeConfig::WithOptions(DotnetOptions {
+            version: Some("Global.JSON".to_string()),
+            ..Default::default()
+        });
+        let step = generate_dotnet_install(&config);
+        assert!(
+            step.contains("useGlobalJson: true"),
+            "sentinel should be case-insensitive: {step}"
+        );
+    }
+
+    // ── generate_ensure_nuget_config ──────────────────────────────
+
+    #[test]
+    fn test_generate_ensure_nuget_config_contains_feed_url() {
+        let feed = "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/nuget/v3/index.json";
+        let config = DotnetRuntimeConfig::WithOptions(DotnetOptions {
+            feed_url: Some(feed.to_string()),
+            ..Default::default()
+        });
+        let step = generate_ensure_nuget_config(&config);
+        assert!(
+            step.contains(feed),
+            "step should interpolate the configured feed URL: {step}"
+        );
+        assert!(
+            step.contains("<packageSources>"),
+            "should emit valid nuget.config XML"
+        );
+        assert!(
+            step.contains("nuget.config"),
+            "step should reference nuget.config"
+        );
+        assert!(
+            step.contains("displayName: 'Ensure nuget.config exists'"),
+            "step should carry the expected displayName"
+        );
+    }
+
+    #[test]
+    fn test_generate_ensure_nuget_config_default_feed() {
+        let config = DotnetRuntimeConfig::Enabled(true);
+        let step = generate_ensure_nuget_config(&config);
+        assert!(
+            step.contains("https://api.nuget.org/v3/index.json"),
+            "default feed should be the public nuget.org v3 index: {step}"
+        );
+    }
+}
