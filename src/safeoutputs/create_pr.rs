@@ -590,18 +590,7 @@ impl Executor for CreatePrResult {
             "Validating repository '{}' against allowed list",
             self.repository
         );
-        let repo_id = if self.repository == "self"
-            || ctx
-                .repository_name
-                .as_deref()
-                .is_some_and(|n| {
-                    n.eq_ignore_ascii_case(&self.repository)
-                        || n.rsplit('/')
-                            .next()
-                            .unwrap_or(n)
-                            .eq_ignore_ascii_case(&self.repository)
-                })
-        {
+        let repo_id = if crate::safeoutputs::input_refers_to_self(&self.repository, ctx) {
             // "self" or a name match against the pipeline's own repository
             debug!("Using 'self' repository (matched '{}')", self.repository);
             ctx.repository_id

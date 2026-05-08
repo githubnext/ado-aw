@@ -201,10 +201,11 @@ pub(crate) fn lookup_allowed_repository<'a>(
     if let Some(name) = allowed_repositories.get(input) {
         return Some(name);
     }
-    // 2. Exact value match (full "project/repo" or just "repo")
+    // 2. Case-insensitive value match (full "project/repo" or just "repo").
+    // ADO repo names are case-insensitive, so accept any case for the full path.
     if let Some((_, name)) = allowed_repositories
         .iter()
-        .find(|(_, v)| v.as_str() == input)
+        .find(|(_, v)| v.eq_ignore_ascii_case(input))
     {
         return Some(name);
     }
@@ -220,10 +221,13 @@ pub(crate) fn lookup_allowed_repository<'a>(
 }
 
 /// Return `true` if `input` refers to the pipeline's own repository — either the
-/// literal string `"self"` or a case-insensitive match against the trailing
-/// repo-name part of `ctx.repository_name`.
-fn input_refers_to_self(input: &str, ctx: &ExecutionContext) -> bool {
+/// literal string `"self"`, the empty string, or a case-insensitive match against
+/// `ctx.repository_name` (full value or trailing repo-name part).
+pub(crate) fn input_refers_to_self(input: &str, ctx: &ExecutionContext) -> bool {
     if input == "self" || input.is_empty() {
+        if input.is_empty() {
+            debug!("Empty repository alias treated as 'self'");
+        }
         return true;
     }
     if let Some(name) = ctx.repository_name.as_deref() {
@@ -793,6 +797,89 @@ mod tests {
         assert_eq!(
             lookup_allowed_repository("plainname", &m),
             Some(&"PlainName".to_string())
+        );
+    }
+
+    #[test]
+    fn test_lookup_allowed_repository_case_insensitive_full_value() {
+        let m = sample_allowed();
+        // Case-insensitive on the full "project/repo" value
+        assert_eq!(
+            lookup_allowed_repository("4x4/SDK-FTDIDEVICECONTROL", &m),
+            Some(&"4x4/sdk-FtdiDeviceControl".to_string())
+        );
+        assert_eq!(
+            lookup_allowed_repository("4X4/sdk-ftdidevicecontrol", &m),
+            Some(&"4x4/sdk-FtdiDeviceControl".to_string())
+        );
+    }
+
+    // ─── resolve_repo_name ──────────────────────────────────────────────
+
+    fn ctx_with(
+        repository_name: Option<&str>,
+        allowed: std::collections::HashMap<String, String>,
+    ) -> ExecutionContext {
+        let mut ctx = ExecutionContext::default();
+        ctx.repository_name = repository_name.map(|s| s.to_string());
+        ctx.allowed_repositories = allowed;
+        ctx
+    }
+
+    #[test]
+    fn test_resolve_repo_name_self_literal() {
+        let ctx = ctx_with(Some("4x4/sdk-FtdiDeviceControl"), sample_allowed());
+        assert_eq!(
+            resolve_repo_name(Some("self"), &ctx).unwrap(),
+            "4x4/sdk-FtdiDeviceControl"
+        );
+        assert_eq!(
+            resolve_repo_name(None, &ctx).unwrap(),
+            "4x4/sdk-FtdiDeviceControl"
+        );
+    }
+
+    #[test]
+    fn test_resolve_repo_name_self_by_repository_name() {
+        let ctx = ctx_with(Some("4x4/sdk-FtdiDeviceControl"), sample_allowed());
+        // Trailing-name match on ctx.repository_name (case-insensitive)
+        assert_eq!(
+            resolve_repo_name(Some("sdk-FtdiDeviceControl"), &ctx).unwrap(),
+            "4x4/sdk-FtdiDeviceControl"
+        );
+        assert_eq!(
+            resolve_repo_name(Some("sdk-ftdidevicecontrol"), &ctx).unwrap(),
+            "4x4/sdk-FtdiDeviceControl"
+        );
+        // Full-value match on ctx.repository_name (case-insensitive)
+        assert_eq!(
+            resolve_repo_name(Some("4X4/sdk-ftdidevicecontrol"), &ctx).unwrap(),
+            "4x4/sdk-FtdiDeviceControl"
+        );
+    }
+
+    #[test]
+    fn test_resolve_repo_name_alias() {
+        let ctx = ctx_with(Some("4x4/some-other-repo"), sample_allowed());
+        assert_eq!(
+            resolve_repo_name(Some("repo-sdk-devicecommunication"), &ctx).unwrap(),
+            "4x4/sdk-DeviceCommunication"
+        );
+        // Trailing-name match against allowed list
+        assert_eq!(
+            resolve_repo_name(Some("sdk-DeviceCommunication"), &ctx).unwrap(),
+            "4x4/sdk-DeviceCommunication"
+        );
+    }
+
+    #[test]
+    fn test_resolve_repo_name_unknown() {
+        let ctx = ctx_with(Some("4x4/some-other-repo"), sample_allowed());
+        let err = resolve_repo_name(Some("does-not-exist"), &ctx).unwrap_err();
+        assert!(
+            err.message.contains("not in the allowed repository list"),
+            "got: {:?}",
+            err.message
         );
     }
 }
