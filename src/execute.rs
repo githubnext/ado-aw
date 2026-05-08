@@ -767,6 +767,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_execute_malformed_upload_workitem_attachment_returns_err() {
+        // Missing required fields (work_item_id, file_path)
+        let entry = serde_json::json!({"name": "upload-workitem-attachment"});
+        let ctx = ExecutionContext::default();
+
+        let result = execute_safe_output(&entry, &ctx).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_execute_upload_workitem_attachment_missing_context() {
+        let entry = serde_json::json!({
+            "name": "upload-workitem-attachment",
+            "work_item_id": 12345,
+            "file_path": "report.log"
+        });
+
+        // Context without required fields (ado_org_url, etc.)
+        let ctx = ExecutionContext {
+            ado_org_url: None,
+            ado_organization: None,
+            ado_project: None,
+            access_token: None,
+            working_directory: PathBuf::from("."),
+            source_directory: PathBuf::from("."),
+            tool_configs: HashMap::new(),
+            repository_id: None,
+            repository_name: None,
+            allowed_repositories: HashMap::new(),
+            agent_stats: None,
+            dry_run: false,
+            ..Default::default()
+        };
+
+        let result = execute_safe_output(&entry, &ctx).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("AZURE_DEVOPS_ORG_URL")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_malformed_upload_build_attachment_returns_err() {
+        // Missing required fields (artifact_name, file_path, staged_file, etc.)
+        let entry = serde_json::json!({"name": "upload-build-attachment"});
+        let ctx = ExecutionContext::default();
+
+        let result = execute_safe_output(&entry, &ctx).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_execute_upload_build_attachment_missing_context() {
+        let entry = serde_json::json!({
+            "name": "upload-build-attachment",
+            "artifact_name": "my-artifact",
+            "file_path": "staged_file.txt",
+            "staged_file": "staged_file.txt",
+            "file_size": 5_u64,
+            "staged_sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        });
+
+        // Context without required fields (ado_org_url, etc.)
+        let ctx = ExecutionContext {
+            ado_org_url: None,
+            ado_organization: None,
+            ado_project: None,
+            access_token: None,
+            working_directory: PathBuf::from("."),
+            source_directory: PathBuf::from("."),
+            tool_configs: HashMap::new(),
+            repository_id: None,
+            repository_name: None,
+            allowed_repositories: HashMap::new(),
+            agent_stats: None,
+            dry_run: false,
+            ..Default::default()
+        };
+
+        let result = execute_safe_output(&entry, &ctx).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
     async fn test_execute_comment_on_work_item_missing_context() {
         let entry = serde_json::json!({
             "name": "comment-on-work-item",
