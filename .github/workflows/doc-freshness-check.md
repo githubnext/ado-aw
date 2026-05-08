@@ -14,6 +14,7 @@ network:
 safe-outputs:
   create-pull-request:
     max: 1
+    protected-files: fallback-to-issue
     allowed-files:
       - AGENTS.md
       - README.md
