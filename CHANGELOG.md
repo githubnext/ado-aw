@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.27.0](https://github.com/githubnext/ado-aw/compare/v0.26.1...v0.27.0) (2026-05-08)
+
+
+### Features
+
+* **cli:** make `init` always overwrite; `--force` bypasses GitHub remote guard ([#465](https://github.com/githubnext/ado-aw/issues/465)) ([6c1a332](https://github.com/githubnext/ado-aw/commit/6c1a332d6f21bff797a6ca963c5ed4050d47dde4))
+
+
+### Bug Fixes
+
+* **doc-freshness-check:** expand allowed-files to docs, README, prompts ([#463](https://github.com/githubnext/ado-aw/issues/463)) ([4abeb09](https://github.com/githubnext/ado-aw/commit/4abeb09899674f1f68143eb5f509c71fccdcf9db))
+* **execute:** match safe-output repository by name or alias ([#469](https://github.com/githubnext/ado-aw/issues/469)) ([76cd618](https://github.com/githubnext/ado-aw/commit/76cd6180e3bf5aafc84ffc95f7b23ed444d61dac))
+* **safeoutputs:** send Content-Range header for pipeline artifact uploads ([#467](https://github.com/githubnext/ado-aw/issues/467)) ([e95cbf5](https://github.com/githubnext/ado-aw/commit/e95cbf5a87419ee37c16e1b53c7d81d8fe607523))
+
 ## [0.26.1](https://github.com/githubnext/ado-aw/compare/v0.26.0...v0.26.1) (2026-05-08)
 
 
