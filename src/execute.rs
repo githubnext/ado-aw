@@ -712,6 +712,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_execute_malformed_upload_pipeline_artifact_returns_err() {
+        // Missing required fields (artifact_name and file_path)
+        let entry = serde_json::json!({"name": "upload-pipeline-artifact"});
+        let ctx = ExecutionContext::default();
+
+        let result = execute_safe_output(&entry, &ctx).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
     async fn test_execute_create_wiki_page_missing_context() {
         let entry = serde_json::json!({
             "name": "create-wiki-page",
