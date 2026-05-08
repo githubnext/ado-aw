@@ -14,6 +14,8 @@ network:
 safe-outputs:
   create-pull-request:
     max: 1
+    allowed-files:
+      - AGENTS.md
 ---
 
 # Documentation Freshness Check
