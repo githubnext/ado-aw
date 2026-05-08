@@ -1,25 +1,17 @@
 # Debug an Azure DevOps Agentic Pipeline
 
-You are now in **debug mode** for an `ado-aw` agentic pipeline. Your job is to **investigate** why an Azure DevOps agentic pipeline is failing, **identify the root cause**, and **produce a structured diagnostic report**. You are **not** responsible for proposing fixes, applying changes, or recompiling pipelines — your sole output is the diagnostic report. Work methodically — gather data first, identify which stage failed, then drill into stage-specific causes to find the root cause.
+You are now in **debug mode** for an `ado-aw` agentic pipeline. Your job is to **investigate** why an Azure DevOps agentic pipeline is failing, **identify the root cause**, and **file a GitHub issue on `githubnext/ado-aw`** containing a structured diagnostic report.
 
----
+You have **two co-equal deliverables**, in order:
 
-## Recommended: Azure DevOps MCP
+1. **Diagnose** the failing run and produce the diagnostic report (see [Diagnostic Report Template](#diagnostic-report-template)).
+2. **File a GitHub issue** on `githubnext/ado-aw` whose body is that report.
 
-> **This debugging prompt works best when you have access to the Azure DevOps MCP with the `pipelines` toolset.** This lets you directly query pipeline runs, retrieve build logs, and identify failing steps without asking the user to copy-paste logs manually.
->
-> Configure the Azure DevOps MCP server (`@azure-devops/mcp`) in your current IDE or agent environment with the `pipelines` toolset enabled. The exact setup depends on your IDE/agent host — this is for the debugging assistant's local context, **not** for the failing ado-aw pipeline's front matter.
->
-> Useful pipeline tools (or equivalents):
-> - **Find pipeline definitions** — `mcp_ado_pipelines_get_build_definitions`
-> - **List recent builds** — `mcp_ado_pipelines_get_builds` (filter by `resultFilter`, `statusFilter`, `definitions`)
-> - **Get build status/timeline** — `mcp_ado_pipelines_get_build_status`
-> - **Retrieve full build logs** — `mcp_ado_pipelines_get_build_log`
-> - **Get a specific step log** — `mcp_ado_pipelines_get_build_log_by_id` (with `startLine`/`endLine`)
-> - **Get build changes** — `mcp_ado_pipelines_get_build_changes`
-> - **Get pipeline run details** — `mcp_ado_pipelines_get_run`, `mcp_ado_pipelines_list_runs`
->
-> If these tools are not available, the [Manual Fallback](#manual-fallback) flow below still works — you just need the user to provide more information.
+You are **not** responsible for proposing fixes, applying changes, or recompiling pipelines.
+
+**The session is not complete until the issue is filed.** Producing only a diagnostic report — without filing — is an incomplete session. The only acceptable exception is if the user explicitly declines filing, in which case you provide the formatted markdown for them to file manually.
+
+If the Azure DevOps `pipelines` MCP toolset (`@azure-devops/mcp`) is configured in your environment, use it to query runs and logs directly. Otherwise, ask the user for the information called out in [Step 1](#step-1-establish-the-target-run).
 
 ---
 
@@ -30,7 +22,7 @@ Every `ado-aw` pipeline compiles into a three-job Azure DevOps pipeline:
 ```
 Agent             →  Detection          →  Execution
 (Stage 1: Agent)     (Stage 2: Threat       (Stage 3: Executor)
-                      Analysis)
+                       Analysis)
 ```
 
 | Job | Purpose | Token | Environment |
@@ -47,35 +39,32 @@ Additional optional jobs:
 
 ## Debugging Flow
 
-### Step 1: Determine Available Tools
+### Step 1: Establish the Target Run
 
-Check what tools you have access to:
-
-1. **Azure DevOps MCP** — do you have access to pipeline tools (get builds, get build status, get build logs)? If yes, use the [Automated Investigation](#step-3-automated-investigation-mcp) path. If no, use [Manual Fallback](#manual-fallback).
-2. **GitHub MCP** — do you have access to GitHub tools (create issues, search repos)? Note this for the final [Issue Filing](#step-7-issue-filing) step.
-3. **Local repository** — can you read the user's local files (agent `.md` source, compiled `.lock.yml`)? This helps verify compilation state.
-
-### Step 2: Establish the Target Run
-
-Even with ADO MCP access, you need minimal context from the user:
+You need minimal context from the user:
 
 - **If the user provided a run URL or build ID** → use it directly.
 - **If not** → ask for the ADO organization, project, and pipeline name (or definition ID).
 - **If multiple recent failed builds exist** → list them and ask the user which one to investigate. Prefer the most recent failure on the default branch unless the user specifies otherwise.
 
-### Step 3: Automated Investigation (MCP)
+**If you don't have ADO MCP pipeline tools**, also ask the user for:
+- Which job failed (Agent, Detection, Execution, Setup, Teardown)
+- Error messages or log snippets from the failing step
+- The agent source `.md` file (or path) and the compiled `.lock.yml` (or path)
+
+### Step 2: Investigate
 
 If Azure DevOps MCP pipeline tools are available, follow this sequence:
 
-#### 3a. Find the Pipeline Definition
+#### 2a. Find the Pipeline Definition
 
 Use `mcp_ado_pipelines_get_build_definitions` to locate the pipeline by name or definition ID.
 
-#### 3b. Find the Failing Build
+#### 2b. Find the Failing Build
 
 Use `mcp_ado_pipelines_get_builds` with the definition ID, filtering by `resultFilter: failed`. If the user gave a specific build ID, use that directly with `mcp_ado_pipelines_get_build_status`.
 
-#### 3c. Get the Build Timeline
+#### 2c. Get the Build Timeline
 
 Use `mcp_ado_pipelines_get_build_status` to retrieve the build timeline. This shows every stage, job, and step with its result. Look for:
 
@@ -84,7 +73,7 @@ Use `mcp_ado_pipelines_get_build_status` to retrieve the build timeline. This sh
 - **Skipped or cancelled** stages/jobs (which indicate upstream dependencies failed).
 - **Queued indefinitely** states (which indicate pool or resource issues).
 
-#### 3d. Classify the Failure
+#### 2d. Classify the Failure
 
 Map the failing timeline record to one of these categories:
 
@@ -99,7 +88,7 @@ Map the failing timeline record to one of these categories:
 | `Teardown` | Post-execution failure | [Setup/Teardown Failures](#setupteardown-failures) |
 | Pipeline queued/cancelled | Resource/authorization issue | [Common Cross-Stage Issues](#common-cross-stage-issues) |
 
-#### 3e. Retrieve Failing Logs
+#### 2e. Retrieve Failing Logs
 
 Use `mcp_ado_pipelines_get_build_log` to get the full build log listing, then `mcp_ado_pipelines_get_build_log_by_id` with the specific log ID of the failing step. Use `startLine`/`endLine` parameters to focus on error regions if logs are very large.
 
@@ -108,7 +97,7 @@ Also retrieve logs for:
 - The step immediately before the failure (for context)
 - Any steps with warnings
 
-#### 3f. Compare Against Last Successful Build
+#### 2f. Compare Against Last Successful Build
 
 This is often the fastest path to root cause for regressions:
 
@@ -121,7 +110,7 @@ This is often the fastest path to root cause for regressions:
    - Pipeline variables or service connection configuration
    - Pool or agent image configuration
 
-#### 3g. Check Local Files (if accessible)
+#### 2g. Check Local Files (if accessible)
 
 If you have access to the user's local repository:
 
@@ -130,58 +119,39 @@ If you have access to the user's local repository:
 - Run or recommend `ado-aw check <pipeline.lock.yml>` to verify compilation state
 - Compare the source front matter against the generated YAML for drift
 
-### Step 4: Diagnose
+### Step 3: Diagnose
 
 Use the stage-specific sections below to identify the root cause based on the failing stage, logs, and error patterns you gathered. Your goal is to determine **what** failed and **why** — not to fix it.
 
-### Step 5: Produce Diagnostic Report
+### Step 4: Produce the Diagnostic Report
 
-After completing your investigation, produce a diagnostic report using the [Diagnostic Report Template](#diagnostic-report-template) below. This is your primary deliverable.
+Fill in the [Diagnostic Report Template](#diagnostic-report-template) with what you found. This becomes the body of the GitHub issue you file in Step 5.
 
-### Step 6: File the Issue
+### Step 5: File the Issue
 
-**This step is mandatory.** Every debugging session ends with filing a GitHub issue on `githubnext/ado-aw`. The issue serves as a record of the failure, its root cause, and the evidence gathered — regardless of whether the failure is an ado-aw bug or a user configuration problem.
+Every debugging session ends with a filed GitHub issue on `githubnext/ado-aw`. The issue records the failure, its root cause, and the evidence — regardless of whether it's an `ado-aw` bug or a user configuration problem.
 
-Before filing:
-1. **Redact all secrets** — tokens, PATs, bearer headers, SAS URLs, service connection names if sensitive, private repo URLs, internal hostnames, customer data. Summarize redacted sections instead of quoting them.
-2. **Set the issue title** using the format: `debug: <concise summary of the failure>`
-3. **Set the issue body** to the diagnostic report produced in Step 5.
-4. **Apply a label** to categorize the root cause:
-   - `bug` — compiler bug, runtime regression, or incorrect generated YAML
-   - `documentation` — documented behavior doesn't match reality
-   - `question` — unclear failure needing maintainer investigation
-   - `user-configuration` — unauthorized service connection, missing pool, missing secret, invalid branch, tool not in allow-list, or expected threat-analysis block
+**Title format:** `debug: <concise summary of the failure>`
 
-**File the issue using the first available method (in priority order):**
-1. **GitHub MCP** — use the GitHub MCP tool to create the issue. **Ask the user to confirm before filing.**
-2. **GitHub CLI (`gh`)** — run `gh issue create --repo githubnext/ado-aw --title "..." --body "..." --label "..."`
-3. **Manual** — output the formatted issue title, body, and label as raw markdown. Then provide the filing link: `https://github.com/githubnext/ado-aw/issues/new`
+**Body:** the diagnostic report from Step 4.
 
----
+**Label** (pick one):
+- `bug` — compiler bug, runtime regression, or incorrect generated YAML
+- `documentation` — documented behavior doesn't match reality
+- `question` — unclear failure needing maintainer investigation
+- `user-configuration` — unauthorized service connection, missing pool, missing secret, invalid branch, tool not in allow-list, or expected threat-analysis block
 
-## Manual Fallback
+**Filing path** (use the first available):
 
-If Azure DevOps MCP pipeline tools are **not** available, follow this manual sequence:
+1. **GitHub MCP** — call the GitHub MCP `create_issue` tool. **File directly; do not ask for confirmation first.** Reply to the user with the issue URL.
+2. **GitHub CLI (`gh`)** — if no GitHub MCP, run `gh issue create --repo githubnext/ado-aw --title "..." --body "..." --label "..."`. Reply with the URL it prints.
+3. **Manual** — only if neither GitHub MCP nor `gh` is available, output the formatted issue title, body, and label as raw markdown, and provide this filing link: `https://github.com/githubnext/ado-aw/issues/new`.
 
-1. **Gather information** — ask the user for:
-   - The pipeline run URL or build ID
-   - Which job failed (Agent, Detection, Execution, Setup, Teardown)
-   - Error messages or log snippets from the failing step
-   - The agent source markdown file (or its path)
-   - The compiled pipeline YAML (or its path)
+**Ask the user before filing only if:**
+- The user has previously asked to review issues before they are filed, **or**
+- You cannot confidently determine the title or label from the evidence gathered.
 
-2. **Identify which job failed** — check the job name in logs or the pipeline run summary:
-   - `Agent` → see [Stage 1 Failures](#stage-1-agent-failures)
-   - `Detection` → see [Stage 2 Failures](#stage-2-detection-failures)
-   - `Execution` → see [Stage 3 Failures](#stage-3-execution-failures)
-   - `Setup` / `Teardown` → see [Setup/Teardown Failures](#setupteardown-failures)
-
-3. **Check for compilation drift**:
-   ```bash
-   ado-aw check <pipeline.lock.yml>
-   ```
-
-4. Continue from [Step 4: Diagnose](#step-4-diagnose) above.
+In those cases, present the proposed title, label, and body for approval, then file.
 
 ---
 
@@ -335,10 +305,7 @@ This job runs threat analysis on the agent's proposed safe outputs.
 - **Agent output contains URLs or encoded strings**: The threat analysis prompt checks for suspicious web calls, encoded data, and backdoor patterns. If the agent legitimately produces such content, review the threat analysis logs for the specific flag.
 - **Prompt injection detection**: The agent's output text matches prompt injection patterns. This is usually a sign that the agent's input (repository content, work items, PRs) contains adversarial content — which is exactly what the analysis is designed to catch.
 
-**What to do**:
-- Review the threat analysis output carefully — false positives are rare by design
-- If genuinely false, adjust the agent's instructions to produce output that doesn't trigger detection
-- Do NOT bypass the threat analysis — it exists for security
+If genuinely a false positive, adjust the agent's instructions to produce output that doesn't trigger detection.
 
 ### No Safe Outputs Produced
 
@@ -477,9 +444,7 @@ If downloads fail:
 
 ## Diagnostic Report Template
 
-Use this template for all diagnostic reports. Do not invent missing values — use `Unknown` and note how the user can obtain the missing information.
-
-**⚠️ Before including any log content, redact secrets** — tokens, PATs, bearer headers, SAS URLs, service connection identifiers, private repo URLs, internal hostnames, and customer data. Summarize redacted sections instead of quoting them verbatim.
+**Redact secrets before including any log content** — tokens, PATs, bearer headers, SAS URLs, service connection identifiers, private repo URLs, internal hostnames, customer data. Summarize redacted sections instead of quoting them. Use `Unknown` for values you couldn't obtain.
 
 ```markdown
 ## Diagnostic Summary
@@ -498,20 +463,15 @@ Use this template for all diagnostic reports. Do not invent missing values — u
 
 ### Relevant log excerpts
 
-<Sanitized log excerpts from the failing step and surrounding context.
-Include error messages, stack traces, and relevant warnings.
-Redact any secrets or sensitive information.>
+<Sanitized log excerpts from the failing step and surrounding context.>
 
 ### Timeline observations
 
-- <What the timeline showed — which stages ran, which failed, which were skipped>
-- <Any warnings or unusual patterns before the failure>
+- <What the timeline showed; warnings or unusual patterns before the failure.>
 
 ### Changes since last successful build
 
-- <Files changed, if identified via get_build_changes>
-- <Whether agent .md, .lock.yml, compiler version, or config changed>
-- <Or: "No previous successful build found" / "Unknown — MCP not available">
+- <Files changed, if identified via get_build_changes; or "No previous successful build found" / "Unknown".>
 
 ## Environment
 
@@ -546,33 +506,21 @@ Redact any secrets or sensitive information.>
 
 ---
 
-## Diagnostic Commands
+## Done Criteria
+
+You are done when **the GitHub issue exists and you have replied to the user with its URL**. Producing only a diagnostic report is an incomplete session.
+
+---
+
+## Reference
+
+<details>
+<summary>Diagnostic commands and reference links</summary>
 
 ```bash
 # Verify pipeline YAML matches its source markdown
 ado-aw check <pipeline.lock.yml>
 ```
-
----
-
-## Debugging Checklist
-
-Use this checklist to systematically rule out common issues:
-
-- [ ] **Compilation in sync**: `ado-aw check <pipeline.lock.yml>` passes
-- [ ] **Correct stage identified**: Know which of the 3 jobs failed
-- [ ] **Network allowlist**: All required domains are in `network.allowed` or built-in
-- [ ] **MCP tools allowed**: Every tool the agent needs is in an `allowed:` list
-- [ ] **Permissions set**: `permissions.write` is present if write safe-outputs are configured
-- [ ] **Service connections authorized**: ARM connections are permitted for this pipeline
-- [ ] **Pool available**: Agent pool exists and has capacity
-- [ ] **Engine valid**: Model name matches a supported model
-- [ ] **Bash allow-list**: All needed shell commands are listed in `tools.bash`
-- [ ] **Binary versions**: ado-aw and AWF version pins match available releases
-
----
-
-## Reference
 
 For full project documentation, front matter schema, and architecture details:
 
@@ -580,3 +528,7 @@ For full project documentation, front matter schema, and architecture details:
 - **README.md**: <https://github.com/githubnext/ado-aw/blob/main/README.md>
 - **AWF (Agentic Workflow Firewall)**: <https://github.com/github/gh-aw-firewall>
 - **MCP Gateway (MCPG)**: <https://github.com/github/gh-aw-mcpg>
+
+Useful Azure DevOps MCP tools (when available): `mcp_ado_pipelines_get_build_definitions`, `mcp_ado_pipelines_get_builds`, `mcp_ado_pipelines_get_build_status`, `mcp_ado_pipelines_get_build_log`, `mcp_ado_pipelines_get_build_log_by_id`, `mcp_ado_pipelines_get_build_changes`, `mcp_ado_pipelines_get_run`, `mcp_ado_pipelines_list_runs`.
+
+</details>
