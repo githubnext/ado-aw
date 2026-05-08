@@ -40,6 +40,7 @@ mod helpers;
 // and uses one of these helpers, both the re-export attribute and
 // the per-item `dead_code` allows on `helpers.rs` should be
 // removed.
+// TODO(codemods): remove when the first real codemod is registered.
 #[allow(unused_imports)]
 pub use helpers::{insert_no_overwrite, rename_key, take_key, ConflictPolicy};
 
@@ -73,6 +74,7 @@ pub struct Codemod {
     pub summary: &'static str,
     /// Compiler version that introduced this codemod (e.g. "0.27.0").
     /// Provenance only; not consumed by the runner.
+    // TODO(codemods): remove when the first real codemod is registered.
     #[allow(dead_code)]
     pub introduced_in: &'static str,
     /// The transformation. Returns `Ok(true)` when the codemod
@@ -107,6 +109,7 @@ pub struct AppliedCodemod {
 
 impl CodemodReport {
     /// An empty report (no codemod fired).
+    // TODO(codemods): remove when the first real codemod is registered.
     #[allow(dead_code)]
     pub fn empty() -> Self {
         Self {
@@ -120,6 +123,7 @@ impl CodemodReport {
     }
 
     /// IDs of codemods that ran, in order. Helpful for tests.
+    // TODO(codemods): remove when the first real codemod is registered.
     #[allow(dead_code)]
     pub fn applied_ids(&self) -> Vec<&'static str> {
         self.applied.iter().map(|a| a.id).collect()
@@ -130,6 +134,7 @@ impl CodemodReport {
 ///
 /// Equivalent to [`apply_codemods_with`] called with the global
 /// [`CODEMODS`] registry.
+// TODO(codemods): remove when the first real codemod is registered.
 #[allow(dead_code)]
 pub fn apply_codemods(fm: &mut Mapping) -> Result<CodemodReport> {
     apply_codemods_with(fm, CODEMODS)

@@ -17,45 +17,27 @@
 //! - The full `compile` -> `check` round-trip succeeds.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use tempfile::TempDir;
 
-/// Set up a unique temp directory for each test run.
-fn fresh_temp_dir(label: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "ado-aw-codemod-tests-{}-{}-{}",
-        label,
-        std::process::id(),
-        rand_suffix(),
-    ));
-    fs::create_dir_all(&dir).expect("create temp dir");
-    dir
+/// Set up a unique temp directory for each test run. Returned as a
+/// `TempDir` so RAII cleans the directory up even if a test panics.
+fn fresh_temp_dir() -> TempDir {
+    tempfile::Builder::new()
+        .prefix("ado-aw-codemod-tests-")
+        .tempdir()
+        .expect("create temp dir")
 }
 
 /// Same as [`fresh_temp_dir`] but also creates an empty `.git/`
 /// directory at the root so `ado-aw check` (which walks up to the
 /// repo root) can resolve a source path from the compiled lock
 /// file's `@ado-aw` header.
-fn fresh_git_temp_dir(label: &str) -> PathBuf {
-    let dir = fresh_temp_dir(label);
-    fs::create_dir(dir.join(".git")).expect("create .git dir");
+fn fresh_git_temp_dir() -> TempDir {
+    let dir = fresh_temp_dir();
+    fs::create_dir(dir.path().join(".git")).expect("create .git dir");
     dir
-}
-
-/// Suffix that's unique within the process for the lifetime of a
-/// single test binary run. Uses a wall-clock nanosecond timestamp
-/// combined with a monotonic atomic counter so two parallel tests
-/// scheduled in the same nanosecond still get distinct directories.
-fn rand_suffix() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    format!("{:x}-{:x}", nanos, seq)
 }
 
 fn ado_aw_binary() -> PathBuf {
@@ -63,7 +45,7 @@ fn ado_aw_binary() -> PathBuf {
 }
 
 /// Run `ado-aw compile <source>`, returning the captured output.
-fn run_compile(source: &PathBuf) -> std::process::Output {
+fn run_compile(source: &Path) -> std::process::Output {
     Command::new(ado_aw_binary())
         .args(["compile", source.to_str().unwrap()])
         .output()
@@ -71,7 +53,7 @@ fn run_compile(source: &PathBuf) -> std::process::Output {
 }
 
 /// Run `ado-aw check <pipeline>`, returning the captured output.
-fn run_check(pipeline: &PathBuf) -> std::process::Output {
+fn run_check(pipeline: &Path) -> std::process::Output {
     Command::new(ado_aw_binary())
         .args(["check", pipeline.to_str().unwrap()])
         .output()
@@ -79,7 +61,7 @@ fn run_check(pipeline: &PathBuf) -> std::process::Output {
 }
 
 /// Write a source file to `dir/agent.md` and return its path.
-fn write_source(dir: &PathBuf, content: &str) -> PathBuf {
+fn write_source(dir: &Path, content: &str) -> PathBuf {
     let path = dir.join("agent.md");
     fs::write(&path, content).expect("write source");
     path
@@ -89,9 +71,9 @@ fn write_source(dir: &PathBuf, content: &str) -> PathBuf {
 
 #[test]
 fn compile_succeeds_on_current_source() {
-    let dir = fresh_temp_dir("current-source");
+    let dir = fresh_temp_dir();
     let original = "---\nname: smoketest\ndescription: smoketest description\n---\n## Body\n\nHello.\n";
-    let source = write_source(&dir, original);
+    let source = write_source(dir.path(), original);
 
     let output = run_compile(&source);
 
@@ -125,15 +107,13 @@ fn compile_succeeds_on_current_source() {
         "no codemod warning expected, got stderr: {}",
         stderr
     );
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn compile_then_check_round_trip_passes() {
-    let dir = fresh_git_temp_dir("round-trip");
+    let dir = fresh_git_temp_dir();
     let source = write_source(
-        &dir,
+        dir.path(),
         "---\nname: round-trip-agent\ndescription: round-trip\n---\n## Body\n",
     );
 
@@ -154,16 +134,14 @@ fn compile_then_check_round_trip_passes() {
         String::from_utf8_lossy(&check_output.stdout),
         String::from_utf8_lossy(&check_output.stderr)
     );
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 // ─── Non-mapping front matter ──────────────────────────────────────────────
 
 #[test]
 fn compile_rejects_non_mapping_top_level_yaml() {
-    let dir = fresh_temp_dir("non-mapping");
-    let source = write_source(&dir, "---\n- a\n- b\n---\nbody\n");
+    let dir = fresh_temp_dir();
+    let source = write_source(dir.path(), "---\n- a\n- b\n---\nbody\n");
 
     let output = run_compile(&source);
 
@@ -177,6 +155,4 @@ fn compile_rejects_non_mapping_top_level_yaml() {
         "stderr should report non-mapping error, got: {}",
         stderr
     );
-
-    let _ = fs::remove_dir_all(&dir);
 }

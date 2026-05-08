@@ -9,6 +9,7 @@ use serde_yaml::{Mapping, Value};
 
 /// Conflict policy used by [`rename_key`] when the destination key is
 /// already present.
+// TODO(codemods): remove when the first real codemod is registered.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub enum ConflictPolicy {
@@ -21,6 +22,7 @@ pub enum ConflictPolicy {
 }
 
 /// Remove and return the value at `key`, or `None` if absent.
+// TODO(codemods): remove when the first real codemod is registered.
 #[allow(dead_code)]
 pub fn take_key(m: &mut Mapping, key: &str) -> Option<Value> {
     m.remove(Value::String(key.to_string()))
@@ -30,6 +32,7 @@ pub fn take_key(m: &mut Mapping, key: &str) -> Option<Value> {
 ///
 /// Prefer this over `Mapping::insert` in migrations: silent overwrite is
 /// almost always a bug when transforming user data.
+// TODO(codemods): remove when the first real codemod is registered.
 #[allow(dead_code)]
 pub fn insert_no_overwrite(
     m: &mut Mapping,
@@ -48,13 +51,24 @@ pub fn insert_no_overwrite(
 
 /// Rename `old` → `new` according to `policy`.
 ///
-/// Returns `Ok(true)` when the rename happened (regardless of policy
-/// branch), `Ok(false)` when `old` was absent (no-op).
+/// Returns `Ok(true)` when the mapping was mutated in any way:
+///
+/// - the `old` key was moved to `new` (the typical rename), OR
+/// - both keys were present with [`ConflictPolicy::PreferOld`] and
+///   `new` was overwritten, OR
+/// - both keys were present with [`ConflictPolicy::PreferNew`] and
+///   the stale `old` key was dropped (note: the `new` value did not
+///   change, but the mapping still mutated — codemod authors using
+///   `PreferNew` should be aware that `Ok(true)` here means
+///   "cleaned up a remnant," not "migrated semantic content").
+///
+/// Returns `Ok(false)` when `old` was absent (no-op).
 ///
 /// The mapping is left **unchanged** on the error path. Callers can
 /// rely on this invariant when chaining migrations: a failed rename
 /// won't leave the mapping in a half-mutated state for the next call
 /// to inspect.
+// TODO(codemods): remove when the first real codemod is registered.
 #[allow(dead_code)]
 pub fn rename_key(
     m: &mut Mapping,

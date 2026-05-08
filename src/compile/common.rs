@@ -182,10 +182,23 @@ pub(crate) fn parse_markdown_detailed_with_registry(
 
     // Stage 3: deserialize the (possibly modified) mapping into the
     // typed FrontMatter. Errors here mean either the user wrote an
-    // unsupported shape or a codemod produced invalid output.
-    let front_matter: FrontMatter =
-        serde_yaml::from_value(serde_yaml::Value::Mapping(mapping.clone()))
-            .context("Failed to parse YAML front matter")?;
+    // unsupported shape or a codemod produced invalid output. The
+    // error context differs by case so the user can tell which.
+    let front_matter: FrontMatter = serde_yaml::from_value(
+        serde_yaml::Value::Mapping(mapping.clone()),
+    )
+    .with_context(|| {
+        if report.changed() {
+            let ids = report.applied_ids().join(", ");
+            format!(
+                "Failed to parse YAML front matter after applying codemods ({}); \
+                 a codemod likely produced an invalid shape",
+                ids
+            )
+        } else {
+            "Failed to parse YAML front matter".to_string()
+        }
+    })?;
 
     Ok(ParsedSource {
         front_matter,
