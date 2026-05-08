@@ -108,7 +108,10 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   ├── python/       # Python runtime
 │   │   │   ├── mod.rs    # Config types, install/auth helpers
 │   │   │   └── extension.rs # CompilerExtension impl
-│   │   └── node/         # Node.js runtime
+│   │   ├── node/         # Node.js runtime
+│   │   │   ├── mod.rs    # Config types, install/auth helpers
+│   │   │   └── extension.rs # CompilerExtension impl
+│   │   └── dotnet/       # .NET runtime
 │   │       ├── mod.rs    # Config types, install/auth helpers
 │   │       └── extension.rs # CompilerExtension impl
 │   ├── data/
@@ -166,7 +169,7 @@ index to jump to the right page.
 - [`docs/tools.md`](docs/tools.md) — `tools:` configuration (bash allow-list,
   `edit`, `cache-memory`, `azure-devops` MCP).
 - [`docs/runtimes.md`](docs/runtimes.md) — `runtimes:` configuration (Lean 4,
-  Python, Node.js).
+  Python, Node.js, .NET).
 - [`docs/targets.md`](docs/targets.md) — target platforms: `standalone` and
   `1es`.
 - [`docs/safe-outputs.md`](docs/safe-outputs.md) — full reference for every

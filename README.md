@@ -241,7 +241,7 @@ the service connections. Approve the permissions and the pipeline is ready.
 | `checkout` | list | — | Which repositories to check out |
 | `mcp-servers` | map | — | MCP server configuration |
 | `tools` | object | — | Tool configuration (`bash`, `edit`, `cache-memory`, `azure-devops`) |
-| `runtimes` | object | — | Runtime environment configuration (`lean`) |
+| `runtimes` | object | — | Runtime environment configuration (`lean`, `python`, `node`, `dotnet`) |
 | `parameters` | list | — | ADO runtime parameters surfaced in the pipeline queue UI |
 | `permissions` | object | — | ARM service connections (`read`, `write`) |
 | `safe-outputs` | object | — | Per-tool configuration |
