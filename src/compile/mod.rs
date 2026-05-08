@@ -127,10 +127,11 @@ async fn compile_pipeline_inner(
 
     let parsed = common::parse_markdown_detailed_with_registry(&content, registry)?;
     let mut front_matter = parsed.front_matter;
-    let markdown_body = parsed.markdown_body.clone();
-    let migrations = parsed.migrations.clone();
-    let front_matter_mapping = parsed.front_matter_mapping.clone();
-    let body_raw = parsed.body_raw.clone();
+    let markdown_body = parsed.markdown_body;
+    let migrations = parsed.migrations;
+    let front_matter_mapping = parsed.front_matter_mapping;
+    let leading_whitespace = parsed.leading_whitespace;
+    let body_raw = parsed.body_raw;
     let source_sha256 = parsed.source_sha256;
 
     // Sanitize all front matter text fields before any further processing.
@@ -205,21 +206,16 @@ async fn compile_pipeline_inner(
     // we abort before the lock file ever gets touched.
     let mut migrated = false;
     if migrations.changed() {
-        // Rebuild the parsed handle (the typed front_matter has been
-        // sanitized and consumed; rewrite needs the unmodified mapping).
-        let parsed_for_rewrite = common::ParsedSource {
-            front_matter: serde_yaml::from_value(serde_yaml::Value::Mapping(
-                front_matter_mapping.clone(),
-            ))
-            .context("Failed to round-trip migrated front matter for rewrite")?,
-            markdown_body: markdown_body.clone(),
-            migrations: migrations.clone(),
-            front_matter_mapping: front_matter_mapping.clone(),
-            body_raw: body_raw.clone(),
-            source_sha256,
-        };
-        migrated = perform_source_rewrite_if_needed(input_path, &content, &parsed_for_rewrite)
-            .await?;
+        migrated = perform_source_rewrite_if_needed(
+            input_path,
+            &content,
+            &leading_whitespace,
+            &front_matter_mapping,
+            &body_raw,
+            &source_sha256,
+            &migrations,
+        )
+        .await?;
     }
 
     // Write output via atomic_write so a crash mid-write cannot leave a
@@ -263,9 +259,14 @@ async fn compile_pipeline_inner(
 async fn perform_source_rewrite_if_needed(
     input_path: &Path,
     original_content: &str,
-    parsed: &common::ParsedSource,
+    leading_whitespace: &str,
+    front_matter_mapping: &serde_yaml::Mapping,
+    body_raw: &str,
+    source_sha256: &[u8; 32],
+    migrations: &migrations::MigrationReport,
 ) -> Result<bool> {
-    let new_content = common::reconstruct_source(parsed)?;
+    let new_content =
+        common::reconstruct_source(leading_whitespace, front_matter_mapping, body_raw)?;
     if new_content == original_content {
         // Migrations ran but their net effect is a no-op on disk —
         // skip the rewrite to avoid gratuitous diffs.
@@ -285,7 +286,7 @@ async fn perform_source_rewrite_if_needed(
     let mut hasher = sha2::Sha256::new();
     hasher.update(&current_bytes);
     let current_hash: [u8; 32] = hasher.finalize().into();
-    if current_hash != parsed.source_sha256 {
+    if &current_hash != source_sha256 {
         anyhow::bail!(
             "source file {} changed during compilation; refusing to migrate. Re-run `ado-aw compile`.",
             input_path.display()
@@ -304,10 +305,10 @@ async fn perform_source_rewrite_if_needed(
     eprintln!(
         "warning: migrated front matter in {}: schema-version {} -> {}",
         input_path.display(),
-        parsed.migrations.from_version,
-        parsed.migrations.to_version
+        migrations.from_version,
+        migrations.to_version
     );
-    for applied in &parsed.migrations.applied {
+    for applied in &migrations.applied {
         eprintln!("  - {}: {}", applied.id, applied.summary);
     }
     eprintln!(
@@ -519,7 +520,7 @@ pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
     // we want to fail loudly so `ado-aw compile` is run.
     if parsed.migrations.changed() {
         anyhow::bail!(
-            "error: {} is at schema-version {}; this compiler requires schema-version {}.\n\
+            "{} is at schema-version {}; this compiler requires schema-version {}.\n  \
              hint: run `ado-aw compile {}` to migrate the source in place.",
             source_path.display(),
             parsed.migrations.from_version,

@@ -102,6 +102,10 @@ pub struct ParsedSource {
     /// The migrated front-matter mapping, with `schema-version`
     /// bumped. Used to reconstruct the source for rewrite.
     pub front_matter_mapping: serde_yaml::Mapping,
+    /// Whitespace bytes that appeared before the opening `---` fence,
+    /// preserved verbatim so that source rewrite is byte-faithful.
+    /// Empty in the typical case where the file starts with `---`.
+    pub leading_whitespace: String,
     /// The body region exactly as it appeared after the closing `---`,
     /// byte-for-byte (no trim). Includes any leading newline.
     pub body_raw: String,
@@ -138,8 +142,12 @@ pub(crate) fn parse_markdown_detailed_with_registry(
 
     // Allow leading whitespace before the opening fence (preserves
     // historical leniency). We compute a byte offset into `content` so
-    // that `body_raw` extraction is purely byte-faithful.
+    // that `body_raw` extraction is purely byte-faithful, and we keep
+    // the whitespace prefix around so that source rewrites preserve
+    // anything the user (or their editor) put before the opening
+    // fence.
     let leading_ws = content.bytes().take_while(|b| b.is_ascii_whitespace()).count();
+    let leading_whitespace = content[..leading_ws].to_string();
     let after_lead = &content[leading_ws..];
     if !after_lead.starts_with("---") {
         anyhow::bail!("Markdown file must start with YAML front matter (---)");
@@ -184,23 +192,37 @@ pub(crate) fn parse_markdown_detailed_with_registry(
         markdown_body,
         migrations: report,
         front_matter_mapping: mapping,
+        leading_whitespace,
         body_raw,
         source_sha256,
     })
 }
 
-/// Reconstruct full source content from a migrated [`ParsedSource`].
+/// Reconstruct full source content from migration outputs.
+///
+/// Takes the individual fragments rather than the full
+/// [`ParsedSource`] so callers that have already destructured the
+/// parse don't have to round-trip a fresh `front_matter` through
+/// serde just to satisfy the typed field.
 ///
 /// Output shape:
+/// - `leading_whitespace` (typically empty)
 /// - `---\n`
 /// - the migrated YAML mapping (`serde_yaml::to_string` always ends
 ///   with `\n`)
 /// - `---`
 /// - the original body region byte-for-byte (`body_raw`)
-pub fn reconstruct_source(parsed: &ParsedSource) -> Result<String> {
-    let yaml_serialized = serde_yaml::to_string(&parsed.front_matter_mapping)
+pub fn reconstruct_source(
+    leading_whitespace: &str,
+    front_matter_mapping: &serde_yaml::Mapping,
+    body_raw: &str,
+) -> Result<String> {
+    let yaml_serialized = serde_yaml::to_string(front_matter_mapping)
         .context("Failed to serialize migrated front matter")?;
-    Ok(format!("---\n{}---{}", yaml_serialized, parsed.body_raw))
+    Ok(format!(
+        "{}---\n{}---{}",
+        leading_whitespace, yaml_serialized, body_raw
+    ))
 }
 
 fn yaml_value_kind(v: &serde_yaml::Value) -> &'static str {
@@ -2539,13 +2561,22 @@ mod tests {
 
     // ─── parse_markdown_detailed ──────────────────────────────────────────────
 
+    fn reconstruct(parsed: &ParsedSource) -> String {
+        reconstruct_source(
+            &parsed.leading_whitespace,
+            &parsed.front_matter_mapping,
+            &parsed.body_raw,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn parse_markdown_detailed_preserves_body_byte_for_byte() {
         // Case 1: trailing newline.
         let original = "---\nname: x\ndescription: y\n---\nbody line\n";
         let parsed = parse_markdown_detailed(original).unwrap();
         assert_eq!(parsed.body_raw, "\nbody line\n");
-        let reconstructed = reconstruct_source(&parsed).unwrap();
+        let reconstructed = reconstruct(&parsed);
         // No migrations ran, so the YAML round-trip is the only
         // structural change. The body region is byte-faithful.
         assert!(reconstructed.ends_with("---\nbody line\n"));
@@ -2554,14 +2585,14 @@ mod tests {
         let original = "---\nname: x\ndescription: y\n---\nbody";
         let parsed = parse_markdown_detailed(original).unwrap();
         assert_eq!(parsed.body_raw, "\nbody");
-        let reconstructed = reconstruct_source(&parsed).unwrap();
+        let reconstructed = reconstruct(&parsed);
         assert!(reconstructed.ends_with("---\nbody"));
 
         // Case 3: empty body, but trailing newline.
         let original = "---\nname: x\ndescription: y\n---\n";
         let parsed = parse_markdown_detailed(original).unwrap();
         assert_eq!(parsed.body_raw, "\n");
-        let reconstructed = reconstruct_source(&parsed).unwrap();
+        let reconstructed = reconstruct(&parsed);
         assert!(reconstructed.ends_with("---\n"));
 
         // Case 4: blank lines between closing fence and content are
@@ -2580,11 +2611,28 @@ mod tests {
         let original = "---\nname: x\ndescription: y\n---\n## body\n";
         let parsed = parse_markdown_detailed(original).unwrap();
         assert!(!parsed.migrations.changed());
-        let reconstructed = reconstruct_source(&parsed).unwrap();
+        let reconstructed = reconstruct(&parsed);
         // Find the closing fence in both and compare the suffix.
         let orig_suffix = &original[original.find("\n---\n").unwrap()..];
         let recon_suffix = &reconstructed[reconstructed.find("\n---\n").unwrap()..];
         assert_eq!(orig_suffix, recon_suffix, "body region must be byte-identical");
+    }
+
+    #[test]
+    fn parse_markdown_detailed_preserves_leading_whitespace() {
+        // Leading blank lines / spaces (e.g. from editor BOM-strippers
+        // adding a blank line) must round-trip through reconstruction
+        // so migration rewrites don't silently normalize them away.
+        let original = "\n  \n---\nname: x\ndescription: y\n---\nbody\n";
+        let parsed = parse_markdown_detailed(original).unwrap();
+        assert_eq!(parsed.leading_whitespace, "\n  \n");
+        let reconstructed = reconstruct(&parsed);
+        assert!(
+            reconstructed.starts_with("\n  \n---\n"),
+            "expected leading whitespace preserved, got: {:?}",
+            &reconstructed[..20.min(reconstructed.len())]
+        );
+        assert!(reconstructed.ends_with("---\nbody\n"));
     }
 
     #[test]
