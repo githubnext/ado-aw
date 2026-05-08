@@ -2794,6 +2794,159 @@ Prove theorems and build Lean 4 projects.
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
+/// Integration test: `runtimes: dotnet: true` end-to-end compilation
+///
+/// Verifies that the dotnet runtime, when enabled with the simple boolean
+/// form, produces a pipeline that includes the `UseDotNet@2` install task,
+/// the `dotnet` bash command in the allow-list, and the .NET ecosystem
+/// domains in the AWF allow-domains list.
+#[test]
+fn test_dotnet_runtime_compiled_output() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-dotnet-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = r#"---
+name: "Dotnet Agent"
+description: "Agent with .NET runtime"
+runtimes:
+  dotnet: true
+---
+
+## Dotnet Agent
+
+Build and test .NET projects.
+"#;
+
+    let input_path = temp_dir.join("dotnet-agent.md");
+    let output_path = temp_dir.join("dotnet-agent.yml");
+    fs::write(&input_path, input).expect("Failed to write test input");
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_path.exists(), "Compiled YAML should exist");
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+
+    // The dotnet runtime installs the SDK via UseDotNet@2.
+    assert!(
+        compiled.contains("UseDotNet@2"),
+        "Should include UseDotNet@2 install task"
+    );
+
+    // The default (no version specified) should pin to 8.0.x.
+    assert!(
+        compiled.contains("8.0.x"),
+        "Default version should be 8.0.x"
+    );
+
+    // The dotnet command should be referenced (e.g. via the bash allow-list
+    // or the install step displayName).
+    assert!(
+        compiled.contains("dotnet"),
+        "Should include dotnet command"
+    );
+
+    // .NET ecosystem domains (e.g. nuget.org) should be in the AWF
+    // allow-domains list.
+    assert!(
+        compiled.contains("nuget.org"),
+        "Should include the .NET ecosystem domains in the AWF allow-list"
+    );
+
+    // Verify no unreplaced {{ markers }} remain.
+    for line in compiled.lines() {
+        let stripped = line.replace("${{", "");
+        assert!(
+            !stripped.contains("{{ "),
+            "Compiled output should not contain unreplaced marker: {}",
+            line.trim()
+        );
+    }
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Integration test: `runtimes: dotnet:` with `feed-url:` end-to-end compilation
+///
+/// Verifies that when `feed-url` is set, the compiler emits both the
+/// ensure-nuget.config shim and the `NuGetAuthenticate@1` step in addition
+/// to the install task.
+#[test]
+fn test_dotnet_runtime_with_feed_url_compiled_output() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-dotnet-feed-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = r#"---
+name: "Dotnet Feed Agent"
+description: "Agent with .NET runtime + private NuGet feed"
+runtimes:
+  dotnet:
+    version: "8.0.x"
+    feed-url: "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/nuget/v3/index.json"
+---
+
+## Dotnet Feed Agent
+"#;
+
+    let input_path = temp_dir.join("dotnet-feed-agent.md");
+    let output_path = temp_dir.join("dotnet-feed-agent.yml");
+    fs::write(&input_path, input).expect("Failed to write test input");
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+
+    assert!(
+        compiled.contains("UseDotNet@2"),
+        "Should include UseDotNet@2"
+    );
+    assert!(
+        compiled.contains("NuGetAuthenticate@1"),
+        "Should include NuGetAuthenticate@1 when feed-url is set"
+    );
+    assert!(
+        compiled.contains("nuget.config"),
+        "Should emit ensure-nuget.config step when feed-url is set"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
 /// Integration test: `schedule:` object form with `branches:` end-to-end compilation
 ///
 /// Verifies that a pipeline compiled with the object-form schedule containing
