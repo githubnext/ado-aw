@@ -237,6 +237,22 @@ fn default_pipeline_max_file_size() -> u64 {
     PIPELINE_ARTIFACT_DEFAULT_MAX_FILE_SIZE
 }
 
+/// Build the `Content-Range` header value required by the Azure DevOps File
+/// Container API on every PUT (single-chunk uploads included).
+///
+/// The canonical format is `bytes {start}-{end}/{total}` for non-empty
+/// payloads. For zero-byte files use `bytes */0` — the form ADO's own
+/// clients send. Sending a non-empty body without this header (or with a
+/// malformed value) causes ADO to reject the request with
+/// `HTTP 400: Content-Range header not understood.`.
+fn format_content_range(file_size: u64) -> String {
+    if file_size == 0 {
+        "bytes */0".to_string()
+    } else {
+        format!("bytes 0-{}/{}", file_size - 1, file_size)
+    }
+}
+
 impl Default for UploadPipelineArtifactConfig {
     fn default() -> Self {
         Self {
@@ -503,9 +519,17 @@ impl Executor for UploadPipelineArtifactResult {
         );
         debug!("Uploading {} bytes to container: {}", file_size, upload_url);
 
+        // The Azure DevOps File Container API requires a `Content-Range`
+        // header on every PUT (it's how ADO supports chunked uploads, even
+        // for clients that send the whole file in a single request). Without
+        // it the server responds `HTTP 400: Content-Range header not
+        // understood.`. See `format_content_range` for the exact format.
+        let content_range = format_content_range(file_size);
+
         let upload_resp = client
             .put(&upload_url)
             .header("Content-Type", "application/octet-stream")
+            .header("Content-Range", &content_range)
             .basic_auth("", Some(token))
             .body(file_bytes)
             .send()
@@ -632,6 +656,19 @@ mod tests {
     #[test]
     fn test_result_has_correct_name() {
         assert_eq!(UploadPipelineArtifactResult::NAME, "upload-pipeline-artifact");
+    }
+
+    #[test]
+    fn test_format_content_range() {
+        // Zero-byte payloads use the `*/0` form (ADO clients send this for
+        // empty files; `bytes 0--1/0` would be malformed).
+        assert_eq!(format_content_range(0), "bytes */0");
+        // Single-byte payload covers the boundary 0-0/1.
+        assert_eq!(format_content_range(1), "bytes 0-0/1");
+        // Typical small file.
+        assert_eq!(format_content_range(12), "bytes 0-11/12");
+        // Larger file.
+        assert_eq!(format_content_range(1024), "bytes 0-1023/1024");
     }
 
     fn make_params(
