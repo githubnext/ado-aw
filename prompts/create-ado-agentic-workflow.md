@@ -382,7 +382,54 @@ teardown:          # Separate job AFTER Execution
     displayName: "Teardown"
 ```
 
-### Step 13 — Network (standalone target only)
+### Step 13 — Runtimes (optional)
+
+Configure language runtimes that are installed before the agent runs. Runtimes auto-extend the bash command allow-list and add ecosystem-specific domains to the network allowlist.
+
+```yaml
+# Lean 4 theorem prover
+runtimes:
+  lean: true
+  # lean:
+  #   toolchain: "leanprover/lean4:v4.29.1"   # pin a specific version
+
+# Python
+runtimes:
+  python: true
+  # python:
+  #   version: "3.12"
+  #   feed-url: "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/pypi/simple/"
+
+# Node.js
+runtimes:
+  node: true
+  # node:
+  #   version: "22.x"
+  #   feed-url: "https://pkgs.dev.azure.com/ORG/PROJECT/_packaging/FEED/npm/registry/"
+
+# .NET
+runtimes:
+  dotnet: true
+  # dotnet:
+  #   version: "8.0.x"           # or "global.json" to use the repo's global.json
+  #   feed-url: "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/nuget/v3/index.json"
+  #   config: "nuget.config"     # mutually exclusive with feed-url
+```
+
+Multiple runtimes can be combined:
+```yaml
+runtimes:
+  python:
+    version: "3.12"
+  node:
+    version: "22.x"
+  dotnet:
+    version: "8.0.x"
+```
+
+> Each enabled runtime auto-adds its ecosystem's bash commands (e.g., `dotnet`, `python`, `node`, `npm`, `lean`, `lake`) and network domains to the allowlist. See `docs/runtimes.md` for full configuration reference.
+
+### Step 14 — Network (standalone target only)
 
 Additional allowed domains beyond the built-in allowlist:
 ```yaml
