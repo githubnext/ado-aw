@@ -1,19 +1,21 @@
 ---
-name: "Pipeline Filter Agent"
-description: "Agent triggered by upstream pipeline with filters"
+name: Pipeline Filter Agent
+description: Agent triggered by upstream pipeline with filters
 on:
   pipeline:
-    name: "Build Pipeline"
-    project: "OtherProject"
+    name: Build Pipeline
+    project: OtherProject
     branches:
-      - main
+    - main
     filters:
-      source-pipeline: "Build*"
+      source-pipeline: Build*
       time-window:
-        start: "08:00"
-        end: "20:00"
+        start: 08:00
+        end: 20:00
       build-reason:
-        include: [ResourceTrigger]
+        include:
+        - ResourceTrigger
+schema-version: 2
 ---
 
 ## Pipeline Filter Agent

@@ -7,7 +7,7 @@
 //! - **1ES**: Integration with 1ES Pipeline Templates for SDL compliance
 
 mod common;
-pub(crate) use common::resolve_repos;
+pub(crate) use common::lower_repos;
 pub mod extensions;
 pub(crate) mod filter_ir;
 mod gitattributes;
@@ -153,8 +153,10 @@ async fn compile_pipeline_inner(
     debug!("Schedule: {:?}", front_matter.schedule());
     debug!("MCP servers configured: {}", front_matter.mcp_servers.len());
 
-    // Resolve repos: new compact syntax or legacy repositories: + checkout:
-    let (resolved_repos, resolved_checkout) = common::resolve_repos(&front_matter)?;
+    // Lower compact `repos:` into the internal Repository/checkout pair.
+    // The migration framework has already converted any legacy
+    // `repositories:` + `checkout:` shapes into `repos:`.
+    let (resolved_repos, resolved_checkout) = common::lower_repos(&front_matter.repos)?;
     front_matter.repositories = resolved_repos;
     front_matter.checkout = resolved_checkout;
     debug!("Repositories: {}", front_matter.repositories.len());
@@ -541,8 +543,8 @@ pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
     use crate::sanitize::SanitizeConfig;
     front_matter.sanitize_config_fields();
 
-    // Resolve repos (compact or legacy)
-    let (resolved_repos, resolved_checkout) = common::resolve_repos(&front_matter)?;
+    // Lower compact `repos:` into the internal Repository/checkout pair.
+    let (resolved_repos, resolved_checkout) = common::lower_repos(&front_matter.repos)?;
     front_matter.repositories = resolved_repos;
     front_matter.checkout = resolved_checkout;
 

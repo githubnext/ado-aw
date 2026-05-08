@@ -1,6 +1,7 @@
 ---
-name: "Minimal Test Agent"
-description: "A minimal agent for testing basic functionality"
+name: Minimal Test Agent
+description: A minimal agent for testing basic functionality
+schema-version: 2
 ---
 
 ## Minimal Agent

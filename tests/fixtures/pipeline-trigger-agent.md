@@ -1,12 +1,13 @@
 ---
-name: "Pipeline Trigger Agent"
-description: "Agent triggered by an upstream pipeline"
+name: Pipeline Trigger Agent
+description: Agent triggered by an upstream pipeline
 on:
   pipeline:
-    name: "Build Pipeline"
-    project: "OtherProject"
+    name: Build Pipeline
+    project: OtherProject
     branches:
-      - main
+    - main
+schema-version: 2
 ---
 
 ## Task

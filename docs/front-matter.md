@@ -217,13 +217,24 @@ repos:
     ref: refs/heads/release/2.x
 ```
 
-### Legacy syntax (deprecated)
+### Migration from legacy syntax
 
-The legacy `repositories:` + `checkout:` fields still work but emit a
-deprecation warning. They cannot be mixed with `repos:`. Migrate by
-converting each `repositories:` entry into a `repos:` entry — any entry
-that appeared in `checkout:` keeps the default `checkout: true`; any that
-did not should set `checkout: false`.
+The previous front-matter grammar used two separate fields,
+`repositories:` (the resource list) and `checkout:` (the alias list of
+which to clone). On compile, the [front-matter migration
+framework](migrations.md) automatically rewrites old sources to the
+new `repos:` shape — you don't have to do it by hand. The first time
+you `ado-aw compile` an older file, you'll see a warning and the file
+will be updated in place.
+
+The mapping is:
+- Each `repositories:` entry becomes a `repos:` entry
+  (`repository:` → `alias:`, the rest is preserved).
+- Any entry whose alias appeared in `checkout:` keeps the default
+  `checkout: true` (and the field is omitted from the rewritten YAML
+  since it's the default).
+- Any entry whose alias did NOT appear in `checkout:` gets an
+  explicit `checkout: false` (resource-only).
 
 ## Filter Validation
 

@@ -1,21 +1,26 @@
 ---
-name: "PR Filter Tier 2 Agent"
-description: "Agent with Tier 2/3 PR filters (requires evaluator extension)"
+name: PR Filter Tier 2 Agent
+description: Agent with Tier 2/3 PR filters (requires evaluator extension)
 on:
   pr:
     branches:
-      include: [main]
+      include:
+      - main
     filters:
-      title: "*[review]*"
+      title: '*[review]*'
       labels:
-        any-of: ["run-agent", "needs-review"]
-        none-of: ["do-not-run"]
+        any-of:
+        - run-agent
+        - needs-review
+        none-of:
+        - do-not-run
       draft: false
       time-window:
-        start: "09:00"
-        end: "17:00"
+        start: 09:00
+        end: 17:00
       min-changes: 1
       max-changes: 500
+schema-version: 2
 ---
 
 ## Tier 2 Filter Agent

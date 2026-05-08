@@ -1,21 +1,24 @@
 ---
-name: "Azure DevOps MCP Agent"
-description: "Agent with Azure DevOps MCP via first-class tool integration"
+name: Azure DevOps MCP Agent
+description: Agent with Azure DevOps MCP via first-class tool integration
 tools:
   azure-devops:
     org: myorg
-    toolsets: [core, work-items]
+    toolsets:
+    - core
+    - work-items
     allowed:
-      - core_list_projects
-      - wit_get_work_item
-      - wit_create_work_item
-      - wit_my_work_items
+    - core_list_projects
+    - wit_get_work_item
+    - wit_create_work_item
+    - wit_my_work_items
 permissions:
   read: my-read-arm-connection
   write: my-write-arm-connection
 safe-outputs:
   create-work-item:
     work-item-type: Task
+schema-version: 2
 ---
 
 ## Azure DevOps MCP Integration Test

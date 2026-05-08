@@ -1,20 +1,26 @@
 ---
-name: "PR Filter Tier 1 Agent"
-description: "Agent with Tier 1 PR filters (pipeline variables only, no evaluator needed)"
+name: PR Filter Tier 1 Agent
+description: Agent with Tier 1 PR filters (pipeline variables only, no evaluator needed)
 on:
   pr:
     branches:
-      include: [main]
+      include:
+      - main
     filters:
-      title: "*[agent]*"
+      title: '*[agent]*'
       author:
-        include: ["dev@corp.com"]
-        exclude: ["bot@noreply.com"]
-      source-branch: "feature/*"
-      target-branch: "main"
-      commit-message: "*[skip-agent]*"
+        include:
+        - dev@corp.com
+        exclude:
+        - bot@noreply.com
+      source-branch: feature/*
+      target-branch: main
+      commit-message: '*[skip-agent]*'
       build-reason:
-        include: [PullRequest, Manual]
+        include:
+        - PullRequest
+        - Manual
+schema-version: 2
 ---
 
 ## Tier 1 Filter Agent

@@ -618,15 +618,20 @@ pub struct FrontMatter {
     /// Runtime configuration for language environments (e.g., Lean 4)
     #[serde(default)]
     pub runtimes: Option<RuntimesConfig>,
-    /// Compact repository declarations (new unified syntax).
+    /// Compact repository declarations.
     /// Each entry declares a repository resource and optionally whether to check it out.
     #[serde(default)]
     pub repos: Vec<ReposItem>,
-    /// Additional repository resources (legacy — use `repos:` instead)
-    #[serde(default)]
+    /// Lowered `Vec<Repository>` form, populated by `lower_repos()` in
+    /// `compile/common.rs` after the migration framework has converted
+    /// the source to the unified `repos:` shape. Not deserialized from
+    /// YAML directly — sources use `repos:`.
+    #[serde(skip)]
     pub repositories: Vec<Repository>,
-    /// Repositories to checkout (legacy — use `repos:` instead; subset of repositories)
-    #[serde(default)]
+    /// Lowered checkout-alias list, populated by `lower_repos()` from
+    /// `repos:` entries with `checkout: true`. Not deserialized from
+    /// YAML directly.
+    #[serde(skip)]
     pub checkout: Vec<String>,
     /// MCP server configurations
     #[serde(default, rename = "mcp-servers")]

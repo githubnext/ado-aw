@@ -28,6 +28,9 @@ mod helpers;
 #[allow(unused_imports)]
 pub use helpers::{insert_no_overwrite, rename_key, take_key, ConflictPolicy};
 
+#[path = "0001_repos_unified.rs"]
+mod m0001_repos_unified;
+
 /// Front-matter key that holds the schema version. Kebab-case to match
 /// the rest of the front-matter grammar.
 #[allow(dead_code)]
@@ -72,7 +75,9 @@ pub struct Migration {
 /// 1. Create `src/compile/migrations/<NNNN>_<id>.rs` with a
 ///    `pub static MIGRATION: Migration` and register the module here.
 /// 2. Append `&<module>::MIGRATION` to this slice.
-pub static MIGRATIONS: &[&'static Migration] = &[];
+pub static MIGRATIONS: &[&'static Migration] = &[
+    &m0001_repos_unified::MIGRATION,
+];
 
 /// Total number of schema versions known to this compiler.
 ///

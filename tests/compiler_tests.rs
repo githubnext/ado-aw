@@ -324,8 +324,8 @@ fn test_fixture_complete_agent() {
     assert!(content.contains("description:"), "Should have description");
     assert!(content.contains("schedule:"), "Should have schedule");
     assert!(
-        content.contains("repositories:"),
-        "Should have repositories"
+        content.contains("repos:"),
+        "Should have repos block"
     );
     assert!(
         content.contains("mcp-servers:"),

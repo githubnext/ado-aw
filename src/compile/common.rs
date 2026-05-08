@@ -648,38 +648,6 @@ fn derive_alias(name: &str) -> Result<String> {
     Ok(alias)
 }
 
-/// Resolve the `repos:` / legacy `repositories:` + `checkout:` fields in a
-/// `FrontMatter` into the canonical `(Vec<Repository>, Vec<String>)` pair.
-///
-/// - If `repos:` is non-empty, the legacy fields must be empty (mixing is rejected).
-/// - If `repos:` is empty, legacy fields are used as-is (with a deprecation warning
-///   when they are non-empty).
-/// - If both are empty, returns `(vec![], vec![])`.
-pub fn resolve_repos(front_matter: &FrontMatter) -> Result<(Vec<Repository>, Vec<String>)> {
-    let has_new = !front_matter.repos.is_empty();
-    let has_legacy = !front_matter.repositories.is_empty() || !front_matter.checkout.is_empty();
-
-    if has_new && has_legacy {
-        anyhow::bail!(
-            "Cannot mix `repos:` with legacy `repositories:` / `checkout:`. \
-            Migrate to `repos:` or remove it to keep using the legacy fields."
-        );
-    }
-
-    if has_new {
-        lower_repos(&front_matter.repos)
-    } else {
-        if has_legacy {
-            eprintln!(
-                "Warning: `repositories:` and `checkout:` are deprecated. \
-                Use the compact `repos:` syntax instead. \
-                See docs/front-matter.md for migration guidance."
-            );
-        }
-        Ok((front_matter.repositories.clone(), front_matter.checkout.clone()))
-    }
-}
-
 /// Names that are reserved by the `workspace:` resolver and therefore cannot
 /// be used as repository aliases / `checkout:` entries. If a user defines a
 /// repository named `repo` and writes `workspace: repo`, the special-cased
@@ -2810,11 +2778,9 @@ mod tests {
 
     #[test]
     fn parse_markdown_detailed_byte_faithful_when_no_migration_runs() {
-        // With the registry empty, parsing a v1 source and reconstructing
-        // it should produce a byte-identical document apart from
-        // serde_yaml's canonical formatting of the YAML mapping. We
-        // assert the body region matches exactly.
-        let original = "---\nname: x\ndescription: y\n---\n## body\n";
+        // A source already at the current schema version goes through
+        // unchanged (no migration applied → byte-identical body).
+        let original = "---\nschema-version: 2\nname: x\ndescription: y\n---\n## body\n";
         let parsed = parse_markdown_detailed(original).unwrap();
         assert!(!parsed.migrations.changed());
         let reconstructed = reconstruct(&parsed);
@@ -6028,7 +5994,7 @@ mod tests {
     // Tests for compact `repos:` lowering
     // ──────────────────────────────────────────────────────────────────────
 
-    use super::{lower_repos, resolve_repos, parse_shorthand, derive_alias};
+    use super::{lower_repos, parse_shorthand, derive_alias};
     use crate::compile::types::{ReposItem, RepoEntry};
 
     #[test]
@@ -6194,38 +6160,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_repos_rejects_mixing() {
-        use crate::compile::types::FrontMatter;
-        let yaml = r#"
-name: "test"
-description: "test"
-repos:
-  - my-org/tools
-repositories:
-  - repository: foo
-    type: git
-    name: org/foo
-"#;
-        let fm: FrontMatter = serde_yaml::from_str(yaml).unwrap();
-        let err = resolve_repos(&fm).unwrap_err();
-        assert!(err.to_string().contains("Cannot mix"), "{err}");
-    }
-
-    #[test]
-    fn test_resolve_repos_empty() {
-        use crate::compile::types::FrontMatter;
-        let yaml = r#"
-name: "test"
-description: "test"
-"#;
-        let fm: FrontMatter = serde_yaml::from_str(yaml).unwrap();
-        let (repos, checkout) = resolve_repos(&fm).unwrap();
-        assert!(repos.is_empty());
-        assert!(checkout.is_empty());
-    }
-
-    #[test]
-    fn test_resolve_repos_compact_syntax() {
+    fn test_repos_via_front_matter_compact_syntax() {
         use crate::compile::types::FrontMatter;
         let yaml = r#"
 name: "test"
@@ -6238,7 +6173,7 @@ repos:
     checkout: false
 "#;
         let fm: FrontMatter = serde_yaml::from_str(yaml).unwrap();
-        let (repos, checkout) = resolve_repos(&fm).unwrap();
+        let (repos, checkout) = lower_repos(&fm.repos).unwrap();
         assert_eq!(repos.len(), 3);
         assert_eq!(repos[0].repository, "tools");
         assert_eq!(repos[0].name, "my-org/tools");
@@ -6250,8 +6185,26 @@ repos:
     }
 
     #[test]
-    fn test_resolve_repos_legacy_compat() {
+    fn test_repos_via_front_matter_empty() {
         use crate::compile::types::FrontMatter;
+        let yaml = r#"
+name: "test"
+description: "test"
+"#;
+        let fm: FrontMatter = serde_yaml::from_str(yaml).unwrap();
+        let (repos, checkout) = lower_repos(&fm.repos).unwrap();
+        assert!(repos.is_empty());
+        assert!(checkout.is_empty());
+    }
+
+    #[test]
+    fn test_repos_legacy_fields_rejected_by_deny_unknown() {
+        use crate::compile::types::FrontMatter;
+        // After migration framework rewrites old sources, the typed
+        // FrontMatter must not accept the legacy keys directly. The
+        // `deny_unknown_fields` derive ensures unmigrated sources fail
+        // typed deserialization (the migration runs first and converts
+        // them).
         let yaml = r#"
 name: "test"
 description: "test"
@@ -6262,10 +6215,11 @@ repositories:
 checkout:
   - tools
 "#;
-        let fm: FrontMatter = serde_yaml::from_str(yaml).unwrap();
-        let (repos, checkout) = resolve_repos(&fm).unwrap();
-        assert_eq!(repos.len(), 1);
-        assert_eq!(repos[0].repository, "tools");
-        assert_eq!(checkout, vec!["tools"]);
+        let err = serde_yaml::from_str::<FrontMatter>(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("repositories") || msg.contains("checkout") || msg.contains("unknown field"),
+            "expected unknown-field error, got: {msg}"
+        );
     }
 }

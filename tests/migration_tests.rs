@@ -243,20 +243,18 @@ fn compile_succeeds_on_unstamped_v1_source() {
         lock.display()
     );
 
-    // With CURRENT_SCHEMA_VERSION == 1 and no migrations registered,
-    // the source must NOT be rewritten — verify byte-identity.
+    // With at least one registered migration (the repos_unified
+    // migration), every unstamped v1 source is rewritten to add a
+    // `schema-version` stamp at the latest known version. The body
+    // must still be preserved.
     let after = fs::read_to_string(&source).expect("re-read source");
-    assert_eq!(
-        after, original,
-        "source must be byte-identical after compile when no migrations apply"
-    );
-
-    // Stderr should NOT contain a migration warning.
-    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        !stderr.contains("warning: migrated front matter"),
-        "no migration warning expected, got stderr: {}",
-        stderr
+        after.contains("schema-version:"),
+        "rewritten source should carry a `schema-version` stamp, got: {after}"
+    );
+    assert!(
+        after.contains("## Body"),
+        "body must be preserved across migration, got: {after}"
     );
 
     let _ = fs::remove_dir_all(&dir);
@@ -276,10 +274,16 @@ fn compile_succeeds_on_explicitly_stamped_v1_source() {
         String::from_utf8_lossy(&output.stderr)
     );
 
+    // Source is rewritten by the migration framework (version stamp
+    // bumps to the current version), but the body must be preserved.
     let after = fs::read_to_string(&source).expect("re-read source");
-    assert_eq!(
-        after, original,
-        "explicitly stamped v1 source must be byte-identical"
+    assert!(
+        !after.contains("schema-version: 1\n"),
+        "schema-version should have been bumped past 1, got: {after}"
+    );
+    assert!(
+        after.contains("## Body"),
+        "body must be preserved across migration, got: {after}"
     );
 
     let _ = fs::remove_dir_all(&dir);

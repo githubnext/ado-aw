@@ -223,10 +223,10 @@ async fn perform_source_rewrite_lost_update_guard() {
 
 #[tokio::test]
 async fn check_pipeline_fails_on_future_schema_version() {
-    // The real registry is empty (CURRENT=1), so a source claiming
-    // schema-version: 2 is a future version. compile should reject it
-    // loudly through the public entry point.
-    let future = "---\nschema-version: 2\nname: x\ndescription: y\n---\n";
+    // CURRENT_SCHEMA_VERSION is 2 (one registered migration), so a
+    // source claiming schema-version: 3 is a future version. compile
+    // should reject it loudly through the public entry point.
+    let future = "---\nschema-version: 3\nname: x\ndescription: y\n---\n";
     let (dir, source_path) = write_temp_md("agent.md", future);
     let result = compile_pipeline(&source_path.to_string_lossy(), None, true, false).await;
     let err = result.expect_err("future-version source should fail compile");
