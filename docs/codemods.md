@@ -43,8 +43,13 @@ every compile; codemods that don't match are essentially free.
   the closing `---`).
 - **Leading whitespace** before the opening `---` is preserved
   byte-for-byte (BOM-strippers and editor blank lines).
-- **Front-matter key order** is preserved by `serde_yaml`'s
-  insertion-ordered mapping.
+- **Front-matter key order** is preserved for keys the codemod
+  doesn't touch (`serde_yaml`'s mapping is insertion-ordered).
+  Renamed keys, however, move to the **end** of the front-matter
+  block: `Mapping::insert` appends new keys, so when a codemod
+  removes `old-key` and inserts `new-key`, the new key lands at
+  the bottom regardless of where the old one was. The compile
+  warning calls this out so users aren't surprised.
 - **Front-matter comments** are NOT preserved. `serde_yaml`
   round-trip drops them. The warning emitted on rewrite calls this
   out so it isn't a surprise. If you have important context in a
@@ -191,6 +196,15 @@ review + per-codemod tests:
 6. **Order-aware.** If codemod B depends on shapes produced by
    codemod A, A must precede B in the registry. Document the
    ordering requirement in B's doc comment.
+7. **Receives unsanitized input.** The compiler runs sanitization
+   (`##vso[` neutralization, control-character stripping, length
+   limits) on the typed `FrontMatter` *after* codemods run, but the
+   raw `Mapping` you receive is whatever the user wrote — including
+   any pipeline-injection attempts, control characters, or
+   over-length strings. Codemods should therefore treat values as
+   opaque (move them around, wrap them in objects, etc.) rather
+   than parse or interpolate them. If a codemod must inspect a
+   value, treat it defensively.
 
 ### Use the helpers
 

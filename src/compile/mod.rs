@@ -263,7 +263,7 @@ async fn perform_source_rewrite_if_needed(
     front_matter_mapping: &serde_yaml::Mapping,
     body_raw: &str,
     source_sha256: &[u8; 32],
-    codemods: &codemods::CodemodReport,
+    report: &codemods::CodemodReport,
 ) -> Result<bool> {
     let new_content =
         common::reconstruct_source(leading_whitespace, front_matter_mapping, body_raw)?;
@@ -303,11 +303,12 @@ async fn perform_source_rewrite_if_needed(
         })?;
 
     eprintln!("warning: applied codemods to {}:", input_path.display());
-    for applied in &codemods.applied {
+    for applied in &report.applied {
         eprintln!("  - {}: {}", applied.id, applied.summary);
     }
     eprintln!(
-        "note: front-matter comments are not preserved when codemods rewrite the source."
+        "note: front-matter comments are not preserved when codemods rewrite the source. \
+         Renamed keys may move to the end of the front-matter block."
     );
 
     Ok(true)

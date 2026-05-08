@@ -33,6 +33,13 @@ use anyhow::{Context, Result};
 use serde_yaml::Mapping;
 
 mod helpers;
+// `#[allow(unused_imports)]` here mirrors the per-item
+// `#[allow(dead_code)]` annotations in `helpers.rs`. While the
+// CODEMODS registry is empty, no in-crate caller exercises these
+// re-exports — the lint warns. Once the first real codemod lands
+// and uses one of these helpers, both the re-export attribute and
+// the per-item `dead_code` allows on `helpers.rs` should be
+// removed.
 #[allow(unused_imports)]
 pub use helpers::{insert_no_overwrite, rename_key, take_key, ConflictPolicy};
 
@@ -159,6 +166,9 @@ mod tests {
 
     #[test]
     fn registry_ids_are_unique() {
+        // Vacuously true while CODEMODS is empty; the assertion
+        // machinery still compiles so this test guards against
+        // duplicate ids the moment a real codemod ships.
         let mut seen = std::collections::BTreeSet::new();
         for c in CODEMODS {
             assert!(
@@ -171,8 +181,10 @@ mod tests {
 
     #[test]
     fn codemod_filenames_match_registry_count() {
-        // Scan src/compile/codemods/*.rs and check that each numeric
-        // codemod file is present exactly once in the registry.
+        // Vacuously true while CODEMODS is empty (the directory
+        // contains only `mod.rs` and `helpers.rs`, which are
+        // skipped). Once a numeric `<NNNN>_<id>.rs` file lands, this
+        // test asserts the registry was updated to match.
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("src/compile/codemods");
         let mut numeric_files: Vec<String> = Vec::new();
