@@ -166,3 +166,70 @@ pub fn generate_ensure_npmrc(config: &NodeRuntimeConfig) -> String {
   displayName: 'Ensure .npmrc exists'"
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_node_install_default_version() {
+        let config = NodeRuntimeConfig::Enabled(true);
+        let step = generate_node_install(&config);
+        assert!(
+            step.contains("versionSpec: '22.x'"),
+            "should default to 22.x, got: {step}"
+        );
+        assert!(step.contains("NodeTool@0"));
+        assert!(step.contains("Install Node.js 22.x"));
+    }
+
+    #[test]
+    fn test_generate_node_install_pinned_version() {
+        let config = NodeRuntimeConfig::WithOptions(NodeOptions {
+            version: Some("20.x".into()),
+            ..Default::default()
+        });
+        let step = generate_node_install(&config);
+        assert!(
+            step.contains("versionSpec: '20.x'"),
+            "should use pinned version, got: {step}"
+        );
+        assert!(step.contains("Install Node.js 20.x"));
+    }
+
+    #[test]
+    fn test_generate_npm_authenticate_emits_task() {
+        let step = generate_npm_authenticate();
+        assert!(step.contains("npmAuthenticate@0"));
+        assert!(step.contains("workingFile: .npmrc"));
+    }
+
+    #[test]
+    fn test_generate_ensure_npmrc_default_registry() {
+        let config = NodeRuntimeConfig::Enabled(true);
+        let step = generate_ensure_npmrc(&config);
+        assert!(
+            step.contains("https://registry.npmjs.org/"),
+            "should fallback to npm registry, got: {step}"
+        );
+        assert!(step.contains("Ensure .npmrc exists"));
+    }
+
+    #[test]
+    fn test_generate_ensure_npmrc_custom_feed_url() {
+        let custom = "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/npm/registry/";
+        let config = NodeRuntimeConfig::WithOptions(NodeOptions {
+            feed_url: Some(custom.into()),
+            ..Default::default()
+        });
+        let step = generate_ensure_npmrc(&config);
+        assert!(
+            step.contains("pkgs.dev.azure.com"),
+            "should use custom feed URL, got: {step}"
+        );
+        assert!(
+            !step.contains("https://registry.npmjs.org/"),
+            "should not fall back to default when custom feed is set, got: {step}"
+        );
+    }
+}

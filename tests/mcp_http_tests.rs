@@ -309,6 +309,10 @@ fn test_mcp_initialize_and_tools_list() {
         body.contains("upload-build-attachment"),
         "Should list upload-build-attachment tool, body: {body}"
     );
+    assert!(
+        body.contains("upload-pipeline-artifact"),
+        "Should list upload-pipeline-artifact tool, body: {body}"
+    );
 }
 
 #[test]

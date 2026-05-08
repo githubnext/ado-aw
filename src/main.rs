@@ -104,7 +104,8 @@ enum Commands {
         /// Target directory (defaults to current directory)
         #[arg(long)]
         path: Option<PathBuf>,
-        /// Overwrite existing agent file
+        /// Bypass the GitHub-remote guard (use when running inside a
+        /// GitHub-hosted repository like `githubnext/ado-aw` itself)
         #[arg(long)]
         force: bool,
     },
@@ -449,8 +450,13 @@ async fn main() -> Result<()> {
         }
         Commands::Init { path, force } => {
             let init_path = path.as_deref().unwrap_or(Path::new("."));
-            ensure_non_github_remote_for_ado_aw("init", init_path).await?;
-            init::run(path.as_deref(), force).await?;
+            // `--force` bypasses the GitHub-remote guard so maintainers can
+            // run `ado-aw init` inside this repository (or other GitHub-hosted
+            // forks) for development and example regeneration.
+            if !force {
+                ensure_non_github_remote_for_ado_aw("init", init_path).await?;
+            }
+            init::run(path.as_deref()).await?;
         }
         Commands::Configure {
             token,
