@@ -11,6 +11,9 @@ pub(crate) use common::resolve_repos;
 pub mod extensions;
 pub(crate) mod filter_ir;
 mod gitattributes;
+#[cfg(test)]
+mod migration_integration_test;
+pub(crate) mod migrations;
 mod onees;
 pub(crate) mod pr_filters;
 mod standalone;
@@ -21,7 +24,10 @@ use async_trait::async_trait;
 use log::{debug, info};
 use std::path::{Path, PathBuf};
 
+#[allow(unused_imports)]
 pub use common::parse_markdown;
+#[allow(unused_imports)]
+pub use common::{atomic_write, parse_markdown_detailed, reconstruct_source, ParsedSource};
 pub use common::HEADER_MARKER;
 pub use common::ADO_MCP_ENTRYPOINT;
 pub use common::ADO_MCP_IMAGE;
@@ -58,7 +64,40 @@ pub async fn compile_pipeline(
     skip_integrity: bool,
     debug_pipeline: bool,
 ) -> Result<()> {
-    compile_pipeline_inner(input_path, output_path, skip_integrity, debug_pipeline, true).await
+    compile_pipeline_inner(
+        input_path,
+        output_path,
+        skip_integrity,
+        debug_pipeline,
+        true,
+        migrations::MIGRATIONS,
+    )
+    .await
+    .map(|_migrated| ())
+}
+
+/// Test-only entry point that injects a custom migration registry.
+///
+/// Production code goes through [`compile_pipeline`]. Tests use this
+/// to drive end-to-end migration scenarios without polluting the real
+/// [`migrations::MIGRATIONS`] slice.
+#[cfg(test)]
+async fn compile_pipeline_with_registry(
+    input_path: &str,
+    output_path: Option<&str>,
+    skip_integrity: bool,
+    debug_pipeline: bool,
+    registry: &[&'static migrations::Migration],
+) -> Result<bool> {
+    compile_pipeline_inner(
+        input_path,
+        output_path,
+        skip_integrity,
+        debug_pipeline,
+        false,
+        registry,
+    )
+    .await
 }
 
 /// Internal compile entry point that lets the caller opt out of the
@@ -66,13 +105,17 @@ pub async fn compile_pipeline(
 /// (`compile_all_pipelines`) skip the per-pipeline sync to avoid an
 /// O(N²)-ish series of full-tree scans and instead perform a single sync
 /// after the whole batch completes.
+///
+/// Returns whether the source `.md` was rewritten by the migration
+/// pass. Batch callers use this to surface an aggregate count.
 async fn compile_pipeline_inner(
     input_path: &str,
     output_path: Option<&str>,
     skip_integrity: bool,
     debug_pipeline: bool,
     sync_gitattributes: bool,
-) -> Result<()> {
+    registry: &[&'static migrations::Migration],
+) -> Result<bool> {
     let input_path = Path::new(input_path);
     info!("Compiling pipeline from: {}", input_path.display());
 
@@ -83,11 +126,22 @@ async fn compile_pipeline_inner(
         .with_context(|| format!("Failed to read input file: {}", input_path.display()))?;
     debug!("Input file size: {} bytes", content.len());
 
-    let (mut front_matter, markdown_body) = parse_markdown(&content)?;
+    let parsed = common::parse_markdown_detailed_with_registry(&content, registry)?;
+    let mut front_matter = parsed.front_matter;
+    let markdown_body = parsed.markdown_body.clone();
+    let migrations = parsed.migrations.clone();
+    let front_matter_mapping = parsed.front_matter_mapping.clone();
+    let body_raw = parsed.body_raw.clone();
+    let source_sha256 = parsed.source_sha256;
 
     // Sanitize all front matter text fields before any further processing.
     // This neutralizes pipeline command injection (##vso[), strips control
     // characters, and enforces content limits across all config values.
+    //
+    // Note: sanitization mutates the typed FrontMatter in memory but does
+    // NOT touch the `front_matter_mapping` we keep around for source
+    // rewrite. That is intentional — we don't want to silently rewrite
+    // user source bytes via sanitize on disk.
     use crate::sanitize::SanitizeConfig;
     front_matter.sanitize_config_fields();
 
@@ -140,7 +194,8 @@ async fn compile_pipeline_inner(
 
     info!("Using {} compiler", compiler.target_name());
 
-    // Compile
+    // Compile (no source mutation yet — a failure here must leave the
+    // source byte-identical).
     let pipeline_yaml = compiler
         .compile(input_path, &yaml_output_path, &front_matter, &markdown_body, skip_integrity, debug_pipeline)
         .await?;
@@ -148,8 +203,34 @@ async fn compile_pipeline_inner(
     // Clean up spacing artifacts from empty placeholder replacements
     let pipeline_yaml = clean_generated_yaml(&pipeline_yaml);
 
-    // Write output
-    tokio::fs::write(&yaml_output_path, &pipeline_yaml)
+    // Source rewrite: only after a fully-successful compile.
+    //
+    // We perform this BEFORE writing the .lock.yml so that a partial
+    // state (rewritten source + stale lock file, or rewritten lock file
+    // pointing at unmigrated source) cannot escape: if rewrite fails,
+    // we abort before the lock file ever gets touched.
+    let mut migrated = false;
+    if migrations.changed() {
+        // Rebuild the parsed handle (the typed front_matter has been
+        // sanitized and consumed; rewrite needs the unmodified mapping).
+        let parsed_for_rewrite = common::ParsedSource {
+            front_matter: serde_yaml::from_value(serde_yaml::Value::Mapping(
+                front_matter_mapping.clone(),
+            ))
+            .context("Failed to round-trip migrated front matter for rewrite")?,
+            markdown_body: markdown_body.clone(),
+            migrations: migrations.clone(),
+            front_matter_mapping: front_matter_mapping.clone(),
+            body_raw: body_raw.clone(),
+            source_sha256,
+        };
+        migrated = perform_source_rewrite_if_needed(input_path, &content, &parsed_for_rewrite)
+            .await?;
+    }
+
+    // Write output via atomic_write so a crash mid-write cannot leave a
+    // half-written .lock.yml on disk.
+    common::atomic_write(&yaml_output_path, &pipeline_yaml)
         .await
         .with_context(|| {
             format!(
@@ -175,7 +256,71 @@ async fn compile_pipeline_inner(
         }
     }
 
-    Ok(())
+    Ok(migrated)
+}
+
+/// Reconstruct the migrated source, run the lost-update guard, and
+/// atomically rewrite the source `.md` if the content actually
+/// changed. Returns whether a write happened.
+///
+/// On success, emits the documented stderr warning so users always see
+/// when their source was migrated. This warning is *not* gated by
+/// `--verbose`/`--debug`.
+async fn perform_source_rewrite_if_needed(
+    input_path: &Path,
+    original_content: &str,
+    parsed: &common::ParsedSource,
+) -> Result<bool> {
+    let new_content = common::reconstruct_source(parsed)?;
+    if new_content == original_content {
+        // Migrations ran but their net effect is a no-op on disk —
+        // skip the rewrite to avoid gratuitous diffs.
+        return Ok(false);
+    }
+
+    // Lost-update guard: re-read the source and compare its hash to
+    // the snapshot we took when parsing. If anyone else mutated the
+    // file in the meantime, refuse to clobber their changes.
+    use sha2::Digest;
+    let current_bytes = tokio::fs::read(input_path).await.with_context(|| {
+        format!(
+            "Failed to re-read source for migration safety check: {}",
+            input_path.display()
+        )
+    })?;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(&current_bytes);
+    let current_hash: [u8; 32] = hasher.finalize().into();
+    if current_hash != parsed.source_sha256 {
+        anyhow::bail!(
+            "source file {} changed during compilation; refusing to migrate. Re-run `ado-aw compile`.",
+            input_path.display()
+        );
+    }
+
+    common::atomic_write(input_path, &new_content)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to atomically rewrite migrated source: {}",
+                input_path.display()
+            )
+        })?;
+
+    eprintln!(
+        "warning: migrated front matter in {}: schema-version {} -> {}",
+        input_path.display(),
+        parsed.migrations.from_version,
+        parsed.migrations.to_version
+    );
+    for applied in &parsed.migrations.applied {
+        eprintln!("  - {}: {}", applied.id, applied.summary);
+    }
+    eprintln!(
+        "note: front-matter comments are not preserved when migrations rewrite the source."
+    );
+
+    Ok(true)
 }
 
 /// Locate the repo root containing `output_path`, scan it for all compiled
@@ -227,6 +372,7 @@ pub async fn compile_all_pipelines(skip_integrity: bool, debug_pipeline: bool) -
     let mut success_count = 0;
     let mut skip_count = 0;
     let mut fail_count = 0;
+    let mut migrated_count = 0;
 
     for pipeline in &detected {
         let source_path = root.join(&pipeline.source);
@@ -245,8 +391,13 @@ pub async fn compile_all_pipelines(skip_integrity: bool, debug_pipeline: bool) -
         let source_str = source_path.to_string_lossy();
         let output_str = yaml_output_path.to_string_lossy();
 
-        match compile_pipeline_inner(&source_str, Some(&output_str), skip_integrity, debug_pipeline, false).await {
-            Ok(()) => success_count += 1,
+        match compile_pipeline_inner(&source_str, Some(&output_str), skip_integrity, debug_pipeline, false, migrations::MIGRATIONS).await {
+            Ok(migrated) => {
+                success_count += 1;
+                if migrated {
+                    migrated_count += 1;
+                }
+            }
             Err(e) => {
                 eprintln!(
                     "  Error compiling '{}': {:#}",
@@ -269,10 +420,17 @@ pub async fn compile_all_pipelines(skip_integrity: bool, debug_pipeline: bool) -
     }
 
     println!();
-    println!(
-        "Done: {} compiled, {} skipped, {} failed.",
-        success_count, skip_count, fail_count
-    );
+    if migrated_count > 0 {
+        println!(
+            "Done: {} compiled, {} skipped, {} failed; {} source file(s) migrated.",
+            success_count, skip_count, fail_count, migrated_count
+        );
+    } else {
+        println!(
+            "Done: {} compiled, {} skipped, {} failed.",
+            success_count, skip_count, fail_count
+        );
+    }
 
     if fail_count > 0 {
         anyhow::bail!("{} pipeline(s) failed to compile", fail_count);
@@ -355,7 +513,29 @@ pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
             )
         })?;
 
-    let (mut front_matter, markdown_body) = parse_markdown(&content)?;
+    let parsed = parse_markdown_detailed(&content)?;
+
+    // Pending-migration enforcement: `check` MUST NOT silently let
+    // a stale source pass. The runtime integrity check inside
+    // compiled pipelines uses the same ado-aw version that produced
+    // the pipeline (see src/data/base.yml / 1es-base.yml — they
+    // download `ado-aw v${COMPILER_VERSION}`), so a check failure
+    // here only happens locally / in CI when a developer runs a
+    // newer ado-aw against an older source. That is exactly when
+    // we want to fail loudly so `ado-aw compile` is run.
+    if parsed.migrations.changed() {
+        anyhow::bail!(
+            "error: {} is at schema-version {}; this compiler requires schema-version {}.\n\
+             hint: run `ado-aw compile {}` to migrate the source in place.",
+            source_path.display(),
+            parsed.migrations.from_version,
+            parsed.migrations.to_version,
+            source_path.display(),
+        );
+    }
+
+    let mut front_matter = parsed.front_matter;
+    let markdown_body = parsed.markdown_body;
 
     use crate::sanitize::SanitizeConfig;
     front_matter.sanitize_config_fields();

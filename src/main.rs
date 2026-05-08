@@ -224,7 +224,11 @@ async fn run_execute(
     ado_project: Option<String>,
     dry_run: bool,
 ) -> Result<()> {
-    // Read and parse source markdown to get tool configs
+    // Read and parse source markdown to get tool configs.
+    // Use parse_markdown_detailed so Stage 3 benefits from in-memory
+    // migration when a source is mid-migration. Stage 3 must NOT
+    // rewrite the source file (the executor's working tree is not the
+    // source-of-truth tree), so we just emit a log warning.
     let content = tokio::fs::read_to_string(&source)
         .await
         .with_context(|| format!("Failed to read source file: {}", source.display()))?;
