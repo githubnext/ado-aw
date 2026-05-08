@@ -7,18 +7,13 @@ const AGENT_TEMPLATE: &str = include_str!("data/init-agent.md");
 const AGENT_DIR: &str = ".github/agents";
 const AGENT_FILENAME: &str = "ado-aw.agent.md";
 
-pub async fn run(path: Option<&std::path::Path>, force: bool) -> Result<()> {
+pub async fn run(path: Option<&std::path::Path>) -> Result<()> {
     let base = path.map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
     let agent_dir = base.join(AGENT_DIR);
     let agent_path = agent_dir.join(AGENT_FILENAME);
 
-    // Check if file already exists
-    if agent_path.exists() && !force {
-        anyhow::bail!(
-            "{} already exists. Use --force to overwrite.",
-            agent_path.display()
-        );
-    }
+    // `init` always (re)writes the agent file so it stays in sync with the
+    // currently installed compiler version.
 
     // Create directory structure
     tokio::fs::create_dir_all(&agent_dir)

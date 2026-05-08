@@ -8,7 +8,7 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
 
 - `init` - Initialize a repository for AI-first agentic pipeline authoring
   - `--path <path>` - Target directory (defaults to current directory)
-  - `--force` - Overwrite existing agent file
+  - `--force` - Bypass the GitHub-remote guard (use when running inside a GitHub-hosted repository like `githubnext/ado-aw` itself)
   - Creates `.github/agents/ado-aw.agent.md` — a Copilot dispatcher agent that routes to specialized prompts for creating, updating, and debugging agentic pipelines
   - The agent auto-downloads the ado-aw compiler and handles the full lifecycle (create → compile → check)
 - `compile [<path>]` - Compile a markdown file to Azure DevOps pipeline YAML. If no path is given, auto-discovers and recompiles all detected agentic pipelines in the current directory.
