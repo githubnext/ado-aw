@@ -27,8 +27,6 @@ fn fresh_temp_dir(label: &str) -> PathBuf {
         "ado-aw-migration-tests-{}-{}-{}",
         label,
         std::process::id(),
-        // Add a thread-local counter to avoid intra-process collisions
-        // when multiple tests run in parallel.
         rand_suffix(),
     ));
     fs::create_dir_all(&dir).expect("create temp dir");
@@ -45,14 +43,20 @@ fn fresh_git_temp_dir(label: &str) -> PathBuf {
     dir
 }
 
-/// Lightweight randomness for test temp dir uniqueness — no crate dep.
+/// Suffix that's unique within the process for the lifetime of a
+/// single test binary run. Uses a wall-clock nanosecond timestamp
+/// combined with a monotonic atomic counter so two parallel tests
+/// scheduled in the same nanosecond still get distinct directories.
 fn rand_suffix() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("{:x}", nanos)
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{:x}-{:x}", nanos, seq)
 }
 
 fn ado_aw_binary() -> PathBuf {

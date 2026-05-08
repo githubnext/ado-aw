@@ -194,8 +194,16 @@ async fn perform_source_rewrite_lost_update_guard() {
     std::fs::write(&source_path, "different bytes\n").unwrap();
 
     // Rewrite must refuse.
-    let result =
-        perform_source_rewrite_if_needed(&source_path, &original, &parsed).await;
+    let result = perform_source_rewrite_if_needed(
+        &source_path,
+        &original,
+        &parsed.leading_whitespace,
+        &parsed.front_matter_mapping,
+        &parsed.body_raw,
+        &parsed.source_sha256,
+        &parsed.migrations,
+    )
+    .await;
     let err = result.expect_err("expected lost-update guard to fire");
     assert!(
         format!("{:#}", err).contains("changed during compilation"),
