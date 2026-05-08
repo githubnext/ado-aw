@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.26.1](https://github.com/githubnext/ado-aw/compare/v0.26.0...v0.26.1) (2026-05-08)
+
+
+### Bug Fixes
+
+* **ci:** allow doc freshness workflow to update AGENTS.md ([#452](https://github.com/githubnext/ado-aw/issues/452)) ([463dafa](https://github.com/githubnext/ado-aw/commit/463dafa18fa0c02bbf25c0d103e64e97257a0096))
+* **compile:** detect and prevent workspace checkout collision with self repo ([#456](https://github.com/githubnext/ado-aw/issues/456)) ([051d45c](https://github.com/githubnext/ado-aw/commit/051d45cc90b900028612b4210bafbd5e7e65372e))
+
 ## [0.26.0](https://github.com/githubnext/ado-aw/compare/v0.25.1...v0.26.0) (2026-05-07)
 
 
