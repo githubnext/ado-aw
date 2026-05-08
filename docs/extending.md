@@ -10,8 +10,8 @@ When extending the compiler:
 2. **New compile targets**: Implement the `Compiler` trait in a new file under `src/compile/`
 3. **New front matter fields**: Add fields to `FrontMatter` in `src/compile/types.rs`
    - **Breaking changes** (renames, removals, type changes, added required fields)
-     require adding a migration under `src/compile/migrations/` in the same PR.
-     See [`docs/migrations.md`](migrations.md).
+     require adding a codemod under `src/compile/codemods/` in the same PR.
+     See [`docs/codemods.md`](codemods.md).
 4. **New template markers**: Handle replacements in the target-specific compiler (e.g., `standalone.rs` or `onees.rs`)
 5. **New safe-output tools**: Add to `src/safeoutputs/` — implement `ToolResult`, `Executor`, register in `mod.rs`, `mcp.rs`, `execute.rs`
 6. **New first-class tools**: Create `src/tools/<name>/` with `mod.rs` and `extension.rs` (CompilerExtension impl). Add `execute.rs` if the tool has Stage 3 runtime logic. Extend `ToolsConfig` in `types.rs`, add collection in `collect_extensions()`

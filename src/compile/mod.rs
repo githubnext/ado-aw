@@ -11,8 +11,8 @@ pub mod extensions;
 pub(crate) mod filter_ir;
 mod gitattributes;
 #[cfg(test)]
-mod migration_integration_test;
-pub(crate) mod migrations;
+mod codemod_integration_test;
+pub(crate) mod codemods;
 mod onees;
 pub(crate) mod pr_filters;
 mod standalone;
@@ -69,24 +69,24 @@ pub async fn compile_pipeline(
         skip_integrity,
         debug_pipeline,
         true,
-        migrations::MIGRATIONS,
+        codemods::CODEMODS,
     )
     .await
-    .map(|_migrated| ())
+    .map(|_rewrote| ())
 }
 
-/// Test-only entry point that injects a custom migration registry.
+/// Test-only entry point that injects a custom codemod registry.
 ///
 /// Production code goes through [`compile_pipeline`]. Tests use this
-/// to drive end-to-end migration scenarios without polluting the real
-/// [`migrations::MIGRATIONS`] slice.
+/// to drive end-to-end codemod scenarios without polluting the real
+/// [`codemods::CODEMODS`] slice.
 #[cfg(test)]
 async fn compile_pipeline_with_registry(
     input_path: &str,
     output_path: Option<&str>,
     skip_integrity: bool,
     debug_pipeline: bool,
-    registry: &[&'static migrations::Migration],
+    registry: &[&'static codemods::Codemod],
 ) -> Result<bool> {
     compile_pipeline_inner(
         input_path,
@@ -113,7 +113,7 @@ async fn compile_pipeline_inner(
     skip_integrity: bool,
     debug_pipeline: bool,
     sync_gitattributes: bool,
-    registry: &[&'static migrations::Migration],
+    registry: &[&'static codemods::Codemod],
 ) -> Result<bool> {
     let input_path = Path::new(input_path);
     info!("Compiling pipeline from: {}", input_path.display());
@@ -128,7 +128,7 @@ async fn compile_pipeline_inner(
     let parsed = common::parse_markdown_detailed_with_registry(&content, registry)?;
     let mut front_matter = parsed.front_matter;
     let markdown_body = parsed.markdown_body;
-    let migrations = parsed.migrations;
+    let codemod_report = parsed.codemods;
     let front_matter_mapping = parsed.front_matter_mapping;
     let leading_whitespace = parsed.leading_whitespace;
     let body_raw = parsed.body_raw;
@@ -204,16 +204,16 @@ async fn compile_pipeline_inner(
     // state (rewritten source + stale lock file, or rewritten lock file
     // pointing at unmigrated source) cannot escape: if rewrite fails,
     // we abort before the lock file ever gets touched.
-    let mut migrated = false;
-    if migrations.changed() {
-        migrated = perform_source_rewrite_if_needed(
+    let mut rewrote = false;
+    if codemod_report.changed() {
+        rewrote = perform_source_rewrite_if_needed(
             input_path,
             &content,
             &leading_whitespace,
             &front_matter_mapping,
             &body_raw,
             &source_sha256,
-            &migrations,
+            &codemod_report,
         )
         .await?;
     }
@@ -246,15 +246,15 @@ async fn compile_pipeline_inner(
         }
     }
 
-    Ok(migrated)
+    Ok(rewrote)
 }
 
-/// Reconstruct the migrated source, run the lost-update guard, and
-/// atomically rewrite the source `.md` if the content actually
-/// changed. Returns whether a write happened.
+/// Reconstruct the codemod-rewritten source, run the lost-update
+/// guard, and atomically rewrite the source `.md` if the content
+/// actually changed. Returns whether a write happened.
 ///
-/// On success, emits the documented stderr warning so users always see
-/// when their source was migrated. This warning is *not* gated by
+/// On success, emits the documented stderr warning so users always
+/// see when codemods were applied. This warning is *not* gated by
 /// `--verbose`/`--debug`.
 async fn perform_source_rewrite_if_needed(
     input_path: &Path,
@@ -263,13 +263,13 @@ async fn perform_source_rewrite_if_needed(
     front_matter_mapping: &serde_yaml::Mapping,
     body_raw: &str,
     source_sha256: &[u8; 32],
-    migrations: &migrations::MigrationReport,
+    codemods: &codemods::CodemodReport,
 ) -> Result<bool> {
     let new_content =
         common::reconstruct_source(leading_whitespace, front_matter_mapping, body_raw)?;
     if new_content == original_content {
-        // Migrations ran but their net effect is a no-op on disk —
-        // skip the rewrite to avoid gratuitous diffs.
+        // Codemods ran but their net effect is a no-op on disk — skip
+        // the rewrite to avoid gratuitous diffs.
         return Ok(false);
     }
 
@@ -279,7 +279,7 @@ async fn perform_source_rewrite_if_needed(
     use sha2::Digest;
     let current_bytes = tokio::fs::read(input_path).await.with_context(|| {
         format!(
-            "Failed to re-read source for migration safety check: {}",
+            "Failed to re-read source for codemod safety check: {}",
             input_path.display()
         )
     })?;
@@ -288,7 +288,7 @@ async fn perform_source_rewrite_if_needed(
     let current_hash: [u8; 32] = hasher.finalize().into();
     if &current_hash != source_sha256 {
         anyhow::bail!(
-            "source file {} changed during compilation; refusing to migrate. Re-run `ado-aw compile`.",
+            "source file {} changed during compilation; refusing to apply codemods. Re-run `ado-aw compile`.",
             input_path.display()
         );
     }
@@ -297,22 +297,17 @@ async fn perform_source_rewrite_if_needed(
         .await
         .with_context(|| {
             format!(
-                "Failed to atomically rewrite migrated source: {}",
+                "Failed to atomically rewrite source after codemods: {}",
                 input_path.display()
             )
         })?;
 
-    eprintln!(
-        "warning: migrated front matter in {}: schema-version {} -> {}",
-        input_path.display(),
-        migrations.from_version,
-        migrations.to_version
-    );
-    for applied in &migrations.applied {
+    eprintln!("warning: applied codemods to {}:", input_path.display());
+    for applied in &codemods.applied {
         eprintln!("  - {}: {}", applied.id, applied.summary);
     }
     eprintln!(
-        "note: front-matter comments are not preserved when migrations rewrite the source."
+        "note: front-matter comments are not preserved when codemods rewrite the source."
     );
 
     Ok(true)
@@ -367,7 +362,7 @@ pub async fn compile_all_pipelines(skip_integrity: bool, debug_pipeline: bool) -
     let mut success_count = 0;
     let mut skip_count = 0;
     let mut fail_count = 0;
-    let mut migrated_count = 0;
+    let mut rewrote_count = 0;
 
     for pipeline in &detected {
         let source_path = root.join(&pipeline.source);
@@ -386,11 +381,11 @@ pub async fn compile_all_pipelines(skip_integrity: bool, debug_pipeline: bool) -
         let source_str = source_path.to_string_lossy();
         let output_str = yaml_output_path.to_string_lossy();
 
-        match compile_pipeline_inner(&source_str, Some(&output_str), skip_integrity, debug_pipeline, false, migrations::MIGRATIONS).await {
-            Ok(migrated) => {
+        match compile_pipeline_inner(&source_str, Some(&output_str), skip_integrity, debug_pipeline, false, codemods::CODEMODS).await {
+            Ok(rewrote) => {
                 success_count += 1;
-                if migrated {
-                    migrated_count += 1;
+                if rewrote {
+                    rewrote_count += 1;
                 }
             }
             Err(e) => {
@@ -415,10 +410,10 @@ pub async fn compile_all_pipelines(skip_integrity: bool, debug_pipeline: bool) -
     }
 
     println!();
-    if migrated_count > 0 {
+    if rewrote_count > 0 {
         println!(
-            "Done: {} compiled, {} skipped, {} failed; {} source file(s) migrated.",
-            success_count, skip_count, fail_count, migrated_count
+            "Done: {} compiled, {} skipped, {} failed; {} source file(s) rewritten by codemods.",
+            success_count, skip_count, fail_count, rewrote_count
         );
     } else {
         println!(
@@ -518,13 +513,11 @@ pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
     // here only happens locally / in CI when a developer runs a
     // newer ado-aw against an older source. That is exactly when
     // we want to fail loudly so `ado-aw compile` is run.
-    if parsed.migrations.changed() {
+    if parsed.codemods.changed() {
         anyhow::bail!(
-            "{} is at schema-version {}; this compiler requires schema-version {}.\n  \
-             hint: run `ado-aw compile {}` to migrate the source in place.",
+            "{} contains deprecated front-matter shapes that need codemod fixes.\n  \
+             hint: run `ado-aw compile {}` to apply the codemods in place.",
             source_path.display(),
-            parsed.migrations.from_version,
-            parsed.migrations.to_version,
             source_path.display(),
         );
     }

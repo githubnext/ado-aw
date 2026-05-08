@@ -225,9 +225,9 @@ async fn run_execute(
 ) -> Result<()> {
     // Read and parse source markdown to get tool configs.
     // Use parse_markdown_detailed so Stage 3 benefits from in-memory
-    // migration when a source is mid-migration. Stage 3 must NOT
-    // rewrite the source file (the executor's working tree is not the
-    // source-of-truth tree), so we just emit a log warning.
+    // codemod fixes when a source has deprecated shapes. Stage 3 must
+    // NOT rewrite the source file (the executor's working tree is not
+    // the source-of-truth tree), so we just emit a log warning.
     let content = tokio::fs::read_to_string(&source)
         .await
         .with_context(|| format!("Failed to read source file: {}", source.display()))?;
@@ -235,12 +235,10 @@ async fn run_execute(
     let parsed = compile::parse_markdown_detailed(&content)
         .with_context(|| format!("Failed to parse source file: {}", source.display()))?;
 
-    if parsed.migrations.changed() {
+    if parsed.codemods.changed() {
         log::warn!(
-            "front matter at {} is at schema-version {}; running with in-memory migration to {}. Run `ado-aw compile {}` to update the source.",
+            "front matter at {} contains deprecated shapes; running with in-memory codemod fixes applied. Run `ado-aw compile {}` to update the source.",
             source.display(),
-            parsed.migrations.from_version,
-            parsed.migrations.to_version,
             source.display(),
         );
     }

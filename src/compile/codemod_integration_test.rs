@@ -1,44 +1,43 @@
-//! White-box integration tests for the front-matter migration framework.
+//! White-box integration tests for the front-matter codemod
+//! framework.
 //!
-//! These tests exercise the rewrite path end-to-end (parse → migrate →
-//! compile → atomic source rewrite → lock-file write) using a stub
-//! migration registry. They live inside `src/` because they need
-//! access to crate-private hooks (`compile_pipeline_with_registry`,
+//! These tests exercise the rewrite path end-to-end (parse →
+//! codemods → compile → atomic source rewrite → lock-file write)
+//! using a stub codemod registry. They live inside `src/` because
+//! they need access to crate-private hooks
+//! (`compile_pipeline_with_registry`,
 //! `perform_source_rewrite_if_needed`,
 //! `common::parse_markdown_detailed_with_registry`) that the empty
-//! production [`super::migrations::MIGRATIONS`] registry cannot
+//! production [`super::codemods::CODEMODS`] registry cannot
 //! exercise.
 //!
-//! Black-box subprocess tests of the user-visible CLI behavior live in
-//! [`tests/migration_tests.rs`](../../tests/migration_tests.rs).
+//! Black-box subprocess tests of the user-visible CLI behavior live
+//! in [`tests/codemod_tests.rs`](../../tests/codemod_tests.rs).
 
 #![cfg(test)]
 
+use super::codemods::{Codemod, CodemodContext, ConflictPolicy};
 use super::common;
-use super::migrations::{ConflictPolicy, Migration, MigrationContext};
-use super::{compile_pipeline, compile_pipeline_with_registry, perform_source_rewrite_if_needed};
+use super::{compile_pipeline_with_registry, perform_source_rewrite_if_needed};
 use anyhow::Result;
 use serde_yaml::Mapping;
 
 // ─── Stub registry ──────────────────────────────────────────────────────────
 
-/// Stub migration: renames the `legacy-name` top-level key to `name`.
-/// Drives end-to-end rewrite tests without registering a real migration.
-static TEST_RENAME_LEGACY_NAME: Migration = Migration {
-    from_version: 1,
-    to_version: 2,
+/// Stub codemod: renames the `legacy-name` top-level key to `name`.
+/// Drives end-to-end rewrite tests without registering a real codemod.
+static TEST_RENAME_LEGACY_NAME: Codemod = Codemod {
     id: "test_rename_legacy_name",
     summary: "rename `legacy-name` -> `name`",
     introduced_in: "test",
     apply: rename_legacy_name,
 };
 
-fn rename_legacy_name(fm: &mut Mapping, _ctx: &MigrationContext) -> Result<()> {
-    super::migrations::rename_key(fm, "legacy-name", "name", ConflictPolicy::Error)?;
-    Ok(())
+fn rename_legacy_name(fm: &mut Mapping, _ctx: &CodemodContext) -> Result<bool> {
+    super::codemods::rename_key(fm, "legacy-name", "name", ConflictPolicy::Error)
 }
 
-/// Source whose typed deserialization would fail without a migration:
+/// Source whose typed deserialization would fail without a codemod:
 /// it has `legacy-name` instead of the required `name` field.
 fn stale_source() -> &'static str {
     "---\nlegacy-name: my-agent\ndescription: test description\n---\n## Body\nHello.\n"
@@ -54,11 +53,11 @@ fn write_temp_md(name: &str, content: &str) -> (tempfile::TempDir, std::path::Pa
 // ─── End-to-end rewrite path ────────────────────────────────────────────────
 
 #[tokio::test]
-async fn migration_rewrites_stale_source_and_preserves_body() {
+async fn codemod_rewrites_stale_source_and_preserves_body() {
     let (dir, source_path) = write_temp_md("agent.md", stale_source());
 
-    let registry: &[&'static Migration] = &[&TEST_RENAME_LEGACY_NAME];
-    let migrated = compile_pipeline_with_registry(
+    let registry: &[&'static Codemod] = &[&TEST_RENAME_LEGACY_NAME];
+    let rewrote = compile_pipeline_with_registry(
         &source_path.to_string_lossy(),
         None,
         true,  // skip_integrity
@@ -68,10 +67,10 @@ async fn migration_rewrites_stale_source_and_preserves_body() {
     .await
     .expect("compile_pipeline_with_registry should succeed");
 
-    assert!(migrated, "expected compile to report a source migration");
+    assert!(rewrote, "expected compile to report a source rewrite");
 
     // Source file rewritten: contains `name: my-agent`, no
-    // `legacy-name`, has `schema-version: 2`.
+    // `legacy-name`.
     let rewritten = std::fs::read_to_string(&source_path).expect("read rewritten");
     assert!(
         rewritten.contains("name: my-agent"),
@@ -81,11 +80,6 @@ async fn migration_rewrites_stale_source_and_preserves_body() {
     assert!(
         !rewritten.contains("legacy-name"),
         "rewritten source still contains legacy-name:\n{}",
-        rewritten
-    );
-    assert!(
-        rewritten.contains("schema-version: 2"),
-        "rewritten source missing `schema-version: 2`:\n{}",
         rewritten
     );
 
@@ -101,28 +95,29 @@ async fn migration_rewrites_stale_source_and_preserves_body() {
     assert!(lock.exists(), "expected {} to exist", lock.display());
 
     // Re-running parse with the same stub registry produces no
-    // further migration — the rewrite moved the source to current.
+    // further codemod fires — the rewrite moved the source to its
+    // current shape.
     let after = std::fs::read_to_string(&source_path).unwrap();
     let parsed_again =
         common::parse_markdown_detailed_with_registry(&after, registry).unwrap();
     assert!(
-        !parsed_again.migrations.changed(),
-        "expected post-rewrite source to be at current schema-version, but \
-         {} more migration(s) ran",
-        parsed_again.migrations.applied.len()
+        !parsed_again.codemods.changed(),
+        "expected post-rewrite source to require no further codemods, but \
+         {} fired",
+        parsed_again.codemods.applied.len()
     );
 
     drop(dir);
 }
 
 #[tokio::test]
-async fn migration_skip_when_no_stub_registry_runs() {
-    // With the empty production registry, a healthy v1 source must
+async fn codemod_skip_when_no_stub_registry_runs() {
+    // With the empty production registry, a healthy source must
     // compile without rewriting anything.
     let healthy = "---\nname: x\ndescription: y\n---\nbody\n";
     let (dir, source_path) = write_temp_md("agent.md", healthy);
-    let registry: &[&'static Migration] = &[];
-    let migrated = compile_pipeline_with_registry(
+    let registry: &[&'static Codemod] = &[];
+    let rewrote = compile_pipeline_with_registry(
         &source_path.to_string_lossy(),
         None,
         true,
@@ -131,32 +126,30 @@ async fn migration_skip_when_no_stub_registry_runs() {
     )
     .await
     .expect("compile should succeed");
-    assert!(!migrated, "expected no rewrite for already-current source");
+    assert!(!rewrote, "expected no rewrite for source that needs no codemods");
     let after = std::fs::read_to_string(&source_path).unwrap();
     assert_eq!(after, healthy, "source must be byte-identical");
     drop(dir);
 }
 
 #[tokio::test]
-async fn migration_with_only_version_bump_still_writes() {
-    fn noop(_fm: &mut Mapping, _ctx: &MigrationContext) -> Result<()> {
-        Ok(())
+async fn codemod_no_op_returns_false_does_not_rewrite() {
+    // A codemod that always returns Ok(false) must not trigger a
+    // source rewrite even though it ran.
+    fn noop(_fm: &mut Mapping, _ctx: &CodemodContext) -> Result<bool> {
+        Ok(false)
     }
-    static NOOP_MIG: Migration = Migration {
-        from_version: 1,
-        to_version: 2,
-        id: "test_noop_v1_to_v2",
+    static NOOP_MIG: Codemod = Codemod {
+        id: "test_noop_returns_false",
         summary: "no-op",
         introduced_in: "test",
         apply: noop,
     };
 
-    // Even a no-op migration changes bytes on disk because the
-    // schema-version field is added. Verify we DO rewrite.
     let healthy = "---\nname: x\ndescription: y\n---\nbody\n";
     let (dir, source_path) = write_temp_md("agent.md", healthy);
-    let registry: &[&'static Migration] = &[&NOOP_MIG];
-    let migrated = compile_pipeline_with_registry(
+    let registry: &[&'static Codemod] = &[&NOOP_MIG];
+    let rewrote = compile_pipeline_with_registry(
         &source_path.to_string_lossy(),
         None,
         true,
@@ -166,11 +159,11 @@ async fn migration_with_only_version_bump_still_writes() {
     .await
     .expect("compile should succeed");
     assert!(
-        migrated,
-        "expected rewrite because schema-version field was added"
+        !rewrote,
+        "no-op codemod that returns Ok(false) must not trigger a rewrite"
     );
     let after = std::fs::read_to_string(&source_path).unwrap();
-    assert!(after.contains("schema-version: 2"));
+    assert_eq!(after, healthy, "source must be byte-identical");
     drop(dir);
 }
 
@@ -184,10 +177,10 @@ async fn perform_source_rewrite_lost_update_guard() {
     // full compile.
     let (dir, source_path) = write_temp_md("agent.md", stale_source());
     let original = std::fs::read_to_string(&source_path).unwrap();
-    let registry: &[&'static Migration] = &[&TEST_RENAME_LEGACY_NAME];
+    let registry: &[&'static Codemod] = &[&TEST_RENAME_LEGACY_NAME];
     let parsed =
         common::parse_markdown_detailed_with_registry(&original, registry).unwrap();
-    assert!(parsed.migrations.changed());
+    assert!(parsed.codemods.changed());
 
     // Mutate the source after parse (simulates editor / concurrent
     // tool overwriting).
@@ -201,7 +194,7 @@ async fn perform_source_rewrite_lost_update_guard() {
         &parsed.front_matter_mapping,
         &parsed.body_raw,
         &parsed.source_sha256,
-        &parsed.migrations,
+        &parsed.codemods,
     )
     .await;
     let err = result.expect_err("expected lost-update guard to fire");
@@ -212,28 +205,9 @@ async fn perform_source_rewrite_lost_update_guard() {
     );
 
     // The source is left as the interloper wrote it (we did not
-    // clobber); it is *not* the migrated version.
+    // clobber); it is *not* the codemod-rewritten version.
     let after = std::fs::read_to_string(&source_path).unwrap();
     assert_eq!(after, "different bytes\n");
 
-    drop(dir);
-}
-
-// ─── Future-version safety net ──────────────────────────────────────────────
-
-#[tokio::test]
-async fn check_pipeline_fails_on_future_schema_version() {
-    // The real registry is empty (CURRENT=1), so a source claiming
-    // schema-version: 2 is a future version. compile should reject it
-    // loudly through the public entry point.
-    let future = "---\nschema-version: 2\nname: x\ndescription: y\n---\n";
-    let (dir, source_path) = write_temp_md("agent.md", future);
-    let result = compile_pipeline(&source_path.to_string_lossy(), None, true, false).await;
-    let err = result.expect_err("future-version source should fail compile");
-    assert!(
-        format!("{:#}", err).contains("only supports up to"),
-        "unexpected error: {:#}",
-        err
-    );
     drop(dir);
 }

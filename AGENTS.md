@@ -61,10 +61,10 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   │   ├── safe_outputs.rs # Always-on SafeOutputs MCP extension
 │   │   │   ├── trigger_filters.rs # Trigger filter extension (gate evaluator delivery)
 │   │   │   └── tests.rs  # Extension integration tests
-│   │   ├── migrations/   # Front-matter migrations (one file per version step)
-│   │   │   ├── mod.rs    # Migration struct, MIGRATIONS registry, runner, CURRENT_SCHEMA_VERSION
+│   │   ├── codemods/     # Front-matter codemods (one file per transformation)
+│   │   │   ├── mod.rs    # Codemod struct, CODEMODS registry, runner
 │   │   │   └── helpers.rs # take_key, insert_no_overwrite, rename_key, ConflictPolicy
-│   │   ├── migration_integration_test.rs # White-box rewrite-path tests (stub registry injection)
+│   │   ├── codemod_integration_test.rs # White-box rewrite-path tests (stub registry injection)
 │   │   └── types.rs      # Front matter grammar and types
 │   ├── init.rs           # Repository initialization for AI-first authoring
 │   ├── execute.rs        # Stage 3 safe output execution
@@ -196,9 +196,10 @@ index to jump to the right page.
 - [`docs/filter-ir.md`](docs/filter-ir.md) — filter expression IR
   specification: `Fact`/`Predicate` types, three-pass compilation (lower →
   validate → codegen), gate step generation, adding new filter types.
-- [`docs/migrations.md`](docs/migrations.md) — front-matter migration
-  framework: schema-version field, automatic source rewrite on
-  breaking-change updates, contributor workflow for adding migrations.
+- [`docs/codemods.md`](docs/codemods.md) — front-matter codemod
+  framework: detection-based transformations, automatic source
+  rewrite on breaking-change updates, contributor workflow for
+  adding codemods.
 - [`docs/local-development.md`](docs/local-development.md) — local development
   setup notes.
 

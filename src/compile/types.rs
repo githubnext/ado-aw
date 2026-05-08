@@ -7,15 +7,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use crate::sanitize::SanitizeConfig as SanitizeConfigTrait;
 
-/// Default `schema-version` used when the field is absent from the
-/// front matter. Defined here so serde's `#[serde(default = "...")]`
-/// can refer to it. Note: source files that simply omit the field
-/// continue to behave as schema-version 1; this default is not the
-/// "current" schema version.
-fn default_schema_version() -> u32 {
-    1
-}
-
 /// Target platform for compiled pipeline
 #[derive(Debug, Deserialize, Clone, Default, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -589,18 +580,6 @@ pub struct PipelineParameter {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FrontMatter {
-    /// Schema version of the front-matter grammar. Missing field defaults
-    /// to 1. The compiler bumps this in place when migrations apply
-    /// during compilation; users typically don't write it by hand.
-    /// See [`crate::compile::migrations`] for the migration framework.
-    ///
-    /// Field is intentionally read-only on the typed view: it exists
-    /// solely so `deny_unknown_fields` accepts a stamped source. The
-    /// authoritative version lives in the untyped front-matter mapping
-    /// and is set by the migration runner before typed deserialization.
-    #[serde(default = "default_schema_version", rename = "schema-version")]
-    #[allow(dead_code)]
-    pub schema_version: u32,
     /// Agent name (required)
     pub name: String,
     /// One-line description (required)
@@ -1163,36 +1142,6 @@ impl SanitizeConfigTrait for LabelFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ─── schema_version field ───────────────────────────────────────────────
-
-    #[test]
-    fn schema_version_defaults_to_one_when_absent() {
-        let yaml = "name: x\ndescription: y\n";
-        let fm: FrontMatter = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(fm.schema_version, 1);
-    }
-
-    #[test]
-    fn schema_version_accepts_explicit_integer() {
-        let yaml = "schema-version: 5\nname: x\ndescription: y\n";
-        let fm: FrontMatter = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(fm.schema_version, 5);
-    }
-
-    #[test]
-    fn schema_version_string_value_fails_typed_deserialize() {
-        // The migration runner is the first line of defense (rejects with a
-        // friendly message before typed deserialization). This test is a
-        // defense-in-depth check that the typed FrontMatter would also
-        // reject a non-integer `schema-version`.
-        let yaml = "schema-version: notanumber\nname: x\ndescription: y\n";
-        let result: Result<FrontMatter, _> = serde_yaml::from_str(yaml);
-        assert!(
-            result.is_err(),
-            "expected non-integer schema-version to fail typed deserialize"
-        );
-    }
 
     // ─── PoolConfig deserialization ──────────────────────────────────────────
 

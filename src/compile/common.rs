@@ -86,21 +86,21 @@ fn atomic_write_blocking(path: &Path, contents: &str) -> Result<()> {
 }
 
 /// Detailed parse result. Holds enough information to rewrite the
-/// source on disk byte-faithfully when migrations apply.
+/// source on disk byte-faithfully when codemods apply.
 ///
 /// See [`parse_markdown_detailed`].
 #[derive(Debug)]
 pub struct ParsedSource {
-    /// Typed front matter, after migrations have been applied to the
+    /// Typed front matter, after codemods have been applied to the
     /// underlying mapping.
     pub front_matter: FrontMatter,
     /// Body for compilation, with leading/trailing whitespace trimmed
     /// (matches the legacy `parse_markdown` second tuple element).
     pub markdown_body: String,
-    /// Migration outcome.
-    pub migrations: super::migrations::MigrationReport,
-    /// The migrated front-matter mapping, with `schema-version`
-    /// bumped. Used to reconstruct the source for rewrite.
+    /// Codemod outcome.
+    pub codemods: super::codemods::CodemodReport,
+    /// The codemod-rewritten front-matter mapping. Used to
+    /// reconstruct the source for the on-disk rewrite.
     pub front_matter_mapping: serde_yaml::Mapping,
     /// Whitespace bytes that appeared before the opening `---` fence,
     /// preserved verbatim so that source rewrite is byte-faithful.
@@ -113,24 +113,24 @@ pub struct ParsedSource {
     pub source_sha256: [u8; 32],
 }
 
-/// Parse the markdown file, run the migration chain on the front matter
-/// in memory, and return both the typed `FrontMatter` and the raw
-/// fragments needed to rewrite the source on disk byte-faithfully.
+/// Parse the markdown file, run the codemod registry on the front
+/// matter in memory, and return both the typed `FrontMatter` and the
+/// raw fragments needed to rewrite the source on disk byte-faithfully.
 ///
 /// Use this from callers that may rewrite the source (the `compile`
 /// command). Callers that only want the typed view of the front matter
 /// should use the backward-compatible [`parse_markdown`] wrapper.
 pub fn parse_markdown_detailed(content: &str) -> Result<ParsedSource> {
-    parse_markdown_detailed_with_registry(content, super::migrations::MIGRATIONS)
+    parse_markdown_detailed_with_registry(content, super::codemods::CODEMODS)
 }
 
 /// Variant of [`parse_markdown_detailed`] that allows injecting an
-/// explicit migration registry. Used by tests; production callers go
+/// explicit codemod registry. Used by tests; production callers go
 /// through the no-arg version that reads the global
-/// [`super::migrations::MIGRATIONS`].
+/// [`super::codemods::CODEMODS`].
 pub(crate) fn parse_markdown_detailed_with_registry(
     content: &str,
-    registry: &[&'static super::migrations::Migration],
+    registry: &[&'static super::codemods::Codemod],
 ) -> Result<ParsedSource> {
     use sha2::Digest;
 
@@ -176,13 +176,13 @@ pub(crate) fn parse_markdown_detailed_with_registry(
         }
     };
 
-    // Stage 2: run the migration chain on the untyped mapping.
-    let report = super::migrations::migrate_front_matter_with(&mut mapping, registry)
-        .context("Failed to migrate front matter")?;
+    // Stage 2: run the codemod registry against the untyped mapping.
+    let report = super::codemods::apply_codemods_with(&mut mapping, registry)
+        .context("Failed to apply codemods")?;
 
-    // Stage 3: deserialize the (possibly migrated) mapping into the
+    // Stage 3: deserialize the (possibly modified) mapping into the
     // typed FrontMatter. Errors here mean either the user wrote an
-    // unsupported shape or a migration produced invalid output.
+    // unsupported shape or a codemod produced invalid output.
     let front_matter: FrontMatter =
         serde_yaml::from_value(serde_yaml::Value::Mapping(mapping.clone()))
             .context("Failed to parse YAML front matter")?;
@@ -190,7 +190,7 @@ pub(crate) fn parse_markdown_detailed_with_registry(
     Ok(ParsedSource {
         front_matter,
         markdown_body,
-        migrations: report,
+        codemods: report,
         front_matter_mapping: mapping,
         leading_whitespace,
         body_raw,
@@ -198,7 +198,7 @@ pub(crate) fn parse_markdown_detailed_with_registry(
     })
 }
 
-/// Reconstruct full source content from migration outputs.
+/// Reconstruct full source content from codemod outputs.
 ///
 /// Takes the individual fragments rather than the full
 /// [`ParsedSource`] so callers that have already destructured the
@@ -208,10 +208,9 @@ pub(crate) fn parse_markdown_detailed_with_registry(
 /// Output shape:
 /// - `leading_whitespace` (typically empty)
 /// - `---\n`
-/// - the migrated YAML mapping (`serde_yaml::to_string` always ends
-///   with `\n`); when present, `schema-version` is hoisted to the top
-///   of the mapping so the serialized output matches the canonical
-///   front-matter template documented in `docs/front-matter.md`
+/// - the codemod-rewritten YAML mapping (`serde_yaml::to_string`
+///   always ends with `\n`); the mapping's existing key order is
+///   preserved so user-authored keys keep their original positions
 /// - `---`
 /// - the original body region byte-for-byte (`body_raw`)
 pub fn reconstruct_source(
@@ -219,34 +218,12 @@ pub fn reconstruct_source(
     front_matter_mapping: &serde_yaml::Mapping,
     body_raw: &str,
 ) -> Result<String> {
-    let yaml_serialized = serde_yaml::to_string(&hoist_schema_version(front_matter_mapping))
-        .context("Failed to serialize migrated front matter")?;
+    let yaml_serialized = serde_yaml::to_string(front_matter_mapping)
+        .context("Failed to serialize codemod-rewritten front matter")?;
     Ok(format!(
         "{}---\n{}---{}",
         leading_whitespace, yaml_serialized, body_raw
     ))
-}
-
-/// Return a mapping with `schema-version` (if present) moved to the
-/// front. Other keys retain their relative order. Returns the input
-/// unchanged when `schema-version` is absent or already first.
-fn hoist_schema_version(input: &serde_yaml::Mapping) -> serde_yaml::Mapping {
-    let key = serde_yaml::Value::String(super::migrations::SCHEMA_VERSION_KEY.to_string());
-    let Some(version) = input.get(&key) else {
-        return input.clone();
-    };
-    // If schema-version is already the first key, no rebuild needed.
-    if input.iter().next().map(|(k, _)| k) == Some(&key) {
-        return input.clone();
-    }
-    let mut hoisted = serde_yaml::Mapping::with_capacity(input.len());
-    hoisted.insert(key.clone(), version.clone());
-    for (k, v) in input {
-        if k != &key {
-            hoisted.insert(k.clone(), v.clone());
-        }
-    }
-    hoisted
 }
 
 fn yaml_value_kind(v: &serde_yaml::Value) -> &'static str {
@@ -2627,14 +2604,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_markdown_detailed_byte_faithful_when_no_migration_runs() {
-        // With the registry empty, parsing a v1 source and reconstructing
-        // it should produce a byte-identical document apart from
-        // serde_yaml's canonical formatting of the YAML mapping. We
-        // assert the body region matches exactly.
+    fn parse_markdown_detailed_byte_faithful_when_no_codemod_runs() {
+        // With the registry empty, parsing a healthy source and
+        // reconstructing it should produce a byte-identical document
+        // apart from serde_yaml's canonical formatting of the YAML
+        // mapping. We assert the body region matches exactly.
         let original = "---\nname: x\ndescription: y\n---\n## body\n";
         let parsed = parse_markdown_detailed(original).unwrap();
-        assert!(!parsed.migrations.changed());
+        assert!(!parsed.codemods.changed());
         let reconstructed = reconstruct(&parsed);
         // Find the closing fence in both and compare the suffix.
         let orig_suffix = &original[original.find("\n---\n").unwrap()..];
@@ -2657,32 +2634,6 @@ mod tests {
             &reconstructed[..20.min(reconstructed.len())]
         );
         assert!(reconstructed.ends_with("---\nbody\n"));
-    }
-
-    #[test]
-    fn reconstruct_source_hoists_schema_version_to_top() {
-        let mut mapping = serde_yaml::Mapping::new();
-        mapping.insert(
-            serde_yaml::Value::String("name".into()),
-            serde_yaml::Value::String("x".into()),
-        );
-        mapping.insert(
-            serde_yaml::Value::String("description".into()),
-            serde_yaml::Value::String("y".into()),
-        );
-        mapping.insert(
-            serde_yaml::Value::String("schema-version".into()),
-            serde_yaml::Value::Number(serde_yaml::Number::from(2u64)),
-        );
-        let out = reconstruct_source("", &mapping, "\nbody\n").unwrap();
-        let lines: Vec<&str> = out.lines().take(3).collect();
-        assert_eq!(lines[0], "---");
-        assert_eq!(
-            lines[1], "schema-version: 2",
-            "schema-version should appear first in the front-matter block, got: {:?}",
-            lines
-        );
-        assert_eq!(lines[2], "name: x");
     }
 
     #[test]
