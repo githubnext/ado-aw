@@ -301,6 +301,14 @@ fn test_mcp_initialize_and_tools_list() {
         body.contains("missing-data"),
         "Should list missing-data tool, body: {body}"
     );
+    assert!(
+        body.contains("upload-workitem-attachment"),
+        "Should list upload-workitem-attachment tool, body: {body}"
+    );
+    assert!(
+        body.contains("upload-build-attachment"),
+        "Should list upload-build-attachment tool, body: {body}"
+    );
 }
 
 #[test]
