@@ -63,9 +63,8 @@ scripts/ado-script/                # TS workspace
 ```
 
 The release workflow (`.github/workflows/release.yml`) runs `npm ci &&
-npm run build` and copies `dist/gate/index.js` to `scripts/gate.js`,
-which is then included in the `scripts.zip` release asset that pipelines
-download at runtime.
+npm run build`, then packages `scripts/ado-script/dist/` as the
+`ado-script.zip` release asset that pipelines download at runtime.
 
 ## Schema codegen — preventing drift
 
@@ -111,10 +110,11 @@ steps when any `filters:` block is active:
 
 1. **`NodeTool@0`** — installs Node 20.x LTS (preinstalled on
    Microsoft-hosted images; pinned for reproducibility on others).
-2. **`curl` download** — fetches `scripts.zip` from the
+2. **`curl` download** — fetches `ado-script.zip` from the
    `githubnext/ado-aw` release matching the compiler's version and
-   extracts `gate.js` to `/tmp/ado-aw-scripts/gate.js`.
-3. **`bash: node '/tmp/ado-aw-scripts/gate.js'`** — runs the gate with
+   extracts `ado-script/dist/gate/index.js` to
+   `/tmp/ado-aw-scripts/ado-script/dist/gate/index.js`.
+3. **`bash: node '/tmp/ado-aw-scripts/ado-script/dist/gate/index.js'`** — runs the gate with
    `GATE_SPEC` (base64 JSON) plus required pipeline env vars.
 
 The IR-to-bash codegen lives in `compile_gate_step_external`

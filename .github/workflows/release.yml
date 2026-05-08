@@ -67,29 +67,13 @@ jobs:
         run: |
           npm ci
           npm run build
-        # `npm run build` runs codegen + ncc + copies dist/gate/index.js
-        # to ../gate.js (i.e. scripts/gate.js), which is then included in
-        # scripts.zip by the next step.
+        # `npm run build` runs codegen + ncc and outputs dist/gate/index.js.
 
-      - name: Package scripts bundle
+      - name: Package ado-script bundle
         run: |
           set -euo pipefail
           cd scripts
-          # Only ship the bundled artefacts that pipelines actually
-          # download and execute (currently: gate.js). The TS source,
-          # tests, and tooling under ado-script/ are excluded — they
-          # live in the repo for development and CI, not in the release.
-          zip -r ../scripts.zip . \
-            -x "ado-script/node_modules/*" \
-            -x "ado-script/dist/*" \
-            -x "ado-script/schema/*" \
-            -x "ado-script/src/*" \
-            -x "ado-script/test/*" \
-            -x "ado-script/package*.json" \
-            -x "ado-script/tsconfig.json" \
-            -x "ado-script/vitest.config*.ts" \
-            -x "ado-script/README.md" \
-            -x "ado-script/.gitignore"
+          zip -r ../ado-script.zip ado-script/dist
 
       - name: Upload release assets
         env:
@@ -98,7 +82,7 @@ jobs:
           TAG="${{ needs.release-please.outputs.tag_name || github.event.inputs.tag_name }}"
           gh release upload "$TAG" \
             target/release/ado-aw-linux-x64 \
-            scripts.zip \
+            ado-script.zip \
             --clobber
 
   build-windows:
@@ -188,13 +172,13 @@ jobs:
           TAG="${{ needs.release-please.outputs.tag_name || github.event.inputs.tag_name }}"
           gh release download "$TAG" \
             --pattern "ado-aw-*" \
-            --pattern "scripts.zip" \
+            --pattern "ado-script.zip" \
             --repo "${{ github.repository }}"
           test -f ado-aw-linux-x64 || { echo "Missing ado-aw-linux-x64"; exit 1; }
           test -f ado-aw-windows-x64.exe || { echo "Missing ado-aw-windows-x64.exe"; exit 1; }
           test -f ado-aw-darwin-arm64 || { echo "Missing ado-aw-darwin-arm64"; exit 1; }
-          test -f scripts.zip || { echo "Missing scripts.zip"; exit 1; }
-          sha256sum ado-aw-linux-x64 ado-aw-windows-x64.exe ado-aw-darwin-arm64 scripts.zip > checksums.txt
+          test -f ado-script.zip || { echo "Missing ado-script.zip"; exit 1; }
+          sha256sum ado-aw-linux-x64 ado-aw-windows-x64.exe ado-aw-darwin-arm64 ado-script.zip > checksums.txt
 
       - name: Upload checksums
         env:

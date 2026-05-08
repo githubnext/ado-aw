@@ -1,6 +1,6 @@
 # @ado-aw/scripts
 
-Bundled TypeScript scripts shipped in `scripts.zip` alongside the ado-aw release.
+Bundled TypeScript scripts shipped in `ado-script.zip` alongside the ado-aw release.
 
 ## Bundles
 
@@ -20,7 +20,7 @@ This invokes `cargo run -- export-gate-schema` to write the JSON Schema, then ru
 
 - `src/shared/` — modules shared across all bundles (auth, ado-client, vso-logger, env-facts, policy state machine)
 - `src/gate/` — gate evaluator entry point and per-concern modules
-- `dist/` — ncc bundle output (gitignored); `npm run build` copies the gate bundle to `../gate.js` for inclusion in `scripts.zip`
+- `dist/` — ncc bundle output (gitignored); `npm run build` writes `dist/gate/index.js`, which ships in `ado-script.zip`
 
 ## See also
 

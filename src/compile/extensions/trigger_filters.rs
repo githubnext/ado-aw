@@ -18,7 +18,7 @@ use crate::compile::filter_ir::{
 use crate::compile::types::{PipelineFilters, PrFilters};
 
 /// The path where the gate evaluator is downloaded at pipeline runtime.
-const GATE_EVAL_PATH: &str = "/tmp/ado-aw-scripts/gate.js";
+const GATE_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/dist/gate/index.js";
 
 /// Base URL for ado-aw release artifacts.
 const RELEASE_BASE_URL: &str = "https://github.com/githubnext/ado-aw/releases/download";
@@ -115,9 +115,9 @@ impl CompilerExtension for TriggerFiltersExtension {
     set -eo pipefail
     mkdir -p /tmp/ado-aw-scripts
     curl -fsSL "{RELEASE_BASE_URL}/v{version}/checksums.txt" -o /tmp/ado-aw-scripts/checksums.txt
-    curl -fsSL "{RELEASE_BASE_URL}/v{version}/scripts.zip" -o /tmp/ado-aw-scripts/scripts.zip
-    cd /tmp/ado-aw-scripts && grep "scripts.zip" checksums.txt | sha256sum -c -
-    cd /tmp/ado-aw-scripts && unzip -jo scripts.zip gate-eval.py
+    curl -fsSL "{RELEASE_BASE_URL}/v{version}/ado-script.zip" -o /tmp/ado-aw-scripts/ado-script.zip
+    cd /tmp/ado-aw-scripts && grep "ado-script.zip" checksums.txt | sha256sum -c -
+    cd /tmp/ado-aw-scripts && unzip -o ado-script.zip
   displayName: "Download ado-aw scripts (v{version})"
   condition: succeeded()"#,
         ));
@@ -241,8 +241,8 @@ mod tests {
         assert!(steps[0].contains("20.x"), "should install Node 20.x");
         assert!(steps[1].contains("curl"), "second step should download");
         assert!(
-            steps[1].contains("scripts.zip"),
-            "should download scripts.zip"
+            steps[1].contains("ado-script.zip"),
+            "should download ado-script.zip"
         );
         assert!(
             steps[1].contains("checksums.txt"),
@@ -250,15 +250,15 @@ mod tests {
         );
         assert!(
             steps[1].contains("sha256sum -c -"),
-            "should verify scripts.zip checksum"
+            "should verify ado-script.zip checksum"
         );
         assert!(
-            steps[1].contains("unzip -jo scripts.zip gate-eval.py"),
-            "should extract only gate-eval.py"
+            steps[1].contains("unzip -o ado-script.zip"),
+            "should extract ado-script.zip"
         );
         assert!(steps[2].contains("prGate"), "third step should be PR gate");
         assert!(
-            steps[2].contains("node '/tmp/ado-aw-scripts/gate.js'"),
+            steps[2].contains("node '/tmp/ado-aw-scripts/ado-script/dist/gate/index.js'"),
             "gate step should reference external script"
         );
     }

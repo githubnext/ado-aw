@@ -22,7 +22,7 @@ fn find_gate_spec(value: &Value) -> Option<String> {
     match value {
         Value::Mapping(mapping) => {
             let script = string_field(mapping, "bash").or_else(|| string_field(mapping, "script"));
-            if script.is_some_and(|script| script.contains("node '/tmp/ado-aw-scripts/gate.js'")) {
+            if script.is_some_and(|script| script.contains("node '/tmp/ado-aw-scripts/ado-script/dist/gate/index.js'")) {
                 let env = value_field(mapping, "env")?.as_mapping()?;
                 return string_field(env, "GATE_SPEC").map(str::to_owned);
             }
@@ -49,7 +49,7 @@ fn run_gate(gate_js: &Path, gate_spec: &str, pr_title: &str) -> Output {
         .env("ADO_PROJECT", "p")
         .env("ADO_BUILD_ID", "1")
         .output()
-        .expect("failed to spawn node scripts/gate.js")
+        .expect("failed to spawn node scripts/ado-script/dist/gate/index.js")
 }
 
 fn assert_gate_output(gate_js: &Path, gate_spec: &str, pr_title: &str, expected: &str) {
@@ -76,7 +76,7 @@ fn assert_gate_output(gate_js: &Path, gate_spec: &str, pr_title: &str, expected:
 #[ignore]
 fn gate_js_runs_against_compiled_pipeline() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let gate_js = repo_root.join("scripts/gate.js");
+    let gate_js = repo_root.join("scripts/ado-script/dist/gate/index.js");
     if !gate_js.exists() {
         panic!("gate.js not built; run: cd scripts/ado-script && npm run build");
     }

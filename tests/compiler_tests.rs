@@ -3972,7 +3972,7 @@ fn test_pr_filter_tier1_compiled_output_is_valid_yaml() {
     assert_valid_yaml(&compiled, "pr-filter-tier1-agent.md");
 }
 
-/// Tier 1 PR filters now also use the Python evaluator via extension.
+/// Tier 1 PR filters use the bundled Node evaluator via extension.
 #[test]
 fn test_pr_filter_tier1_has_evaluator_gate() {
     let compiled = compile_fixture("pr-filter-tier1-agent.md");
@@ -3990,11 +3990,11 @@ fn test_pr_filter_tier1_has_evaluator_gate() {
         "Should include base64-encoded spec"
     );
     assert!(
-        compiled.contains("node '/tmp/ado-aw-scripts/gate.js'"),
+        compiled.contains("node '/tmp/ado-aw-scripts/ado-script/dist/gate/index.js'"),
         "Should invoke node gate evaluator"
     );
     assert!(
-        compiled.contains("scripts.zip"),
+        compiled.contains("ado-script.zip"),
         "Should download scripts bundle"
     );
     assert!(
@@ -4020,7 +4020,7 @@ fn test_pr_filter_tier2_has_extension_gate() {
         "Should create Setup job for PR filters"
     );
     assert!(
-        compiled.contains("scripts.zip"),
+        compiled.contains("ado-script.zip"),
         "Tier 2 should download scripts bundle"
     );
     assert!(
@@ -4028,7 +4028,7 @@ fn test_pr_filter_tier2_has_extension_gate() {
         "Tier 2 should include base64-encoded spec"
     );
     assert!(
-        compiled.contains("node '/tmp/ado-aw-scripts/gate.js'"),
+        compiled.contains("node '/tmp/ado-aw-scripts/ado-script/dist/gate/index.js'"),
         "Tier 2 should invoke node gate evaluator"
     );
     assert!(compiled.contains("name: prGate"), "Should have prGate step");

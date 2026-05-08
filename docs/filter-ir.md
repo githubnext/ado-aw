@@ -235,7 +235,7 @@ require heuristic analysis and could produce false positives.
 
 Produces a complete ADO pipeline step (`- bash: |`) with a **data-driven
 architecture**: bash is a thin ADO-macro shim, all filter logic lives in
-the bundled Node.js gate evaluator (`scripts/gate.js`) that reads a JSON
+the bundled Node.js gate evaluator (`scripts/ado-script/dist/gate/index.js`) that reads a JSON
 gate spec.
 
 #### Generated Step Structure
@@ -257,7 +257,7 @@ gate spec.
     export ADO_SYSTEM_ACCESS_TOKEN="$SYSTEM_ACCESSTOKEN"
 
     # 4. Run the bundled Node evaluator (downloaded by the Setup job)
-    node '/tmp/ado-aw-scripts/gate.js'
+    node '/tmp/ado-aw-scripts/ado-script/dist/gate/index.js'
   name: prGate
   displayName: "Evaluate PR filters"
   env:
@@ -304,8 +304,8 @@ acquisition logic.
 #### Bundled Gate Evaluator (`scripts/ado-script/src/gate/`)
 
 The evaluator is a TypeScript program ncc-bundled to a single
-self-contained `scripts/gate.js` (~1.1 MB) that ships as part of the
-`scripts.zip` release asset. See [`ado-script.md`](ado-script.md) for the
+self-contained `scripts/ado-script/dist/gate/index.js` (~1.1 MB) that ships as part of the
+`ado-script.zip` release asset. See [`ado-script.md`](ado-script.md) for the
 full design and codegen pipeline. It handles:
 
 1. **Bypass logic** — reads `ADO_BUILD_REASON` and exits early for non-matching
@@ -358,11 +358,11 @@ When Tier 2/3 filters are configured, the `TriggerFiltersExtension`
 
 1. **Node install step** — emits a `NodeTool@0` step pinned to Node 20.x
    LTS so `gate.js` has a runtime
-2. **Download step** — fetches `scripts.zip` from the ado-aw release
+2. **Download step** — fetches `ado-script.zip` from the ado-aw release
    artifacts, verifies its SHA256 checksum via `checksums.txt`, then
-   extracts `gate.js` to `/tmp/ado-aw-scripts/gate.js`
+   extracts `gate.js` to `/tmp/ado-aw-scripts/ado-script/dist/gate/index.js`
 3. **Gate step** — calls `compile_gate_step_external()` to generate a step
-   that runs `node /tmp/ado-aw-scripts/gate.js` (no inline heredoc)
+   that runs `node /tmp/ado-aw-scripts/ado-script/dist/gate/index.js` (no inline heredoc)
 4. **Validation** — runs `validate_pr_filters()` / `validate_pipeline_filters()`
    during compilation via the `validate()` trait method
 
@@ -409,18 +409,18 @@ The `expression` escape hatch is also ANDed if present.
 ### Scripts Distribution
 
 The `gate.js` bundle is built from the TypeScript workspace at
-`scripts/ado-script/` (see [`ado-script.md`](ado-script.md)) and copied to
-`scripts/gate.js` by the release workflow's build step. It ships inside
-the `scripts.zip` release asset, alongside any future bundled helpers
+`scripts/ado-script/` (see [`ado-script.md`](ado-script.md)) and emitted to
+`scripts/ado-script/dist/gate/index.js` by the release workflow's build step. It ships inside
+the `ado-script.zip` release asset, alongside any future bundled helpers
 (e.g. `poll.js`, `stats.js`). The download URL is deterministic based on
 the ado-aw version:
-`https://github.com/githubnext/ado-aw/releases/download/v{VERSION}/scripts.zip`
+`https://github.com/githubnext/ado-aw/releases/download/v{VERSION}/ado-script.zip`
 
 A `checksums.txt` file is also published at the same URL base and used to
-verify the SHA256 integrity of `scripts.zip` before extraction.
+verify the SHA256 integrity of `ado-script.zip` before extraction.
 
-The Setup-job download step pulls the zip, extracts `gate.js`, and
-discards the rest. New per-use-site bundles follow the same pattern
+The Setup-job download step pulls the zip, extracts `ado-script/dist/gate/index.js`,
+and discards the rest. New per-use-site bundles follow the same pattern
 (per-bundle ncc entry + per-bundle download step).
 
 ## Adding New Filter Types
@@ -439,4 +439,3 @@ step-by-step guide. In summary:
    `lower_pipeline_filters`)
 6. Add validation rules if the new filter can conflict with existing ones
 7. Write tests: lowering, validation, spec serialization, and evaluator
-
