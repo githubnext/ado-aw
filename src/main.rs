@@ -244,7 +244,13 @@ async fn run_execute(
         );
     }
 
-    let front_matter = parsed.front_matter;
+    let mut front_matter = parsed.front_matter;
+
+    // Resolve compact repos: syntax into the legacy fields for execution
+    let (resolved_repos, resolved_checkout) = compile::resolve_repos(&front_matter)
+        .with_context(|| "Failed to resolve repository configuration")?;
+    front_matter.repositories = resolved_repos;
+    front_matter.checkout = resolved_checkout;
 
     println!("Loaded tool configs from: {}", source.display());
 
