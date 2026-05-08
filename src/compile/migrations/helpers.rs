@@ -50,6 +50,11 @@ pub fn insert_no_overwrite(
 ///
 /// Returns `Ok(true)` when the rename happened (regardless of policy
 /// branch), `Ok(false)` when `old` was absent (no-op).
+///
+/// The mapping is left **unchanged** on the error path. Callers can
+/// rely on this invariant when chaining migrations: a failed rename
+/// won't leave the mapping in a half-mutated state for the next call
+/// to inspect.
 #[allow(dead_code)]
 pub fn rename_key(
     m: &mut Mapping,
@@ -57,26 +62,33 @@ pub fn rename_key(
     new: &str,
     policy: ConflictPolicy,
 ) -> Result<bool> {
-    let Some(old_value) = take_key(m, old) else {
+    let old_key = Value::String(old.to_string());
+    let new_key = Value::String(new.to_string());
+
+    if !m.contains_key(&old_key) {
         return Ok(false);
-    };
-    let new_present = m.contains_key(Value::String(new.to_string()));
+    }
+    let new_present = m.contains_key(&new_key);
+
     match (new_present, policy) {
-        (false, _) => {
-            m.insert(Value::String(new.to_string()), old_value);
-            Ok(true)
-        }
         (true, ConflictPolicy::Error) => {
+            // Surface the conflict without mutating the mapping.
             bail!(
                 "refusing to rename `{}` -> `{}`: destination key already exists \
-                 (set both old and new keys at once is ambiguous)",
+                 (setting both old and new keys at once is ambiguous)",
                 old,
                 new
             );
         }
-        (true, ConflictPolicy::PreferNew) => Ok(true),
-        (true, ConflictPolicy::PreferOld) => {
-            m.insert(Value::String(new.to_string()), old_value);
+        (false, _) | (true, ConflictPolicy::PreferOld) => {
+            // Move old -> new, replacing any existing new value.
+            let old_value = m.remove(&old_key).expect("old key checked above");
+            m.insert(new_key, old_value);
+            Ok(true)
+        }
+        (true, ConflictPolicy::PreferNew) => {
+            // Drop old, keep new.
+            m.remove(&old_key);
             Ok(true)
         }
     }
@@ -167,6 +179,18 @@ mod tests {
             format!("{}", err).contains("destination key already exists"),
             "unexpected error message: {}",
             err
+        );
+        // Both keys must remain intact — the helper guarantees the
+        // mapping is unchanged on the error path.
+        assert_eq!(
+            m.get(Value::String("old".into())),
+            Some(&Value::String("v_old".into())),
+            "old key must be preserved on error"
+        );
+        assert_eq!(
+            m.get(Value::String("new".into())),
+            Some(&Value::String("v_new".into())),
+            "new key must be preserved on error"
         );
     }
 

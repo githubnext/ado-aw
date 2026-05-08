@@ -209,7 +209,9 @@ pub(crate) fn parse_markdown_detailed_with_registry(
 /// - `leading_whitespace` (typically empty)
 /// - `---\n`
 /// - the migrated YAML mapping (`serde_yaml::to_string` always ends
-///   with `\n`)
+///   with `\n`); when present, `schema-version` is hoisted to the top
+///   of the mapping so the serialized output matches the canonical
+///   front-matter template documented in `docs/front-matter.md`
 /// - `---`
 /// - the original body region byte-for-byte (`body_raw`)
 pub fn reconstruct_source(
@@ -217,12 +219,34 @@ pub fn reconstruct_source(
     front_matter_mapping: &serde_yaml::Mapping,
     body_raw: &str,
 ) -> Result<String> {
-    let yaml_serialized = serde_yaml::to_string(front_matter_mapping)
+    let yaml_serialized = serde_yaml::to_string(&hoist_schema_version(front_matter_mapping))
         .context("Failed to serialize migrated front matter")?;
     Ok(format!(
         "{}---\n{}---{}",
         leading_whitespace, yaml_serialized, body_raw
     ))
+}
+
+/// Return a mapping with `schema-version` (if present) moved to the
+/// front. Other keys retain their relative order. Returns the input
+/// unchanged when `schema-version` is absent or already first.
+fn hoist_schema_version(input: &serde_yaml::Mapping) -> serde_yaml::Mapping {
+    let key = serde_yaml::Value::String(super::migrations::SCHEMA_VERSION_KEY.to_string());
+    let Some(version) = input.get(&key) else {
+        return input.clone();
+    };
+    // If schema-version is already the first key, no rebuild needed.
+    if input.iter().next().map(|(k, _)| k) == Some(&key) {
+        return input.clone();
+    }
+    let mut hoisted = serde_yaml::Mapping::with_capacity(input.len());
+    hoisted.insert(key.clone(), version.clone());
+    for (k, v) in input {
+        if k != &key {
+            hoisted.insert(k.clone(), v.clone());
+        }
+    }
+    hoisted
 }
 
 fn yaml_value_kind(v: &serde_yaml::Value) -> &'static str {
@@ -2633,6 +2657,32 @@ mod tests {
             &reconstructed[..20.min(reconstructed.len())]
         );
         assert!(reconstructed.ends_with("---\nbody\n"));
+    }
+
+    #[test]
+    fn reconstruct_source_hoists_schema_version_to_top() {
+        let mut mapping = serde_yaml::Mapping::new();
+        mapping.insert(
+            serde_yaml::Value::String("name".into()),
+            serde_yaml::Value::String("x".into()),
+        );
+        mapping.insert(
+            serde_yaml::Value::String("description".into()),
+            serde_yaml::Value::String("y".into()),
+        );
+        mapping.insert(
+            serde_yaml::Value::String("schema-version".into()),
+            serde_yaml::Value::Number(serde_yaml::Number::from(2u64)),
+        );
+        let out = reconstruct_source("", &mapping, "\nbody\n").unwrap();
+        let lines: Vec<&str> = out.lines().take(3).collect();
+        assert_eq!(lines[0], "---");
+        assert_eq!(
+            lines[1], "schema-version: 2",
+            "schema-version should appear first in the front-matter block, got: {:?}",
+            lines
+        );
+        assert_eq!(lines[2], "name: x");
     }
 
     #[test]

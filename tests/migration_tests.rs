@@ -7,7 +7,7 @@
 //!
 //! The migration registry shipped with this binary is intentionally
 //! empty (`CURRENT_SCHEMA_VERSION == 1`); the rewrite path is exercised
-//! by the white-box tests in `src/compile/migrations/integration_test.rs`,
+//! by the white-box tests in `src/compile/migration_integration_test.rs`,
 //! which can inject a stub registry. These tests cover the user-facing
 //! CLI behaviors that don't require migration registration:
 //!

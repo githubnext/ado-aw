@@ -593,6 +593,11 @@ pub struct FrontMatter {
     /// to 1. The compiler bumps this in place when migrations apply
     /// during compilation; users typically don't write it by hand.
     /// See [`crate::compile::migrations`] for the migration framework.
+    ///
+    /// Field is intentionally read-only on the typed view: it exists
+    /// solely so `deny_unknown_fields` accepts a stamped source. The
+    /// authoritative version lives in the untyped front-matter mapping
+    /// and is set by the migration runner before typed deserialization.
     #[serde(default = "default_schema_version", rename = "schema-version")]
     #[allow(dead_code)]
     pub schema_version: u32,
