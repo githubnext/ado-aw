@@ -229,8 +229,14 @@ async fn run_execute(
         .await
         .with_context(|| format!("Failed to read source file: {}", source.display()))?;
 
-    let (front_matter, _) = compile::parse_markdown(&content)
+    let (mut front_matter, _) = compile::parse_markdown(&content)
         .with_context(|| format!("Failed to parse source file: {}", source.display()))?;
+
+    // Resolve compact repos: syntax into the legacy fields for execution
+    let (resolved_repos, resolved_checkout) = compile::resolve_repos(&front_matter)
+        .with_context(|| "Failed to resolve repository configuration")?;
+    front_matter.repositories = resolved_repos;
+    front_matter.checkout = resolved_checkout;
 
     println!("Loaded tool configs from: {}", source.display());
 

@@ -7,6 +7,7 @@
 //! - **1ES**: Integration with 1ES Pipeline Templates for SDL compliance
 
 mod common;
+pub(crate) use common::resolve_repos;
 pub mod extensions;
 pub(crate) mod filter_ir;
 mod gitattributes;
@@ -95,8 +96,13 @@ async fn compile_pipeline_inner(
     debug!("Target: {:?}", front_matter.target);
     debug!("Engine: {} (model: {})", front_matter.engine.engine_id(), front_matter.engine.model().unwrap_or("default"));
     debug!("Schedule: {:?}", front_matter.schedule());
-    debug!("Repositories: {}", front_matter.repositories.len());
     debug!("MCP servers configured: {}", front_matter.mcp_servers.len());
+
+    // Resolve repos: new compact syntax or legacy repositories: + checkout:
+    let (resolved_repos, resolved_checkout) = common::resolve_repos(&front_matter)?;
+    front_matter.repositories = resolved_repos;
+    front_matter.checkout = resolved_checkout;
+    debug!("Repositories: {}", front_matter.repositories.len());
 
     // Validate checkout list against repositories
     common::validate_checkout_list(&front_matter.repositories, &front_matter.checkout)?;
@@ -353,6 +359,11 @@ pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
 
     use crate::sanitize::SanitizeConfig;
     front_matter.sanitize_config_fields();
+
+    // Resolve repos (compact or legacy)
+    let (resolved_repos, resolved_checkout) = common::resolve_repos(&front_matter)?;
+    front_matter.repositories = resolved_repos;
+    front_matter.checkout = resolved_checkout;
 
     common::validate_checkout_list(&front_matter.repositories, &front_matter.checkout)?;
 
