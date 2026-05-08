@@ -299,8 +299,7 @@ impl Executor for CreateGitTagResult {
                 .context("BUILD_REPOSITORY_NAME not set and repository is 'self'")?
                 .to_string()
         } else {
-            ctx.allowed_repositories
-                .get(repo_alias)
+            crate::safeoutputs::lookup_allowed_repository(repo_alias, &ctx.allowed_repositories)
                 .cloned()
                 .context(format!(
                     "Repository alias '{}' not found in allowed repositories",

@@ -184,29 +184,86 @@ pub(crate) async fn resolve_wiki_branch(
     }
 }
 
+/// Look up an ADO repo name in `allowed_repositories`, accepting either:
+/// 1. an exact alias key (e.g. `repo-sdk-ftdidevicecontrol`),
+/// 2. an exact value match against the configured `name` (e.g. `4x4/sdk-FtdiDeviceControl`), or
+/// 3. a case-insensitive match against the trailing repo-name part of the value
+///    (e.g. `sdk-FtdiDeviceControl` for `4x4/sdk-FtdiDeviceControl`).
+///
+/// Azure DevOps repository names are case-insensitive, so the trailing-name fallback
+/// matches case-insensitively. Returns the resolved ADO repo name (the map value) on
+/// success, or `None` if no entry matches.
+pub(crate) fn lookup_allowed_repository<'a>(
+    input: &str,
+    allowed_repositories: &'a std::collections::HashMap<String, String>,
+) -> Option<&'a String> {
+    // 1. Exact alias key match
+    if let Some(name) = allowed_repositories.get(input) {
+        return Some(name);
+    }
+    // 2. Exact value match (full "project/repo" or just "repo")
+    if let Some((_, name)) = allowed_repositories
+        .iter()
+        .find(|(_, v)| v.as_str() == input)
+    {
+        return Some(name);
+    }
+    // 3. Trailing repo-name part match (case-insensitive)
+    allowed_repositories.iter().find_map(|(_, v)| {
+        let trailing = v.rsplit('/').next().unwrap_or(v.as_str());
+        if trailing.eq_ignore_ascii_case(input) {
+            Some(v)
+        } else {
+            None
+        }
+    })
+}
+
+/// Return `true` if `input` refers to the pipeline's own repository — either the
+/// literal string `"self"` or a case-insensitive match against the trailing
+/// repo-name part of `ctx.repository_name`.
+fn input_refers_to_self(input: &str, ctx: &ExecutionContext) -> bool {
+    if input == "self" || input.is_empty() {
+        return true;
+    }
+    if let Some(name) = ctx.repository_name.as_deref() {
+        if name.eq_ignore_ascii_case(input) {
+            return true;
+        }
+        let trailing = name.rsplit('/').next().unwrap_or(name);
+        if trailing.eq_ignore_ascii_case(input) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Resolve a repository alias to its ADO repo name.
 ///
-/// "self" (or None) → `ctx.repository_name`, otherwise look up in `ctx.allowed_repositories`.
+/// Accepts `"self"` (or `None`) → `ctx.repository_name`, an alias key from
+/// `ctx.allowed_repositories`, an exact value match, or a case-insensitive match
+/// against the trailing repo-name part of either `ctx.repository_name` or any
+/// configured allowed repository. See [`lookup_allowed_repository`] for the
+/// matching rules used against `ctx.allowed_repositories`.
 pub(crate) fn resolve_repo_name(
     repo_alias: Option<&str>,
     ctx: &ExecutionContext,
 ) -> Result<String, ExecutionResult> {
     let alias = repo_alias.unwrap_or("self");
-    if alias == "self" {
-        ctx.repository_name
+    if input_refers_to_self(alias, ctx) {
+        return ctx
+            .repository_name
             .clone()
-            .ok_or_else(|| ExecutionResult::failure("BUILD_REPOSITORY_NAME not set"))
-    } else {
-        ctx.allowed_repositories
-            .get(alias)
-            .cloned()
-            .ok_or_else(|| {
-                ExecutionResult::failure(format!(
-                    "Repository '{}' is not in the allowed repository list",
-                    alias
-                ))
-            })
+            .ok_or_else(|| ExecutionResult::failure("BUILD_REPOSITORY_NAME not set"));
     }
+    lookup_allowed_repository(alias, &ctx.allowed_repositories)
+        .cloned()
+        .ok_or_else(|| {
+            ExecutionResult::failure(format!(
+                "Repository '{}' is not in the allowed repository list",
+                alias
+            ))
+        })
 }
 
 /// Match a `value` against a `pattern` where `*` matches zero or more of **any**
@@ -661,5 +718,81 @@ mod tests {
         assert!(name_matches_pattern("agent-report-123", "agent-*"));
         assert!(name_matches_pattern("agent-report", "agent-*"));
         assert!(!name_matches_pattern("bot-report", "agent-*"));
+    }
+
+    // ─── lookup_allowed_repository ──────────────────────────────────────
+
+    fn sample_allowed() -> std::collections::HashMap<String, String> {
+        let mut m = std::collections::HashMap::new();
+        m.insert(
+            "repo-sdk-ftdidevicecontrol".to_string(),
+            "4x4/sdk-FtdiDeviceControl".to_string(),
+        );
+        m.insert(
+            "repo-sdk-devicecommunication".to_string(),
+            "4x4/sdk-DeviceCommunication".to_string(),
+        );
+        m
+    }
+
+    #[test]
+    fn test_lookup_allowed_repository_by_alias() {
+        let m = sample_allowed();
+        assert_eq!(
+            lookup_allowed_repository("repo-sdk-ftdidevicecontrol", &m),
+            Some(&"4x4/sdk-FtdiDeviceControl".to_string())
+        );
+    }
+
+    #[test]
+    fn test_lookup_allowed_repository_by_full_value() {
+        let m = sample_allowed();
+        assert_eq!(
+            lookup_allowed_repository("4x4/sdk-FtdiDeviceControl", &m),
+            Some(&"4x4/sdk-FtdiDeviceControl".to_string())
+        );
+    }
+
+    #[test]
+    fn test_lookup_allowed_repository_by_trailing_name() {
+        let m = sample_allowed();
+        // Exact case
+        assert_eq!(
+            lookup_allowed_repository("sdk-FtdiDeviceControl", &m),
+            Some(&"4x4/sdk-FtdiDeviceControl".to_string())
+        );
+        // Case-insensitive (ADO repo names are case-insensitive)
+        assert_eq!(
+            lookup_allowed_repository("sdk-ftdidevicecontrol", &m),
+            Some(&"4x4/sdk-FtdiDeviceControl".to_string())
+        );
+        assert_eq!(
+            lookup_allowed_repository("SDK-DEVICECOMMUNICATION", &m),
+            Some(&"4x4/sdk-DeviceCommunication".to_string())
+        );
+    }
+
+    #[test]
+    fn test_lookup_allowed_repository_no_match() {
+        let m = sample_allowed();
+        assert_eq!(lookup_allowed_repository("does-not-exist", &m), None);
+        // Partial name should not match
+        assert_eq!(lookup_allowed_repository("sdk", &m), None);
+    }
+
+    #[test]
+    fn test_lookup_allowed_repository_no_slash_value() {
+        let mut m = std::collections::HashMap::new();
+        m.insert("alias".to_string(), "PlainName".to_string());
+        // Full value
+        assert_eq!(
+            lookup_allowed_repository("PlainName", &m),
+            Some(&"PlainName".to_string())
+        );
+        // Case-insensitive trailing match
+        assert_eq!(
+            lookup_allowed_repository("plainname", &m),
+            Some(&"PlainName".to_string())
+        );
     }
 }

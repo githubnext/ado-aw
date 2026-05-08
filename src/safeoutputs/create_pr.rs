@@ -590,18 +590,31 @@ impl Executor for CreatePrResult {
             "Validating repository '{}' against allowed list",
             self.repository
         );
-        let repo_id = if self.repository == "self" {
-            // "self" uses the pipeline's own repository
-            debug!("Using 'self' repository");
+        let repo_id = if self.repository == "self"
+            || ctx
+                .repository_name
+                .as_deref()
+                .is_some_and(|n| {
+                    n.eq_ignore_ascii_case(&self.repository)
+                        || n.rsplit('/')
+                            .next()
+                            .unwrap_or(n)
+                            .eq_ignore_ascii_case(&self.repository)
+                })
+        {
+            // "self" or a name match against the pipeline's own repository
+            debug!("Using 'self' repository (matched '{}')", self.repository);
             ctx.repository_id
                 .as_ref()
                 .or(ctx.repository_name.as_ref())
                 .context("Repository ID not configured for 'self'")?
                 .clone()
-        } else if let Some(ado_repo_name) = ctx.allowed_repositories.get(&self.repository) {
-            // Alias found in allowed list - use the mapped ADO repo name
+        } else if let Some(ado_repo_name) =
+            crate::safeoutputs::lookup_allowed_repository(&self.repository, &ctx.allowed_repositories)
+        {
+            // Matched against allowed list (by alias, full value, or trailing name)
             debug!(
-                "Repository alias '{}' maps to '{}'",
+                "Repository '{}' resolved to '{}'",
                 self.repository, ado_repo_name
             );
             ado_repo_name.clone()

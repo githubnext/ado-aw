@@ -183,7 +183,7 @@ When `workspace: root` and multiple repositories are checked out, agents can cre
 {"title": "Fix in main repo", "description": "...", "repository": "self"}
 {"title": "Fix in other repo", "description": "...", "repository": "other-repo"}
 ```
-The `repository` value must be "self" or an alias from the `checkout:` list in the front matter.
+The `repository` value must be `"self"`, an alias from the `checkout:` list in the front matter, the full Azure DevOps repository name (e.g. `project/repo`), or the bare repository name (case-insensitive, e.g. `sdk-FtdiDeviceControl` for an entry whose ADO name is `4x4/sdk-FtdiDeviceControl`).
 
 ### noop
 Reports that no action was needed. Use this to provide visibility when analysis is complete but no changes or outputs are required.
