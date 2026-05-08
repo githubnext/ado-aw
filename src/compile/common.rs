@@ -42,17 +42,23 @@ pub async fn atomic_write(path: &Path, contents: &str) -> Result<()> {
 fn atomic_write_blocking(path: &Path, contents: &str) -> Result<()> {
     use std::io::Write;
 
+    // Determine the directory to create the tempfile in. We MUST use
+    // a path on the same filesystem as the destination so that the
+    // final `persist` rename is atomic (otherwise it fails with
+    // EXDEV on Linux when /tmp is a separate tmpfs mount).
+    //
+    // - `path.parent() == Some(non-empty)` -> use that parent.
+    // - `path.parent() == Some("")` (bare filename like "agent.md")
+    //   or `None` -> use the current directory ("."), which is the
+    //   same filesystem as where the file will land.
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
-    let mut tmp = match parent {
-        Some(dir) => tempfile::NamedTempFile::new_in(dir).with_context(|| {
-            format!(
-                "failed to create temporary file in {}",
-                dir.display()
-            )
-        })?,
-        None => tempfile::NamedTempFile::new()
-            .context("failed to create temporary file in current directory")?,
-    };
+    let parent_dir: &Path = parent.unwrap_or_else(|| Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(parent_dir).with_context(|| {
+        format!(
+            "failed to create temporary file in {}",
+            parent_dir.display()
+        )
+    })?;
 
     tmp.write_all(contents.as_bytes())
         .with_context(|| format!("failed to write temporary file for {}", path.display()))?;
@@ -233,6 +239,16 @@ pub fn reconstruct_source(
 ) -> Result<String> {
     let yaml_serialized = serde_yaml::to_string(front_matter_mapping)
         .context("Failed to serialize codemod-rewritten front matter")?;
+    // Defensive: the format string assumes the serialized YAML ends
+    // with `\n` so the closing `---` lands on a new line. This is
+    // serde_yaml's documented behavior for non-empty mappings, but
+    // hard-fail loudly if a future version breaks the assumption
+    // rather than silently producing malformed YAML.
+    anyhow::ensure!(
+        yaml_serialized.ends_with('\n'),
+        "serde_yaml::to_string produced output without trailing newline; \
+         cannot reconstruct front-matter block safely"
+    );
     Ok(format!(
         "{}---\n{}---{}",
         leading_whitespace, yaml_serialized, body_raw
@@ -2571,6 +2587,31 @@ mod tests {
         );
         assert_eq!(tokio::fs::read_to_string(&link).await.unwrap(), "via-link");
         assert_eq!(tokio::fs::read_to_string(&target).await.unwrap(), "target");
+    }
+
+    #[test]
+    fn atomic_write_parent_derivation_handles_bare_filename() {
+        // Regression test for the EXDEV bug: a bare filename (no
+        // directory component) used to fall through to
+        // `NamedTempFile::new()` which creates the tempfile in the
+        // system temp dir, breaking persist() across filesystem
+        // boundaries (e.g. tmpfs `/tmp` on Linux). Verify the
+        // derivation logic now picks ".". Pure-logic test — no
+        // filesystem I/O so it's parallel-safe.
+        let bare = Path::new("agent.md");
+        let parent = bare.parent().filter(|p| !p.as_os_str().is_empty());
+        let parent_dir: &Path = parent.unwrap_or_else(|| Path::new("."));
+        assert_eq!(parent_dir, Path::new("."));
+
+        let with_dir = Path::new("subdir/agent.md");
+        let parent = with_dir.parent().filter(|p| !p.as_os_str().is_empty());
+        let parent_dir: &Path = parent.unwrap_or_else(|| Path::new("."));
+        assert_eq!(parent_dir, Path::new("subdir"));
+
+        let absolute = Path::new("/tmp/agent.md");
+        let parent = absolute.parent().filter(|p| !p.as_os_str().is_empty());
+        let parent_dir: &Path = parent.unwrap_or_else(|| Path::new("."));
+        assert_eq!(parent_dir, Path::new("/tmp"));
     }
 
     // ─── parse_markdown_detailed ──────────────────────────────────────────────
