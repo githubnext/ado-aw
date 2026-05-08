@@ -16,6 +16,9 @@ safe-outputs:
     max: 1
     allowed-files:
       - AGENTS.md
+      - README.md
+      - docs/**
+      - prompts/**
 ---
 
 # Documentation Freshness Check
