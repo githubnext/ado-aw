@@ -661,10 +661,12 @@ fn parse_shorthand(s: &str) -> Result<(String, String)> {
 
 /// Derive the alias from a full `org/repo` name (last path segment).
 fn derive_alias(name: &str) -> Result<String> {
-    let alias = name
+    // Trim trailing slashes to handle "org/repo/" gracefully
+    let trimmed = name.trim_end_matches('/');
+    let alias = trimmed
         .rsplit('/')
         .next()
-        .unwrap_or(name)
+        .unwrap_or(trimmed)
         .to_string();
     if alias.is_empty() {
         anyhow::bail!(
@@ -6170,6 +6172,22 @@ mod tests {
         let items = vec![ReposItem::Shorthand("org/repo".to_string())];
         let err = lower_repos(&items).unwrap_err();
         assert!(err.to_string().contains("reserved"), "{err}");
+
+        // Reserved via explicit alias in shorthand form
+        let items = vec![ReposItem::Shorthand("self=org/some-repo".to_string())];
+        let err = lower_repos(&items).unwrap_err();
+        assert!(err.to_string().contains("reserved"), "{err}");
+
+        // Reserved via explicit alias in object form
+        let items = vec![ReposItem::Full(RepoEntry {
+            name: "org/fine-repo".to_string(),
+            alias: Some("root".to_string()),
+            repo_type: "git".to_string(),
+            repo_ref: "refs/heads/main".to_string(),
+            checkout: true,
+        })];
+        let err = lower_repos(&items).unwrap_err();
+        assert!(err.to_string().contains("reserved"), "{err}");
     }
 
     #[test]
@@ -6212,10 +6230,22 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_shorthand_empty_name_rejected() {
+        let err = parse_shorthand("alias=").unwrap_err();
+        assert!(err.to_string().contains("empty name"), "{err}");
+    }
+
+    #[test]
     fn test_derive_alias_basic() {
         assert_eq!(derive_alias("org/my-repo").unwrap(), "my-repo");
         assert_eq!(derive_alias("my-repo").unwrap(), "my-repo");
         assert_eq!(derive_alias("a/b/c").unwrap(), "c");
+    }
+
+    #[test]
+    fn test_derive_alias_trailing_slash() {
+        // Trailing slash should be trimmed gracefully
+        assert_eq!(derive_alias("org/repo/").unwrap(), "repo");
     }
 
     #[test]
