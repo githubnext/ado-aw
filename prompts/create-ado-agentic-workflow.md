@@ -236,6 +236,13 @@ safe-outputs:
     auto-complete: true
     delete-source-branch: true
     squash-merge: true
+    title-prefix: "[Bot] "  # Optional — prepended to every PR title
+    if-no-changes: warn      # "warn" (default), "error", or "ignore" when the patch is empty
+    max-files: 100           # Reject patches touching more than this many files (default: 100)
+    protected-files: blocked # "blocked" (default) prevents changes to pipeline/CI files; "allowed" permits all
+    excluded-files:          # Glob patterns for files to exclude from the patch
+      - "*.lock"
+    allowed-labels: []       # Restrict which labels the agent can apply (empty = any)
     reviewers:
       - "lead@example.com"
     labels:

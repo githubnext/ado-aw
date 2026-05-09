@@ -173,6 +173,13 @@ Note: The source branch name is auto-generated from a sanitized version of the P
 - `auto-complete` - Set auto-complete on the PR (default: false). Requires `draft: false` to take effect.
 - `delete-source-branch` - Delete source branch after merge (default: true)
 - `squash-merge` - Squash commits on merge (default: true)
+- `title-prefix` - Optional string prepended to every PR title (e.g., `"[Bot] "`). Useful for making agent-created PRs visually distinct.
+- `if-no-changes` - Behavior when the agent's patch is empty: `"warn"` (succeed with a warning, default), `"error"` (fail the pipeline step), or `"ignore"` (succeed silently).
+- `max-files` - Maximum number of files allowed in a single PR patch (default: 100). PRs with more files are rejected.
+- `protected-files` - Whether manifest and CI/CD files can be modified: `"blocked"` (default, prevents changes to pipeline YAML, lock files, etc.) or `"allowed"` (permit all files).
+- `excluded-files` - Glob patterns for files to exclude from the patch (e.g., `["*.lock", "dist/**"]`).
+- `allowed-labels` - Allowlist of label names the agent is permitted to apply. If empty (default), any labels are accepted.
+- `fallback-record-branch` - Whether to record the pushed branch name in failure data when PR creation fails (default: true). When enabled, the failure response includes the branch and target so operators can manually create the PR.
 - `reviewers` - List of reviewer emails to add
 - `labels` - List of labels to apply
 - `work-items` - List of work item IDs to link
@@ -223,6 +230,9 @@ Adds a new comment thread to a pull request.
 - `content` - Comment text in markdown format (required, at least 10 characters)
 - `repository` - Repository alias (default: "self")
 - `file_path` *(optional)* - File path for an inline comment anchored to a specific file
+- `line` *(optional)* - Line number for an inline comment. Requires `file_path`.
+- `start_line` *(optional)* - Starting line for a multi-line inline comment range. Requires `file_path` and `line`, and must be strictly less than `line`.
+- `status` *(optional)* - Initial thread status: `"active"` (default), `"fixed"`, `"wont-fix"`, `"closed"`, or `"by-design"`. Subject to the `allowed-statuses` allowlist.
 
 **Configuration options (front matter):**
 ```yaml
@@ -230,6 +240,7 @@ safe-outputs:
   add-pr-comment:
     comment-prefix: "[Agent Review] "  # Optional — prepended to all comments
     allowed-repositories: []           # Optional — restrict which repos can be commented on
+    allowed-statuses: []               # Optional — restrict which thread statuses the agent can set (empty = any)
     max: 1                             # Maximum per run (default: 1)
     include-stats: true                # Append agent stats to comment (default: true)
 ```
