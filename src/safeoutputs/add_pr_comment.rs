@@ -7,9 +7,10 @@ use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
 use ado_aw_derive::SanitizeConfig;
-use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::validate::reject_pipeline_injection;
 use anyhow::{Context, ensure};
 
 /// Parameters for adding a comment thread on a pull request
@@ -89,6 +90,7 @@ impl Validate for AddPrCommentParams {
         if let Some(fp) = &self.file_path {
             validate_file_path(fp)?;
         }
+        reject_pipeline_injection(&self.repository, "repository")?;
         Ok(())
     }
 }
@@ -112,8 +114,8 @@ tool_result! {
 impl SanitizeContent for AddPrCommentResult {
     fn sanitize_content_fields(&mut self) {
         self.content = sanitize_text(&self.content);
-        // Strip control characters from structural fields for defense-in-depth
-        self.repository = self.repository.chars().filter(|c| !c.is_control()).collect();
+        self.repository = sanitize_config(&self.repository);
+        // Strip control characters from remaining structural fields for defense-in-depth
         self.status = self.status.chars().filter(|c| !c.is_control()).collect();
         self.file_path = self.file_path.as_ref().map(|fp| {
             fp.chars().filter(|c| !c.is_control()).collect()
@@ -464,6 +466,21 @@ mod tests {
     }
 
     #[test]
+    fn test_validation_rejects_repository_pipeline_command() {
+        let params = AddPrCommentParams {
+            pull_request_id: 42,
+            content: "This is a valid comment body text.".to_string(),
+            repository: "##vso[task.setvariable variable=x]y".to_string(),
+            file_path: None,
+            start_line: None,
+            line: None,
+            status: "active".to_string(),
+        };
+        let result: Result<AddPrCommentResult, _> = params.try_into();
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_validation_rejects_line_without_file_path() {
         let params = AddPrCommentParams {
             pull_request_id: 42,
@@ -630,6 +647,35 @@ allowed-statuses:
         assert!(
             matched,
             "uppercase 'Active' should match config value 'active'"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_content_neutralizes_repository_pipeline_command() {
+        let params = AddPrCommentParams {
+            pull_request_id: 42,
+            content: "This is a valid comment body text.".to_string(),
+            repository: "##vso[task.setvariable variable=x]y".to_string(),
+            file_path: None,
+            start_line: None,
+            line: None,
+            status: "active".to_string(),
+        };
+        let mut result = AddPrCommentResult {
+            name: "add-pr-comment".to_string(),
+            pull_request_id: params.pull_request_id,
+            content: params.content,
+            repository: params.repository,
+            file_path: params.file_path,
+            start_line: params.start_line,
+            line: params.line,
+            status: params.status,
+        };
+        result.sanitize_content_fields();
+        assert!(
+            result.repository.contains("`##vso[`"),
+            "repository pipeline command should be neutralized with backticks: {}",
+            result.repository
         );
     }
 }

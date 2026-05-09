@@ -11,6 +11,7 @@ use super::PATH_SEGMENT;
 use crate::sanitize::{SanitizeContent, sanitize_config};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::validate::reject_pipeline_injection;
 use anyhow::{Context, ensure};
 
 /// All valid thread status strings (lowercase, agent-facing)
@@ -70,6 +71,9 @@ impl Validate for ResolvePrThreadParams {
             self.status,
             VALID_STATUSES.join(", ")
         );
+        if let Some(repository) = &self.repository {
+            reject_pipeline_injection(repository, "repository")?;
+        }
         Ok(())
     }
 }
@@ -359,6 +363,18 @@ mod tests {
             thread_id: 7,
             status: "invalid-status".to_string(),
             repository: Some("self".to_string()),
+        };
+        let result: Result<ResolvePrThreadResult, _> = params.try_into();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validation_rejects_repository_pipeline_command() {
+        let params = ResolvePrThreadParams {
+            pull_request_id: 42,
+            thread_id: 7,
+            status: "fixed".to_string(),
+            repository: Some("##vso[task.setvariable variable=x]y".to_string()),
         };
         let result: Result<ResolvePrThreadResult, _> = params.try_into();
         assert!(result.is_err());

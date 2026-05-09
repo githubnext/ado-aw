@@ -7,9 +7,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
-use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::validate::reject_pipeline_injection;
 use anyhow::{Context, ensure};
 
 /// Parameters for replying to an existing review comment thread on a pull request
@@ -42,6 +43,9 @@ impl Validate for ReplyToPrCommentParams {
             self.content.len() >= 10,
             "content must be at least 10 characters"
         );
+        if let Some(repository) = &self.repository {
+            reject_pipeline_injection(repository, "repository")?;
+        }
         Ok(())
     }
 }
@@ -62,6 +66,7 @@ tool_result! {
 impl SanitizeContent for ReplyToPrCommentResult {
     fn sanitize_content_fields(&mut self) {
         self.content = sanitize_text(&self.content);
+        self.repository = self.repository.as_deref().map(sanitize_config);
     }
 }
 
@@ -319,6 +324,18 @@ mod tests {
     }
 
     #[test]
+    fn test_validation_rejects_repository_pipeline_command() {
+        let params = ReplyToPrCommentParams {
+            pull_request_id: 42,
+            thread_id: 7,
+            content: "This is a valid reply body text.".to_string(),
+            repository: Some("##vso[task.setvariable variable=x]y".to_string()),
+        };
+        let result: Result<ReplyToPrCommentResult, _> = params.try_into();
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_result_serializes_correctly() {
         let params = ReplyToPrCommentParams {
             pull_request_id: 42,
@@ -352,5 +369,23 @@ allowed-repositories:
         let config: ReplyToPrCommentConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.comment_prefix, Some("[Agent] ".to_string()));
         assert_eq!(config.allowed_repositories, vec!["self", "other-repo"]);
+    }
+
+    #[test]
+    fn test_sanitize_content_neutralizes_repository_pipeline_command() {
+        let mut result = ReplyToPrCommentResult {
+            name: "reply-to-pr-review-comment".to_string(),
+            pull_request_id: 42,
+            thread_id: 7,
+            content: "This is a valid reply body text.".to_string(),
+            repository: Some("##vso[task.setvariable variable=x]y".to_string()),
+        };
+        result.sanitize_content_fields();
+        let repository = result.repository.as_deref().unwrap_or("");
+        assert!(
+            repository.contains("`##vso[`"),
+            "repository pipeline command should be neutralized with backticks: {}",
+            repository
+        );
     }
 }

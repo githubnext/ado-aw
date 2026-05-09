@@ -10,6 +10,7 @@ use super::{PATH_SEGMENT, resolve_repo_name};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::validate::reject_pipeline_injection;
 use anyhow::{Context, ensure};
 
 /// Valid event values for submit-pr-review
@@ -57,6 +58,9 @@ impl Validate for SubmitPrReviewParams {
             self.pull_request_id > 0,
             "pull_request_id must be a positive integer"
         );
+        if let Some(repository) = &self.repository {
+            reject_pipeline_injection(repository, "repository")?;
+        }
         ensure!(
             VALID_EVENTS.contains(&self.event.as_str()),
             "event must be one of: {}",
@@ -509,6 +513,18 @@ mod tests {
         };
         let result: Result<SubmitPrReviewResult, _> = params.try_into();
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validation_rejects_repository_pipeline_command() {
+        let params = SubmitPrReviewParams {
+            pull_request_id: 1,
+            event: "approve".to_string(),
+            body: None,
+            repository: Some("##vso[task.setvariable variable=x]y".to_string()),
+        };
+        let result: Result<SubmitPrReviewResult, _> = params.try_into();
+        assert!(result.is_err());
     }
 
     #[test]
