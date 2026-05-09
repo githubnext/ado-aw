@@ -63,7 +63,8 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   │   └── tests.rs  # Extension integration tests
 │   │   ├── codemods/     # Front-matter codemods (one file per transformation)
 │   │   │   ├── mod.rs    # Codemod struct, CODEMODS registry, runner
-│   │   │   └── helpers.rs # take_key, insert_no_overwrite, rename_key, ConflictPolicy
+│   │   │   ├── helpers.rs # take_key, insert_no_overwrite, rename_key, ConflictPolicy
+│   │   │   └── 0001_repos_unified.rs # Codemod: legacy repositories:+checkout: → repos:
 │   │   ├── codemod_integration_test.rs # White-box rewrite-path tests (stub registry injection)
 │   │   └── types.rs      # Front matter grammar and types
 │   ├── init.rs           # Repository initialization for AI-first authoring

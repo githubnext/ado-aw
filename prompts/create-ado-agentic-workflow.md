@@ -132,28 +132,24 @@ Controls where the agent's working directory is set.
 | `root` (default) | `$(Build.SourcesDirectory)` | Only checking out `self` |
 | `repo` | `$(Build.SourcesDirectory)/$(Build.Repository.Name)` | Multiple repos checked out |
 
-Only include `workspace:` if non-default. Warn the user if they set `workspace: repo` but have no additional repos in `checkout:`.
+Only include `workspace:` if non-default. Warn the user if they set `workspace: repo` but have no additional repos declared in `repos:`.
 
 ### Step 5 — Repositories & Checkout
 
-Declare extra repositories the pipeline can access, then select which ones the agent actually checks out.
+Declare extra repositories the pipeline can access, then select which ones the agent actually checks out. Use the compact `repos:` field.
 
 ```yaml
-repositories:
-  - repository: my-other-repo        # alias
-    type: git
-    name: my-org/my-other-repo       # org/repo
-  - repository: templates
-    type: git
-    name: my-org/pipeline-templates
-
-checkout:
-  - my-other-repo    # only check this one out; "templates" stays as a resource only
+repos:
+  - my-other-repo=my-org/my-other-repo   # shorthand with alias: checked out by default
+  - name: my-org/pipeline-templates       # object form: resource only, not checked out
+    alias: templates
+    checkout: false
 ```
 
-- `repositories:` — pipeline-level resources (for templates, pipeline triggers, etc.)
-- `checkout:` — which aliases the agent actually checks out alongside `self`
-- Omit `checkout:` entirely to check out only `self`
+- `repos:` — combined resource declaration and checkout configuration
+- Shorthand `org/repo` or `alias=org/repo` — checked out by default
+- Object form with `checkout: false` — available as a pipeline resource only (not cloned)
+- Omit `repos:` entirely to check out only `self`
 
 ### Step 6 — Pool
 
@@ -629,12 +625,8 @@ safe-outputs:
 Agent checks out and modifies a secondary repository.
 
 ```yaml
-repositories:
-  - repository: shared-config
-    type: git
-    name: my-org/shared-config
-checkout:
-  - shared-config
+repos:
+  - shared-config=my-org/shared-config
 workspace: repo
 permissions:
   read: my-read-sc
