@@ -115,7 +115,7 @@ impl SanitizeContent for AddPrCommentResult {
     fn sanitize_content_fields(&mut self) {
         self.content = sanitize_text(&self.content);
         self.repository = sanitize_config(&self.repository);
-        // Strip control characters from structural fields for defense-in-depth
+        // Strip control characters from remaining structural fields for defense-in-depth
         self.status = self.status.chars().filter(|c| !c.is_control()).collect();
         self.file_path = self.file_path.as_ref().map(|fp| {
             fp.chars().filter(|c| !c.is_control()).collect()
