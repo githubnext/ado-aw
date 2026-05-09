@@ -7,9 +7,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{PATH_SEGMENT, validate_git_ref_name};
-use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::validate::reject_pipeline_injection;
 use anyhow::{Context, ensure};
 
 /// Parameters for creating a git tag (agent-provided)
@@ -75,6 +76,9 @@ impl Validate for CreateGitTagParams {
                 "message must be at least 5 characters"
             );
         }
+        if let Some(repository) = &self.repository {
+            reject_pipeline_injection(repository, "repository")?;
+        }
 
         Ok(())
     }
@@ -106,9 +110,7 @@ impl SanitizeContent for CreateGitTagResult {
         self.commit = self.commit.as_ref().map(|c| {
             c.chars().filter(|ch| !ch.is_control()).collect()
         });
-        self.repository = self.repository.as_ref().map(|r| {
-            r.chars().filter(|ch| !ch.is_control()).collect()
-        });
+        self.repository = self.repository.as_deref().map(sanitize_config);
     }
 }
 
@@ -478,6 +480,18 @@ mod tests {
     }
 
     #[test]
+    fn test_validation_rejects_repository_pipeline_command() {
+        let params = CreateGitTagParams {
+            tag_name: "v1.0.0".to_string(),
+            commit: None,
+            message: Some("Valid message".to_string()),
+            repository: Some("##vso[task.setvariable variable=x]y".to_string()),
+        };
+        let result: Result<CreateGitTagResult, _> = params.try_into();
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_result_serializes_correctly() {
         let params = CreateGitTagParams {
             tag_name: "v2.0.0".to_string(),
@@ -516,5 +530,23 @@ message-prefix: "[release] "
         );
         assert_eq!(config.allowed_repositories, vec!["self", "my-lib"]);
         assert_eq!(config.message_prefix.as_deref(), Some("[release] "));
+    }
+
+    #[test]
+    fn test_sanitize_content_neutralizes_repository_pipeline_command() {
+        let mut result = CreateGitTagResult {
+            name: "create-git-tag".to_string(),
+            tag_name: "v1.0.0".to_string(),
+            commit: None,
+            message: Some("Valid message".to_string()),
+            repository: Some("##vso[task.setvariable variable=x]y".to_string()),
+        };
+        result.sanitize_content_fields();
+        let repository = result.repository.as_deref().unwrap_or("");
+        assert!(
+            repository.contains("`##vso[`"),
+            "repository pipeline command should be neutralized with backticks: {}",
+            repository
+        );
     }
 }

@@ -10,6 +10,7 @@ use super::{PATH_SEGMENT, validate_git_ref_name};
 use crate::sanitize::{SanitizeContent, sanitize_config};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::validate::reject_pipeline_injection;
 use anyhow::{Context, ensure};
 
 /// Parameters for creating a branch
@@ -71,6 +72,9 @@ impl Validate for CreateBranchParams {
             );
             validate_git_ref_name(branch, "source_branch")?;
         }
+        if let Some(repository) = &self.repository {
+            reject_pipeline_injection(repository, "repository")?;
+        }
 
         Ok(())
     }
@@ -92,6 +96,7 @@ tool_result! {
 impl SanitizeContent for CreateBranchResult {
     fn sanitize_content_fields(&mut self) {
         self.branch_name = sanitize_config(&self.branch_name);
+        self.repository = self.repository.as_deref().map(sanitize_config);
     }
 }
 
@@ -460,6 +465,18 @@ mod tests {
     }
 
     #[test]
+    fn test_validation_rejects_repository_pipeline_command() {
+        let params = CreateBranchParams {
+            branch_name: "feature/new-work".to_string(),
+            source_branch: Some("main".to_string()),
+            source_commit: None,
+            repository: Some("##vso[task.setvariable variable=x]y".to_string()),
+        };
+        let result: Result<CreateBranchResult, _> = params.try_into();
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_validation_rejects_branch_starting_with_dash() {
         let params = CreateBranchParams {
             branch_name: "-bad".to_string(),
@@ -545,5 +562,23 @@ allowed-source-branches:
         assert_eq!(config.branch_pattern, Some("^agent/.*".to_string()));
         assert_eq!(config.allowed_repositories, vec!["self", "other-repo"]);
         assert_eq!(config.allowed_source_branches, vec!["main", "develop"]);
+    }
+
+    #[test]
+    fn test_sanitize_content_neutralizes_repository_pipeline_command() {
+        let mut result = CreateBranchResult {
+            name: "create-branch".to_string(),
+            branch_name: "feature/new-work".to_string(),
+            source_branch: Some("main".to_string()),
+            source_commit: None,
+            repository: Some("##vso[task.setvariable variable=x]y".to_string()),
+        };
+        result.sanitize_content_fields();
+        let repository = result.repository.as_deref().unwrap_or("");
+        assert!(
+            repository.contains("`##vso[`"),
+            "repository pipeline command should be neutralized with backticks: {}",
+            repository
+        );
     }
 }
