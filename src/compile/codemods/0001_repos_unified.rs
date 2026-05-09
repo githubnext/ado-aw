@@ -101,6 +101,16 @@ fn apply_codemod(fm: &mut Mapping, _ctx: &CodemodContext) -> Result<bool> {
         ),
     };
 
+    // Trivially-empty sources: an empty `repositories:` (and either no
+    // `checkout:` or an empty one) carries no semantic content. We
+    // already removed the vacuous keys from the mapping above, but
+    // report this as a no-op so the caller doesn't surface a
+    // "deprecated shapes" warning or rewrite the file just to drop
+    // empty stubs.
+    if repositories_seq.is_empty() && checkout_aliases.is_empty() {
+        return Ok(false);
+    }
+
     // Track which checkout aliases we've matched so we can flag
     // dangling references (alias listed in checkout but absent from
     // repositories).
@@ -373,7 +383,11 @@ mod tests {
 
     #[test]
     fn empty_repositories_sequence_does_not_emit_repos_key() {
-        let after = run("name: x\nrepositories: []\n");
+        // A trivially-empty `repositories: []` carries no semantic
+        // content — the codemod cleans up the stub key but reports
+        // changed=false so the caller doesn't surface a rewrite
+        // warning.
+        let after = run_noop("name: x\nrepositories: []\n");
         assert!(!after.contains_key(Value::String("repos".into())));
     }
 

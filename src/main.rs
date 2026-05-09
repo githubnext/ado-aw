@@ -246,6 +246,12 @@ async fn run_execute(
 
     let mut front_matter = parsed.front_matter;
 
+    // Sanitize before lowering repos, mirroring compile_pipeline_inner
+    // and check_pipeline so unsanitized fields never flow into the
+    // execution context.
+    use crate::sanitize::SanitizeConfig;
+    front_matter.sanitize_config_fields();
+
     // Resolve compact repos: syntax into the legacy fields for execution
     let (resolved_repos, resolved_checkout) = compile::resolve_repos(&front_matter)
         .with_context(|| "Failed to resolve repository configuration")?;
