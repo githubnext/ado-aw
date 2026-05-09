@@ -1,0 +1,386 @@
+# Front-matter Codemods
+
+_Part of the [ado-aw documentation](../AGENTS.md)._
+
+The `ado-aw` compiler keeps user front matter forward-compatible
+through **codemods**: small, detection-based transformations that
+rewrite deprecated front-matter shapes to the current shape during
+`compile`. The model is borrowed from
+[gh-aw's codemod registry](https://github.com/github/gh-aw/blob/main/pkg/cli/fix_codemods.go).
+
+This page is the reference for both users (what codemods mean for me)
+and contributors (how to add one).
+
+## How it works
+
+### No version field on user files
+
+Codemods don't stamp anything onto user front matter. There is no
+`schema-version` field. Each codemod inspects the mapping, decides
+whether the input contains the deprecated shape it knows about, and
+either rewrites it or returns "no-op". The whole registry runs on
+every compile; codemods that don't match are essentially free.
+
+### The compile flow
+
+1. `ado-aw compile` reads the source `.md` and parses the front
+   matter as an **untyped** `serde_yaml::Mapping`. This step never
+   trips on removed/renamed fields.
+2. The runner walks the registered codemod registry in order. Each
+   codemod returns `Ok(true)` if it modified the mapping, `Ok(false)`
+   if it didn't, or `Err` to abort the whole compile.
+3. The compiler runs all the usual validation and codegen against
+   the rewritten, typed `FrontMatter`.
+4. **Only on a fully successful compile** AND **only if at least one
+   codemod fired**, the source `.md` is atomically rewritten and a
+   warning prints to stderr. A failed compile leaves the source
+   untouched.
+5. The `.lock.yml` is written atomically last.
+
+### What gets preserved on rewrite
+
+- **Body markdown** is preserved byte-for-byte (everything after
+  the closing `---`).
+- **Leading whitespace** before the opening `---` is preserved
+  byte-for-byte (BOM-strippers and editor blank lines).
+- **Front-matter key order** is preserved for keys the codemod
+  doesn't touch (`serde_yaml`'s mapping is insertion-ordered).
+  Renamed keys, however, move to the **end** of the front-matter
+  block: `Mapping::insert` appends new keys, so when a codemod
+  removes `old-key` and inserts `new-key`, the new key lands at
+  the bottom regardless of where the old one was. The compile
+  warning calls this out so users aren't surprised.
+- **Front-matter comments** are NOT preserved. `serde_yaml`
+  round-trip drops them. The warning emitted on rewrite calls this
+  out so it isn't a surprise. If you have important context in a
+  front-matter comment, move it into the markdown body before
+  running compile.
+- **Quote and scalar styles** in YAML may be normalized. This is
+  cosmetic.
+
+### Atomicity and lost-update protection
+
+The rewrite uses `tempfile + rename` for atomicity (no torn writes).
+Before the rename, the runner re-reads the source and compares its
+SHA-256 to the snapshot taken at parse time. If the file changed
+between parse and rewrite, the runner aborts with a clear error
+("source file ... changed during compilation; refusing to apply
+codemods") rather than clobbering whoever wrote the file.
+
+### `check` command behavior
+
+`ado-aw check` exits non-zero when codemods would fire — there is no
+opt-in flag and no warning-only mode. Rationale: compiled pipelines
+download the **same** `ado-aw` version that produced them
+(`src/data/base.yml`, `src/data/1es-base.yml`), so the in-pipeline
+integrity check is internally consistent by construction. The only
+time `check` sees pending codemods is when a developer runs a newer
+`ado-aw` locally against an older source — exactly when we want to
+fail loudly. The fix is `ado-aw compile`, which applies the codemods
+in place.
+
+### `execute` command behavior
+
+The Stage 3 executor runs codemods in memory only. It never rewrites
+the source (the executor's working tree is not the source-of-truth
+tree). When at least one codemod would fire, it logs a warning and
+continues.
+
+## Adding a codemod
+
+You need a codemod whenever you introduce a breaking change to the
+front-matter grammar:
+
+- Renaming a field
+- Removing a field
+- Changing a field's type or shape
+- Adding a required field that didn't exist before
+- Changing the meaning of an existing field
+
+Non-breaking changes (adding an optional field, accepting a new
+variant) do **not** need a codemod.
+
+### File layout
+
+Codemods live in `src/compile/codemods/`:
+
+```
+src/compile/codemods/
+├── mod.rs       # Framework + CODEMODS registry
+├── helpers.rs   # take_key, insert_no_overwrite, rename_key, ConflictPolicy
+├── 0001_engine_id_split.rs
+├── 0002_permissions_field.rs
+└── 0003_safeoutput_renames.rs
+```
+
+The filename prefix is a zero-padded sequence number (`<NNNN>`). It
+sorts files naturally in directory listings; the **registry order**
+in `mod.rs` is what determines runtime order, not the filename.
+
+### Anatomy of a codemod
+
+```rust
+// src/compile/codemods/0001_engine_id_split.rs
+
+use anyhow::{bail, Result};
+use serde_yaml::{Mapping, Value};
+
+use super::{Codemod, CodemodContext};
+
+pub static CODEMOD: Codemod = Codemod {
+    id: "engine_id_split",
+    summary: "engine: <model> -> engine: { id: copilot, model: <model> }",
+    introduced_in: "0.27.0",
+    apply: apply_codemod,
+};
+
+fn apply_codemod(fm: &mut Mapping, _ctx: &CodemodContext) -> Result<bool> {
+    // ... your detection-based transformation ...
+    // Return Ok(true) if the mapping was modified, Ok(false) if the
+    // shape didn't match (no-op), or Err for a hard failure.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rewrites_legacy_shape() { /* before / after fixture */ }
+
+    #[test]
+    fn already_current_shape_is_noop() { /* defensive */ }
+
+    #[test]
+    fn missing_field_is_noop() { /* defensive */ }
+
+    #[test]
+    fn unexpected_shape_is_rejected() { /* hard error */ }
+}
+```
+
+### Registry append
+
+Two edits in `src/compile/codemods/mod.rs`:
+
+```rust
+mod m0001_engine_id_split;  // <-- add module declaration
+
+pub static CODEMODS: &[&'static Codemod] = &[
+    &m0001_engine_id_split::CODEMOD,  // <-- append at the end
+];
+```
+
+Tests in `mod.rs` enforce that codemod ids are unique and that the
+file count matches the registry length. A malformed registry fails
+fast at runtime via `with_context`.
+
+### Author contract (invariants)
+
+Every codemod must satisfy these properties. We enforce them via
+review + per-codemod tests:
+
+1. **Idempotent.** Running twice produces the same final state as
+   running once. The runner re-runs the entire registry every
+   compile — codemods that no longer apply must be no-ops.
+2. **Detection-based.** Returns `Ok(false)` and leaves the mapping
+   untouched when the input does not contain the targeted shape.
+   Never modifies a mapping that's already current.
+3. **Conflict-aware.** When both old and new shapes coexist in the
+   same source, error with a "manual migration required" message
+   rather than guess. Use `helpers::rename_key` with
+   `ConflictPolicy::Error` (the default) to get this for free.
+4. **Pure.** No I/O, no env, no time/randomness. (Convention; not
+   type-enforced.)
+5. **Mapping-only.** Cannot inspect the markdown body, the file
+   path, the lock file, or git state.
+6. **Order-aware.** If codemod B depends on shapes produced by
+   codemod A, A must precede B in the registry. Document the
+   ordering requirement in B's doc comment.
+7. **Receives unsanitized input.** The compiler runs sanitization
+   (`##vso[` neutralization, control-character stripping, length
+   limits) on the typed `FrontMatter` *after* codemods run, but the
+   raw `Mapping` you receive is whatever the user wrote — including
+   any pipeline-injection attempts, control characters, or
+   over-length strings. Codemods should therefore treat values as
+   opaque (move them around, wrap them in objects, etc.) rather
+   than parse or interpolate them. If a codemod must inspect a
+   value, treat it defensively.
+
+### Use the helpers
+
+Codemods should prefer `helpers::*` over raw `Mapping` manipulation:
+
+- `take_key(map, "old")` — remove and return.
+- `insert_no_overwrite(map, "new", value)` — error on conflict.
+- `rename_key(map, "old", "new", ConflictPolicy::Error)` — default
+  policy is **error**, never silent overwrite. The helper is
+  transactional: on the error path the mapping is unchanged.
+
+`rename_key` returns `Result<bool>` directly, so it composes with a
+codemod's return value:
+
+```rust
+fn apply_codemod(fm: &mut Mapping, _ctx: &CodemodContext) -> Result<bool> {
+    rename_key(fm, "old-key", "new-key", ConflictPolicy::Error)
+}
+```
+
+### What if my change can't be expressed as a Mapping rewrite?
+
+The codemod `apply` function receives only the front-matter mapping.
+It cannot inspect the markdown body, the file path, the lock file,
+or git state. If your change requires that information, do not
+write a codemod that guesses. Instead, return an `Err` with an
+actionable "manual migration required: <instructions>" message so
+the user knows exactly what to fix.
+
+## Worked example: `engine_id_split`
+
+This is the codemod that would have caught the `0.17.0` breaking
+change (`engine: <model-string>` → `engine: { id: copilot, model: <model> }`).
+Drop-in template for your own codemod.
+
+```rust
+// src/compile/codemods/0001_engine_id_split.rs
+
+//! engine: <model-string> -> engine: { id: copilot, model: <model> }
+//!
+//! Before 0.17.0 the `engine` field was a model name (e.g.
+//! `engine: claude-opus-4.5`). The grammar changed to use engine
+//! identifiers (`engine: copilot`), with the model nested in an
+//! object form (`engine: { id: copilot, model: <name> }`).
+
+use anyhow::{bail, Result};
+use serde_yaml::{Mapping, Value};
+
+use super::{Codemod, CodemodContext};
+
+pub static CODEMOD: Codemod = Codemod {
+    id: "engine_id_split",
+    summary: "engine: <model> -> engine: { id: copilot, model: <model> }",
+    introduced_in: "0.27.0",
+    apply: apply_codemod,
+};
+
+/// Engine identifiers that are valid as the simple-form string. When
+/// `engine` is a string equal to one of these, the source is already
+/// using the current grammar and we leave it alone.
+const KNOWN_ENGINE_IDS: &[&str] = &["copilot"];
+
+fn apply_codemod(fm: &mut Mapping, _ctx: &CodemodContext) -> Result<bool> {
+    let key = Value::String("engine".to_string());
+
+    let Some(engine) = fm.get(&key) else {
+        // No engine field at all — relies on default (copilot) in
+        // both old and new grammars. Nothing to do.
+        return Ok(false);
+    };
+
+    match engine {
+        // Already the object form: nothing to migrate.
+        Value::Mapping(_) => Ok(false),
+
+        // Simple-form string with a known engine identifier
+        // (e.g. `copilot`): already current. No-op.
+        Value::String(s) if KNOWN_ENGINE_IDS.contains(&s.as_str()) => Ok(false),
+
+        // Simple-form string that is NOT a known engine identifier:
+        // it's a *model name* from the old grammar. Wrap in object
+        // form.
+        Value::String(s) => {
+            let model = s.clone();
+            let mut object = Mapping::new();
+            object.insert(
+                Value::String("id".to_string()),
+                Value::String("copilot".to_string()),
+            );
+            object.insert(
+                Value::String("model".to_string()),
+                Value::String(model),
+            );
+            fm.insert(key, Value::Mapping(object));
+            Ok(true)
+        }
+
+        // Unexpected shape (number, bool, sequence, …). Refuse rather
+        // than guess — the user needs to fix this by hand.
+        other => bail!(
+            "engine field has unexpected shape (expected string or mapping, \
+             got {}); manual migration required",
+            describe(other)
+        ),
+    }
+}
+
+fn describe(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Sequence(_) => "sequence",
+        Value::Mapping(_) => "mapping",
+        Value::Tagged(_) => "tagged",
+    }
+}
+```
+
+### What this example illustrates
+
+1. **Detection-first.** Each match arm decides whether the input
+   matches the codemod's target shape. Three of the four arms
+   return `Ok(false)` — those are the cases where the source is
+   already current.
+2. **Idempotent by construction.** Once the mapping is in object
+   form, the first match arm fires and returns `Ok(false)`. The
+   codemod can run on every compile without harm.
+3. **Conflict-aware.** The `Value::Mapping(_)` arm is the
+   "already-migrated" case. We never overwrite an existing object
+   form. The `bail!` on unexpected shapes is the manual-migration
+   escape hatch.
+4. **Two-line registry append:**
+
+   ```rust
+   mod m0001_engine_id_split;
+
+   pub static CODEMODS: &[&'static Codemod] = &[
+       &m0001_engine_id_split::CODEMOD,
+   ];
+   ```
+
+   That's it. The registry-uniqueness and filename-prefix tests
+   keep passing.
+
+## Tests
+
+The codemod framework is covered by three layers of tests:
+
+- **Unit tests** in `src/compile/codemods/{mod.rs,helpers.rs}`
+  cover registry health, helper edge cases, and (for shipped
+  codemods) individual `apply` functions.
+- **White-box integration tests** in
+  `src/compile/codemod_integration_test.rs` exercise the rewrite
+  path end-to-end (parse → codemods → compile → atomic source
+  rewrite → lock-file write) using a stub codemod registry
+  injected via the crate-private `compile_pipeline_with_registry`
+  and `parse_markdown_detailed_with_registry` hooks. They live
+  inside `src/` because the production registry is empty and
+  integration tests in `tests/` cannot link against crate
+  internals.
+- **Black-box CLI tests** in `tests/codemod_tests.rs` spawn the
+  compiled `ado-aw` binary as a subprocess and assert on the
+  user-visible behavior of `compile` and `check`.
+
+When you add a real codemod, ship the per-codemod before/after
+fixtures alongside it in the codemod's own file
+(`src/compile/codemods/<NNNN>_<id>.rs`).
+
+## See also
+
+- [`docs/front-matter.md`](front-matter.md) — the full
+  front-matter grammar.
+- [`docs/extending.md`](extending.md) — broader guidance for
+  adding features to the compiler, including the requirement to
+  add a codemod alongside any breaking front-matter change.
+- [gh-aw's `pkg/cli/fix_codemods.go`](https://github.com/github/gh-aw/blob/main/pkg/cli/fix_codemods.go) —
+  the upstream codemod model.

@@ -12,27 +12,268 @@ use crate::allowed_hosts::{CORE_ALLOWED_HOSTS, mcp_required_hosts};
 use crate::ecosystem_domains::{get_ecosystem_domains, is_ecosystem_identifier, is_known_ecosystem};
 use crate::validate;
 
-/// Parse the markdown file and extract front matter and body
-pub fn parse_markdown(content: &str) -> Result<(FrontMatter, String)> {
-    let content = content.trim();
+/// Atomically write `contents` to `path`.
+///
+/// Uses [`tempfile::NamedTempFile`] in the destination's parent
+/// directory so the final `persist` is a same-filesystem rename. This
+/// guarantees readers either see the old file or the new file in full —
+/// never a half-written state.
+///
+/// Behavior:
+///
+/// - Creates the tempfile in `path.parent()` (falls back to `.` when
+///   the parent is empty, matching `tokio::fs::write` semantics).
+/// - On Unix, preserves the existing file's mode if the target exists.
+///   Otherwise the tempfile keeps its default mode (0o600 from
+///   `tempfile`'s implementation).
+/// - When the destination is a symlink, the rename replaces the
+///   symlink with a regular file (matches `tokio::fs::write`; the
+///   symlink target is *not* followed).
+pub async fn atomic_write(path: &Path, contents: &str) -> Result<()> {
+    let path = path.to_path_buf();
+    let owned_contents = contents.to_string();
+    // tempfile is sync; do the whole thing on a blocking task so we
+    // don't block the async runtime on large writes / fsync.
+    tokio::task::spawn_blocking(move || atomic_write_blocking(&path, &owned_contents))
+        .await
+        .context("atomic_write task panicked")?
+}
 
-    if !content.starts_with("---") {
+fn atomic_write_blocking(path: &Path, contents: &str) -> Result<()> {
+    use std::io::Write;
+
+    // Determine the directory to create the tempfile in. We MUST use
+    // a path on the same filesystem as the destination so that the
+    // final `persist` rename is atomic (otherwise it fails with
+    // EXDEV on Linux when /tmp is a separate tmpfs mount).
+    //
+    // - `path.parent() == Some(non-empty)` -> use that parent.
+    // - `path.parent() == Some("")` (bare filename like "agent.md")
+    //   or `None` -> use the current directory ("."), which is the
+    //   same filesystem as where the file will land.
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+    let parent_dir: &Path = parent.unwrap_or_else(|| Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(parent_dir).with_context(|| {
+        format!(
+            "failed to create temporary file in {}",
+            parent_dir.display()
+        )
+    })?;
+
+    tmp.write_all(contents.as_bytes())
+        .with_context(|| format!("failed to write temporary file for {}", path.display()))?;
+    tmp.as_file()
+        .sync_all()
+        .with_context(|| format!("failed to fsync temporary file for {}", path.display()))?;
+
+    // On Unix, copy the existing file's mode onto the tempfile so
+    // permissions are preserved across the atomic rename.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mode = meta.permissions().mode();
+            std::fs::set_permissions(
+                tmp.path(),
+                std::fs::Permissions::from_mode(mode),
+            )
+            .with_context(|| {
+                format!(
+                    "failed to copy permissions from {} to temp file",
+                    path.display()
+                )
+            })?;
+        }
+    }
+
+    tmp.persist(path)
+        .with_context(|| format!("failed to atomically rename into {}", path.display()))?;
+    Ok(())
+}
+
+/// Detailed parse result. Holds enough information to rewrite the
+/// source on disk byte-faithfully when codemods apply.
+///
+/// See [`parse_markdown_detailed`].
+#[derive(Debug)]
+pub struct ParsedSource {
+    /// Typed front matter, after codemods have been applied to the
+    /// underlying mapping.
+    pub front_matter: FrontMatter,
+    /// Body for compilation, with leading/trailing whitespace trimmed
+    /// (matches the legacy `parse_markdown` second tuple element).
+    pub markdown_body: String,
+    /// Codemod outcome.
+    pub codemods: super::codemods::CodemodReport,
+    /// The codemod-rewritten front-matter mapping. Used to
+    /// reconstruct the source for the on-disk rewrite.
+    pub front_matter_mapping: serde_yaml::Mapping,
+    /// Whitespace bytes that appeared before the opening `---` fence,
+    /// preserved verbatim so that source rewrite is byte-faithful.
+    /// Empty in the typical case where the file starts with `---`.
+    pub leading_whitespace: String,
+    /// The body region exactly as it appeared after the closing `---`,
+    /// byte-for-byte (no trim). Includes any leading newline.
+    pub body_raw: String,
+    /// SHA-256 of the original source bytes (lost-update protection).
+    pub source_sha256: [u8; 32],
+}
+
+/// Parse the markdown file, run the codemod registry on the front
+/// matter in memory, and return both the typed `FrontMatter` and the
+/// raw fragments needed to rewrite the source on disk byte-faithfully.
+///
+/// Use this from callers that may rewrite the source (the `compile`
+/// command). Callers that only want the typed view of the front matter
+/// should use the backward-compatible [`parse_markdown`] wrapper.
+pub fn parse_markdown_detailed(content: &str) -> Result<ParsedSource> {
+    parse_markdown_detailed_with_registry(content, super::codemods::CODEMODS)
+}
+
+/// Variant of [`parse_markdown_detailed`] that allows injecting an
+/// explicit codemod registry. Used by tests; production callers go
+/// through the no-arg version that reads the global
+/// [`super::codemods::CODEMODS`].
+pub(crate) fn parse_markdown_detailed_with_registry(
+    content: &str,
+    registry: &[&'static super::codemods::Codemod],
+) -> Result<ParsedSource> {
+    use sha2::Digest;
+
+    // Lost-update protection: hash the raw input as it was provided, so
+    // a rewrite path can later re-read the file and compare.
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(content.as_bytes());
+    let source_sha256: [u8; 32] = hasher.finalize().into();
+
+    // Allow leading whitespace before the opening fence (preserves
+    // historical leniency). We compute a byte offset into `content` so
+    // that `body_raw` extraction is purely byte-faithful, and we keep
+    // the whitespace prefix around so that source rewrites preserve
+    // anything the user (or their editor) put before the opening
+    // fence.
+    let leading_ws = content.bytes().take_while(|b| b.is_ascii_whitespace()).count();
+    let leading_whitespace = content[..leading_ws].to_string();
+    let after_lead = &content[leading_ws..];
+    if !after_lead.starts_with("---") {
         anyhow::bail!("Markdown file must start with YAML front matter (---)");
     }
 
-    // Find the closing ---
-    let rest = &content[3..];
-    let end_idx = rest
+    let after_open = &after_lead[3..];
+    let end_idx = after_open
         .find("\n---")
         .context("Could not find closing --- for front matter")?;
 
-    let yaml_content = &rest[..end_idx];
-    let markdown_body = rest[end_idx + 4..].trim();
+    let yaml_str = &after_open[..end_idx];
+    let body_raw_slice = &after_open[end_idx + 4..];
+    let body_raw = body_raw_slice.to_string();
+    let markdown_body = body_raw_slice.trim().to_string();
 
-    let front_matter: FrontMatter =
-        serde_yaml::from_str(yaml_content).context("Failed to parse YAML front matter")?;
+    // Stage 1: parse to untyped Value, reject non-mapping at top level.
+    let parsed_value: serde_yaml::Value =
+        serde_yaml::from_str(yaml_str).context("Failed to parse YAML front matter")?;
+    let mut mapping = match parsed_value {
+        serde_yaml::Value::Mapping(m) => m,
+        other => {
+            anyhow::bail!(
+                "YAML front matter must be a mapping/object, got {}",
+                yaml_value_kind(&other)
+            );
+        }
+    };
 
-    Ok((front_matter, markdown_body.to_string()))
+    // Stage 2: run the codemod registry against the untyped mapping.
+    let report = super::codemods::apply_codemods_with(&mut mapping, registry)
+        .context("Failed to apply codemods")?;
+
+    // Stage 3: deserialize the (possibly modified) mapping into the
+    // typed FrontMatter. Errors here mean either the user wrote an
+    // unsupported shape or a codemod produced invalid output. The
+    // error context differs by case so the user can tell which.
+    let front_matter: FrontMatter = serde_yaml::from_value(
+        serde_yaml::Value::Mapping(mapping.clone()),
+    )
+    .with_context(|| {
+        if report.changed() {
+            let ids = report.applied_ids().join(", ");
+            format!(
+                "Failed to parse YAML front matter after applying codemods ({}); \
+                 a codemod likely produced an invalid shape",
+                ids
+            )
+        } else {
+            "Failed to parse YAML front matter".to_string()
+        }
+    })?;
+
+    Ok(ParsedSource {
+        front_matter,
+        markdown_body,
+        codemods: report,
+        front_matter_mapping: mapping,
+        leading_whitespace,
+        body_raw,
+        source_sha256,
+    })
+}
+
+/// Reconstruct full source content from codemod outputs.
+///
+/// Takes the individual fragments rather than the full
+/// [`ParsedSource`] so callers that have already destructured the
+/// parse don't have to round-trip a fresh `front_matter` through
+/// serde just to satisfy the typed field.
+///
+/// Output shape:
+/// - `leading_whitespace` (typically empty)
+/// - `---\n`
+/// - the codemod-rewritten YAML mapping (`serde_yaml::to_string`
+///   always ends with `\n`); the mapping's existing key order is
+///   preserved so user-authored keys keep their original positions
+/// - `---`
+/// - the original body region byte-for-byte (`body_raw`)
+pub fn reconstruct_source(
+    leading_whitespace: &str,
+    front_matter_mapping: &serde_yaml::Mapping,
+    body_raw: &str,
+) -> Result<String> {
+    let yaml_serialized = serde_yaml::to_string(front_matter_mapping)
+        .context("Failed to serialize codemod-rewritten front matter")?;
+    // Defensive: the format string assumes the serialized YAML ends
+    // with `\n` so the closing `---` lands on a new line. This is
+    // serde_yaml's documented behavior for non-empty mappings, but
+    // hard-fail loudly if a future version breaks the assumption
+    // rather than silently producing malformed YAML.
+    anyhow::ensure!(
+        yaml_serialized.ends_with('\n'),
+        "serde_yaml::to_string produced output without trailing newline; \
+         cannot reconstruct front-matter block safely"
+    );
+    Ok(format!(
+        "{}---\n{}---{}",
+        leading_whitespace, yaml_serialized, body_raw
+    ))
+}
+
+fn yaml_value_kind(v: &serde_yaml::Value) -> &'static str {
+    match v {
+        serde_yaml::Value::Null => "null",
+        serde_yaml::Value::Bool(_) => "bool",
+        serde_yaml::Value::Number(_) => "number",
+        serde_yaml::Value::String(_) => "string",
+        serde_yaml::Value::Sequence(_) => "sequence",
+        serde_yaml::Value::Mapping(_) => "mapping",
+        serde_yaml::Value::Tagged(_) => "tagged",
+    }
+}
+
+/// Backward-compatible parse: returns the typed front matter and the
+/// trimmed body. New callers that may rewrite the source on disk
+/// should use [`parse_markdown_detailed`] instead.
+#[allow(dead_code)]
+pub fn parse_markdown(content: &str) -> Result<(FrontMatter, String)> {
+    let parsed = parse_markdown_detailed(content)?;
+    Ok((parsed.front_matter, parsed.markdown_body))
 }
 
 /// Replace a placeholder in the template, preserving the indentation for multi-line content.
@@ -2361,6 +2602,214 @@ mod tests {
     fn minimal_front_matter() -> FrontMatter {
         let (fm, _) = parse_markdown("---\nname: test-agent\ndescription: test\n---\n").unwrap();
         fm
+    }
+
+    // ─── atomic_write ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn atomic_write_creates_new_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        atomic_write(&path, "hello\n").await.unwrap();
+        let read = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(read, "hello\n");
+    }
+
+    #[tokio::test]
+    async fn atomic_write_overwrites_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        tokio::fs::write(&path, "old contents").await.unwrap();
+        atomic_write(&path, "new contents").await.unwrap();
+        let read = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(read, "new contents");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn atomic_write_preserves_unix_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        tokio::fs::write(&path, "old").await.unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        atomic_write(&path, "new").await.unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o640, "expected mode 0o640, got {:o}", mode & 0o777);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn atomic_write_replaces_symlink_with_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        let link = dir.path().join("link.txt");
+        tokio::fs::write(&target, "target").await.unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        atomic_write(&link, "via-link").await.unwrap();
+
+        // Link is now a regular file; target is unchanged.
+        let link_meta = std::fs::symlink_metadata(&link).unwrap();
+        assert!(
+            !link_meta.file_type().is_symlink(),
+            "symlink should have been replaced"
+        );
+        assert_eq!(tokio::fs::read_to_string(&link).await.unwrap(), "via-link");
+        assert_eq!(tokio::fs::read_to_string(&target).await.unwrap(), "target");
+    }
+
+    #[test]
+    fn atomic_write_parent_derivation_handles_bare_filename() {
+        // Regression test for the EXDEV bug: a bare filename (no
+        // directory component) used to fall through to
+        // `NamedTempFile::new()` which creates the tempfile in the
+        // system temp dir, breaking persist() across filesystem
+        // boundaries (e.g. tmpfs `/tmp` on Linux). Verify the
+        // derivation logic now picks ".". Pure-logic test — no
+        // filesystem I/O so it's parallel-safe.
+        let bare = Path::new("agent.md");
+        let parent = bare.parent().filter(|p| !p.as_os_str().is_empty());
+        let parent_dir: &Path = parent.unwrap_or_else(|| Path::new("."));
+        assert_eq!(parent_dir, Path::new("."));
+
+        let with_dir = Path::new("subdir/agent.md");
+        let parent = with_dir.parent().filter(|p| !p.as_os_str().is_empty());
+        let parent_dir: &Path = parent.unwrap_or_else(|| Path::new("."));
+        assert_eq!(parent_dir, Path::new("subdir"));
+
+        let absolute = Path::new("/tmp/agent.md");
+        let parent = absolute.parent().filter(|p| !p.as_os_str().is_empty());
+        let parent_dir: &Path = parent.unwrap_or_else(|| Path::new("."));
+        assert_eq!(parent_dir, Path::new("/tmp"));
+    }
+
+    // ─── parse_markdown_detailed ──────────────────────────────────────────────
+
+    fn reconstruct(parsed: &ParsedSource) -> String {
+        reconstruct_source(
+            &parsed.leading_whitespace,
+            &parsed.front_matter_mapping,
+            &parsed.body_raw,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn parse_markdown_detailed_preserves_body_byte_for_byte() {
+        // Case 1: trailing newline.
+        let original = "---\nname: x\ndescription: y\n---\nbody line\n";
+        let parsed = parse_markdown_detailed(original).unwrap();
+        assert_eq!(parsed.body_raw, "\nbody line\n");
+        let reconstructed = reconstruct(&parsed);
+        // No migrations ran, so the YAML round-trip is the only
+        // structural change. The body region is byte-faithful.
+        assert!(reconstructed.ends_with("---\nbody line\n"));
+
+        // Case 2: no trailing newline at all.
+        let original = "---\nname: x\ndescription: y\n---\nbody";
+        let parsed = parse_markdown_detailed(original).unwrap();
+        assert_eq!(parsed.body_raw, "\nbody");
+        let reconstructed = reconstruct(&parsed);
+        assert!(reconstructed.ends_with("---\nbody"));
+
+        // Case 3: empty body, but trailing newline.
+        let original = "---\nname: x\ndescription: y\n---\n";
+        let parsed = parse_markdown_detailed(original).unwrap();
+        assert_eq!(parsed.body_raw, "\n");
+        let reconstructed = reconstruct(&parsed);
+        assert!(reconstructed.ends_with("---\n"));
+
+        // Case 4: blank lines between closing fence and content are
+        // preserved as-is in body_raw.
+        let original = "---\nname: x\ndescription: y\n---\n\n\n## heading\n\nbody.\n";
+        let parsed = parse_markdown_detailed(original).unwrap();
+        assert_eq!(parsed.body_raw, "\n\n\n## heading\n\nbody.\n");
+    }
+
+    #[test]
+    fn parse_markdown_detailed_byte_faithful_when_no_codemod_runs() {
+        // With the registry empty, parsing a healthy source and
+        // reconstructing it should produce a byte-identical document
+        // apart from serde_yaml's canonical formatting of the YAML
+        // mapping. We assert the body region matches exactly.
+        let original = "---\nname: x\ndescription: y\n---\n## body\n";
+        let parsed = parse_markdown_detailed(original).unwrap();
+        assert!(!parsed.codemods.changed());
+        let reconstructed = reconstruct(&parsed);
+        // Find the closing fence in both and compare the suffix.
+        let orig_suffix = &original[original.find("\n---\n").unwrap()..];
+        let recon_suffix = &reconstructed[reconstructed.find("\n---\n").unwrap()..];
+        assert_eq!(orig_suffix, recon_suffix, "body region must be byte-identical");
+    }
+
+    #[test]
+    fn parse_markdown_detailed_preserves_leading_whitespace() {
+        // Leading blank lines / spaces (e.g. from editor BOM-strippers
+        // adding a blank line) must round-trip through reconstruction
+        // so migration rewrites don't silently normalize them away.
+        let original = "\n  \n---\nname: x\ndescription: y\n---\nbody\n";
+        let parsed = parse_markdown_detailed(original).unwrap();
+        assert_eq!(parsed.leading_whitespace, "\n  \n");
+        let reconstructed = reconstruct(&parsed);
+        assert!(
+            reconstructed.starts_with("\n  \n---\n"),
+            "expected leading whitespace preserved, got: {:?}",
+            &reconstructed[..20.min(reconstructed.len())]
+        );
+        assert!(reconstructed.ends_with("---\nbody\n"));
+    }
+
+    #[test]
+    fn parse_markdown_detailed_allows_leading_whitespace() {
+        let original = "\n  \n---\nname: x\ndescription: y\n---\nbody\n";
+        let parsed = parse_markdown_detailed(original).unwrap();
+        assert_eq!(parsed.front_matter.name, "x");
+    }
+
+    #[test]
+    fn parse_markdown_detailed_rejects_missing_open_fence() {
+        let original = "name: x\ndescription: y\nbody\n";
+        let err = parse_markdown_detailed(original).unwrap_err();
+        assert!(
+            format!("{}", err).contains("must start with YAML front matter"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn parse_markdown_detailed_rejects_non_mapping_top_level() {
+        let original = "---\n- a\n- b\n---\nbody\n";
+        let err = parse_markdown_detailed(original).unwrap_err();
+        assert!(
+            format!("{}", err).contains("must be a mapping"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn parse_markdown_detailed_rejects_missing_close_fence() {
+        let original = "---\nname: x\nno-fence";
+        let err = parse_markdown_detailed(original).unwrap_err();
+        assert!(
+            format!("{}", err).contains("Could not find closing"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn parse_markdown_detailed_records_source_hash() {
+        let a = "---\nname: x\ndescription: y\n---\n";
+        let b = "---\nname: x\ndescription: y\n---\nextra\n";
+        let pa = parse_markdown_detailed(a).unwrap();
+        let pb = parse_markdown_detailed(b).unwrap();
+        assert_ne!(pa.source_sha256, pb.source_sha256);
+        // Hashing is stable over re-parses of the same input.
+        let pa2 = parse_markdown_detailed(a).unwrap();
+        assert_eq!(pa.source_sha256, pa2.source_sha256);
     }
 
     // ─── compute_effective_workspace ─────────────────────────────────────────
