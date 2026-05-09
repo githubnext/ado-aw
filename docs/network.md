@@ -85,7 +85,7 @@ Available ecosystem identifiers include:
 | `swift` | Swift.org, CocoaPods |
 | `terraform` | HashiCorp releases, Terraform registry |
 
-Additional ecosystems: `bazel`, `chrome`, `clojure`, `dart`, `deno`, `elixir`, `fonts`, `github-actions`, `haskell`, `julia`, `kotlin`, `lua`, `node-cdns`, `ocaml`, `perl`, `php`, `playwright`, `powershell`, `r`, `scala`, `zig`.
+Additional ecosystems: `bazel`, `chrome`, `clojure`, `dart`, `deno`, `elixir`, `fonts`, `github-actions`, `haskell`, `julia`, `kotlin`, `latex`, `lean`, `lua`, `node-cdns`, `ocaml`, `perl`, `php`, `playwright`, `powershell`, `python-native`, `r`, `scala`, `zig`.
 
 The full domain lists are defined in `src/data/ecosystem_domains.json`.
 
