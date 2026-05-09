@@ -1,6 +1,6 @@
-//! Helpers for writing migrations against `serde_yaml::Mapping`.
+//! Helpers for writing codemods against `serde_yaml::Mapping`.
 //!
-//! Migrations should prefer these over raw `Mapping` manipulation so that
+//! Codemods should prefer these over raw `Mapping` manipulation so that
 //! conflicts (e.g. both old and new keys present) are surfaced rather than
 //! silently overwritten.
 
@@ -27,7 +27,7 @@ pub fn take_key(m: &mut Mapping, key: &str) -> Option<Value> {
 
 /// Insert `value` at `key`, returning `Err` if the key already exists.
 ///
-/// Prefer this over `Mapping::insert` in migrations: silent overwrite is
+/// Prefer this over `Mapping::insert` in codemods: silent overwrite is
 /// almost always a bug when transforming user data.
 #[allow(dead_code)]
 pub fn insert_no_overwrite(
@@ -61,7 +61,7 @@ pub fn insert_no_overwrite(
 /// Returns `Ok(false)` when `old` was absent (no-op).
 ///
 /// The mapping is left **unchanged** on the error path. Callers can
-/// rely on this invariant when chaining migrations: a failed rename
+/// rely on this invariant when chaining codemods: a failed rename
 /// won't leave the mapping in a half-mutated state for the next call
 /// to inspect.
 #[allow(dead_code)]
