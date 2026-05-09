@@ -85,20 +85,22 @@ engine:
 
 ### Step 3 — Schedule
 
-Use the **fuzzy schedule syntax** (deterministic time scattering based on agent name hash prevents load spikes). Omit `schedule:` entirely for manual/trigger-only pipelines.
+Use the **fuzzy schedule syntax** (deterministic time scattering based on agent name hash prevents load spikes). Omit `on.schedule` (or omit `on:` entirely) for manual/trigger-only pipelines.
 
 **String form** (always schedules on `main`):
 ```yaml
-schedule: daily around 14:00
+on:
+  schedule: daily around 14:00
 ```
 
 **Object form** (custom branch list):
 ```yaml
-schedule:
-  run: daily around 14:00
-  branches:
-    - main
-    - release/*
+on:
+  schedule:
+    run: daily around 14:00
+    branches:
+      - main
+      - release/*
 ```
 
 **Frequency options:**
@@ -483,7 +485,8 @@ description: "Checks for outdated npm dependencies and opens PRs to update them"
 engine:
   id: copilot
   model: claude-sonnet-4.5
-schedule: weekly on monday around 9:00
+on:
+  schedule: weekly on monday around 9:00
 tools:
   azure-devops: true
 permissions:
@@ -568,7 +571,8 @@ Next steps:
 Agent reads data (Kusto, ADO) and files a work item if action is needed.
 
 ```yaml
-schedule: daily around 10:00
+on:
+  schedule: daily around 10:00
 tools:
   azure-devops: true
 permissions:
@@ -604,7 +608,8 @@ safe-outputs:
 Agent makes code changes and proposes them via PR.
 
 ```yaml
-schedule: weekly on sunday
+on:
+  schedule: weekly on sunday
 tools:
   azure-devops: true
 permissions:
