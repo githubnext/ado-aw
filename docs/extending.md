@@ -41,13 +41,14 @@ pub trait CompilerExtension: Send {
     fn required_bash_commands(&self) -> Vec<String>;           // Agent bash allow-list
     fn prompt_supplement(&self) -> Option<String>;              // Agent prompt markdown
     fn prepare_steps(&self) -> Vec<String>;                    // Execution job steps (install, etc.)
-    fn setup_steps(&self, ctx: &CompileContext) -> Vec<String>; // Setup job steps (gates, pre-checks)
+    fn setup_steps(&self, ctx: &CompileContext) -> Result<Vec<String>>; // Setup job steps (gates, pre-checks)
     fn mcpg_servers(&self, ctx: &CompileContext) -> Result<Vec<(String, McpgServerConfig)>>; // MCPG entries
     fn allowed_copilot_tools(&self) -> Vec<String>;            // --allow-tool values
     fn validate(&self, ctx: &CompileContext) -> Result<Vec<String>>; // Compile-time warnings/errors
     fn required_pipeline_vars(&self) -> Vec<PipelineEnvMapping>; // Container env var mappings
     fn required_awf_mounts(&self) -> Vec<AwfMount>;            // AWF Docker volume mounts
     fn awf_path_prepends(&self) -> Vec<String>;                // Directories to add to chroot PATH
+    fn agent_env_vars(&self) -> Vec<(String, String)>;         // Agent env vars (e.g., PIP_INDEX_URL)
 }
 ```
 
