@@ -602,11 +602,20 @@ pub struct FrontMatter {
     /// Runtime configuration for language environments (e.g., Lean 4)
     #[serde(default)]
     pub runtimes: Option<RuntimesConfig>,
-    /// Additional repository resources
+    /// Compact repository declarations.
+    /// Each entry declares a repository resource and optionally whether to check it out.
     #[serde(default)]
+    pub repos: Vec<ReposItem>,
+    /// Lowered `Vec<Repository>` form, populated by `lower_repos()` in
+    /// `compile/common.rs` after the codemod registry has converted any
+    /// legacy `repositories:` + `checkout:` shape into the unified
+    /// `repos:` shape. Not deserialized from YAML directly.
+    #[serde(skip)]
     pub repositories: Vec<Repository>,
-    /// Repositories to checkout (subset of repositories)
-    #[serde(default)]
+    /// Lowered checkout-alias list, populated by `lower_repos()` from
+    /// `repos:` entries with `checkout: true`. Not deserialized from
+    /// YAML directly.
+    #[serde(skip)]
     pub checkout: Vec<String>,
     /// MCP server configurations
     #[serde(default, rename = "mcp-servers")]
@@ -696,6 +705,9 @@ impl SanitizeConfigTrait for FrontMatter {
         }
         if let Some(ref mut r) = self.runtimes {
             r.sanitize_config_fields();
+        }
+        for item in &mut self.repos {
+            item.sanitize();
         }
         for repo in &mut self.repositories {
             repo.sanitize_config_fields();
@@ -793,6 +805,99 @@ pub struct Repository {
 
 fn default_ref() -> String {
     "refs/heads/main".to_string()
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Compact `repos:` syntax — a single block that replaces both `repositories:`
+// and `checkout:` with sensible defaults.
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Object form for a `repos:` entry.
+#[derive(Debug, Deserialize, Clone)]
+pub struct RepoEntry {
+    /// Full repo name in the form `org/repo` (maps to ADO `name:`).
+    pub name: String,
+    /// Optional alias (maps to ADO `repository:`). Defaults to the last segment of `name`.
+    #[serde(default)]
+    pub alias: Option<String>,
+    /// ADO repository resource type. Defaults to `"git"`.
+    #[serde(default = "default_repo_type", rename = "type")]
+    pub repo_type: String,
+    /// Branch/tag ref. Defaults to `"refs/heads/main"`.
+    #[serde(default = "default_ref", rename = "ref")]
+    pub repo_ref: String,
+    /// Whether the agent job checks out this repository. Defaults to `true`.
+    #[serde(default = "default_checkout")]
+    pub checkout: bool,
+}
+
+fn default_repo_type() -> String {
+    "git".to_string()
+}
+
+fn default_checkout() -> bool {
+    true
+}
+
+/// A single item in the `repos:` list — either a string shorthand or an object.
+#[derive(Debug, Clone)]
+pub enum ReposItem {
+    /// String shorthand: `"org/repo"` or `"alias=org/repo"`.
+    Shorthand(String),
+    /// Full object form with explicit fields.
+    Full(RepoEntry),
+}
+
+impl<'de> Deserialize<'de> for ReposItem {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de;
+
+        struct ReposItemVisitor;
+
+        impl<'de> de::Visitor<'de> for ReposItemVisitor {
+            type Value = ReposItem;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a string shorthand (\"org/repo\" or \"alias=org/repo\") or an object with at least a `name` field")
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> std::result::Result<ReposItem, E> {
+                Ok(ReposItem::Shorthand(value.to_string()))
+            }
+
+            fn visit_map<M>(self, map: M) -> std::result::Result<ReposItem, M::Error>
+            where
+                M: de::MapAccess<'de>,
+            {
+                let entry = RepoEntry::deserialize(de::value::MapAccessDeserializer::new(map))?;
+                Ok(ReposItem::Full(entry))
+            }
+        }
+
+        deserializer.deserialize_any(ReposItemVisitor)
+    }
+}
+
+impl ReposItem {
+    /// Sanitize all user-provided fields through `sanitize_config`.
+    pub fn sanitize(&mut self) {
+        match self {
+            ReposItem::Shorthand(s) => {
+                *s = crate::sanitize::sanitize_config(s);
+            }
+            ReposItem::Full(entry) => {
+                entry.name = crate::sanitize::sanitize_config(&entry.name);
+                if let Some(ref mut a) = entry.alias {
+                    *a = crate::sanitize::sanitize_config(a);
+                }
+                entry.repo_type = crate::sanitize::sanitize_config(&entry.repo_type);
+                entry.repo_ref = crate::sanitize::sanitize_config(&entry.repo_ref);
+            }
+        }
+    }
 }
 
 /// MCP configuration - can be `true` for simple enablement or an object with options

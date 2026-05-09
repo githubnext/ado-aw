@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use super::types::{FrontMatter, OnConfig, PipelineParameter, Repository};
+use super::types::{FrontMatter, OnConfig, PipelineParameter, Repository, ReposItem};
 use super::extensions::{CompilerExtension, Extension, McpgServerConfig, McpgGatewayConfig, McpgConfig, CompileContext};
 use crate::compile::types::McpConfig;
 use crate::fuzzy_schedule;
@@ -572,6 +572,124 @@ pub fn generate_checkout_steps(checkout: &[String]) -> String {
 /// Generate `checkout: self` step.
 pub fn generate_checkout_self() -> String {
     "- checkout: self".to_string()
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Compact `repos:` lowering
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Lower a `repos:` list into the internal `(Vec<Repository>, Vec<String>)` pair
+/// consumed by the rest of the compiler. Also validates aliases for collisions.
+pub fn lower_repos(items: &[ReposItem]) -> Result<(Vec<Repository>, Vec<String>)> {
+    let mut repositories: Vec<Repository> = Vec::new();
+    let mut checkout: Vec<String> = Vec::new();
+    let mut seen_aliases: HashSet<String> = HashSet::new();
+
+    for item in items {
+        let (name, alias, repo_type, repo_ref, do_checkout) = match item {
+            ReposItem::Shorthand(s) => {
+                let (alias, name) = parse_shorthand(s)?;
+                (name, alias, "git".to_string(), "refs/heads/main".to_string(), true)
+            }
+            ReposItem::Full(entry) => {
+                let alias = match &entry.alias {
+                    Some(a) => a.clone(),
+                    None => derive_alias(&entry.name)?,
+                };
+                (
+                    entry.name.clone(),
+                    alias,
+                    entry.repo_type.clone(),
+                    entry.repo_ref.clone(),
+                    entry.checkout,
+                )
+            }
+        };
+
+        // Reject duplicate aliases
+        if !seen_aliases.insert(alias.clone()) {
+            anyhow::bail!(
+                "Duplicate repository alias '{}' in repos. \
+                Use the `alias` field (or `alias=org/repo` shorthand) to disambiguate.",
+                alias
+            );
+        }
+
+        // Reject reserved names
+        if RESERVED_WORKSPACE_NAMES.contains(&alias.as_str()) {
+            anyhow::bail!(
+                "Repository alias '{}' is reserved by the 'workspace:' resolver ({:?}). \
+                Rename the alias to avoid ambiguity.",
+                alias,
+                RESERVED_WORKSPACE_NAMES
+            );
+        }
+
+        repositories.push(Repository {
+            repository: alias.clone(),
+            repo_type,
+            name,
+            repo_ref,
+        });
+
+        if do_checkout {
+            checkout.push(alias);
+        }
+    }
+
+    Ok((repositories, checkout))
+}
+
+/// Parse a shorthand string: `"org/repo"` → (derived alias, name), or
+/// `"alias=org/repo"` → (alias, name).
+fn parse_shorthand(s: &str) -> Result<(String, String)> {
+    if let Some((alias, name)) = s.split_once('=') {
+        let alias = alias.trim().to_string();
+        let name = name.trim().to_string();
+        if alias.is_empty() {
+            anyhow::bail!("repos shorthand '{}' has an empty alias before '='", s);
+        }
+        if name.is_empty() {
+            anyhow::bail!("repos shorthand '{}' has an empty name after '='", s);
+        }
+        Ok((alias, name))
+    } else {
+        let alias = derive_alias(s)?;
+        Ok((alias, s.to_string()))
+    }
+}
+
+/// Derive the alias from a full `org/repo` name (last path segment).
+fn derive_alias(name: &str) -> Result<String> {
+    // Trim trailing slashes to handle "org/repo/" gracefully
+    let trimmed = name.trim_end_matches('/');
+    let alias = trimmed
+        .rsplit('/')
+        .next()
+        .unwrap_or(trimmed)
+        .to_string();
+    if alias.is_empty() {
+        anyhow::bail!(
+            "Cannot derive a repository alias from '{}'. \
+            Provide an explicit `alias` field.",
+            name
+        );
+    }
+    Ok(alias)
+}
+
+/// Resolve the `repos:` field in a `FrontMatter` into the canonical
+/// `(Vec<Repository>, Vec<String>)` pair consumed by the rest of the compiler.
+///
+/// The legacy `repositories:` + `checkout:` fields are converted to `repos:`
+/// by the `repos_unified` codemod (`src/compile/codemods/0001_repos_unified.rs`)
+/// before typed deserialization, so by the time this function runs the only
+/// shape it sees is `repos:`.
+pub fn resolve_repos(front_matter: &FrontMatter) -> Result<(Vec<Repository>, Vec<String>)> {
+    if front_matter.repos.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    lower_repos(&front_matter.repos)
 }
 
 /// Names that are reserved by the `workspace:` resolver and therefore cannot
@@ -5941,5 +6059,231 @@ mod tests {
         assert!(out.contains("- repository: repo-b"), "out: {out}");
         assert!(out.contains("name: org/repo-a"), "out: {out}");
         assert!(out.contains("ref: refs/heads/develop"), "out: {out}");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Tests for compact `repos:` lowering
+    // ──────────────────────────────────────────────────────────────────────
+
+    use super::{lower_repos, resolve_repos, parse_shorthand, derive_alias};
+    use crate::compile::types::{ReposItem, RepoEntry};
+
+    #[test]
+    fn test_repos_shorthand_simple() {
+        let items = vec![ReposItem::Shorthand("my-org/my-repo".to_string())];
+        let (repos, checkout) = lower_repos(&items).unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].repository, "my-repo");
+        assert_eq!(repos[0].name, "my-org/my-repo");
+        assert_eq!(repos[0].repo_type, "git");
+        assert_eq!(repos[0].repo_ref, "refs/heads/main");
+        assert_eq!(checkout, vec!["my-repo"]);
+    }
+
+    #[test]
+    fn test_repos_shorthand_with_alias() {
+        let items = vec![ReposItem::Shorthand("schemas=my-org/internal-schemas".to_string())];
+        let (repos, checkout) = lower_repos(&items).unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].repository, "schemas");
+        assert_eq!(repos[0].name, "my-org/internal-schemas");
+        assert_eq!(checkout, vec!["schemas"]);
+    }
+
+    #[test]
+    fn test_repos_object_form_defaults() {
+        let items = vec![ReposItem::Full(RepoEntry {
+            name: "my-org/docs".to_string(),
+            alias: None,
+            repo_type: "git".to_string(),
+            repo_ref: "refs/heads/main".to_string(),
+            checkout: true,
+        })];
+        let (repos, checkout) = lower_repos(&items).unwrap();
+        assert_eq!(repos[0].repository, "docs");
+        assert_eq!(repos[0].name, "my-org/docs");
+        assert_eq!(checkout, vec!["docs"]);
+    }
+
+    #[test]
+    fn test_repos_object_form_no_checkout() {
+        let items = vec![ReposItem::Full(RepoEntry {
+            name: "my-org/big-monorepo".to_string(),
+            alias: None,
+            repo_type: "git".to_string(),
+            repo_ref: "refs/heads/main".to_string(),
+            checkout: false,
+        })];
+        let (repos, checkout) = lower_repos(&items).unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].repository, "big-monorepo");
+        assert!(checkout.is_empty());
+    }
+
+    #[test]
+    fn test_repos_object_form_custom_ref() {
+        let items = vec![ReposItem::Full(RepoEntry {
+            name: "my-org/docs".to_string(),
+            alias: Some("docs-v2".to_string()),
+            repo_type: "git".to_string(),
+            repo_ref: "refs/heads/release/2.x".to_string(),
+            checkout: true,
+        })];
+        let (repos, checkout) = lower_repos(&items).unwrap();
+        assert_eq!(repos[0].repository, "docs-v2");
+        assert_eq!(repos[0].repo_ref, "refs/heads/release/2.x");
+        assert_eq!(checkout, vec!["docs-v2"]);
+    }
+
+    #[test]
+    fn test_repos_rejects_duplicate_aliases() {
+        let items = vec![
+            ReposItem::Shorthand("org/tools".to_string()),
+            ReposItem::Shorthand("other-org/tools".to_string()),
+        ];
+        let err = lower_repos(&items).unwrap_err();
+        assert!(err.to_string().contains("Duplicate repository alias 'tools'"), "{err}");
+    }
+
+    #[test]
+    fn test_repos_rejects_reserved_alias() {
+        let items = vec![ReposItem::Shorthand("org/self".to_string())];
+        let err = lower_repos(&items).unwrap_err();
+        assert!(err.to_string().contains("reserved"), "{err}");
+
+        let items = vec![ReposItem::Shorthand("org/repo".to_string())];
+        let err = lower_repos(&items).unwrap_err();
+        assert!(err.to_string().contains("reserved"), "{err}");
+
+        // Reserved via explicit alias in shorthand form
+        let items = vec![ReposItem::Shorthand("self=org/some-repo".to_string())];
+        let err = lower_repos(&items).unwrap_err();
+        assert!(err.to_string().contains("reserved"), "{err}");
+
+        // Reserved via explicit alias in object form
+        let items = vec![ReposItem::Full(RepoEntry {
+            name: "org/fine-repo".to_string(),
+            alias: Some("root".to_string()),
+            repo_type: "git".to_string(),
+            repo_ref: "refs/heads/main".to_string(),
+            checkout: true,
+        })];
+        let err = lower_repos(&items).unwrap_err();
+        assert!(err.to_string().contains("reserved"), "{err}");
+    }
+
+    #[test]
+    fn test_repos_multiple_mixed() {
+        let items = vec![
+            ReposItem::Shorthand("my-org/tools".to_string()),
+            ReposItem::Shorthand("schemas=my-org/internal-schemas".to_string()),
+            ReposItem::Full(RepoEntry {
+                name: "my-org/templates".to_string(),
+                alias: None,
+                repo_type: "git".to_string(),
+                repo_ref: "refs/heads/main".to_string(),
+                checkout: false,
+            }),
+        ];
+        let (repos, checkout) = lower_repos(&items).unwrap();
+        assert_eq!(repos.len(), 3);
+        assert_eq!(checkout, vec!["tools", "schemas"]);
+        assert_eq!(repos[2].repository, "templates");
+    }
+
+    #[test]
+    fn test_parse_shorthand_simple() {
+        let (alias, name) = parse_shorthand("org/my-repo").unwrap();
+        assert_eq!(alias, "my-repo");
+        assert_eq!(name, "org/my-repo");
+    }
+
+    #[test]
+    fn test_parse_shorthand_with_equals() {
+        let (alias, name) = parse_shorthand("custom=org/my-repo").unwrap();
+        assert_eq!(alias, "custom");
+        assert_eq!(name, "org/my-repo");
+    }
+
+    #[test]
+    fn test_parse_shorthand_empty_alias_rejected() {
+        let err = parse_shorthand("=org/repo").unwrap_err();
+        assert!(err.to_string().contains("empty alias"), "{err}");
+    }
+
+    #[test]
+    fn test_parse_shorthand_empty_name_rejected() {
+        let err = parse_shorthand("alias=").unwrap_err();
+        assert!(err.to_string().contains("empty name"), "{err}");
+    }
+
+    #[test]
+    fn test_derive_alias_basic() {
+        assert_eq!(derive_alias("org/my-repo").unwrap(), "my-repo");
+        assert_eq!(derive_alias("my-repo").unwrap(), "my-repo");
+        assert_eq!(derive_alias("a/b/c").unwrap(), "c");
+    }
+
+    #[test]
+    fn test_derive_alias_trailing_slash() {
+        // Trailing slash should be trimmed gracefully
+        assert_eq!(derive_alias("org/repo/").unwrap(), "repo");
+    }
+
+    #[test]
+    fn test_resolve_repos_empty() {
+        use crate::compile::types::FrontMatter;
+        let yaml = r#"
+name: "test"
+description: "test"
+"#;
+        let fm: FrontMatter = serde_yaml::from_str(yaml).unwrap();
+        let (repos, checkout) = resolve_repos(&fm).unwrap();
+        assert!(repos.is_empty());
+        assert!(checkout.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_repos_compact_syntax() {
+        use crate::compile::types::FrontMatter;
+        let yaml = r#"
+name: "test"
+description: "test"
+repos:
+  - my-org/tools
+  - schemas=my-org/internal-schemas
+  - name: my-org/docs
+    ref: refs/heads/v2
+    checkout: false
+"#;
+        let fm: FrontMatter = serde_yaml::from_str(yaml).unwrap();
+        let (repos, checkout) = resolve_repos(&fm).unwrap();
+        assert_eq!(repos.len(), 3);
+        assert_eq!(repos[0].repository, "tools");
+        assert_eq!(repos[0].name, "my-org/tools");
+        assert_eq!(repos[1].repository, "schemas");
+        assert_eq!(repos[1].name, "my-org/internal-schemas");
+        assert_eq!(repos[2].repository, "docs");
+        assert_eq!(repos[2].repo_ref, "refs/heads/v2");
+        assert_eq!(checkout, vec!["tools", "schemas"]);
+    }
+
+    #[test]
+    fn test_resolve_repos_legacy_via_codemod() {
+        // Legacy `repositories:` + `checkout:` now flow through the
+        // `repos_unified` codemod and arrive at typed deserialization
+        // already in the unified `repos:` shape.
+        use crate::compile::parse_markdown;
+        let source = "---\n\
+                      name: test\n\
+                      description: test\n\
+                      repositories:\n  - repository: tools\n    type: git\n    name: my-org/tools\n\
+                      checkout:\n  - tools\n\
+                      ---\nbody\n";
+        let (fm, _) = parse_markdown(source).unwrap();
+        let (repos, checkout) = resolve_repos(&fm).unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].repository, "tools");
+        assert_eq!(checkout, vec!["tools"]);
     }
 }

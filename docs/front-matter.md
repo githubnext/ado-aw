@@ -16,20 +16,17 @@ engine: copilot # Engine identifier. Defaults to copilot. Currently only 'copilo
 #   id: copilot
 #   model: claude-opus-4.7
 #   timeout-minutes: 30
-workspace: repo # Optional: "root", "repo" (alias: "self"), or a checked-out repository alias. If not specified, defaults to "root" when no additional repositories are listed in `checkout:`, and to "repo" when one or more additional repos are checked out. See "Workspace Defaults" below.
+workspace: repo # Optional: "root", "repo" (alias: "self"), or a checked-out repository alias. If not specified, defaults to "root" when no additional repositories are listed in `repos:`, and to "repo" when one or more additional repos are checked out. See "Workspace Defaults" below.
 pool: AZS-1ES-L-MMS-ubuntu-22.04 # Agent pool name (string format). Defaults to AZS-1ES-L-MMS-ubuntu-22.04.
 # pool:                        # Alternative object format (required for 1ES if specifying os)
 #   name: AZS-1ES-L-MMS-ubuntu-22.04
 #   os: linux                  # Operating system: "linux" or "windows". Defaults to "linux".
-repositories: # a list of repository resources available to the pipeline (for pre/post jobs, templates, etc.)
-  - repository: reponame
-    type: git
-    name: my-org/my-repo
-  - repository: another-repo
-    type: git
-    name: my-org/another-repo
-checkout: # optional list of repository aliases for the agent to checkout and work with (must be subset of repositories)
-  - reponame # only checkout reponame, not another-repo
+repos:                           # compact repository declarations (replaces repositories: + checkout:)
+  - my-org/my-repo               # shorthand: alias="my-repo", type=git, ref=refs/heads/main, checkout=true
+  - reponame=my-org/another-repo # shorthand with explicit alias
+  - name: my-org/templates       # object form for full control
+    ref: refs/heads/release/2.x
+    checkout: false              # declared as resource only, not checked out by the agent
 tools:                         # optional tool configuration
   bash: ["cat", "ls", "grep"]  # bash command allow-list (defaults to safe built-in list)
   edit: true                   # enable file editing tool (default: true)
@@ -152,18 +149,82 @@ Build the project and run all tests...
 ## Workspace Defaults
 
 The `workspace:` field controls which directory the agent runs in. When it is
-not set explicitly, the compiler chooses a default based on the `checkout:`
-list:
+not set explicitly, the compiler chooses a default based on which repositories
+are checked out (entries in `repos:` with `checkout: true`, which is the
+default):
 
-- If `checkout:` is empty (i.e. only the pipeline's own repository is checked
-  out via the implicit `self`), `workspace:` defaults to **`root`** — the
-  agent runs in the pipeline's working directory root.
-- If `checkout:` lists one or more additional repository aliases,
-  `workspace:` defaults to **`repo`** — the agent runs inside the first
-  checked-out repository's directory.
+- If no additional repositories are checked out (i.e. only the pipeline's own
+  repository is checked out via the implicit `self`), `workspace:` defaults to
+  **`root`** — the agent runs in the pipeline's working directory root.
+- If one or more additional repositories are checked out, `workspace:` defaults
+  to **`repo`** — the agent runs inside the trigger repository's directory.
 
 Set `workspace:` explicitly to `root`, `repo` (alias `self`), or a specific
 checked-out repository alias to override this behavior.
+
+## Repositories (`repos:`)
+
+The `repos:` field provides a compact way to declare additional repository
+resources and control which ones the agent checks out. It replaces the legacy
+`repositories:` + `checkout:` pair.
+
+Each entry can be:
+
+| Form | Syntax | Description |
+|------|--------|-------------|
+| **Shorthand** | `- org/repo` | Alias derived from last segment, type=git, ref=refs/heads/main, checkout=true |
+| **Shorthand with alias** | `- alias=org/repo` | Explicit alias before `=` |
+| **Object** | `- name: org/repo` | Full control over all fields |
+
+Object fields:
+
+| Field      | Default                | Description |
+|------------|------------------------|-------------|
+| `name`     | *(required)*           | Full `org/repo` name (maps to ADO `name:`) |
+| `alias`    | last segment of `name` | Repository alias (maps to ADO `repository:`) |
+| `type`     | `git`                  | ADO repository resource type |
+| `ref`      | `refs/heads/main`      | Branch or tag reference |
+| `checkout` | `true`                 | Whether the agent job clones this repo |
+
+### Examples
+
+Three repos, all checked out (most common case):
+
+```yaml
+repos:
+  - my-org/tools
+  - my-org/schemas
+  - my-org/docs
+```
+
+Mixed: two checked out, one resource-only (used by templates):
+
+```yaml
+repos:
+  - my-org/tools
+  - my-org/schemas
+  - name: my-org/pipeline-templates
+    checkout: false
+```
+
+Custom ref and explicit alias:
+
+```yaml
+repos:
+  - name: my-org/docs
+    alias: docs-v2
+    ref: refs/heads/release/2.x
+```
+
+### Legacy syntax (auto-rewritten)
+
+The legacy `repositories:` + `checkout:` fields are auto-converted to
+`repos:` by the [`repos_unified` codemod](codemods.md). On the next
+`ado-aw compile`, any source that still uses the legacy fields is
+rewritten in place to the new shape — each `repositories:` entry
+becomes a `repos:` entry, with `checkout: false` added for entries
+that weren't listed under `checkout:`. Mixing the legacy fields with
+an existing `repos:` block is rejected; pick one shape.
 
 ## Filter Validation
 

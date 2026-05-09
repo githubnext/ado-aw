@@ -33,15 +33,10 @@ use anyhow::{Context, Result};
 use serde_yaml::Mapping;
 
 mod helpers;
-// `#[allow(unused_imports)]` here mirrors the per-item
-// `#[allow(dead_code)]` annotations in `helpers.rs`. While the
-// CODEMODS registry is empty, no in-crate caller exercises these
-// re-exports — the lint warns. Once the first real codemod lands
-// and uses one of these helpers, both the re-export attribute and
-// the per-item `dead_code` allows on `helpers.rs` should be
-// removed.
-// TODO(codemods): remove when the first real codemod is registered.
-#[allow(unused_imports)]
+#[path = "0001_repos_unified.rs"]
+mod m0001_repos_unified;
+
+#[allow(unused_imports)] // Re-exported for future codemods; only `take_key` is in-tree use.
 pub use helpers::{insert_no_overwrite, rename_key, take_key, ConflictPolicy};
 
 /// Forward-compatible context passed to every codemod. Currently
@@ -74,7 +69,6 @@ pub struct Codemod {
     pub summary: &'static str,
     /// Compiler version that introduced this codemod (e.g. "0.27.0").
     /// Provenance only; not consumed by the runner.
-    // TODO(codemods): remove when the first real codemod is registered.
     #[allow(dead_code)]
     pub introduced_in: &'static str,
     /// The transformation. Returns `Ok(true)` when the codemod
@@ -89,7 +83,9 @@ pub struct Codemod {
 /// having run first (e.g. A renames `foo` → `bar`, B operates on
 /// `bar`); idempotency means any codemod can re-run on any source
 /// without harm.
-pub static CODEMODS: &[&'static Codemod] = &[];
+pub static CODEMODS: &[&'static Codemod] = &[
+    &m0001_repos_unified::CODEMOD,
+];
 
 /// Result of running the codemod registry on a single front-matter
 /// mapping.
@@ -109,7 +105,6 @@ pub struct AppliedCodemod {
 
 impl CodemodReport {
     /// An empty report (no codemod fired).
-    // TODO(codemods): remove when the first real codemod is registered.
     #[allow(dead_code)]
     pub fn empty() -> Self {
         Self {
@@ -123,8 +118,6 @@ impl CodemodReport {
     }
 
     /// IDs of codemods that ran, in order. Helpful for tests.
-    // TODO(codemods): remove when the first real codemod is registered.
-    #[allow(dead_code)]
     pub fn applied_ids(&self) -> Vec<&'static str> {
         self.applied.iter().map(|a| a.id).collect()
     }
@@ -134,7 +127,6 @@ impl CodemodReport {
 ///
 /// Equivalent to [`apply_codemods_with`] called with the global
 /// [`CODEMODS`] registry.
-// TODO(codemods): remove when the first real codemod is registered.
 #[allow(dead_code)]
 pub fn apply_codemods(fm: &mut Mapping) -> Result<CodemodReport> {
     apply_codemods_with(fm, CODEMODS)
