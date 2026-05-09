@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.28.0](https://github.com/githubnext/ado-aw/compare/v0.27.0...v0.28.0) (2026-05-09)
+
+
+### Features
+
+* **compile:** add compact `repos:` front-matter syntax with codemod auto-rewrite ([#478](https://github.com/githubnext/ado-aw/issues/478)) ([3e67cfd](https://github.com/githubnext/ado-aw/commit/3e67cfd30ea28153890460bf36ba4db26bce9e30))
+* **compile:** autorewrite front matter via detection-based codemods ([#476](https://github.com/githubnext/ado-aw/issues/476)) ([64bbc73](https://github.com/githubnext/ado-aw/commit/64bbc73a4ea3d53d4bed14ddc4c0166ac6d36887))
+
+
+### Bug Fixes
+
+* **safeoutputs:** block VSO command injection via repository alias across Stage 3 PR-safe-output executors ([#482](https://github.com/githubnext/ado-aw/issues/482)) ([6f4a6dd](https://github.com/githubnext/ado-aw/commit/6f4a6dd2642521067bcf955c3db0912245061e8a))
+* **workflow:** add protected-files fallback-to-issue for doc-freshness-check ([#473](https://github.com/githubnext/ado-aw/issues/473)) ([12e273c](https://github.com/githubnext/ado-aw/commit/12e273c18fd3526d0c3d1020a215052b94f196d1))
+
 ## [0.27.0](https://github.com/githubnext/ado-aw/compare/v0.26.1...v0.27.0) (2026-05-08)
 
 
