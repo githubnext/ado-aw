@@ -9,6 +9,7 @@ use ado_aw_derive::SanitizeConfig;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, ToolResult, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
+use crate::validate::reject_pipeline_injection;
 use anyhow::{Context, ensure};
 
 /// Maximum allowed patch file size (5 MB)
@@ -254,6 +255,9 @@ impl Validate for CreatePrParams {
             self.description.len() >= 10,
             "PR description must be at least 10 characters"
         );
+        if let Some(repository) = &self.repository {
+            reject_pipeline_injection(repository, "repository")?;
+        }
         Ok(())
     }
 }
@@ -320,6 +324,7 @@ impl SanitizeContent for CreatePrResult {
     fn sanitize_content_fields(&mut self) {
         self.title = sanitize_text(&self.title);
         self.description = sanitize_text(&self.description);
+        self.repository = sanitize_config(&self.repository);
         for label in &mut self.agent_labels {
             *label = sanitize_config(label);
         }
@@ -2090,6 +2095,37 @@ mod tests {
             labels: vec![],
         };
         assert!(params.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_params_rejects_repository_pipeline_command() {
+        let params = CreatePrParams {
+            title: "Fix bug in parser".to_string(),
+            description: "This PR fixes a critical bug in the parser module.".to_string(),
+            repository: Some("##vso[task.setvariable variable=x]y".to_string()),
+            labels: vec![],
+        };
+        assert!(params.validate().is_err());
+    }
+
+    #[test]
+    fn test_sanitize_content_neutralizes_repository_pipeline_command() {
+        let mut result = CreatePrResult::new(
+            "Fix bug in parser".to_string(),
+            "This PR fixes a critical bug in the parser module.".to_string(),
+            "agent/fix-parser".to_string(),
+            "/tmp/test.patch".to_string(),
+            "##vso[task.setvariable variable=x]y".to_string(),
+            vec![],
+            None,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+        );
+        result.sanitize_content_fields();
+        assert!(
+            result.repository.contains("`##vso[`"),
+            "repository pipeline command should be neutralized with backticks: {}",
+            result.repository
+        );
     }
 
     #[test]

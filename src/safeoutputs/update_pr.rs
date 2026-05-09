@@ -10,6 +10,7 @@ use super::{PATH_SEGMENT, resolve_repo_name};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::validate::reject_pipeline_injection;
 use anyhow::{Context, ensure};
 
 /// Valid operation names for update-pr
@@ -77,6 +78,9 @@ impl Validate for UpdatePrParams {
             self.pull_request_id > 0,
             "pull_request_id must be a positive integer"
         );
+        if let Some(repository) = &self.repository {
+            reject_pipeline_injection(repository, "repository")?;
+        }
         ensure!(
             VALID_OPERATIONS.contains(&self.operation.as_str()),
             "operation must be one of: {}",
@@ -127,7 +131,6 @@ impl Validate for UpdatePrParams {
             }
             _ => {} // set-auto-complete has no extra required fields
         }
-
         Ok(())
     }
 }
@@ -1053,6 +1056,21 @@ mod tests {
             pull_request_id: 1,
             repository: None,
             operation: "add-reviewers".to_string(),
+            reviewers: None,
+            labels: None,
+            vote: None,
+            description: None,
+        };
+        let result: Result<UpdatePrResult, _> = params.try_into();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validation_rejects_repository_pipeline_command() {
+        let params = UpdatePrParams {
+            pull_request_id: 1,
+            repository: Some("##vso[task.setvariable variable=x]y".to_string()),
+            operation: "set-auto-complete".to_string(),
             reviewers: None,
             labels: None,
             vote: None,
