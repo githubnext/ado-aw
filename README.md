@@ -285,11 +285,21 @@ on:
 on:
   schedule: weekly on monday around 9:00   # Monday morning
 
+# Multi-day / Special periods
+on:
+  schedule: every 2 days                   # Every 2 days at scattered time
+on:
+  schedule: every 2 weeks                  # Every 14 days at scattered time
+on:
+  schedule: bi-weekly                      # Every 14 days at scattered time
+on:
+  schedule: tri-weekly                     # Every 21 days at scattered time
+
 # Hourly / Minute intervals
 on:
   schedule: hourly                         # Every hour, scattered minute
 on:
-  schedule: every 2h                       # Every 2 hours
+  schedule: every 2h                       # Every 2 hours (valid: 1, 2, 3, 4, 6, 8, 12)
 on:
   schedule: every 15 minutes               # Fixed, not scattered
 
