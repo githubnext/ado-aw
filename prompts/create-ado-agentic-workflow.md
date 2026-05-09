@@ -111,11 +111,13 @@ schedule:
 | `daily between 9:00 and 17:00` | Business hours |
 | `weekly on monday` | Every Monday, scattered time |
 | `weekly on friday around 17:00` | Friday ~5 PM |
-| `hourly` | Every hour, scattered minute |
-| `every 2h` / `every 6h` | Every N hours (must divide 24) |
-| `every 15 minutes` | Minimum 5 min interval |
+| `every 2 days` | Every N days, time scattered |
+| `every 2 weeks` | Every N weeks (converted to N×7 days) |
 | `bi-weekly` | Every 14 days |
 | `tri-weekly` | Every 21 days |
+| `hourly` | Every hour, scattered minute |
+| `every 2h` / `every 6h` | Every N hours (valid: 1, 2, 3, 4, 6, 8, 12) |
+| `every 15 minutes` | Minimum 5 min interval |
 
 **Timezone**: Append `utc+N` or `utc-N` to any time: `daily around 9:00 utc-5`
 
