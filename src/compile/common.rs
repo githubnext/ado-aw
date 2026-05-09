@@ -678,36 +678,18 @@ fn derive_alias(name: &str) -> Result<String> {
     Ok(alias)
 }
 
-/// Resolve the `repos:` / legacy `repositories:` + `checkout:` fields in a
-/// `FrontMatter` into the canonical `(Vec<Repository>, Vec<String>)` pair.
+/// Resolve the `repos:` field in a `FrontMatter` into the canonical
+/// `(Vec<Repository>, Vec<String>)` pair consumed by the rest of the compiler.
 ///
-/// - If `repos:` is non-empty, the legacy fields must be empty (mixing is rejected).
-/// - If `repos:` is empty, legacy fields are used as-is (with a deprecation warning
-///   when they are non-empty).
-/// - If both are empty, returns `(vec![], vec![])`.
+/// The legacy `repositories:` + `checkout:` fields are converted to `repos:`
+/// by the `repos_unified` codemod (`src/compile/codemods/0001_repos_unified.rs`)
+/// before typed deserialization, so by the time this function runs the only
+/// shape it sees is `repos:`.
 pub fn resolve_repos(front_matter: &FrontMatter) -> Result<(Vec<Repository>, Vec<String>)> {
-    let has_new = !front_matter.repos.is_empty();
-    let has_legacy = !front_matter.repositories.is_empty() || !front_matter.checkout.is_empty();
-
-    if has_new && has_legacy {
-        anyhow::bail!(
-            "Cannot mix `repos:` with legacy `repositories:` / `checkout:`. \
-            Migrate to `repos:` or remove it to keep using the legacy fields."
-        );
+    if front_matter.repos.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
     }
-
-    if has_new {
-        lower_repos(&front_matter.repos)
-    } else {
-        if has_legacy {
-            eprintln!(
-                "Warning: `repositories:` and `checkout:` are deprecated. \
-                Use the compact `repos:` syntax instead. \
-                See docs/front-matter.md for migration guidance."
-            );
-        }
-        Ok((front_matter.repositories.clone(), front_matter.checkout.clone()))
-    }
+    lower_repos(&front_matter.repos)
 }
 
 /// Names that are reserved by the `workspace:` resolver and therefore cannot
@@ -6249,24 +6231,6 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_repos_rejects_mixing() {
-        use crate::compile::types::FrontMatter;
-        let yaml = r#"
-name: "test"
-description: "test"
-repos:
-  - my-org/tools
-repositories:
-  - repository: foo
-    type: git
-    name: org/foo
-"#;
-        let fm: FrontMatter = serde_yaml::from_str(yaml).unwrap();
-        let err = resolve_repos(&fm).unwrap_err();
-        assert!(err.to_string().contains("Cannot mix"), "{err}");
-    }
-
-    #[test]
     fn test_resolve_repos_empty() {
         use crate::compile::types::FrontMatter;
         let yaml = r#"
@@ -6305,19 +6269,18 @@ repos:
     }
 
     #[test]
-    fn test_resolve_repos_legacy_compat() {
-        use crate::compile::types::FrontMatter;
-        let yaml = r#"
-name: "test"
-description: "test"
-repositories:
-  - repository: tools
-    type: git
-    name: my-org/tools
-checkout:
-  - tools
-"#;
-        let fm: FrontMatter = serde_yaml::from_str(yaml).unwrap();
+    fn test_resolve_repos_legacy_via_codemod() {
+        // Legacy `repositories:` + `checkout:` now flow through the
+        // `repos_unified` codemod and arrive at typed deserialization
+        // already in the unified `repos:` shape.
+        use crate::compile::parse_markdown;
+        let source = "---\n\
+                      name: test\n\
+                      description: test\n\
+                      repositories:\n  - repository: tools\n    type: git\n    name: my-org/tools\n\
+                      checkout:\n  - tools\n\
+                      ---\nbody\n";
+        let (fm, _) = parse_markdown(source).unwrap();
         let (repos, checkout) = resolve_repos(&fm).unwrap();
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].repository, "tools");

@@ -216,13 +216,15 @@ repos:
     ref: refs/heads/release/2.x
 ```
 
-### Legacy syntax (deprecated)
+### Legacy syntax (auto-rewritten)
 
-The legacy `repositories:` + `checkout:` fields still work but emit a
-deprecation warning. They cannot be mixed with `repos:`. Migrate by
-converting each `repositories:` entry into a `repos:` entry — any entry
-that appeared in `checkout:` keeps the default `checkout: true`; any that
-did not should set `checkout: false`.
+The legacy `repositories:` + `checkout:` fields are auto-converted to
+`repos:` by the [`repos_unified` codemod](codemods.md). On the next
+`ado-aw compile`, any source that still uses the legacy fields is
+rewritten in place to the new shape — each `repositories:` entry
+becomes a `repos:` entry, with `checkout: false` added for entries
+that weren't listed under `checkout:`. Mixing the legacy fields with
+an existing `repos:` block is rejected; pick one shape.
 
 ## Filter Validation
 

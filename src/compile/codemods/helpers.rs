@@ -9,7 +9,6 @@ use serde_yaml::{Mapping, Value};
 
 /// Conflict policy used by [`rename_key`] when the destination key is
 /// already present.
-// TODO(codemods): remove when the first real codemod is registered.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub enum ConflictPolicy {
@@ -22,8 +21,6 @@ pub enum ConflictPolicy {
 }
 
 /// Remove and return the value at `key`, or `None` if absent.
-// TODO(codemods): remove when the first real codemod is registered.
-#[allow(dead_code)]
 pub fn take_key(m: &mut Mapping, key: &str) -> Option<Value> {
     m.remove(Value::String(key.to_string()))
 }
@@ -32,7 +29,6 @@ pub fn take_key(m: &mut Mapping, key: &str) -> Option<Value> {
 ///
 /// Prefer this over `Mapping::insert` in migrations: silent overwrite is
 /// almost always a bug when transforming user data.
-// TODO(codemods): remove when the first real codemod is registered.
 #[allow(dead_code)]
 pub fn insert_no_overwrite(
     m: &mut Mapping,
@@ -68,7 +64,6 @@ pub fn insert_no_overwrite(
 /// rely on this invariant when chaining migrations: a failed rename
 /// won't leave the mapping in a half-mutated state for the next call
 /// to inspect.
-// TODO(codemods): remove when the first real codemod is registered.
 #[allow(dead_code)]
 pub fn rename_key(
     m: &mut Mapping,
