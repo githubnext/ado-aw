@@ -232,6 +232,7 @@ Safe outputs are the only write operations available to the agent. They are thre
 safe-outputs:
   create-pull-request:
     target-branch: main
+    draft: false             # PRs are drafts by default; set false to publish immediately (required for auto-complete)
     auto-complete: true
     delete-source-branch: true
     squash-merge: true
@@ -492,6 +493,7 @@ permissions:
 safe-outputs:
   create-pull-request:
     target-branch: main
+    draft: false             # PRs are drafts by default; set false to publish immediately (required for auto-complete)
     auto-complete: true
     squash-merge: true
     reviewers:
@@ -615,6 +617,7 @@ permissions:
 safe-outputs:
   create-pull-request:
     target-branch: main
+    draft: false             # PRs are drafts by default; set false to publish immediately (required for auto-complete)
     auto-complete: true
     squash-merge: true
 ```

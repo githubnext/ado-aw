@@ -92,6 +92,7 @@ permissions:
 safe-outputs:
   create-pull-request:
     target-branch: main
+    draft: false
     auto-complete: true
     squash-merge: true
     reviewers:
@@ -429,6 +430,7 @@ actions, and the executor processes them after threat analysis.
 safe-outputs:
   create-pull-request:
     target-branch: main
+    draft: false             # PRs are drafts by default; set false to publish immediately (required for auto-complete)
     auto-complete: true
     delete-source-branch: true
     squash-merge: true
@@ -492,8 +494,9 @@ Commands:
   configure     Detect agentic pipelines and update GITHUB_TOKEN on ADO definitions
 
 Options:
-  -v, --verbose  Enable info-level logging
-  -d, --debug    Enable debug-level logging
+  -v, --verbose              Enable info-level logging
+  -d, --debug                Enable debug-level logging
+      --log-output-dir <path>  Write ado-aw logs to a specific directory (overrides ADO_AW_LOG_DIR)
 ```
 
 ---

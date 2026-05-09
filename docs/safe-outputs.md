@@ -16,6 +16,7 @@ safe-outputs:
       - agent-created
   create-pull-request:
     target-branch: main
+    draft: false             # default is true; set false to publish immediately (required for auto-complete)
     auto-complete: true
     delete-source-branch: true
     squash-merge: true
@@ -168,7 +169,8 @@ Note: The source branch name is auto-generated from a sanitized version of the P
 
 **Configuration options (front matter):**
 - `target-branch` - Target branch to merge into (default: "main")
-- `auto-complete` - Set auto-complete on the PR (default: false)
+- `draft` - Whether to create the PR as a draft (default: **true**). Set to `false` to publish the PR immediately. **Note:** `auto-complete` is silently skipped on draft PRs — set `draft: false` when using `auto-complete: true`.
+- `auto-complete` - Set auto-complete on the PR (default: false). Requires `draft: false` to take effect.
 - `delete-source-branch` - Delete source branch after merge (default: true)
 - `squash-merge` - Squash commits on merge (default: true)
 - `reviewers` - List of reviewer emails to add
