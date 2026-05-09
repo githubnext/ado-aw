@@ -237,8 +237,7 @@ the service connections. Approve the permissions and the pipeline is ready.
 | `on` | object | — | Unified trigger configuration (`schedule`, `pipeline` completion, `pr` triggers). See [schedule syntax](#schedule-syntax). |
 | `pool` | string or object | `AZS-1ES-L-MMS-ubuntu-22.04` | Agent pool |
 | `workspace` | `root` \| `repo` | auto | Working directory mode |
-| `repositories` | list | — | Additional repository resources |
-| `checkout` | list | — | Which repositories to check out |
+| `repos` | list | — | Compact repository declarations (replaces legacy `repositories:` + `checkout:`) |
 | `mcp-servers` | map | — | MCP server configuration |
 | `tools` | object | — | Tool configuration (`bash`, `edit`, `cache-memory`, `azure-devops`) |
 | `runtimes` | object | — | Runtime environment configuration (`lean`, `python`, `node`, `dotnet`) |
