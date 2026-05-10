@@ -443,6 +443,38 @@ network:
 
 The built-in allowlist includes: Azure DevOps, GitHub, Microsoft identity, Azure services, Application Insights, and MCP-specific endpoints for each enabled server.
 
+### Step 15 — Parameters (optional)
+
+ADO runtime parameters are surfaced in the pipeline queue UI when a user manually runs the pipeline. Use them to expose configuration knobs (e.g., target region, log verbosity, feature flags) without hardcoding values.
+
+```yaml
+parameters:
+  - name: targetRegion
+    displayName: "Target region"
+    type: string
+    default: "us-east"
+    values:
+      - us-east
+      - eu-west
+      - ap-south
+  - name: verbose
+    displayName: "Verbose output"
+    type: boolean
+    default: false
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | Yes | Parameter identifier (referenced as `${{ parameters.name }}` in steps) |
+| `displayName` | No | Human-readable label in the ADO queue UI |
+| `type` | No | ADO parameter type: `boolean`, `string`, `number`, `object` |
+| `default` | No | Default value when not specified at queue time |
+| `values` | No | Allowed values for `string`/`number` parameters (shows a dropdown in the UI) |
+
+> **Auto-injected `clearMemory` parameter**: When `tools.cache-memory` is configured, the compiler automatically injects a `clearMemory: boolean` parameter (default: `false`) at the start of the parameters list. It lets users clear the agent's persisted memory from the ADO UI without editing the source. Defining your own `clearMemory` parameter suppresses the auto-injected one.
+
+Omit `parameters:` if no runtime configuration knobs are needed.
+
 ---
 
 ## Agent Instruction Body
