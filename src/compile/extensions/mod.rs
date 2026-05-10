@@ -732,6 +732,7 @@ pub fn wrap_prompt_append(content: &str, display_name: &str) -> Result<String> {
 
     Ok(format!(
         r#"- bash: |
+    set -eo pipefail
     cat >> "/tmp/awf-tools/agent-prompt.md" << '{delimiter}'
 {indented_content}
     {delimiter}

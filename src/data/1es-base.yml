@@ -59,6 +59,7 @@ extends:
                 {{ engine_install_steps }}
 
                 - bash: |
+                    set -eo pipefail
                     COMPILER_VERSION="{{ compiler_version }}"
                     DOWNLOAD_DIR="$(Pipeline.Workspace)/agentic-pipeline-compiler"
                     DOWNLOAD_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/ado-aw-linux-x64"
@@ -79,6 +80,7 @@ extends:
                 {{ integrity_check }}
 
                 - bash: |
+                    set -eo pipefail
                     mkdir -p "$(Agent.TempDirectory)/staging"
 
                     # Generate MCPG API key early so it's available as an ADO secret variable
@@ -106,6 +108,7 @@ extends:
                   displayName: "Prepare MCPG config"
 
                 - bash: |
+                    set -eo pipefail
                     mkdir -p /tmp/awf-tools/staging
 
                     echo "HOME: $HOME"
@@ -128,6 +131,7 @@ extends:
                   displayName: "Prepare tooling"
 
                 - bash: |
+                    set -eo pipefail
                     # Write agent instructions to /tmp so it's accessible inside AWF container
                     cat > "/tmp/awf-tools/agent-prompt.md" << 'AGENT_PROMPT_EOF'
                     {{ agent_content }}
@@ -180,6 +184,7 @@ extends:
 
                 # Start SafeOutputs HTTP server on host (MCPG proxies to it)
                 - bash: |
+                    set -eo pipefail
                     SAFE_OUTPUTS_PORT=8100
                     SAFE_OUTPUTS_API_KEY=$(openssl rand -base64 45 | tr -d '/+=')
                     echo "##vso[task.setvariable variable=SAFE_OUTPUTS_PORT]$SAFE_OUTPUTS_PORT"
@@ -220,6 +225,7 @@ extends:
 
                 # Start MCP Gateway (MCPG) on host
                 - bash: |
+                    set -eo pipefail
                     # Substitute runtime values into MCPG config
                     MCPG_CONFIG=$(cat /tmp/awf-tools/staging/mcpg-config.json \
                       | sed "s|\${SAFE_OUTPUTS_PORT}|$(SAFE_OUTPUTS_PORT)|g" \
@@ -323,7 +329,7 @@ extends:
 
                 # Network isolation via AWF (Agentic Workflow Firewall)
                 - bash: |
-                    set -o pipefail
+                    set -eo pipefail
 
                     AGENT_OUTPUT_FILE="$(Agent.TempDirectory)/staging/logs/agent-output.txt"
                     mkdir -p "$(Agent.TempDirectory)/staging/logs"
@@ -368,6 +374,7 @@ extends:
                     {{ engine_env }}
 
                 - bash: |
+                    set -eo pipefail
                     # Copy safe outputs from /tmp back to staging for artifact publish
                     mkdir -p "$(Agent.TempDirectory)/staging"
                     cp -r /tmp/awf-tools/staging/* "$(Agent.TempDirectory)/staging/" 2>/dev/null || true
@@ -377,6 +384,7 @@ extends:
                   condition: always()
 
                 - bash: |
+                    set -eo pipefail
                     # Stop MCPG container
                     echo "Stopping MCPG..."
                     docker stop mcpg 2>/dev/null || true
@@ -394,6 +402,7 @@ extends:
                 {{ finalize_steps }}
 
                 - bash: |
+                    set -eo pipefail
                     # Copy all logs to output directory for artifact upload
                     mkdir -p "$(Agent.TempDirectory)/staging/logs"
                     if [ -d "{{ engine_log_dir }}" ]; then
@@ -433,6 +442,7 @@ extends:
                 {{ engine_install_steps }}
 
                 - bash: |
+                    set -eo pipefail
                     COMPILER_VERSION="{{ compiler_version }}"
                     DOWNLOAD_DIR="$(Pipeline.Workspace)/agentic-pipeline-compiler"
                     DOWNLOAD_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/ado-aw-linux-x64"
@@ -487,11 +497,13 @@ extends:
                   displayName: "Pre-pull AWF container images (v{{ firewall_version }})"
 
                 - bash: |
+                    set -eo pipefail
                     mkdir -p {{ working_directory }}/safe_outputs
                     cp -a "$(Pipeline.Workspace)/agent_outputs_$(Build.BuildId)/."  {{ working_directory }}/safe_outputs
                   displayName: "Prepare safe outputs for analysis"
 
                 - bash: |
+                    set -eo pipefail
                     # Write threat analysis prompt to /tmp (accessible inside AWF container)
                     cat > "/tmp/awf-tools/threat-analysis-prompt.md" << 'THREAT_ANALYSIS_EOF'
                     {{ threat_analysis_prompt }}
@@ -502,12 +514,13 @@ extends:
                   displayName: "Prepare threat analysis prompt"
 
                 - bash: |
+                    set -eo pipefail
                     AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
                     chmod +x "$AGENTIC_PIPELINES_PATH"
                   displayName: "Setup agentic pipeline compiler"
 
                 - bash: |
-                    set -o pipefail
+                    set -eo pipefail
 
                     # Run threat analysis with AWF network isolation
                     THREAT_OUTPUT_FILE="$(Agent.TempDirectory)/threat-analysis-output.txt"
@@ -534,6 +547,7 @@ extends:
                     GITHUB_READ_ONLY: 1
 
                 - bash: |
+                    set -eo pipefail
                     # Create analyzed outputs directory with original safe outputs and analysis
                     mkdir -p "$(Agent.TempDirectory)/analyzed_outputs"
 
@@ -547,7 +561,7 @@ extends:
 
                     # Extract JSON from THREAT_DETECTION_RESULT line in threat analysis output
                     if [ -f "$(Agent.TempDirectory)/threat-analysis-output.txt" ]; then
-                      RESULT_LINE=$(grep "THREAT_DETECTION_RESULT:" "$(Agent.TempDirectory)/threat-analysis-output.txt" | tail -1)
+                      RESULT_LINE=$(grep "THREAT_DETECTION_RESULT:" "$(Agent.TempDirectory)/threat-analysis-output.txt" | tail -1 || true)
                       if [ -n "$RESULT_LINE" ]; then
                         # Extract JSON after the prefix
                         JSON_CONTENT=$(echo "$RESULT_LINE" | sed 's/.*THREAT_DETECTION_RESULT://')
@@ -567,6 +581,7 @@ extends:
                   condition: always()
 
                 - bash: |
+                    set -eo pipefail
                     SAFE_TO_PROCESS="false"
                     JSON_FILE="$(Agent.TempDirectory)/analyzed_outputs/threat-analysis.json"
 
@@ -596,6 +611,7 @@ extends:
                   condition: always()
 
                 - bash: |
+                    set -eo pipefail
                     # Copy all logs to analyzed outputs for artifact upload
                     mkdir -p "$(Agent.TempDirectory)/analyzed_outputs/logs"
                     if [ -d "{{ engine_log_dir }}" ]; then
@@ -635,6 +651,7 @@ extends:
                   artifact: analyzed_outputs_$(Build.BuildId)
 
                 - bash: |
+                    set -eo pipefail
                     COMPILER_VERSION="{{ compiler_version }}"
                     DOWNLOAD_DIR="$(Pipeline.Workspace)/agentic-pipeline-compiler"
                     DOWNLOAD_URL="https://github.com/githubnext/ado-aw/releases/download/v${COMPILER_VERSION}/ado-aw-linux-x64"
@@ -653,18 +670,21 @@ extends:
                   displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
 
                 - bash: |
+                    set -eo pipefail
                     ls -la "$(Pipeline.Workspace)/agentic-pipeline-compiler"
                     chmod +x "$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
                     echo "##vso[task.prependpath]$(Pipeline.Workspace)/agentic-pipeline-compiler"
                   displayName: Add agentic compiler to path
 
                 - bash: |
+                    set -eo pipefail
                     mkdir -p "$(Agent.TempDirectory)/staging"
                   displayName: "Prepare output directory"
 
                 - bash: |
-                    ado-aw execute --source "{{ source_path }}" --safe-output-dir "$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)" --output-dir "$(Agent.TempDirectory)/staging"
-                    EXIT_CODE=$?
+                    set -eo pipefail
+                    ado-aw execute --source "{{ source_path }}" --safe-output-dir "$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)" --output-dir "$(Agent.TempDirectory)/staging" \
+                      && EXIT_CODE=0 || EXIT_CODE=$?
                     if [ $EXIT_CODE -eq 2 ]; then
                       echo "##vso[task.complete result=SucceededWithIssues;]Executor completed with warnings"
                       exit 0
@@ -675,6 +695,7 @@ extends:
                   {{ executor_ado_env }}
 
                 - bash: |
+                    set -eo pipefail
                     # Copy all logs to output directory for artifact upload
                     mkdir -p "$(Agent.TempDirectory)/staging/logs"
                     # Copy agent output log from analyzed_outputs for optimisation use

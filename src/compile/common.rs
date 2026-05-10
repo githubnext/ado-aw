@@ -1113,6 +1113,7 @@ pub fn generate_integrity_check(skip: bool) -> String {
 
     // Indentation is handled by replace_with_indent at the call site.
     r#"- bash: |
+    set -eo pipefail
     AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
     chmod +x "$AGENTIC_PIPELINES_PATH"
     $AGENTIC_PIPELINES_PATH check "{{ pipeline_path }}"
@@ -1147,6 +1148,7 @@ pub fn generate_debug_pipeline_replacements(debug: bool) -> Vec<(String, String)
 # step, a broken backend (e.g., npx timeout) only surfaces as a silent
 # missing-tool error during the agent run.
 - bash: |
+    set -eo pipefail
     echo "=== Probing MCP backends ==="
     PROBE_FAILED=false
     for server in $(jq -r '.mcpServers | keys[]' /tmp/awf-tools/mcp-config.json); do
@@ -2302,6 +2304,7 @@ pub fn generate_awf_path_step(awf_paths: &[String]) -> String {
     format!(
         "\
 - bash: |
+    set -eo pipefail
     AWF_PATH_FILE=\"/tmp/awf-tools/ado-path-entries\"
     cat > \"$AWF_PATH_FILE\" << AWF_PATH_EOF
 {path_lines}

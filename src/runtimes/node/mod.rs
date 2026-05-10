@@ -157,6 +157,7 @@ pub fn generate_ensure_npmrc(config: &NodeRuntimeConfig) -> String {
     format!(
         "\
 - bash: |\n\
+    set -eo pipefail\n\
     if [ ! -f .npmrc ]; then\n\
       echo 'registry={registry}' > .npmrc\n\
       echo 'Created .npmrc with registry={registry}'\n\

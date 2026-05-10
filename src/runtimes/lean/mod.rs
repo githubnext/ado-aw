@@ -91,6 +91,7 @@ pub fn generate_lean_install(config: &LeanRuntimeConfig) -> String {
     let toolchain = config.toolchain().unwrap_or("stable");
     let script = format!(
         "\
+set -eo pipefail
 curl https://elan.lean-lang.org/elan-init.sh -sSf | sh -s -- -y --default-toolchain {toolchain}
 echo \"##vso[task.prependpath]$HOME/.elan/bin\"
 export PATH=\"$HOME/.elan/bin:$PATH\"
@@ -109,6 +110,7 @@ lake --version || echo \"Lake installed via elan\""
 /// Generate the prompt append step to inform the agent that Lean 4 is available.
 pub fn generate_lean_prompt() -> String {
     r#"- bash: |
+    set -eo pipefail
     cat >> "/tmp/awf-tools/agent-prompt.md" << 'LEAN_PROMPT_EOF'
 
     ---

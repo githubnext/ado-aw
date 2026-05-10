@@ -209,6 +209,7 @@ pub fn generate_ensure_nuget_config(config: &DotnetRuntimeConfig) -> String {
     format!(
         "\
 - bash: |\n\
+    set -eo pipefail\n\
     if [ ! -f nuget.config ] && [ ! -f NuGet.config ] && [ ! -f NuGet.Config ]; then\n\
       cat > nuget.config <<'EOF'\n\
     <?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
