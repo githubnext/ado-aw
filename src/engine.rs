@@ -105,7 +105,11 @@ impl Engine {
     /// Used by log collection steps to copy engine logs to pipeline artifacts.
     pub fn log_dir(&self) -> &str {
         match self {
-            Engine::Copilot => "~/.copilot/logs",
+            // `$HOME` (not `~`) so that the bash `[ -d "..." ]` test below
+            // actually expands. Tilde does not expand inside double quotes,
+            // so the previous value caused the directory check to always
+            // fail and Copilot logs were silently never collected.
+            Engine::Copilot => "$HOME/.copilot/logs",
         }
     }
 

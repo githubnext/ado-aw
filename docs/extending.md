@@ -90,3 +90,45 @@ To add a new filter type:
    `validate_pr_filters()` or `validate_pipeline_filters()`
 5. **Write tests** — lowering test, validation test, and codegen test in
    `filter_ir.rs`
+
+## Bash steps in pipeline templates
+
+Pipeline templates and Rust step generators emit dozens of multi-line `bash:`
+steps. ADO bash steps fail only on the *last* command's exit status by
+default, so a chain like `mkdir … && curl … && cd … && cmd` can silently
+swallow earlier failures.
+
+Rather than spread `set -eo pipefail` boilerplate across every step, the
+project enforces hygiene via `tests/bash_lint_tests.rs`, which compiles a set
+of fixtures and runs `shellcheck` against every literal `bash:` body in the
+generated YAML. The lint catches:
+
+- **SC2164** — `cd $X` without `|| exit` (the canonical silent-failure)
+- **SC2155** — `local var=$(cmd)` masking the inner exit code
+- **SC2086 / SC2046** — unquoted variables / command substitutions
+- **SC2154** — variables referenced but never assigned
+- **SC2088** — tilde inside double quotes (does not expand at all)
+
+When you add or modify a bash step:
+
+1. Run `cargo test --test bash_lint_tests` (locally requires `shellcheck` on
+   PATH; install with `brew install shellcheck` or
+   `apt-get install -y shellcheck`). CI sets `ENFORCE_BASH_LINT=1` so a
+   missing shellcheck becomes a hard failure rather than a silent skip.
+2. Fix any finding by adjusting the bash. Common fixes: `cd "$X" || exit 1`,
+   `exit "$CODE"`, `"$HOME/.foo"` instead of `"~/.foo"`, quoting variable
+   expansions.
+3. If a finding is genuinely intentional, add a
+   `# shellcheck disable=SCxxxx` comment immediately above the line in the
+   bash body. Such directives are bash comments and have no runtime effect.
+
+Do **not** sprinkle `set -eo pipefail` into every step to silence the lint —
+that approach was tried (PR #492) and was rejected because it adds noise,
+drifts as new steps are added, and doesn't address the actual silent-failure
+patterns that the lint surfaces. Use targeted `set -eo pipefail` only when a
+step has a real fail-fast requirement that the lint cannot express (the
+current uses are on AWF/MCPG download and the `tee`-piped agent run).
+
+The exclude list (`SC1090`, `SC1091`, `SC2034`, `SC2016`) is documented in
+`tests/bash_lint_tests.rs`. Each entry has a justification — do not extend
+without one.

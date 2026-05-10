@@ -207,23 +207,23 @@ pub fn generate_ensure_nuget_config(config: &DotnetRuntimeConfig) -> String {
     let feed_url = config.feed_url().unwrap_or("https://api.nuget.org/v3/index.json");
 
     format!(
-        "\
-- bash: |\n\
-    if [ ! -f nuget.config ] && [ ! -f NuGet.config ] && [ ! -f NuGet.Config ]; then\n\
-      cat > nuget.config <<'EOF'\n\
-    <?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
-    <configuration>\n\
-      <packageSources>\n\
-        <clear />\n\
-        <add key=\"internal\" value=\"{feed_url}\" />\n\
-      </packageSources>\n\
-    </configuration>\n\
-    EOF\n\
-      echo 'Created nuget.config with source={feed_url}'\n\
-    else\n\
-      echo 'nuget.config already exists, skipping creation'\n\
-    fi\n\
-  displayName: 'Ensure nuget.config exists'"
+        r#"- bash: |
+    set -eo pipefail
+    if [ ! -f nuget.config ] && [ ! -f NuGet.config ] && [ ! -f NuGet.Config ]; then
+      cat > nuget.config <<'EOF'
+    <?xml version="1.0" encoding="utf-8"?>
+    <configuration>
+      <packageSources>
+        <clear />
+        <add key="internal" value="{feed_url}" />
+      </packageSources>
+    </configuration>
+    EOF
+      echo 'Created nuget.config with source={feed_url}'
+    else
+      echo 'nuget.config already exists, skipping creation'
+    fi
+  displayName: 'Ensure nuget.config exists'"#
     )
 }
 
