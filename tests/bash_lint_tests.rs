@@ -63,6 +63,12 @@ const SHELLCHECK_EXCLUDE: &str = "SC1090,SC1091";
 /// first-class tool that emits bash (cache-memory). Add a fixture here only
 /// when a new generator is introduced that none of the existing fixtures
 /// exercises.
+///
+/// Note: `runtime-coverage-agent.md` and `runtime-coverage-1es-agent.md` are
+/// the same agent compiled to different targets so we exercise code-generated
+/// runtime/tool bash on both `standalone` and `1es`. Today their bash bodies
+/// are byte-identical, but a future target-specific divergence in a generator
+/// would only be caught with both fixtures in the harness.
 const FIXTURES: &[&str] = &[
     "minimal-agent.md",
     "complete-agent.md",
@@ -71,6 +77,7 @@ const FIXTURES: &[&str] = &[
     "pipeline-trigger-agent.md",
     "pipeline-filter-agent.md",
     "runtime-coverage-agent.md",
+    "runtime-coverage-1es-agent.md",
 ];
 
 /// Step display names that the lint expects to find at least once across all
@@ -129,8 +136,9 @@ fn fresh_workspace() -> TempDir {
 }
 
 /// Compile a fixture by copying it into `workspace` and invoking
-/// `ado-aw compile`. Returns the path to the generated `.lock.yml`.
-fn compile_fixture(workspace: &Path, fixture: &str) -> PathBuf {
+/// `ado-aw compile`. Returns the path to the generated `.lock.yml` and the
+/// target (`"standalone"` or `"1es"`) reported in compiler stdout.
+fn compile_fixture(workspace: &Path, fixture: &str) -> (PathBuf, String) {
     let src = fixtures_dir().join(fixture);
     let dest = workspace.join(fixture);
     std::fs::copy(&src, &dest)
@@ -149,9 +157,22 @@ fn compile_fixture(workspace: &Path, fixture: &str) -> PathBuf {
         String::from_utf8_lossy(&output.stderr),
     );
 
+    // `ado-aw compile` prints `Generated <target> pipeline: <file>` to stdout;
+    // parse the target so the test can assert coverage of every known target.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let target = if stdout.contains("Generated 1ES pipeline:") {
+        "1es"
+    } else if stdout.contains("Generated standalone pipeline:") {
+        "standalone"
+    } else {
+        panic!(
+            "could not determine compile target for {fixture} from stdout:\n{stdout}"
+        )
+    };
+
     let lock = dest.with_extension("lock.yml");
     assert!(lock.exists(), "expected lock file {}", lock.display());
-    lock
+    (lock, target.to_string())
 }
 
 /// A single bash body extracted from a compiled pipeline.
@@ -287,9 +308,12 @@ fn compiled_bash_bodies_pass_shellcheck() {
     let workspace = fresh_workspace();
     let mut report: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut all_display_names: Vec<String> = Vec::new();
+    let mut targets_seen: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
 
     for fixture in FIXTURES {
-        let lock = compile_fixture(workspace.path(), fixture);
+        let (lock, target) = compile_fixture(workspace.path(), fixture);
+        targets_seen.insert(target);
         for body in extract_bash_bodies(&lock) {
             all_display_names.push(body.display_name.clone());
             let findings = run_shellcheck(&body.body);
@@ -303,6 +327,25 @@ fn compiled_bash_bodies_pass_shellcheck() {
             }
         }
     }
+
+    // Target coverage — assert that every known compile target is exercised by
+    // at least one fixture, so we shellcheck the bash output of every template
+    // (`src/data/base.yml` and `src/data/1es-base.yml`) and every code-generated
+    // step on both targets.
+    const REQUIRED_TARGETS: &[&str] = &["standalone", "1es"];
+    let missing_targets: Vec<&str> = REQUIRED_TARGETS
+        .iter()
+        .copied()
+        .filter(|t| !targets_seen.contains(*t))
+        .collect();
+    assert!(
+        missing_targets.is_empty(),
+        "no fixture compiles to the following target(s): {:?}\n\
+         Each compile target has its own template under src/data/ whose bash \
+         bodies need shellchecking. Add a fixture with `target: <missing>` to \
+         tests/fixtures/ and list it in FIXTURES.",
+        missing_targets
+    );
 
     // Coverage check — every required generator must appear in the harvested
     // step list, otherwise a fixture has stopped exercising its generator.
