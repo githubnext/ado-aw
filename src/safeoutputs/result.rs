@@ -47,12 +47,23 @@ pub struct ExecutionContext {
     pub ado_project_id: Option<String>,
     /// Personal access token or system access token
     pub access_token: Option<String>,
+    /// GitHub PAT used by debug-only safe outputs (e.g. `ado-aw-debug.create-issue`).
+    /// Sourced from the `ADO_AW_DEBUG_GITHUB_TOKEN` pipeline variable. Intentionally
+    /// **separate** from `access_token` (ADO) and from the read-only `GITHUB_TOKEN`
+    /// the agent sees in Stage 1 — only Stage 3 ever sees this token.
+    pub github_token: Option<String>,
     /// Working directory for file operations (safe outputs directory)
     pub working_directory: std::path::PathBuf,
     /// Source checkout directory (BUILD_SOURCESDIRECTORY) where git repos are checked out
     pub source_directory: std::path::PathBuf,
     /// Per-tool configuration, keyed by tool name
     pub tool_configs: HashMap<String, serde_json::Value>,
+    /// Debug-only tools (e.g. `create-issue`) that the operator authorized
+    /// via the `ado-aw-debug:` front-matter section. Stage 3 executors for
+    /// `crate::safeoutputs::DEBUG_ONLY_TOOLS` MUST reject NDJSON entries
+    /// whose tool name is absent from this set — otherwise a forged entry
+    /// could bypass the MCP-layer default-deny gate. Empty by default.
+    pub debug_enabled_tools: HashSet<String>,
     /// Repository ID (from BUILD_REPOSITORY_ID)
     pub repository_id: Option<String>,
     /// Repository name (from BUILD_REPOSITORY_NAME)
@@ -190,9 +201,11 @@ impl ExecutionContext {
             ado_project: env("SYSTEM_TEAMPROJECT"),
             ado_project_id: env("SYSTEM_TEAMPROJECTID"),
             access_token: env("SYSTEM_ACCESSTOKEN").or_else(|| env("AZURE_DEVOPS_EXT_PAT")),
+            github_token: env("ADO_AW_DEBUG_GITHUB_TOKEN"),
             working_directory: std::env::current_dir().unwrap_or_default(),
             source_directory,
             tool_configs: HashMap::new(),
+            debug_enabled_tools: HashSet::new(),
             repository_id: env("BUILD_REPOSITORY_ID"),
             repository_name: env("BUILD_REPOSITORY_NAME"),
             allowed_repositories: HashMap::new(),

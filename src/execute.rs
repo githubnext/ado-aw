@@ -14,11 +14,12 @@ use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
 use crate::sanitize::neutralize_pipeline_commands;
 use crate::safeoutputs::{
     AddBuildTagResult, AddPrCommentResult, CreateBranchResult, CreateGitTagResult,
-    CreatePrResult, CreateWikiPageResult, CreateWorkItemResult, CommentOnWorkItemResult,
-    ExecutionContext, ExecutionResult, Executor, LinkWorkItemsResult, MissingDataResult,
-    MissingToolResult, NoopResult, QueueBuildResult, ReplyToPrCommentResult,
-    ReportIncompleteResult, ResolvePrThreadResult, SubmitPrReviewResult, ToolResult,
-    UpdatePrResult, UpdateWikiPageResult, UpdateWorkItemResult, UploadBuildAttachmentResult,
+    CreateIssueResult, CreatePrResult, CreateWikiPageResult, CreateWorkItemResult,
+    CommentOnWorkItemResult, ExecutionContext, ExecutionResult, Executor,
+    LinkWorkItemsResult, MissingDataResult, MissingToolResult, NoopResult,
+    QueueBuildResult, ReplyToPrCommentResult, ReportIncompleteResult,
+    ResolvePrThreadResult, SubmitPrReviewResult, ToolResult, UpdatePrResult,
+    UpdateWikiPageResult, UpdateWorkItemResult, UploadBuildAttachmentResult,
     UploadPipelineArtifactResult, UploadWorkitemAttachmentResult,
 };
 
@@ -99,6 +100,7 @@ pub async fn execute_safe_outputs(
         SubmitPrReviewResult,
         ReplyToPrCommentResult,
         ResolvePrThreadResult,
+        CreateIssueResult,
     );
 
     let mut results = Vec::new();
@@ -288,6 +290,9 @@ async fn find_tool_executor(
     if let Some(r) = dispatch_resource_tools(tool_name, entry, ctx).await? {
         return Ok(Some(r));
     }
+    if let Some(r) = dispatch_debug_tools(tool_name, entry, ctx).await? {
+        return Ok(Some(r));
+    }
     Ok(None)
 }
 
@@ -351,6 +356,18 @@ async fn dispatch_resource_tools(
         "create-branch" => CreateBranchResult,
         "upload-build-attachment" => UploadBuildAttachmentResult,
         "upload-pipeline-artifact" => UploadPipelineArtifactResult,
+    })
+}
+
+/// Dispatch debug-only tools (gated by `ado-aw-debug:` front-matter section
+/// at compile time and `DEBUG_ONLY_TOOLS` at the MCP layer at runtime).
+async fn dispatch_debug_tools(
+    tool_name: &str,
+    entry: &Value,
+    ctx: &ExecutionContext,
+) -> Result<Option<ExecutionResult>> {
+    dispatch_executor_tools!(tool_name, entry, ctx, {
+        "create-issue" => CreateIssueResult,
     })
 }
 

@@ -265,7 +265,7 @@ Generates the "Verify pipeline integrity" pipeline step that downloads the relea
 
 The step sets `workingDirectory: {{ trigger_repo_directory }}` so that the relative `{{ pipeline_path }}` argument resolves correctly when `checkout:` produces a multi-repo `$(Build.SourcesDirectory)` layout, and so `ado-aw check`'s internal recompile can infer the ADO org from the trigger repo's git remote.
 
-When the compiler is built with `--skip-integrity` (debug builds only), this placeholder is replaced with an empty string and the integrity step is omitted from the generated pipeline.
+When the compiler is built with `--skip-integrity` (debug builds only) **OR** when the agent's front matter sets `ado-aw-debug.skip-integrity: true`, this placeholder is replaced with an empty string and the integrity step is omitted from the generated pipeline. The two flags are OR-ed — either is sufficient. See [`docs/ado-aw-debug.md`](ado-aw-debug.md).
 
 ## {{ mcpg_debug_flags }}
 
@@ -444,9 +444,12 @@ If `permissions.write` is not configured, this marker is replaced with an empty 
 
 ## {{ executor_ado_env }}
 
-Generates the complete `env:` block (including the `env:` key) for the Stage 3 executor step when `permissions.write` is configured. Sets `SYSTEM_ACCESSTOKEN` to the write service connection token (`SC_WRITE_TOKEN`).
+Generates the complete `env:` block (including the `env:` key) for the Stage 3 executor step. The block contains zero, one, or two lines depending on which features are configured:
 
-If `permissions.write` is not configured, this marker is replaced with an empty string so that no `env:` block is emitted at all. Note: `System.AccessToken` is never used directly — all ADO tokens come from explicitly configured service connections.
+* `SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)` — emitted when `permissions.write` is configured. Provides the write-capable ADO token to the executor.
+* `ADO_AW_DEBUG_GITHUB_TOKEN: $(ADO_AW_DEBUG_GITHUB_TOKEN)` — emitted when `ado-aw-debug.create-issue` is configured. Provides the GitHub PAT used by the debug-only `create-issue` safe output. See [`docs/ado-aw-debug.md`](ado-aw-debug.md).
+
+If neither feature is configured, this marker is replaced with an empty string so that no `env:` block is emitted at all. Note: `System.AccessToken` is never used directly — all ADO tokens come from explicitly configured service connections, and the GitHub PAT is sourced from a dedicated pipeline variable separate from the read-only `GITHUB_TOKEN` the agent sees in Stage 1.
 
 ## {{ compiler_version }}
 

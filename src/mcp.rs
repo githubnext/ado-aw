@@ -16,6 +16,7 @@ use crate::safeoutputs::{
     CommentOnWorkItemParams, CommentOnWorkItemResult,
     CreateBranchParams, CreateBranchResult,
     CreateGitTagParams, CreateGitTagResult,
+    CreateIssueParams, CreateIssueResult,
     CreatePrParams, CreatePrResult, CreateWikiPageParams, CreateWikiPageResult,
     CreateWorkItemParams, CreateWorkItemResult,
     LinkWorkItemsParams, LinkWorkItemsResult,
@@ -62,7 +63,7 @@ fn generate_short_id() -> String {
 }
 
 // Re-export from tools module
-use crate::safeoutputs::ALWAYS_ON_TOOLS;
+use crate::safeoutputs::{ALWAYS_ON_TOOLS, DEBUG_ONLY_TOOLS};
 
 // ============================================================================
 // SafeOutputs MCP Server
@@ -146,26 +147,50 @@ impl SafeOutputs {
 
         let mut tool_router = Self::tool_router();
 
-        // Filter tools if an enabled list is provided
-        if let Some(enabled) = enabled_tools {
-            let all_tools: Vec<String> = tool_router.list_all().iter().map(|t| t.name.to_string()).collect();
-            let total = all_tools.len();
-            for tool_name in &all_tools {
-                let is_always_on = ALWAYS_ON_TOOLS.contains(&tool_name.as_str());
-                let is_enabled = enabled.iter().any(|e| e == tool_name);
-                if !is_always_on && !is_enabled {
-                    debug!("Filtering out tool: {}", tool_name);
-                    tool_router.remove_route(tool_name);
-                }
+        // Apply tool filtering. Three categories:
+        //   * ALWAYS_ON_TOOLS — diagnostic/transparency tools always served.
+        //   * DEBUG_ONLY_TOOLS — gated tools (e.g. `create-issue`) that are
+        //     stripped even when `enabled_tools` is `None`. They become
+        //     reachable only when explicitly listed in `enabled_tools`.
+        //   * Everything else — permissive default when `enabled_tools` is
+        //     `None`; otherwise filtered against the explicit allowlist.
+        let all_tools: Vec<String> = tool_router.list_all().iter().map(|t| t.name.to_string()).collect();
+        let total = all_tools.len();
+        let explicit_filter = enabled_tools.is_some();
+        for tool_name in &all_tools {
+            let is_always_on = ALWAYS_ON_TOOLS.contains(&tool_name.as_str());
+            let is_debug_only = DEBUG_ONLY_TOOLS.contains(&tool_name.as_str());
+            let explicitly_enabled = enabled_tools
+                .map(|enabled| enabled.iter().any(|e| e == tool_name))
+                .unwrap_or(false);
+
+            let keep = if is_debug_only {
+                explicitly_enabled
+            } else if is_always_on {
+                true
+            } else if let Some(enabled) = enabled_tools {
+                enabled.iter().any(|e| e == tool_name)
+            } else {
+                true
+            };
+
+            if !keep {
+                debug!("Filtering out tool: {}", tool_name);
+                tool_router.remove_route(tool_name);
             }
-            // Warn about enabled-tools entries that don't match any registered route
+        }
+        if let Some(enabled) = enabled_tools {
             for name in enabled {
                 if !all_tools.iter().any(|t| t == name) {
                     warn!("Enabled-tools entry '{}' has no matching route (ignored)", name);
                 }
             }
-            let remaining: Vec<String> = tool_router.list_all().iter().map(|t| t.name.to_string()).collect();
+        }
+        let remaining: Vec<String> = tool_router.list_all().iter().map(|t| t.name.to_string()).collect();
+        if explicit_filter {
             info!("Tool filtering applied: {} of {} tools enabled: {:?}", remaining.len(), total, remaining);
+        } else {
+            info!("Default tool exposure: {} of {} tools served (debug-only stripped)", remaining.len(), total);
         }
 
         Ok(Self {
@@ -590,6 +615,35 @@ impl SafeOutputs {
         let result: CreateWorkItemResult = sanitized.try_into()?;
         let _ = self.write_safe_output_file(&result).await;
         info!("Work item queued for creation");
+        Ok(CallToolResult::success(vec![]))
+    }
+
+    /// Debug-only: file a GitHub issue. Default-deny gated via
+    /// `DEBUG_ONLY_TOOLS` so this route is only reachable when the compiler
+    /// explicitly lists `create-issue` in `--enabled-tools` (which it does
+    /// only when the agent's front matter sets `ado-aw-debug.create-issue`).
+    /// Stage 3 authenticates against GitHub using the
+    /// `ADO_AW_DEBUG_GITHUB_TOKEN` pipeline variable.
+    #[tool(
+        name = "create-issue",
+        description = "Debug-only: file a GitHub issue against the operator-configured \
+target repository. Provide a concise title and a markdown body. \
+Optional `labels` and `assignees` are subject to operator-controlled allowlists. \
+This tool is gated by the agent's `ado-aw-debug.create-issue` front-matter section \
+and is not available in regular pipelines."
+    )]
+    async fn create_issue(
+        &self,
+        params: Parameters<CreateIssueParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!("Tool called: create-issue - '{}'", params.0.title);
+        debug!("Body length: {} chars", params.0.body.len());
+        let mut sanitized = params.0;
+        sanitized.title = sanitize_text(&sanitized.title);
+        sanitized.body = sanitize_text(&sanitized.body);
+        let result: CreateIssueResult = sanitized.try_into()?;
+        let _ = self.write_safe_output_file(&result).await;
+        info!("Issue queued for creation");
         Ok(CallToolResult::success(vec![]))
     }
 
@@ -1857,15 +1911,19 @@ mod tests {
             "Non-enabled tool should be filtered out");
     }
 
-    /// Asserts that ALL_KNOWN_SAFE_OUTPUTS contains every tool registered in the
-    /// router. This prevents the list from drifting when new tools are added to
-    /// the router but not to the constant.
+    /// Asserts that ALL_KNOWN_SAFE_OUTPUTS contains every NON-DEBUG-ONLY tool
+    /// registered in the router. Debug-only tools (e.g. `create-issue`) are
+    /// intentionally absent from the list because they're not regular
+    /// safe-outputs.
     #[tokio::test]
     async fn test_all_known_safe_outputs_covers_router() {
         use crate::safeoutputs::ALL_KNOWN_SAFE_OUTPUTS;
 
         let temp_dir = tempfile::tempdir().unwrap();
-        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), None)
+        // Pass an enable list that includes every debug-only tool so they
+        // remain in the router for this introspection check.
+        let enabled: Vec<String> = DEBUG_ONLY_TOOLS.iter().map(|s| s.to_string()).collect();
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled))
             .await
             .unwrap();
         let router_tools: Vec<String> = so
@@ -1876,11 +1934,78 @@ mod tests {
             .collect();
 
         for tool_name in &router_tools {
+            if DEBUG_ONLY_TOOLS.contains(&tool_name.as_str()) {
+                // Debug-only tools intentionally bypass ALL_KNOWN_SAFE_OUTPUTS.
+                continue;
+            }
             assert!(
                 ALL_KNOWN_SAFE_OUTPUTS.contains(&tool_name.as_str()),
-                "Tool '{}' is registered in the router but missing from ALL_KNOWN_SAFE_OUTPUTS in src/tools/mod.rs",
+                "Tool '{}' is registered in the router but missing from ALL_KNOWN_SAFE_OUTPUTS in src/safeoutputs/mod.rs",
                 tool_name
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_filter_strips_debug_only_when_no_enabled_list() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), None)
+            .await
+            .unwrap();
+        let tool_names: Vec<String> = so
+            .tool_router
+            .list_all()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        for debug_tool in DEBUG_ONLY_TOOLS {
+            assert!(
+                !tool_names.contains(&debug_tool.to_string()),
+                "Debug-only tool '{}' must NOT be exposed when enabled_tools is None",
+                debug_tool
+            );
+        }
+        // Spot check a regular tool is present in the permissive default.
+        assert!(tool_names.contains(&"create-work-item".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_filter_keeps_debug_only_when_explicitly_enabled() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let enabled = vec!["create-issue".to_string()];
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled))
+            .await
+            .unwrap();
+        let tool_names: Vec<String> = so
+            .tool_router
+            .list_all()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        assert!(
+            tool_names.contains(&"create-issue".to_string()),
+            "Explicitly enabled debug-only tool should be present, got: {:?}",
+            tool_names
+        );
+    }
+
+    #[tokio::test]
+    async fn test_filter_strips_debug_only_when_other_tool_enabled() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let enabled = vec!["create-work-item".to_string()];
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled))
+            .await
+            .unwrap();
+        let tool_names: Vec<String> = so
+            .tool_router
+            .list_all()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        assert!(
+            !tool_names.contains(&"create-issue".to_string()),
+            "Debug-only tool must remain stripped when not in the explicit enable list"
+        );
+        assert!(tool_names.contains(&"create-work-item".to_string()));
     }
 }

@@ -298,6 +298,28 @@ async fn build_execution_context(
     }
     ctx.working_directory = safe_output_dir.clone();
     ctx.tool_configs = front_matter.safe_outputs.clone();
+    // Merge ado-aw-debug.create-issue config under the same tool_configs map
+    // so Stage 3's `ctx.get_tool_config::<CreateIssueConfig>("create-issue")`
+    // works exactly like every other safe-output. Without this merge the
+    // executor would only ever see Default::default().
+    //
+    // Crucially, also record `create-issue` in `debug_enabled_tools` so the
+    // Stage 3 executor can independently enforce the `ado-aw-debug` gate
+    // — without this, a forged NDJSON entry whose tool name is `create-issue`
+    // could bypass the MCP-layer default-deny.
+    if let Some(d) = front_matter.ado_aw_debug.as_ref()
+        && let Some(ci) = d.create_issue.as_ref()
+    {
+        match serde_json::to_value(ci) {
+            Ok(v) => {
+                ctx.tool_configs.insert("create-issue".to_string(), v);
+            }
+            Err(e) => log::warn!(
+                "Failed to serialize ado-aw-debug.create-issue config: {e}"
+            ),
+        }
+        ctx.debug_enabled_tools.insert("create-issue".to_string());
+    }
     ctx.allowed_repositories = allowed_repositories;
     ctx.dry_run = dry_run;
 

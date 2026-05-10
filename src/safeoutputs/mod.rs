@@ -55,6 +55,17 @@ pub const WRITE_REQUIRING_SAFE_OUTPUTS: &[&str] = tool_names![
 /// filtered out (the router has no route for them).
 pub const NON_MCP_SAFE_OUTPUT_KEYS: &[&str] = &[];
 
+/// Tools that are gated behind `ado-aw-debug:` front-matter sections and must
+/// NOT be exposed to a regular pipeline. The SafeOutputs MCP filter strips
+/// these even when `enabled_tools` is `None`, so they only become reachable
+/// when the compiler explicitly lists them in `--enabled-tools`.
+///
+/// Adding a new debug-only tool: register its result type with
+/// `tool_result! { write = true, ... }`, add it here, and gate the
+/// compiler-side `--enabled-tools` injection on its corresponding
+/// `ado-aw-debug.<tool>` front-matter section.
+pub const DEBUG_ONLY_TOOLS: &[&str] = tool_names![CreateIssueResult];
+
 /// All recognised safe-output keys accepted in front matter `safe-outputs:`.
 /// This is the union of write-requiring tool types and diagnostic tool types.
 ///
@@ -319,6 +330,7 @@ mod add_pr_comment;
 mod comment_on_work_item;
 mod create_branch;
 mod create_git_tag;
+mod create_issue;
 mod create_pr;
 mod create_wiki_page;
 mod create_work_item;
@@ -344,6 +356,8 @@ pub use add_pr_comment::*;
 pub use comment_on_work_item::*;
 pub use create_branch::*;
 pub use create_git_tag::*;
+pub use create_issue::*;
+pub(crate) use create_issue::validate_target_repo;
 pub use create_pr::*;
 pub use create_wiki_page::*;
 pub use create_work_item::*;

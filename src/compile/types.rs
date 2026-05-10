@@ -614,6 +614,13 @@ pub struct FrontMatter {
     /// Per-tool configuration for safe outputs
     #[serde(default, rename = "safe-outputs")]
     pub safe_outputs: HashMap<String, serde_json::Value>,
+    /// Debug-only configuration. Top-level section that gates features only
+    /// intended for ado-aw dogfood/debug pipelines (e.g., `create-issue` for
+    /// filing failure reports back to GitHub during local testing). NOT a
+    /// regular safe-output section — anything declared here is omitted from
+    /// the regular safe-outputs documentation surface.
+    #[serde(default, rename = "ado-aw-debug")]
+    pub ado_aw_debug: Option<AdoAwDebugConfig>,
     /// Unified trigger configuration: schedule, pipeline, PR triggers and filters
     #[serde(default, rename = "on")]
     pub on_config: Option<OnConfig>,
@@ -723,6 +730,9 @@ impl SanitizeConfigTrait for FrontMatter {
         for p in &mut self.parameters {
             p.sanitize_config_fields();
         }
+        if let Some(ref mut d) = self.ado_aw_debug {
+            d.sanitize_config_fields();
+        }
     }
 }
 
@@ -777,6 +787,42 @@ pub struct PermissionsConfig {
     /// This token is never exposed to the agent.
     #[serde(default)]
     pub write: Option<String>,
+}
+
+/// Debug-only configuration block.
+///
+/// Lives under the `ado-aw-debug:` top-level front-matter key. Holds knobs
+/// that only make sense for pipelines we're actively dogfooding from
+/// `githubnext/ado-aw` and that we explicitly do **not** want to advertise
+/// as part of the regular agent surface.
+///
+/// Adding a new field: pair the front-matter knob with a corresponding
+/// compile-side hook (e.g., a debug-only safe output should also be added
+/// to `crate::safeoutputs::DEBUG_ONLY_TOOLS` so the MCP layer enforces a
+/// matching default-deny gate).
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct AdoAwDebugConfig {
+    /// When true, the "Verify pipeline integrity" step is omitted from the
+    /// generated pipeline. Mirrors and OR-s with the `--skip-integrity`
+    /// CLI flag.
+    #[serde(default, rename = "skip-integrity")]
+    pub skip_integrity: bool,
+
+    /// Configuration for the debug-only `create-issue` safe output.
+    /// Presence of this field is what enables the tool — when omitted
+    /// the SafeOutputs MCP layer hides it via `DEBUG_ONLY_TOOLS`.
+    #[serde(default, rename = "create-issue")]
+    pub create_issue: Option<crate::safeoutputs::CreateIssueConfig>,
+}
+
+impl SanitizeConfigTrait for AdoAwDebugConfig {
+    fn sanitize_config_fields(&mut self) {
+        // skip_integrity: bool — nothing to sanitize
+        if let Some(ref mut ci) = self.create_issue {
+            ci.sanitize_config_fields();
+        }
+    }
 }
 
 /// Repository resource definition
@@ -1781,6 +1827,71 @@ Body
 "#;
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
         assert!(fm.safe_outputs.contains_key("upload-pipeline-artifact"));
+    }
+
+    #[test]
+    fn test_front_matter_parses_ado_aw_debug() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+ado-aw-debug:
+  skip-integrity: true
+  create-issue:
+    target-repo: githubnext/ado-aw
+    title-prefix: "[bug] "
+    labels: [pipeline-failure]
+    allowed-labels: ["agent-*"]
+    assignees: [jamesdevine]
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let debug = fm.ado_aw_debug.expect("ado-aw-debug should parse");
+        assert!(debug.skip_integrity);
+        let ci = debug.create_issue.expect("create-issue should parse");
+        assert_eq!(ci.target_repo, "githubnext/ado-aw");
+        assert_eq!(ci.title_prefix.as_deref(), Some("[bug] "));
+        assert_eq!(ci.labels, vec!["pipeline-failure".to_string()]);
+        assert_eq!(ci.allowed_labels, vec!["agent-*".to_string()]);
+        assert_eq!(ci.assignees, vec!["jamesdevine".to_string()]);
+    }
+
+    #[test]
+    fn test_front_matter_ado_aw_debug_defaults() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+ado-aw-debug: {}
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let debug = fm.ado_aw_debug.unwrap();
+        assert!(!debug.skip_integrity);
+        assert!(debug.create_issue.is_none());
+    }
+
+    #[test]
+    fn test_front_matter_ado_aw_debug_rejects_unknown_field() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+ado-aw-debug:
+  bogus-knob: true
+---
+
+Body
+"#;
+        let result = super::super::common::parse_markdown(content);
+        assert!(result.is_err(), "unknown ado-aw-debug field should be rejected");
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(
+            err.contains("bogus-knob") || err.contains("unknown field"),
+            "expected error to mention unknown field, got: {}",
+            err
+        );
     }
 
     // ─── PrTriggerConfig deserialization ─────────────────────────────────────
