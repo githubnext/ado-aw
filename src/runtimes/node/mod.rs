@@ -155,15 +155,15 @@ pub fn generate_ensure_npmrc(config: &NodeRuntimeConfig) -> String {
         .unwrap_or("https://registry.npmjs.org/");
 
     format!(
-        "\
-- bash: |\n\
-    if [ ! -f .npmrc ]; then\n\
-      echo 'registry={registry}' > .npmrc\n\
-      echo 'Created .npmrc with registry={registry}'\n\
-    else\n\
-      echo '.npmrc already exists, skipping creation'\n\
-    fi\n\
-  displayName: 'Ensure .npmrc exists'"
+        r#"- bash: |
+    set -eo pipefail
+    if [ ! -f .npmrc ]; then
+      echo 'registry={registry}' > .npmrc
+      echo 'Created .npmrc with registry={registry}'
+    else
+      echo '.npmrc already exists, skipping creation'
+    fi
+  displayName: 'Ensure .npmrc exists'"#
     )
 }
 
