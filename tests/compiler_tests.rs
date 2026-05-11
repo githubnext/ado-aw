@@ -3112,6 +3112,130 @@ safe-outputs:
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
+/// Integration test: `runtimes: python:` with `feed-url:` end-to-end compilation
+///
+/// Verifies that when `feed-url` is set, the compiler emits `PipAuthenticate@1`
+/// and injects `PIP_INDEX_URL` / `UV_DEFAULT_INDEX` env vars into the agent step.
+#[test]
+fn test_python_runtime_with_feed_url_compiled_output() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-python-feed-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = r#"---
+name: "Python Feed Agent"
+description: "Python agent with internal feed"
+runtimes:
+  python:
+    feed-url: "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/pypi/simple/"
+safe-outputs:
+  noop: {}
+---
+
+## Python Feed Agent
+"#;
+
+    let input_path = temp_dir.join("python-feed-agent.md");
+    let output_path = temp_dir.join("python-feed-agent.yml");
+    fs::write(&input_path, input).expect("Failed to write test input");
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+
+    assert!(
+        compiled.contains("PipAuthenticate@1"),
+        "Should include PipAuthenticate@1 when feed-url is set"
+    );
+    assert!(
+        compiled.contains("PIP_INDEX_URL"),
+        "Should inject PIP_INDEX_URL env var when feed-url is set"
+    );
+    assert!(
+        compiled.contains("UV_DEFAULT_INDEX"),
+        "Should inject UV_DEFAULT_INDEX env var when feed-url is set"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Integration test: `runtimes: node:` with `feed-url:` end-to-end compilation
+///
+/// Verifies that when `feed-url` is set, the compiler emits `npmAuthenticate@0`
+/// and injects `NPM_CONFIG_REGISTRY` env var into the agent step.
+#[test]
+fn test_node_runtime_with_feed_url_compiled_output() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-node-feed-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = r#"---
+name: "Node Feed Agent"
+description: "Node agent with internal npm feed"
+runtimes:
+  node:
+    feed-url: "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/npm/registry/"
+safe-outputs:
+  noop: {}
+---
+
+## Node Feed Agent
+"#;
+
+    let input_path = temp_dir.join("node-feed-agent.md");
+    let output_path = temp_dir.join("node-feed-agent.yml");
+    fs::write(&input_path, input).expect("Failed to write test input");
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+
+    assert!(
+        compiled.contains("npmAuthenticate@0"),
+        "Should include npmAuthenticate@0 when feed-url is set"
+    );
+    assert!(
+        compiled.contains("NPM_CONFIG_REGISTRY"),
+        "Should inject NPM_CONFIG_REGISTRY env var when feed-url is set"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
 /// Integration test: `schedule:` object form with `branches:` end-to-end compilation
 ///
 /// Verifies that a pipeline compiled with the object-form schedule containing

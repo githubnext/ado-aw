@@ -453,6 +453,52 @@ fn test_python_config_warns_not_functional() {
     assert!(warnings.iter().any(|w| w.contains("will not be available")));
 }
 
+#[test]
+fn test_python_validate_bash_disabled_warning() {
+    let (fm, _) =
+        parse_markdown("---\nname: test\ndescription: test\ntools:\n  bash: []\n---\n").unwrap();
+    let ext = crate::runtimes::python::PythonExtension::new(
+        crate::runtimes::python::PythonRuntimeConfig::Enabled(true),
+    );
+    let ctx = ctx_from(&fm);
+    let warnings = ext.validate(&ctx).unwrap();
+    assert!(!warnings.is_empty());
+    assert!(warnings[0].contains("tools.bash is empty"));
+}
+
+#[test]
+fn test_python_validate_bash_not_disabled_no_warning() {
+    let fm = minimal_front_matter();
+    let ext = crate::runtimes::python::PythonExtension::new(
+        crate::runtimes::python::PythonRuntimeConfig::Enabled(true),
+    );
+    let ctx = ctx_from(&fm);
+    let warnings = ext.validate(&ctx).unwrap();
+    assert!(warnings.is_empty());
+}
+
+#[test]
+fn test_python_invalid_feed_url_rejected() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  python:\n    feed-url: 'pkgs.dev.azure.com/no-scheme'\n---\n",
+    ).unwrap();
+    let python = fm.runtimes.as_ref().unwrap().python.as_ref().unwrap();
+    let ext = crate::runtimes::python::PythonExtension::new(python.clone());
+    let ctx = ctx_from(&fm);
+    assert!(ext.validate(&ctx).is_err());
+}
+
+#[test]
+fn test_python_validate_version_injection_rejected() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  python:\n    version: '$(SECRET)'\n---\n",
+    ).unwrap();
+    let python = fm.runtimes.as_ref().unwrap().python.as_ref().unwrap();
+    let ext = crate::runtimes::python::PythonExtension::new(python.clone());
+    let ctx = ctx_from(&fm);
+    assert!(ext.validate(&ctx).is_err());
+}
+
 // ── NodeExtension ──────────────────────────────────────────────
 
 #[test]
@@ -560,6 +606,41 @@ fn test_node_config_and_feed_url_mutually_exclusive() {
     let result = ext.validate(&ctx);
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("mutually exclusive"));
+}
+
+#[test]
+fn test_node_validate_bash_disabled_warning() {
+    let (fm, _) =
+        parse_markdown("---\nname: test\ndescription: test\ntools:\n  bash: []\n---\n").unwrap();
+    let ext = crate::runtimes::node::NodeExtension::new(
+        crate::runtimes::node::NodeRuntimeConfig::Enabled(true),
+    );
+    let ctx = ctx_from(&fm);
+    let warnings = ext.validate(&ctx).unwrap();
+    assert!(!warnings.is_empty());
+    assert!(warnings[0].contains("tools.bash is empty"));
+}
+
+#[test]
+fn test_node_invalid_feed_url_rejected() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  node:\n    feed-url: 'pkgs.dev.azure.com/no-scheme'\n---\n",
+    ).unwrap();
+    let node = fm.runtimes.as_ref().unwrap().node.as_ref().unwrap();
+    let ext = crate::runtimes::node::NodeExtension::new(node.clone());
+    let ctx = ctx_from(&fm);
+    assert!(ext.validate(&ctx).is_err());
+}
+
+#[test]
+fn test_node_validate_version_injection_rejected() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  node:\n    version: '$(SECRET)'\n---\n",
+    ).unwrap();
+    let node = fm.runtimes.as_ref().unwrap().node.as_ref().unwrap();
+    let ext = crate::runtimes::node::NodeExtension::new(node.clone());
+    let ctx = ctx_from(&fm);
+    assert!(ext.validate(&ctx).is_err());
 }
 
 #[test]
@@ -793,6 +874,41 @@ fn test_dotnet_no_version_with_global_json_present_ok() {
     let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
     let ctx = CompileContext::for_test_with_compile_dir(&fm, tmp.path());
     assert!(ext.validate(&ctx).is_ok());
+}
+
+#[test]
+fn test_dotnet_validate_bash_disabled_warning() {
+    let (fm, _) =
+        parse_markdown("---\nname: test\ndescription: test\ntools:\n  bash: []\n---\n").unwrap();
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(
+        crate::runtimes::dotnet::DotnetRuntimeConfig::Enabled(true),
+    );
+    let ctx = ctx_from(&fm);
+    let warnings = ext.validate(&ctx).unwrap();
+    assert!(!warnings.is_empty());
+    assert!(warnings[0].contains("tools.bash is empty"));
+}
+
+#[test]
+fn test_dotnet_validate_version_injection_rejected() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: '$(SECRET)'\n---\n",
+    ).unwrap();
+    let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
+    let ctx = ctx_from(&fm);
+    assert!(ext.validate(&ctx).is_err());
+}
+
+#[test]
+fn test_dotnet_validate_config_injection_rejected() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    config: '$(SECRET)/nuget.config'\n---\n",
+    ).unwrap();
+    let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+    let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
+    let ctx = ctx_from(&fm);
+    assert!(ext.validate(&ctx).is_err());
 }
 
 // ── Multiple runtimes ──────────────────────────────────────────
