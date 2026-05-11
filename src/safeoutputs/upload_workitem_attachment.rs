@@ -51,6 +51,10 @@ impl Validate for UploadWorkitemAttachmentParams {
             "file_path must not contain newlines or carriage returns"
         );
         ensure!(
+            !self.file_path.contains("##vso[") && !self.file_path.contains("##["),
+            "file_path must not contain Azure DevOps pipeline command sequences"
+        );
+        ensure!(
             !self
                 .file_path
                 .split(['/', '\\'])
@@ -222,10 +226,10 @@ impl Executor for UploadWorkitemAttachmentResult {
         // acceptable because the injection risk from binary attachments is negligible.
         if let Ok(text) = std::str::from_utf8(&file_bytes) {
             if text.contains("##vso[") {
-                return Ok(ExecutionResult::failure(format!(
-                    "File '{}' contains '##vso[' command injection sequence",
-                    self.file_path
-                )));
+                return Ok(ExecutionResult::failure(
+                    "Uploaded file contains '##vso[' command injection sequence — upload rejected"
+                        .to_string(),
+                ));
             }
         }
 
@@ -519,6 +523,24 @@ mod tests {
         };
         let result: Result<UploadWorkitemAttachmentResult, _> = params.try_into();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validation_rejects_pipeline_command_sequences_in_file_path() {
+        let vso = UploadWorkitemAttachmentParams {
+            work_item_id: 42,
+            file_path: "##vso[task.setvariable variable=EXPLOIT]value.txt".to_string(),
+            comment: None,
+        };
+        let shorthand = UploadWorkitemAttachmentParams {
+            work_item_id: 42,
+            file_path: "##[error]value.txt".to_string(),
+            comment: None,
+        };
+        let vso_result: Result<UploadWorkitemAttachmentResult, _> = vso.try_into();
+        let shorthand_result: Result<UploadWorkitemAttachmentResult, _> = shorthand.try_into();
+        assert!(vso_result.is_err());
+        assert!(shorthand_result.is_err());
     }
 
     #[test]
