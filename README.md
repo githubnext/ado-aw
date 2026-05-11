@@ -237,7 +237,7 @@ the service connections. Approve the permissions and the pipeline is ready.
 | `engine` | string or object | `copilot` | Engine identifier or object with `id`, `model`, `timeout-minutes`, etc. |
 | `on` | object | — | Unified trigger configuration (`schedule`, `pipeline` completion, `pr` triggers). See [schedule syntax](#schedule-syntax). |
 | `pool` | string or object | `AZS-1ES-L-MMS-ubuntu-22.04` | Agent pool |
-| `workspace` | `root` \| `repo` | auto | Working directory mode |
+| `workspace` | `root` \| `repo` \| `self` \| *alias* | auto | Working directory mode. `self` is an alias for `repo`; any checked-out repo alias is also accepted. |
 | `repos` | list | — | Compact repository declarations (replaces legacy `repositories:` + `checkout:`) |
 | `mcp-servers` | map | — | MCP server configuration |
 | `tools` | object | — | Tool configuration (`bash`, `edit`, `cache-memory`, `azure-devops`) |
