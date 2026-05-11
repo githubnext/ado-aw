@@ -302,7 +302,7 @@ The spec is declarative — it uses fact *kinds* (e.g., `"pr_title"`,
 `"pr_metadata"`) not raw REST endpoints. The Python evaluator owns
 acquisition logic.
 
-#### Python Gate Evaluator (`src/data/gate-eval.py`)
+#### Python Gate Evaluator (`scripts/gate-eval.py`)
 
 The evaluator is a self-contained Python script embedded via
 `include_str!()`. It handles:
@@ -355,8 +355,9 @@ When Tier 2/3 filters are configured, the `TriggerFiltersExtension`
 (`src/compile/extensions/trigger_filters.rs`) activates via
 `collect_extensions()`. It implements `CompilerExtension` and controls:
 
-1. **Download step** — fetches `gate-eval.py` from the ado-aw release
-   artifacts to `/tmp/ado-aw-scripts/gate-eval.py`
+1. **Download step** — downloads `scripts.zip` from the ado-aw release
+   artifacts, verifies its SHA256 checksum via `checksums.txt`, then
+   extracts `gate-eval.py` to `/tmp/ado-aw-scripts/gate-eval.py`
 2. **Gate step** — calls `compile_gate_step_external()` to generate a step
    that references the downloaded script (no inline heredoc)
 3. **Validation** — runs `validate_pr_filters()` / `validate_pipeline_filters()`
@@ -405,9 +406,12 @@ The `expression` escape hatch is also ANDed if present.
 ### Scripts Distribution
 
 `gate-eval.py` lives at `scripts/gate-eval.py` in the repository and is
-shipped as a release artifact alongside the ado-aw binary. The download URL
-is deterministic based on the ado-aw version:
-`https://github.com/githubnext/ado-aw/releases/download/v{VERSION}/gate-eval.py`
+shipped inside a `scripts.zip` archive alongside the ado-aw binary. The
+download URL is deterministic based on the ado-aw version:
+`https://github.com/githubnext/ado-aw/releases/download/v{VERSION}/scripts.zip`
+
+A `checksums.txt` file is also published at the same URL base and used to
+verify the SHA256 integrity of `scripts.zip` before extraction.
 
 ## Adding New Filter Types
 
