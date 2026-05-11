@@ -610,4 +610,3 @@ safe-outputs:
 Note: `wiki-name` is required. If it is not set, execution fails with an explicit error message.
 
 **Code wikis vs project wikis:** The executor automatically detects code wikis (type 1) and resolves the published branch from the wiki metadata. You only need to set `branch` explicitly to override the auto-detected value (e.g. targeting a non-default branch). Project wikis (type 0) need no branch configuration.
-
