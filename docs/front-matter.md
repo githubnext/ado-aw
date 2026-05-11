@@ -28,7 +28,7 @@ repos:                           # compact repository declarations (replaces rep
     ref: refs/heads/release/2.x
     checkout: false              # declared as resource only, not checked out by the agent
 tools:                         # optional tool configuration
-  bash: ["cat", "ls", "grep"]  # bash command allow-list (defaults to safe built-in list)
+  bash: ["cat", "ls", "grep"]  # explicit bash allow-list; when omitted, all bash tools are allowed (unrestricted)
   edit: true                   # enable file editing tool (default: true)
   cache-memory: true           # persistent memory across runs (see docs/tools.md)
   # cache-memory:              # Alternative object format (with options)

@@ -173,16 +173,16 @@ Note: The source branch name is auto-generated from a sanitized version of the P
 - `auto-complete` - Set auto-complete on the PR (default: false). Requires `draft: false` to take effect.
 - `delete-source-branch` - Delete source branch after merge (default: true)
 - `squash-merge` - Squash commits on merge (default: true)
-- `title-prefix` - Optional string prepended to every PR title (e.g., `"[Bot] "`). Useful for making agent-created PRs visually distinct.
-- `if-no-changes` - Behavior when the agent's patch is empty: `"warn"` (succeed with a warning, default), `"error"` (fail the pipeline step), or `"ignore"` (succeed silently).
-- `max-files` - Maximum number of files allowed in a single PR patch (default: 100). PRs with more files are rejected.
-- `protected-files` - Whether manifest and CI/CD files can be modified: `"blocked"` (default, prevents changes to pipeline YAML, lock files, etc.) or `"allowed"` (permit all files).
-- `excluded-files` - Glob patterns for files to exclude from the patch (e.g., `["*.lock", "dist/**"]`).
-- `allowed-labels` - Allowlist of label names the agent is permitted to apply. If empty (default), any labels are accepted.
-- `fallback-record-branch` - Whether to record the pushed branch name in failure data when PR creation fails (default: true). When enabled, the failure response includes the branch and target so operators can manually create the PR.
+- `title-prefix` - Optional string prepended to all PR titles created by this agent (e.g., `"[Bot] "`)
+- `if-no-changes` - Behavior when the agent's patch produces no file changes: `"warn"` (default, succeed with a warning), `"error"` (fail the step), `"ignore"` (succeed silently)
+- `max-files` - Maximum number of files allowed in a single PR (default: 100). PRs exceeding this limit are rejected.
+- `protected-files` - Controls whether manifest/CI files (e.g., `package-lock.json`, `.github/`, `*.lock`) can be modified: `"blocked"` (default, reject changes to these files) or `"allowed"` (permit all files)
+- `excluded-files` - Glob patterns for files to strip from the patch before applying (e.g., `["*.lock", "dist/**"]`)
+- `allowed-labels` - Allowlist of labels the agent is permitted to apply. If empty (default), any labels are accepted.
 - `reviewers` - List of reviewer emails to add
 - `labels` - List of labels to apply
 - `work-items` - List of work item IDs to link
+- `fallback-record-branch` - When PR creation fails, record the pushed branch name and target branch in the failure response so operators can manually create the PR (default: true)
 - `max` - Maximum number of create-pull-request outputs allowed per run (default: 1)
 - `include-stats` - Whether to append agent execution stats (token usage, duration, model) to the PR description (default: true)
 
@@ -614,4 +614,3 @@ safe-outputs:
 Note: `wiki-name` is required. If it is not set, execution fails with an explicit error message.
 
 **Code wikis vs project wikis:** The executor automatically detects code wikis (type 1) and resolves the published branch from the wiki metadata. You only need to set `branch` explicitly to override the auto-detected value (e.g. targeting a non-default branch). Project wikis (type 0) need no branch configuration.
-

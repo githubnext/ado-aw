@@ -58,9 +58,10 @@ Note: Minimum interval is 5 minutes (GitHub Actions/Azure DevOps constraint).
 ### Special Periods
 
 ```yaml
-schedule: bi-weekly    # Every 14 days at scattered time
-schedule: tri-weekly   # Every 21 days at scattered time
-schedule: every 2 days # Every 2 days at scattered time
+schedule: bi-weekly       # Every 14 days at scattered time
+schedule: tri-weekly      # Every 21 days at scattered time
+schedule: every 2 days    # Every N days at scattered time
+schedule: every 2 weeks   # Every N weeks (converted to N×7 days) at scattered time
 ```
 
 ### Timezone Support

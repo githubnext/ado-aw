@@ -101,6 +101,7 @@ impl CompilerExtension for TriggerFiltersExtension {
         let mut steps = Vec::new();
         steps.push(format!(
             r#"- bash: |
+    set -eo pipefail
     mkdir -p /tmp/ado-aw-scripts
     curl -fsSL "{RELEASE_BASE_URL}/v{version}/checksums.txt" -o /tmp/ado-aw-scripts/checksums.txt
     curl -fsSL "{RELEASE_BASE_URL}/v{version}/scripts.zip" -o /tmp/ado-aw-scripts/scripts.zip

@@ -214,7 +214,8 @@ fn log_and_print_entry_result(i: usize, total: usize, tool_name: &str, result: &
         warn!("[{}/{}] {} failed: {}", i + 1, total, tool_name, result.message);
     }
     let symbol = if result.is_warning() { "⚠" } else if result.success { "✓" } else { "✗" };
-    println!("[{}/{}] {} - {} - {}", i + 1, total, tool_name, symbol, result.message);
+    let safe_msg = neutralize_pipeline_commands(&result.message);
+    println!("[{}/{}] {} - {} - {}", i + 1, total, tool_name, symbol, safe_msg);
 }
 
 /// Parse a JSON entry as `T` and run it through `execute_sanitized`.
@@ -484,6 +485,14 @@ mod tests {
     fn test_extract_entry_context_prefers_id_over_title() {
         let entry = serde_json::json!({"id": 42, "title": "should be ignored"});
         assert_eq!(extract_entry_context(&entry), " (work item #42)");
+    }
+
+    #[test]
+    fn test_stdout_print_neutralizes_result_message_pipeline_commands() {
+        let message = "Uploaded '##vso[task.setvariable variable=X]y.txt'";
+        let safe = neutralize_pipeline_commands(message);
+        assert!(!safe.contains("##vso[task"));
+        assert!(safe.contains("`##vso[`"));
     }
 
     #[tokio::test]
