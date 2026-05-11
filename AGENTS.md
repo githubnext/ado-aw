@@ -136,6 +136,10 @@ Every compiled pipeline runs as three sequential jobs:
 │           └── execute.rs   # Stage 3 runtime (validate/copy)
 ├── ado-aw-derive/        # Proc-macro crate: #[derive(SanitizeConfig)], #[derive(SanitizeContent)]
 ├── examples/             # Example agent definitions
+├── prompts/              # AI agent prompt files for workflow authoring tasks
+│   ├── create-ado-agentic-workflow.md # Step-by-step guide for creating a new agentic pipeline
+│   ├── update-ado-agentic-workflow.md # Guide for modifying an existing agentic pipeline
+│   └── debug-ado-agentic-workflow.md  # Guide for troubleshooting a failing agentic pipeline
 ├── scripts/              # Supporting scripts shipped as release artifacts
 │   ├── gate-eval.py      # Python gate evaluator (data-driven filter evaluation)
 │   └── gate-spec.schema.json # JSON Schema for gate spec (generated from Rust types)
@@ -159,6 +163,15 @@ Every compiled pipeline runs as three sequential jobs:
 
 The detailed reference for each concept lives in [`docs/`](docs/). Use this
 index to jump to the right page.
+
+### Prompt files for workflow authoring
+
+- [`prompts/create-ado-agentic-workflow.md`](prompts/create-ado-agentic-workflow.md) — step-by-step
+  guide for creating a new agentic pipeline from scratch (interactive and non-interactive modes).
+- [`prompts/update-ado-agentic-workflow.md`](prompts/update-ado-agentic-workflow.md) — guide for
+  modifying an existing agentic pipeline (read-then-update workflow with validation).
+- [`prompts/debug-ado-agentic-workflow.md`](prompts/debug-ado-agentic-workflow.md) — guide for
+  troubleshooting a failing agentic pipeline and filing a diagnostic report.
 
 ### Authoring agent files
 
