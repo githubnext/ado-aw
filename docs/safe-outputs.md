@@ -230,6 +230,9 @@ Adds a new comment thread to a pull request.
 - `content` - Comment text in markdown format (required, at least 10 characters)
 - `repository` - Repository alias (default: "self")
 - `file_path` *(optional)* - File path for an inline comment anchored to a specific file
+- `line` *(optional)* - Line number for an inline comment. Requires `file_path`.
+- `start_line` *(optional)* - Starting line for a multi-line inline comment range. Requires `file_path` and `line`, and must be strictly less than `line`.
+- `status` *(optional)* - Initial thread status: `"active"` (default), `"fixed"`, `"wont-fix"`, `"closed"`, or `"by-design"`. Subject to the `allowed-statuses` allowlist.
 
 **Configuration options (front matter):**
 ```yaml
@@ -237,6 +240,7 @@ safe-outputs:
   add-pr-comment:
     comment-prefix: "[Agent Review] "  # Optional — prepended to all comments
     allowed-repositories: []           # Optional — restrict which repos can be commented on
+    allowed-statuses: []               # Optional — restrict which thread statuses the agent can set (empty = any)
     max: 1                             # Maximum per run (default: 1)
     include-stats: true                # Append agent stats to comment (default: true)
 ```
