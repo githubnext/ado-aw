@@ -111,6 +111,10 @@ impl Validate for UploadPipelineArtifactParams {
             !self.file_path.contains(':'),
             "file_path must not contain ':'"
         );
+        ensure!(
+            !self.file_path.contains("##vso[") && !self.file_path.contains("##["),
+            "file_path must not contain Azure DevOps pipeline command sequences"
+        );
         for component in self.file_path.split(['/', '\\']) {
             ensure!(
                 is_safe_path_segment(component),
@@ -774,6 +778,24 @@ mod tests {
         assert!(make_params(None, "report", "C:\\out\\report.pdf")
             .validate()
             .is_err());
+    }
+
+    #[test]
+    fn test_validation_rejects_pipeline_command_sequences_in_file_path() {
+        assert!(
+            make_params(
+                None,
+                "report",
+                "##vso[task.setvariable variable=EXPLOIT]value.txt"
+            )
+            .validate()
+            .is_err()
+        );
+        assert!(
+            make_params(None, "report", "##[error]value.txt")
+                .validate()
+                .is_err()
+        );
     }
 
     #[test]
