@@ -173,9 +173,16 @@ Note: The source branch name is auto-generated from a sanitized version of the P
 - `auto-complete` - Set auto-complete on the PR (default: false). Requires `draft: false` to take effect.
 - `delete-source-branch` - Delete source branch after merge (default: true)
 - `squash-merge` - Squash commits on merge (default: true)
+- `title-prefix` - Optional string prepended to all PR titles created by this agent (e.g., `"[Bot] "`)
+- `if-no-changes` - Behavior when the agent's patch produces no file changes: `"warn"` (default, succeed with a warning), `"error"` (fail the step), `"ignore"` (succeed silently)
+- `max-files` - Maximum number of files allowed in a single PR (default: 100). PRs exceeding this limit are rejected.
+- `protected-files` - Controls whether manifest/CI files (e.g., `package-lock.json`, `.github/`, `*.lock`) can be modified: `"blocked"` (default, reject changes to these files) or `"allowed"` (permit all files)
+- `excluded-files` - Glob patterns for files to strip from the patch before applying (e.g., `["*.lock", "dist/**"]`)
+- `allowed-labels` - Allowlist of labels the agent is permitted to apply. If empty (default), any labels are accepted.
 - `reviewers` - List of reviewer emails to add
 - `labels` - List of labels to apply
 - `work-items` - List of work item IDs to link
+- `fallback-record-branch` - When PR creation fails, record the pushed branch name and target branch in the failure response so operators can manually create the PR (default: true)
 - `max` - Maximum number of create-pull-request outputs allowed per run (default: 1)
 - `include-stats` - Whether to append agent execution stats (token usage, duration, model) to the PR description (default: true)
 
