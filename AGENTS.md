@@ -273,6 +273,25 @@ cargo test
 cargo clippy
 ```
 
+### Bash step lint
+
+The `tests/bash_lint_tests.rs` integration test compiles a representative set
+of fixtures and runs `shellcheck` against every literal `bash:` body in the
+generated YAML. It catches silent-failure patterns that ADO's "fail on last
+command" default would let through (e.g. `cd "$X"` without `|| exit`, tilde
+inside double quotes, masked-return assignments).
+
+The test is skipped if `shellcheck` is not on PATH. Install locally with
+`brew install shellcheck` (macOS) or `apt-get install -y shellcheck` (Debian
+/ Ubuntu); CI installs it in `.github/workflows/rust-tests.yml` and sets
+`ENFORCE_BASH_LINT=1` so a missing shellcheck becomes a hard failure rather
+than a silent skip.
+
+When adding a new bash step, run `cargo test --test bash_lint_tests` and fix
+anything it flags. If a finding is genuinely intentional, add a
+`# shellcheck disable=SCxxxx` comment immediately above the offending line in
+the bash body — shellcheck honours the directive and it's inert at runtime.
+
 ## Common Tasks
 
 ### Compile a markdown pipeline

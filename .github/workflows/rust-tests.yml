@@ -22,8 +22,16 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install shellcheck
+        # ubuntu-latest already ships shellcheck, but install explicitly to
+        # guarantee it on every refresh of the runner image and to surface
+        # a clear failure when the bash-lint integration test is enforced.
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
       - name: Build
         run: cargo build --verbose
 
       - name: Run tests
+        env:
+          ENFORCE_BASH_LINT: "1"
         run: cargo test --verbose

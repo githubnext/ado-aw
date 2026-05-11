@@ -91,6 +91,7 @@ pub fn generate_lean_install(config: &LeanRuntimeConfig) -> String {
     let toolchain = config.toolchain().unwrap_or("stable");
     let script = format!(
         "\
+set -eo pipefail
 curl https://elan.lean-lang.org/elan-init.sh -sSf | sh -s -- -y --default-toolchain {toolchain}
 echo \"##vso[task.prependpath]$HOME/.elan/bin\"
 export PATH=\"$HOME/.elan/bin:$PATH\"

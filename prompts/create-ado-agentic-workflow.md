@@ -201,6 +201,10 @@ mcp-servers:
     entrypoint: "node"
     entrypoint-args: ["path/to/server.js"]
     enabled: false             # Set to false to temporarily disable without removing
+    args: ["--memory", "512m"] # Additional Docker runtime args (inserted before image name).
+                               # Dangerous flags like --privileged trigger compile-time warnings.
+    mounts:
+      - "/host/data:/app/data:ro"  # Volume mounts in "source:dest:mode" format
     env:
       API_KEY: "$(MY_SECRET)"
     allowed:
