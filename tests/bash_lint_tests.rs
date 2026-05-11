@@ -101,6 +101,7 @@ const REQUIRED_STEP_DISPLAY_NAMES: &[&str] = &[
     "Restore previous agent memory",          // src/tools/cache_memory/extension.rs
     "Initialize empty agent memory (clearMemory=true)",
     "Generate GITHUB_PATH file",              // src/compile/common.rs (AWF path step)
+    "Evaluate pipeline filters",              // src/compile/extensions/trigger_filters.rs + src/compile/filter_ir.rs
 ];
 
 fn ado_aw_binary() -> PathBuf {
