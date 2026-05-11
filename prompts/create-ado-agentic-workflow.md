@@ -130,7 +130,8 @@ Controls where the agent's working directory is set.
 | Value | Path | Use when |
 |---|---|---|
 | `root` (default) | `$(Build.SourcesDirectory)` | Only checking out `self` |
-| `repo` | `$(Build.SourcesDirectory)/$(Build.Repository.Name)` | Multiple repos checked out |
+| `repo` (alias: `self`) | `$(Build.SourcesDirectory)/$(Build.Repository.Name)` | Multiple repos checked out |
+| *repo-alias* | `$(Build.SourcesDirectory)/<alias>` | Run in a specific checked-out repo |
 
 Only include `workspace:` if non-default. Warn the user if they set `workspace: repo` but have no additional repos in `repos:`.
 
@@ -225,7 +226,7 @@ mcp-servers:
 
 > **Security**: All `mcp-servers:` entries must have an explicit `allowed:` list.
 >
-> **Standalone target** (the default): Built-in MCPs (entries without a `container:` or `url:` field) are silently skipped at compile time — they have no effect and will not be available to the agent. For the standalone target, use only **custom** containerized MCPs with a `container:` field.
+> **Standalone target** (the default): MCPs without a `container:` or `url:` field are skipped at compile time with a compile-time warning — they have no effect and will not be available to the agent. For the standalone target, use only **custom** containerized MCPs with a `container:` field.
 
 ### Step 9 — Safe Outputs
 
