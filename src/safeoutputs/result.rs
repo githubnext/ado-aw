@@ -117,6 +117,13 @@ pub struct ExecutionContext {
     #[allow(dead_code)]
     pub pull_request_target_branch: Option<String>,
 
+    /// Email of the last git committer of the agent source file.
+    ///
+    /// Populated at Stage 3 startup by running `git log -1 --format='%ae'`
+    /// against the agent markdown. Used as a fallback assignee for
+    /// `create-work-item` when no explicit `assignee` is configured.
+    pub agent_last_committer: Option<String>,
+
     /// Per-run dedupe set for `upload-pipeline-artifact` when the
     /// `require-unique-names` config is set. Stores `format!("{}/{}",
     /// effective_build_id, final_name)` keys; the executor checks-and-inserts
@@ -219,6 +226,9 @@ impl ExecutionContext {
             pull_request_id: env("SYSTEM_PULLREQUEST_PULLREQUESTID"),
             pull_request_source_branch: env("SYSTEM_PULLREQUEST_SOURCEBRANCH"),
             pull_request_target_branch: env("SYSTEM_PULLREQUEST_TARGETBRANCH"),
+
+            // Populated later by run_execute via git log on the source file
+            agent_last_committer: None,
 
             // Per-run state for upload-pipeline-artifact dedupe.
             uploaded_pipeline_artifact_keys: Arc::new(Mutex::new(HashSet::new())),

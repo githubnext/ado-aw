@@ -71,7 +71,7 @@ Creates an Azure DevOps work item.
 - `work-item-type` - Work item type (default: "Task")
 - `area-path` - Area path for the work item
 - `iteration-path` - Iteration path for the work item
-- `assignee` - User to assign (email or display name)
+- `assignee` - User to assign (email or display name). When omitted, falls back to the email of the last person who committed changes to the agent source markdown file (discovered via `git log` at Stage 3).
 - `tags` - Static list of tags always applied to the work item (regardless of agent input)
 - `allowed-tags` - Allowlist of tags the agent is permitted to use via the `tags` parameter. If empty, any agent-provided tags are accepted. Supports `*` wildcards anywhere in the pattern (e.g., `"agent-*"` matches `"agent-created"`; `"copilot:repo=org/project/*@main"` matches any repo name).
 - `custom-fields` - Map of custom field reference names to values (e.g., `Custom.MyField: "value"`)
