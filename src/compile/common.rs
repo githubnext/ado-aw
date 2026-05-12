@@ -2861,11 +2861,11 @@ pub async fn compile_shared(
 ///
 /// Handles the full setup — collecting extensions, building the compile context,
 /// generating the stage prefix and template parameters, computing AWF/MCPG
-/// values — and delegates to [`compile_shared`].  The caller supplies:
+/// values — and delegates to [`compile_shared`]. The caller supplies:
 ///
 /// - `cfg`: target-specific settings (template string, integrity / debug flags).
 /// - `header_fn`: a function that generates the leading comment block prepended
-///   to the compiled YAML.  The two template compilers use different header
+///   to the compiled YAML. The two template compilers use different header
 ///   layouts, so this lets each compiler keep its own generator while sharing
 ///   all of the boilerplate setup.
 ///
@@ -2927,9 +2927,15 @@ pub async fn compile_template_target(
     };
 
     let yaml = compile_shared(
-        input_path, output_path, front_matter, markdown_body,
-        &extensions, &ctx, config,
-    ).await?;
+        input_path,
+        output_path,
+        front_matter,
+        markdown_body,
+        &extensions,
+        &ctx,
+        config,
+    )
+    .await?;
 
     let header = header_fn(input_path, output_path, front_matter);
     Ok(format!("{}{}", header, yaml))

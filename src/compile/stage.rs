@@ -17,13 +17,12 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use log::warn;
+use log::{info, warn};
 use std::path::Path;
 
 use super::Compiler;
 use super::common::{
-    compile_template_target, TemplateTargetConfig,
-    generate_header_comment,
+    compile_template_target, generate_header_comment, TemplateTargetConfig,
 };
 use super::types::FrontMatter;
 
@@ -45,6 +44,8 @@ impl Compiler for StageCompiler {
         skip_integrity: bool,
         debug_pipeline: bool,
     ) -> Result<String> {
+        info!("Compiling for stage template target");
+
         if front_matter.on_config.is_some() {
             warn!("on: trigger configuration is ignored for target: stage (triggers are the parent pipeline's concern)");
         }
@@ -60,16 +61,15 @@ impl Compiler for StageCompiler {
                 debug_pipeline,
             },
             generate_stage_header,
-        ).await
+        )
+        .await
     }
 }
 
 /// Generate the header comment block for stage-level templates.
 fn generate_stage_header(input_path: &Path, output_path: &Path, front_matter: &FrontMatter) -> String {
     let base_header = generate_header_comment(input_path);
-    let mut lock_path = output_path
-        .to_string_lossy()
-        .replace('\\', "/");
+    let mut lock_path = output_path.to_string_lossy().replace('\\', "/");
     while lock_path.starts_with("./") {
         lock_path = lock_path[2..].to_string();
     }

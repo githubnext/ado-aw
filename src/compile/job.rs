@@ -9,13 +9,12 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use log::warn;
+use log::{info, warn};
 use std::path::Path;
 
 use super::Compiler;
 use super::common::{
-    compile_template_target, TemplateTargetConfig,
-    generate_header_comment,
+    compile_template_target, generate_header_comment, TemplateTargetConfig,
 };
 use super::types::FrontMatter;
 
@@ -37,6 +36,8 @@ impl Compiler for JobCompiler {
         skip_integrity: bool,
         debug_pipeline: bool,
     ) -> Result<String> {
+        info!("Compiling for job template target");
+
         if front_matter.on_config.is_some() {
             warn!("on: trigger configuration is ignored for target: job (triggers are the parent pipeline's concern)");
         }
@@ -52,16 +53,15 @@ impl Compiler for JobCompiler {
                 debug_pipeline,
             },
             generate_job_header,
-        ).await
+        )
+        .await
     }
 }
 
 /// Generate the header comment block for job-level templates.
 fn generate_job_header(input_path: &Path, output_path: &Path, front_matter: &FrontMatter) -> String {
     let base_header = generate_header_comment(input_path);
-    let mut lock_path = output_path
-        .to_string_lossy()
-        .replace('\\', "/");
+    let mut lock_path = output_path.to_string_lossy().replace('\\', "/");
     // Strip redundant leading "./" (same normalization as generate_header_comment)
     while lock_path.starts_with("./") {
         lock_path = lock_path[2..].to_string();
@@ -102,7 +102,6 @@ fn generate_job_header(input_path: &Path, output_path: &Path, front_matter: &Fro
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::compile::common::generate_stage_prefix;
 
     #[test]

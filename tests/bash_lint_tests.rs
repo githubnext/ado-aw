@@ -180,6 +180,7 @@ fn compile_fixture_with_flags(workspace: &Path, fixture: &str, extra_flags: &[&s
     } else if stdout.contains("Generated job template:") {
         "job"
     } else if stdout.contains("Generated stage template:") {
+
         "stage"
     } else {
         panic!(
