@@ -199,6 +199,8 @@ The `repository` value must be `"self"`, an alias from the `checkout:` list in t
 ### noop
 Reports that no action was needed. Use this to provide visibility when analysis is complete but no changes or outputs are required.
 
+The executor always files an Azure DevOps work item or appends a comment to an existing one. Override the defaults in front matter to customise the title, type, or area path. If ADO credentials are not available the tool succeeds with a warning.
+
 **Agent parameters:**
 - `context` - Optional context about why no action was taken
 
@@ -206,17 +208,17 @@ Reports that no action was needed. Use this to provide visibility when analysis 
 ```yaml
 safe-outputs:
   noop:
-    work-item:                            # Optional — file or append to a work item when noop is reached
-      title: "Agent reported no operation"  # Required — work item title (used to find existing items)
-      work-item-type: Task              # Work item type (default: "Task")
-      area-path: "MyProject\\MyTeam"    # Optional — area path
-      iteration-path: "MyProject\\Sprint 1"  # Optional — iteration path
-      tags:                             # Optional — tags to apply
+    work-item:                                  # Work item config — always active with these defaults
+      title: "Agent reported no operation"      # Default title (used to find existing items too)
+      work-item-type: Task                      # Work item type (default: "Task")
+      area-path: "MyProject\\MyTeam"            # Optional — area path
+      iteration-path: "MyProject\\Sprint 1"     # Optional — iteration path
+      tags:                                     # Optional — tags to apply
         - agent-noop
-      include-stats: true               # Append agent stats to description/comment (default: true)
+      include-stats: true                       # Append agent stats to description/comment (default: true)
 ```
 
-When `work-item` is configured, the executor searches for a non-closed work item with the same `title` in the project. If one is found, a comment is appended; otherwise a new work item is created.
+The executor searches for a non-closed work item with the same `title` in the project. If one is found, a comment is appended; otherwise a new work item is created.
 
 ### missing-data
 Reports that data or information needed to complete the task is not available.
@@ -229,6 +231,8 @@ Reports that data or information needed to complete the task is not available.
 ### missing-tool
 Reports that a tool or capability needed to complete the task is not available.
 
+The executor always files an Azure DevOps work item or appends a comment to an existing one. Override the defaults in front matter to customise the title, type, or area path. If ADO credentials are not available the tool succeeds with a warning.
+
 **Agent parameters:**
 - `tool_name` - Name of the tool that was expected but not found
 - `context` - Optional context about why the tool was needed
@@ -237,17 +241,17 @@ Reports that a tool or capability needed to complete the task is not available.
 ```yaml
 safe-outputs:
   missing-tool:
-    work-item:                              # Optional — file or append to a work item when a tool is missing
-      title: "Agent encountered missing tool"  # Required — work item title (used to find existing items)
-      work-item-type: Bug               # Work item type (default: "Task")
-      area-path: "MyProject\\MyTeam"    # Optional — area path
-      iteration-path: "MyProject\\Sprint 1"  # Optional — iteration path
-      tags:                             # Optional — tags to apply
+    work-item:                                     # Work item config — always active with these defaults
+      title: "Agent encountered missing tool"      # Default title (used to find existing items too)
+      work-item-type: Task                         # Work item type (default: "Task")
+      area-path: "MyProject\\MyTeam"               # Optional — area path
+      iteration-path: "MyProject\\Sprint 1"        # Optional — iteration path
+      tags:                                        # Optional — tags to apply
         - agent-missing-tool
-      include-stats: true               # Append agent stats to description/comment (default: true)
+      include-stats: true                          # Append agent stats to description/comment (default: true)
 ```
 
-When `work-item` is configured, the executor searches for a non-closed work item with the same `title` in the project. If one is found, a comment is appended; otherwise a new work item is created.
+The executor searches for a non-closed work item with the same `title` in the project. If one is found, a comment is appended; otherwise a new work item is created.
 
 ### report-incomplete
 Reports that a task could not be completed.

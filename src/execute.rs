@@ -578,8 +578,9 @@ mod tests {
         assert!(result.is_ok());
         let (tool_name, result) = result.unwrap();
         assert_eq!(tool_name, "noop");
+        // noop always attempts to file a work item; without ADO credentials it
+        // returns a warning (success=true) rather than failing hard.
         assert!(result.success);
-        assert!(result.message.contains("No operation"));
     }
 
     #[tokio::test]
@@ -591,6 +592,8 @@ mod tests {
         assert!(result.is_ok());
         let (tool_name, result) = result.unwrap();
         assert_eq!(tool_name, "missing-tool");
+        // missing-tool always attempts to file a work item; without ADO credentials
+        // it returns a warning (success=true) rather than failing hard.
         assert!(result.success);
     }
 

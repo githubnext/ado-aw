@@ -382,11 +382,14 @@ fn work_item_report_default_type() -> String {
     "Task".to_string()
 }
 
-/// Configuration for optionally filing (or appending to) an Azure DevOps work item
+/// Configuration for filing (or appending to) an Azure DevOps work item
 /// when a diagnostic safe output (`noop`, `missing-tool`) is called.
 ///
 /// If a work item with the same title already exists in the project in a non-closed
 /// state, a comment is appended instead of creating a new work item.
+///
+/// Both `noop` and `missing-tool` default to always creating/appending a work item.
+/// Override the defaults in front matter to customise the title, type, area path, etc.
 ///
 /// Example:
 /// ```yaml
@@ -425,19 +428,6 @@ pub struct WorkItemReportConfig {
     /// Whether to include agent execution stats in the work item description/comment (default: true)
     #[serde(default = "crate::agent_stats::default_include_stats", rename = "include-stats")]
     pub include_stats: bool,
-}
-
-impl Default for WorkItemReportConfig {
-    fn default() -> Self {
-        Self {
-            title: String::new(),
-            work_item_type: work_item_report_default_type(),
-            area_path: None,
-            iteration_path: None,
-            tags: Vec::new(),
-            include_stats: true,
-        }
-    }
 }
 
 /// Search for a non-closed work item by exact title using WIQL.
@@ -516,6 +506,11 @@ async fn wiql_find_work_item_by_title(
 /// a comment with `body` is appended. Otherwise a new work item is created
 /// with `body` as the description.
 ///
+/// When ADO credentials are not available (e.g. the pipeline has no write token) the
+/// function returns [`ExecutionResult::warning`] instead of a hard failure so that
+/// always-on diagnostic tools (`noop`, `missing-tool`) do not break pipelines that
+/// run without a write service connection.
+///
 /// Returns an [`ExecutionResult`] describing what was done.
 pub(crate) async fn file_or_append_work_item(
     config: &WorkItemReportConfig,
@@ -525,25 +520,25 @@ pub(crate) async fn file_or_append_work_item(
     let org_url = match &ctx.ado_org_url {
         Some(u) => u,
         None => {
-            return Ok(ExecutionResult::failure(
-                "AZURE_DEVOPS_ORG_URL not set; cannot file work item".to_string(),
+            return Ok(ExecutionResult::warning(
+                "AZURE_DEVOPS_ORG_URL not set; work item not filed".to_string(),
             ));
         }
     };
     let project = match &ctx.ado_project {
         Some(p) => p,
         None => {
-            return Ok(ExecutionResult::failure(
-                "SYSTEM_TEAMPROJECT not set; cannot file work item".to_string(),
+            return Ok(ExecutionResult::warning(
+                "SYSTEM_TEAMPROJECT not set; work item not filed".to_string(),
             ));
         }
     };
     let token = match &ctx.access_token {
         Some(t) => t,
         None => {
-            return Ok(ExecutionResult::failure(
+            return Ok(ExecutionResult::warning(
                 "No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT); \
-                 cannot file work item"
+                 work item not filed"
                     .to_string(),
             ));
         }
@@ -556,9 +551,9 @@ pub(crate) async fn file_or_append_work_item(
         match wiql_find_work_item_by_title(&client, org_url, project, token, &config.title).await {
             Ok(id) => id,
             Err(e) => {
-                warn!("WIQL search for existing work item failed: {e} — aborting work item filing");
-                return Ok(ExecutionResult::failure(format!(
-                    "Failed to search for existing work item: {e}"
+                warn!("WIQL search for existing work item failed: {e} — skipping work item filing");
+                return Ok(ExecutionResult::warning(format!(
+                    "Work item not filed (WIQL search failed): {e}"
                 )));
             }
         };

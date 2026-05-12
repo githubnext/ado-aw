@@ -31,10 +31,28 @@ impl SanitizeContent for NoopResult {
     }
 }
 
+fn noop_default_work_item_title() -> String {
+    "Agent reported no operation".to_string()
+}
+
+fn noop_default_work_item() -> WorkItemReportConfig {
+    WorkItemReportConfig {
+        title: noop_default_work_item_title(),
+        work_item_type: "Task".to_string(),
+        area_path: None,
+        iteration_path: None,
+        tags: Vec::new(),
+        include_stats: true,
+    }
+}
+
 /// Configuration for the noop tool (specified in front matter).
 ///
-/// When `work-item` is configured, the executor will file a new Azure DevOps work item
-/// or append a comment to an existing one with the same title.
+/// The executor always files a new Azure DevOps work item or appends a comment to an
+/// existing one with the same title. Override the defaults to customise the work item.
+///
+/// If ADO credentials are not available (e.g. the pipeline has no write service
+/// connection), the executor succeeds with a warning rather than failing hard.
 ///
 /// Example front matter:
 /// ```yaml
@@ -48,19 +66,25 @@ impl SanitizeContent for NoopResult {
 ///       tags:
 ///         - agent-noop
 /// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NoopConfig {
-    /// Optional work item to file (or append to) when a noop is reached.
-    /// If absent, the executor only logs a message.
-    #[serde(default, rename = "work-item")]
-    pub work_item: Option<WorkItemReportConfig>,
+    /// Work item to file (or append to) when a noop is reached.
+    /// Defaults to a Task titled "Agent reported no operation".
+    #[serde(default = "noop_default_work_item", rename = "work-item")]
+    pub work_item: WorkItemReportConfig,
+}
+
+impl Default for NoopConfig {
+    fn default() -> Self {
+        Self {
+            work_item: noop_default_work_item(),
+        }
+    }
 }
 
 impl SanitizeConfig for NoopConfig {
     fn sanitize_config_fields(&mut self) {
-        if let Some(wi) = &mut self.work_item {
-            wi.sanitize_config_fields();
-        }
+        self.work_item.sanitize_config_fields();
     }
 }
 
@@ -77,12 +101,7 @@ impl Executor for NoopResult {
         };
 
         let config: NoopConfig = ctx.get_tool_config("noop");
-
-        if let Some(wi_config) = &config.work_item {
-            return file_or_append_work_item(wi_config, &message, ctx).await;
-        }
-
-        Ok(ExecutionResult::success(message))
+        file_or_append_work_item(&config.work_item, &message, ctx).await
     }
 }
 
@@ -154,65 +173,55 @@ mod tests {
     }
 
     #[test]
-    fn test_config_defaults_to_no_work_item() {
+    fn test_config_default_has_sensible_work_item() {
         let config = NoopConfig::default();
-        assert!(config.work_item.is_none());
+        assert_eq!(config.work_item.title, "Agent reported no operation");
+        assert_eq!(config.work_item.work_item_type, "Task");
+        assert!(config.work_item.area_path.is_none());
+        assert!(config.work_item.iteration_path.is_none());
+        assert!(config.work_item.tags.is_empty());
+        assert!(config.work_item.include_stats);
     }
 
     #[test]
-    fn test_config_deserializes_with_work_item() {
+    fn test_config_deserializes_with_work_item_overrides() {
         let yaml = r#"
 work-item:
-  title: "Agent reported no operation"
-  work-item-type: Task
+  title: "My custom noop title"
+  work-item-type: Bug
   area-path: "MyProject\\MyTeam"
   tags:
     - agent-noop
 "#;
         let config: NoopConfig = serde_yaml::from_str(yaml).unwrap();
-        let wi = config.work_item.unwrap();
-        assert_eq!(wi.title, "Agent reported no operation");
-        assert_eq!(wi.work_item_type, "Task");
-        assert_eq!(wi.area_path.as_deref(), Some("MyProject\\MyTeam"));
-        assert_eq!(wi.tags, vec!["agent-noop"]);
+        assert_eq!(config.work_item.title, "My custom noop title");
+        assert_eq!(config.work_item.work_item_type, "Bug");
+        assert_eq!(config.work_item.area_path.as_deref(), Some("MyProject\\MyTeam"));
+        assert_eq!(config.work_item.tags, vec!["agent-noop"]);
     }
 
     #[test]
-    fn test_config_deserializes_without_work_item() {
+    fn test_config_deserializes_empty_uses_defaults() {
         let yaml = r#"{}"#;
         let config: NoopConfig = serde_yaml::from_str(yaml).unwrap();
-        assert!(config.work_item.is_none());
-    }
-
-    #[test]
-    fn test_work_item_config_default_type() {
-        let yaml = r#"
-work-item:
-  title: "No op"
-"#;
-        let config: NoopConfig = serde_yaml::from_str(yaml).unwrap();
-        let wi = config.work_item.unwrap();
-        assert_eq!(wi.work_item_type, "Task");
-        assert!(wi.area_path.is_none());
-        assert!(wi.iteration_path.is_none());
-        assert!(wi.tags.is_empty());
-        assert!(wi.include_stats);
+        assert_eq!(config.work_item.title, "Agent reported no operation");
+        assert_eq!(config.work_item.work_item_type, "Task");
     }
 
     #[tokio::test]
-    async fn test_execute_impl_without_work_item_config() {
+    async fn test_execute_impl_without_ado_credentials_returns_warning() {
         let result: NoopResult = NoopParams {
             context: Some("nothing to do".to_string()),
         }
         .try_into()
         .unwrap();
 
+        // Default ExecutionContext has no ADO credentials — should warn, not fail
         let exec = result
             .execute_impl(&crate::safeoutputs::ExecutionContext::default())
             .await
             .unwrap();
         assert!(exec.success);
-        assert!(exec.message.contains("No operation needed"));
-        assert!(exec.message.contains("nothing to do"));
+        assert!(exec.is_warning());
     }
 }
