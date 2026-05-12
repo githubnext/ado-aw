@@ -78,6 +78,8 @@ const FIXTURES: &[&str] = &[
     "pipeline-filter-agent.md",
     "runtime-coverage-agent.md",
     "runtime-coverage-1es-agent.md",
+    "job-agent.md",
+    "stage-agent.md",
 ];
 
 /// Step display names that the lint expects to find at least once across all
@@ -165,6 +167,10 @@ fn compile_fixture(workspace: &Path, fixture: &str) -> (PathBuf, String) {
         "1es"
     } else if stdout.contains("Generated standalone pipeline:") {
         "standalone"
+    } else if stdout.contains("Generated job pipeline:") {
+        "job"
+    } else if stdout.contains("Generated stage pipeline:") {
+        "stage"
     } else {
         panic!(
             "could not determine compile target for {fixture} from stdout:\n{stdout}"
@@ -333,7 +339,7 @@ fn compiled_bash_bodies_pass_shellcheck() {
     // at least one fixture, so we shellcheck the bash output of every template
     // (`src/data/base.yml` and `src/data/1es-base.yml`) and every code-generated
     // step on both targets.
-    const REQUIRED_TARGETS: &[&str] = &["standalone", "1es"];
+    const REQUIRED_TARGETS: &[&str] = &["standalone", "1es", "job", "stage"];
     let missing_targets: Vec<&str> = REQUIRED_TARGETS
         .iter()
         .copied()

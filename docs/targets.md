@@ -31,3 +31,79 @@ target: 1es
 ```
 
 When using `target: 1es`, the pipeline will extend `1es/1ES.Unofficial.PipelineTemplate.yml@1ESPipelinesTemplates`.
+
+### `job`
+
+Generates a **job-level ADO YAML template** with `jobs:` at root. This is a
+reusable template that can be included in an existing pipeline — it does not
+generate a complete pipeline.
+
+The output contains the same 3-job chain (Agent → Detection → Execution) as
+`standalone`, with:
+- Job names prefixed with the agent name for uniqueness (e.g., `DailyReview_Agent`)
+- No triggers, pipeline name, or resource declarations (the parent pipeline owns those)
+- Pool baked in from the front matter `pool:` field
+
+Example front matter:
+```yaml
+target: job
+```
+
+#### Usage in a flat pipeline
+
+```yaml
+jobs:
+  - job: Build
+    steps: ...
+  - template: agents/review.lock.yml
+```
+
+#### Usage inside a user-defined stage
+
+```yaml
+stages:
+  - stage: Build
+    jobs: ...
+  - stage: AgenticReview
+    dependsOn: Build
+    jobs:
+      - template: agents/review.lock.yml
+```
+
+#### Notes
+
+- Triggers (`on:`) are ignored with a warning (the parent pipeline controls triggers)
+- If the agent declares additional repositories via `repos:`, add them to the
+  parent pipeline's `resources:` block (documented in the generated file header)
+
+### `stage`
+
+Generates a **stage-level ADO YAML template** with `stages:` at root. This
+wraps the 3-job chain inside a stage block for direct inclusion in multi-stage
+pipelines.
+
+Example front matter:
+```yaml
+target: stage
+```
+
+#### Usage
+
+```yaml
+stages:
+  - stage: Build
+    jobs: ...
+  - template: agents/review.lock.yml
+    dependsOn: Build
+    condition: succeeded()
+```
+
+ADO natively supports `dependsOn` and `condition` at the template call site —
+no template parameters are needed for stage ordering.
+
+#### Notes
+
+- Same 3-job chain, job-name prefixing, and pool handling as `target: job`
+- Triggers (`on:`) are ignored with a warning
+- If the agent declares additional repositories via `repos:`, add them to the
+  parent pipeline's `resources:` block

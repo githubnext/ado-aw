@@ -17,6 +17,10 @@ pub enum CompileTarget {
     /// 1ES Pipeline Template integration using agencyJob
     #[serde(rename = "1es")]
     OneES,
+    /// Job-level ADO template: produces `jobs:` at root for inclusion in existing pipelines
+    Job,
+    /// Stage-level ADO template: produces `stages:` wrapping jobs for multi-stage pipelines
+    Stage,
 }
 
 /// Pool configuration - accepts both string and object formats

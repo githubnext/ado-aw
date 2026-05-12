@@ -999,6 +999,59 @@ pub fn sanitize_filename(name: &str) -> String {
 /// Default pool name
 pub const DEFAULT_POOL: &str = "AZS-1ES-L-MMS-ubuntu-22.04";
 
+/// Derive a valid ADO identifier from the agent name for use as a job-name
+/// prefix and stage name. Converts to PascalCase, stripping non-alphanumeric
+/// characters.
+///
+/// Examples:
+/// - `"Daily Code Review"` → `"DailyCodeReview"`
+/// - `"my-agent-123"` → `"MyAgent123"`
+/// - `""` → `"Agent"` (fallback)
+/// - `"123start"` → `"_123start"` (prefix underscore for leading digit)
+pub fn generate_stage_prefix(name: &str) -> String {
+    let pascal: String = name
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => {
+                    let upper = first.to_uppercase().to_string();
+                    upper + chars.as_str()
+                }
+            }
+        })
+        .collect();
+
+    if pascal.is_empty() {
+        "Agent".to_string()
+    } else if pascal.starts_with(|c: char| c.is_ascii_digit()) {
+        format!("_{}", pascal)
+    } else {
+        pascal
+    }
+}
+
+/// Generate the template-level `parameters:` YAML block for job/stage
+/// template targets.
+///
+/// Includes clearMemory (if cache-memory enabled) and user-defined
+/// parameters from front matter. Returns empty string if no parameters
+/// are needed.
+pub fn generate_template_parameters(front_matter: &FrontMatter) -> Result<String> {
+    let has_memory = front_matter
+        .tools
+        .as_ref()
+        .and_then(|t| t.cache_memory.as_ref())
+        .is_some_and(|cm| cm.is_enabled());
+    let params = build_parameters(&front_matter.parameters, has_memory);
+    if params.is_empty() {
+        return Ok(String::new());
+    }
+    generate_parameters(&params)
+}
+
 /// Version of the AWF (Agentic Workflow Firewall) binary to download from GitHub Releases.
 /// Update this when upgrading to a new AWF release.
 /// See: https://github.com/github/gh-aw-firewall/releases
@@ -2423,6 +2476,10 @@ pub struct CompileConfig {
     /// to append `GITHUB_PATH: $(GITHUB_PATH)` to the engine env block without
     /// re-collecting path prepends from extensions.
     pub has_awf_paths: bool,
+    /// When true, `compile_shared` omits the standard `# @ado-aw` header.
+    /// Template-producing compilers (Job, Stage) set this to prepend their
+    /// own custom header with usage instructions.
+    pub skip_header: bool,
 }
 
 /// Shared compilation flow used by both standalone and 1ES compilers.
@@ -2704,9 +2761,13 @@ pub async fn compile_shared(
             replace_with_indent(&yaml, placeholder, replacement)
         });
 
-    // 15. Prepend header
-    let header = generate_header_comment(input_path);
-    Ok(format!("{}{}", header, pipeline_yaml))
+    // 15. Prepend header (unless the caller will prepend its own)
+    if config.skip_header {
+        Ok(pipeline_yaml)
+    } else {
+        let header = generate_header_comment(input_path);
+        Ok(format!("{}{}", header, pipeline_yaml))
+    }
 }
 
 #[cfg(test)]

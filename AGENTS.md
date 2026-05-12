@@ -52,6 +52,8 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   ├── common.rs     # Shared helpers across targets
 │   │   ├── standalone.rs # Standalone pipeline compiler
 │   │   ├── onees.rs      # 1ES Pipeline Template compiler
+│   │   ├── job.rs        # Job-level ADO template compiler (target: job)
+│   │   ├── stage.rs      # Stage-level ADO template compiler (target: stage)
 │   │   ├── gitattributes.rs # .gitattributes management for compiled pipelines
 │   │   ├── filter_ir.rs  # Filter expression IR: Fact/Predicate types, lowering, validation, codegen
 │   │   ├── pr_filters.rs # PR trigger filter generation (native ADO + gate steps)
@@ -122,6 +124,8 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── data/
 │   │   ├── base.yml          # Base pipeline template for standalone
 │   │   ├── 1es-base.yml      # Base pipeline template for 1ES target
+│   │   ├── job-base.yml      # Job-level ADO template for target: job
+│   │   ├── stage-base.yml    # Stage-level ADO template for target: stage
 │   │   ├── ecosystem_domains.json # Network allowlists per ecosystem
 │   │   ├── init-agent.md     # Dispatcher agent template for `init` command
 │   │   └── threat-analysis.md # Threat detection analysis prompt template

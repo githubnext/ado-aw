@@ -10,7 +10,7 @@ The compiler expects markdown files with YAML front matter similar to gh-aw:
 ---
 name: "name for this agent"
 description: "One line description for this agent"
-target: standalone # Optional: "standalone" (default) or "1es". See docs/targets.md.
+target: standalone # Optional: "standalone" (default), "1es", "job", or "stage". See docs/targets.md.
 engine: copilot # Engine identifier. Defaults to copilot. Currently only 'copilot' (GitHub Copilot CLI) is supported.
 # engine:                        # Alternative object format (with additional options)
 #   id: copilot
