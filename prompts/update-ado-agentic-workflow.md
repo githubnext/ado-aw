@@ -39,7 +39,7 @@ When adding new fields, place them in the conventional front matter order:
 
 ```
 name → description → target → engine → schedule → workspace → pool →
-repositories → checkout → tools → mcp-servers → safe-outputs →
+repos → tools → mcp-servers → safe-outputs →
 triggers → steps → post-steps → setup → teardown → network →
 permissions → parameters
 ```
@@ -244,9 +244,9 @@ Before finalizing any update, verify:
 
 3. **Schedule syntax**: The schedule expression uses valid fuzzy schedule syntax. Valid frequencies: `daily`, `weekly on <day>`, `hourly`, `every Nh`, `every N minutes`, `bi-weekly`, `tri-weekly`. Valid time specs: `around HH:MM`, `between HH:MM and HH:MM`.
 
-4. **Repository aliases**: Every alias in `checkout:` exists in `repositories:`.
+4. **Repository aliases**: Every repo alias used in agent instructions or safe-output `repository:` fields exists as an entry in `repos:` with `checkout: true` (the default).
 
-5. **Workspace consistency**: If `workspace: repo` is set, ensure `checkout:` has additional repositories. If only `self` is checked out, `workspace: repo` is unnecessary (the compiler warns about this).
+5. **Workspace consistency**: If `workspace: repo` is set, ensure `repos:` has at least one additional repository with `checkout: true`. If only `self` is checked out, `workspace: repo` is unnecessary (the compiler warns about this).
 
 6. **Network domains**: If new MCPs or external services are added, ensure required domains are in `network.allowed`.
 

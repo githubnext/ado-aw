@@ -347,7 +347,7 @@ This job executes the approved safe outputs using the write token. Failures here
 |-------|-------|-----|
 | Patch doesn't apply | Merge conflicts — target branch diverged since the agent ran | Rerun the pipeline; consider more frequent schedules |
 | Target branch not found | Branch name doesn't exist in the repository | Check `safe-outputs.create-pull-request.target-branch` |
-| Repository not in allowed list | Agent tried to create PR in a repo not in `checkout:` | Add the repository to both `repositories:` and `checkout:` |
+| Repository not in allowed list | Agent tried to create PR in a repo not in `repos:` | Add the repository to `repos:` (with `checkout: true`, which is the default) |
 | Patch too large | Patch file exceeds 5 MB limit | Reduce the scope of changes in agent instructions |
 | Path validation failed | Patch contains `..`, `.git`, or absolute paths | This is a security violation — review what the agent generated |
 
