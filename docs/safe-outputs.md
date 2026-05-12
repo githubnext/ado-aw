@@ -209,7 +209,7 @@ The executor always files an Azure DevOps work item or appends a comment to an e
 safe-outputs:
   noop:
     work-item:                                  # Work item config — always active with these defaults
-      title: "Agent reported no operation"      # Default title (used to find existing items too)
+      title: "[ado-aw] Agent reported no operation"  # Default title (used to find existing items too)
       work-item-type: Task                      # Work item type (default: "Task")
       area-path: "MyProject\\MyTeam"            # Optional — area path
       iteration-path: "MyProject\\Sprint 1"     # Optional — iteration path
@@ -242,7 +242,7 @@ The executor always files an Azure DevOps work item or appends a comment to an e
 safe-outputs:
   missing-tool:
     work-item:                                     # Work item config — always active with these defaults
-      title: "Agent encountered missing tool"      # Default title (used to find existing items too)
+      title: "[ado-aw] Agent encountered missing tool"  # Default title (used to find existing items too)
       work-item-type: Task                         # Work item type (default: "Task")
       area-path: "MyProject\\MyTeam"               # Optional — area path
       iteration-path: "MyProject\\Sprint 1"        # Optional — iteration path

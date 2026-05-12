@@ -396,7 +396,7 @@ fn work_item_report_default_type() -> String {
 /// safe-outputs:
 ///   noop:
 ///     work-item:
-///       title: "Agent reported no operation"
+///       title: "[ado-aw] Agent reported no operation"
 ///       work-item-type: Task
 ///       area-path: "MyProject\\MyTeam"
 ///       tags:

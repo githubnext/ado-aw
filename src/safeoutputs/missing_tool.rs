@@ -38,7 +38,7 @@ impl SanitizeContent for MissingToolResult {
 }
 
 fn missing_tool_default_work_item_title() -> String {
-    "Agent encountered missing tool".to_string()
+    "[ado-aw] Agent encountered missing tool".to_string()
 }
 
 fn missing_tool_default_work_item() -> WorkItemReportConfig {
@@ -65,7 +65,7 @@ fn missing_tool_default_work_item() -> WorkItemReportConfig {
 /// safe-outputs:
 ///   missing-tool:
 ///     work-item:
-///       title: "Agent encountered missing tool"
+///       title: "[ado-aw] Agent encountered missing tool"
 ///       work-item-type: Bug
 ///       area-path: "MyProject\\MyTeam"
 ///       tags:
@@ -74,7 +74,7 @@ fn missing_tool_default_work_item() -> WorkItemReportConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MissingToolConfig {
     /// Work item to file (or append to) when a tool is reported missing.
-    /// Defaults to a Task titled "Agent encountered missing tool".
+    /// Defaults to a Task titled "[ado-aw] Agent encountered missing tool".
     #[serde(default = "missing_tool_default_work_item", rename = "work-item")]
     pub work_item: WorkItemReportConfig,
 }
@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn test_config_default_has_sensible_work_item() {
         let config = MissingToolConfig::default();
-        assert_eq!(config.work_item.title, "Agent encountered missing tool");
+        assert_eq!(config.work_item.title, "[ado-aw] Agent encountered missing tool");
         assert_eq!(config.work_item.work_item_type, "Task");
         assert!(config.work_item.area_path.is_none());
         assert!(config.work_item.iteration_path.is_none());
@@ -193,7 +193,7 @@ work-item:
     fn test_config_deserializes_empty_uses_defaults() {
         let yaml = r#"{}"#;
         let config: MissingToolConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.work_item.title, "Agent encountered missing tool");
+        assert_eq!(config.work_item.title, "[ado-aw] Agent encountered missing tool");
         assert_eq!(config.work_item.work_item_type, "Task");
     }
 

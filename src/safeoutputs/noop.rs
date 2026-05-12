@@ -32,7 +32,7 @@ impl SanitizeContent for NoopResult {
 }
 
 fn noop_default_work_item_title() -> String {
-    "Agent reported no operation".to_string()
+    "[ado-aw] Agent reported no operation".to_string()
 }
 
 fn noop_default_work_item() -> WorkItemReportConfig {
@@ -59,7 +59,7 @@ fn noop_default_work_item() -> WorkItemReportConfig {
 /// safe-outputs:
 ///   noop:
 ///     work-item:
-///       title: "Agent reported no operation"
+///       title: "[ado-aw] Agent reported no operation"
 ///       work-item-type: Task
 ///       area-path: "MyProject\\MyTeam"
 ///       iteration-path: "MyProject\\Sprint 1"
@@ -69,7 +69,7 @@ fn noop_default_work_item() -> WorkItemReportConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NoopConfig {
     /// Work item to file (or append to) when a noop is reached.
-    /// Defaults to a Task titled "Agent reported no operation".
+    /// Defaults to a Task titled "[ado-aw] Agent reported no operation".
     #[serde(default = "noop_default_work_item", rename = "work-item")]
     pub work_item: WorkItemReportConfig,
 }
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn test_config_default_has_sensible_work_item() {
         let config = NoopConfig::default();
-        assert_eq!(config.work_item.title, "Agent reported no operation");
+        assert_eq!(config.work_item.title, "[ado-aw] Agent reported no operation");
         assert_eq!(config.work_item.work_item_type, "Task");
         assert!(config.work_item.area_path.is_none());
         assert!(config.work_item.iteration_path.is_none());
@@ -204,7 +204,7 @@ work-item:
     fn test_config_deserializes_empty_uses_defaults() {
         let yaml = r#"{}"#;
         let config: NoopConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.work_item.title, "Agent reported no operation");
+        assert_eq!(config.work_item.title, "[ado-aw] Agent reported no operation");
         assert_eq!(config.work_item.work_item_type, "Task");
     }
 
