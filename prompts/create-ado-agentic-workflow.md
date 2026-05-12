@@ -320,10 +320,10 @@ safe-outputs:
     target: "TeamProject\\AreaPath"   # Required — scopes which work items can be commented on
     max: 3
   update-work-item:
+    target: "*"                       # Required — "*" allows any work item, or set to a specific ID number
     status: true                      # Each updatable field requires explicit opt-in
     title: true
     max: 5
-    target: "*"
   add-pr-comment:
     max: 10
   queue-build:
