@@ -1,11 +1,11 @@
 //! Missing tool reporting schemas
 
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
+use crate::sanitize::{SanitizeConfig, SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate, WorkItemReportConfig, file_or_append_work_item};
 
 /// Parameters for reporting a missing tool
 #[derive(Deserialize, JsonSchema)]
@@ -37,17 +37,56 @@ impl SanitizeContent for MissingToolResult {
     }
 }
 
+/// Configuration for the missing-tool tool (specified in front matter).
+///
+/// When `work-item` is configured, the executor will file a new Azure DevOps work item
+/// or append a comment to an existing one with the same title.
+///
+/// Example front matter:
+/// ```yaml
+/// safe-outputs:
+///   missing-tool:
+///     work-item:
+///       title: "Agent encountered missing tool"
+///       work-item-type: Bug
+///       area-path: "MyProject\\MyTeam"
+///       tags:
+///         - agent-missing-tool
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MissingToolConfig {
+    /// Optional work item to file (or append to) when a tool is reported missing.
+    /// If absent, the executor only logs a message.
+    #[serde(default, rename = "work-item")]
+    pub work_item: Option<WorkItemReportConfig>,
+}
+
+impl SanitizeConfig for MissingToolConfig {
+    fn sanitize_config_fields(&mut self) {
+        if let Some(wi) = &mut self.work_item {
+            wi.sanitize_config_fields();
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl Executor for MissingToolResult {
     fn dry_run_summary(&self) -> String {
         format!("report missing tool '{}'", self.tool_name)
     }
 
-    async fn execute_impl(&self, _: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
+    async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         let message = match &self.context {
             Some(context) => format!("Missing tool reported: {} ({context})", self.tool_name),
             None => format!("Missing tool reported: {}", self.tool_name),
         };
+
+        let config: MissingToolConfig = ctx.get_tool_config("missing-tool");
+
+        if let Some(wi_config) = &config.work_item {
+            return file_or_append_work_item(wi_config, &message, ctx).await;
+        }
+
         Ok(ExecutionResult::success(message))
     }
 }
@@ -101,5 +140,69 @@ mod tests {
         let json = r#"{"context": "why"}"#;
         let result: Result<MissingToolParams, _> = serde_json::from_str(json);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_defaults_to_no_work_item() {
+        let config = MissingToolConfig::default();
+        assert!(config.work_item.is_none());
+    }
+
+    #[test]
+    fn test_config_deserializes_with_work_item() {
+        let yaml = r#"
+work-item:
+  title: "Agent encountered missing tool"
+  work-item-type: Bug
+  area-path: "MyProject\\MyTeam"
+  tags:
+    - agent-missing-tool
+"#;
+        let config: MissingToolConfig = serde_yaml::from_str(yaml).unwrap();
+        let wi = config.work_item.unwrap();
+        assert_eq!(wi.title, "Agent encountered missing tool");
+        assert_eq!(wi.work_item_type, "Bug");
+        assert_eq!(wi.area_path.as_deref(), Some("MyProject\\MyTeam"));
+        assert_eq!(wi.tags, vec!["agent-missing-tool"]);
+    }
+
+    #[test]
+    fn test_config_deserializes_without_work_item() {
+        let yaml = r#"{}"#;
+        let config: MissingToolConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.work_item.is_none());
+    }
+
+    #[test]
+    fn test_work_item_config_default_type() {
+        let yaml = r#"
+work-item:
+  title: "Missing tool"
+"#;
+        let config: MissingToolConfig = serde_yaml::from_str(yaml).unwrap();
+        let wi = config.work_item.unwrap();
+        assert_eq!(wi.work_item_type, "Task");
+        assert!(wi.area_path.is_none());
+        assert!(wi.iteration_path.is_none());
+        assert!(wi.tags.is_empty());
+        assert!(wi.include_stats);
+    }
+
+    #[tokio::test]
+    async fn test_execute_impl_without_work_item_config() {
+        let result: MissingToolResult = MissingToolParams {
+            tool_name: "bash".to_string(),
+            context: Some("needed for script execution".to_string()),
+        }
+        .try_into()
+        .unwrap();
+
+        let exec = result
+            .execute_impl(&crate::safeoutputs::ExecutionContext::default())
+            .await
+            .unwrap();
+        assert!(exec.success);
+        assert!(exec.message.contains("Missing tool reported"));
+        assert!(exec.message.contains("bash"));
     }
 }

@@ -1,9 +1,9 @@
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
+use crate::sanitize::{SanitizeConfig, SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate, WorkItemReportConfig, file_or_append_work_item};
 
 /// Parameters for describing a no operation. Use this if there is no work to do.
 #[derive(Deserialize, JsonSchema)]
@@ -31,17 +31,57 @@ impl SanitizeContent for NoopResult {
     }
 }
 
+/// Configuration for the noop tool (specified in front matter).
+///
+/// When `work-item` is configured, the executor will file a new Azure DevOps work item
+/// or append a comment to an existing one with the same title.
+///
+/// Example front matter:
+/// ```yaml
+/// safe-outputs:
+///   noop:
+///     work-item:
+///       title: "Agent reported no operation"
+///       work-item-type: Task
+///       area-path: "MyProject\\MyTeam"
+///       iteration-path: "MyProject\\Sprint 1"
+///       tags:
+///         - agent-noop
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NoopConfig {
+    /// Optional work item to file (or append to) when a noop is reached.
+    /// If absent, the executor only logs a message.
+    #[serde(default, rename = "work-item")]
+    pub work_item: Option<WorkItemReportConfig>,
+}
+
+impl SanitizeConfig for NoopConfig {
+    fn sanitize_config_fields(&mut self) {
+        if let Some(wi) = &mut self.work_item {
+            wi.sanitize_config_fields();
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl Executor for NoopResult {
     fn dry_run_summary(&self) -> String {
         "noop".to_string()
     }
 
-    async fn execute_impl(&self, _: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
+    async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         let message = match &self.context {
             Some(context) => format!("No operation needed: {context}"),
             None => "No operation needed".to_string(),
         };
+
+        let config: NoopConfig = ctx.get_tool_config("noop");
+
+        if let Some(wi_config) = &config.work_item {
+            return file_or_append_work_item(wi_config, &message, ctx).await;
+        }
+
         Ok(ExecutionResult::success(message))
     }
 }
@@ -111,5 +151,68 @@ mod tests {
     fn test_validate_default_succeeds() {
         let params = NoopParams { context: None };
         assert!(params.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_defaults_to_no_work_item() {
+        let config = NoopConfig::default();
+        assert!(config.work_item.is_none());
+    }
+
+    #[test]
+    fn test_config_deserializes_with_work_item() {
+        let yaml = r#"
+work-item:
+  title: "Agent reported no operation"
+  work-item-type: Task
+  area-path: "MyProject\\MyTeam"
+  tags:
+    - agent-noop
+"#;
+        let config: NoopConfig = serde_yaml::from_str(yaml).unwrap();
+        let wi = config.work_item.unwrap();
+        assert_eq!(wi.title, "Agent reported no operation");
+        assert_eq!(wi.work_item_type, "Task");
+        assert_eq!(wi.area_path.as_deref(), Some("MyProject\\MyTeam"));
+        assert_eq!(wi.tags, vec!["agent-noop"]);
+    }
+
+    #[test]
+    fn test_config_deserializes_without_work_item() {
+        let yaml = r#"{}"#;
+        let config: NoopConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.work_item.is_none());
+    }
+
+    #[test]
+    fn test_work_item_config_default_type() {
+        let yaml = r#"
+work-item:
+  title: "No op"
+"#;
+        let config: NoopConfig = serde_yaml::from_str(yaml).unwrap();
+        let wi = config.work_item.unwrap();
+        assert_eq!(wi.work_item_type, "Task");
+        assert!(wi.area_path.is_none());
+        assert!(wi.iteration_path.is_none());
+        assert!(wi.tags.is_empty());
+        assert!(wi.include_stats);
+    }
+
+    #[tokio::test]
+    async fn test_execute_impl_without_work_item_config() {
+        let result: NoopResult = NoopParams {
+            context: Some("nothing to do".to_string()),
+        }
+        .try_into()
+        .unwrap();
+
+        let exec = result
+            .execute_impl(&crate::safeoutputs::ExecutionContext::default())
+            .await
+            .unwrap();
+        assert!(exec.success);
+        assert!(exec.message.contains("No operation needed"));
+        assert!(exec.message.contains("nothing to do"));
     }
 }

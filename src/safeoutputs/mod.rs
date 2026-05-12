@@ -1,8 +1,11 @@
 //! Tool parameter and result structs for MCP tools
 
 use crate::{all_safe_output_names, tool_names};
+use anyhow::Context;
 use log::{debug, warn};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+use serde::{Deserialize, Serialize};
+use ado_aw_derive::SanitizeConfig;
 
 /// Characters to percent-encode in a URL path segment.
 /// Encodes the structural delimiters that would break URL parsing if left raw:
@@ -373,6 +376,314 @@ pub(crate) fn validate_git_ref_name(name: &str, label: &str) -> anyhow::Result<(
         );
     }
     Ok(())
+}
+
+fn work_item_report_default_type() -> String {
+    "Task".to_string()
+}
+
+/// Configuration for optionally filing (or appending to) an Azure DevOps work item
+/// when a diagnostic safe output (`noop`, `missing-tool`) is called.
+///
+/// If a work item with the same title already exists in the project in a non-closed
+/// state, a comment is appended instead of creating a new work item.
+///
+/// Example:
+/// ```yaml
+/// safe-outputs:
+///   noop:
+///     work-item:
+///       title: "Agent reported no operation"
+///       work-item-type: Task
+///       area-path: "MyProject\\MyTeam"
+///       tags:
+///         - agent-noop
+/// ```
+#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
+pub struct WorkItemReportConfig {
+    /// Title of the work item to file or append a comment to.
+    /// If a non-closed work item with this exact title already exists,
+    /// a comment is appended rather than creating a new work item.
+    pub title: String,
+
+    /// Work item type to create (default: "Task")
+    #[serde(default = "work_item_report_default_type", rename = "work-item-type")]
+    pub work_item_type: String,
+
+    /// Area path for the work item
+    #[serde(default, rename = "area-path")]
+    pub area_path: Option<String>,
+
+    /// Iteration path for the work item
+    #[serde(default, rename = "iteration-path")]
+    pub iteration_path: Option<String>,
+
+    /// Tags to apply to the work item
+    #[serde(default)]
+    pub tags: Vec<String>,
+
+    /// Whether to include agent execution stats in the work item description/comment (default: true)
+    #[serde(default = "crate::agent_stats::default_include_stats", rename = "include-stats")]
+    pub include_stats: bool,
+}
+
+impl Default for WorkItemReportConfig {
+    fn default() -> Self {
+        Self {
+            title: String::new(),
+            work_item_type: work_item_report_default_type(),
+            area_path: None,
+            iteration_path: None,
+            tags: Vec::new(),
+            include_stats: true,
+        }
+    }
+}
+
+/// Search for a non-closed work item by exact title using WIQL.
+/// Returns the ID of the most-recently-changed matching work item, or `None` if none found.
+async fn wiql_find_work_item_by_title(
+    client: &reqwest::Client,
+    org_url: &str,
+    project: &str,
+    token: &str,
+    title: &str,
+) -> anyhow::Result<Option<i64>> {
+    // Escape single quotes in WIQL by doubling them
+    let escaped_title = title.replace('\'', "''");
+    let query = format!(
+        "SELECT [System.Id] FROM WorkItems \
+         WHERE [System.Title] = '{escaped_title}' \
+         AND [System.TeamProject] = @project \
+         AND [System.State] NOT IN ('Closed', 'Resolved', 'Done') \
+         ORDER BY [System.ChangedDate] DESC"
+    );
+
+    let url = format!(
+        "{}/{}/_apis/wit/wiql?api-version=7.0",
+        org_url.trim_end_matches('/'),
+        utf8_percent_encode(project, PATH_SEGMENT),
+    );
+
+    debug!("WIQL search URL: {}", url);
+    let body = serde_json::json!({ "query": query });
+
+    let response = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .basic_auth("", Some(token))
+        .json(&body)
+        .send()
+        .await
+        .context("Failed to query work items via WIQL")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        anyhow::bail!("WIQL query failed (HTTP {}): {}", status, error_body);
+    }
+
+    let result: serde_json::Value = response
+        .json()
+        .await
+        .context("Failed to parse WIQL response")?;
+
+    let first_id = result
+        .get("workItems")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|item| item.get("id"))
+        .and_then(|id| id.as_i64());
+
+    debug!("WIQL search found work item id: {:?}", first_id);
+    Ok(first_id)
+}
+
+/// File a new work item or append a comment to an existing one with the same title.
+///
+/// If a non-closed work item matching `config.title` exists in the project,
+/// a comment with `body` is appended. Otherwise a new work item is created
+/// with `body` as the description.
+///
+/// Returns an [`ExecutionResult`] describing what was done.
+pub(crate) async fn file_or_append_work_item(
+    config: &WorkItemReportConfig,
+    body: &str,
+    ctx: &ExecutionContext,
+) -> anyhow::Result<ExecutionResult> {
+    let org_url = match &ctx.ado_org_url {
+        Some(u) => u,
+        None => {
+            return Ok(ExecutionResult::failure(
+                "AZURE_DEVOPS_ORG_URL not set; cannot file work item".to_string(),
+            ));
+        }
+    };
+    let project = match &ctx.ado_project {
+        Some(p) => p,
+        None => {
+            return Ok(ExecutionResult::failure(
+                "SYSTEM_TEAMPROJECT not set; cannot file work item".to_string(),
+            ));
+        }
+    };
+    let token = match &ctx.access_token {
+        Some(t) => t,
+        None => {
+            return Ok(ExecutionResult::failure(
+                "No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT); \
+                 cannot file work item"
+                    .to_string(),
+            ));
+        }
+    };
+
+    let client = reqwest::Client::new();
+
+    // Search for an existing non-closed work item with the same title
+    let existing_id =
+        match wiql_find_work_item_by_title(&client, org_url, project, token, &config.title).await {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("WIQL search for existing work item failed: {e} — aborting work item filing");
+                return Ok(ExecutionResult::failure(format!(
+                    "Failed to search for existing work item: {e}"
+                )));
+            }
+        };
+
+    let body_with_stats =
+        crate::agent_stats::append_stats_to_body(body, ctx, config.include_stats);
+
+    if let Some(work_item_id) = existing_id {
+        // Append a comment to the existing work item
+        debug!(
+            "Found existing work item #{}, appending comment",
+            work_item_id
+        );
+        let comment_payload = serde_json::json!({ "text": body_with_stats });
+
+        let url = format!(
+            "{}/{}/_apis/wit/workItems/{}/comments?api-version=7.1-preview.4",
+            org_url.trim_end_matches('/'),
+            utf8_percent_encode(project, PATH_SEGMENT),
+            work_item_id,
+        );
+
+        let resp = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .basic_auth("", Some(token))
+            .json(&comment_payload)
+            .send()
+            .await
+            .context("Failed to add comment to work item")?;
+
+        if resp.status().is_success() {
+            let resp_body: serde_json::Value = resp
+                .json()
+                .await
+                .context("Failed to parse comment response")?;
+            let comment_id = resp_body.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+            Ok(ExecutionResult::success_with_data(
+                format!(
+                    "Appended comment #{} to existing work item #{}: {}",
+                    comment_id, work_item_id, config.title
+                ),
+                serde_json::json!({
+                    "action": "appended",
+                    "work_item_id": work_item_id,
+                    "comment_id": comment_id,
+                }),
+            ))
+        } else {
+            let status = resp.status();
+            let error_body = resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            Ok(ExecutionResult::failure(format!(
+                "Failed to append comment to work item #{} (HTTP {}): {}",
+                work_item_id, status, error_body
+            )))
+        }
+    } else {
+        // Create a new work item
+        debug!("No existing work item found, creating new one");
+
+        let mut patch_doc = vec![
+            serde_json::json!({"op": "add", "path": "/fields/System.Title",       "value": &config.title}),
+            serde_json::json!({"op": "add", "path": "/fields/System.Description", "value": body_with_stats}),
+            serde_json::json!({"op": "add", "path": "/multilineFieldsFormat/System.Description", "value": "Markdown"}),
+        ];
+
+        if let Some(area_path) = &config.area_path {
+            patch_doc.push(
+                serde_json::json!({"op": "add", "path": "/fields/System.AreaPath", "value": area_path}),
+            );
+        }
+        if let Some(iteration_path) = &config.iteration_path {
+            patch_doc.push(
+                serde_json::json!({"op": "add", "path": "/fields/System.IterationPath", "value": iteration_path}),
+            );
+        }
+        if !config.tags.is_empty() {
+            patch_doc.push(
+                serde_json::json!({"op": "add", "path": "/fields/System.Tags", "value": config.tags.join("; ")}),
+            );
+        }
+
+        let url = format!(
+            "{}/{}/_apis/wit/workitems/${}?api-version=7.0",
+            org_url.trim_end_matches('/'),
+            utf8_percent_encode(project, PATH_SEGMENT),
+            utf8_percent_encode(&config.work_item_type, PATH_SEGMENT),
+        );
+
+        let resp = client
+            .post(&url)
+            .header("Content-Type", "application/json-patch+json")
+            .basic_auth("", Some(token))
+            .json(&patch_doc)
+            .send()
+            .await
+            .context("Failed to create work item")?;
+
+        if resp.status().is_success() {
+            let resp_body: serde_json::Value = resp
+                .json()
+                .await
+                .context("Failed to parse work item response")?;
+            let work_item_id = resp_body.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+            let work_item_url = resp_body
+                .get("_links")
+                .and_then(|l| l.get("html"))
+                .and_then(|h| h.get("href"))
+                .and_then(|h| h.as_str())
+                .unwrap_or("");
+            Ok(ExecutionResult::success_with_data(
+                format!("Created work item #{}: {}", work_item_id, config.title),
+                serde_json::json!({
+                    "action": "created",
+                    "work_item_id": work_item_id,
+                    "url": work_item_url,
+                }),
+            ))
+        } else {
+            let status = resp.status();
+            let error_body = resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            Ok(ExecutionResult::failure(format!(
+                "Failed to create work item (HTTP {}): {}",
+                status, error_body
+            )))
+        }
+    }
 }
 
 mod add_build_tag;
