@@ -407,7 +407,11 @@ pub struct WorkItemReportConfig {
     /// Title of the work item to file or append a comment to.
     /// If a non-closed work item with this exact title already exists,
     /// a comment is appended rather than creating a new work item.
-    pub title: String,
+    ///
+    /// When `None`, each caller supplies a context-appropriate default
+    /// (e.g. noop vs missing-tool).
+    #[serde(default)]
+    pub title: Option<String>,
 
     /// Work item type to create (default: "Task")
     #[serde(default = "work_item_report_default_type", rename = "work-item-type")]
@@ -502,7 +506,8 @@ async fn wiql_find_work_item_by_title(
 
 /// File a new work item or append a comment to an existing one with the same title.
 ///
-/// If a non-closed work item matching `config.title` exists in the project,
+/// If a non-closed work item matching the title (from `config.title` or
+/// `default_title` when the config omits it) exists in the project,
 /// a comment with `body` is appended. Otherwise a new work item is created
 /// with `body` as the description.
 ///
@@ -514,9 +519,11 @@ async fn wiql_find_work_item_by_title(
 /// Returns an [`ExecutionResult`] describing what was done.
 pub(crate) async fn file_or_append_work_item(
     config: &WorkItemReportConfig,
+    default_title: &str,
     body: &str,
     ctx: &ExecutionContext,
 ) -> anyhow::Result<ExecutionResult> {
+    let title = config.title.as_deref().unwrap_or(default_title);
     let org_url = match &ctx.ado_org_url {
         Some(u) => u,
         None => {
@@ -548,7 +555,7 @@ pub(crate) async fn file_or_append_work_item(
 
     // Search for an existing non-closed work item with the same title
     let existing_id =
-        match wiql_find_work_item_by_title(&client, org_url, project, token, &config.title).await {
+        match wiql_find_work_item_by_title(&client, org_url, project, token, title).await {
             Ok(id) => id,
             Err(e) => {
                 warn!("WIQL search for existing work item failed: {e} — skipping work item filing");
@@ -594,11 +601,11 @@ pub(crate) async fn file_or_append_work_item(
             let message = match comment_id {
                 Some(id) => format!(
                     "Appended comment #{} to existing work item #{}: {}",
-                    id, work_item_id, config.title
+                    id, work_item_id, title
                 ),
                 None => format!(
                     "Appended comment to existing work item #{}: {}",
-                    work_item_id, config.title
+                    work_item_id, title
                 ),
             };
             Ok(ExecutionResult::success_with_data(
@@ -625,7 +632,7 @@ pub(crate) async fn file_or_append_work_item(
         debug!("No existing work item found, creating new one");
 
         let mut patch_doc = vec![
-            serde_json::json!({"op": "add", "path": "/fields/System.Title",       "value": &config.title}),
+            serde_json::json!({"op": "add", "path": "/fields/System.Title",       "value": title}),
             serde_json::json!({"op": "add", "path": "/fields/System.Description", "value": body_with_stats}),
             serde_json::json!({"op": "add", "path": "/multilineFieldsFormat/System.Description", "value": "Markdown"}),
         ];
@@ -676,8 +683,8 @@ pub(crate) async fn file_or_append_work_item(
                 .unwrap_or("")
                 .to_string();
             let message = match work_item_id {
-                Some(id) => format!("Created work item #{}: {}", id, config.title),
-                None => format!("Created work item: {}", config.title),
+                Some(id) => format!("Created work item #{}: {}", id, title),
+                None => format!("Created work item: {}", title),
             };
             Ok(ExecutionResult::success_with_data(
                 message,

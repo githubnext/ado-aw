@@ -43,7 +43,7 @@ fn missing_tool_default_work_item_title() -> String {
 
 fn missing_tool_default_work_item() -> WorkItemReportConfig {
     WorkItemReportConfig {
-        title: missing_tool_default_work_item_title(),
+        title: Some(missing_tool_default_work_item_title()),
         work_item_type: "Task".to_string(),
         area_path: None,
         iteration_path: None,
@@ -106,7 +106,7 @@ impl Executor for MissingToolResult {
         };
 
         let config: MissingToolConfig = ctx.get_tool_config("missing-tool");
-        file_or_append_work_item(&config.work_item, &message, ctx).await
+        file_or_append_work_item(&config.work_item, &missing_tool_default_work_item_title(), &message, ctx).await
     }
 }
 
@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn test_config_default_has_sensible_work_item() {
         let config = MissingToolConfig::default();
-        assert_eq!(config.work_item.title, "[ado-aw] Agent encountered missing tool");
+        assert_eq!(config.work_item.title.as_deref(), Some("[ado-aw] Agent encountered missing tool"));
         assert_eq!(config.work_item.work_item_type, "Task");
         assert!(config.work_item.area_path.is_none());
         assert!(config.work_item.iteration_path.is_none());
@@ -183,7 +183,7 @@ work-item:
     - agent-missing-tool
 "#;
         let config: MissingToolConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.work_item.title, "Custom missing tool title");
+        assert_eq!(config.work_item.title.as_deref(), Some("Custom missing tool title"));
         assert_eq!(config.work_item.work_item_type, "Bug");
         assert_eq!(config.work_item.area_path.as_deref(), Some("MyProject\\MyTeam"));
         assert_eq!(config.work_item.tags, vec!["agent-missing-tool"]);
@@ -193,8 +193,22 @@ work-item:
     fn test_config_deserializes_empty_uses_defaults() {
         let yaml = r#"{}"#;
         let config: MissingToolConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.work_item.title, "[ado-aw] Agent encountered missing tool");
+        assert_eq!(config.work_item.title.as_deref(), Some("[ado-aw] Agent encountered missing tool"));
         assert_eq!(config.work_item.work_item_type, "Task");
+    }
+
+    #[test]
+    fn test_config_partial_work_item_preserves_overrides() {
+        let yaml = r#"
+work-item:
+  work-item-type: Bug
+  tags:
+    - agent-missing-tool
+"#;
+        let config: MissingToolConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.work_item.title.is_none(), "title should be None when omitted");
+        assert_eq!(config.work_item.work_item_type, "Bug");
+        assert_eq!(config.work_item.tags, vec!["agent-missing-tool"]);
     }
 
     #[tokio::test]

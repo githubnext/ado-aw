@@ -37,7 +37,7 @@ fn noop_default_work_item_title() -> String {
 
 fn noop_default_work_item() -> WorkItemReportConfig {
     WorkItemReportConfig {
-        title: noop_default_work_item_title(),
+        title: Some(noop_default_work_item_title()),
         work_item_type: "Task".to_string(),
         area_path: None,
         iteration_path: None,
@@ -101,7 +101,7 @@ impl Executor for NoopResult {
         };
 
         let config: NoopConfig = ctx.get_tool_config("noop");
-        file_or_append_work_item(&config.work_item, &message, ctx).await
+        file_or_append_work_item(&config.work_item, &noop_default_work_item_title(), &message, ctx).await
     }
 }
 
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn test_config_default_has_sensible_work_item() {
         let config = NoopConfig::default();
-        assert_eq!(config.work_item.title, "[ado-aw] Agent reported no operation");
+        assert_eq!(config.work_item.title.as_deref(), Some("[ado-aw] Agent reported no operation"));
         assert_eq!(config.work_item.work_item_type, "Task");
         assert!(config.work_item.area_path.is_none());
         assert!(config.work_item.iteration_path.is_none());
@@ -194,7 +194,7 @@ work-item:
     - agent-noop
 "#;
         let config: NoopConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.work_item.title, "My custom noop title");
+        assert_eq!(config.work_item.title.as_deref(), Some("My custom noop title"));
         assert_eq!(config.work_item.work_item_type, "Bug");
         assert_eq!(config.work_item.area_path.as_deref(), Some("MyProject\\MyTeam"));
         assert_eq!(config.work_item.tags, vec!["agent-noop"]);
@@ -204,8 +204,23 @@ work-item:
     fn test_config_deserializes_empty_uses_defaults() {
         let yaml = r#"{}"#;
         let config: NoopConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.work_item.title, "[ado-aw] Agent reported no operation");
+        assert_eq!(config.work_item.title.as_deref(), Some("[ado-aw] Agent reported no operation"));
         assert_eq!(config.work_item.work_item_type, "Task");
+    }
+
+    #[test]
+    fn test_config_partial_work_item_preserves_overrides() {
+        // Regression: a partial work-item config (no title) must not
+        // silently discard the user's other overrides.
+        let yaml = r#"
+work-item:
+  work-item-type: Bug
+  area-path: "MyProject\\MyTeam"
+"#;
+        let config: NoopConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.work_item.title.is_none(), "title should be None when omitted");
+        assert_eq!(config.work_item.work_item_type, "Bug");
+        assert_eq!(config.work_item.area_path.as_deref(), Some("MyProject\\MyTeam"));
     }
 
     #[tokio::test]
