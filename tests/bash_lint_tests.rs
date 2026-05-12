@@ -76,6 +76,7 @@ const FIXTURES: &[&str] = &[
     "azure-devops-mcp-agent.md",
     "pipeline-trigger-agent.md",
     "pipeline-filter-agent.md",
+    "pr-filter-tier1-agent.md",
     "runtime-coverage-agent.md",
     "runtime-coverage-1es-agent.md",
 ];
@@ -102,6 +103,7 @@ const REQUIRED_STEP_DISPLAY_NAMES: &[&str] = &[
     "Initialize empty agent memory (clearMemory=true)",
     "Generate GITHUB_PATH file",              // src/compile/common.rs (AWF path step)
     "Evaluate pipeline filters",              // src/compile/extensions/trigger_filters.rs + src/compile/filter_ir.rs
+    "Evaluate PR filters",                    // src/compile/filter_ir.rs (GateContext::PullRequest)
 ];
 
 fn ado_aw_binary() -> PathBuf {
