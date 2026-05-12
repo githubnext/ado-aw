@@ -226,7 +226,7 @@ mcp-servers:
 
 > **Security**: All `mcp-servers:` entries must have an explicit `allowed:` list.
 >
-> **Standalone target** (the default): MCPs without a `container:` or `url:` field are skipped at compile time with a compile-time warning — they have no effect and will not be available to the agent. For the standalone target, use only **custom** containerized MCPs with a `container:` field.
+> **Standalone target** (the default): MCPs without a `container:` or `url:` field are skipped at compile time with a compile-time warning — they have no effect and will not be available to the agent. Both containerized MCPs (with `container:`) and remote HTTP MCPs (with `url:`) are supported in standalone target.
 
 ### Step 9 — Safe Outputs
 
