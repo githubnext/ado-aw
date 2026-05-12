@@ -449,8 +449,16 @@ async fn wiql_find_work_item_by_title(
     token: &str,
     title: &str,
 ) -> anyhow::Result<Option<i64>> {
-    // Escape single quotes in WIQL by doubling them
+    // The WIQL API does not support parameterized queries; string literals must be
+    // manually escaped. Doubling single quotes is the standard WIQL escaping convention
+    // (analogous to SQL). This title value comes from operator-controlled front-matter
+    // configuration and is sanitized via `sanitize_config_fields()` before reaching
+    // here, so it is not agent-supplied content. No other characters are WIQL-special
+    // inside a single-quoted literal.
     let escaped_title = title.replace('\'', "''");
+    // The state filter covers the three built-in ADO process templates:
+    //   Agile: "Closed", Scrum: "Done", CMMI: "Closed" (also "Resolved" in Agile/CMMI).
+    // Work items in any other state are considered active and eligible for commenting.
     let query = format!(
         "SELECT [System.Id] FROM WorkItems \
          WHERE [System.Title] = '{escaped_title}' \
@@ -587,12 +595,19 @@ pub(crate) async fn file_or_append_work_item(
                 .json()
                 .await
                 .context("Failed to parse comment response")?;
-            let comment_id = resp_body.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
-            Ok(ExecutionResult::success_with_data(
-                format!(
+            let comment_id = resp_body.get("id").and_then(|v| v.as_i64());
+            let message = match comment_id {
+                Some(id) => format!(
                     "Appended comment #{} to existing work item #{}: {}",
-                    comment_id, work_item_id, config.title
+                    id, work_item_id, config.title
                 ),
+                None => format!(
+                    "Appended comment to existing work item #{}: {}",
+                    work_item_id, config.title
+                ),
+            };
+            Ok(ExecutionResult::success_with_data(
+                message,
                 serde_json::json!({
                     "action": "appended",
                     "work_item_id": work_item_id,
@@ -657,15 +672,20 @@ pub(crate) async fn file_or_append_work_item(
                 .json()
                 .await
                 .context("Failed to parse work item response")?;
-            let work_item_id = resp_body.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+            let work_item_id = resp_body.get("id").and_then(|v| v.as_i64());
             let work_item_url = resp_body
                 .get("_links")
                 .and_then(|l| l.get("html"))
                 .and_then(|h| h.get("href"))
                 .and_then(|h| h.as_str())
-                .unwrap_or("");
+                .unwrap_or("")
+                .to_string();
+            let message = match work_item_id {
+                Some(id) => format!("Created work item #{}: {}", id, config.title),
+                None => format!("Created work item: {}", config.title),
+            };
             Ok(ExecutionResult::success_with_data(
-                format!("Created work item #{}: {}", work_item_id, config.title),
+                message,
                 serde_json::json!({
                     "action": "created",
                     "work_item_id": work_item_id,
