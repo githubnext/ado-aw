@@ -106,12 +106,12 @@ Codemods live in `src/compile/codemods/`:
 
 ```
 src/compile/codemods/
-├── mod.rs       # Framework + CODEMODS registry
-├── helpers.rs   # take_key, insert_no_overwrite, rename_key, ConflictPolicy
-├── 0001_engine_id_split.rs
-├── 0002_permissions_field.rs
-└── 0003_safeoutput_renames.rs
+├── mod.rs                  # Framework + CODEMODS registry
+├── helpers.rs              # take_key, insert_no_overwrite, rename_key, ConflictPolicy
+└── 0001_repos_unified.rs   # Legacy repositories: + checkout: → repos: codemod
 ```
+
+(New codemods are appended as `<NNNN>_<id>.rs` files.)
 
 The filename prefix is a zero-padded sequence number (`<NNNN>`). It
 sorts files naturally in directory listings; the **registry order**
@@ -163,6 +163,9 @@ mod tests {
 Two edits in `src/compile/codemods/mod.rs`:
 
 ```rust
+// Filenames start with a digit, so #[path] is required to map the module
+// name (valid Rust identifier) to the file path (starts with a digit).
+#[path = "0001_engine_id_split.rs"]
 mod m0001_engine_id_split;  // <-- add module declaration
 
 pub static CODEMODS: &[&'static Codemod] = &[
@@ -338,9 +341,10 @@ fn describe(v: &Value) -> &'static str {
    "already-migrated" case. We never overwrite an existing object
    form. The `bail!` on unexpected shapes is the manual-migration
    escape hatch.
-4. **Two-line registry append:**
+4. **Registry append (three lines):**
 
    ```rust
+   #[path = "0001_engine_id_split.rs"]
    mod m0001_engine_id_split;
 
    pub static CODEMODS: &[&'static Codemod] = &[
@@ -348,8 +352,9 @@ fn describe(v: &Value) -> &'static str {
    ];
    ```
 
-   That's it. The registry-uniqueness and filename-prefix tests
-   keep passing.
+   The `#[path = ...]` attribute is required because Rust module
+   identifiers cannot start with digits, but the file name does.
+   The registry-uniqueness and filename-prefix tests keep passing.
 
 ## Tests
 
