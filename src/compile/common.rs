@@ -1008,9 +1008,10 @@ pub const DEFAULT_POOL: &str = "AZS-1ES-L-MMS-ubuntu-22.04";
 /// - `"my-agent-123"` → `"MyAgent123"`
 /// - `""` → `"Agent"` (fallback)
 /// - `"123start"` → `"_123start"` (prefix underscore for leading digit)
+/// - `"über-agent"` → `"BerAgent"` (non-ASCII stripped; ADO requires `[A-Za-z0-9_]`)
 pub fn generate_stage_prefix(name: &str) -> String {
     let pascal: String = name
-        .split(|c: char| !c.is_alphanumeric())
+        .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|s| !s.is_empty())
         .map(|word| {
             let mut chars = word.chars();

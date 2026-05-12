@@ -123,7 +123,8 @@ impl Compiler for StageCompiler {
 /// Generate the header comment block for stage-level templates.
 fn generate_stage_header(input_path: &Path, front_matter: &FrontMatter) -> String {
     let base_header = generate_header_comment(input_path);
-    let source_path = input_path
+    let lock_path = input_path
+        .with_extension("lock.yml")
         .to_string_lossy()
         .replace('\\', "/");
 
@@ -132,12 +133,12 @@ fn generate_stage_header(input_path: &Path, front_matter: &FrontMatter) -> Strin
     header.push_str("# Stage-level ADO template. Include in your pipeline:\n");
     header.push_str("#\n");
     header.push_str("#   stages:\n");
-    header.push_str(&format!("#     - template: {}\n", source_path.replace(".md", ".lock.yml")));
+    header.push_str(&format!("#     - template: {}\n", lock_path));
     header.push_str("#       dependsOn: Build\n");
     header.push_str("#       condition: succeeded()\n");
 
     // Document required resources if agent uses repos
-    if !front_matter.repos.is_empty() || !front_matter.repositories.is_empty() {
+    if !front_matter.repositories.is_empty() {
         header.push_str("#\n");
         header.push_str("# Add these repositories to your pipeline's resources: block:\n");
         header.push_str("#\n");
