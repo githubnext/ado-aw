@@ -147,3 +147,111 @@ in the repository.\n"
         Ok(warnings)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compile::parse_markdown;
+
+    fn ctx_from(front_matter: &crate::compile::types::FrontMatter) -> CompileContext<'_> {
+        CompileContext::for_test(front_matter)
+    }
+
+    #[test]
+    fn test_validate_bash_disabled_warning() {
+        let (fm, _) =
+            parse_markdown("---\nname: test\ndescription: test\ntools:\n  bash: []\n---\n")
+                .unwrap();
+        let ext = DotnetExtension::new(DotnetRuntimeConfig::Enabled(true));
+        let warnings = ext.validate(&ctx_from(&fm)).unwrap();
+        assert!(!warnings.is_empty());
+        assert!(warnings[0].contains("tools.bash is empty"));
+    }
+
+    #[test]
+    fn test_validate_config_and_feed_url_are_mutually_exclusive() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    config: 'nuget.config'\n    feed-url: 'https://pkgs.dev.azure.com/myorg/_packaging/myfeed/nuget/v3/index.json'\n---\n",
+        )
+        .unwrap();
+        let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+        let ext = DotnetExtension::new(dotnet.clone());
+        let err = ext.validate(&ctx_from(&fm)).unwrap_err();
+        assert!(err.to_string().contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn test_validate_invalid_feed_url_rejected() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    feed-url: 'https://example.com/$(SECRET)/nuget'\n---\n",
+        )
+        .unwrap();
+        let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+        let ext = DotnetExtension::new(dotnet.clone());
+        assert!(ext.validate(&ctx_from(&fm)).is_err());
+    }
+
+    #[test]
+    fn test_validate_version_injection_rejected() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: '$(SECRET)'\n---\n",
+        )
+        .unwrap();
+        let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+        let ext = DotnetExtension::new(dotnet.clone());
+        assert!(ext.validate(&ctx_from(&fm)).is_err());
+    }
+
+    #[test]
+    fn test_validate_global_json_sentinel_skips_injection_check() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: 'global.json'\n---\n",
+        )
+        .unwrap();
+        let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+        let ext = DotnetExtension::new(dotnet.clone());
+        assert!(ext.validate(&ctx_from(&fm)).is_ok());
+    }
+
+    #[test]
+    fn test_validate_global_json_conflict_bails() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("global.json"), r#"{"sdk":{"version":"8.0.100"}}"#).unwrap();
+
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: '9.0.x'\n---\n",
+        )
+        .unwrap();
+        let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+        let ext = DotnetExtension::new(dotnet.clone());
+        let ctx = CompileContext::for_test_with_compile_dir(&fm, tmp.path());
+        let err = ext.validate(&ctx).unwrap_err();
+        assert!(err.to_string().contains("global.json"));
+    }
+
+    #[test]
+    fn test_validate_global_json_sentinel_accepted_with_file_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("global.json"), r#"{"sdk":{"version":"8.0.100"}}"#).unwrap();
+
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: 'global.json'\n---\n",
+        )
+        .unwrap();
+        let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+        let ext = DotnetExtension::new(dotnet.clone());
+        let ctx = CompileContext::for_test_with_compile_dir(&fm, tmp.path());
+        assert!(ext.validate(&ctx).is_ok());
+    }
+
+    #[test]
+    fn test_validate_config_injection_rejected() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    config: '$(SECRET)/nuget.config'\n---\n",
+        )
+        .unwrap();
+        let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+        let ext = DotnetExtension::new(dotnet.clone());
+        assert!(ext.validate(&ctx_from(&fm)).is_err());
+    }
+}
