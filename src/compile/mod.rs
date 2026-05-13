@@ -238,11 +238,18 @@ async fn compile_pipeline_inner(
             )
         })?;
 
-    println!(
-        "Generated {} pipeline: {}",
-        compiler.target_name(),
-        yaml_output_path.display()
-    );
+    {
+        let kind = match front_matter.target {
+            CompileTarget::Job | CompileTarget::Stage => "template",
+            _ => "pipeline",
+        };
+        println!(
+            "Generated {} {}: {}",
+            compiler.target_name(),
+            kind,
+            yaml_output_path.display()
+        );
+    }
 
     // Update .gitattributes at the repo root so every compiled pipeline is
     // marked as a generated file with `merge=ours`. Best-effort: skip with a

@@ -2817,7 +2817,7 @@ pub async fn compile_template_target(
     front_matter: &FrontMatter,
     markdown_body: &str,
     cfg: TemplateTargetConfig<'_>,
-    header_fn: impl FnOnce(&Path, &FrontMatter) -> String,
+    header_fn: impl FnOnce(&Path, &Path, &FrontMatter) -> String,
 ) -> Result<String> {
     // Collect extensions (needed before compile_shared for MCPG config)
     let extensions = super::extensions::collect_extensions(front_matter);
@@ -2872,7 +2872,7 @@ pub async fn compile_template_target(
         &extensions, &ctx, config,
     ).await?;
 
-    let header = header_fn(input_path, front_matter);
+    let header = header_fn(input_path, output_path, front_matter);
     Ok(format!("{}{}", header, yaml))
 }
 

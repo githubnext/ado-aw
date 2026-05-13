@@ -65,12 +65,14 @@ impl Compiler for StageCompiler {
 }
 
 /// Generate the header comment block for stage-level templates.
-fn generate_stage_header(input_path: &Path, front_matter: &FrontMatter) -> String {
+fn generate_stage_header(input_path: &Path, output_path: &Path, front_matter: &FrontMatter) -> String {
     let base_header = generate_header_comment(input_path);
-    let lock_path = input_path
-        .with_extension("lock.yml")
+    let mut lock_path = output_path
         .to_string_lossy()
         .replace('\\', "/");
+    while lock_path.starts_with("./") {
+        lock_path = lock_path[2..].to_string();
+    }
 
     let mut header = base_header;
     header.push_str("#\n");

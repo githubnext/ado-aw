@@ -160,16 +160,16 @@ fn compile_fixture(workspace: &Path, fixture: &str) -> (PathBuf, String) {
         String::from_utf8_lossy(&output.stderr),
     );
 
-    // `ado-aw compile` prints `Generated <target> pipeline: <file>` to stdout;
+    // `ado-aw compile` prints `Generated <target> pipeline/template: <file>` to stdout;
     // parse the target so the test can assert coverage of every known target.
     let stdout = String::from_utf8_lossy(&output.stdout);
     let target = if stdout.contains("Generated 1ES pipeline:") {
         "1es"
     } else if stdout.contains("Generated standalone pipeline:") {
         "standalone"
-    } else if stdout.contains("Generated job pipeline:") {
+    } else if stdout.contains("Generated job template:") {
         "job"
-    } else if stdout.contains("Generated stage pipeline:") {
+    } else if stdout.contains("Generated stage template:") {
         "stage"
     } else {
         panic!(
