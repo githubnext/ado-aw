@@ -161,11 +161,26 @@ pub async fn process_agent_memory(
 ) -> Result<ExecutionResult> {
     let memory_source = source_dir.join(AGENT_MEMORY_DIR);
 
-    if !memory_source.exists() || !memory_source.is_dir() {
-        info!("No agent_memory directory found, skipping memory processing");
-        return Ok(ExecutionResult::success(
-            "No agent memory to process",
-        ));
+    // Use symlink_metadata (lstat) so we do NOT follow a symlink at the base
+    // directory level — a top-level `agent_memory -> /sensitive/dir` symlink
+    // in the artifact would otherwise bypass all per-file containment checks.
+    match tokio::fs::symlink_metadata(&memory_source).await {
+        Err(_) => {
+            info!("No agent_memory directory found, skipping memory processing");
+            return Ok(ExecutionResult::success("No agent memory to process"));
+        }
+        Ok(m) if m.is_symlink() => {
+            warn!(
+                "agent_memory is a symlink — skipping to prevent directory escape: {}",
+                memory_source.display()
+            );
+            return Ok(ExecutionResult::success("No agent memory to process"));
+        }
+        Ok(m) if !m.is_dir() => {
+            info!("No agent_memory directory found, skipping memory processing");
+            return Ok(ExecutionResult::success("No agent memory to process"));
+        }
+        Ok(_) => {} // real directory, proceed
     }
 
     info!(
@@ -686,5 +701,39 @@ allowed-extensions:
         // The outside directory must not have been recursed into
         assert!(!out_memory.join("etc_backup").exists());
         assert!(!out_memory.join("etc_backup").join("passwd").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_process_memory_rejects_base_directory_symlink() {
+        // If the entire agent_memory entry is a symlink to an outside directory,
+        // all per-file containment checks would resolve relative to that target,
+        // so every file inside would "pass" the starts_with guard. The fix is to
+        // reject agent_memory itself when it is a symlink (lstat check).
+        let temp = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+
+        // Sensitive directory outside the staging area
+        let outside_dir = temp.path().join("sensitive");
+        std::fs::create_dir(&outside_dir).unwrap();
+        std::fs::write(outside_dir.join("environ"), "SC_WRITE_TOKEN=secret").unwrap();
+
+        // The whole agent_memory entry is a symlink to the sensitive directory
+        std::os::unix::fs::symlink(&outside_dir, temp.path().join(AGENT_MEMORY_DIR)).unwrap();
+
+        let config = MemoryConfig::default();
+        let result = process_agent_memory(temp.path(), output.path(), &config)
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        // Should be treated as "no memory" — nothing copied
+        assert!(
+            result.message.contains("No agent memory"),
+            "unexpected message: {}",
+            result.message
+        );
+        // Sensitive file must not appear in output
+        assert!(!output.path().join(AGENT_MEMORY_DIR).join("environ").exists());
     }
 }
