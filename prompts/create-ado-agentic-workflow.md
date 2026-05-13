@@ -367,9 +367,14 @@ on:
       - release/*
     filters:                   # optional runtime filters (compiled to gate step with self-cancellation)
       source-pipeline: "Build*"
+      branch: "refs/heads/main"  # triggering branch (Build.SourceBranch)
       time-window:
         start: "09:00"
         end: "17:00"
+      build-reason:
+        include: [IndividualCI]
+        exclude: [Schedule]
+      expression: "eq(variables['Custom.Flag'], 'true')"  # raw ADO condition
 ```
 
 When `on.pipeline` is set: `trigger: none` and `pr: none` are generated automatically. If `filters:` are configured under `on.pipeline`, a gate step is added to the Setup job that evaluates the filters and self-cancels the build when they do not match.
