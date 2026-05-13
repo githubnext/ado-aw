@@ -264,7 +264,7 @@ async fn run_execute(
     let tools = front_matter.tools.clone();
 
     // Build execution context from front matter, CLI args, and environment
-    let ctx = build_execution_context(
+    let mut ctx = build_execution_context(
         front_matter,
         &safe_output_dir,
         ado_org_url,
@@ -272,6 +272,13 @@ async fn run_execute(
         dry_run,
     )
     .await;
+
+    // Discover the last author of the agent source file for use as a
+    // fallback assignee in create-work-item.
+    ctx.agent_last_author = discover_last_author(&source).await;
+    if let Some(ref email) = ctx.agent_last_author {
+        log::info!("Agent source last author: {}", email);
+    }
 
     let results = execute::execute_safe_outputs(&safe_output_dir, &ctx).await?;
 
@@ -347,6 +354,54 @@ async fn build_execution_context(
     }
 
     ctx
+}
+
+/// Look up the email of the person who last authored changes to `path`.
+///
+/// Runs `git log -1 --format='%ae' -- <path>` in the file's parent directory.
+/// Returns `None` (with a debug log) when the lookup fails — e.g. shallow
+/// clone with no relevant history, or git is unavailable.
+///
+/// Note: we pass the bare filename (not a full path) so git resolves it
+/// relative to `cwd`. This means renames in history are not followed
+/// (`--follow` has its own edge-cases with merge commits and is not worth
+/// the complexity here).
+async fn discover_last_author(path: &Path) -> Option<String> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let output = tokio::process::Command::new("git")
+        .args(["log", "-1", "--format=%ae", "--"])
+        .arg(path.file_name()?)
+        .current_dir(dir)
+        .output()
+        .await;
+
+    match output {
+        Ok(o) if o.status.success() => {
+            let email = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if email.is_empty() {
+                log::debug!("git log returned no committer for {}", path.display());
+                None
+            } else {
+                // Sanitize the email: git committer values can contain
+                // arbitrary text (e.g. ADO pipeline log commands like
+                // ##vso[task.setvariable ...]).  Apply the same config-level
+                // sanitization used for operator-supplied fields.
+                Some(crate::sanitize::sanitize_config(&email))
+            }
+        }
+        Ok(o) => {
+            log::debug!(
+                "git log failed for {}: {}",
+                path.display(),
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+            None
+        }
+        Err(e) => {
+            log::debug!("Failed to run git log for {}: {}", path.display(), e);
+            None
+        }
+    }
 }
 
 async fn process_cache_memory(

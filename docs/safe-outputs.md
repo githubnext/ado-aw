@@ -71,7 +71,7 @@ Creates an Azure DevOps work item.
 - `work-item-type` - Work item type (default: "Task")
 - `area-path` - Area path for the work item
 - `iteration-path` - Iteration path for the work item
-- `assignee` - User to assign (email or display name)
+- `assignee` - User to assign (email or display name). When omitted, falls back to the email of the last person who committed changes to the agent source markdown file (discovered via `git log` at Stage 3).
 - `tags` - Static list of tags always applied to the work item (regardless of agent input)
 - `allowed-tags` - Allowlist of tags the agent is permitted to use via the `tags` parameter. If empty, any agent-provided tags are accepted. Supports `*` wildcards anywhere in the pattern (e.g., `"agent-*"` matches `"agent-created"`; `"copilot:repo=org/project/*@main"` matches any repo name).
 - `custom-fields` - Map of custom field reference names to values (e.g., `Custom.MyField: "value"`)
@@ -199,8 +199,27 @@ The `repository` value must be `"self"`, an alias from the `checkout:` list in t
 ### noop
 Reports that no action was needed. Use this to provide visibility when analysis is complete but no changes or outputs are required.
 
+The executor always files an Azure DevOps work item or appends a comment to an existing one. Override the defaults in front matter to customise the title, type, or area path. If ADO credentials are not available the tool succeeds with a warning.
+
 **Agent parameters:**
 - `context` - Optional context about why no action was taken
+
+**Configuration options (front matter):**
+```yaml
+safe-outputs:
+  noop:
+    work-item:                                  # Work item config — always active with these defaults
+      enabled: true                             # Set to false to disable work-item filing entirely
+      title: "[ado-aw] Agent reported no operation"  # Default title (used to find existing items too)
+      work-item-type: Task                      # Work item type (default: "Task")
+      area-path: "MyProject\\MyTeam"            # Optional — area path
+      iteration-path: "MyProject\\Sprint 1"     # Optional — iteration path
+      tags:                                     # Optional — tags to apply
+        - agent-noop
+      include-stats: true                       # Append agent stats to description/comment (default: true)
+```
+
+The executor searches for a non-closed work item with the same `title` in the project. If one is found, a comment is appended; otherwise a new work item is created.
 
 ### missing-data
 Reports that data or information needed to complete the task is not available.
@@ -213,9 +232,28 @@ Reports that data or information needed to complete the task is not available.
 ### missing-tool
 Reports that a tool or capability needed to complete the task is not available.
 
+The executor always files an Azure DevOps work item or appends a comment to an existing one. Override the defaults in front matter to customise the title, type, or area path. If ADO credentials are not available the tool succeeds with a warning.
+
 **Agent parameters:**
 - `tool_name` - Name of the tool that was expected but not found
 - `context` - Optional context about why the tool was needed
+
+**Configuration options (front matter):**
+```yaml
+safe-outputs:
+  missing-tool:
+    work-item:                                     # Work item config — always active with these defaults
+      enabled: true                                # Set to false to disable work-item filing entirely
+      title: "[ado-aw] Agent encountered missing tool"  # Default title (used to find existing items too)
+      work-item-type: Task                         # Work item type (default: "Task")
+      area-path: "MyProject\\MyTeam"               # Optional — area path
+      iteration-path: "MyProject\\Sprint 1"        # Optional — iteration path
+      tags:                                        # Optional — tags to apply
+        - agent-missing-tool
+      include-stats: true                          # Append agent stats to description/comment (default: true)
+```
+
+The executor searches for a non-closed work item with the same `title` in the project. If one is found, a comment is appended; otherwise a new work item is created.
 
 ### report-incomplete
 Reports that a task could not be completed.

@@ -578,8 +578,15 @@ mod tests {
         assert!(result.is_ok());
         let (tool_name, result) = result.unwrap();
         assert_eq!(tool_name, "noop");
+        // noop always attempts to file a work item; without ADO credentials it
+        // returns a warning (success=true) rather than failing hard.
         assert!(result.success);
-        assert!(result.message.contains("No operation"));
+        assert!(result.is_warning(), "noop without credentials should be a warning");
+        assert!(
+            result.message.contains("not set"),
+            "noop warning should mention missing config, got: {}",
+            result.message
+        );
     }
 
     #[tokio::test]
@@ -591,7 +598,15 @@ mod tests {
         assert!(result.is_ok());
         let (tool_name, result) = result.unwrap();
         assert_eq!(tool_name, "missing-tool");
+        // missing-tool always attempts to file a work item; without ADO credentials
+        // it returns a warning (success=true) rather than failing hard.
         assert!(result.success);
+        assert!(result.is_warning(), "missing-tool without credentials should be a warning");
+        assert!(
+            result.message.contains("not set"),
+            "missing-tool warning should mention missing config, got: {}",
+            result.message
+        );
     }
 
     #[tokio::test]

@@ -1,11 +1,11 @@
 //! Missing tool reporting schemas
 
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
+use crate::sanitize::{SanitizeConfig, SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate, WorkItemReportConfig, file_or_append_work_item};
 
 /// Parameters for reporting a missing tool
 #[derive(Deserialize, JsonSchema)]
@@ -37,18 +37,77 @@ impl SanitizeContent for MissingToolResult {
     }
 }
 
+fn missing_tool_default_work_item_title() -> String {
+    "[ado-aw] Agent encountered missing tool".to_string()
+}
+
+fn missing_tool_default_work_item() -> WorkItemReportConfig {
+    WorkItemReportConfig {
+        enabled: true,
+        title: Some(missing_tool_default_work_item_title()),
+        work_item_type: "Task".to_string(),
+        area_path: None,
+        iteration_path: None,
+        tags: Vec::new(),
+        include_stats: true,
+    }
+}
+
+/// Configuration for the missing-tool tool (specified in front matter).
+///
+/// The executor always files a new Azure DevOps work item or appends a comment to an
+/// existing one with the same title. Override the defaults to customise the work item.
+///
+/// If ADO credentials are not available (e.g. the pipeline has no write service
+/// connection), the executor succeeds with a warning rather than failing hard.
+///
+/// Example front matter:
+/// ```yaml
+/// safe-outputs:
+///   missing-tool:
+///     work-item:
+///       title: "[ado-aw] Agent encountered missing tool"
+///       work-item-type: Bug
+///       area-path: "MyProject\\MyTeam"
+///       tags:
+///         - agent-missing-tool
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissingToolConfig {
+    /// Work item to file (or append to) when a tool is reported missing.
+    /// Defaults to a Task titled "[ado-aw] Agent encountered missing tool".
+    #[serde(default = "missing_tool_default_work_item", rename = "work-item")]
+    pub work_item: WorkItemReportConfig,
+}
+
+impl Default for MissingToolConfig {
+    fn default() -> Self {
+        Self {
+            work_item: missing_tool_default_work_item(),
+        }
+    }
+}
+
+impl SanitizeConfig for MissingToolConfig {
+    fn sanitize_config_fields(&mut self) {
+        self.work_item.sanitize_config_fields();
+    }
+}
+
 #[async_trait::async_trait]
 impl Executor for MissingToolResult {
     fn dry_run_summary(&self) -> String {
         format!("report missing tool '{}'", self.tool_name)
     }
 
-    async fn execute_impl(&self, _: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
+    async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         let message = match &self.context {
             Some(context) => format!("Missing tool reported: {} ({context})", self.tool_name),
             None => format!("Missing tool reported: {}", self.tool_name),
         };
-        Ok(ExecutionResult::success(message))
+
+        let config: MissingToolConfig = ctx.get_tool_config("missing-tool");
+        file_or_append_work_item(&config.work_item, &missing_tool_default_work_item_title(), &message, ctx).await
     }
 }
 
@@ -101,5 +160,111 @@ mod tests {
         let json = r#"{"context": "why"}"#;
         let result: Result<MissingToolParams, _> = serde_json::from_str(json);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_default_has_sensible_work_item() {
+        let config = MissingToolConfig::default();
+        assert!(config.work_item.enabled);
+        assert_eq!(config.work_item.title.as_deref(), Some("[ado-aw] Agent encountered missing tool"));
+        assert_eq!(config.work_item.work_item_type, "Task");
+        assert!(config.work_item.area_path.is_none());
+        assert!(config.work_item.iteration_path.is_none());
+        assert!(config.work_item.tags.is_empty());
+        assert!(config.work_item.include_stats);
+    }
+
+    #[test]
+    fn test_config_deserializes_with_work_item_overrides() {
+        let yaml = r#"
+work-item:
+  title: "Custom missing tool title"
+  work-item-type: Bug
+  area-path: "MyProject\\MyTeam"
+  tags:
+    - agent-missing-tool
+"#;
+        let config: MissingToolConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.work_item.title.as_deref(), Some("Custom missing tool title"));
+        assert_eq!(config.work_item.work_item_type, "Bug");
+        assert_eq!(config.work_item.area_path.as_deref(), Some("MyProject\\MyTeam"));
+        assert_eq!(config.work_item.tags, vec!["agent-missing-tool"]);
+    }
+
+    #[test]
+    fn test_config_deserializes_empty_uses_defaults() {
+        let yaml = r#"{}"#;
+        let config: MissingToolConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.work_item.title.as_deref(), Some("[ado-aw] Agent encountered missing tool"));
+        assert_eq!(config.work_item.work_item_type, "Task");
+    }
+
+    #[test]
+    fn test_config_partial_work_item_preserves_overrides() {
+        // When a partial work-item: block is provided in front matter (e.g.
+        // only `work-item-type:` with no `title:`), serde deserializes
+        // `title` as `None` via `#[serde(default)]` — NOT via the per-tool
+        // default function `missing_tool_default_work_item()`.  The caller's
+        // `unwrap_or(default_title)` in `file_or_append_work_item` recovers
+        // the intended title at execution time.
+        let yaml = r#"
+work-item:
+  work-item-type: Bug
+  tags:
+    - agent-missing-tool
+"#;
+        let config: MissingToolConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.work_item.title.is_none(), "title should be None when omitted");
+        assert_eq!(config.work_item.work_item_type, "Bug");
+        assert_eq!(config.work_item.tags, vec!["agent-missing-tool"]);
+    }
+
+    #[tokio::test]
+    async fn test_execute_impl_disabled_skips_work_item() {
+        let result: MissingToolResult = MissingToolParams {
+            tool_name: "bash".to_string(),
+            context: None,
+        }
+        .try_into()
+        .unwrap();
+
+        let mut ctx = crate::safeoutputs::ExecutionContext::default();
+        ctx.tool_configs.insert(
+            "missing-tool".to_string(),
+            serde_json::to_value(MissingToolConfig {
+                work_item: WorkItemReportConfig {
+                    enabled: false,
+                    ..missing_tool_default_work_item()
+                },
+            })
+            .unwrap(),
+        );
+
+        let exec = result.execute_impl(&ctx).await.unwrap();
+        assert!(exec.success);
+        assert!(!exec.is_warning());
+        assert!(
+            exec.message.contains("disabled"),
+            "expected disabled message, got: {}",
+            exec.message
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_impl_without_ado_credentials_returns_warning() {
+        let result: MissingToolResult = MissingToolParams {
+            tool_name: "bash".to_string(),
+            context: Some("needed for script execution".to_string()),
+        }
+        .try_into()
+        .unwrap();
+
+        // Default ExecutionContext has no ADO credentials — should warn, not fail
+        let exec = result
+            .execute_impl(&crate::safeoutputs::ExecutionContext::default())
+            .await
+            .unwrap();
+        assert!(exec.success);
+        assert!(exec.is_warning());
     }
 }

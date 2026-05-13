@@ -300,7 +300,8 @@ impl Executor for CreateWorkItemResult {
         debug!("Work item type: {}", config.work_item_type);
         debug!("Area path: {:?}", config.area_path);
         debug!("Iteration path: {:?}", config.iteration_path);
-        debug!("Assignee: {:?}", config.assignee);
+        debug!("Assignee (config): {:?}", config.assignee);
+        debug!("Assignee (last author fallback): {:?}", ctx.agent_last_author);
 
         // Validate agent-provided tags against allowed-tags (if configured)
         if !self.tags.is_empty() && !config.allowed_tags.is_empty() {
@@ -357,7 +358,7 @@ impl Executor for CreateWorkItemResult {
         if let Some(iteration_path) = &config.iteration_path {
             patch_doc.push(field_op("System.IterationPath", iteration_path));
         }
-        if let Some(assignee) = &config.assignee {
+        if let Some(assignee) = config.assignee.as_ref().or(ctx.agent_last_author.as_ref()) {
             patch_doc.push(field_op("System.AssignedTo", assignee));
         }
         // Merge static config tags with validated agent-provided tags (dedup, case-insensitive)
