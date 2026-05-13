@@ -127,6 +127,12 @@
     "fonts.googleapis.com",
     "fonts.gstatic.com"
   ],
+  "gh-aw": [
+    "codeload.github.com",
+    "github.com",
+    "github.github.com",
+    "raw.githubusercontent.com"
+  ],
   "github": [
     "*.githubusercontent.com",
     "codeload.github.com",
