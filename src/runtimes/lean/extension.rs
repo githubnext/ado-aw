@@ -85,3 +85,21 @@ the toolchain. Lean files use the `.lean` extension.\n"
         Ok(warnings)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compile::parse_markdown;
+
+    #[test]
+    fn test_validate_lean_bash_disabled_emits_warning() {
+        let (fm, _) =
+            parse_markdown("---\nname: test\ndescription: test\ntools:\n  bash: []\n---\n")
+                .unwrap();
+        let ext = LeanExtension::new(LeanRuntimeConfig::Enabled(true));
+        let ctx = CompileContext::for_test(&fm);
+        let warnings = ext.validate(&ctx).unwrap();
+        assert!(!warnings.is_empty());
+        assert!(warnings[0].contains("tools.bash is empty"));
+    }
+}

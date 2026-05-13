@@ -104,6 +104,7 @@ const REQUIRED_STEP_DISPLAY_NAMES: &[&str] = &[
     "Generate GITHUB_PATH file",              // src/compile/common.rs (AWF path step)
     "Evaluate pipeline filters",              // src/compile/extensions/trigger_filters.rs + src/compile/filter_ir.rs
     "Evaluate PR filters",                    // src/compile/filter_ir.rs (GateContext::PullRequest)
+    "Verify MCP backends",                    // src/compile/common.rs (--debug-pipeline only)
 ];
 
 fn ado_aw_binary() -> PathBuf {
@@ -139,16 +140,22 @@ fn fresh_workspace() -> TempDir {
 }
 
 /// Compile a fixture by copying it into `workspace` and invoking
-/// `ado-aw compile`. Returns the path to the generated `.lock.yml` and the
-/// target (`"standalone"` or `"1es"`) reported in compiler stdout.
-fn compile_fixture(workspace: &Path, fixture: &str) -> (PathBuf, String) {
+/// `ado-aw compile [extra_flags]`. Returns the path to the generated
+/// `.lock.yml` and the target (`"standalone"` or `"1es"`) reported in
+/// compiler stdout. The `extra_flags` slice is appended after the file path,
+/// allowing callers to enable modes like `--debug-pipeline` that cannot be
+/// expressed in front matter.
+fn compile_fixture_with_flags(workspace: &Path, fixture: &str, extra_flags: &[&str]) -> (PathBuf, String) {
     let src = fixtures_dir().join(fixture);
     let dest = workspace.join(fixture);
     std::fs::copy(&src, &dest)
         .unwrap_or_else(|e| panic!("copy fixture {fixture}: {e}"));
 
+    let mut args = vec!["compile", dest.to_str().unwrap()];
+    args.extend_from_slice(extra_flags);
+
     let output = Command::new(ado_aw_binary())
-        .args(["compile", dest.to_str().unwrap()])
+        .args(&args)
         .current_dir(workspace)
         .output()
         .unwrap_or_else(|e| panic!("spawn ado-aw compile: {e}"));
@@ -178,7 +185,13 @@ fn compile_fixture(workspace: &Path, fixture: &str) -> (PathBuf, String) {
     (lock, target.to_string())
 }
 
-/// A single bash body extracted from a compiled pipeline.
+/// Convenience wrapper around `compile_fixture_with_flags` for the common
+/// case where no extra CLI flags are needed.
+fn compile_fixture(workspace: &Path, fixture: &str) -> (PathBuf, String) {
+    compile_fixture_with_flags(workspace, fixture, &[])
+}
+
+
 struct BashBody {
     display_name: String,
     body: String,
@@ -326,6 +339,29 @@ fn compiled_bash_bodies_pass_shellcheck() {
                         .entry((*fixture).to_string())
                         .or_default()
                         .push(format_finding(fixture, &body.display_name, finding));
+                }
+            }
+        }
+    }
+
+    // Debug-pipeline coverage — compile one fixture with `--debug-pipeline` to
+    // exercise the `generate_debug_pipeline_replacements(true)` path in
+    // `src/compile/common.rs`, which emits the "Verify MCP backends" bash body.
+    // This code path is unreachable via front matter alone.
+    {
+        let debug_fixture = "minimal-agent.md";
+        let debug_label = "minimal-agent.md (--debug-pipeline)";
+        let (lock, _) =
+            compile_fixture_with_flags(workspace.path(), debug_fixture, &["--debug-pipeline"]);
+        for body in extract_bash_bodies(&lock) {
+            all_display_names.push(body.display_name.clone());
+            let findings = run_shellcheck(&body.body);
+            if let Some(arr) = findings.as_array() {
+                for finding in arr {
+                    report
+                        .entry(debug_label.to_string())
+                        .or_default()
+                        .push(format_finding(debug_label, &body.display_name, finding));
                 }
             }
         }

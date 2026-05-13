@@ -226,7 +226,7 @@ mcp-servers:
 
 > **Security**: All `mcp-servers:` entries must have an explicit `allowed:` list.
 >
-> **Standalone target** (the default): MCPs without a `container:` or `url:` field are skipped at compile time with a compile-time warning — they have no effect and will not be available to the agent. For the standalone target, use only **custom** containerized MCPs with a `container:` field.
+> **Standalone target** (the default): MCPs without a `container:` or `url:` field are skipped at compile time with a compile-time warning — they have no effect and will not be available to the agent. Both containerized MCPs (with `container:`) and remote HTTP MCPs (with `url:`) are supported in standalone target.
 
 ### Step 9 — Safe Outputs
 
@@ -365,9 +365,14 @@ on:
     branches:
       - main
       - release/*
+    filters:                   # optional runtime filters (compiled to gate step with self-cancellation)
+      source-pipeline: "Build*"
+      time-window:
+        start: "09:00"
+        end: "17:00"
 ```
 
-When `on.pipeline` is set: `trigger: none` and `pr: none` are generated automatically, and a step to cancel previous queued builds is included.
+When `on.pipeline` is set: `trigger: none` and `pr: none` are generated automatically. If `filters:` are configured under `on.pipeline`, a gate step is added to the Setup job that evaluates the filters and self-cancels the build when they do not match.
 
 ### Step 12 — Inline Steps (optional)
 
