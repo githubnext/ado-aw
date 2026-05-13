@@ -15,22 +15,14 @@
 //! ADO natively supports `dependsOn` and `condition` at the template call site,
 //! so these don't need to be template parameters.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
-use log::{info, warn};
+use log::warn;
 use std::path::Path;
 
 use super::Compiler;
 use super::common::{
-    AWF_VERSION, MCPG_VERSION, MCPG_IMAGE, MCPG_PORT, MCPG_DOMAIN,
-    CompileConfig, compile_shared,
-    generate_allowed_domains,
-    generate_awf_mounts,
-    generate_awf_path_step,
-    collect_awf_path_prepends,
-    generate_enabled_tools_args,
-    generate_mcpg_config, generate_mcpg_docker_env, generate_mcpg_step_env,
-    generate_stage_prefix, generate_template_parameters,
+    compile_template_target, TemplateTargetConfig,
     generate_header_comment,
 };
 use super::types::FrontMatter;
@@ -53,70 +45,22 @@ impl Compiler for StageCompiler {
         skip_integrity: bool,
         debug_pipeline: bool,
     ) -> Result<String> {
-        info!("Compiling for stage template target");
-
         if front_matter.on_config.is_some() {
             warn!("on: trigger configuration is ignored for target: stage (triggers are the parent pipeline's concern)");
         }
 
-        // Collect extensions (needed before compile_shared for MCPG config)
-        let extensions = super::extensions::collect_extensions(front_matter);
-
-        // Build compile context for MCPG config generation
-        let input_dir = input_path.parent().unwrap_or(std::path::Path::new("."));
-        let ctx = super::extensions::CompileContext::new(front_matter, input_dir).await?;
-
-        // Generate stage prefix for job-name uniqueness
-        let stage_prefix = generate_stage_prefix(&front_matter.name);
-
-        // Generate template-level parameters
-        let template_params = generate_template_parameters(front_matter)?;
-
-        // Same AWF/MCPG values as standalone
-        let allowed_domains = generate_allowed_domains(front_matter, &extensions)?;
-        let awf_mounts = generate_awf_mounts(&extensions);
-        let awf_paths = collect_awf_path_prepends(&extensions);
-        let awf_path_step = generate_awf_path_step(&awf_paths);
-        let enabled_tools_args = generate_enabled_tools_args(front_matter);
-
-        let config_obj = generate_mcpg_config(front_matter, &ctx, &extensions)?;
-        let mcpg_config_json =
-            serde_json::to_string_pretty(&config_obj).context("Failed to serialize MCPG config")?;
-        let mcpg_docker_env = generate_mcpg_docker_env(front_matter, &extensions);
-        let mcpg_step_env = generate_mcpg_step_env(&extensions);
-
-        let config = CompileConfig {
-            template: include_str!("../data/stage-base.yml").to_string(),
-            extra_replacements: vec![
-                ("{{ stage_prefix }}".into(), stage_prefix),
-                ("{{ template_parameters }}".into(), template_params),
-                ("{{ firewall_version }}".into(), AWF_VERSION.into()),
-                ("{{ mcpg_version }}".into(), MCPG_VERSION.into()),
-                ("{{ mcpg_image }}".into(), MCPG_IMAGE.into()),
-                ("{{ mcpg_port }}".into(), MCPG_PORT.to_string()),
-                ("{{ mcpg_domain }}".into(), MCPG_DOMAIN.into()),
-                ("{{ allowed_domains }}".into(), allowed_domains),
-                ("{{ awf_mounts }}".into(), awf_mounts),
-                ("{{ awf_path_step }}".into(), awf_path_step),
-                ("{{ enabled_tools_args }}".into(), enabled_tools_args),
-                ("{{ mcpg_config }}".into(), mcpg_config_json),
-                ("{{ mcpg_docker_env }}".into(), mcpg_docker_env),
-                ("{{ mcpg_step_env }}".into(), mcpg_step_env),
-            ],
-            skip_integrity,
-            debug_pipeline,
-            has_awf_paths: !awf_paths.is_empty(),
-            skip_header: true,
-        };
-
-        let yaml = compile_shared(
-            input_path, output_path, front_matter, markdown_body,
-            &extensions, &ctx, config,
-        ).await?;
-
-        // Prepend custom header with stage-template usage instructions
-        let header = generate_stage_header(input_path, front_matter);
-        Ok(format!("{}{}", header, yaml))
+        compile_template_target(
+            input_path,
+            output_path,
+            front_matter,
+            markdown_body,
+            TemplateTargetConfig {
+                template: include_str!("../data/stage-base.yml"),
+                skip_integrity,
+                debug_pipeline,
+            },
+            generate_stage_header,
+        ).await
     }
 }
 

@@ -196,6 +196,7 @@ async fn compile_pipeline_inner(
         CompileTarget::Job => Box::new(job::JobCompiler),
         CompileTarget::Stage => Box::new(stage::StageCompiler),
     };
+    info!("Using {} compiler", compiler.target_name());
 
     // Compile (no source mutation yet — a failure here must leave the
     // source byte-identical).

@@ -8,6 +8,8 @@ The compiler transforms the input into valid Azure DevOps pipeline YAML based on
 
 - **Standalone**: Uses `src/data/base.yml`
 - **1ES**: Uses `src/data/1es-base.yml`
+- **Job template**: Uses `src/data/job-base.yml`
+- **Stage template**: Uses `src/data/stage-base.yml`
 
 Explicit markings are embedded in these templates that the compiler is allowed to replace e.g. `{{ engine_run }}` denotes the full engine invocation command. The compiler should not replace sections denoted by `${{ some content }}`. What follows is a mapping of markings to responsibilities (primarily for the standalone template).
 
@@ -495,3 +497,54 @@ Should be replaced with the domain the AWF-sandboxed agent uses to reach MCPG on
 The 1ES target uses the same template markers as standalone, plus the 1ES-specific `extends:` / `stages:` / `templateContext` wrapping. The 1ES template includes `templateContext.type: buildJob` for all jobs, and the pool is specified at the top-level `parameters.pool` rather than per-job.
 
 Both targets share the same execution model (Copilot CLI + AWF + MCPG) and the same set of template markers.
+
+## Job/Stage Template Markers
+
+The `target: job` and `target: stage` targets use `job-base.yml` and `stage-base.yml`
+respectively. Both include all the standard AWF/MCPG markers above, plus the two
+template-specific markers below.
+
+### {{ stage_prefix }}
+
+Replaced with a PascalCase ADO-safe identifier derived from the agent `name:` front
+matter field. Used to prefix the three job names so that including multiple templates
+in the same pipeline produces unique job identifiers.
+
+Derivation rules:
+
+- Non-ASCII-alphanumeric characters are treated as word separators (they are not
+  included in the output).
+- Each word is capitalised and the words are concatenated: `"daily code review"` →
+  `"DailyCodeReview"`.
+- An empty result (all characters stripped) falls back to `"Agent"`.
+- A result starting with a digit is prefixed with `_`: `"123start"` → `"_123start"`.
+- Names containing non-ASCII alphanumeric characters (e.g. `"über-agent"`) produce a
+  compiler warning because those characters are silently dropped.
+
+Example job names produced for `name: Daily Code Review`:
+
+```yaml
+jobs:
+  - job: DailyCodeReview_Agent
+  - job: DailyCodeReview_Detection
+    dependsOn: DailyCodeReview_Agent
+  - job: DailyCodeReview_Execution
+    dependsOn: [DailyCodeReview_Agent, DailyCodeReview_Detection]
+```
+
+### {{ template_parameters }}
+
+Replaced with the `parameters:` block that callers pass when including the template.
+Contains `clearMemory` (auto-injected when `tools.cache-memory` is configured) and any
+user-defined `parameters:` from front matter. Replaced with an empty string when no
+parameters are needed.
+
+Example output when `tools.cache-memory` is configured:
+
+```yaml
+parameters:
+- name: clearMemory
+  displayName: Clear agent memory
+  type: boolean
+  default: false
+```
