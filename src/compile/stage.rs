@@ -17,7 +17,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use log::{info, warn};
+use log::warn;
 use std::path::Path;
 
 use super::Compiler;
@@ -44,8 +44,6 @@ impl Compiler for StageCompiler {
         skip_integrity: bool,
         debug_pipeline: bool,
     ) -> Result<String> {
-        info!("Compiling for stage template target");
-
         if front_matter.on_config.is_some() {
             warn!("on: trigger configuration is ignored for target: stage (triggers are the parent pipeline's concern)");
         }
