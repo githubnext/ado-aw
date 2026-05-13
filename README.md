@@ -204,8 +204,10 @@ sees.
    ```
 
 > [!IMPORTANT]
-> If you configure safe outputs that require write access (`create-pull-request`
-> or `create-work-item`) but omit `permissions.write`, compilation will fail
+> If you configure any safe output that requires write access (e.g.
+> `create-pull-request`, `create-work-item`, `add-pr-comment`, `queue-build`,
+> `upload-pipeline-artifact`, and others — see the [Safe Outputs](#safe-outputs)
+> table for the full list) but omit `permissions.write`, compilation will fail
 > with a clear error. This is a safety check — write operations must always
 > have an explicitly configured credential.
 
