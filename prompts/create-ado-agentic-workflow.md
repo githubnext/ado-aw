@@ -365,9 +365,14 @@ on:
     branches:
       - main
       - release/*
+    filters:                   # optional runtime filters (compiled to gate step with self-cancellation)
+      source-pipeline: "Build*"
+      time-window:
+        start: "09:00"
+        end: "17:00"
 ```
 
-When `on.pipeline` is set: `trigger: none` and `pr: none` are generated automatically, and a step to cancel previous queued builds is included.
+When `on.pipeline` is set: `trigger: none` and `pr: none` are generated automatically. If `filters:` are configured under `on.pipeline`, a gate step is added to the Setup job that evaluates the filters and self-cancels the build when they do not match.
 
 ### Step 12 — Inline Steps (optional)
 
