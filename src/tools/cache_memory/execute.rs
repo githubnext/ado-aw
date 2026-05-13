@@ -138,6 +138,8 @@ async fn collect_files(base: &Path, current: &Path) -> Result<Vec<PathBuf>> {
         if file_type.is_symlink() {
             warn!("Skipping symlink in memory directory: {}", path.display());
         } else if file_type.is_dir() {
+            // This branch is only reached when file_type.is_symlink() is false,
+            // so `path` is guaranteed to be a real directory (not a symlink-to-dir).
             let mut sub_files = Box::pin(collect_files(base, &path)).await?;
             files.append(&mut sub_files);
         } else {
@@ -183,9 +185,11 @@ pub async fn process_agent_memory(
     info!("Found {} file(s) in agent_memory", files.len());
 
     // Canonicalize the base directory once for containment checks below.
+    // This is required for the symlink-following defense: we compare canonical
+    // resolved paths to ensure no file escapes the memory directory boundary.
     let canonical_base = tokio::fs::canonicalize(&memory_source).await.with_context(|| {
         format!(
-            "Cannot canonicalize memory source: {}",
+            "Cannot verify memory directory containment (symlink defense requires canonical path): {}",
             memory_source.display()
         )
     })?;
@@ -562,6 +566,30 @@ allowed-extensions:
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn test_collect_files_skips_relative_symlinks() {
+        // Relative symlinks (e.g., ../../etc/passwd) are just as dangerous as
+        // absolute ones and must also be rejected.
+        let temp = tempfile::tempdir().unwrap();
+        let mem_dir = temp.path().join(AGENT_MEMORY_DIR);
+        std::fs::create_dir(&mem_dir).unwrap();
+
+        // A real file
+        std::fs::write(mem_dir.join("real.md"), "real content").unwrap();
+
+        // Relative symlink: within mem_dir, "../secret.txt" points one level up
+        let target = temp.path().join("secret.txt");
+        std::fs::write(&target, "secret data").unwrap();
+        std::os::unix::fs::symlink("../secret.txt", mem_dir.join("relative_link.txt")).unwrap();
+
+        let files = collect_files(&mem_dir, &mem_dir).await.unwrap();
+
+        // Only the real file should be collected; the relative symlink must be skipped
+        assert_eq!(files.len(), 1, "relative symlink should be skipped");
+        assert_eq!(files[0], std::path::PathBuf::from("real.md"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn test_collect_files_skips_directory_symlinks() {
         let temp = tempfile::tempdir().unwrap();
         let mem_dir = temp.path().join(AGENT_MEMORY_DIR);
@@ -614,7 +642,7 @@ allowed-extensions:
 
         let out_memory = output.path().join(AGENT_MEMORY_DIR);
         assert!(out_memory.join("notes.md").exists(), "notes.md should be copied");
-        assert!(!out_memory.join("env.txt").exists(), "symlink target must NOT be copied");
+        assert!(!out_memory.join("env.txt").exists(), "symlink target must not be copied");
 
         // The sensitive contents must not appear in the output at all
         let out_notes = std::fs::read_to_string(out_memory.join("notes.md")).unwrap();
