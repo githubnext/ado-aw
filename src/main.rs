@@ -361,6 +361,11 @@ async fn build_execution_context(
 /// Runs `git log -1 --format='%ae' -- <path>` in the file's parent directory.
 /// Returns `None` (with a debug log) when the lookup fails — e.g. shallow
 /// clone with no relevant history, or git is unavailable.
+///
+/// Note: we pass the bare filename (not a full path) so git resolves it
+/// relative to `cwd`. This means renames in history are not followed
+/// (`--follow` has its own edge-cases with merge commits and is not worth
+/// the complexity here).
 async fn discover_last_committer(path: &Path) -> Option<String> {
     let dir = path.parent().unwrap_or(Path::new("."));
     let output = tokio::process::Command::new("git")
@@ -377,7 +382,11 @@ async fn discover_last_committer(path: &Path) -> Option<String> {
                 log::debug!("git log returned no committer for {}", path.display());
                 None
             } else {
-                Some(email)
+                // Sanitize the email: git committer values can contain
+                // arbitrary text (e.g. ADO pipeline log commands like
+                // ##vso[task.setvariable ...]).  Apply the same config-level
+                // sanitization used for operator-supplied fields.
+                Some(crate::sanitize::sanitize_config(&email))
             }
         }
         Ok(o) => {

@@ -581,6 +581,11 @@ mod tests {
         // noop always attempts to file a work item; without ADO credentials it
         // returns a warning (success=true) rather than failing hard.
         assert!(result.success);
+        assert!(
+            result.message.contains("work item") || result.message.contains("not set"),
+            "noop warning should mention work item or missing config, got: {}",
+            result.message
+        );
     }
 
     #[tokio::test]
@@ -595,6 +600,11 @@ mod tests {
         // missing-tool always attempts to file a work item; without ADO credentials
         // it returns a warning (success=true) rather than failing hard.
         assert!(result.success);
+        assert!(
+            result.message.contains("work item") || result.message.contains("not set"),
+            "missing-tool warning should mention work item or missing config, got: {}",
+            result.message
+        );
     }
 
     #[tokio::test]

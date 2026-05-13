@@ -43,6 +43,7 @@ fn missing_tool_default_work_item_title() -> String {
 
 fn missing_tool_default_work_item() -> WorkItemReportConfig {
     WorkItemReportConfig {
+        enabled: true,
         title: Some(missing_tool_default_work_item_title()),
         work_item_type: "Task".to_string(),
         area_path: None,
@@ -164,6 +165,7 @@ mod tests {
     #[test]
     fn test_config_default_has_sensible_work_item() {
         let config = MissingToolConfig::default();
+        assert!(config.work_item.enabled);
         assert_eq!(config.work_item.title.as_deref(), Some("[ado-aw] Agent encountered missing tool"));
         assert_eq!(config.work_item.work_item_type, "Task");
         assert!(config.work_item.area_path.is_none());
@@ -199,6 +201,12 @@ work-item:
 
     #[test]
     fn test_config_partial_work_item_preserves_overrides() {
+        // When a partial work-item: block is provided in front matter (e.g.
+        // only `work-item-type:` with no `title:`), serde deserializes
+        // `title` as `None` via `#[serde(default)]` — NOT via the per-tool
+        // default function `missing_tool_default_work_item()`.  The caller's
+        // `unwrap_or(default_title)` in `file_or_append_work_item` recovers
+        // the intended title at execution time.
         let yaml = r#"
 work-item:
   work-item-type: Bug
@@ -209,6 +217,37 @@ work-item:
         assert!(config.work_item.title.is_none(), "title should be None when omitted");
         assert_eq!(config.work_item.work_item_type, "Bug");
         assert_eq!(config.work_item.tags, vec!["agent-missing-tool"]);
+    }
+
+    #[tokio::test]
+    async fn test_execute_impl_disabled_skips_work_item() {
+        let result: MissingToolResult = MissingToolParams {
+            tool_name: "bash".to_string(),
+            context: None,
+        }
+        .try_into()
+        .unwrap();
+
+        let mut ctx = crate::safeoutputs::ExecutionContext::default();
+        ctx.tool_configs.insert(
+            "missing-tool".to_string(),
+            serde_json::to_value(MissingToolConfig {
+                work_item: WorkItemReportConfig {
+                    enabled: false,
+                    ..missing_tool_default_work_item()
+                },
+            })
+            .unwrap(),
+        );
+
+        let exec = result.execute_impl(&ctx).await.unwrap();
+        assert!(exec.success);
+        assert!(!exec.is_warning());
+        assert!(
+            exec.message.contains("disabled"),
+            "expected disabled message, got: {}",
+            exec.message
+        );
     }
 
     #[tokio::test]

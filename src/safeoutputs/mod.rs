@@ -390,6 +390,8 @@ fn work_item_report_default_type() -> String {
 ///
 /// Both `noop` and `missing-tool` default to always creating/appending a work item.
 /// Override the defaults in front matter to customise the title, type, area path, etc.
+/// Set `enabled: false` to disable work-item filing entirely and restore the old
+/// pass-through behaviour.
 ///
 /// Example:
 /// ```yaml
@@ -404,12 +406,21 @@ fn work_item_report_default_type() -> String {
 /// ```
 #[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
 pub struct WorkItemReportConfig {
+    /// Whether work-item filing is enabled (default: `true`).
+    /// Set to `false` to disable work-item creation/appending entirely.
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+
     /// Title of the work item to file or append a comment to.
     /// If a non-closed work item with this exact title already exists,
     /// a comment is appended rather than creating a new work item.
     ///
     /// When `None`, each caller supplies a context-appropriate default
-    /// (e.g. noop vs missing-tool).
+    /// (e.g. noop vs missing-tool).  This can happen when a partial
+    /// `work-item:` block is provided in front matter (e.g. overriding
+    /// only `work-item-type:`) — serde deserializes `title` as `None`
+    /// because `#[serde(default)]` applies per-field, not via the
+    /// per-tool default function.
     #[serde(default)]
     pub title: Option<String>,
 
@@ -432,6 +443,10 @@ pub struct WorkItemReportConfig {
     /// Whether to include agent execution stats in the work item description/comment (default: true)
     #[serde(default = "crate::agent_stats::default_include_stats", rename = "include-stats")]
     pub include_stats: bool,
+}
+
+fn default_enabled() -> bool {
+    true
 }
 
 /// Search for a non-closed work item by exact title using WIQL.
@@ -523,6 +538,11 @@ pub(crate) async fn file_or_append_work_item(
     body: &str,
     ctx: &ExecutionContext,
 ) -> anyhow::Result<ExecutionResult> {
+    if !config.enabled {
+        return Ok(ExecutionResult::success(
+            "Work-item filing disabled via enabled: false".to_string(),
+        ));
+    }
     let title = config.title.as_deref().unwrap_or(default_title);
     let org_url = match &ctx.ado_org_url {
         Some(u) => u,
