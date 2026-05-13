@@ -84,9 +84,14 @@ on:                            # trigger configuration (unified under on: key)
       - release/*
     filters:                   # optional runtime filters (compiled to gate step)
       source-pipeline: "Build*"
+      branch: "refs/heads/main"  # triggering branch (Build.SourceBranch)
       time-window:
         start: "09:00"
         end: "17:00"
+      build-reason:
+        include: [IndividualCI]
+        exclude: [Schedule]
+      expression: "eq(variables['Custom.Flag'], 'true')"  # raw ADO condition
   pr:                          # PR trigger
     branches:
       include: [main]
@@ -236,7 +241,7 @@ errors for impossible or conflicting combinations:
 | `min-changes` > `max-changes` | Error | No PR can satisfy both constraints |
 | `time-window.start` = `time-window.end` | Error | Zero-width window never matches |
 | Same value in `author.include` and `author.exclude` | Error | Conflicting include/exclude |
-| Same value in `build-reason.include` and `build-reason.exclude` | Error | Conflicting include/exclude |
+| Same value in `build-reason.include` and `build-reason.exclude` | Error | Conflicting include/exclude *(both PR and pipeline filters)* |
 | Label in both `labels.any-of` and `labels.none-of` | Error | Label both required and blocked |
 | Label in both `labels.all-of` and `labels.none-of` | Error | Label both required and blocked |
 | Empty `labels` filter (no any-of/all-of/none-of) | Warning | No label checks applied |
