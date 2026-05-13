@@ -150,6 +150,100 @@ async fn collect_files(base: &Path, current: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+/// Outcome of processing a single memory file.
+enum FileOutcome {
+    Copied(u64),
+    Skipped(String),
+}
+
+/// Validate containment, safety, extension, size, and content for one file;
+/// copy it to `dest_file` if all checks pass.
+///
+/// All validation failures return `Ok(FileOutcome::Skipped(reason))` so the
+/// caller can keep a tally without complex nested control flow.
+async fn process_memory_file(
+    relative_path: &Path,
+    source_file: &Path,
+    canonical_base: &Path,
+    dest_file: &Path,
+    config: &MemoryConfig,
+    total_size: u64,
+) -> Result<FileOutcome> {
+    // Defense-in-depth: verify the fully-resolved source path is still within
+    // the memory base directory, guarding against TOCTOU symlink races.
+    match tokio::fs::canonicalize(source_file).await {
+        Ok(canonical_source) => {
+            if !canonical_source.starts_with(canonical_base) {
+                warn!(
+                    "Skipping path that escapes memory directory (possible symlink attack): {}",
+                    relative_path.display()
+                );
+                return Ok(FileOutcome::Skipped(format!(
+                    "{}: resolved path escapes memory directory",
+                    relative_path.display()
+                )));
+            }
+        }
+        Err(e) => {
+            warn!(
+                "Skipping unresolvable path '{}': {}",
+                relative_path.display(),
+                e
+            );
+            return Ok(FileOutcome::Skipped(format!(
+                "{}: cannot resolve path ({})",
+                relative_path.display(),
+                e
+            )));
+        }
+    }
+
+    if let Err(e) = validate_memory_path(relative_path) {
+        warn!("Skipping unsafe path '{}': {}", relative_path.display(), e);
+        return Ok(FileOutcome::Skipped(format!(
+            "{}: {}",
+            relative_path.display(),
+            e
+        )));
+    }
+
+    if !config.is_extension_allowed(relative_path) {
+        warn!("Skipping disallowed extension: {}", relative_path.display());
+        return Ok(FileOutcome::Skipped(format!(
+            "{}: extension not in allowed list",
+            relative_path.display()
+        )));
+    }
+
+    let metadata = tokio::fs::metadata(source_file).await?;
+    if total_size + metadata.len() > MAX_MEMORY_SIZE_BYTES {
+        warn!(
+            "Memory size limit ({} bytes) would be exceeded, skipping: {}",
+            MAX_MEMORY_SIZE_BYTES,
+            relative_path.display()
+        );
+        return Ok(FileOutcome::Skipped(format!(
+            "{}: would exceed {} byte size limit",
+            relative_path.display(),
+            MAX_MEMORY_SIZE_BYTES
+        )));
+    }
+
+    if !validate_memory_file_content(source_file).await? {
+        return Ok(FileOutcome::Skipped(format!(
+            "{}: contains ##vso[ command",
+            relative_path.display()
+        )));
+    }
+
+    if let Some(parent) = dest_file.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::copy(source_file, dest_file).await?;
+    debug!("Copied memory file: {}", relative_path.display());
+    Ok(FileOutcome::Copied(metadata.len()))
+}
+
 /// Process agent memory from the safe output directory.
 ///
 /// Validates and copies sanitized memory files from `source_dir/agent_memory/`
@@ -192,9 +286,7 @@ pub async fn process_agent_memory(
 
     if files.is_empty() {
         info!("Agent memory directory is empty");
-        return Ok(ExecutionResult::success(
-            "Agent memory directory is empty",
-        ));
+        return Ok(ExecutionResult::success("Agent memory directory is empty"));
     }
 
     info!("Found {} file(s) in agent_memory", files.len());
@@ -217,98 +309,26 @@ pub async fn process_agent_memory(
 
     for relative_path in &files {
         let source_file = memory_source.join(relative_path);
-
-        // Defense-in-depth: verify the fully-resolved source path is still within
-        // the memory base directory, guarding against TOCTOU symlink races.
-        match tokio::fs::canonicalize(&source_file).await {
-            Ok(canonical_source) => {
-                if !canonical_source.starts_with(&canonical_base) {
-                    warn!(
-                        "Skipping path that escapes memory directory (possible symlink attack): {}",
-                        relative_path.display()
-                    );
-                    skipped_count += 1;
-                    skipped_reasons.push(format!(
-                        "{}: resolved path escapes memory directory",
-                        relative_path.display()
-                    ));
-                    continue;
-                }
-            }
-            Err(e) => {
-                warn!(
-                    "Skipping unresolvable path '{}': {}",
-                    relative_path.display(),
-                    e
-                );
-                skipped_count += 1;
-                skipped_reasons.push(format!(
-                    "{}: cannot resolve path ({})",
-                    relative_path.display(),
-                    e
-                ));
-                continue;
-            }
-        }
-
-        // Validate path safety
-        if let Err(e) = validate_memory_path(relative_path) {
-            warn!("Skipping unsafe path '{}': {}", relative_path.display(), e);
-            skipped_count += 1;
-            skipped_reasons.push(format!("{}: {}", relative_path.display(), e));
-            continue;
-        }
-
-        // Validate file extension
-        if !config.is_extension_allowed(relative_path) {
-            warn!(
-                "Skipping disallowed extension: {}",
-                relative_path.display()
-            );
-            skipped_count += 1;
-            skipped_reasons.push(format!(
-                "{}: extension not in allowed list",
-                relative_path.display()
-            ));
-            continue;
-        }
-
-        // Check file size contribution
-        let metadata = tokio::fs::metadata(&source_file).await?;
-        if total_size + metadata.len() > MAX_MEMORY_SIZE_BYTES {
-            warn!(
-                "Memory size limit ({} bytes) would be exceeded, skipping: {}",
-                MAX_MEMORY_SIZE_BYTES,
-                relative_path.display()
-            );
-            skipped_count += 1;
-            skipped_reasons.push(format!(
-                "{}: would exceed {} byte size limit",
-                relative_path.display(),
-                MAX_MEMORY_SIZE_BYTES
-            ));
-            continue;
-        }
-
-        // Validate content for ##vso[ injection
-        if !validate_memory_file_content(&source_file).await? {
-            skipped_count += 1;
-            skipped_reasons.push(format!(
-                "{}: contains ##vso[ command",
-                relative_path.display()
-            ));
-            continue;
-        }
-
-        // Copy the file
         let dest_file = memory_output.join(relative_path);
-        if let Some(parent) = dest_file.parent() {
-            tokio::fs::create_dir_all(parent).await?;
+        match process_memory_file(
+            relative_path,
+            &source_file,
+            &canonical_base,
+            &dest_file,
+            config,
+            total_size,
+        )
+        .await?
+        {
+            FileOutcome::Copied(size) => {
+                total_size += size;
+                copied_count += 1;
+            }
+            FileOutcome::Skipped(reason) => {
+                skipped_count += 1;
+                skipped_reasons.push(reason);
+            }
         }
-        tokio::fs::copy(&source_file, &dest_file).await?;
-        total_size += metadata.len();
-        copied_count += 1;
-        debug!("Copied memory file: {}", relative_path.display());
     }
 
     let message = format!(
@@ -316,10 +336,8 @@ pub async fn process_agent_memory(
         copied_count, total_size, skipped_count
     );
 
-    if !skipped_reasons.is_empty() {
-        for reason in &skipped_reasons {
-            info!("Skipped: {}", reason);
-        }
+    for reason in &skipped_reasons {
+        info!("Skipped: {}", reason);
     }
 
     info!("{}", message);
