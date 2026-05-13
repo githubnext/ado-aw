@@ -854,6 +854,7 @@ attachment-type: "agent-artifact"
             uploaded_pipeline_artifact_keys: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashSet::new(),
             )),
+            agent_last_committer: None,
         }
     }
 
