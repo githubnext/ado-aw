@@ -571,7 +571,10 @@ pub(crate) async fn file_or_append_work_item(
         }
     };
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_default();
 
     // Search for an existing non-closed work item with the same title
     let existing_id =
