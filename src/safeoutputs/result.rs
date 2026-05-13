@@ -117,12 +117,16 @@ pub struct ExecutionContext {
     #[allow(dead_code)]
     pub pull_request_target_branch: Option<String>,
 
-    /// Email of the last git committer of the agent source file.
+    /// Email of the last git author of the agent source file.
     ///
     /// Populated at Stage 3 startup by running `git log -1 --format='%ae'`
-    /// against the agent markdown. Used as a fallback assignee for
-    /// `create-work-item` when no explicit `assignee` is configured.
-    pub agent_last_committer: Option<String>,
+    /// against the agent markdown.  Uses the *author* email (not the
+    /// committer email `%ce`) because squash-merge workflows set the
+    /// committer to a service account (e.g. GitHub's noreply address)
+    /// while the author remains the PR author.  Used as a fallback
+    /// assignee for `create-work-item` when no explicit `assignee` is
+    /// configured.
+    pub agent_last_author: Option<String>,
 
     /// Per-run dedupe set for `upload-pipeline-artifact` when the
     /// `require-unique-names` config is set. Stores `format!("{}/{}",
@@ -228,7 +232,7 @@ impl ExecutionContext {
             pull_request_target_branch: env("SYSTEM_PULLREQUEST_TARGETBRANCH"),
 
             // Populated later by run_execute via git log on the source file
-            agent_last_committer: None,
+            agent_last_author: None,
 
             // Per-run state for upload-pipeline-artifact dedupe.
             uploaded_pipeline_artifact_keys: Arc::new(Mutex::new(HashSet::new())),

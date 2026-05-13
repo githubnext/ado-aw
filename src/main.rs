@@ -273,11 +273,11 @@ async fn run_execute(
     )
     .await;
 
-    // Discover the last committer of the agent source file for use as a
+    // Discover the last author of the agent source file for use as a
     // fallback assignee in create-work-item.
-    ctx.agent_last_committer = discover_last_committer(&source).await;
-    if let Some(ref email) = ctx.agent_last_committer {
-        log::info!("Agent source last committer: {}", email);
+    ctx.agent_last_author = discover_last_author(&source).await;
+    if let Some(ref email) = ctx.agent_last_author {
+        log::info!("Agent source last author: {}", email);
     }
 
     let results = execute::execute_safe_outputs(&safe_output_dir, &ctx).await?;
@@ -356,7 +356,7 @@ async fn build_execution_context(
     ctx
 }
 
-/// Look up the email of the person who last committed changes to `path`.
+/// Look up the email of the person who last authored changes to `path`.
 ///
 /// Runs `git log -1 --format='%ae' -- <path>` in the file's parent directory.
 /// Returns `None` (with a debug log) when the lookup fails — e.g. shallow
@@ -366,7 +366,7 @@ async fn build_execution_context(
 /// relative to `cwd`. This means renames in history are not followed
 /// (`--follow` has its own edge-cases with merge commits and is not worth
 /// the complexity here).
-async fn discover_last_committer(path: &Path) -> Option<String> {
+async fn discover_last_author(path: &Path) -> Option<String> {
     let dir = path.parent().unwrap_or(Path::new("."));
     let output = tokio::process::Command::new("git")
         .args(["log", "-1", "--format=%ae", "--"])
