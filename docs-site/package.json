@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "astro dev",
+    "dev": "node -e \"fs=require('fs');['.astro','dist','node_modules/.vite'].forEach(d=>fs.rmSync(d,{recursive:true,force:true}))\" && astro dev",
     "build": "astro build",
     "preview": "astro preview",
     "astro": "astro"
