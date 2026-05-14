@@ -153,15 +153,19 @@ repos:
 
 ### Step 6 — Pool
 
-Defaults to `AZS-1ES-L-MMS-ubuntu-22.04`. Only include if overriding.
+Default depends on target: standalone uses `vmImage: ubuntu-latest` (Microsoft-hosted); 1ES uses `name: AZS-1ES-L-MMS-ubuntu-22.04`. Only include if overriding the default.
 
-String form:
+String form (self-hosted pool by name):
 ```yaml
 pool: MyCustomPool
 ```
 
-Object form (needed for 1ES target with explicit OS):
+Object form (Microsoft-hosted or explicit OS):
 ```yaml
+pool:
+  vmImage: ubuntu-latest   # Microsoft-hosted (standalone default)
+
+# 1ES pool with explicit OS:
 pool:
   name: AZS-1ES-L-MMS-ubuntu-22.04
   os: linux   # "linux" or "windows"

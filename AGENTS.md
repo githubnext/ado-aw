@@ -66,6 +66,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   ├── codemods/     # Front-matter codemods (one file per transformation)
 │   │   │   ├── mod.rs    # Codemod struct, CODEMODS registry, runner
 │   │   │   ├── 0001_repos_unified.rs # Legacy repositories/checkout → repos codemod
+│   │   │   ├── 0002_pool_object_form.rs # Legacy scalar pool → object form codemod
 │   │   │   └── helpers.rs # take_key, insert_no_overwrite, rename_key, ConflictPolicy
 │   │   ├── codemod_integration_test.rs # White-box rewrite-path tests (stub registry injection)
 │   │   └── types.rs      # Front matter grammar and types
