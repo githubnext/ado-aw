@@ -1,10 +1,12 @@
 ---
 title: ado-aw
-description: Compile natural-language markdown into Azure DevOps agentic pipelines
+description: Inject continuous AI into your Azure DevOps projects
 template: splash
 hero:
-  title: ado-aw
-  tagline: Compile natural-language markdown into Azure DevOps agentic pipelines
+  title: |
+    Continuous AI for
+    Azure DevOps
+  tagline: Wake up to security patch PRs, documentation updates, and pipeline failure analysis -- all proposed, reviewed, and applied automatically while you sleep.
   actions:
     - text: Get Started
       link: /ado-aw/setup/quick-start/
@@ -14,22 +16,156 @@ hero:
       variant: minimal
 ---
 
-`ado-aw` is a compiler for teams that want to define Azure DevOps agentic pipelines in a more human-friendly format. You write a markdown file with YAML front matter that describes the agent, tools, permissions, and schedule, and `ado-aw` compiles it into pipeline YAML that Azure DevOps can run.
+import { Card, CardGrid, Tabs, TabItem } from '@astrojs/starlight/components';
 
-## Built for safer agentic automation
+## What if your pipelines could think?
 
-Every compiled pipeline follows a three-stage model:
+Write a markdown file. Describe what you want an AI agent to do -- in plain English. `ado-aw` compiles it into a production-grade Azure DevOps pipeline with **five layers of security** baked in.
 
-1. **Agent** -- runs in a network-isolated sandbox with a read-only token and produces safe-output proposals.
-2. **Detection** -- inspects those proposals for prompt injection, secret leaks, and other threats.
-3. **Execution** -- applies approved outputs with a separate write-capable token that the agent never sees.
+Your agents run on a schedule or in response to events, proposing changes through **safe outputs** that are threat-scanned before anything touches your repositories.
 
-## Key features
+```markdown
+---
+on:
+  schedule: daily around 09:00
+repos:
+  - my-org/my-service
+safe-outputs:
+  create-pr:
+    title-prefix: "[auto] "
+    max: 1
+---
 
-- **Safe outputs** for controlled write actions such as pull requests, comments, and work items
-- **Network isolation** for Stage 1 agents running inside the AWF sandbox model
-- **Tool allow-listing** so agents only get the tools and hosts you explicitly permit
-- **MCP support** for SafeOutputs, Azure DevOps integrations, and additional MCP-based extensions
-- **Natural-language authoring** that keeps pipeline intent readable in markdown source files
+## Dependency Guardian
 
-Start with the quick start guide to create your first agent file, compile it, and add the generated pipeline to Azure DevOps.
+Scan all package manifests for outdated or vulnerable dependencies.
+For each finding, create a single pull request that bumps the version
+and updates the lockfile. Include a summary of CVEs addressed.
+```
+
+---
+
+## Wake up to results
+
+<CardGrid>
+  <Card title="Security patch PRs" icon="approve-check">
+    Agents scan for CVEs overnight and open ready-to-merge pull requests by morning.
+  </Card>
+  <Card title="Pipeline failure analysis" icon="warning">
+    When a build breaks, an agent reads the logs, identifies the root cause, and proposes a fix PR.
+  </Card>
+  <Card title="Documentation consistency" icon="document">
+    Keep READMEs, changelogs, and API docs in sync with the code -- automatically.
+  </Card>
+  <Card title="Work item triage" icon="list-format">
+    Stale issues get flagged, duplicates get linked, and priorities get suggested -- every day.
+  </Card>
+</CardGrid>
+
+---
+
+## Five security layers, zero trust
+
+Every compiled pipeline enforces a defense-in-depth model. The agent **never** receives write credentials or secrets.
+
+```mermaid
+flowchart LR
+    E["Trigger"] --> Agent
+    subgraph Sandbox["Isolated Container -- Read-only Token -- Firewall"]
+        Agent["AI Agent"]
+    end
+    Agent --> Output["Proposed\nSafe Outputs"]
+    Output --> Detect["Threat\nDetection"]
+    Detect -->|"safe"| Write["Executor\n(write token)"]
+    Detect -->|"blocked"| Fail["Rejected"]
+    Write --> ADO["Azure DevOps\nAPIs"]
+
+    style Sandbox fill:#1a1a2e,stroke:#7c3aed,stroke-width:2px,color:#e5c7ff
+    style Agent fill:#6d28d9,color:#fff,stroke:#5b21b6
+    style Detect fill:#d97706,color:#fff,stroke:#b45309
+    style Write fill:#059669,color:#fff,stroke:#047857
+    style Fail fill:#dc2626,color:#fff,stroke:#b91c1c
+    style ADO fill:#2563eb,color:#fff,stroke:#1d4ed8
+```
+
+| Layer | What it does |
+|-------|-------------|
+| **Read-only token** | The agent can observe your repos but cannot push, merge, or delete anything |
+| **Zero secrets** | Write tokens, API keys, and credentials exist only in the isolated executor stage |
+| **Network firewall** | All outbound traffic routes through an allowlist-only proxy; everything else is dropped |
+| **Safe outputs** | The agent proposes structured actions (PRs, comments, work items); hard limits and prefixes constrain what can be requested |
+| **Threat detection** | A dedicated AI scan checks proposals for prompt injection, secret leaks, and malicious patterns before anything is applied |
+
+---
+
+## Define agents in markdown
+
+No pipeline YAML to hand-write. No complex scripting. Just describe the agent's purpose in a markdown file with a YAML front-matter header for configuration.
+
+<Tabs>
+  <TabItem label="Agent file">
+```markdown
+---
+on:
+  schedule: weekly on monday around 10:00
+engine:
+  model: gpt-4.1
+tools:
+  bash: [grep, find, wc, jq]
+safe-outputs:
+  create-pr:
+    title-prefix: "[docs] "
+    max: 1
+  comment-on-work-item:
+---
+
+## Documentation Sync
+
+Review all public API surfaces and ensure the corresponding
+docs are up to date. Open a PR with any corrections and
+comment on related work items with a summary.
+```
+  </TabItem>
+  <TabItem label="Compiled pipeline">
+```yaml
+# Auto-generated by ado-aw -- do not edit
+trigger: none
+schedules:
+  - cron: "23 10 * * 1"
+    branches:
+      include: [main]
+stages:
+  - stage: Agent
+    # Network-isolated sandbox, read-only token...
+  - stage: Detection
+    # AI threat scan of proposed outputs...
+  - stage: Execution
+    # Apply approved PRs and comments...
+```
+  </TabItem>
+</Tabs>
+
+---
+
+## Get started in minutes
+
+<CardGrid>
+  <Card title="With Copilot agents" icon="rocket">
+    Download `ado-aw`, run `ado-aw init`, then co-create your first agent interactively with `/agent ado-aw`.
+
+    [Quick start with agents](/ado-aw/setup/quick-start/#with-agents-recommended)
+  </Card>
+  <Card title="Write it by hand" icon="pencil">
+    Author an agent markdown file, compile it, push, and configure your Azure DevOps project.
+
+    [Manual quick start](/ado-aw/setup/quick-start/#manual)
+  </Card>
+</CardGrid>
+
+---
+
+<div style="text-align: center; opacity: 0.7; font-size: 0.9rem; margin-top: 2rem;">
+
+Built by [GitHub Next](https://githubnext.com) and Microsoft Research. Inspired by [GitHub Agentic Workflows](https://github.github.com/gh-aw/).
+
+</div>
