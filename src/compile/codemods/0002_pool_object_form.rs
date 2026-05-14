@@ -45,11 +45,18 @@ fn apply_codemod(fm: &mut Mapping, ctx: &CodemodContext) -> Result<bool> {
     let key = Value::String("pool".to_string());
 
     let Some(pool_value) = fm.get(&key).cloned() else {
-        // Pool absent — only inject the legacy default when the
-        // compiler version is at or above the release that changed
-        // the implicit default. Older binaries still carry the old
-        // default in `resolve_pool_block`, so no rewrite is needed.
+        // Pool absent — only inject the legacy default for 1ES
+        // targets where the old implicit default was the self-hosted
+        // pool. Non-1ES (standalone/job/stage) targets now default to
+        // `vmImage: ubuntu-latest`, which is the desired behaviour
+        // for new pipelines that omit `pool:`.
         if !version_gte(ctx.compiler_version, INTRODUCED_IN) {
+            return Ok(false);
+        }
+        let target = fm
+            .get(&Value::String("target".to_string()))
+            .and_then(|v| v.as_str());
+        if target != Some("1es") {
             return Ok(false);
         }
         let mut mapped = Mapping::new();
@@ -108,8 +115,9 @@ mod tests {
     }
 
     #[test]
-    fn inserts_legacy_default_when_pool_absent_and_version_gte() {
-        let mut fm: Mapping = serde_yaml::from_str("name: x\ndescription: y").unwrap();
+    fn inserts_legacy_default_when_pool_absent_1es_and_version_gte() {
+        let mut fm: Mapping =
+            serde_yaml::from_str("name: x\ndescription: y\ntarget: 1es").unwrap();
         let changed = apply_codemod(&mut fm, &ctx("0.30.0")).expect("apply");
         assert!(changed);
         assert_eq!(
@@ -119,8 +127,28 @@ mod tests {
     }
 
     #[test]
-    fn noops_when_pool_absent_and_version_below() {
+    fn noops_when_pool_absent_standalone_and_version_gte() {
+        // Standalone pipelines without pool should get the new
+        // vmImage: ubuntu-latest default, not the legacy 1ES pool.
         let mut fm: Mapping = serde_yaml::from_str("name: x\ndescription: y").unwrap();
+        let changed = apply_codemod(&mut fm, &ctx("0.30.0")).expect("apply");
+        assert!(!changed);
+        assert!(!fm.contains_key(Value::String("pool".into())));
+    }
+
+    #[test]
+    fn noops_when_pool_absent_explicit_standalone_and_version_gte() {
+        let mut fm: Mapping =
+            serde_yaml::from_str("name: x\ndescription: y\ntarget: standalone").unwrap();
+        let changed = apply_codemod(&mut fm, &ctx("0.30.0")).expect("apply");
+        assert!(!changed);
+        assert!(!fm.contains_key(Value::String("pool".into())));
+    }
+
+    #[test]
+    fn noops_when_pool_absent_1es_and_version_below() {
+        let mut fm: Mapping =
+            serde_yaml::from_str("name: x\ndescription: y\ntarget: 1es").unwrap();
         let changed = apply_codemod(&mut fm, &ctx("0.29.0")).expect("apply");
         assert!(!changed);
         assert!(!fm.contains_key(Value::String("pool".into())));
@@ -128,7 +156,8 @@ mod tests {
 
     #[test]
     fn idempotent_after_inserting_legacy_default() {
-        let mut fm: Mapping = serde_yaml::from_str("name: x\ndescription: y").unwrap();
+        let mut fm: Mapping =
+            serde_yaml::from_str("name: x\ndescription: y\ntarget: 1es").unwrap();
         let changed1 = apply_codemod(&mut fm, &ctx("0.30.0")).expect("first apply");
         assert!(changed1);
         let changed2 = apply_codemod(&mut fm, &ctx("0.30.0")).expect("second apply");
