@@ -41,12 +41,26 @@ mod m0002_pool_object_form;
 #[allow(unused_imports)] // Re-exported for future codemods; only `take_key` is in-tree use.
 pub use helpers::{insert_no_overwrite, rename_key, take_key, ConflictPolicy};
 
-/// Forward-compatible context passed to every codemod. Currently
-/// empty; we keep it in the signature so future codemods can be
-/// given (e.g.) the source path without breaking the function
-/// pointer type.
+/// Forward-compatible context passed to every codemod.
+///
+/// Carries ambient information (e.g. compiler version) so codemods
+/// can condition their behaviour without hard-coding assumptions.
 #[non_exhaustive]
-pub struct CodemodContext {}
+pub struct CodemodContext {
+    /// Semantic version of the running `ado-aw` binary
+    /// (e.g. `"0.30.0"`). Codemods can compare this against their
+    /// `introduced_in` to decide when a default has changed.
+    pub compiler_version: &'static str,
+}
+
+impl CodemodContext {
+    /// Build a context using the compile-time package version.
+    pub fn current() -> Self {
+        Self {
+            compiler_version: env!("CARGO_PKG_VERSION"),
+        }
+    }
+}
 
 /// A single front-matter codemod.
 ///
@@ -141,10 +155,11 @@ pub(crate) fn apply_codemods_with(
     fm: &mut Mapping,
     registry: &[&'static Codemod],
 ) -> Result<CodemodReport> {
+    let ctx = CodemodContext::current();
     let mut applied: Vec<AppliedCodemod> = Vec::new();
     for c in registry {
-        let changed = (c.apply)(fm, &CodemodContext {})
-            .with_context(|| format!("codemod {} failed", c.id))?;
+        let changed =
+            (c.apply)(fm, &ctx).with_context(|| format!("codemod {} failed", c.id))?;
         if changed {
             applied.push(AppliedCodemod {
                 id: c.id,
