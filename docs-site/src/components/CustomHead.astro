@@ -1,7 +1,10 @@
 ---
 // Custom head component for ado-aw docs
-// Adds Mona Sans preload and Schema.org structured data
+// Extends Starlight's default Head with Mona Sans preload and Schema.org structured data
+import Default from '@astrojs/starlight/components/Head.astro';
 ---
+
+<Default {...Astro.props}><slot /></Default>
 
 <link
   rel="preload"
