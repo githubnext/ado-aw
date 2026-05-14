@@ -48,6 +48,73 @@
 .hero {
   text-align: center;
   padding: 3rem 1rem;
+  position: relative;
+  overflow: hidden;
+}
+
+/* Hero background glow — dark mode: animated aurora */
+.hero::before {
+  content: '';
+  position: absolute;
+  inset: -50%;
+  z-index: -1;
+  background:
+    radial-gradient(ellipse 40% 50% at 30% 20%, rgba(139, 92, 246, 0.25) 0%, transparent 60%),
+    radial-gradient(ellipse 50% 40% at 70% 10%, rgba(236, 72, 153, 0.18) 0%, transparent 55%),
+    radial-gradient(ellipse 45% 55% at 55% 50%, rgba(59, 130, 246, 0.15) 0%, transparent 60%),
+    radial-gradient(ellipse 35% 45% at 20% 60%, rgba(168, 85, 247, 0.20) 0%, transparent 55%);
+  animation: hero-drift 12s ease-in-out infinite alternate;
+  pointer-events: none;
+  filter: blur(40px);
+  -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, black 20%, transparent 70%);
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, black 20%, transparent 70%);
+}
+
+.hero::after {
+  content: '';
+  position: absolute;
+  inset: -50%;
+  z-index: -1;
+  background:
+    radial-gradient(ellipse 50% 35% at 60% 40%, rgba(192, 132, 252, 0.15) 0%, transparent 55%),
+    radial-gradient(ellipse 40% 50% at 35% 70%, rgba(99, 102, 241, 0.12) 0%, transparent 50%),
+    radial-gradient(ellipse 45% 40% at 75% 65%, rgba(244, 114, 182, 0.10) 0%, transparent 50%);
+  animation: hero-drift-reverse 15s ease-in-out infinite alternate;
+  pointer-events: none;
+  filter: blur(50px);
+  -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, black 20%, transparent 70%);
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, black 20%, transparent 70%);
+}
+
+@keyframes hero-drift {
+  0%   { transform: translate(0, 0) rotate(0deg) scale(1); }
+  33%  { transform: translate(5%, -3%) rotate(2deg) scale(1.05); }
+  66%  { transform: translate(-3%, 4%) rotate(-1deg) scale(0.97); }
+  100% { transform: translate(4%, 2%) rotate(3deg) scale(1.03); }
+}
+
+@keyframes hero-drift-reverse {
+  0%   { transform: translate(0, 0) rotate(0deg) scale(1); }
+  50%  { transform: translate(-5%, 3%) rotate(-3deg) scale(1.06); }
+  100% { transform: translate(3%, -4%) rotate(2deg) scale(0.95); }
+}
+
+/* Hero background glow — light mode: softer aurora */
+[data-theme='light'] .hero::before {
+  background:
+    radial-gradient(ellipse 40% 50% at 30% 20%, rgba(107, 70, 193, 0.14) 0%, transparent 60%),
+    radial-gradient(ellipse 50% 40% at 70% 10%, rgba(219, 39, 119, 0.09) 0%, transparent 55%),
+    radial-gradient(ellipse 45% 55% at 55% 50%, rgba(37, 99, 235, 0.08) 0%, transparent 60%),
+    radial-gradient(ellipse 35% 45% at 20% 60%, rgba(124, 58, 237, 0.10) 0%, transparent 55%);
+  filter: blur(50px);
+}
+
+[data-theme='light'] .hero::after {
+  background:
+    radial-gradient(ellipse 50% 35% at 60% 40%, rgba(147, 51, 234, 0.08) 0%, transparent 55%),
+    radial-gradient(ellipse 40% 50% at 35% 70%, rgba(79, 70, 229, 0.06) 0%, transparent 50%),
+    radial-gradient(ellipse 45% 40% at 75% 65%, rgba(236, 72, 153, 0.05) 0%, transparent 50%);
+  filter: blur(60px);
 }
 
 .hero h1 {
@@ -139,6 +206,13 @@
 pre {
   border: 1px solid var(--sl-color-hairline);
   border-radius: 0.5rem;
+}
+
+/* Mermaid diagrams — prevent mobile overflow */
+.mermaid,
+pre:has(.mermaid) {
+  overflow-x: auto;
+  max-width: 100%;
 }
 
 /* Table styling */

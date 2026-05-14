@@ -1,0 +1,103 @@
+---
+// Side-by-side markdown → compiled YAML preview with arrow
+---
+
+<div class="compile-preview">
+  <div class="compile-panel compile-source">
+    <div class="compile-label">agent.md</div>
+    <slot name="source" />
+  </div>
+
+  <div class="compile-arrow" aria-hidden="true">
+    <svg width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <circle cx="24" cy="24" r="23" stroke="currentColor" stroke-width="1.5" opacity="0.3" />
+      <path d="M18 24h12M26 18l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+    </svg>
+    <span class="compile-arrow-label">ado-aw compile</span>
+  </div>
+
+  <div class="compile-panel compile-output">
+    <div class="compile-label">pipeline.yml</div>
+    <slot name="output" />
+  </div>
+</div>
+
+<style>
+  .compile-preview {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    margin: 2rem 0;
+    max-width: 100%;
+  }
+
+  .compile-panel {
+    flex: 1;
+    min-width: 0;
+    position: relative;
+    overflow: hidden;
+    border-radius: 0.75rem;
+  }
+
+  /* Strip Starlight code block margins inside the panels */
+  .compile-panel :global(pre) {
+    margin: 0;
+    border-radius: 0.75rem;
+    height: 100%;
+    font-size: 0.82rem;
+  }
+
+  .compile-label {
+    position: absolute;
+    top: 0.65rem;
+    right: 1rem;
+    z-index: 1;
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--sl-color-accent);
+    opacity: 0.7;
+    font-family: var(--sl-font-mono, monospace);
+  }
+
+  .compile-arrow {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 0 1.25rem;
+    color: var(--sl-color-accent);
+    flex-shrink: 0;
+  }
+
+  .compile-arrow-label {
+    font-size: 0.65rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    opacity: 0.6;
+    white-space: nowrap;
+    font-family: var(--sl-font-mono, monospace);
+  }
+
+  /* Stack vertically on narrow viewports */
+  @media (max-width: 768px) {
+    .compile-preview {
+      flex-direction: column;
+      gap: 0;
+    }
+
+    .compile-arrow {
+      flex-direction: row;
+      padding: 0.75rem 0;
+    }
+
+    .compile-arrow svg {
+      transform: rotate(90deg);
+      width: 32px;
+      height: 32px;
+    }
+  }
+</style>
