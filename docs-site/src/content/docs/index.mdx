@@ -76,12 +76,12 @@ flowchart LR
     Detect -->|"blocked"| Fail["Rejected"]
     Write --> ADO["Azure DevOps\nAPIs"]
 
-    style Sandbox fill:#1a1a2e,stroke:#7c3aed,stroke-width:2px,color:#e5c7ff
-    style Agent fill:#6d28d9,color:#fff,stroke:#5b21b6
-    style Detect fill:#d97706,color:#fff,stroke:#b45309
-    style Write fill:#059669,color:#fff,stroke:#047857
-    style Fail fill:#dc2626,color:#fff,stroke:#b91c1c
-    style ADO fill:#2563eb,color:#fff,stroke:#1d4ed8
+    style Sandbox stroke:#7c3aed,stroke-width:2px
+    style Agent fill:#4361ee,color:#fff,stroke:#3a56d4
+    style Detect fill:#e6a817,color:#1a1a1a,stroke:#c49000
+    style Write fill:#2d9d78,color:#fff,stroke:#238066
+    style Fail fill:#e63946,color:#fff,stroke:#c5303c
+    style ADO fill:#4361ee,color:#fff,stroke:#3a56d4
 ```
 
 | Layer | What it does |
@@ -160,8 +160,23 @@ stages:
 
 ---
 
-<div style="text-align: center; opacity: 0.7; font-size: 0.9rem; margin-top: 2rem;">
+## Same salad, different dressing
 
-Built by [GitHub Next](https://githubnext.com) and Microsoft Research. Inspired by [GitHub Agentic Workflows](https://github.github.com/gh-aw/).
+Familiar with [GitHub Agentic Workflows](https://github.github.com/gh-aw/)? Azure DevOps Agentic Workflows leverages the exact same technologies -- network-isolated sandboxes, safe outputs, threat detection, and MCP tooling -- with a specialized compiler that targets Azure DevOps Pipelines instead of GitHub Actions.
+
+| | GitHub Agentic Workflows | Azure DevOps Agentic Workflows |
+|---|---|---|
+| **Platform** | GitHub Actions | Azure DevOps Pipelines |
+| **Agent format** | Markdown + YAML front matter | Markdown + YAML front matter |
+| **Security model** | Read-only token, AWF sandbox, safe outputs, threat detection | Read-only token, AWF sandbox, safe outputs, threat detection |
+| **Compiler** | `gh aw compile` | `ado-aw compile` |
+| **Safe outputs** | PRs, issues, labels, comments | PRs, work items, wiki pages, build tags |
+| **MCP support** | GitHub MCP, custom servers | Azure DevOps MCP, GitHub MCP, custom servers |
+
+If your team already writes `gh-aw` workflows, you already know how to write `ado-aw` agents. The markdown format, security architecture, and mental model are identical.
+
+<div style="text-align: center; opacity: 0.7; font-size: 0.9rem; margin-top: 3rem;">
+
+Inspired by [GitHub Agentic Workflows](https://github.github.com/gh-aw/).
 
 </div>

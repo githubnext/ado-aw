@@ -59,6 +59,82 @@
   background-clip: text;
 }
 
+/* Card styling -- good contrast in both modes */
+.card {
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 0.75rem;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.card:hover {
+  border-color: var(--sl-color-accent);
+  box-shadow: 0 0 0 1px var(--sl-color-accent);
+}
+
+/* Dark mode cards */
+:root .card {
+  background: #161b22;
+  border-color: #30363d;
+}
+
+:root .card .title {
+  color: #f0f6fc;
+}
+
+:root .card .icon {
+  color: #d896ff;
+}
+
+/* Light mode cards */
+[data-theme='light'] .card {
+  background: #ffffff;
+  border-color: #d1d9e0;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+[data-theme='light'] .card:hover {
+  background: #faf8ff;
+  border-color: #6b46c1;
+  box-shadow: 0 2px 8px rgba(107, 70, 193, 0.12);
+}
+
+[data-theme='light'] .card .title {
+  color: #1f2328;
+}
+
+[data-theme='light'] .card .icon {
+  color: #1f2328;
+}
+
+[data-theme='light'] .card .body {
+  color: #424a53;
+}
+
+/* Hero gradient for light mode */
+[data-theme='light'] .hero h1 {
+  background: linear-gradient(135deg, #6b46c1, #7c3aed);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Search box — consistent display on splash pages */
+[data-has-hero] .search-input,
+[data-has-hero] site-search button {
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 0.5rem;
+}
+
+[data-theme='light'] site-search button {
+  background: #ffffff;
+  border-color: #d1d9e0;
+  color: #424a53;
+}
+
+[data-theme='light'] site-search button:hover {
+  border-color: #6b46c1;
+}
+
 /* Code blocks */
 pre {
   border: 1px solid var(--sl-color-hairline);
