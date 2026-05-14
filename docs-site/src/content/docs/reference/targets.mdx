@@ -10,7 +10,7 @@ The `target` field in the front matter determines the output format and executio
 ### `standalone` (default)
 
 Generates a self-contained Azure DevOps pipeline with:
-- Full 3-job pipeline: `Agent` → `Detection` → `Execution`
+- Full 3-job pipeline: `Agent` -> `Detection` -> `Execution`
 - AWF (Agentic Workflow Firewall) L7 domain whitelisting via Squid proxy + Docker
 - MCP Gateway (MCPG) for MCP routing with SafeOutputs HTTP backend
 - Setup/teardown job support
@@ -23,7 +23,7 @@ This is the recommended target for maximum flexibility and security controls.
 Generates a pipeline that extends the 1ES Unofficial Pipeline Template:
 - Uses `templateContext.type: buildJob` with Copilot CLI + AWF + MCPG (same execution model as standalone)
 - Integrates with 1ES SDL scanning and compliance tools
-- Full 3-job pipeline: Agent → Detection → Execution
+- Full 3-job pipeline: Agent -> Detection -> Execution
 - Requires 1ES Pipeline Templates repository access
 
 Example:
@@ -36,10 +36,10 @@ When using `target: 1es`, the pipeline will extend `1es/1ES.Unofficial.PipelineT
 ### `job`
 
 Generates a **job-level ADO YAML template** with `jobs:` at root. This is a
-reusable template that can be included in an existing pipeline — it does not
+reusable template that can be included in an existing pipeline -- it does not
 generate a complete pipeline.
 
-The output contains the same 3-job chain (Agent → Detection → Execution) as
+The output contains the same 3-job chain (Agent -> Detection -> Execution) as
 `standalone`, with:
 - Job names prefixed with the agent name for uniqueness (e.g., `DailyReview_Agent`)
 - No triggers, pipeline name, or resource declarations (the parent pipeline owns those)
@@ -99,7 +99,7 @@ stages:
     condition: succeeded()
 ```
 
-ADO natively supports `dependsOn` and `condition` at the template call site —
+ADO natively supports `dependsOn` and `condition` at the template call site --
 no template parameters are needed for stage ordering.
 
 #### Notes

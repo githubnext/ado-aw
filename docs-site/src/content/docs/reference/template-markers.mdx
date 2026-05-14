@@ -50,7 +50,7 @@ This marker should be replaced with a cron-style schedule block generated from t
 By default, when no branches are explicitly configured, the schedule defaults to `main` branch only. When the object form is used with a `branches` list, a `branches.include` block is generated with the specified branches.
 
 ```yaml
-# Default (string form) — defaults to main branch
+# Default (string form) -- defaults to main branch
 schedules:
   - cron: "43 14 * * *"    # Generated from "daily around 14:00"
     displayName: "Scheduled run"
@@ -70,13 +70,13 @@ schedules:
     always: true
 ```
 
-Examples of fuzzy schedule → cron conversion:
-- `daily` → scattered across 24 hours (e.g., `"43 5 * * *"`)
-- `daily around 14:00` → within 13:00-15:00 (e.g., `"13 14 * * *"`)
-- `hourly` → every hour at scattered minute (e.g., `"43 * * * *"`)
-- `weekly on monday` → Monday at scattered time (e.g., `"43 5 * * 1"`)
-- `every 2h` → every 2 hours at scattered minute (e.g., `"53 */2 * * *"`)
-- `bi-weekly` → every 14 days (e.g., `"43 5 */14 * *"`)
+Examples of fuzzy schedule -> cron conversion:
+- `daily` -> scattered across 24 hours (e.g., `"43 5 * * *"`)
+- `daily around 14:00` -> within 13:00-15:00 (e.g., `"13 14 * * *"`)
+- `hourly` -> every hour at scattered minute (e.g., `"43 * * * *"`)
+- `weekly on monday` -> Monday at scattered time (e.g., `"43 5 * * 1"`)
+- `every 2h` -> every 2 hours at scattered minute (e.g., `"53 */2 * * *"`)
+- `bi-weekly` -> every 14 days (e.g., `"43 5 */14 * *"`)
 
 ## `{{ checkout_self }}`
 
@@ -128,7 +128,7 @@ Engine args include:
 - `--allow-all-tools` - When bash is omitted (default) or has a wildcard (`":*"` or `"*"`), allows all tools instead of individual `--allow-tool` flags
 - `--allow-tool <tool>` - When bash is NOT wildcard, explicitly allows configured tools (github, safeoutputs, write, and shell commands from the `bash:` field plus any runtime-required commands)
 - `--allow-all-paths` - When `edit` tool is enabled (default), allows the agent to write to any file path
-- Custom args from `engine.args` — appended after compiler-generated args (subject to shell-safety validation and blocked flag checks)
+- Custom args from `engine.args` -- appended after compiler-generated args (subject to shell-safety validation and blocked flag checks)
 
 MCP servers are handled entirely by the MCP Gateway (MCPG) and are not passed as copilot CLI params.
 
@@ -140,12 +140,12 @@ Same as `{{ engine_run }}` but for the Detection (threat analysis) job. Uses a d
 
 Generates engine-specific environment variable entries for the AWF sandbox step via `Engine::env()`. For the Copilot engine, this produces:
 
-- `GITHUB_TOKEN: $(GITHUB_TOKEN)` — GitHub authentication
-- `GITHUB_READ_ONLY: 1` — Restricts GitHub API to read-only access
-- `COPILOT_OTEL_ENABLED`, `COPILOT_OTEL_EXPORTER_TYPE`, `COPILOT_OTEL_FILE_EXPORTER_PATH` — OpenTelemetry file-based tracing for agent statistics
-- Custom env vars from `engine.env` — merged after compiler-controlled vars (YAML-quoted, validated for safety)
+- `GITHUB_TOKEN: $(GITHUB_TOKEN)` -- GitHub authentication
+- `GITHUB_READ_ONLY: 1` -- Restricts GitHub API to read-only access
+- `COPILOT_OTEL_ENABLED`, `COPILOT_OTEL_EXPORTER_TYPE`, `COPILOT_OTEL_FILE_EXPORTER_PATH` -- OpenTelemetry file-based tracing for agent statistics
+- Custom env vars from `engine.env` -- merged after compiler-controlled vars (YAML-quoted, validated for safety)
 
-ADO access tokens (`AZURE_DEVOPS_EXT_PAT`, `SYSTEM_ACCESSTOKEN`) are not part of this marker — they are injected separately by `{{ acquire_ado_token }}` and extension pipeline variable mappings when `permissions.read` is configured.
+ADO access tokens (`AZURE_DEVOPS_EXT_PAT`, `SYSTEM_ACCESSTOKEN`) are not part of this marker -- they are injected separately by `{{ acquire_ado_token }}` and extension pipeline variable mappings when `permissions.read` is configured.
 
 ## `{{ engine_log_dir }}`
 
@@ -221,11 +221,11 @@ Should be replaced with the appropriate working directory based on the effective
 **Warning:** If `workspace: repo` (or `self`) is explicitly set but no additional repositories are in `checkout:`, a warning is emitted because when only `self` is checked out, `$(Build.SourcesDirectory)` already contains the repository content directly.
 
 **Accepted values:**
-- `root` → `$(Build.SourcesDirectory)` — the checkout root directory
-- `repo` (or `self`) → `$(Build.SourcesDirectory)/$(Build.Repository.Name)` — the trigger repository's subfolder
-- `<alias>` → `$(Build.SourcesDirectory)/<alias>` — a specific checked-out repository's subfolder. The alias must appear in the `checkout:` list (which itself must be a subset of `repositories:`). This form is only valid when at least one additional repository is checked out; otherwise compilation fails.
+- `root` -> `$(Build.SourcesDirectory)` -- the checkout root directory
+- `repo` (or `self`) -> `$(Build.SourcesDirectory)/$(Build.Repository.Name)` -- the trigger repository's subfolder
+- `<alias>` -> `$(Build.SourcesDirectory)/<alias>` -- a specific checked-out repository's subfolder. The alias must appear in the `checkout:` list (which itself must be a subset of `repositories:`). This form is only valid when at least one additional repository is checked out; otherwise compilation fails.
 
-**Example — pointing the agent's workspace at a checked-out repository:**
+**Example -- pointing the agent's workspace at a checked-out repository:**
 ```yaml
 repositories:
   - repository: exp23-a7-nw
@@ -257,8 +257,8 @@ Used by the pipeline's integrity check step to verify the pipeline hasn't been m
 ## `{{ trigger_repo_directory }}`
 
 Should be replaced with the directory where the trigger ("self") repository is checked out. This is independent of the `workspace:` setting and depends only on whether any additional repositories are listed in `checkout:`:
-- No additional checkouts → `$(Build.SourcesDirectory)` (ADO checks `self` into the root)
-- One or more additional checkouts → `$(Build.SourcesDirectory)/$(Build.Repository.Name)` (ADO puts each checked-out repo, including `self`, into a subfolder named after the repository)
+- No additional checkouts -> `$(Build.SourcesDirectory)` (ADO checks `self` into the root)
+- One or more additional checkouts -> `$(Build.SourcesDirectory)/$(Build.Repository.Name)` (ADO puts each checked-out repo, including `self`, into a subfolder named after the repository)
 
 Use this marker (rather than `{{ working_directory }}` / `{{ workspace }}`) for any path that refers to a file shipped in the trigger repo (e.g. the agent markdown source) or as a `workingDirectory:` for steps that need access to the trigger repo's `.git` (e.g. the integrity check step).
 
@@ -350,7 +350,7 @@ The "Start MCP Gateway (MCPG)" pipeline step:
 1. Redirects MCPG's stdout to `gateway-output.json`
 2. Waits for the health check and for valid JSON output
 3. Transforms the output with a Python script that:
-   - Rewrites URLs from `127.0.0.1` → `host.docker.internal` (AWF container loopback vs host)
+   - Rewrites URLs from `127.0.0.1` -> `host.docker.internal` (AWF container loopback vs host)
    - Ensures `tools: ["*"]` on each server entry (Copilot CLI requirement)
    - Preserves all other fields (headers, type, etc.)
 4. Writes the result to `/tmp/awf-tools/mcp-config.json` and `$HOME/.copilot/mcp-config.json`
@@ -363,7 +363,7 @@ Should be replaced with the comma-separated domain list for AWF's `--allow-domai
 1. Core Azure DevOps/GitHub endpoints (from `allowed_hosts.rs`)
 2. MCP-specific endpoints for each enabled MCP
 3. Engine-required hosts (e.g., `engine.api-target` hostname for GHES/GHEC)
-4. Ecosystem identifier expansions from `network.allowed:` (e.g., `python` → PyPI/pip domains)
+4. Ecosystem identifier expansions from `network.allowed:` (e.g., `python` -> PyPI/pip domains)
 5. User-specified additional hosts from `network.allowed:` front matter
 
 The output is formatted as a comma-separated string (e.g., `github.com,*.dev.azure.com,api.github.com`).
@@ -378,7 +378,7 @@ AWF replaces `$HOME` with an empty directory overlay for security; only explicit
 
 ## `{{ awf_path_step }}`
 
-Replaced with a dedicated pipeline step that generates a `GITHUB_PATH` file for AWF chroot PATH discovery. The step is collected from `CompilerExtension::awf_path_prepends()` — each extension can declare directories that should be on PATH inside the AWF chroot (e.g., the Lean runtime declares `$HOME/.elan/bin`).
+Replaced with a dedicated pipeline step that generates a `GITHUB_PATH` file for AWF chroot PATH discovery. The step is collected from `CompilerExtension::awf_path_prepends()` -- each extension can declare directories that should be on PATH inside the AWF chroot (e.g., the Lean runtime declares `$HOME/.elan/bin`).
 
 AWF reads the `$GITHUB_PATH` environment variable (a path to a file) at startup, reads path entries from it (one per line), and merges them into `AWF_HOST_PATH` which becomes the chroot PATH. This bypasses the `sudo` `secure_path` reset that strips custom PATH entries.
 
@@ -396,7 +396,7 @@ Example generated step (with Lean enabled):
   displayName: "Generate GITHUB_PATH file"
 ```
 
-The heredoc uses an unquoted delimiter so shell variables like `$HOME` are expanded by bash at write time — AWF reads the file as literal resolved paths and does not perform shell expansion itself.
+The heredoc uses an unquoted delimiter so shell variables like `$HOME` are expanded by bash at write time -- AWF reads the file as literal resolved paths and does not perform shell expansion itself.
 
 The `GITHUB_PATH` pipeline variable is also explicitly passed through the AWF step's `env:` block (appended to `{{ engine_env }}`) as `GITHUB_PATH: $(GITHUB_PATH)` for robust environment passthrough.
 
@@ -449,7 +449,7 @@ If `permissions.write` is not configured, this marker is replaced with an empty 
 
 Generates the complete `env:` block (including the `env:` key) for the Stage 3 executor step when `permissions.write` is configured. Sets `SYSTEM_ACCESSTOKEN` to the write service connection token (`SC_WRITE_TOKEN`).
 
-If `permissions.write` is not configured, this marker is replaced with an empty string so that no `env:` block is emitted at all. Note: `System.AccessToken` is never used directly — all ADO tokens come from explicitly configured service connections.
+If `permissions.write` is not configured, this marker is replaced with an empty string so that no `env:` block is emitted at all. Note: `System.AccessToken` is never used directly -- all ADO tokens come from explicitly configured service connections.
 
 ## `{{ compiler_version }}`
 
@@ -515,10 +515,10 @@ Derivation rules:
 
 - Non-ASCII-alphanumeric characters are treated as word separators (they are not
   included in the output).
-- Each word is capitalised and the words are concatenated: `"daily code review"` →
+- Each word is capitalised and the words are concatenated: `"daily code review"` ->
   `"DailyCodeReview"`.
 - An empty result (all characters stripped) falls back to `"Agent"`.
-- A result starting with a digit is prefixed with `_`: `"123start"` → `"_123start"`.
+- A result starting with a digit is prefixed with `_`: `"123start"` -> `"_123start"`.
 - Names containing non-ASCII alphanumeric characters (e.g. `"über-agent"`) produce a
   compiler warning because those characters are silently dropped.
 

@@ -43,15 +43,15 @@ runtimes:                      # optional runtime configuration (language enviro
   lean: true                   # Lean 4 theorem prover (see docs/runtimes.md)
   # lean:                      # Alternative object format (with toolchain pinning)
   #   toolchain: "leanprover/lean4:v4.29.1"
-  # python: true               # Python runtime — auto-installs via UsePythonVersion@0 (see docs/runtimes.md)
+  # python: true               # Python runtime -- auto-installs via UsePythonVersion@0 (see docs/runtimes.md)
   # python:                    # Alternative object format (pin version, configure internal feed)
   #   version: "3.12"
   #   feed-url: "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/pypi/simple/"
-  # node: true                 # Node.js runtime — auto-installs via NodeTool@0 (see docs/runtimes.md)
+  # node: true                 # Node.js runtime -- auto-installs via NodeTool@0 (see docs/runtimes.md)
   # node:                      # Alternative object format (pin version, configure internal feed)
   #   version: "22.x"
   #   feed-url: "https://pkgs.dev.azure.com/ORG/PROJECT/_packaging/FEED/npm/registry/"
-  # dotnet: true               # .NET runtime — auto-installs via UseDotNet@2 (see docs/runtimes.md)
+  # dotnet: true               # .NET runtime -- auto-installs via UseDotNet@2 (see docs/runtimes.md)
   # dotnet:                    # Alternative object format (pin version, configure internal feed via nuget.config)
   #   version: "8.0.x"          # use "global.json" to pin from the repo's global.json
   #   feed-url: "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/nuget/v3/index.json"
@@ -127,7 +127,7 @@ teardown:                      # separate job AFTER safe outputs processing
     displayName: "Teardown step"
 network:                       # optional network policy (standalone target only)
   allowed:                       # allowed host patterns and/or ecosystem identifiers
-    - python                   # ecosystem identifier — expands to Python/PyPI domains
+    - python                   # ecosystem identifier -- expands to Python/PyPI domains
     - "*.mycompany.com"        # raw domain pattern
   blocked:                     # blocked host patterns or ecosystems (removes from allow list)
     - "evil.example.com"
@@ -156,9 +156,9 @@ default):
 
 - If no additional repositories are checked out (i.e. only the pipeline's own
   repository is checked out via the implicit `self`), `workspace:` defaults to
-  **`root`** — the agent runs in the pipeline's working directory root.
+  **`root`** -- the agent runs in the pipeline's working directory root.
 - If one or more additional repositories are checked out, `workspace:` defaults
-  to **`repo`** — the agent runs inside the trigger repository's directory.
+  to **`repo`** -- the agent runs inside the trigger repository's directory.
 
 Set `workspace:` explicitly to `root`, `repo` (alias `self`), or a specific
 checked-out repository alias to override this behavior.
@@ -222,7 +222,7 @@ repos:
 The legacy `repositories:` + `checkout:` fields are auto-converted to
 `repos:` by the [`repos_unified` codemod](/ado-aw/reference/codemods/). On the next
 `ado-aw compile`, any source that still uses the legacy fields is
-rewritten in place to the new shape — each `repositories:` entry
+rewritten in place to the new shape -- each `repositories:` entry
 becomes a `repos:` entry, with `checkout: false` added for entries
 that weren't listed under `checkout:`. Mixing the legacy fields with
 an existing `repos:` block is rejected; pick one shape.
@@ -280,7 +280,7 @@ The filter gate step uses `System.AccessToken` for self-cancellation
 (PATCH to the builds REST API) and PR metadata retrieval. This requires:
 
 1. **"Allow scripts to access the OAuth token"** must be enabled on the
-   pipeline definition in ADO (Project Settings → Pipelines → Settings).
+   pipeline definition in ADO (Project Settings -> Pipelines -> Settings).
 2. The pipeline's build service account must have permission to cancel
    builds.
 

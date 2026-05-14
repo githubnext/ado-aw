@@ -37,8 +37,8 @@ engine:
 
 The `timeout-minutes` field sets a wall-clock limit (in minutes) for the entire agent job. It maps to the Azure DevOps `timeoutInMinutes` job property on `Agent`. This is useful for:
 
-- **Budget enforcement** — hard-capping the total runtime of an agent to control compute costs.
-- **Pipeline hygiene** — preventing agents from occupying a runner indefinitely if they stall or enter long retry loops.
-- **SLA compliance** — ensuring scheduled agents complete within a known window.
+- **Budget enforcement** -- hard-capping the total runtime of an agent to control compute costs.
+- **Pipeline hygiene** -- preventing agents from occupying a runner indefinitely if they stall or enter long retry loops.
+- **SLA compliance** -- ensuring scheduled agents complete within a known window.
 
 When omitted, Azure DevOps uses its default job timeout (60 minutes). When set, the compiler emits `timeoutInMinutes: <value>` on the agentic job.

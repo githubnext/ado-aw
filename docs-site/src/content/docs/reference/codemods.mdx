@@ -70,13 +70,13 @@ codemods") rather than clobbering whoever wrote the file.
 
 ### `check` command behavior
 
-`ado-aw check` exits non-zero when codemods would fire — there is no
+`ado-aw check` exits non-zero when codemods would fire -- there is no
 opt-in flag and no warning-only mode. Rationale: compiled pipelines
 download the **same** `ado-aw` version that produced them
 (`src/data/base.yml`, `src/data/1es-base.yml`), so the in-pipeline
 integrity check is internally consistent by construction. The only
 time `check` sees pending codemods is when a developer runs a newer
-`ado-aw` locally against an older source — exactly when we want to
+`ado-aw` locally against an older source -- exactly when we want to
 fail loudly. The fix is `ado-aw compile`, which applies the codemods
 in place.
 
@@ -182,7 +182,7 @@ review + per-codemod tests:
 
 1. **Idempotent.** Running twice produces the same final state as
    running once. The runner re-runs the entire registry every
-   compile — codemods that no longer apply must be no-ops.
+   compile -- codemods that no longer apply must be no-ops.
 2. **Detection-based.** Returns `Ok(false)` and leaves the mapping
    untouched when the input does not contain the targeted shape.
    Never modifies a mapping that's already current.
@@ -200,7 +200,7 @@ review + per-codemod tests:
 7. **Receives unsanitized input.** The compiler runs sanitization
    (`##vso[` neutralization, control-character stripping, length
    limits) on the typed `FrontMatter` *after* codemods run, but the
-   raw `Mapping` you receive is whatever the user wrote — including
+   raw `Mapping` you receive is whatever the user wrote -- including
    any pipeline-injection attempts, control characters, or
    over-length strings. Codemods should therefore treat values as
    opaque (move them around, wrap them in objects, etc.) rather
@@ -211,9 +211,9 @@ review + per-codemod tests:
 
 Codemods should prefer `helpers::*` over raw `Mapping` manipulation:
 
-- `take_key(map, "old")` — remove and return.
-- `insert_no_overwrite(map, "new", value)` — error on conflict.
-- `rename_key(map, "old", "new", ConflictPolicy::Error)` — default
+- `take_key(map, "old")` -- remove and return.
+- `insert_no_overwrite(map, "new", value)` -- error on conflict.
+- `rename_key(map, "old", "new", ConflictPolicy::Error)` -- default
   policy is **error**, never silent overwrite. The helper is
   transactional: on the error path the mapping is unchanged.
 
@@ -238,7 +238,7 @@ the user knows exactly what to fix.
 ## Worked example: `engine_id_split`
 
 This is the codemod that would have caught the `0.17.0` breaking
-change (`engine: <model-string>` → `engine: { id: copilot, model: <model> }`).
+change (`engine: <model-string>` -> `engine: { id: copilot, model: <model> }`).
 Drop-in template for your own codemod.
 
 ```rust
@@ -272,7 +272,7 @@ fn apply_codemod(fm: &mut Mapping, _ctx: &CodemodContext) -> Result<bool> {
     let key = Value::String("engine".to_string());
 
     let Some(engine) = fm.get(&key) else {
-        // No engine field at all — relies on default (copilot) in
+        // No engine field at all -- relies on default (copilot) in
         // both old and new grammars. Nothing to do.
         return Ok(false);
     };
@@ -303,8 +303,8 @@ fn apply_codemod(fm: &mut Mapping, _ctx: &CodemodContext) -> Result<bool> {
             Ok(true)
         }
 
-        // Unexpected shape (number, bool, sequence, …). Refuse rather
-        // than guess — the user needs to fix this by hand.
+        // Unexpected shape (number, bool, sequence, ...). Refuse rather
+        // than guess -- the user needs to fix this by hand.
         other => bail!(
             "engine field has unexpected shape (expected string or mapping, \
              got {}); manual migration required",
@@ -330,7 +330,7 @@ fn describe(v: &Value) -> &'static str {
 
 1. **Detection-first.** Each match arm decides whether the input
    matches the codemod's target shape. Three of the four arms
-   return `Ok(false)` — those are the cases where the source is
+   return `Ok(false)` -- those are the cases where the source is
    already current.
 2. **Idempotent by construction.** Once the mapping is in object
    form, the first match arm fires and returns `Ok(false)`. The
@@ -361,8 +361,8 @@ The codemod framework is covered by three layers of tests:
   codemods) individual `apply` functions.
 - **White-box integration tests** in
   `src/compile/codemod_integration_test.rs` exercise the rewrite
-  path end-to-end (parse → codemods → compile → atomic source
-  rewrite → lock-file write) using a stub codemod registry
+  path end-to-end (parse -> codemods -> compile -> atomic source
+  rewrite -> lock-file write) using a stub codemod registry
   injected via the crate-private `compile_pipeline_with_registry`
   and `parse_markdown_detailed_with_registry` hooks. They live
   inside `src/` because the production registry is empty and
@@ -378,10 +378,10 @@ fixtures alongside it in the codemod's own file
 
 ## See also
 
-- [Front Matter](/ado-aw/reference/front-matter/) — the full
+- [Front Matter](/ado-aw/reference/front-matter/) -- the full
   front-matter grammar.
-- [Extending the Compiler](/ado-aw/guides/extending/) — broader guidance for
+- [Extending the Compiler](/ado-aw/guides/extending/) -- broader guidance for
   adding features to the compiler, including the requirement to
   add a codemod alongside any breaking front-matter change.
-- [gh-aw's `pkg/cli/fix_codemods.go`](https://github.com/github/gh-aw/blob/main/pkg/cli/fix_codemods.go) —
+- [gh-aw's `pkg/cli/fix_codemods.go`](https://github.com/github/gh-aw/blob/main/pkg/cli/fix_codemods.go) --
   the upstream codemod model.

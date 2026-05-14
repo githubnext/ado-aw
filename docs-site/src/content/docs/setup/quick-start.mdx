@@ -7,7 +7,7 @@ sidebar:
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-There are two ways to get started with `ado-aw` — using a Copilot agent to co-create your first workflow interactively, or writing the agent file manually.
+There are two ways to get started with `ado-aw` -- using a Copilot agent to co-create your first workflow interactively, or writing the agent file manually.
 
 ## Install ado-aw
 
@@ -58,7 +58,7 @@ In your Azure DevOps repository root, run:
 ado-aw init
 ```
 
-This creates `.github/agents/ado-aw.agent.md` — a Copilot dispatcher agent that knows how to create, update, and debug agentic pipelines. It auto-downloads the `ado-aw` compiler and handles the full lifecycle.
+This creates `.github/agents/ado-aw.agent.md` -- a Copilot dispatcher agent that knows how to create, update, and debug agentic pipelines. It auto-downloads the `ado-aw` compiler and handles the full lifecycle.
 
 ### 2. Co-create a workflow with Copilot
 
@@ -72,7 +72,7 @@ Describe what you want your agentic pipeline to do. For example:
 
 > *"Create a workflow that runs daily, reads open work items tagged 'stale', and adds a reminder comment."*
 
-The agent will walk you through the front-matter configuration, write the agent prompt, and compile the pipeline — all interactively.
+The agent will walk you through the front-matter configuration, write the agent prompt, and compile the pipeline -- all interactively.
 
 ### 3. Push and configure
 
@@ -83,14 +83,14 @@ ado-aw configure
 ```
 
 This sets the `GITHUB_TOKEN` pipeline variable on the ADO build definition. The command prompts for:
-- A **GitHub Personal Access Token (PAT)** — used by the Copilot CLI at runtime
-- An **Azure DevOps PAT** — used to update the pipeline variable via the ADO API
+- A **GitHub Personal Access Token (PAT)** -- used by the Copilot CLI at runtime
+- An **Azure DevOps PAT** -- used to update the pipeline variable via the ADO API
 
 :::caution[Temporary limitation: GitHub PAT required]
 The Copilot CLI does not yet support GitHub App tokens. You must provide a **classic or fine-grained GitHub PAT** with appropriate scopes. This requirement will be removed once GitHub App token support is added to the Copilot CLI.
 :::
 
-Run the pipeline in Azure DevOps — it executes the three-stage workflow: Agent → Detection → Execution.
+Run the pipeline in Azure DevOps -- it executes the three-stage workflow: Agent -> Detection -> Execution.
 
 ---
 
@@ -128,8 +128,8 @@ ado-aw compile agent.md
 
 This writes a compiled `.lock.yml` pipeline alongside the source file. You should now have:
 
-- `agent.md` — your source definition
-- `agent.lock.yml` — the compiled Azure DevOps pipeline
+- `agent.md` -- your source definition
+- `agent.lock.yml` -- the compiled Azure DevOps pipeline
 
 ### 3. Push to Azure DevOps
 
@@ -148,7 +148,7 @@ This sets the `GITHUB_TOKEN` pipeline variable. See the [With Agents](#3-push-an
 
 ### 5. Run the pipeline
 
-Back in Azure DevOps, run the pipeline. It executes the compiled three-stage workflow: Agent → Detection → Execution.
+Back in Azure DevOps, run the pipeline. It executes the compiled three-stage workflow: Agent -> Detection -> Execution.
 
 ---
 

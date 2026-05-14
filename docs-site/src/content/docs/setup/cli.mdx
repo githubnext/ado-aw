@@ -11,9 +11,9 @@ The `ado-aw` CLI provides commands for initializing repositories, compiling pipe
 
 These flags apply to all commands:
 
-- `--verbose`, `-v` — enable more detailed logging
-- `--debug`, `-d` — enable debug logging
-- `--log-output-dir <path>` — write log files to a specific directory
+- `--verbose`, `-v` -- enable more detailed logging
+- `--debug`, `-d` -- enable debug logging
+- `--log-output-dir <path>` -- write log files to a specific directory
 
 ## Commands
 
@@ -27,8 +27,8 @@ ado-aw init [--path <path>] [--force]
 
 Options:
 
-- `--path <path>` — target directory
-- `--force` — continue even when repository checks would normally block initialization
+- `--path <path>` -- target directory
+- `--force` -- continue even when repository checks would normally block initialization
 
 ### `compile [<path>]`
 
@@ -40,9 +40,9 @@ ado-aw compile [<path>] [--output <path>]
 
 Options:
 
-- `--output`, `-o <path>` — write the generated YAML to a specific file or directory
-- `--skip-integrity` — debug-only option to skip the generated integrity check step
-- `--debug-pipeline` — debug-only option to include extra pipeline diagnostics
+- `--output`, `-o <path>` -- write the generated YAML to a specific file or directory
+- `--skip-integrity` -- debug-only option to skip the generated integrity check step
+- `--debug-pipeline` -- debug-only option to include extra pipeline diagnostics
 
 ### `check <pipeline>`
 
@@ -62,7 +62,7 @@ ado-aw mcp <output_directory> <bounding_directory> [--enabled-tools <name>]
 
 Options:
 
-- `--enabled-tools <name>` — limit the server to specific tools; repeat to allow more than one
+- `--enabled-tools <name>` -- limit the server to specific tools; repeat to allow more than one
 
 ### `mcp-http <output_directory> <bounding_directory>`
 
@@ -74,9 +74,9 @@ ado-aw mcp-http <output_directory> <bounding_directory> [options]
 
 Options:
 
-- `--port <port>` — port to listen on
-- `--api-key <key>` — API key used to authenticate requests
-- `--enabled-tools <name>` — limit the server to specific tools; repeat to allow more than one
+- `--port <port>` -- port to listen on
+- `--api-key <key>` -- API key used to authenticate requests
+- `--enabled-tools <name>` -- limit the server to specific tools; repeat to allow more than one
 
 ### `execute`
 
@@ -88,12 +88,12 @@ ado-aw execute [options]
 
 Options:
 
-- `--source`, `-s <path>` — source markdown file
-- `--safe-output-dir <path>` — directory containing safe output records
-- `--output-dir <path>` — directory for processed artifacts
-- `--ado-org-url <url>` — Azure DevOps organization URL override
-- `--ado-project <name>` — Azure DevOps project name override
-- `--dry-run` — validate inputs without making write calls
+- `--source`, `-s <path>` -- source markdown file
+- `--safe-output-dir <path>` -- directory containing safe output records
+- `--output-dir <path>` -- directory for processed artifacts
+- `--ado-org-url <url>` -- Azure DevOps organization URL override
+- `--ado-project <name>` -- Azure DevOps project name override
+- `--dry-run` -- validate inputs without making write calls
 
 ### `configure`
 
@@ -105,13 +105,13 @@ ado-aw configure [options]
 
 Options:
 
-- `--token <token>` — token value to apply
-- `--org <url>` — Azure DevOps organization URL
-- `--project <name>` — Azure DevOps project name
-- `--pat <pat>` — PAT used for Azure DevOps API authentication
-- `--path <path>` — repository path to inspect
-- `--dry-run` — preview changes without applying them
-- `--definition-ids <ids>` — comma-separated definition IDs to update
+- `--token <token>` -- token value to apply
+- `--org <url>` -- Azure DevOps organization URL
+- `--project <name>` -- Azure DevOps project name
+- `--pat <pat>` -- PAT used for Azure DevOps API authentication
+- `--path <path>` -- repository path to inspect
+- `--dry-run` -- preview changes without applying them
+- `--definition-ids <ids>` -- comma-separated definition IDs to update
 
 ## Common examples
 

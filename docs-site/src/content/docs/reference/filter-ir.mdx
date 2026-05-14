@@ -12,7 +12,7 @@ into bash gate steps that run inside Azure DevOps pipelines.
 ## Overview
 
 When an agent file declares runtime trigger filters under `on.pr.filters` or
-`on.pipeline.filters`, the compiler generates a *gate step* — a bash script
+`on.pipeline.filters`, the compiler generates a *gate step* -- a bash script
 injected into the Setup job that evaluates each filter at pipeline runtime and
 self-cancels the build if any filter fails.
 
@@ -23,17 +23,17 @@ on.pr.filters / on.pipeline.filters   (YAML front matter)
         │
         ▼
   ┌──────────────┐
-  │  1. Lower    │   Filters  →  Vec<FilterCheck>
+  │  1. Lower    │   Filters  ->  Vec<FilterCheck>
   └──────┬───────┘
          │
          ▼
   ┌──────────────┐
-  │  2. Validate │   Vec<FilterCheck>  →  Vec<Diagnostic>
+  │  2. Validate │   Vec<FilterCheck>  ->  Vec<Diagnostic>
   └──────┬───────┘
          │
          ▼
   ┌──────────────┐
-  │  3. Codegen  │   GateContext + Vec<FilterCheck>  →  bash string
+  │  3. Codegen  │   GateContext + Vec<FilterCheck>  ->  bash string
   └──────────────┘
 ```
 
@@ -48,7 +48,7 @@ execution. Each fact has:
 |----------|------|---------|
 | `dependencies()` | `&[Fact]` | Facts that must be acquired first |
 | `kind()` | `&str` | Unique identifier used in the serialized spec |
-| `ado_exports()` | `Vec<(&str, &str)>` | ADO macro → env var mappings for the bash shim |
+| `ado_exports()` | `Vec<(&str, &str)>` | ADO macro -> env var mappings for the bash shim |
 | `failure_policy()` | `FailurePolicy` | What happens if acquisition fails |
 | `is_pipeline_var()` | `bool` | Whether this is a free ADO pipeline variable |
 
@@ -56,7 +56,7 @@ Facts are organised into four tiers by acquisition cost:
 
 #### Pipeline Variables (free)
 
-These are always available via ADO macro expansion — no I/O required.
+These are always available via ADO macro expansion -- no I/O required.
 
 | Fact | ADO Variable | Shell Var | Applies To |
 |------|-------------|-----------|------------|
@@ -76,7 +76,7 @@ on `PrMetadata` being acquired first.
 
 | Fact | Source | Shell Var | Depends On |
 |------|--------|-----------|------------|
-| `PrMetadata` | `GET pullRequests/{id}` | `PR_DATA` | — |
+| `PrMetadata` | `GET pullRequests/{id}` | `PR_DATA` | -- |
 | `PrIsDraft` | `json .isDraft` from `PR_DATA` | `IS_DRAFT` | `PrMetadata` |
 | `PrLabels` | `json .labels[].name` from `PR_DATA` | `PR_LABELS` | `PrMetadata` |
 
@@ -86,8 +86,8 @@ Require a separate API call to the PR iterations endpoint.
 
 | Fact | Source | Shell Var | Depends On |
 |------|--------|-----------|------------|
-| `ChangedFiles` | `GET pullRequests/{id}/iterations/{last}/changes` | `CHANGED_FILES` | — |
-| `ChangedFileCount` | `grep -c` on `CHANGED_FILES` | `FILE_COUNT` | — |
+| `ChangedFiles` | `GET pullRequests/{id}/iterations/{last}/changes` | `CHANGED_FILES` | -- |
+| `ChangedFileCount` | `grep -c` on `CHANGED_FILES` | `FILE_COUNT` | -- |
 
 #### Computed
 
@@ -95,7 +95,7 @@ Derived from runtime computation (no API calls).
 
 | Fact | Source | Shell Var |
 |------|--------|-----------|
-| `CurrentUtcMinutes` | `date -u` → minutes since midnight | `CURRENT_MINUTES` |
+| `CurrentUtcMinutes` | `date -u` -> minutes since midnight | `CURRENT_MINUTES` |
 
 ### Failure Policies
 
@@ -103,8 +103,8 @@ Each fact declares what happens if it cannot be acquired at runtime:
 
 | Policy | Behaviour | Used By |
 |--------|-----------|---------|
-| `FailClosed` | Check fails → `SHOULD_RUN=false` | Pipeline vars, `PrIsDraft`, `CurrentUtcMinutes` |
-| `FailOpen` | Check passes → assume OK | `PrLabels`, `ChangedFiles`, `ChangedFileCount` |
+| `FailClosed` | Check fails -> `SHOULD_RUN=false` | Pipeline vars, `PrIsDraft`, `CurrentUtcMinutes` |
+| `FailOpen` | Check passes -> assume OK | `PrLabels`, `ChangedFiles`, `ChangedFileCount` |
 | `SkipDependents` | Log warning, skip dependent predicates | `PrMetadata` |
 
 ### Predicates
@@ -143,7 +143,7 @@ codegen:
 struct FilterCheck {
     name: &'static str,            // "title", "author include", "labels", etc.
     predicate: Predicate,          // The boolean test
-    build_tag_suffix: &'static str, // "title-mismatch" → "{prefix}:title-mismatch"
+    build_tag_suffix: &'static str, // "title-mismatch" -> "{prefix}:title-mismatch"
 }
 ```
 
@@ -176,8 +176,8 @@ Maps each field of `PrFilters` to a `FilterCheck`:
 | `source_branch` | `GlobMatch` | `SourceBranch` | `source-branch-mismatch` |
 | `target_branch` | `GlobMatch` | `TargetBranch` | `target-branch-mismatch` |
 | `commit_message` | `GlobMatch` | `CommitMessage` | `commit-message-mismatch` |
-| `labels` | `LabelSetMatch` | `PrLabels` (→ `PrMetadata`) | `labels-mismatch` |
-| `draft` | `Equality` | `PrIsDraft` (→ `PrMetadata`) | `draft-mismatch` |
+| `labels` | `LabelSetMatch` | `PrLabels` (-> `PrMetadata`) | `labels-mismatch` |
+| `draft` | `Equality` | `PrIsDraft` (-> `PrMetadata`) | `draft-mismatch` |
 | `changed_files` | `FileGlobMatch` | `ChangedFiles` | `changed-files-mismatch` |
 | `time_window` | `TimeWindow` | `CurrentUtcMinutes` | `time-window-mismatch` |
 | `min/max_changes` | `NumericRange` | `ChangedFileCount` | `changes-mismatch` |
@@ -227,7 +227,7 @@ Compile-time checks for impossible or conflicting configurations:
 **Error** diagnostics cause compilation to fail with an actionable message.
 **Warning** diagnostics are emitted to stderr but compilation continues.
 
-Regex and glob pattern overlap is intentionally not validated — it would
+Regex and glob pattern overlap is intentionally not validated -- it would
 require heuristic analysis and could produce false positives.
 
 ## Pass 3: Codegen
@@ -256,7 +256,7 @@ generic Python evaluator that reads a JSON gate spec.
     # 3. Access token passthrough
     export ADO_SYSTEM_ACCESS_TOKEN="$SYSTEM_ACCESSTOKEN"
 
-    # 4. Embedded Python evaluator (heredoc — never modified)
+    # 4. Embedded Python evaluator (heredoc -- never modified)
     python3 << 'GATE_EVAL_EOF'
     ...evaluator source...
     GATE_EVAL_EOF
@@ -299,7 +299,7 @@ quoting issues. Decoded, it contains:
 }
 ```
 
-The spec is declarative — it uses fact *kinds* (e.g., `"pr_title"`,
+The spec is declarative -- it uses fact *kinds* (e.g., `"pr_title"`,
 `"pr_metadata"`) not raw REST endpoints. The Python evaluator owns
 acquisition logic.
 
@@ -308,18 +308,18 @@ acquisition logic.
 The evaluator is a self-contained Python script embedded via
 `include_str!()`. It handles:
 
-1. **Bypass logic** — reads `ADO_BUILD_REASON` and exits early for non-matching
+1. **Bypass logic** -- reads `ADO_BUILD_REASON` and exits early for non-matching
    trigger types
-2. **Fact acquisition** — maps fact kinds to acquisition methods:
-   - Pipeline variables → `os.environ.get("ADO_*")`
-   - PR metadata → `urllib` call to ADO REST API
-   - Changed files → iteration API calls
-   - UTC time → `datetime.now(timezone.utc)`
-3. **Failure policies** — `fail_closed`, `fail_open`, `skip_dependents`
-4. **Predicate evaluation** — recursive evaluator supporting all predicate types
-5. **Result reporting** — `##vso[...]` logging commands, build tags, self-cancel
+2. **Fact acquisition** -- maps fact kinds to acquisition methods:
+   - Pipeline variables -> `os.environ.get("ADO_*")`
+   - PR metadata -> `urllib` call to ADO REST API
+   - Changed files -> iteration API calls
+   - UTC time -> `datetime.now(timezone.utc)`
+3. **Failure policies** -- `fail_closed`, `fail_open`, `skip_dependents`
+4. **Predicate evaluation** -- recursive evaluator supporting all predicate types
+5. **Result reporting** -- `##vso[...]` logging commands, build tags, self-cancel
 
-The evaluator never changes per-pipeline — all variation is in the spec.
+The evaluator never changes per-pipeline -- all variation is in the spec.
 
 #### ADO Macro Export Strategy
 
@@ -330,7 +330,7 @@ The bash shim exports only the ADO macros needed by the spec's facts:
 - **PR API facts**: `ADO_REPO_ID`, `ADO_PR_ID` (only when `pr_metadata`,
   `pr_is_draft`, `pr_labels`, or `changed_files` facts are required)
 - **Fact-specific**: each `Fact` variant declares its ADO exports via
-  `ado_exports()` (e.g., `PrTitle` → `ADO_PR_TITLE`)
+  `ado_exports()` (e.g., `PrTitle` -> `ADO_PR_TITLE`)
 
 #### Predicate Types in Spec
 
@@ -356,12 +356,12 @@ When Tier 2/3 filters are configured, the `TriggerFiltersExtension`
 (`src/compile/extensions/trigger_filters.rs`) activates via
 `collect_extensions()`. It implements `CompilerExtension` and controls:
 
-1. **Download step** — downloads `scripts.zip` from the ado-aw release
+1. **Download step** -- downloads `scripts.zip` from the ado-aw release
    artifacts, verifies its SHA256 checksum via `checksums.txt`, then
    extracts `gate-eval.py` to `/tmp/ado-aw-scripts/gate-eval.py`
-2. **Gate step** — calls `compile_gate_step_external()` to generate a step
+2. **Gate step** -- calls `compile_gate_step_external()` to generate a step
    that references the downloaded script (no inline heredoc)
-3. **Validation** — runs `validate_pr_filters()` / `validate_pipeline_filters()`
+3. **Validation** -- runs `validate_pr_filters()` / `validate_pipeline_filters()`
    during compilation via the `validate()` trait method
 
 The extension uses the `setup_steps()` trait method (not `prepare_steps()`)
@@ -369,7 +369,7 @@ because the gate must run in the **Setup job** (before the Execution job).
 
 ### Tier 1 Inline Path
 
-When only Tier 1 filters are configured (pipeline variables — title, author,
+When only Tier 1 filters are configured (pipeline variables -- title, author,
 branch, commit-message, build-reason), the extension is NOT activated.
 `generate_pr_gate_step()` generates an inline bash gate step directly, with
 no Python evaluator and no download step.

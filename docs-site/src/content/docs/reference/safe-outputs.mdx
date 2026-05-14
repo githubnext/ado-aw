@@ -44,7 +44,7 @@ Adds a comment to an existing Azure DevOps work item. This is the ADO equivalent
 **Configuration options (front matter):**
 - `max` - Maximum number of comments per run (default: 1)
 - `include-stats` - Whether to append agent execution stats to the comment body (default: true)
-- `target` - **Required** — scoping policy for which work items can be commented on:
+- `target` - **Required** -- scoping policy for which work items can be commented on:
   - `"*"` - Any work item in the project (unrestricted, must be explicit)
   - `12345` - A specific work item ID
   - `[12345, 67890]` - A list of allowed work item IDs
@@ -114,7 +114,7 @@ safe-outputs:
     iteration-path: true      # enable iteration path updates (default: false)
     assignee: true            # enable assignee updates (default: false)
     tags: true                # enable tag updates (default: false)
-    allowed-tags: []          # Optional — restrict which tags the agent can set (empty = any; supports * wildcards like "agent-*")
+    allowed-tags: []          # Optional -- restrict which tags the agent can set (empty = any; supports * wildcards like "agent-*")
 ```
 
 **Security note:** Every field that can be modified requires explicit opt-in (`true`) in the front matter configuration. If the `max` limit is exceeded, additional entries are skipped rather than aborting the entire batch.
@@ -170,7 +170,7 @@ Note: The source branch name is auto-generated from a sanitized version of the P
 
 **Configuration options (front matter):**
 - `target-branch` - Target branch to merge into (default: "main")
-- `draft` - Whether to create the PR as a draft (default: **true**). Set to `false` to publish the PR immediately. **Note:** `auto-complete` is silently skipped on draft PRs — set `draft: false` when using `auto-complete: true`.
+- `draft` - Whether to create the PR as a draft (default: **true**). Set to `false` to publish the PR immediately. **Note:** `auto-complete` is silently skipped on draft PRs -- set `draft: false` when using `auto-complete: true`.
 - `auto-complete` - Set auto-complete on the PR (default: false). Requires `draft: false` to take effect.
 - `delete-source-branch` - Delete source branch after merge (default: true)
 - `squash-merge` - Squash commits on merge (default: true)
@@ -239,9 +239,9 @@ Adds a new comment thread to a pull request.
 ```yaml
 safe-outputs:
   add-pr-comment:
-    comment-prefix: "[Agent Review] "  # Optional — prepended to all comments
-    allowed-repositories: []           # Optional — restrict which repos can be commented on
-    allowed-statuses: []               # Optional — restrict which thread statuses the agent can set (empty = any)
+    comment-prefix: "[Agent Review] "  # Optional -- prepended to all comments
+    allowed-repositories: []           # Optional -- restrict which repos can be commented on
+    allowed-statuses: []               # Optional -- restrict which thread statuses the agent can set (empty = any)
     max: 1                             # Maximum per run (default: 1)
     include-stats: true                # Append agent stats to comment (default: true)
 ```
@@ -259,8 +259,8 @@ Replies to an existing review comment thread on a pull request.
 ```yaml
 safe-outputs:
   reply-to-pr-comment:
-    comment-prefix: "[Agent] "     # Optional — prepended to all replies
-    allowed-repositories: []       # Optional — restrict which repos can be replied on
+    comment-prefix: "[Agent] "     # Optional -- prepended to all replies
+    allowed-repositories: []       # Optional -- restrict which repos can be replied on
     max: 1                         # Maximum per run (default: 1)
 ```
 
@@ -277,8 +277,8 @@ Resolves or updates the status of a pull request review thread.
 ```yaml
 safe-outputs:
   resolve-pr-thread:
-    allowed-repositories: []     # Optional — restrict which repos can be operated on
-    allowed-statuses: []         # REQUIRED — empty list rejects all status transitions
+    allowed-repositories: []     # Optional -- restrict which repos can be operated on
+    allowed-statuses: []         # REQUIRED -- empty list rejects all status transitions
     max: 1                       # Maximum per run (default: 1)
 ```
 
@@ -295,8 +295,8 @@ Submits a review vote on a pull request.
 ```yaml
 safe-outputs:
   submit-pr-review:
-    allowed-events: []           # REQUIRED — empty list rejects all events
-    allowed-repositories: []     # Optional — restrict which repos can be reviewed
+    allowed-events: []           # REQUIRED -- empty list rejects all events
+    allowed-repositories: []     # Optional -- restrict which repos can be reviewed
     max: 1                       # Maximum per run (default: 1)
 ```
 
@@ -316,9 +316,9 @@ Updates pull request metadata (reviewers, labels, auto-complete, vote, descripti
 ```yaml
 safe-outputs:
   update-pr:
-    allowed-operations: []          # Optional — restrict which operations are permitted (empty = all)
-    allowed-repositories: []        # Optional — restrict which repos can be updated
-    allowed-votes: []               # REQUIRED for vote operation — empty rejects all votes
+    allowed-operations: []          # Optional -- restrict which operations are permitted (empty = all)
+    allowed-repositories: []        # Optional -- restrict which repos can be updated
+    allowed-votes: []               # REQUIRED for vote operation -- empty rejects all votes
     delete-source-branch: true      # For set-auto-complete (default: true)
     merge-strategy: "squash"        # For set-auto-complete: squash, noFastForward, rebase, rebaseMerge
     max: 1                          # Maximum per run (default: 1)
@@ -337,7 +337,7 @@ Links two Azure DevOps work items together.
 ```yaml
 safe-outputs:
   link-work-items:
-    allowed-link-types: []       # Optional — restrict which link types are allowed (empty = all)
+    allowed-link-types: []       # Optional -- restrict which link types are allowed (empty = all)
     target: "*"                  # Scoping policy (same as comment-on-work-item target)
     max: 5                       # Maximum per run (default: 5)
 ```
@@ -355,10 +355,10 @@ Queues an Azure DevOps pipeline build by definition ID.
 ```yaml
 safe-outputs:
   queue-build:
-    allowed-pipelines: []        # REQUIRED — pipeline definition IDs that can be triggered (empty rejects all)
-    allowed-branches: []         # Optional — branches allowed to be built (empty = any)
-    allowed-parameters: []       # Optional — parameter keys allowed to be passed (empty = any)
-    default-branch: "main"       # Optional — default branch when agent doesn't specify one
+    allowed-pipelines: []        # REQUIRED -- pipeline definition IDs that can be triggered (empty rejects all)
+    allowed-branches: []         # Optional -- branches allowed to be built (empty = any)
+    allowed-parameters: []       # Optional -- parameter keys allowed to be passed (empty = any)
+    default-branch: "main"       # Optional -- default branch when agent doesn't specify one
     max: 3                       # Maximum per run (default: 3)
 ```
 
@@ -375,9 +375,9 @@ Creates a git tag on a repository ref.
 ```yaml
 safe-outputs:
   create-git-tag:
-    tag-pattern: "^v\\d+\\.\\d+\\.\\d+$"  # Optional — regex pattern tag names must match
-    allowed-repositories: []                # Optional — restrict which repos can be tagged
-    message-prefix: "[Release] "            # Optional — prefix prepended to tag message
+    tag-pattern: "^v\\d+\\.\\d+\\.\\d+$"  # Optional -- regex pattern tag names must match
+    allowed-repositories: []                # Optional -- restrict which repos can be tagged
+    message-prefix: "[Release] "            # Optional -- prefix prepended to tag message
     max: 1                                  # Maximum per run (default: 1)
 ```
 
@@ -392,8 +392,8 @@ Adds a tag to an Azure DevOps build.
 ```yaml
 safe-outputs:
   add-build-tag:
-    allowed-tags: []             # Optional — restrict which tags can be applied (supports * wildcards)
-    tag-prefix: "agent-"         # Optional — prefix prepended to all tags
+    allowed-tags: []             # Optional -- restrict which tags can be applied (supports * wildcards)
+    tag-prefix: "agent-"         # Optional -- prefix prepended to all tags
     allow-any-build: false       # When false, only the current pipeline build can be tagged (default: false)
     max: 1                       # Maximum per run (default: 1)
 ```
@@ -411,9 +411,9 @@ Creates a new branch from an existing ref.
 ```yaml
 safe-outputs:
   create-branch:
-    branch-pattern: "^agent/.*$"       # Optional — regex pattern branch names must match
-    allowed-repositories: []           # Optional — restrict which repos can have branches created
-    allowed-source-branches: []        # Optional — restrict which source branches can be branched from
+    branch-pattern: "^agent/.*$"       # Optional -- regex pattern branch names must match
+    allowed-repositories: []           # Optional -- restrict which repos can have branches created
+    allowed-source-branches: []        # Optional -- restrict which source branches can be branched from
     max: 1                             # Maximum per run (default: 1)
 ```
 
@@ -430,8 +430,8 @@ Uploads a workspace file as an attachment to an Azure DevOps work item.
 safe-outputs:
   upload-workitem-attachment:
     max-file-size: 5242880       # Maximum file size in bytes (default: 5 MB)
-    allowed-extensions: []       # Optional — restrict file types (e.g., [".png", ".pdf"])
-    comment-prefix: "[Agent] "   # Optional — prefix prepended to the comment
+    allowed-extensions: []       # Optional -- restrict file types (e.g., [".png", ".pdf"])
+    comment-prefix: "[Agent] "   # Optional -- prefix prepended to the comment
     max: 1                       # Maximum per run (default: 1)
 ```
 
@@ -447,9 +447,9 @@ the ADO build attachments REST API
 > `attachment-type` value. For artifacts that should appear in the **Artifacts
 > tab**, use [`upload-pipeline-artifact`](#upload-pipeline-artifact) instead.
 
-**Omit `build_id` to target the current pipeline run** — the executor resolves
+**Omit `build_id` to target the current pipeline run** -- the executor resolves
 the build ID from the `BUILD_BUILDID` environment variable automatically. When
-`build_id` is provided, the file is attached to that specific build — useful for
+`build_id` is provided, the file is attached to that specific build -- useful for
 posthumously decorating a finished build with a generated report, screenshot, or
 log bundle.
 
@@ -459,7 +459,7 @@ API.
 
 **Agent parameters:**
 - `build_id` *(optional)* - Target build ID. Omit to attach to the current pipeline run. Must be positive when specified.
-- `artifact_name` - Attachment name (1–100 chars, alphanumeric / `-` / `_` / `.`, no leading `.`)
+- `artifact_name` - Attachment name (1-100 chars, alphanumeric / `-` / `_` / `.`, no leading `.`)
 - `file_path` - Relative path to the file in the workspace (no directory traversal)
 
 **Configuration options (front matter):**
@@ -467,22 +467,22 @@ API.
 safe-outputs:
   upload-build-attachment:
     max-file-size: 52428800              # Maximum file size in bytes (default: 50 MB)
-    allowed-extensions: []               # Optional — restrict file types (e.g., [".png", ".pdf", ".log"])
-    allowed-artifact-names: []           # Optional — restrict names (suffix `*` = prefix match)
-    allowed-build-ids: []                # Optional — restrict target builds (skipped when targeting current build)
-    name-prefix: ""                      # Optional — prepended to the agent-supplied artifact name
-    attachment-type: "agent-artifact"    # Optional — {type} segment in the attachments URL (default: "agent-artifact")
+    allowed-extensions: []               # Optional -- restrict file types (e.g., [".png", ".pdf", ".log"])
+    allowed-artifact-names: []           # Optional -- restrict names (suffix `*` = prefix match)
+    allowed-build-ids: []                # Optional -- restrict target builds (skipped when targeting current build)
+    name-prefix: ""                      # Optional -- prepended to the agent-supplied artifact name
+    attachment-type: "agent-artifact"    # Optional -- {type} segment in the attachments URL (default: "agent-artifact")
     max: 3                               # Maximum per run (default: 3)
 ```
 
 **Notes:**
 - Single-file only; directory uploads are not supported.
-- When `build_id` is omitted and `allowed-build-ids` is configured, the allow-list check is skipped — the current build is implicitly trusted.
+- When `build_id` is omitted and `allowed-build-ids` is configured, the allow-list check is skipped -- the current build is implicitly trusted.
 
 **About `attachment-type`:** This is the `{type}` segment in the ADO build
 attachments URL (`PUT .../attachments/{type}/{name}`). It acts as a category
 label. Azure DevOps extensions can register to display attachments of a specific
-type — for example, the built-in code coverage extension displays attachments
+type -- for example, the built-in code coverage extension displays attachments
 with type `CodeCoverageSummary`. The default `agent-artifact` is a custom type;
 without a matching ADO extension installed, attachments with this type are only
 accessible via the REST API. Change this only if you have a custom extension
@@ -501,12 +501,12 @@ REST API in two steps:
 2. **Associate** the artifact record (`name = artifact_name`) with the target
    build via `POST /{project}/_apis/build/builds/{effective_build_id}/artifacts`.
 
-**Omit `build_id` to target the current pipeline run** — the executor resolves
+**Omit `build_id` to target the current pipeline run** -- the executor resolves
 the build ID from the `BUILD_BUILDID` environment variable automatically. When
 `build_id` is provided, the artifact record is published to that specific build
 ("cross-build publishing"). The artifact bytes still live in the agent's own
 build container; only the record's pointer is associated with the target build.
-This means cross-published artifacts share the agent build's retention — if the
+This means cross-published artifacts share the agent build's retention -- if the
 agent's build is purged, the cross-referenced artifact stops being downloadable.
 Cross-project publishing is not supported (the associate POST uses the current
 pipeline's project).
@@ -517,7 +517,7 @@ REST flow.
 
 **Agent parameters:**
 - `build_id` *(optional)* - Target build ID. Omit to publish to the current pipeline run. Must be positive when specified.
-- `artifact_name` - Artifact name shown in the Artifacts tab (1–100 chars, alphanumeric / `-` / `_` / `.`, no leading `.`)
+- `artifact_name` - Artifact name shown in the Artifacts tab (1-100 chars, alphanumeric / `-` / `_` / `.`, no leading `.`)
 - `file_path` - Relative path to the file in the workspace (no directory traversal)
 
 **Configuration options (front matter):**
@@ -525,11 +525,11 @@ REST flow.
 safe-outputs:
   upload-pipeline-artifact:
     max-file-size: 52428800              # Maximum file size in bytes (default: 50 MB)
-    allowed-extensions: []               # Optional — restrict file types (e.g., [".png", ".pdf", ".log"])
-    allowed-artifact-names: []           # Optional — restrict names (suffix `*` = prefix match)
-    allowed-build-ids: []                # Optional — restrict target builds (skipped when targeting current build)
-    name-prefix: ""                      # Optional — prepended to the agent-supplied artifact name
-    require-unique-names: false          # Optional — see "Reusing artifact names" below
+    allowed-extensions: []               # Optional -- restrict file types (e.g., [".png", ".pdf", ".log"])
+    allowed-artifact-names: []           # Optional -- restrict names (suffix `*` = prefix match)
+    allowed-build-ids: []                # Optional -- restrict target builds (skipped when targeting current build)
+    name-prefix: ""                      # Optional -- prepended to the agent-supplied artifact name
+    require-unique-names: false          # Optional -- see "Reusing artifact names" below
     max: 3                               # Maximum per run (default: 3)
 ```
 
@@ -539,7 +539,7 @@ By default, the same `artifact_name` may be reused across multiple
 to many failing builds at once). The executor inserts a short hash suffix
 (`{artifact_name}__{6 hex}`) into the **internal container folder name** so
 the calls don't silently overwrite each other's bytes in the agent's shared
-build container. The hash lives only in internal addressing — it does not
+build container. The hash lives only in internal addressing -- it does not
 appear in the `record.name` your downstream consumers query for, in the web UI
 "Download as zip" filename, or in the contents of files extracted by the
 `DownloadBuildArtifacts@1` / `DownloadPipelineArtifact@2` tasks (all of which
@@ -558,7 +558,7 @@ multiple uploads.
 
 **Notes:**
 - Single-file only; directory uploads are not supported.
-- When `build_id` is omitted and `allowed-build-ids` is configured, the allow-list check is skipped — the current build is implicitly trusted.
+- When `build_id` is omitted and `allowed-build-ids` is configured, the allow-list check is skipped -- the current build is implicitly trusted.
 - Requires `BUILD_CONTAINERID`, `BUILD_BUILDID`, and `SYSTEM_TEAMPROJECTID` (all set automatically inside an Azure DevOps pipeline job) and `vso.build_execute` scope on the executor's token (the existing write service connection provides this).
 
 ### cache-memory (moved to `tools:`)
@@ -576,12 +576,12 @@ Creates a new Azure DevOps wiki page. The page must **not** already exist; the t
 ```yaml
 safe-outputs:
   create-wiki-page:
-    wiki-name: "MyProject.wiki"     # Required — wiki identifier (name or GUID)
-    wiki-project: "OtherProject"    # Optional — ADO project that owns the wiki; defaults to current pipeline project
-    branch: "main"                  # Optional — git branch override; auto-detected for code wikis (see note below)
-    path-prefix: "/agent-output"    # Optional — prepended to the agent-supplied path (restricts write scope)
-    title-prefix: "[Agent] "        # Optional — prepended to the last path segment (the page title)
-    comment: "Created by agent"     # Optional — default commit comment when agent omits one
+    wiki-name: "MyProject.wiki"     # Required -- wiki identifier (name or GUID)
+    wiki-project: "OtherProject"    # Optional -- ADO project that owns the wiki; defaults to current pipeline project
+    branch: "main"                  # Optional -- git branch override; auto-detected for code wikis (see note below)
+    path-prefix: "/agent-output"    # Optional -- prepended to the agent-supplied path (restricts write scope)
+    title-prefix: "[Agent] "        # Optional -- prepended to the last path segment (the page title)
+    comment: "Created by agent"     # Optional -- default commit comment when agent omits one
     max: 1                          # Maximum number of create-wiki-page outputs allowed per run (default: 1)
     include-stats: true             # Append agent stats to wiki page content (default: true)
 ```
@@ -602,12 +602,12 @@ Updates the content of an existing Azure DevOps wiki page. The wiki page must al
 ```yaml
 safe-outputs:
   update-wiki-page:
-    wiki-name: "MyProject.wiki"     # Required — wiki identifier (name or GUID)
-    wiki-project: "OtherProject"    # Optional — ADO project that owns the wiki; defaults to current pipeline project
-    branch: "main"                  # Optional — git branch override; auto-detected for code wikis (see note below)
-    path-prefix: "/agent-output"    # Optional — prepended to the agent-supplied path (restricts write scope)
-    title-prefix: "[Agent] "        # Optional — prepended to the last path segment (the page title)
-    comment: "Updated by agent"     # Optional — default commit comment when agent omits one
+    wiki-name: "MyProject.wiki"     # Required -- wiki identifier (name or GUID)
+    wiki-project: "OtherProject"    # Optional -- ADO project that owns the wiki; defaults to current pipeline project
+    branch: "main"                  # Optional -- git branch override; auto-detected for code wikis (see note below)
+    path-prefix: "/agent-output"    # Optional -- prepended to the agent-supplied path (restricts write scope)
+    title-prefix: "[Agent] "        # Optional -- prepended to the last path segment (the page title)
+    comment: "Updated by agent"     # Optional -- default commit comment when agent omits one
     max: 1                          # Maximum number of update-wiki-page outputs allowed per run (default: 1)
     include-stats: true             # Append agent stats to wiki page content (default: true)
 ```
