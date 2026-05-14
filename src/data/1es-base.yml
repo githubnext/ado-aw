@@ -617,8 +617,8 @@ extends:
                   displayName: "Copy logs to output directory"
                   condition: always()
 
-          - job: Execution
-            displayName: "Execution"
+          - job: SafeOutputs
+            displayName: "SafeOutputs"
             dependsOn:
               - Agent
               - Detection

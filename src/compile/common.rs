@@ -1854,7 +1854,7 @@ pub fn generate_teardown_job(
     let template = format!(
         r#"- job: Teardown
   displayName: "Teardown"
-  dependsOn: Execution
+  dependsOn: SafeOutputs
   pool:
     {{{{ pool }}}}
   steps:
@@ -6217,7 +6217,7 @@ mod tests {
         let step: serde_yaml::Value = serde_yaml::from_str("bash: echo td").unwrap();
         let out = generate_teardown_job(&[step], "name: MyPool");
         assert!(out.contains("- job: Teardown"), "out: {out}");
-        assert!(out.contains("dependsOn: Execution"), "out: {out}");
+        assert!(out.contains("dependsOn: SafeOutputs"), "out: {out}");
         assert!(out.contains("name: MyPool"), "out: {out}");
         assert!(out.contains("echo td"), "out: {out}");
     }

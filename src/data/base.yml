@@ -591,8 +591,8 @@ jobs:
         artifact: analyzed_outputs_$(Build.BuildId)
         condition: always()
 
-  - job: Execution
-    displayName: "Execution"
+  - job: SafeOutputs
+    displayName: "SafeOutputs"
     dependsOn:
       - Agent
       - Detection
