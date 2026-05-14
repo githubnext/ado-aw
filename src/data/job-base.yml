@@ -578,8 +578,8 @@ jobs:
         artifact: analyzed_outputs_$(Build.BuildId)
         condition: always()
 
-  - job: {{ stage_prefix }}_Execution
-    displayName: "Execution"
+  - job: {{ stage_prefix }}_SafeOutputs
+    displayName: "SafeOutputs"
     dependsOn:
       - {{ stage_prefix }}_Agent
       - {{ stage_prefix }}_Detection

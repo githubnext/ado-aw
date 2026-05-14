@@ -134,7 +134,7 @@ fn generate_teardown_job(teardown_steps: &[serde_yaml::Value]) -> String {
     format!(
         r#"- job: Teardown
   displayName: "Teardown"
-  dependsOn: Execution
+  dependsOn: SafeOutputs
   templateContext:
     type: buildJob
     steps:
@@ -190,8 +190,8 @@ mod tests {
             "Should use simple display name"
         );
         assert!(
-            result.contains("dependsOn: Execution"),
-            "Should depend on Execution"
+            result.contains("dependsOn: SafeOutputs"),
+            "Should depend on SafeOutputs"
         );
         assert!(result.contains("checkout: self"), "Should include self checkout");
         assert!(result.contains("echo teardown"), "Should include the step content");

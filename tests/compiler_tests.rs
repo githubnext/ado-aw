@@ -95,7 +95,7 @@ fn assert_required_markers(content: &str) {
 /// Asserts that the pool configuration uses the `{{ pool }}` marker everywhere
 /// and that no hardcoded pool name leaks into the template.
 fn assert_pool_config(content: &str) {
-    // Must appear once per job: Agent, Detection, Execution.
+    // Must appear once per job: Agent, Detection, SafeOutputs.
     let pool_marker_count = content.matches("{{ pool }}").count();
     assert_eq!(
         pool_marker_count, 3,
@@ -3509,8 +3509,8 @@ fn test_1es_compiled_output_is_valid_yaml() {
         "1ES output should contain Detection job"
     );
     assert!(
-        compiled.contains("job: Execution"),
-        "1ES output should contain Execution job"
+        compiled.contains("job: SafeOutputs"),
+        "1ES output should contain SafeOutputs job"
     );
 
     // Verify no Agency remnants
