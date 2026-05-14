@@ -24,8 +24,7 @@ extends:
   template: v1/1ES.Unofficial.PipelineTemplate.yml@1ESPipelineTemplates
   parameters:
     pool:
-      name: {{ pool }}
-      os: linux
+      {{ pool }}
     sdl:
       sourceAnalysisPool:
         name: AZS-1ES-W-MMS2022

@@ -7,7 +7,7 @@ jobs:
     {{ agentic_depends_on }}
     {{ job_timeout }}
     pool:
-      {{ pool_block }}
+      {{ pool }}
     steps:
       {{ checkout_self }}
       {{ checkout_repositories }}
@@ -383,7 +383,7 @@ jobs:
     displayName: "Detection"
     dependsOn: {{ stage_prefix }}_Agent
     pool:
-      {{ pool_block }}
+      {{ pool }}
     steps:
       {{ checkout_self }}
       {{ checkout_repositories }}
@@ -585,7 +585,7 @@ jobs:
       - {{ stage_prefix }}_Detection
     condition: and(succeeded(), eq(dependencies.{{ stage_prefix }}_Detection.outputs['threatAnalysis.SafeToProcess'], 'true'))
     pool:
-      {{ pool_block }}
+      {{ pool }}
     steps:
       {{ checkout_self }}
       {{ checkout_repositories }}
