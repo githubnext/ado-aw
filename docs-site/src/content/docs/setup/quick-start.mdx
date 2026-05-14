@@ -83,11 +83,11 @@ ado-aw configure
 ```
 
 This sets the `GITHUB_TOKEN` pipeline variable on the ADO build definition. The command prompts for:
-- A **GitHub Personal Access Token (PAT)** -- used by the Copilot CLI at runtime
+- A **GitHub Personal Access Token (PAT)** -- used by the Copilot CLI at runtime (see [required permissions](#github-pat-permissions) below)
 - For Azure DevOps authentication, the command first tries the **Azure CLI** (`az` login session). If the Azure CLI is not available or not logged in, it falls back to prompting for an **Azure DevOps PAT**.
 
 :::caution[Temporary limitation: GitHub PAT required]
-The Copilot CLI does not yet support GitHub App tokens. You must provide a **classic or fine-grained GitHub PAT** with appropriate scopes. This requirement will be removed once GitHub App token support is added to the Copilot CLI.
+The Copilot CLI does not yet support GitHub App tokens. You must provide a fine-grained GitHub PAT. This requirement will be removed once GitHub App token support is added to the Copilot CLI.
 :::
 
 Run the pipeline in Azure DevOps -- it executes the three-stage workflow: Agent -> Detection -> Execution.
@@ -149,6 +149,25 @@ This sets the `GITHUB_TOKEN` pipeline variable. See the [With Agents](#3-push-an
 ### 5. Run the pipeline
 
 Back in Azure DevOps, run the pipeline. It executes the compiled three-stage workflow: Agent -> Detection -> Execution.
+
+---
+
+## GitHub PAT permissions
+
+The Copilot CLI engine requires a **fine-grained GitHub Personal Access Token** to authenticate. [Create one here](https://github.com/settings/personal-access-tokens/new) with the following settings:
+
+| Setting | Value |
+|---------|-------|
+| **Resource owner** | Your **personal user account** (not an organization) |
+| **Permissions** | Account permissions -> **Copilot Requests: Read** |
+
+No repository permissions are needed -- the token is only used for Copilot inference.
+
+:::caution[Temporary limitation]
+GitHub App tokens and OAuth tokens are **not supported** for this secret. Only fine-grained PATs work. The token owner's account must have an active Copilot license.
+:::
+
+The token is stored as the `GITHUB_TOKEN` pipeline variable on your Azure DevOps build definition (set by `ado-aw configure`). It is never exposed to the agent -- only the pipeline runtime uses it.
 
 ---
 

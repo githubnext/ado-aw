@@ -97,7 +97,9 @@ Options:
 
 ### `configure`
 
-Detect and update Azure DevOps pipeline variables on build definitions.
+Detect agentic pipelines in a local repository and update the `GITHUB_TOKEN` pipeline variable on their Azure DevOps build definitions. The Copilot CLI engine needs this token to authenticate with GitHub.
+
+For Azure DevOps API authentication, the command first tries the **Azure CLI** (`az` login session) and falls back to prompting for a PAT if unavailable.
 
 ```bash
 ado-aw configure [options]
@@ -105,10 +107,10 @@ ado-aw configure [options]
 
 Options:
 
-- `--token <token>` -- token value to apply
+- `--token <token>` -- GitHub PAT value to apply (prompted if omitted). Must be a [fine-grained PAT](/ado-aw/setup/quick-start/#github-pat-permissions) with **Copilot Requests: Read** permission.
 - `--org <url>` -- Azure DevOps organization URL
 - `--project <name>` -- Azure DevOps project name
-- `--pat <pat>` -- PAT used for Azure DevOps API authentication
+- `--pat <pat>` -- PAT used for Azure DevOps API authentication (fallback if Azure CLI is unavailable)
 - `--path <path>` -- repository path to inspect
 - `--dry-run` -- preview changes without applying them
 - `--definition-ids <ids>` -- comma-separated definition IDs to update
