@@ -1,0 +1,71 @@
+---
+title: Architecture
+description: Explore the main components that make up the ado-aw compiler and runtime model
+sidebar:
+  order: 3
+---
+
+`ado-aw` combines a Rust-based compiler with runtime components that support secure agent execution in Azure DevOps.
+
+## High-level architecture
+
+At a high level, the project includes:
+
+- a **compiler** that reads markdown agent files and emits Azure DevOps YAML
+- multiple **compile targets** for different pipeline shapes
+- configurable **runtimes** such as Python, Node.js, .NET, and Lean
+- first-class **tools** and **tool allow-lists** for agent execution
+- **safe outputs** that let agents propose controlled write actions
+- **MCP support** for exposing tools and services through the Model Context Protocol
+
+## Main building blocks
+
+### Compiler
+
+The compiler parses front matter, validates configuration, and renders pipeline templates for Azure DevOps.
+
+### Compile targets
+
+`ado-aw` supports different output targets, including standalone pipelines and Azure DevOps template-style targets such as job and stage outputs.
+
+### Runtimes
+
+Runtimes define the environment an agent needs for its work. For example, a workflow may require Python packages, Node.js tooling, or .NET support.
+
+### Tools and integrations
+
+Agents can be given controlled access to built-in tools and MCP-backed integrations. This keeps capabilities explicit and reviewable.
+
+### Safe outputs
+
+Safe outputs are the bridge between agent intent and real-world mutations. Instead of writing directly, the agent produces structured proposals that are checked before execution.
+
+### MCP
+
+`ado-aw` can run SafeOutputs as an MCP server and can integrate with additional MCP services, making it easier to expose tools in a structured, auditable way.
+
+## Directory structure overview
+
+A simplified view of the repository looks like this:
+
+```text
+src/
+  compile/       Pipeline compilation logic and targets
+  runtimes/      Runtime environment support
+  safeoutputs/   Safe-output tool implementations
+  tools/         First-class tool integrations
+  data/          Base pipeline templates and supporting assets
+docs/            Detailed reference documentation
+examples/        Example agent definitions
+tests/           Integration tests and fixtures
+```
+
+## How the pieces fit together
+
+1. You author an agent file in markdown.
+2. The compiler reads its front matter and body.
+3. Compile targets render the appropriate Azure DevOps YAML.
+4. Runtimes, tools, and MCP integrations are added based on configuration.
+5. Safe outputs connect Stage 1 proposals to Stage 3 execution.
+
+This separation helps keep the authoring model approachable while preserving strong runtime controls.

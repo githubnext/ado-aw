@@ -1,0 +1,318 @@
+---
+title: Creating agent definition files
+description: Learn how to write ado-aw agent files with front matter, tools, runtimes, repositories, safe outputs, and triggers.
+---
+
+# Creating agent definition files
+
+This guide shows how to create an `ado-aw` agent file from scratch.
+
+An agent file is a Markdown document with YAML front matter at the top:
+
+- **YAML front matter** configures the pipeline
+- **Markdown body** becomes the agent's instructions
+
+## Start with the smallest useful file
+
+Create a file such as `my-agent.md`:
+
+```yaml
+---
+name: "my-agent"
+description: "Describes what this agent does"
+engine: copilot
+pool: AZS-1ES-L-MMS-ubuntu-22.04
+---
+
+Your agent prompt goes here in markdown. This is what the AI agent will see
+as its instructions when the pipeline runs.
+```
+
+That is enough to define an agent. The compiler reads the front matter, then uses the Markdown body as the prompt.
+
+## Understand the structure
+
+A typical file looks like this:
+
+```md
+---
+name: "dependency-updater"
+description: "Updates dependencies and proposes safe changes"
+on:
+  schedule: weekly on monday
+---
+
+## Dependency updater
+
+Review outdated dependencies, make safe updates, run relevant checks, and
+summarize the result.
+```
+
+Use the front matter for configuration and keep the body focused on what the agent should do.
+
+## Add tools
+
+Use `tools:` to control what the agent can do.
+
+```yaml
+tools:
+  bash: ["git", "ls", "cat", "grep", "cargo"]
+  edit: true
+  cache-memory: true
+  azure-devops: true
+```
+
+### Bash allow-list
+
+Use `tools.bash` when you want to restrict shell access to specific commands:
+
+```yaml
+tools:
+  bash: ["git", "npm", "node", "grep"]
+```
+
+Use an empty list to disable bash entirely:
+
+```yaml
+tools:
+  bash: []
+```
+
+### Edit tool
+
+The `edit` tool lets the agent modify files:
+
+```yaml
+tools:
+  edit: true
+```
+
+### Cache memory
+
+Enable persistent memory across runs:
+
+```yaml
+tools:
+  cache-memory:
+    allowed-extensions: [.md, .json, .txt]
+```
+
+This is useful for long-running review, triage, or maintenance agents.
+
+### Azure DevOps tool
+
+Enable the built-in Azure DevOps MCP integration:
+
+```yaml
+tools:
+  azure-devops:
+    toolsets: [core, repos, wit]
+    allowed:
+      - core_list_projects
+      - repo_list_repos_by_project
+      - wit_get_work_item
+```
+
+If the agent needs Azure DevOps API access, also configure `permissions:` appropriately.
+
+## Add runtimes
+
+Use `runtimes:` when the agent needs a language toolchain installed before it runs.
+
+```yaml
+runtimes:
+  python:
+    version: "3.12"
+  node:
+    version: "22.x"
+  dotnet:
+    version: "8.0.x"
+  lean: true
+```
+
+You can enable just the runtimes you need:
+
+```yaml
+runtimes:
+  python: true
+```
+
+Common uses:
+
+- **python** for scripts, data processing, or package-based automation
+- **node** for JavaScript or TypeScript workflows
+- **dotnet** for .NET builds and tooling
+- **lean** for theorem proving and formal verification
+
+## Configure safe outputs
+
+Safe outputs let the agent propose approved write actions instead of acting directly.
+
+```yaml
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+    reviewers:
+      - user@example.com
+  create-work-item:
+    work-item-type: Task
+    tags:
+      - automated
+      - backlog
+```
+
+Use safe outputs when you want the agent to do things like:
+
+- create a pull request
+- create or update work items
+- comment on a PR or work item
+- upload artifacts or attachments
+
+If you configure write-capable safe outputs, also configure `permissions.write`.
+
+## Add repositories with `repos:`
+
+Use `repos:` when the agent needs access to repositories beyond the triggering repo.
+
+### Shorthand form
+
+```yaml
+repos:
+  - my-org/tools
+  - docs=my-org/product-docs
+```
+
+This is the fastest way to add repositories.
+
+### Object form
+
+Use the object form when you need full control:
+
+```yaml
+repos:
+  - name: my-org/tools
+    alias: tools
+    ref: refs/heads/main
+  - name: my-org/pipeline-templates
+    alias: templates
+    ref: refs/heads/release
+    checkout: false
+```
+
+Use `checkout: false` for a repository that should be declared as a resource but not cloned into the workspace.
+
+## Set the workspace
+
+The `workspace:` field controls which checked-out directory the agent runs in.
+
+```yaml
+workspace: root
+```
+
+Common values:
+
+- `root` — run from the pipeline working directory root
+- `repo` or `self` — run from the triggering repository
+- a repo alias — run from a specific repository declared in `repos:`
+
+Example:
+
+```yaml
+repos:
+  - tools=my-org/tools
+  - docs=my-org/product-docs
+workspace: docs
+```
+
+That makes the agent run inside the `docs` repository.
+
+## Add triggers
+
+Configure triggers under `on:`.
+
+### Push
+
+```yaml
+on:
+  push:
+    branches:
+      include: [main]
+```
+
+### Pull request
+
+```yaml
+on:
+  pull_request:
+    branches:
+      include: [main]
+```
+
+### Schedule
+
+```yaml
+on:
+  schedule: daily around 14:00
+```
+
+You can combine them:
+
+```yaml
+on:
+  push:
+    branches:
+      include: [main]
+  pull_request:
+    branches:
+      include: [main]
+  schedule: weekly on monday around 09:00
+```
+
+## Put it together
+
+Here is a practical example:
+
+```yaml
+---
+name: "dependency-maintainer"
+description: "Updates dependencies and proposes safe changes"
+workspace: repo
+repos:
+  - infra=my-org/infra-scripts
+on:
+  pull_request:
+    branches:
+      include: [main]
+  schedule: weekly on monday around 09:00
+tools:
+  bash: ["git", "python", "pip", "npm", "cargo"]
+  edit: true
+  cache-memory: true
+  azure-devops: true
+runtimes:
+  python:
+    version: "3.12"
+  node:
+    version: "22.x"
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+    draft: true
+permissions:
+  read: my-read-arm-connection
+  write: my-write-arm-connection
+---
+
+## Dependency maintainer
+
+Review dependency updates, make safe changes, run the relevant checks, and
+create a pull request with a concise summary.
+```
+
+## Next steps
+
+1. Create the Markdown file.
+2. Add only the tools and runtimes your agent needs.
+3. Configure `repos:` and `workspace:` if the agent spans multiple repositories.
+4. Add `safe-outputs:` for any write actions.
+5. Add `on:` triggers so the pipeline runs when you want.

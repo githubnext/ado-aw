@@ -1,0 +1,44 @@
+{
+  "questions": [
+    {
+      "q": "What is ado-aw?",
+      "a": "ado-aw is a compiler that transforms natural-language markdown files with YAML front matter into Azure DevOps pipeline definitions. It enables AI agents to work safely in network-isolated sandboxes."
+    },
+    {
+      "q": "How do I install ado-aw?",
+      "a": "Build from source with `cargo build` or install with `cargo install --path .` from the repository root."
+    },
+    {
+      "q": "How do I compile an agent file?",
+      "a": "Run `ado-aw compile ./path/to/agent.md` to compile a single file, or `ado-aw compile` to auto-discover and recompile all agentic pipelines in the current directory."
+    },
+    {
+      "q": "What is the three-stage pipeline model?",
+      "a": "Every compiled pipeline runs three sequential jobs: (1) Agent stage in a network-isolated sandbox producing safe-output proposals, (2) Detection stage inspecting for prompt injection/secret leaks, (3) Execution stage applying approved outputs with a write-capable token."
+    },
+    {
+      "q": "What are safe outputs?",
+      "a": "Safe outputs are the controlled set of actions an agent can propose (create PRs, comment on work items, etc.). They are validated in Stage 2 and executed in Stage 3, ensuring the agent never has direct write access."
+    },
+    {
+      "q": "What targets are supported?",
+      "a": "Four targets: 'standalone' (default, full pipeline), '1es' (1ES Pipeline Template), 'job' (job-level ADO template), and 'stage' (stage-level ADO template)."
+    },
+    {
+      "q": "How does network isolation work?",
+      "a": "Pipelines run in OneBranch's AWF (Agentic Workflow Firewall) network-isolated environment. Only explicitly allowed domains are accessible. Ecosystem domains (PyPI, npm, crates.io, etc.) can be enabled via the runtimes configuration."
+    },
+    {
+      "q": "What MCP tools are available?",
+      "a": "Built-in MCP tools include GitHub integration (always-on), SafeOutputs (always-on), and configurable tools like azure-devops and cache-memory. Custom MCP servers can be added via stdio containers or HTTP backends."
+    },
+    {
+      "q": "How do I configure an AI engine?",
+      "a": "Set the `engine:` field in front matter. Use the string form (`engine: copilot`) for defaults, or the object form to specify model, timeout-minutes, version, api-target, args, env, or command."
+    },
+    {
+      "q": "How do I add runtime dependencies?",
+      "a": "Use the `runtimes:` field in front matter to declare Python, Node.js, .NET, or Lean runtimes. Each runtime supports version pinning, package installation, and authentication to private registries."
+    }
+  ]
+}

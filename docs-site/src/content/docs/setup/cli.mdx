@@ -1,0 +1,127 @@
+---
+title: CLI Commands
+description: Reference for the ado-aw command-line interface
+sidebar:
+  order: 2
+---
+
+The `ado-aw` CLI provides commands for initializing repositories, compiling pipelines, running MCP servers, executing safe outputs, and configuring Azure DevOps definitions.
+
+## Global flags
+
+These flags apply to all commands:
+
+- `--verbose`, `-v` — enable more detailed logging
+- `--debug`, `-d` — enable debug logging
+- `--log-output-dir <path>` — write log files to a specific directory
+
+## Commands
+
+### `init`
+
+Initialize a repository for AI-first agentic pipeline authoring.
+
+```bash
+ado-aw init [--path <path>] [--force]
+```
+
+Options:
+
+- `--path <path>` — target directory
+- `--force` — continue even when repository checks would normally block initialization
+
+### `compile [<path>]`
+
+Compile markdown into Azure DevOps pipeline YAML. If you omit the path, `ado-aw` auto-discovers agentic pipeline sources in the current directory.
+
+```bash
+ado-aw compile [<path>] [--output <path>]
+```
+
+Options:
+
+- `--output`, `-o <path>` — write the generated YAML to a specific file or directory
+- `--skip-integrity` — debug-only option to skip the generated integrity check step
+- `--debug-pipeline` — debug-only option to include extra pipeline diagnostics
+
+### `check <pipeline>`
+
+Verify that a compiled pipeline still matches its source markdown.
+
+```bash
+ado-aw check <pipeline>
+```
+
+### `mcp <output_directory> <bounding_directory>`
+
+Run SafeOutputs as a stdio MCP server.
+
+```bash
+ado-aw mcp <output_directory> <bounding_directory> [--enabled-tools <name>]
+```
+
+Options:
+
+- `--enabled-tools <name>` — limit the server to specific tools; repeat to allow more than one
+
+### `mcp-http <output_directory> <bounding_directory>`
+
+Run SafeOutputs as an HTTP MCP server.
+
+```bash
+ado-aw mcp-http <output_directory> <bounding_directory> [options]
+```
+
+Options:
+
+- `--port <port>` — port to listen on
+- `--api-key <key>` — API key used to authenticate requests
+- `--enabled-tools <name>` — limit the server to specific tools; repeat to allow more than one
+
+### `execute`
+
+Execute safe outputs as the final runtime stage.
+
+```bash
+ado-aw execute [options]
+```
+
+Options:
+
+- `--source`, `-s <path>` — source markdown file
+- `--safe-output-dir <path>` — directory containing safe output records
+- `--output-dir <path>` — directory for processed artifacts
+- `--ado-org-url <url>` — Azure DevOps organization URL override
+- `--ado-project <name>` — Azure DevOps project name override
+- `--dry-run` — validate inputs without making write calls
+
+### `configure`
+
+Detect and update Azure DevOps pipeline variables on build definitions.
+
+```bash
+ado-aw configure [options]
+```
+
+Options:
+
+- `--token <token>` — token value to apply
+- `--org <url>` — Azure DevOps organization URL
+- `--project <name>` — Azure DevOps project name
+- `--pat <pat>` — PAT used for Azure DevOps API authentication
+- `--path <path>` — repository path to inspect
+- `--dry-run` — preview changes without applying them
+- `--definition-ids <ids>` — comma-separated definition IDs to update
+
+## Common examples
+
+```bash
+# Compile one source file
+ado-aw compile agent.md
+
+# Recompile all detected pipelines in the current directory
+ado-aw compile
+
+# Verify a generated pipeline
+ado-aw check agent.lock.yml
+```

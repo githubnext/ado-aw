@@ -1,0 +1,178 @@
+---
+title: Configuring MCP servers
+description: Learn how ado-aw uses MCP, which built-in servers are available, and how to add custom stdio or HTTP MCP backends.
+---
+
+# Configuring MCP servers
+
+In `ado-aw`, **MCP** means **Model Context Protocol** servers that expose tools to the agent.
+
+Instead of giving the agent direct access to every system, you configure specific MCP backends and allow only the tools you want the agent to call.
+
+## Start with the built-in MCPs
+
+Two built-in MCP integrations matter most for day-to-day usage:
+
+- **SafeOutputs** for approved write proposals such as PRs, work items, and comments
+- **GitHub** for GitHub-related operations made available by the compiler's built-in extension layer
+
+You usually interact with SafeOutputs through `safe-outputs:` configuration rather than by wiring the server yourself.
+
+## Add a custom stdio MCP server
+
+Use `mcp-servers:` when you want to run a containerized MCP server over stdio.
+
+```yaml
+mcp-servers:
+  azure-devops:
+    container: "node:20-slim"
+    entrypoint: "npx"
+    entrypoint-args: ["-y", "@azure-devops/mcp", "myorg"]
+    env:
+      AZURE_DEVOPS_EXT_PAT: ""
+    allowed:
+      - core_list_projects
+      - wit_get_work_item
+```
+
+This tells the compiler to make that MCP server available through the gateway and allow only the listed tools.
+
+### When to use stdio containers
+
+Use a containerized stdio MCP when:
+
+- you have an MCP server packaged as a CLI program
+- you want reproducible runtime dependencies
+- you want the gateway to launch the server for you
+
+## Add an HTTP MCP backend
+
+If you already host an MCP server elsewhere, point to it with `url:`.
+
+```yaml
+mcp-servers:
+  remote-ado:
+    url: "https://mcp.dev.azure.com/myorg"
+    headers:
+      X-MCP-Toolsets: "repos,wit"
+      X-MCP-Readonly: "true"
+    allowed:
+      - wit_get_work_item
+      - repo_list_repos_by_project
+```
+
+### When to use HTTP backends
+
+Use an HTTP backend when:
+
+- your MCP server already runs as a shared service
+- you do not want the pipeline to start a container for it
+- the service is managed outside the pipeline
+
+## Pass environment variables through
+
+Many MCP servers need credentials or configuration values.
+
+Use `env:` for that:
+
+```yaml
+env:
+  AZURE_DEVOPS_EXT_PAT: ""
+  STATIC_CONFIG: "readonly"
+```
+
+A blank string means **pass through the value from the pipeline environment**.
+A normal string means **use this literal value**.
+
+This is especially useful for tokens and service-specific configuration.
+
+## Restrict tool access with `allowed:`
+
+Always keep the `allowed:` list as small as practical.
+
+```yaml
+mcp-servers:
+  custom-tool:
+    container: "ghcr.io/example/my-tool:latest"
+    entrypoint: "my-tool"
+    allowed:
+      - search_docs
+      - get_status
+```
+
+This prevents the agent from calling tools you did not intend to expose.
+
+## Understand the MCP Gateway architecture
+
+`ado-aw` uses **MCPG** (MCP Gateway) as the routing layer between the agent and configured MCP servers.
+
+At a high level:
+
+1. the agent runs inside the AWF-isolated environment
+2. the gateway runs outside that container boundary
+3. SafeOutputs and your configured MCP servers are connected to the gateway
+4. the agent calls tools through the gateway
+5. the gateway routes each request to the correct backend
+
+This gives you one place to control:
+
+- which servers are available
+- which tools are exposed
+- how tool traffic is routed
+
+## Practical example: Azure DevOps MCP plus safe outputs
+
+```yaml
+---
+name: "triage-agent"
+description: "Triages work items and proposes follow-up actions"
+tools:
+  azure-devops:
+    toolsets: [core, wit]
+    allowed:
+      - core_list_projects
+      - wit_get_work_item
+permissions:
+  read: my-read-arm-connection
+  write: my-write-arm-connection
+safe-outputs:
+  update-work-item:
+    status: true
+    body: true
+    target: "*"
+  comment-on-work-item:
+    max: 5
+    target: "*"
+---
+
+Review assigned work items, summarize findings, and propose safe updates.
+```
+
+This combines:
+
+- Azure DevOps read access for the agent
+- SafeOutputs for controlled write actions
+- explicit tool scoping for safety
+
+## Practical example: custom MCP service
+
+```yaml
+mcp-servers:
+  docs-search:
+    url: "https://mcp.contoso.net/docs"
+    headers:
+      Authorization: "Bearer $(DOCS_MCP_TOKEN)"
+    allowed:
+      - search_docs
+      - fetch_doc
+```
+
+Use this pattern when you already operate an internal MCP service.
+
+## Recommended workflow
+
+1. start with built-in capabilities such as SafeOutputs
+2. add `tools.azure-devops` if the agent needs Azure DevOps tooling
+3. add custom `mcp-servers:` only for extra capabilities
+4. keep `allowed:` lists tight
+5. use `env:` passthrough for secrets and tokens instead of hardcoding values

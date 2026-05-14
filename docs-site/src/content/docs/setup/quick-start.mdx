@@ -1,0 +1,89 @@
+---
+title: Quick Start
+description: Build ado-aw, create a minimal agent file, and compile your first Azure DevOps pipeline
+sidebar:
+  order: 1
+---
+
+This guide walks through the fastest way to build `ado-aw`, create a minimal agent definition, and compile it into Azure DevOps pipeline YAML.
+
+## Prerequisites
+
+Install a current Rust toolchain before you begin.
+
+```bash
+rustup toolchain install stable
+rustup default stable
+```
+
+## 1. Build ado-aw
+
+From the repository root, build the project:
+
+```bash
+cargo build --release
+```
+
+You can also run commands directly from source with `cargo run --`.
+
+## 2. Create a minimal agent file
+
+Create a file named `agent.md`:
+
+```markdown
+---
+name: Hello from ado-aw
+description: A minimal agentic pipeline example
+engine:
+  id: copilot
+on:
+  workflow_dispatch:
+pool: AZS-1ES-L-MMS-ubuntu-22.04
+---
+
+## Instructions
+
+Inspect the repository and summarize what this project does.
+```
+
+This file combines YAML front matter for configuration with markdown instructions for the agent.
+
+## 3. Compile it
+
+Run the compiler:
+
+```bash
+cargo run -- compile agent.md
+```
+
+By default, `ado-aw` writes a compiled `.lock.yml` pipeline alongside the source file.
+
+## 4. Verify the generated pipeline
+
+You should now have:
+
+- `agent.md` — your source definition
+- `agent.lock.yml` — the compiled Azure DevOps pipeline
+
+To verify that the generated pipeline still matches the source file:
+
+```bash
+cargo run -- check agent.lock.yml
+```
+
+## 5. Push it to Azure DevOps
+
+After you are happy with the generated files:
+
+1. Commit both `agent.md` and the compiled `.lock.yml` file.
+2. Push them to your Azure DevOps repository.
+3. In Azure DevOps, create a pipeline that points at the compiled YAML file.
+4. Save or run the pipeline.
+
+From there, Azure DevOps executes the compiled three-stage workflow: Agent, Detection, and Execution.
+
+## Next steps
+
+- Learn the available commands in [CLI Commands](/ado-aw/setup/cli/)
+- Read [How It Works](/ado-aw/introduction/how-it-works/)
+- Explore the reference docs for front matter, tools, runtimes, and safe outputs

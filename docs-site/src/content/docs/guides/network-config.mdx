@@ -1,0 +1,177 @@
+---
+title: Configuring network access
+description: Learn how ado-aw network isolation works, which domains are allowed by default, and how to allow or block additional hosts.
+---
+
+# Configuring network access
+
+`ado-aw` runs agents inside **AWF** (Agentic Workflow Firewall), which applies network isolation to outbound traffic.
+
+The default model is simple:
+
+- the agent runs in an isolated environment
+- only approved domains are reachable
+- you explicitly allow anything extra the agent needs
+
+## Understand the AWF model
+
+When a pipeline runs, the agent does **not** get open internet access. Instead, AWF enforces an allowlist for outbound HTTP and HTTPS traffic.
+
+This gives you a safer default for AI-driven automation:
+
+- package registries can be allowed intentionally
+- internal APIs can be added explicitly
+- unwanted destinations can be blocked even if they would otherwise be reachable
+
+## Rely on the default allowed domains
+
+Several domains are always allowed so the platform can function.
+
+These include GitHub, Azure DevOps, and related authentication and asset hosts, such as:
+
+- `github.com`
+- `api.github.com`
+- `dev.azure.com`
+- `*.dev.azure.com`
+- Azure DevOps package and identity domains
+
+In practice, this means many common GitHub and Azure DevOps scenarios work without extra network configuration.
+
+## Enable ecosystem domains through runtimes
+
+The easiest way to allow package ecosystem traffic is often to enable the matching runtime.
+
+For example, enabling Python adds Python ecosystem domains such as PyPI hosts, and enabling Node adds Node ecosystem domains such as npm registry hosts.
+
+```yaml
+runtimes:
+  python: true
+  node: true
+  dotnet: true
+```
+
+Typical runtime-driven ecosystem access:
+
+- `python` adds Python package domains such as `pypi.org`
+- `node` adds Node package domains such as `registry.npmjs.org`
+- `dotnet` adds .NET package domains such as NuGet hosts
+- `lean` adds Lean ecosystem hosts
+
+This is usually better than hand-maintaining every package registry domain yourself.
+
+## Allow custom hosts
+
+To allow additional domains, add them under `network.allowed`.
+
+```yaml
+network:
+  allowed:
+    - "api.contoso.internal"
+    - "*.corp.example.com"
+```
+
+You can mix raw host patterns with ecosystem identifiers:
+
+```yaml
+network:
+  allowed:
+    - python
+    - node
+    - "packages.contoso.com"
+    - "*.services.contoso.com"
+```
+
+Use this when your agent needs:
+
+- an internal API
+- an internal package registry
+- a vendor service not covered by the defaults
+
+## Block specific domains
+
+Use `network.blocked` to remove entries from the final allowlist.
+
+```yaml
+network:
+  allowed:
+    - python
+    - node
+    - "*.example.com"
+  blocked:
+    - python
+    - "registry.npmjs.org"
+    - "bad.example.com"
+```
+
+This is useful when you want broad access in one area but still need to exclude specific destinations.
+
+A practical pattern is:
+
+1. allow an ecosystem or wildcard domain
+2. block the parts you do not want used
+
+## Give the agent Azure DevOps access with `permissions:`
+
+Network access and Azure DevOps API access are related but different.
+
+Even if Azure DevOps domains are reachable, the agent still needs credentials if it should call ADO APIs.
+
+Configure that with service connections:
+
+```yaml
+permissions:
+  read: my-read-arm-connection
+  write: my-write-arm-connection
+```
+
+Use this model as follows:
+
+- `permissions.read` gives the Stage 1 agent read-only ADO access
+- `permissions.write` gives Stage 3 safe-output execution write access
+- the write token is not exposed directly to the agent
+
+This lets you combine tight network rules with controlled ADO permissions.
+
+## Example: Python agent with internal feed access
+
+```yaml
+---
+name: "python-maintainer"
+description: "Maintains Python dependencies"
+runtimes:
+  python:
+    version: "3.12"
+network:
+  allowed:
+    - "pkgs.dev.azure.com"
+    - "*.pkgs.dev.azure.com"
+    - "pypi.contoso.internal"
+permissions:
+  read: my-read-arm-connection
+---
+
+Review Python dependencies, install what you need, and summarize any required
+changes.
+```
+
+## Example: Allow an internal API but block a public endpoint
+
+```yaml
+network:
+  allowed:
+    - "*.contoso.com"
+  blocked:
+    - "public-api.contoso.com"
+```
+
+## Recommended workflow
+
+When configuring network access:
+
+1. start with defaults only
+2. enable runtimes for package ecosystems
+3. add custom hosts under `network.allowed`
+4. block anything you explicitly want excluded
+5. add `permissions.read` or `permissions.write` if the agent must call Azure DevOps APIs
+
+This keeps agent access narrow, explicit, and easier to review.

@@ -1,0 +1,158 @@
+---
+title: Writing schedule expressions
+description: Learn how to configure human-readable schedules, timezones, scattering, and how ado-aw turns them into concrete pipeline schedules.
+---
+
+# Writing schedule expressions
+
+`ado-aw` lets you write schedules in a human-readable format instead of hand-writing cron.
+
+You configure schedules under `on.schedule`.
+
+## Start with a simple schedule
+
+```yaml
+on:
+  schedule: daily around 14:00
+```
+
+This says: run every day at roughly 2 PM.
+
+## Use fuzzy human-readable expressions
+
+Here are common patterns you can use.
+
+### Daily
+
+```yaml
+on:
+  schedule: daily around 14:00
+```
+
+```yaml
+on:
+  schedule: daily between 09:00 and 17:00
+```
+
+### Weekly
+
+```yaml
+on:
+  schedule: weekly on monday
+```
+
+```yaml
+on:
+  schedule: weekly on friday around 17:00
+```
+
+### Hour-based intervals
+
+```yaml
+on:
+  schedule: every 6 hours
+```
+
+Other supported interval-style schedules include forms like `every 2h` and `every 30m`.
+
+## Add a timezone
+
+You can add UTC offsets directly in the expression.
+
+```yaml
+on:
+  schedule: daily around 14:00 utc+9
+```
+
+```yaml
+on:
+  schedule: daily between 09:00 utc-5 and 17:00 utc-5
+```
+
+Use this when you want the schedule to reflect a team's local business hours without manually converting everything to UTC.
+
+## Understand scattering
+
+`ado-aw` does not always compile a fuzzy schedule to the exact same wall-clock minute you typed.
+
+Instead, it applies **scattering**: a deterministic offset that spreads runs out to avoid a thundering herd effect.
+
+For example:
+
+```yaml
+on:
+  schedule: daily around 14:00
+```
+
+means:
+
+- stay near 14:00
+- pick a stable offset for this agent
+- avoid scheduling every agent at the exact same minute
+
+This helps when many teams use convenient schedule times like midnight, 9 AM, or the top of the hour.
+
+## Know what happens at compile time
+
+Azure DevOps pipelines ultimately need concrete schedule values. During compilation, `ado-aw` converts the fuzzy expression into a concrete schedule that Azure DevOps can run.
+
+In practice, that means:
+
+- your human-readable expression is parsed
+- timezone offsets are converted to UTC
+- scattering is applied
+- the compiled pipeline gets a concrete cron-style schedule
+
+You write the friendly expression; the compiler emits the precise schedule.
+
+## Schedule specific branches
+
+If you want more than the default branch behavior, use the object form:
+
+```yaml
+on:
+  schedule:
+    run: weekly on monday around 09:00
+    branches:
+      - main
+      - release/*
+```
+
+This is useful when scheduled automation should run on release branches as well as `main`.
+
+## Practical examples
+
+### Business-hours review agent
+
+```yaml
+on:
+  schedule: daily between 09:00 and 17:00 utc-5
+```
+
+Use this for an agent that should run once each day during US Eastern business hours.
+
+### Weekly maintenance window
+
+```yaml
+on:
+  schedule: weekly on monday around 06:00 utc+1
+```
+
+Use this for a Monday morning maintenance agent.
+
+### Regular polling
+
+```yaml
+on:
+  schedule: every 6 hours
+```
+
+Use this when you need a repeated check throughout the day.
+
+## Tips for choosing a schedule
+
+- Use `daily around ...` for routine maintenance jobs.
+- Use `weekly on ...` for lower-frequency cleanup or reporting.
+- Use `every N hours` for repeated monitoring or polling.
+- Add a timezone when the schedule should track local working hours.
+- Let scattering do its job instead of trying to force an exact shared minute across many agents.

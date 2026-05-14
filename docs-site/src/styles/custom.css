@@ -1,0 +1,82 @@
+/* ado-aw docs — custom Starlight theme */
+
+/* Fonts */
+@font-face {
+  font-family: 'Mona Sans';
+  src: url('/ado-aw/fonts/Mona-Sans.woff2') format('woff2');
+  font-weight: 200 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --sl-font: 'Mona Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+}
+
+/* Dark mode (default) */
+:root {
+  --sl-color-accent-low: #6639ba;
+  --sl-color-accent: #d896ff;
+  --sl-color-accent-high: #e5c7ff;
+  --sl-color-text-accent: #d896ff;
+  --sl-color-black: #010409;
+  --sl-color-text: #f0f6fc;
+  --sl-color-bg: #0d1117;
+  --sl-color-bg-sidebar: #010409;
+  --sl-color-bg-nav: #161b22;
+  --sl-color-hairline-light: #21262d;
+  --sl-color-hairline: #30363d;
+}
+
+/* Light mode */
+[data-theme='light'] {
+  --sl-color-accent-low: #ede5f7;
+  --sl-color-accent: #6b46c1;
+  --sl-color-accent-high: #4c2889;
+  --sl-color-text-accent: #6b46c1;
+  --sl-color-black: #1f2328;
+  --sl-color-text: #1f2328;
+  --sl-color-bg: #ffffff;
+  --sl-color-bg-sidebar: #f6f8fa;
+  --sl-color-bg-nav: #f6f8fa;
+  --sl-color-hairline-light: #d1d9e0;
+  --sl-color-hairline: #d1d9e0;
+}
+
+/* Hero section styling */
+.hero {
+  text-align: center;
+  padding: 3rem 1rem;
+}
+
+.hero h1 {
+  font-size: 2.5rem;
+  font-weight: 800;
+  background: linear-gradient(135deg, var(--sl-color-accent), #a855f7);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Code blocks */
+pre {
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 0.5rem;
+}
+
+/* Table styling */
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th {
+  background: var(--sl-color-bg-nav);
+  font-weight: 600;
+}
+
+td, th {
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--sl-color-hairline);
+}

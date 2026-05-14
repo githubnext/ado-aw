@@ -1,0 +1,73 @@
+---
+title: Local Development
+description: Set up a local ado-aw development environment and test changes from source
+sidebar:
+  order: 3
+---
+
+If you want to work on `ado-aw` itself, a local Rust-based development setup is enough for most compiler and documentation tasks.
+
+## Prerequisites
+
+- A current Rust toolchain
+- Git
+- An editor of your choice
+
+## Build from source
+
+From the repository root:
+
+```bash
+cargo build
+```
+
+For an optimized build:
+
+```bash
+cargo build --release
+```
+
+## Run the test suite
+
+Use the standard Rust workflow while developing:
+
+```bash
+cargo test
+cargo clippy
+```
+
+These commands help catch regressions and style issues before you commit changes.
+
+## Test compilation locally
+
+A simple way to validate changes is to compile an example or your own agent file.
+
+```bash
+cargo run -- compile path/to/agent.md
+```
+
+To verify the generated YAML matches the source definition:
+
+```bash
+cargo run -- check path/to/agent.lock.yml
+```
+
+## Iterate on documentation or compiler changes
+
+A common local loop looks like this:
+
+```bash
+cargo build
+cargo test
+cargo run -- compile path/to/agent.md
+cargo run -- check path/to/agent.lock.yml
+```
+
+If you are working on the docs site itself, run the site from `docs-site/` with your usual Astro workflow after installing dependencies.
+
+## What to verify before submitting changes
+
+- the project builds successfully
+- tests pass
+- your sample pipeline compiles cleanly
+- generated YAML matches the markdown source when checked
