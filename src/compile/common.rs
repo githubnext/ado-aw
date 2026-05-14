@@ -2637,15 +2637,12 @@ pub async fn compile_shared(
     let pipeline_path = generate_pipeline_path(output_path);
 
     // 7. Pool settings
-    let pool = if front_matter.target == CompileTarget::OneES {
-        resolve_onees_pool_name(front_matter.pool.as_ref())?
-    } else {
-        DEFAULT_ONEES_POOL.to_string()
-    };
-    let pool_block = if front_matter.target == CompileTarget::OneES {
-        format!("name: {}", pool)
-    } else {
-        resolve_non_onees_pool_block(front_matter.pool.as_ref())?
+    let (pool, pool_block) = match front_matter.target {
+        CompileTarget::OneES => {
+            let onees_pool = resolve_onees_pool_name(front_matter.pool.as_ref())?;
+            (onees_pool.clone(), format!("name: {}", onees_pool))
+        }
+        _ => (String::new(), resolve_non_onees_pool_block(front_matter.pool.as_ref())?),
     };
 
     // 8. Setup/teardown jobs, parameters, prepare/finalize steps
