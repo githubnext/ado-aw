@@ -84,7 +84,7 @@ ado-aw configure
 
 This sets the `GITHUB_TOKEN` pipeline variable on the ADO build definition. The command prompts for:
 - A **GitHub Personal Access Token (PAT)** -- used by the Copilot CLI at runtime
-- An **Azure DevOps PAT** -- used to update the pipeline variable via the ADO API
+- For Azure DevOps authentication, the command first tries the **Azure CLI** (`az` login session). If the Azure CLI is not available or not logged in, it falls back to prompting for an **Azure DevOps PAT**.
 
 :::caution[Temporary limitation: GitHub PAT required]
 The Copilot CLI does not yet support GitHub App tokens. You must provide a **classic or fine-grained GitHub PAT** with appropriate scopes. This requirement will be removed once GitHub App token support is added to the Copilot CLI.
