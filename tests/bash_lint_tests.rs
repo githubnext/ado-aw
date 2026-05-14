@@ -103,6 +103,7 @@ const REQUIRED_STEP_DISPLAY_NAMES: &[&str] = &[
     "Ensure nuget.config exists",             // src/runtimes/dotnet/mod.rs
     "Restore previous agent memory",          // src/tools/cache_memory/extension.rs
     "Initialize empty agent memory (clearMemory=true)",
+    "Append Python prompt",                   // src/runtimes/python/extension.rs
     "Generate GITHUB_PATH file",              // src/compile/common.rs (AWF path step)
     "Evaluate pipeline filters",              // src/compile/extensions/trigger_filters.rs + src/compile/filter_ir.rs
     "Evaluate PR filters",                    // src/compile/filter_ir.rs (GateContext::PullRequest)

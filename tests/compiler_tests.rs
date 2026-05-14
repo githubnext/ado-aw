@@ -96,7 +96,7 @@ fn assert_required_markers(content: &str) {
 /// and that no hardcoded pool name leaks into the template.
 fn assert_pool_config(content: &str) {
     // Must appear once per job: Agent, Detection, Execution.
-    let pool_marker_count = content.matches("name: {{ pool }}").count();
+    let pool_marker_count = content.matches("{{ pool }}").count();
     assert_eq!(
         pool_marker_count, 3,
         "Template should use '{{ pool }}' marker exactly three times (once for each job)"

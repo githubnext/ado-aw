@@ -242,14 +242,14 @@ mod tests {
 
     fn run(input: &str) -> Mapping {
         let mut m: Mapping = serde_yaml::from_str(input).unwrap();
-        let changed = apply_codemod(&mut m, &CodemodContext {}).expect("apply");
+        let changed = apply_codemod(&mut m, &CodemodContext::current()).expect("apply");
         assert!(changed, "expected codemod to fire on input:\n{}", input);
         m
     }
 
     fn run_noop(input: &str) -> Mapping {
         let mut m: Mapping = serde_yaml::from_str(input).unwrap();
-        let changed = apply_codemod(&mut m, &CodemodContext {}).expect("apply");
+        let changed = apply_codemod(&mut m, &CodemodContext::current()).expect("apply");
         assert!(!changed, "expected codemod to be a no-op on input:\n{}", input);
         m
     }
@@ -258,7 +258,7 @@ mod tests {
         let mut m: Mapping = serde_yaml::from_str(input).unwrap();
         format!(
             "{}",
-            apply_codemod(&mut m, &CodemodContext {}).unwrap_err()
+            apply_codemod(&mut m, &CodemodContext::current()).unwrap_err()
         )
     }
 
@@ -425,10 +425,10 @@ mod tests {
              checkout: [a]\n",
         )
         .unwrap();
-        let first = apply_codemod(&mut m, &CodemodContext {}).expect("first");
+        let first = apply_codemod(&mut m, &CodemodContext::current()).expect("first");
         assert!(first, "first run should fire");
         let snapshot = m.clone();
-        let second = apply_codemod(&mut m, &CodemodContext {}).expect("second");
+        let second = apply_codemod(&mut m, &CodemodContext::current()).expect("second");
         assert!(!second, "second run should be a no-op");
         assert_eq!(m, snapshot, "second run must not mutate");
     }

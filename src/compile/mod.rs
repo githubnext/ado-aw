@@ -778,7 +778,8 @@ Body
 "#;
         let (fm, _) = parse_markdown(content).unwrap();
         let pool = fm.pool.unwrap();
-        assert_eq!(pool.name(), "my-custom-pool");
+        assert_eq!(pool.name(), Some("my-custom-pool"));
+        assert_eq!(pool.vm_image(), None);
         assert_eq!(pool.os(), "linux"); // default
     }
 
@@ -795,7 +796,8 @@ Body
 "#;
         let (fm, _) = parse_markdown(content).unwrap();
         let pool = fm.pool.unwrap();
-        assert_eq!(pool.name(), "my-custom-pool");
+        assert_eq!(pool.name(), Some("my-custom-pool"));
+        assert_eq!(pool.vm_image(), None);
         assert_eq!(pool.os(), "windows");
     }
 

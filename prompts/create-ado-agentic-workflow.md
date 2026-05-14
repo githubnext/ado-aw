@@ -207,7 +207,9 @@ mcp-servers:
     mounts:
       - "/host/data:/app/data:ro"  # Volume mounts in "source:dest:mode" format
     env:
-      API_KEY: "$(MY_SECRET)"
+      API_KEY: ""              # Use "" (empty string) to passthrough from the pipeline environment.
+                               # Non-empty values are embedded as literal strings in the MCPG config —
+                               # ADO variable syntax like $(MY_SECRET) is NOT resolved here.
     allowed:
       - do_thing
       - get_status
@@ -219,7 +221,7 @@ mcp-servers:
   remote-service:
     url: "https://mcp.example.com"
     headers:
-      Authorization: "Bearer $(TOKEN)"
+      X-MCP-Toolsets: "repos,wit"
     allowed:
       - query_data
 ```
