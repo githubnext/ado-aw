@@ -4,9 +4,9 @@ description: Inject continuous AI into your Azure DevOps projects
 template: splash
 hero:
   title: |
-    Continuous AI for
     Azure DevOps
-  tagline: Wake up to security patch PRs, documentation updates, and pipeline failure analysis -- all proposed, reviewed, and applied automatically while you sleep.
+    Agentic Workflows
+  tagline: Continuous AI for Azure DevOps
   actions:
     - text: Get Started
       link: /ado-aw/setup/quick-start/
@@ -18,12 +18,6 @@ hero:
 
 import { Card, CardGrid, Tabs, TabItem } from '@astrojs/starlight/components';
 
-## What if your pipelines could think?
-
-Write a markdown file. Describe what you want an AI agent to do -- in plain English. `ado-aw` compiles it into a production-grade Azure DevOps pipeline with **five layers of security** baked in.
-
-Your agents run on a schedule or in response to events, proposing changes through **safe outputs** that are threat-scanned before anything touches your repositories.
-
 ```markdown
 ---
 on:
@@ -32,16 +26,18 @@ repos:
   - my-org/my-service
 safe-outputs:
   create-pr:
-    title-prefix: "[auto] "
-    max: 1
+    title-prefix: "[security] "
+    max: 3
 ---
 
 ## Dependency Guardian
 
 Scan all package manifests for outdated or vulnerable dependencies.
-For each finding, create a single pull request that bumps the version
+For each finding, create a pull request that bumps the version
 and updates the lockfile. Include a summary of CVEs addressed.
 ```
+
+Wake up to security patch PRs, documentation updates, and pipeline failure analysis -- all proposed, reviewed, and applied automatically while you sleep.
 
 ---
 
