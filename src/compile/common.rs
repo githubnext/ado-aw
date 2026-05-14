@@ -1055,6 +1055,8 @@ fn resolve_pool_block(target: CompileTarget, pool: Option<&PoolConfig>) -> Resul
                     ),
                     (Some(name), None) => Ok(format!("name: {}", name)),
                     (None, Some(vm_image)) => Ok(format!("vmImage: {}", vm_image)),
+                    // `pool: {}` (empty object) — fall back to the
+                    // Microsoft-hosted default, same as omitting pool.
                     (None, None) => Ok(format!("vmImage: {}", DEFAULT_VM_IMAGE_POOL)),
                 },
             }
@@ -1815,15 +1817,14 @@ pub fn generate_setup_job(
     let user_steps = steps_parts.join("\n\n");
 
     // Build the job YAML with markers for proper indentation
-    let mut template = format!(
-        r#"- job: Setup
+    let mut template = r#"- job: Setup
   displayName: "Setup"
   pool:
-    {pool}
+    {{ pool }}
   steps:
     - checkout: self
 "#
-    );
+    .to_string();
 
     if !ext_steps_combined.is_empty() {
         template.push_str("    {{ ext_setup_steps }}\n");
@@ -1832,7 +1833,8 @@ pub fn generate_setup_job(
         template.push_str("    {{ user_setup_steps }}\n");
     }
 
-    let yaml = replace_with_indent(&template, "{{ ext_setup_steps }}", &ext_steps_combined);
+    let yaml = replace_with_indent(&template, "{{ pool }}", pool);
+    let yaml = replace_with_indent(&yaml, "{{ ext_setup_steps }}", &ext_steps_combined);
     let yaml = replace_with_indent(&yaml, "{{ user_setup_steps }}", &user_steps);
 
     Ok(yaml)
@@ -1849,18 +1851,20 @@ pub fn generate_teardown_job(
 
     let steps_yaml = format_steps_yaml_indented(teardown_steps, 4);
 
-    format!(
+    let template = format!(
         r#"- job: Teardown
   displayName: "Teardown"
   dependsOn: Execution
   pool:
-    {}
+    {{{{ pool }}}}
   steps:
     - checkout: self
 {}
 "#,
-        pool, steps_yaml
-    )
+        steps_yaml
+    );
+
+    replace_with_indent(&template, "{{ pool }}", pool)
 }
 
 /// Generate prepare steps (inline), including extension steps and user-defined steps.
@@ -2944,7 +2948,7 @@ pub async fn compile_template_target(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compile::types::{McpConfig, McpOptions, Repository};
+    use crate::compile::types::{McpConfig, McpOptions, PoolConfigFull, Repository};
     use crate::compile::extensions::{CompileContext, collect_extensions};
     use std::collections::HashMap;
 
@@ -6219,6 +6223,33 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_setup_job_multiline_pool_indentation() {
+        // 1ES pool resolves to a multi-line string; verify all lines
+        // are properly indented under `pool:`.
+        let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
+        let ctx = CompileContext::for_test(&fm);
+        let step: serde_yaml::Value = serde_yaml::from_str("bash: echo setup").unwrap();
+        let pool = "name: AZS-1ES-L-MMS-ubuntu-22.04\nos: linux";
+        let out = generate_setup_job(&[step], pool, None, None, &[], &ctx).unwrap();
+        // Both pool lines must be indented at the same level (4 spaces)
+        assert!(
+            out.contains("    name: AZS-1ES-L-MMS-ubuntu-22.04\n    os: linux"),
+            "multi-line pool must be indented correctly:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_generate_teardown_job_multiline_pool_indentation() {
+        let step: serde_yaml::Value = serde_yaml::from_str("bash: echo td").unwrap();
+        let pool = "name: AZS-1ES-L-MMS-ubuntu-22.04\nos: linux";
+        let out = generate_teardown_job(&[step], pool);
+        assert!(
+            out.contains("    name: AZS-1ES-L-MMS-ubuntu-22.04\n    os: linux"),
+            "multi-line pool must be indented correctly:\n{out}"
+        );
+    }
+
+    #[test]
     fn test_resolve_pool_block_non_onees_defaults_to_vm_image() {
         let block = resolve_pool_block(CompileTarget::Standalone, None).expect("pool block");
         assert_eq!(block, "vmImage: ubuntu-latest");
@@ -6251,6 +6282,18 @@ mod tests {
         let fm: FrontMatter = serde_yaml::from_str(yaml).expect("front matter");
         let block = resolve_pool_block(CompileTarget::OneES, fm.pool.as_ref()).expect("pool block");
         assert_eq!(block, "name: CustomPool\nos: windows");
+    }
+
+    #[test]
+    fn test_resolve_pool_block_non_onees_empty_object_defaults_to_vm_image() {
+        let pool = PoolConfig::Full(PoolConfigFull {
+            name: None,
+            vm_image: None,
+            os: None,
+        });
+        let block =
+            resolve_pool_block(CompileTarget::Standalone, Some(&pool)).expect("pool block");
+        assert_eq!(block, "vmImage: ubuntu-latest");
     }
 
     #[test]
