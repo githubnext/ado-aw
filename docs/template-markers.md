@@ -82,10 +82,10 @@ Should be replaced with the `checkout: self` step. This generates a simple check
 All checkout steps across all jobs (Agent, Detection, Execution, Setup, Teardown) use this marker.
 
 ## {{ checkout_repositories }}
-Should be replaced with checkout steps for additional repositories the agent will work with. The behavior depends on the `checkout:` front matter:
+Should be replaced with checkout steps for additional repositories the agent will work with. The behavior depends on the `repos:` front-matter field (each entry's `checkout:` flag, which defaults to `true`):
 
-- **If `checkout:` is omitted or empty**: No additional repositories are checked out. Only `self` is checked out (from the template).
-- **If `checkout:` is specified**: The listed repository aliases are checked out in addition to `self`. Each entry must exist in `repositories:`.
+- **If `repos:` is omitted or all entries have `checkout: false`**: No additional repositories are checked out. Only `self` is checked out (from the template).
+- **If `repos:` has entries with `checkout: true`**: Those repository aliases are checked out in addition to `self`.
 
 This distinction allows resources (like templates) to be available as pipeline resources without being checked out into the workspace for the agent to analyze.
 
@@ -212,24 +212,21 @@ Should be replaced with the appropriate working directory based on the effective
 
 **Workspace Resolution Logic:**
 1. If `workspace` is explicitly set in front matter, that value is used (after validation)
-2. If `workspace` is not set and `checkout:` contains additional repositories, defaults to `repo`
+2. If `workspace` is not set and `repos:` has entries with `checkout: true` (the default), defaults to `repo`
 3. If `workspace` is not set and only `self` is checked out, defaults to `root`
 
-**Warning:** If `workspace: repo` (or `self`) is explicitly set but no additional repositories are in `checkout:`, a warning is emitted because when only `self` is checked out, `$(Build.SourcesDirectory)` already contains the repository content directly.
+**Warning:** If `workspace: repo` (or `self`) is explicitly set but no additional repositories are configured with `checkout: true` in `repos:`, a warning is emitted because when only `self` is checked out, `$(Build.SourcesDirectory)` already contains the repository content directly.
 
 **Accepted values:**
 - `root` → `$(Build.SourcesDirectory)` — the checkout root directory
 - `repo` (or `self`) → `$(Build.SourcesDirectory)/$(Build.Repository.Name)` — the trigger repository's subfolder
-- `<alias>` → `$(Build.SourcesDirectory)/<alias>` — a specific checked-out repository's subfolder. The alias must appear in the `checkout:` list (which itself must be a subset of `repositories:`). This form is only valid when at least one additional repository is checked out; otherwise compilation fails.
+- `<alias>` → `$(Build.SourcesDirectory)/<alias>` — a specific checked-out repository's subfolder. The alias must be the alias of a `repos:` entry with `checkout: true` (the default). This form is only valid when at least one additional repository is checked out; otherwise compilation fails.
 
 **Example — pointing the agent's workspace at a checked-out repository:**
 ```yaml
-repositories:
-  - repository: exp23-a7-nw
-    type: git
-    name: msazuresphere/exp23-a7-nw
-checkout:
-  - exp23-a7-nw
+repos:
+  - name: msazuresphere/exp23-a7-nw
+    alias: exp23-a7-nw
 workspace: exp23-a7-nw    # Resolves to $(Build.SourcesDirectory)/exp23-a7-nw
 ```
 
@@ -253,7 +250,7 @@ Used by the pipeline's integrity check step to verify the pipeline hasn't been m
 
 ## {{ trigger_repo_directory }}
 
-Should be replaced with the directory where the trigger ("self") repository is checked out. This is independent of the `workspace:` setting and depends only on whether any additional repositories are listed in `checkout:`:
+Should be replaced with the directory where the trigger ("self") repository is checked out. This is independent of the `workspace:` setting and depends only on whether any additional repositories are configured with `checkout: true` (the default) in `repos:`:
 - No additional checkouts → `$(Build.SourcesDirectory)` (ADO checks `self` into the root)
 - One or more additional checkouts → `$(Build.SourcesDirectory)/$(Build.Repository.Name)` (ADO puts each checked-out repo, including `self`, into a subfolder named after the repository)
 
@@ -263,7 +260,7 @@ Use this marker (rather than `{{ working_directory }}` / `{{ workspace }}`) for 
 
 Generates the "Verify pipeline integrity" pipeline step that downloads the released ado-aw compiler and runs `ado-aw check` against the compiled pipeline YAML. This step ensures the pipeline file hasn't been modified outside the compilation process.
 
-The step sets `workingDirectory: {{ trigger_repo_directory }}` so that the relative `{{ pipeline_path }}` argument resolves correctly when `checkout:` produces a multi-repo `$(Build.SourcesDirectory)` layout, and so `ado-aw check`'s internal recompile can infer the ADO org from the trigger repo's git remote.
+The step sets `workingDirectory: {{ trigger_repo_directory }}` so that the relative `{{ pipeline_path }}` argument resolves correctly when `repos:` produces a multi-repo `$(Build.SourcesDirectory)` layout, and so `ado-aw check`'s internal recompile can infer the ADO org from the trigger repo's git remote.
 
 When the compiler is built with `--skip-integrity` (debug builds only), this placeholder is replaced with an empty string and the integrity step is omitted from the generated pipeline.
 
