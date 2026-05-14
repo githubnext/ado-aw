@@ -5,6 +5,7 @@ on:
   schedule: daily
 runtimes:
   lean: true
+  python: true
   node:
     version: "22.x"
     feed-url: "https://pkgs.dev.azure.com/example/example/_packaging/example/npm/registry/"
@@ -19,4 +20,5 @@ tools:
 
 This agent enables every runtime that produces a code-generated bash step,
 plus the `cache-memory` tool. Its sole job is to compile cleanly so the
-bash-step lint can analyse those generated bodies.
+bash-step lint can analyse those generated bodies. Python is included to
+exercise the `Append Python prompt` step from `src/runtimes/python/extension.rs`.
