@@ -1,32 +1,104 @@
 ---
 title: Quick Start
-description: Build ado-aw, create a minimal agent file, and compile your first Azure DevOps pipeline
+description: Get your first ado-aw agentic pipeline running in minutes
 sidebar:
   order: 1
 ---
 
-This guide walks through the fastest way to build `ado-aw`, create a minimal agent definition, and compile it into Azure DevOps pipeline YAML.
+import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-## Prerequisites
+There are two ways to get started with `ado-aw` — using a Copilot agent to co-create your first workflow interactively, or writing the agent file manually.
 
-Install a current Rust toolchain before you begin.
+## Install ado-aw
+
+Download the latest release for your platform from [GitHub Releases](https://github.com/githubnext/ado-aw/releases/latest).
+
+<Tabs>
+  <TabItem label="Linux (x64)">
+    ```bash
+    curl -fSL "https://github.com/githubnext/ado-aw/releases/latest/download/ado-aw-linux-x64" \
+      -o ado-aw
+    chmod +x ado-aw
+    sudo mv ado-aw /usr/local/bin/
+    ```
+  </TabItem>
+  <TabItem label="macOS (Apple Silicon)">
+    ```bash
+    curl -fSL "https://github.com/githubnext/ado-aw/releases/latest/download/ado-aw-darwin-arm64" \
+      -o ado-aw
+    chmod +x ado-aw
+    sudo mv ado-aw /usr/local/bin/
+    ```
+  </TabItem>
+  <TabItem label="Windows (x64)">
+    ```powershell
+    Invoke-WebRequest `
+      -Uri "https://github.com/githubnext/ado-aw/releases/latest/download/ado-aw-windows-x64.exe" `
+      -OutFile ado-aw.exe
+    Move-Item ado-aw.exe "$env:LOCALAPPDATA\Microsoft\WindowsApps\"
+    ```
+  </TabItem>
+</Tabs>
+
+:::tip[Pinning a version]
+Replace `latest` in the URL with a tag name (e.g., `download/v0.19.0/ado-aw-linux-x64`) to pin a specific version.
+:::
+
+---
+
+## With Agents (recommended)
+
+The fastest way to create an agentic pipeline is to let Copilot do the heavy lifting.
+
+### 1. Initialize your project
+
+In your Azure DevOps repository root, run:
 
 ```bash
-rustup toolchain install stable
-rustup default stable
+ado-aw init
 ```
 
-## 1. Build ado-aw
+This creates `.github/agents/ado-aw.agent.md` — a Copilot dispatcher agent that knows how to create, update, and debug agentic pipelines. It auto-downloads the `ado-aw` compiler and handles the full lifecycle.
 
-From the repository root, build the project:
+### 2. Co-create a workflow with Copilot
+
+Open your project in an editor with Copilot and invoke the agent:
+
+```
+/agent ado-aw
+```
+
+Describe what you want your agentic pipeline to do. For example:
+
+> *"Create a workflow that runs daily, reads open work items tagged 'stale', and adds a reminder comment."*
+
+The agent will walk you through the front-matter configuration, write the agent prompt, and compile the pipeline — all interactively.
+
+### 3. Push and configure
+
+Once you're happy with the generated files, commit and push them to your Azure DevOps repository. Then create a pipeline in Azure DevOps pointing at the compiled `.lock.yml` file, and configure it:
 
 ```bash
-cargo build --release
+ado-aw configure
 ```
 
-You can also run commands directly from source with `cargo run --`.
+This sets the `GITHUB_TOKEN` pipeline variable on the ADO build definition. The command prompts for:
+- A **GitHub Personal Access Token (PAT)** — used by the Copilot CLI at runtime
+- An **Azure DevOps PAT** — used to update the pipeline variable via the ADO API
 
-## 2. Create a minimal agent file
+:::caution[Temporary limitation: GitHub PAT required]
+The Copilot CLI does not yet support GitHub App tokens. You must provide a **classic or fine-grained GitHub PAT** with appropriate scopes. This requirement will be removed once GitHub App token support is added to the Copilot CLI.
+:::
+
+Run the pipeline in Azure DevOps — it executes the three-stage workflow: Agent → Detection → Execution.
+
+---
+
+## Manual
+
+If you prefer full control, you can author agent files by hand.
+
+### 1. Create an agent file
 
 Create a file named `agent.md`:
 
@@ -48,42 +120,40 @@ Inspect the repository and summarize what this project does.
 
 This file combines YAML front matter for configuration with markdown instructions for the agent.
 
-## 3. Compile it
-
-Run the compiler:
+### 2. Compile it
 
 ```bash
-cargo run -- compile agent.md
+ado-aw compile agent.md
 ```
 
-By default, `ado-aw` writes a compiled `.lock.yml` pipeline alongside the source file.
-
-## 4. Verify the generated pipeline
-
-You should now have:
+This writes a compiled `.lock.yml` pipeline alongside the source file. You should now have:
 
 - `agent.md` — your source definition
 - `agent.lock.yml` — the compiled Azure DevOps pipeline
 
-To verify that the generated pipeline still matches the source file:
-
-```bash
-cargo run -- check agent.lock.yml
-```
-
-## 5. Push it to Azure DevOps
-
-After you are happy with the generated files:
+### 3. Push to Azure DevOps
 
 1. Commit both `agent.md` and the compiled `.lock.yml` file.
 2. Push them to your Azure DevOps repository.
 3. In Azure DevOps, create a pipeline that points at the compiled YAML file.
-4. Save or run the pipeline.
+4. Save the pipeline.
 
-From there, Azure DevOps executes the compiled three-stage workflow: Agent, Detection, and Execution.
+### 4. Configure the pipeline
+
+```bash
+ado-aw configure
+```
+
+This sets the `GITHUB_TOKEN` pipeline variable. See the [With Agents](#3-push-and-configure) section above for details on what the command prompts for and the current GitHub PAT limitation.
+
+### 5. Run the pipeline
+
+Back in Azure DevOps, run the pipeline. It executes the compiled three-stage workflow: Agent → Detection → Execution.
+
+---
 
 ## Next steps
 
 - Learn the available commands in [CLI Commands](/ado-aw/setup/cli/)
 - Read [How It Works](/ado-aw/introduction/how-it-works/)
-- Explore the reference docs for front matter, tools, runtimes, and safe outputs
+- Explore the [Creating Agents](/ado-aw/guides/creating-agents/) guide for the full agent file format
