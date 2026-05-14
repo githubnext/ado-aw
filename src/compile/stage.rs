@@ -22,8 +22,7 @@ use std::path::Path;
 
 use super::Compiler;
 use super::common::{
-    compile_template_target, TemplateTargetConfig,
-    generate_header_comment,
+    compile_template_target, generate_header_comment, TemplateTargetConfig,
 };
 use super::types::FrontMatter;
 
@@ -60,16 +59,15 @@ impl Compiler for StageCompiler {
                 debug_pipeline,
             },
             generate_stage_header,
-        ).await
+        )
+        .await
     }
 }
 
 /// Generate the header comment block for stage-level templates.
 fn generate_stage_header(input_path: &Path, output_path: &Path, front_matter: &FrontMatter) -> String {
     let base_header = generate_header_comment(input_path);
-    let mut lock_path = output_path
-        .to_string_lossy()
-        .replace('\\', "/");
+    let mut lock_path = output_path.to_string_lossy().replace('\\', "/");
     while lock_path.starts_with("./") {
         lock_path = lock_path[2..].to_string();
     }
