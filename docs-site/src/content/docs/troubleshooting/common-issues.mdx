@@ -1,0 +1,81 @@
+---
+title: Common Issues
+description: Solutions to frequently encountered problems with ado-aw
+---
+
+## Pipeline Compilation Errors
+
+### "Source markdown not found"
+
+The `check` command couldn't locate the source `.md` file referenced in the compiled pipeline's `@ado-aw` header.
+
+**Solution:** Ensure the markdown source file hasn't been moved or renamed since compilation. Recompile with `ado-aw compile`.
+
+### Front matter parse errors
+
+YAML front matter must be valid YAML between `---` delimiters.
+
+**Common causes:**
+- Unquoted strings containing special YAML characters (`:`, `#`, `{`, `}`)
+- Incorrect indentation (YAML uses spaces, not tabs)
+- Missing required fields (`name`, `description`)
+
+```yaml
+---
+# ✗ Bad -- colon in unquoted string
+description: Agent: does things
+
+# ✓ Good -- quoted string
+description: "Agent: does things"
+---
+```
+
+## Runtime Errors
+
+### Network timeouts in AWF sandbox
+
+The agent can only access explicitly allowed domains. If your agent needs to reach an external service:
+
+1. Check if a runtime enables the domain (e.g., `runtimes: [python]` enables `pypi.org`)
+2. Add custom domains via `allowed-hosts:` in front matter
+3. For broader access, use ADO `permissions:` with a service connection
+
+### Safe output validation failures
+
+Stage 2 (Detection) may reject safe outputs that appear to contain:
+- Prompt injection patterns
+- Embedded secrets or tokens
+- Malformed parameters
+
+**Solution:** Review the agent's output proposals. Ensure generated content doesn't accidentally include patterns that resemble secrets (long base64 strings, key-value patterns matching `password=...`).
+
+## Build & Development
+
+### `cargo build` fails with missing dependencies
+
+Ensure you're using the Rust 2024 edition toolchain:
+
+```bash
+rustup update
+rustup default stable
+```
+
+### `cargo test` hangs
+
+Some tests require `shellcheck` to be installed. If missing, tests are skipped (unless `ENFORCE_BASH_LINT=1` is set).
+
+```bash
+# macOS
+brew install shellcheck
+
+# Ubuntu/Debian
+sudo apt-get install -y shellcheck
+```
+
+## Getting Help
+
+If your issue isn't covered here:
+
+1. Check the [GitHub Issues](https://github.com/githubnext/ado-aw/issues)
+2. Review the [Reference documentation](/ado-aw/reference/front-matter/) for field specifications
+3. Run with `--debug` for verbose logging: `ado-aw --debug compile ./agent.md`

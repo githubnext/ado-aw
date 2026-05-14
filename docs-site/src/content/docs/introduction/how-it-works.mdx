@@ -1,0 +1,74 @@
+---
+title: How It Works
+description: Understand the compile-time and runtime flow behind ado-aw pipelines
+sidebar:
+  order: 2
+---
+
+`ado-aw` takes a markdown agent file and turns it into an Azure DevOps pipeline that runs in three stages.
+
+## The three-stage pipeline model
+
+### 1. Agent
+
+The first stage runs the AI agent inside a network-isolated sandbox with a read-only Azure DevOps token. The agent can inspect code, use its approved tools, and propose actions through safe outputs.
+
+Importantly, the agent does **not** perform write actions directly.
+
+### 2. Detection
+
+The second stage reviews the agent's proposed outputs. Its job is to detect problems such as:
+
+- prompt injection attempts
+- secret leakage
+- malformed or suspicious outputs
+- policy violations
+
+Only approved proposals continue to the next stage.
+
+### 3. Execution
+
+The third stage applies approved actions with a separate write-capable token. This stage can create or update Azure DevOps resources such as pull requests, comments, work items, and related artifacts.
+
+Because the write credential is isolated from the agent, the system keeps a strong boundary between reasoning and mutation.
+
+## Compile time vs. runtime
+
+### At compile time
+
+When you run `ado-aw compile`, the compiler:
+
+- parses the markdown body and YAML front matter
+- validates the configuration
+- selects the target pipeline template
+- injects runtime configuration for tools, runtimes, and safe outputs
+- emits Azure DevOps YAML and supporting agent assets
+
+### At runtime
+
+When Azure DevOps executes the compiled pipeline, it:
+
+- runs the agent with the configured tool set and permissions
+- records proposed safe outputs
+- analyzes those outputs for threats
+- executes approved outputs with the final executor stage
+
+## Flow diagram
+
+```mermaid
+flowchart TD
+    A["agent.md source"] --> B["ado-aw compile"]
+    B --> C["Azure DevOps pipeline YAML"]
+    C --> D["Stage 1: Agent"]
+    D -->|"safe-output proposals"| E["Stage 2: Detection"]
+    E -->|"approved proposals"| F["Stage 3: Execution"]
+
+    style A fill:#7c3aed,color:#fff,stroke:#5b21b6
+    style B fill:#6d28d9,color:#fff,stroke:#4c1d95
+    style C fill:#4338ca,color:#fff,stroke:#3730a3
+    style D fill:#2563eb,color:#fff,stroke:#1d4ed8
+    style E fill:#d97706,color:#fff,stroke:#b45309
+    style F fill:#059669,color:#fff,stroke:#047857
+```
+
+The key idea is that authoring happens once in markdown, compilation produces the pipeline definition, and runtime execution enforces the safety boundaries.

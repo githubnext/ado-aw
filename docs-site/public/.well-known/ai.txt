@@ -1,0 +1,3 @@
+Allow: /
+Llms-txt: https://githubnext.github.io/ado-aw/llms.txt
+Summary: https://githubnext.github.io/ado-aw/ai/summary.json

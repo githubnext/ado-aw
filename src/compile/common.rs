@@ -999,6 +999,73 @@ pub fn sanitize_filename(name: &str) -> String {
 /// Default pool name
 pub const DEFAULT_POOL: &str = "AZS-1ES-L-MMS-ubuntu-22.04";
 
+/// Derive a valid ADO identifier from the agent name for use as a job-name
+/// prefix and stage name. Converts to PascalCase, stripping non-alphanumeric
+/// characters.
+///
+/// Examples:
+/// - `"Daily Code Review"` → `"DailyCodeReview"`
+/// - `"my-agent-123"` → `"MyAgent123"`
+/// - `""` → `"Agent"` (fallback)
+/// - `"123start"` → `"_123start"` (prefix underscore for leading digit)
+/// - `"über-agent"` → `"BerAgent"` (non-ASCII stripped; ADO requires `[A-Za-z0-9_]`)
+pub fn generate_stage_prefix(name: &str) -> String {
+    // Warn if any Unicode alphanumeric characters are present — they will be
+    // treated as word-separator boundaries and stripped from the output, which
+    // may surprise users whose agent name starts with a non-ASCII letter.
+    if name.chars().any(|c| c.is_alphanumeric() && !c.is_ascii_alphanumeric()) {
+        log::warn!(
+            "Agent name '{}' contains non-ASCII alphanumeric characters; \
+             these are dropped from the ADO job-name prefix because ADO identifiers \
+             require [A-Za-z0-9_]. Rename the agent to use ASCII characters only \
+             if the prefix is important.",
+            name
+        );
+    }
+
+    let pascal: String = name
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => {
+                    let upper = first.to_uppercase().to_string();
+                    upper + chars.as_str()
+                }
+            }
+        })
+        .collect();
+
+    if pascal.is_empty() {
+        "Agent".to_string()
+    } else if pascal.starts_with(|c: char| c.is_ascii_digit()) {
+        format!("_{}", pascal)
+    } else {
+        pascal
+    }
+}
+
+/// Generate the template-level `parameters:` YAML block for job/stage
+/// template targets.
+///
+/// Includes clearMemory (if cache-memory enabled) and user-defined
+/// parameters from front matter. Returns empty string if no parameters
+/// are needed.
+pub fn generate_template_parameters(front_matter: &FrontMatter) -> Result<String> {
+    let has_memory = front_matter
+        .tools
+        .as_ref()
+        .and_then(|t| t.cache_memory.as_ref())
+        .is_some_and(|cm| cm.is_enabled());
+    let params = build_parameters(&front_matter.parameters, has_memory);
+    if params.is_empty() {
+        return Ok(String::new());
+    }
+    generate_parameters(&params)
+}
+
 /// Version of the AWF (Agentic Workflow Firewall) binary to download from GitHub Releases.
 /// Update this when upgrading to a new AWF release.
 /// See: https://github.com/github/gh-aw-firewall/releases
@@ -2423,6 +2490,23 @@ pub struct CompileConfig {
     /// to append `GITHUB_PATH: $(GITHUB_PATH)` to the engine env block without
     /// re-collecting path prepends from extensions.
     pub has_awf_paths: bool,
+    /// When true, `compile_shared` omits the standard `# @ado-aw` header.
+    /// Template-producing compilers (Job, Stage) set this to prepend their
+    /// own custom header with usage instructions.
+    pub skip_header: bool,
+}
+
+/// Input configuration for [`compile_template_target`].
+///
+/// Groups the template-specific settings so that the function stays within
+/// the seven-argument limit while remaining easy to extend.
+pub struct TemplateTargetConfig<'a> {
+    /// Raw YAML template string (e.g. `job-base.yml` or `stage-base.yml`).
+    pub template: &'a str,
+    /// When true, the "Verify pipeline integrity" step is omitted.
+    pub skip_integrity: bool,
+    /// When true, MCPG debug diagnostics are included in the generated pipeline.
+    pub debug_pipeline: bool,
 }
 
 /// Shared compilation flow used by both standalone and 1ES compilers.
@@ -2704,9 +2788,92 @@ pub async fn compile_shared(
             replace_with_indent(&yaml, placeholder, replacement)
         });
 
-    // 15. Prepend header
-    let header = generate_header_comment(input_path);
-    Ok(format!("{}{}", header, pipeline_yaml))
+    // 15. Prepend header (unless the caller will prepend its own)
+    if config.skip_header {
+        Ok(pipeline_yaml)
+    } else {
+        let header = generate_header_comment(input_path);
+        Ok(format!("{}{}", header, pipeline_yaml))
+    }
+}
+
+/// Shared compilation flow for template-producing compilers (`target: job` and
+/// `target: stage`).
+///
+/// Handles the full setup — collecting extensions, building the compile context,
+/// generating the stage prefix and template parameters, computing AWF/MCPG
+/// values — and delegates to [`compile_shared`].  The caller supplies:
+///
+/// - `cfg`: target-specific settings (template string, integrity / debug flags).
+/// - `header_fn`: a function that generates the leading comment block prepended
+///   to the compiled YAML.  The two template compilers use different header
+///   layouts, so this lets each compiler keep its own generator while sharing
+///   all of the boilerplate setup.
+///
+/// Returns the final YAML string with the header prepended.
+pub async fn compile_template_target(
+    input_path: &Path,
+    output_path: &Path,
+    front_matter: &FrontMatter,
+    markdown_body: &str,
+    cfg: TemplateTargetConfig<'_>,
+    header_fn: impl FnOnce(&Path, &Path, &FrontMatter) -> String,
+) -> Result<String> {
+    // Collect extensions (needed before compile_shared for MCPG config)
+    let extensions = super::extensions::collect_extensions(front_matter);
+
+    // Build compile context for MCPG config generation
+    let input_dir = input_path.parent().unwrap_or(Path::new("."));
+    let ctx = CompileContext::new(front_matter, input_dir).await?;
+
+    // Generate stage prefix for job-name uniqueness and template parameters
+    let stage_prefix = generate_stage_prefix(&front_matter.name);
+    let template_params = generate_template_parameters(front_matter)?;
+
+    // AWF / MCPG values (same as standalone)
+    let allowed_domains = generate_allowed_domains(front_matter, &extensions)?;
+    let awf_mounts = generate_awf_mounts(&extensions);
+    let awf_paths = collect_awf_path_prepends(&extensions);
+    let awf_path_step = generate_awf_path_step(&awf_paths);
+    let enabled_tools_args = generate_enabled_tools_args(front_matter);
+
+    let config_obj = generate_mcpg_config(front_matter, &ctx, &extensions)?;
+    let mcpg_config_json =
+        serde_json::to_string_pretty(&config_obj).context("Failed to serialize MCPG config")?;
+    let mcpg_docker_env = generate_mcpg_docker_env(front_matter, &extensions);
+    let mcpg_step_env = generate_mcpg_step_env(&extensions);
+
+    let config = CompileConfig {
+        template: cfg.template.to_string(),
+        extra_replacements: vec![
+            ("{{ stage_prefix }}".into(), stage_prefix),
+            ("{{ template_parameters }}".into(), template_params),
+            ("{{ firewall_version }}".into(), AWF_VERSION.into()),
+            ("{{ mcpg_version }}".into(), MCPG_VERSION.into()),
+            ("{{ mcpg_image }}".into(), MCPG_IMAGE.into()),
+            ("{{ mcpg_port }}".into(), MCPG_PORT.to_string()),
+            ("{{ mcpg_domain }}".into(), MCPG_DOMAIN.into()),
+            ("{{ allowed_domains }}".into(), allowed_domains),
+            ("{{ awf_mounts }}".into(), awf_mounts),
+            ("{{ awf_path_step }}".into(), awf_path_step),
+            ("{{ enabled_tools_args }}".into(), enabled_tools_args),
+            ("{{ mcpg_config }}".into(), mcpg_config_json),
+            ("{{ mcpg_docker_env }}".into(), mcpg_docker_env),
+            ("{{ mcpg_step_env }}".into(), mcpg_step_env),
+        ],
+        skip_integrity: cfg.skip_integrity,
+        debug_pipeline: cfg.debug_pipeline,
+        has_awf_paths: !awf_paths.is_empty(),
+        skip_header: true,
+    };
+
+    let yaml = compile_shared(
+        input_path, output_path, front_matter, markdown_body,
+        &extensions, &ctx, config,
+    ).await?;
+
+    let header = header_fn(input_path, output_path, front_matter);
+    Ok(format!("{}{}", header, yaml))
 }
 
 #[cfg(test)]

@@ -1,0 +1,23 @@
+{
+  "name": "ado-aw",
+  "capabilities": {
+    "compile": "Transforms markdown agent definitions into Azure DevOps YAML pipelines",
+    "targets": ["standalone", "1es", "job", "stage"],
+    "engines": ["copilot"],
+    "runtimes": ["python", "node", "dotnet", "lean"],
+    "safe_outputs": [
+      "create_pr", "add_pr_comment", "reply_to_pr_comment", "submit_pr_review",
+      "resolve_pr_thread", "update_pr", "create_work_item", "update_work_item",
+      "comment_on_work_item", "link_work_items", "create_branch", "create_git_tag",
+      "queue_build", "add_build_tag", "create_wiki_page", "update_wiki_page",
+      "upload_build_attachment", "upload_pipeline_artifact", "upload_workitem_attachment"
+    ],
+    "tools": ["bash", "edit", "cache-memory", "azure-devops"],
+    "mcp": "MCP server support (stdio containers + HTTP backends)"
+  },
+  "three_stage_model": {
+    "stage_1": "Agent runs in network-isolated sandbox with read-only ADO token, produces safe-output proposals",
+    "stage_2": "Detection agent inspects proposals for prompt injection and secret leaks",
+    "stage_3": "Executor applies approved safe outputs using write-capable ADO token"
+  }
+}

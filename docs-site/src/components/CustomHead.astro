@@ -1,0 +1,37 @@
+---
+// Custom head component for ado-aw docs
+// Extends Starlight's default Head with Mona Sans preload and Schema.org structured data
+import Default from '@astrojs/starlight/components/Head.astro';
+---
+
+<Default {...Astro.props}><slot /></Default>
+
+<link
+  rel="preload"
+  href="/ado-aw/fonts/Mona-Sans.woff2"
+  as="font"
+  type="font/woff2"
+  crossorigin
+/>
+
+{Astro.url.pathname === '/ado-aw/' && (
+  <script type="application/ld+json" set:html={JSON.stringify({
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "SoftwareApplication",
+        "name": "ado-aw",
+        "description": "Compiler for Azure DevOps agentic pipelines from natural-language markdown",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "Cross-platform",
+        "url": "https://githubnext.github.io/ado-aw/",
+        "codeRepository": "https://github.com/githubnext/ado-aw"
+      },
+      {
+        "@type": "WebSite",
+        "name": "ado-aw Documentation",
+        "url": "https://githubnext.github.io/ado-aw/"
+      }
+    ]
+  })} />
+)}

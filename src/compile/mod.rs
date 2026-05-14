@@ -14,8 +14,10 @@ mod gitattributes;
 #[cfg(test)]
 mod codemod_integration_test;
 pub(crate) mod codemods;
+mod job;
 mod onees;
 pub(crate) mod pr_filters;
+mod stage;
 mod standalone;
 pub mod types;
 
@@ -191,8 +193,9 @@ async fn compile_pipeline_inner(
     let compiler: Box<dyn Compiler> = match front_matter.target {
         CompileTarget::OneES => Box::new(onees::OneESCompiler),
         CompileTarget::Standalone => Box::new(standalone::StandaloneCompiler),
+        CompileTarget::Job => Box::new(job::JobCompiler),
+        CompileTarget::Stage => Box::new(stage::StageCompiler),
     };
-
     info!("Using {} compiler", compiler.target_name());
 
     // Compile (no source mutation yet — a failure here must leave the
@@ -235,11 +238,18 @@ async fn compile_pipeline_inner(
             )
         })?;
 
-    println!(
-        "Generated {} pipeline: {}",
-        compiler.target_name(),
-        yaml_output_path.display()
-    );
+    {
+        let kind = match front_matter.target {
+            CompileTarget::Job | CompileTarget::Stage => "template",
+            _ => "pipeline",
+        };
+        println!(
+            "Generated {} {}: {}",
+            compiler.target_name(),
+            kind,
+            yaml_output_path.display()
+        );
+    }
 
     // Update .gitattributes at the repo root so every compiled pipeline is
     // marked as a generated file with `merge=ours`. Best-effort: skip with a
@@ -545,6 +555,8 @@ pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
     let compiler: Box<dyn Compiler> = match front_matter.target {
         CompileTarget::OneES => Box::new(onees::OneESCompiler),
         CompileTarget::Standalone => Box::new(standalone::StandaloneCompiler),
+        CompileTarget::Job => Box::new(job::JobCompiler),
+        CompileTarget::Stage => Box::new(stage::StageCompiler),
     };
 
     // Pass the header's relative source path to compile so the generated

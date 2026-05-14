@@ -1,0 +1,54 @@
+---
+title: Overview
+description: Learn what ado-aw is, why it exists, and how it makes agentic pipelines easier to author
+sidebar:
+  order: 1
+---
+
+`ado-aw` is a compiler that turns natural-language markdown with YAML front matter into Azure DevOps agentic pipeline definitions.
+
+Instead of hand-authoring large YAML files, you describe your workflow in a markdown document:
+
+- what the agent should do
+- when it should run
+- which tools and runtimes it can use
+- which safe outputs it may propose
+
+The compiler turns that source file into Azure DevOps pipeline YAML plus the runtime assets needed to execute the agent safely.
+
+## Why ado-aw exists
+
+Authoring secure AI-driven pipelines directly in YAML is hard. Teams need a way to:
+
+- express intent in a readable format
+- keep security boundaries explicit
+- control write actions carefully
+- reuse a consistent pipeline structure
+
+`ado-aw` addresses that by giving you a higher-level authoring format while still producing standard Azure DevOps pipeline definitions.
+
+## Key benefits
+
+### Natural-language authoring
+
+Pipeline intent stays in markdown, which is easier to review, edit, and generate with AI tools.
+
+### Safer execution model
+
+The generated pipelines separate agent execution from threat detection and final write operations.
+
+### Consistent structure
+
+Every compiled pipeline follows the same three-stage pattern, making behavior more predictable across repositories.
+
+### Extensible integrations
+
+`ado-aw` supports runtimes, built-in tools, safe outputs, and MCP-based integrations for richer workflows.
+
+## Inspired by GitHub Agentic Workflows
+
+The design is inspired by [GitHub Agentic Workflows (gh-aw)](https://github.com/githubnext/gh-aw), adapted for Azure DevOps pipelines and OneBranch-style execution environments.
+
+## Who it is for
+
+`ado-aw` is a good fit for teams that want to use AI agents in Azure DevOps while keeping authoring approachable and operational controls explicit.

@@ -90,6 +90,7 @@ impl Compiler for OneESCompiler {
             skip_integrity,
             debug_pipeline,
             has_awf_paths: !awf_paths.is_empty(),
+            skip_header: false,
         };
 
         compile_shared(input_path, output_path, front_matter, markdown_body, &extensions, &ctx, config).await
