@@ -17,8 +17,11 @@ engine: copilot # Engine identifier. Defaults to copilot. Currently only 'copilo
 #   model: claude-opus-4.7
 #   timeout-minutes: 30
 workspace: repo # Optional: "root", "repo" (alias: "self"), or a checked-out repository alias. If not specified, defaults to "root" when no additional repositories are listed in `repos:`, and to "repo" when one or more additional repos are checked out. See "Workspace Defaults" below.
-pool: AZS-1ES-L-MMS-ubuntu-22.04 # Agent pool name (string format). Defaults to AZS-1ES-L-MMS-ubuntu-22.04.
-# pool:                        # Alternative object format (required for 1ES if specifying os)
+pool:                          # Optional pool configuration
+  vmImage: ubuntu-latest       # Microsoft-hosted (default for non-1ES targets)
+# pool:                        # Self-hosted pool
+#   name: MySelfHostedPool
+# pool:                        # 1ES pool format
 #   name: AZS-1ES-L-MMS-ubuntu-22.04
 #   os: linux                  # Operating system: "linux" or "windows". Defaults to "linux".
 repos:                           # compact repository declarations (replaces repositories: + checkout:)

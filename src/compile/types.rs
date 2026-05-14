@@ -27,10 +27,18 @@ pub enum CompileTarget {
 ///
 /// Examples:
 /// ```yaml
-/// # Simple string format (works for both targets)
-/// pool: AZS-1ES-L-MMS-ubuntu-22.04
+/// # Simple legacy string format (self-hosted pool name)
+/// pool: MySelfHostedPool
 ///
-/// # Object format (required for 1ES if specifying os)
+/// # Object format (recommended)
+/// pool:
+///   vmImage: ubuntu-latest   # Microsoft-hosted
+///
+/// # Object format (self-hosted)
+/// pool:
+///   name: MySelfHostedPool
+///
+/// # 1ES object format
 /// pool:
 ///   name: AZS-1ES-L-MMS-ubuntu-22.04
 ///   os: linux
@@ -38,7 +46,7 @@ pub enum CompileTarget {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum PoolConfig {
-    /// Simple pool name string
+    /// Simple legacy pool name string (self-hosted)
     Name(String),
     /// Full pool configuration object
     Full(PoolConfigFull),
@@ -46,20 +54,34 @@ pub enum PoolConfig {
 
 impl Default for PoolConfig {
     fn default() -> Self {
-        PoolConfig::Name("AZS-1ES-L-MMS-ubuntu-22.04".to_string())
+        PoolConfig::Full(PoolConfigFull {
+            name: None,
+            vm_image: Some("ubuntu-latest".to_string()),
+            os: None,
+        })
     }
 }
 
 impl PoolConfig {
-    /// Get the pool name
-    pub fn name(&self) -> &str {
+    /// Get the self-hosted pool name, if configured.
+    pub fn name(&self) -> Option<&str> {
         match self {
-            PoolConfig::Name(name) => name,
-            PoolConfig::Full(full) => &full.name,
+            PoolConfig::Name(name) => Some(name),
+            PoolConfig::Full(full) => full.name.as_deref(),
         }
     }
 
-    /// Get the OS (defaults to "linux" if not specified)
+    /// Get the Microsoft-hosted VM image, if configured.
+    pub fn vm_image(&self) -> Option<&str> {
+        match self {
+            PoolConfig::Name(_) => None,
+            PoolConfig::Full(full) => full.vm_image.as_deref(),
+        }
+    }
+
+    /// Get the OS (defaults to "linux" if not specified).
+    ///
+    /// Primarily applicable to 1ES pool configuration.
     #[allow(dead_code)]
     pub fn os(&self) -> &str {
         match self {
@@ -80,7 +102,10 @@ impl SanitizeConfigTrait for PoolConfig {
 
 #[derive(Debug, Deserialize, Clone, SanitizeConfig)]
 pub struct PoolConfigFull {
-    pub name: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default, rename = "vmImage")]
+    pub vm_image: Option<String>,
     #[serde(default)]
     pub os: Option<String>,
 }
@@ -1259,7 +1284,8 @@ mod tests {
         let yaml = "pool: MyPool";
         let fm: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let pool: PoolConfig = serde_yaml::from_value(fm["pool"].clone()).unwrap();
-        assert_eq!(pool.name(), "MyPool");
+        assert_eq!(pool.name(), Some("MyPool"));
+        assert_eq!(pool.vm_image(), None);
         assert_eq!(pool.os(), "linux"); // default
     }
 
@@ -1268,7 +1294,8 @@ mod tests {
         let yaml = "pool:\n  name: WinPool\n  os: windows";
         let fm: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let pool: PoolConfig = serde_yaml::from_value(fm["pool"].clone()).unwrap();
-        assert_eq!(pool.name(), "WinPool");
+        assert_eq!(pool.name(), Some("WinPool"));
+        assert_eq!(pool.vm_image(), None);
         assert_eq!(pool.os(), "windows");
     }
 
@@ -1277,14 +1304,26 @@ mod tests {
         let yaml = "pool:\n  name: LinuxPool";
         let fm: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let pool: PoolConfig = serde_yaml::from_value(fm["pool"].clone()).unwrap();
-        assert_eq!(pool.name(), "LinuxPool");
+        assert_eq!(pool.name(), Some("LinuxPool"));
+        assert_eq!(pool.vm_image(), None);
         assert_eq!(pool.os(), "linux");
     }
 
     #[test]
-    fn test_pool_config_default() {
+    fn test_pool_config_object_vm_image_form() {
+        let yaml = "pool:\n  vmImage: ubuntu-latest";
+        let fm: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let pool: PoolConfig = serde_yaml::from_value(fm["pool"].clone()).unwrap();
+        assert_eq!(pool.name(), None);
+        assert_eq!(pool.vm_image(), Some("ubuntu-latest"));
+        assert_eq!(pool.os(), "linux");
+    }
+
+    #[test]
+    fn test_pool_config_default_is_vm_image() {
         let pool = PoolConfig::default();
-        assert_eq!(pool.name(), "AZS-1ES-L-MMS-ubuntu-22.04");
+        assert_eq!(pool.name(), None);
+        assert_eq!(pool.vm_image(), Some("ubuntu-latest"));
         assert_eq!(pool.os(), "linux");
     }
 
