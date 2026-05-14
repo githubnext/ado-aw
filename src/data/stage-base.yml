@@ -11,7 +11,7 @@ stages:
       {{ agentic_depends_on }}
       {{ job_timeout }}
       pool:
-        name: {{ pool }}
+        {{ pool_block }}
       steps:
         {{ checkout_self }}
         {{ checkout_repositories }}
@@ -387,7 +387,7 @@ stages:
       displayName: "Detection"
       dependsOn: {{ stage_prefix }}_Agent
       pool:
-        name: {{ pool }}
+        {{ pool_block }}
       steps:
         {{ checkout_self }}
         {{ checkout_repositories }}
@@ -589,7 +589,7 @@ stages:
         - {{ stage_prefix }}_Detection
       condition: and(succeeded(), eq(dependencies.{{ stage_prefix }}_Detection.outputs['threatAnalysis.SafeToProcess'], 'true'))
       pool:
-        name: {{ pool }}
+        {{ pool_block }}
       steps:
         {{ checkout_self }}
         {{ checkout_repositories }}

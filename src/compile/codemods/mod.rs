@@ -35,6 +35,8 @@ use serde_yaml::Mapping;
 mod helpers;
 #[path = "0001_repos_unified.rs"]
 mod m0001_repos_unified;
+#[path = "0002_pool_object_form.rs"]
+mod m0002_pool_object_form;
 
 #[allow(unused_imports)] // Re-exported for future codemods; only `take_key` is in-tree use.
 pub use helpers::{insert_no_overwrite, rename_key, take_key, ConflictPolicy};
@@ -85,6 +87,7 @@ pub struct Codemod {
 /// without harm.
 pub static CODEMODS: &[&'static Codemod] = &[
     &m0001_repos_unified::CODEMOD,
+    &m0002_pool_object_form::CODEMOD,
 ];
 
 /// Result of running the codemod registry on a single front-matter

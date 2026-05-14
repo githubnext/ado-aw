@@ -42,7 +42,7 @@ The output contains the same 3-job chain (Agent → Detection → Execution) as
 `standalone`, with:
 - Job names prefixed with the agent name for uniqueness (e.g., `DailyReview_Agent`)
 - No triggers, pipeline name, or resource declarations (the parent pipeline owns those)
-- Pool baked in from the front matter `pool:` field
+- Pool baked in from the front matter `pool:` field (`vmImage` or `name`; defaults to `vmImage: ubuntu-latest`)
 
 Example front matter:
 ```yaml

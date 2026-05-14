@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use super::types::{FrontMatter, OnConfig, PipelineParameter, Repository, ReposItem};
+use super::types::{CompileTarget, FrontMatter, OnConfig, PipelineParameter, PoolConfig, Repository, ReposItem};
 use super::extensions::{CompilerExtension, Extension, McpgServerConfig, McpgGatewayConfig, McpgConfig, CompileContext};
 use crate::compile::types::McpConfig;
 use crate::fuzzy_schedule;
@@ -996,8 +996,51 @@ pub fn sanitize_filename(name: &str) -> String {
         .join("-")
 }
 
-/// Default pool name
-pub const DEFAULT_POOL: &str = "AZS-1ES-L-MMS-ubuntu-22.04";
+/// Default self-hosted pool for 1ES templates.
+pub const DEFAULT_ONEES_POOL: &str = "AZS-1ES-L-MMS-ubuntu-22.04";
+/// Default Microsoft-hosted VM image for non-1ES templates.
+pub const DEFAULT_VM_IMAGE_POOL: &str = "ubuntu-latest";
+
+/// Resolve the `{{ pool }}` replacement used by the 1ES template (`name: {{ pool }}`).
+fn resolve_onees_pool_name(pool: Option<&PoolConfig>) -> Result<String> {
+    let Some(pool) = pool else {
+        return Ok(DEFAULT_ONEES_POOL.to_string());
+    };
+
+    if let Some(name) = pool.name() {
+        return Ok(name.to_string());
+    }
+
+    if let Some(vm_image) = pool.vm_image() {
+        anyhow::bail!(
+            "target: 1es does not support `pool.vmImage` ('{}'); use `pool.name` for a 1ES pool",
+            vm_image
+        );
+    }
+
+    Ok(DEFAULT_ONEES_POOL.to_string())
+}
+
+/// Resolve the non-1ES pool block line (`name: ...` or `vmImage: ...`).
+fn resolve_non_onees_pool_block(pool: Option<&PoolConfig>) -> Result<String> {
+    let Some(pool) = pool else {
+        return Ok(format!("vmImage: {}", DEFAULT_VM_IMAGE_POOL));
+    };
+
+    match pool {
+        PoolConfig::Name(name) => Ok(format!("name: {}", name)),
+        PoolConfig::Full(full) => match (full.name.as_deref(), full.vm_image.as_deref()) {
+            (Some(name), Some(vm_image)) => anyhow::bail!(
+                "pool cannot specify both `name` and `vmImage` (got name='{}', vmImage='{}')",
+                name,
+                vm_image
+            ),
+            (Some(name), None) => Ok(format!("name: {}", name)),
+            (None, Some(vm_image)) => Ok(format!("vmImage: {}", vm_image)),
+            (None, None) => Ok(format!("vmImage: {}", DEFAULT_VM_IMAGE_POOL)),
+        },
+    }
+}
 
 /// Derive a valid ADO identifier from the agent name for use as a job-name
 /// prefix and stage name. Converts to PascalCase, stripping non-alphanumeric
@@ -1692,7 +1735,7 @@ pub fn validate_resolve_pr_thread_statuses(front_matter: &FrontMatter) -> Result
 /// last, conditioned on the gate if filters are active.
 pub fn generate_setup_job(
     setup_steps: &[serde_yaml::Value],
-    pool: &str,
+    pool_block: &str,
     pr_filters: Option<&super::types::PrFilters>,
     pipeline_filters: Option<&super::types::PipelineFilters>,
     extensions: &[super::extensions::Extension],
@@ -1756,7 +1799,7 @@ pub fn generate_setup_job(
         r#"- job: Setup
   displayName: "Setup"
   pool:
-    name: {pool}
+    {pool_block}
   steps:
     - checkout: self
 "#
@@ -1778,7 +1821,7 @@ pub fn generate_setup_job(
 /// Generate the teardown job YAML
 pub fn generate_teardown_job(
     teardown_steps: &[serde_yaml::Value],
-    pool: &str,
+    pool_block: &str,
 ) -> String {
     if teardown_steps.is_empty() {
         return String::new();
@@ -1791,12 +1834,12 @@ pub fn generate_teardown_job(
   displayName: "Teardown"
   dependsOn: Execution
   pool:
-    name: {}
+    {}
   steps:
     - checkout: self
 {}
 "#,
-        pool, steps_yaml
+        pool_block, steps_yaml
     )
 }
 
@@ -2593,12 +2636,17 @@ pub async fn compile_shared(
     let source_path = generate_source_path(input_path);
     let pipeline_path = generate_pipeline_path(output_path);
 
-    // 7. Pool name
-    let pool = front_matter
-        .pool
-        .as_ref()
-        .map(|p| p.name().to_string())
-        .unwrap_or_else(|| DEFAULT_POOL.to_string());
+    // 7. Pool settings
+    let pool = if front_matter.target == CompileTarget::OneES {
+        resolve_onees_pool_name(front_matter.pool.as_ref())?
+    } else {
+        DEFAULT_ONEES_POOL.to_string()
+    };
+    let pool_block = if front_matter.target == CompileTarget::OneES {
+        format!("name: {}", pool)
+    } else {
+        resolve_non_onees_pool_block(front_matter.pool.as_ref())?
+    };
 
     // 8. Setup/teardown jobs, parameters, prepare/finalize steps
     let pr_filters = front_matter.pr_filters();
@@ -2612,8 +2660,8 @@ pub async fn compile_shared(
     let has_pipeline_filters = pipeline_filters
         .map(|f| !super::filter_ir::lower_pipeline_filters(f).is_empty())
         .unwrap_or(false);
-    let setup_job = generate_setup_job(&front_matter.setup, &pool, pr_filters, pipeline_filters, extensions, ctx)?;
-    let teardown_job = generate_teardown_job(&front_matter.teardown, &pool);
+    let setup_job = generate_setup_job(&front_matter.setup, &pool_block, pr_filters, pipeline_filters, extensions, ctx)?;
+    let teardown_job = generate_teardown_job(&front_matter.teardown, &pool_block);
     let has_memory = front_matter
         .tools
         .as_ref()
@@ -2746,6 +2794,7 @@ pub async fn compile_shared(
         ("{{ compiler_version }}", compiler_version),
         ("{{ engine_install_steps }}", &engine_install_steps),
         ("{{ pool }}", &pool),
+        ("{{ pool_block }}", &pool_block),
         ("{{ setup_job }}", &setup_job),
         ("{{ teardown_job }}", &teardown_job),
         ("{{ prepare_steps }}", &prepare_steps),
@@ -6118,7 +6167,11 @@ mod tests {
     fn test_generate_setup_job_empty_returns_empty() {
         let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
         let ctx = CompileContext::for_test(&fm);
-        assert!(generate_setup_job(&[], "MyPool", None, None, &[], &ctx).unwrap().is_empty());
+        assert!(
+            generate_setup_job(&[], "name: MyPool", None, None, &[], &ctx)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -6126,7 +6179,7 @@ mod tests {
         let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
         let ctx = CompileContext::for_test(&fm);
         let step: serde_yaml::Value = serde_yaml::from_str("bash: echo setup").unwrap();
-        let out = generate_setup_job(&[step], "MyPool", None, None, &[], &ctx).unwrap();
+        let out = generate_setup_job(&[step], "name: MyPool", None, None, &[], &ctx).unwrap();
         assert!(out.contains("- job: Setup"), "out: {out}");
         assert!(out.contains("displayName: \"Setup\""), "out: {out}");
         assert!(out.contains("name: MyPool"), "out: {out}");
@@ -6136,17 +6189,38 @@ mod tests {
 
     #[test]
     fn test_generate_teardown_job_empty_returns_empty() {
-        assert!(generate_teardown_job(&[], "MyPool").is_empty());
+        assert!(generate_teardown_job(&[], "name: MyPool").is_empty());
     }
 
     #[test]
     fn test_generate_teardown_job_with_steps() {
         let step: serde_yaml::Value = serde_yaml::from_str("bash: echo td").unwrap();
-        let out = generate_teardown_job(&[step], "MyPool");
+        let out = generate_teardown_job(&[step], "name: MyPool");
         assert!(out.contains("- job: Teardown"), "out: {out}");
         assert!(out.contains("dependsOn: Execution"), "out: {out}");
         assert!(out.contains("name: MyPool"), "out: {out}");
         assert!(out.contains("echo td"), "out: {out}");
+    }
+
+    #[test]
+    fn test_resolve_non_onees_pool_block_defaults_to_vm_image() {
+        let block = resolve_non_onees_pool_block(None).expect("pool block");
+        assert_eq!(block, "vmImage: ubuntu-latest");
+    }
+
+    #[test]
+    fn test_resolve_non_onees_pool_block_from_name() {
+        let pool = PoolConfig::Name("SelfHostedPool".to_string());
+        let block = resolve_non_onees_pool_block(Some(&pool)).expect("pool block");
+        assert_eq!(block, "name: SelfHostedPool");
+    }
+
+    #[test]
+    fn test_resolve_non_onees_pool_block_from_vm_image() {
+        let pool_yaml = "name: x\ndescription: x\npool:\n  vmImage: windows-latest";
+        let fm: FrontMatter = serde_yaml::from_str(pool_yaml).expect("front matter");
+        let block = resolve_non_onees_pool_block(fm.pool.as_ref()).expect("pool block");
+        assert_eq!(block, "vmImage: windows-latest");
     }
 
     #[test]
