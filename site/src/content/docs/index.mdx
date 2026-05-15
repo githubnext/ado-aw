@@ -29,22 +29,18 @@ No pipeline YAML to hand-write. No complex scripting. Just describe the agent's 
 ---
 on:
   schedule: weekly on monday around 10:00
-engine:
-  model: gpt-4.1
-tools:
-  bash: [grep, find, wc, jq]
+permissions:
+  write: my-write-arm-connection
 safe-outputs:
   create-pull-request:
     title-prefix: "[docs] "
     max: 1
-  comment-on-work-item:
 ---
 
 ## Documentation Sync
 
 Review all public API surfaces and ensure the corresponding
-docs are up to date. Open a PR with any corrections and
-comment on related work items with a summary.
+docs are up to date. Open a PR with any corrections.
 ```
   </Fragment>
   <Fragment slot="output">

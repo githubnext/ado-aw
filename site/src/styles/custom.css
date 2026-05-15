@@ -177,6 +177,18 @@
   color: #424a53;
 }
 
+/* Hero action buttons — light mode contrast fix */
+[data-theme='light'] .hero .sl-link-button.primary {
+  background: #4c2889;
+  border-color: #4c2889;
+  color: #ffffff;
+}
+
+[data-theme='light'] .hero .sl-link-button.primary:hover {
+  background: #3c1f6e;
+  border-color: #3c1f6e;
+}
+
 /* Hero gradient for light mode */
 [data-theme='light'] .hero h1 {
   background: linear-gradient(135deg, #6b46c1, #7c3aed);
