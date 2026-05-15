@@ -337,7 +337,7 @@ async fn dispatch_pr_tools(
         "add-pr-comment" => AddPrCommentResult,
         "update-pr" => UpdatePrResult,
         "submit-pr-review" => SubmitPrReviewResult,
-        "reply-to-pr-review-comment" => ReplyToPrCommentResult,
+        "reply-to-pr-comment" => ReplyToPrCommentResult,
         "resolve-pr-thread" => ResolvePrThreadResult,
     })
 }

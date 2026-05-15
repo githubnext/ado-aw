@@ -379,7 +379,7 @@ pub enum ProtectedFiles {
     Allowed,
 }
 
-/// Configuration for the create_pr tool (specified in front matter)
+/// Configuration for the create-pull-request tool (specified in front matter)
 ///
 /// Example front matter:
 /// ```yaml

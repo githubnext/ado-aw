@@ -1352,7 +1352,7 @@ submitted during safe output processing. Requires 'allowed-events' to be configu
     }
 
     #[tool(
-        name = "reply-to-pr-review-comment",
+        name = "reply-to-pr-comment",
         description = "Reply to an existing review comment thread on an Azure DevOps pull request. \
 Provide the PR ID, thread ID, and reply content. The reply will be posted during safe output processing."
     )]
@@ -1361,7 +1361,7 @@ Provide the PR ID, thread ID, and reply content. The reply will be posted during
         params: Parameters<ReplyToPrCommentParams>,
     ) -> Result<CallToolResult, McpError> {
         info!(
-            "Tool called: reply-to-pr-review-comment - PR #{} thread #{}",
+            "Tool called: reply-to-pr-comment - PR #{} thread #{}",
             params.0.pull_request_id, params.0.thread_id
         );
         let mut sanitized = params.0;

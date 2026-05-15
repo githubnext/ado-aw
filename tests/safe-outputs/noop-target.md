@@ -1,0 +1,24 @@
+---
+name: "ado-aw smoke noop target"
+description: "No-op target pipeline used by the queue-build smoke fixture"
+target: standalone
+engine:
+  id: copilot
+  model: gpt-5-mini
+  timeout-minutes: 5
+permissions:
+  read: agent-playground-read
+safe-outputs:
+  noop:
+    work-item:
+      enabled: false
+---
+
+## Noop target pipeline
+
+You are the no-op target of the `queue-build` smoke. Call exactly one
+safe-output tool: `noop`. Use these literal values (no improvisation):
+
+- context: "ado-aw-smoke-noop-target build $(Build.BuildId) queued from queue-build smoke"
+
+Do not call any other tool. After the safe output is emitted, stop.
