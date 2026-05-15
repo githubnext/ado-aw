@@ -127,11 +127,11 @@ Creates a pull request with code changes made by the agent. When invoked:
 
 During Stage 3 execution, the repository is validated against the allowed list (from `checkout:` + "self"), then the patch is applied and a PR is created in Azure DevOps.
 
-**Stage 3 Execution Architecture (Hybrid Git + ADO API):**
+**Stage 3 SafeOutputs Architecture (Hybrid Git + ADO API):**
 
 ```text
 ┌─────────────────────────────────────────────────────────────────┐
-│                        Stage 3 Execution                        │
+│                       Stage 3 SafeOutputs                       │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  1. Security Validation                                         │
