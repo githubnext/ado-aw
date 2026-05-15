@@ -20,7 +20,7 @@ If the Azure DevOps `pipelines` MCP toolset (`@azure-devops/mcp`) is configured 
 Every `ado-aw` pipeline compiles into a three-job Azure DevOps pipeline:
 
 ```
-Agent             →  Detection          →  Execution
+Agent             →  Detection          →  SafeOutputs
 (Stage 1: Agent)     (Stage 2: Threat       (Stage 3: Executor)
                        Analysis)
 ```
@@ -29,11 +29,11 @@ Agent             →  Detection          →  Execution
 |-----|---------|-------|-------------|
 | **Agent** | Runs the AI agent inside an AWF network sandbox (Squid proxy + Docker). Agent proposes actions via safe-output MCP tools. | Read-only (`permissions.read`) | Network-isolated via AWF |
 | **Detection** | Threat analysis on proposed safe outputs — checks for prompt injection, secret leaks, malicious patches. | None | Standard ADO agent |
-| **Execution** | Executes approved safe outputs (create PRs, work items, wiki pages, etc.) | Write (`permissions.write`) | Standard ADO agent |
+| **SafeOutputs** | Executes approved safe outputs (create PRs, work items, wiki pages, etc.) | Write (`permissions.write`) | Standard ADO agent |
 
 Additional optional jobs:
 - **Setup** — runs before `Agent` (from `setup:` front matter)
-- **Teardown** — runs after `Execution` (from `teardown:` front matter)
+- **Teardown** — runs after `SafeOutputs` (from `teardown:` front matter)
 
 ---
 
@@ -48,7 +48,7 @@ You need minimal context from the user:
 - **If multiple recent failed builds exist** → list them and ask the user which one to investigate. Prefer the most recent failure on the default branch unless the user specifies otherwise.
 
 **If you don't have ADO MCP pipeline tools**, also ask the user for:
-- Which job failed (Agent, Detection, Execution, Setup, Teardown)
+- Which job failed (Agent, Detection, SafeOutputs, Setup, Teardown)
 - Error messages or log snippets from the failing step
 - The agent source `.md` file (or path) and the compiled `.lock.yml` (or path)
 
@@ -84,7 +84,7 @@ Map the failing timeline record to one of these categories:
 | `Agent` — MCPG/MCP steps | Tool routing failure | [MCPG Issues](#mcp-gateway-mcpg-issues) |
 | `Agent` — engine/run step | Agent runtime failure | [Stage 1: Agent Failures](#stage-1-agent-failures) |
 | `Detection` | Threat analysis issue | [Stage 2: Detection Failures](#stage-2-detection-failures) |
-| `Execution` | Safe output execution issue | [Stage 3: Execution Failures](#stage-3-execution-failures) |
+| `SafeOutputs` | Safe output execution issue | [Stage 3: SafeOutputs Failures](#stage-3-safeoutputs-failures) |
 | `Teardown` | Post-execution failure | [Setup/Teardown Failures](#setupteardown-failures) |
 | Pipeline queued/cancelled | Resource/authorization issue | [Common Cross-Stage Issues](#common-cross-stage-issues) |
 
@@ -309,7 +309,7 @@ If genuinely a false positive, adjust the agent's instructions to produce output
 
 ### No Safe Outputs Produced
 
-**Symptoms**: `Detection` succeeds but `Execution` has nothing to do. The agent completed without producing any mutations.
+**Symptoms**: `Detection` succeeds but `SafeOutputs` has nothing to do. The agent completed without producing any mutations.
 
 **Common causes**:
 
@@ -320,7 +320,7 @@ If genuinely a false positive, adjust the agent's instructions to produce output
 
 ---
 
-## Stage 3: Execution Failures
+## Stage 3: SafeOutputs Failures
 
 This job executes the approved safe outputs using the write token. Failures here are usually ADO API errors or validation issues.
 
@@ -390,7 +390,7 @@ This job executes the approved safe outputs using the write token. Failures here
 
 ## Setup/Teardown Failures
 
-**Setup** runs before `Agent`; **Teardown** runs after `Execution`.
+**Setup** runs before `Agent`; **Teardown** runs after `SafeOutputs`.
 
 - These use the same pool as the main agentic task — check `pool:` configuration
 - They include a `checkout: self` step — check that the repository is accessible
@@ -488,7 +488,7 @@ If downloads fail:
 
 ## Analysis
 
-- **Stage classification**: Stage 1 (Agent) / Stage 2 (Detection) / Stage 3 (Execution) / Setup / Teardown / Cross-stage
+- **Stage classification**: Stage 1 (Agent) / Stage 2 (Detection) / Stage 3 (SafeOutputs) / Setup / Teardown / Cross-stage
 - **Why this stage failed**: <detailed explanation>
 
 ## Root Cause

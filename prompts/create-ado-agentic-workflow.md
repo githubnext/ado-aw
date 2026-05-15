@@ -38,7 +38,7 @@ Produce a single `.md` file containing two parts:
 The `ado-aw` compiler turns this into a three-job Azure DevOps pipeline:
 
 ```
-Agent             →  Detection          →  Execution
+Agent             →  Detection          →  SafeOutputs
 (Stage 1: Agent)     (Stage 2: Threat       (Stage 3: Executor)
                       analysis)
 ```
@@ -409,7 +409,7 @@ setup:             # Separate job BEFORE Agent
   - bash: echo "Provisioning resources..."
     displayName: "Setup"
 
-teardown:          # Separate job AFTER Execution
+teardown:          # Separate job AFTER SafeOutputs
   - bash: echo "Cleanup..."
     displayName: "Teardown"
 ```
