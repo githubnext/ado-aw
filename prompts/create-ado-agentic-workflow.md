@@ -22,7 +22,7 @@ When working with a user in a chat session (e.g., Copilot Chat, Claude, Codex):
 When triggered automatically (e.g., from a script, CI, or autonomous agent flow):
 
 - **Make reasonable assumptions** based on repository context — inspect `package.json`, `Cargo.toml`, `.csproj`, or other project files to infer what the agent should do.
-- **Use sensible defaults** — `claude-opus-4.7` engine, `standalone` target, `root` workspace, no schedule (manual trigger) unless context suggests otherwise.
+- **Use sensible defaults** — default `copilot` engine with `claude-opus-4.7` model (omit `engine:` entirely), `standalone` target, `root` workspace, no schedule (manual trigger) unless context suggests otherwise.
 - **Produce the complete file immediately** without asking questions.
 - **Include a summary comment** at the end explaining the assumptions made.
 
