@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.29.0](https://github.com/githubnext/ado-aw/compare/v0.28.0...v0.29.0) (2026-05-15)
+
+
+### Features
+
+* **compile:** add target: job and target: stage for ADO template output ([#519](https://github.com/githubnext/ado-aw/issues/519)) ([8df9682](https://github.com/githubnext/ado-aw/commit/8df9682f664bf00011a1a32b9a4bc62b09268a56))
+* **compile:** unify pool front-matter replacement across targets ([#538](https://github.com/githubnext/ado-aw/issues/538)) ([7806369](https://github.com/githubnext/ado-aw/commit/7806369766d3837de5a11cdf9f359ec2a63c59b3))
+* **safeoutputs:** add ado-aw-debug.create-issue for dogfood pipelines ([#492](https://github.com/githubnext/ado-aw/issues/492)) ([69a634b](https://github.com/githubnext/ado-aw/commit/69a634b436ae7fa62bd5a1eaffd490a27d7b82fb))
+* **safeoutputs:** add work-item filing to noop and missing-tool safe outputs ([#521](https://github.com/githubnext/ado-aw/issues/521)) ([c1bf552](https://github.com/githubnext/ado-aw/commit/c1bf552440be7f39108eef6266d121970ade1fc7))
+
+
+### Bug Fixes
+
+* **cache-memory:** reject symlinks in agent memory to prevent Stage 3 credential theft ([#524](https://github.com/githubnext/ado-aw/issues/524)) ([f311d36](https://github.com/githubnext/ado-aw/commit/f311d364258ba0b3faae7ac5629f3e56b5c3950a))
+* **ci:** move docs deploy workflow to top-level .github/workflows ([#539](https://github.com/githubnext/ado-aw/issues/539)) ([dcb2b33](https://github.com/githubnext/ado-aw/commit/dcb2b33fa1d06280a08bd3caf0589d08960350d7))
+* **compile:** address pool review feedback ([#541](https://github.com/githubnext/ado-aw/issues/541)) ([9bdb126](https://github.com/githubnext/ado-aw/commit/9bdb12606c5567ab5b31b5234be0f795c9e90817))
+* **safeoutputs:** neutralize Stage 3 upload message command injection paths ([#501](https://github.com/githubnext/ado-aw/issues/501)) ([45cd552](https://github.com/githubnext/ado-aw/commit/45cd55271d0a8fc8d273f7ce11ac501030f7b9d6))
+
 ## [0.28.0](https://github.com/githubnext/ado-aw/compare/v0.27.0...v0.28.0) (2026-05-09)
 
 
