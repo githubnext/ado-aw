@@ -198,9 +198,15 @@ If `post-steps` is empty, this is replaced with an empty string.
 
 ## {{ agentic_depends_on }}
 
-Generates a `dependsOn: Setup` clause for `Agent` if a setup job is configured. The setup job is identified by the job name `Setup`, ensuring the agentic task waits for the setup job to complete.
+Generates job dependency and condition configuration for the `Agent` job. This marker is populated whenever any of the following are true:
 
-If no setup job is configured, this is replaced with an empty string.
+- A **setup job** is configured (`setup:` steps are present)
+- **PR runtime filters** are configured (`on.pr.filters`)
+- **Pipeline runtime filters** are configured (`on.pipeline.filters`)
+
+When a setup job or gate step is needed, this emits `dependsOn: Setup`. When PR or pipeline filter conditions are also present, it additionally emits a `condition:` expression that gates the Agent job on the gate evaluator's output from the Setup job (e.g. `dependencies.Setup.outputs['prGate.SHOULD_RUN'] == 'true'`).
+
+If none of these are configured, this is replaced with an empty string.
 
 ## {{ job_timeout }}
 
@@ -288,9 +294,9 @@ Generates CI trigger configuration. When a schedule or pipeline trigger is confi
 
 ## {{ pipeline_resources }}
 
-Generates pipeline resource YAML when `triggers.pipeline` is configured in the front matter. Creates a pipeline resource with appropriate trigger configuration based on the specified branches. If no branches are specified, the pipeline triggers on any branch.
+Generates pipeline resource YAML when `on.pipeline` is configured in the front matter. Creates a pipeline resource with appropriate trigger configuration based on the specified branches. If no branches are specified, the pipeline triggers on any branch.
 
-Example output when `triggers.pipeline` is configured:
+Example output when `on.pipeline` is configured:
 ```yaml
 resources:
   pipelines:
