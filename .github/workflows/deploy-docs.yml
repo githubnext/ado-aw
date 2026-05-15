@@ -3,7 +3,7 @@ name: Deploy Docs to GitHub Pages
 on:
   push:
     branches: [main]
-    paths: ['docs-site/**']
+    paths: ['site/**']
   workflow_dispatch:
 
 permissions:
@@ -25,19 +25,19 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: docs-site/package-lock.json
+          cache-dependency-path: site/package-lock.json
 
       - name: Install dependencies
-        working-directory: docs-site
+        working-directory: site
         run: npm ci
 
       - name: Build site
-        working-directory: docs-site
+        working-directory: site
         run: npm run build
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: docs-site/dist
+          path: site/dist
 
   deploy:
     needs: build
