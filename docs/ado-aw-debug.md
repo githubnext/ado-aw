@@ -1,0 +1,195 @@
+# `ado-aw-debug:` — Debug-only front-matter section
+
+_Part of the [ado-aw documentation](../AGENTS.md)._
+
+> ⚠️ **This section is for dogfood pipelines only.**
+> Anything declared under `ado-aw-debug:` is **not** part of the regular
+> agent surface and is not recommended for general use. Knobs here exist so
+> the team can validate `githubnext/ado-aw` changes against real Azure
+> DevOps pipelines and file failures back to GitHub for triage. Each knob
+> bypasses or weakens a normal safety control.
+
+The compiler accepts a top-level `ado-aw-debug:` block in agent front
+matter. Currently exposed knobs:
+
+| Knob | Purpose | Default |
+| --- | --- | --- |
+| `skip-integrity` | Omit the "Verify pipeline integrity" step from the generated YAML. OR-ed with the `--skip-integrity` CLI flag. | `false` |
+| `create-issue`   | Enable the [debug-only `create-issue`](#create-issue) safe output. | absent (disabled) |
+
+Unrecognised keys under `ado-aw-debug:` cause a compile-time error
+(`#[serde(deny_unknown_fields)]`).
+
+## `create-issue`
+
+Files a GitHub issue against an operator-configured target repository.
+Used to surface failures from ADO-hosted dogfood pipelines back to
+`githubnext/ado-aw` for triage.
+
+### Why it's gated
+
+`create-issue` is **default-deny** at three layers:
+
+1. **MCP layer.** The SafeOutputs MCP server lists `create-issue` in
+   [`DEBUG_ONLY_TOOLS`][debug-only-tools], so the route is removed from
+   the tool router unless the compiler explicitly opts in via
+   `--enabled-tools`.
+2. **Compiler layer.** `--enabled-tools create-issue` is only emitted
+   when `ado-aw-debug.create-issue:` is present in front matter. The
+   compiler also rejects `safe-outputs.create-issue:` outright, so the
+   tool can't be smuggled in via the regular safe-outputs surface.
+3. **Executor layer.** Stage 3 maintains a separate
+   `ExecutionContext.debug_enabled_tools` set populated only from
+   `ado-aw-debug:`. The executor refuses any NDJSON `create-issue`
+   entry that isn't in that set, so a forged or smuggled NDJSON entry
+   fails closed before any token is read.
+
+[debug-only-tools]: ../src/safeoutputs/mod.rs
+
+### Front-matter schema
+
+```yaml
+ado-aw-debug:
+  create-issue:
+    target-repo: githubnext/ado-aw       # REQUIRED. Operator-only; agent has no override.
+    title-prefix: "[pipeline-failure] "  # Optional; prepended to every agent title.
+    labels:                              # Optional; static labels always applied.
+      - pipeline-failure
+      - automated
+    allowed-labels:                      # Optional; default-deny — see below.
+      - "agent-*"
+      - "pipeline-failure"
+    assignees:                           # Optional; static assignees always applied.
+      - "jamesdevine"
+    max: 3                               # Optional; per-run budget. Default 1.
+```
+
+* **`target-repo`** is required. Format `owner/repo`. The agent has no
+  parameter to override it; you cannot redirect issues to a different
+  repository at runtime.
+* **`title-prefix`** is appended at execution time. The final title length
+  (prefix + agent title) must be ≤ 256 characters; longer titles fail at
+  Stage 3.
+* **`labels`** are applied unconditionally to every issue, on top of any
+  agent-supplied labels that pass `allowed-labels`.
+* **`allowed-labels`** is **default-deny**: an empty or absent list means
+  **no agent-supplied labels are accepted**. To accept any agent label,
+  set `allowed-labels: ["*"]` explicitly. Patterns may include `*`
+  wildcards (e.g. `"agent-*"`).
+* **Allowed-label matching is case-insensitive.** It uses the same
+  `tag_matches_pattern` helper as ADO tag allow-lists. GitHub labels are
+  case-sensitive, so `allowed-labels: ["safe"]` will also admit
+  `SAFE` and `Safe` — keep that in mind when modelling policy.
+* **`assignees`** are merged with agent-supplied assignees. There is
+  intentionally no `allowed-assignees` allowlist in v1; if you need
+  one, configure assignees only via the static `assignees:` list and
+  skip the agent parameter.
+* **`max`** controls per-run budget the same way it does for other
+  safe-output tools.
+
+### Agent-supplied parameters
+
+The agent calls the `create-issue` MCP tool with:
+
+```jsonc
+{
+  "title": "Pipeline failure on main",
+  "body": "<markdown body, ≥ 30 chars>",
+  "labels": ["pipeline-failure"],          // optional
+  "assignees": ["copilot"]                  // optional
+}
+```
+
+The MCP-side `Validate` impl rejects ADO pipeline-command sequences in
+labels and assignees (see [src/safeoutputs/create_issue.rs](../src/safeoutputs/create_issue.rs)).
+Stage 3 also neutralises `##vso[…]` in any error messages it produces, so
+agent-supplied content cannot escape the executor's stdout.
+
+### Pipeline variable: `ADO_AW_DEBUG_GITHUB_TOKEN`
+
+Stage 3 authenticates against GitHub using the
+**`ADO_AW_DEBUG_GITHUB_TOKEN`** ADO pipeline variable. The compiler emits
+
+```yaml
+env:
+  SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)                  # if write permissions: are set
+  ADO_AW_DEBUG_GITHUB_TOKEN: $(ADO_AW_DEBUG_GITHUB_TOKEN) # only when ado-aw-debug.create-issue is set
+```
+
+into the executor step's `env:` block. The token is **not** exposed to
+the agent in Stage 1 — the read-only `GITHUB_TOKEN` the agent sees is a
+separate variable wired through `engine.env` and used only for GitHub
+MCP read access.
+
+### Setting up the PAT
+
+1. **Generate a fine-grained PAT** scoped to **only** `target-repo` (e.g.
+   `githubnext/ado-aw`). Required permissions:
+   * Repository access: only the target repo.
+   * Permissions: **Issues** = Read and write. Nothing else.
+2. **Store as a secret pipeline variable** named exactly
+   `ADO_AW_DEBUG_GITHUB_TOKEN`. Mark it secret. Do **not** copy it into
+   `engine.env` or any non-secret variable.
+3. **Confirm the operator-configured target-repo matches the PAT scope.**
+   The compiler validator only checks shape (`owner/repo`); it cannot
+   verify the PAT has access. If the PAT lacks Issues:write, the Stage 3
+   call fails with the GitHub API error and Stage 3 reports
+   `succeeded with issues`.
+4. `ado-aw configure` does **not** automate this variable today — set it
+   manually in the ADO pipeline definition.
+
+### Auto-footer
+
+Every issue gets an auto-appended traceability footer that looks like:
+
+```markdown
+<!-- ado-aw -->
+---
+Pipeline: `dogfood-failure-reporter`
+Run: <https://dev.azure.com/myorg/MyProject/_build/results?buildId=42>
+Trigger: `Manual`
+```
+
+The `<!-- ado-aw -->` marker is stable so that future tooling can locate
+the generated content without parsing prose. The footer is built from
+`BUILD_BUILDID`, `BUILD_DEFINITIONNAME`, `BUILD_REASON`,
+`SYSTEM_TEAMFOUNDATIONCOLLECTIONURI` and `SYSTEM_TEAMPROJECT` — these are
+present whenever Stage 3 runs inside an ADO pipeline.
+
+If your pipeline / org / project names are sensitive, do not enable
+`create-issue` against a public repo.
+
+### Security checklist
+
+- [ ] Target repo's GitHub PAT is scoped to that repo only and only has
+      Issues:write.
+- [ ] `ADO_AW_DEBUG_GITHUB_TOKEN` is stored as a secret pipeline
+      variable, never hard-coded or printed.
+- [ ] `allowed-labels` is set explicitly. Empty means default-deny;
+      `["*"]` accepts any agent label — pick deliberately.
+- [ ] `target-repo` is private if the agent's prompts or pipeline
+      metadata are sensitive (the auto-footer publishes ADO run URLs and
+      pipeline names).
+- [ ] `skip-integrity` is **not** enabled in pipelines triggered by
+      untrusted PRs.
+
+## `skip-integrity`
+
+Equivalent to passing `--skip-integrity` on the `ado-aw compile` CLI.
+Setting either OR setting both omits the `Verify pipeline integrity`
+step from the generated YAML.
+
+The integrity step downloads the same `ado-aw` binary the pipeline was
+compiled with and runs `ado-aw check` against the committed pipeline
+file. Without it, a tampered `*.yml` won't be caught at run time.
+
+Use this only for short-lived dogfood pipelines where you're iterating
+on the compiler and re-compiling frequently.
+
+## See also
+
+- [`docs/safe-outputs.md`](safe-outputs.md) — regular safe-outputs
+  surface (`create-issue` is **not** in it).
+- [`docs/cli.md`](cli.md) — `--skip-integrity` CLI flag.
+- [`docs/template-markers.md`](template-markers.md) — `{{ executor_ado_env }}`
+  and `{{ integrity_check }}` markers and their conditional behaviour.

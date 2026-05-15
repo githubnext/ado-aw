@@ -2,6 +2,12 @@
 
 _Part of the [ado-aw documentation](../AGENTS.md)._
 
+> ℹ️ The debug-only `create-issue` tool (used by dogfood pipelines to file
+> failure reports back to GitHub) is **not** a safe output and is not
+> configurable here. It is gated by a separate `ado-aw-debug:` front-matter
+> section and stripped from the SafeOutputs MCP server unless explicitly
+> enabled. See [`docs/ado-aw-debug.md`](ado-aw-debug.md).
+
 ## Safe Outputs Configuration
 
 The front matter supports a `safe-outputs:` field for configuring specific tool behaviors:

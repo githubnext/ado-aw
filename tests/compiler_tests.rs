@@ -3980,3 +3980,62 @@ fn test_executor_step_has_env_block_with_write_permissions() {
         "Executor step should include SYSTEM_ACCESSTOKEN: {after_execute}"
     );
 }
+
+// ─── ado-aw-debug fixture ──────────────────────────────────────────────────
+
+/// Compile the `ado-aw-debug-agent.md` fixture and assert the
+/// front-matter section's compile-time effects:
+/// 1. The integrity check step is omitted (`skip-integrity: true`).
+/// 2. The Stage 3 executor `env:` block exposes
+///    `ADO_AW_DEBUG_GITHUB_TOKEN`.
+/// 3. `--enabled-tools create-issue` is wired into the SafeOutputs MCP
+///    invocation.
+/// 4. The output is otherwise valid YAML.
+#[test]
+fn test_compile_ado_aw_debug_fixture() {
+    let compiled = compile_fixture("ado-aw-debug-agent.md");
+    assert_valid_yaml(&compiled, "ado-aw-debug-agent.md");
+
+    // skip-integrity: integrity check should be absent
+    assert!(
+        !compiled.contains("Verify pipeline integrity"),
+        "ado-aw-debug.skip-integrity: true must omit the integrity check step"
+    );
+
+    // Executor env block exposes the GitHub PAT pipeline variable
+    let execute_block_start = compiled
+        .find("Execute safe outputs (Stage 3)")
+        .expect("Should have executor step");
+    let after_execute = &compiled[execute_block_start..];
+    assert!(
+        after_execute.contains("ADO_AW_DEBUG_GITHUB_TOKEN: $(ADO_AW_DEBUG_GITHUB_TOKEN)"),
+        "Executor step must expose ADO_AW_DEBUG_GITHUB_TOKEN when ado-aw-debug.create-issue is set: {after_execute}"
+    );
+
+    // --enabled-tools includes create-issue
+    assert!(
+        compiled.contains("--enabled-tools create-issue"),
+        "Compiler must add --enabled-tools create-issue when ado-aw-debug.create-issue is set"
+    );
+}
+
+/// The example file in `examples/dogfood-failure-reporter.md` must compile
+/// cleanly. Mirror of the structural smoke test for `examples/sample-agent.md`.
+#[test]
+fn test_example_dogfood_failure_reporter_structure() {
+    let example_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("dogfood-failure-reporter.md");
+    assert!(
+        example_path.exists(),
+        "examples/dogfood-failure-reporter.md should exist"
+    );
+    let content = fs::read_to_string(&example_path).expect("Should be able to read example");
+    assert!(content.starts_with("---"), "Example should start with front matter");
+    assert!(content.contains("ado-aw-debug:"), "Example should declare ado-aw-debug section");
+    assert!(content.contains("create-issue:"), "Example should configure create-issue");
+    assert!(
+        content.contains("target-repo: githubnext/ado-aw"),
+        "Example should target githubnext/ado-aw"
+    );
+}
