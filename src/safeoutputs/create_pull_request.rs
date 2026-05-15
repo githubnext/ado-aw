@@ -1656,14 +1656,32 @@ async fn collect_changes_from_worktree(
             }
             // New/untracked files
             "??" | "A " | " A" | "AM" => {
-                if full_path.is_file() {
-                    changes.push(read_file_change("add", file_path, &full_path).await?);
+                match tokio::fs::symlink_metadata(&full_path).await {
+                    Ok(meta) if meta.file_type().is_file() => {
+                        changes.push(read_file_change("add", file_path, &full_path).await?);
+                    }
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        warn!(
+                            "Skipping symlink in worktree: {} (symlink-following attack prevention)",
+                            file_path
+                        );
+                    }
+                    _ => {}
                 }
             }
             // Modified files
             " M" | "M " | "MM" => {
-                if full_path.is_file() {
-                    changes.push(read_file_change("edit", file_path, &full_path).await?);
+                match tokio::fs::symlink_metadata(&full_path).await {
+                    Ok(meta) if meta.file_type().is_file() => {
+                        changes.push(read_file_change("edit", file_path, &full_path).await?);
+                    }
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        warn!(
+                            "Skipping symlink in worktree: {} (symlink-following attack prevention)",
+                            file_path
+                        );
+                    }
+                    _ => {}
                 }
             }
             // Renamed files - format is "R  old_path -> new_path"
@@ -1687,16 +1705,34 @@ async fn collect_changes_from_worktree(
                     // If status is "RM" (renamed + modified), also emit content
                     if status_code == "RM" {
                         let new_full_path = worktree_path.join(new_path.trim());
-                        if new_full_path.is_file() {
-                            changes.push(read_file_change("edit", new_path.trim(), &new_full_path).await?);
+                        match tokio::fs::symlink_metadata(&new_full_path).await {
+                            Ok(meta) if meta.file_type().is_file() => {
+                                changes.push(read_file_change("edit", new_path.trim(), &new_full_path).await?);
+                            }
+                            Ok(meta) if meta.file_type().is_symlink() => {
+                                warn!(
+                                    "Skipping symlink in worktree: {} (symlink-following attack prevention)",
+                                    new_path.trim()
+                                );
+                            }
+                            _ => {}
                         }
                     }
                 }
             }
             // Other statuses - try to handle as edit if file exists
             _ => {
-                if full_path.is_file() {
-                    changes.push(read_file_change("edit", file_path, &full_path).await?);
+                match tokio::fs::symlink_metadata(&full_path).await {
+                    Ok(meta) if meta.file_type().is_file() => {
+                        changes.push(read_file_change("edit", file_path, &full_path).await?);
+                    }
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        warn!(
+                            "Skipping symlink in worktree: {} (symlink-following attack prevention)",
+                            file_path
+                        );
+                    }
+                    _ => {}
                 }
             }
         }
@@ -1744,8 +1780,17 @@ async fn collect_changes_from_diff_tree(
             }));
         } else if status_code == "A" {
             // Added file
-            if full_path.is_file() {
-                changes.push(read_file_change("add", file_path, &full_path).await?);
+            match tokio::fs::symlink_metadata(&full_path).await {
+                Ok(meta) if meta.file_type().is_file() => {
+                    changes.push(read_file_change("add", file_path, &full_path).await?);
+                }
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    warn!(
+                        "Skipping symlink in worktree: {} (symlink-following attack prevention)",
+                        file_path
+                    );
+                }
+                _ => {}
             }
         } else if status_code.starts_with('R') && parts.len() >= 3 {
             // Renamed file: R100\told_path\tnew_path
@@ -1765,8 +1810,19 @@ async fn collect_changes_from_diff_tree(
 
             // If the file was also modified (similarity < 100), emit an edit with content
             let new_full_path = worktree_path.join(new_path);
-            if status_code != "R100" && new_full_path.is_file() {
-                changes.push(read_file_change("edit", new_path, &new_full_path).await?);
+            if status_code != "R100" {
+                match tokio::fs::symlink_metadata(&new_full_path).await {
+                    Ok(meta) if meta.file_type().is_file() => {
+                        changes.push(read_file_change("edit", new_path, &new_full_path).await?);
+                    }
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        warn!(
+                            "Skipping symlink in worktree: {} (symlink-following attack prevention)",
+                            new_path
+                        );
+                    }
+                    _ => {}
+                }
             }
         } else if status_code.starts_with('C') && parts.len() >= 3 {
             // Copied file: C100\tsrc_path\tdest_path
@@ -1774,13 +1830,31 @@ async fn collect_changes_from_diff_tree(
             validate_single_path(dest_path)?;
 
             let dest_full_path = worktree_path.join(dest_path);
-            if dest_full_path.is_file() {
-                changes.push(read_file_change("add", dest_path, &dest_full_path).await?);
+            match tokio::fs::symlink_metadata(&dest_full_path).await {
+                Ok(meta) if meta.file_type().is_file() => {
+                    changes.push(read_file_change("add", dest_path, &dest_full_path).await?);
+                }
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    warn!(
+                        "Skipping symlink in worktree: {} (symlink-following attack prevention)",
+                        dest_path
+                    );
+                }
+                _ => {}
             }
         } else {
             // Modified or other — read current content
-            if full_path.is_file() {
-                changes.push(read_file_change("edit", file_path, &full_path).await?);
+            match tokio::fs::symlink_metadata(&full_path).await {
+                Ok(meta) if meta.file_type().is_file() => {
+                    changes.push(read_file_change("edit", file_path, &full_path).await?);
+                }
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    warn!(
+                        "Skipping symlink in worktree: {} (symlink-following attack prevention)",
+                        file_path
+                    );
+                }
+                _ => {}
             }
         }
     }
@@ -1833,6 +1907,7 @@ async fn read_file_change(
 /// - No .git directory modifications
 /// - No absolute paths
 /// - No null bytes
+/// - No symlink entries (mode 120000)
 fn validate_patch_paths(patch_content: &str) -> anyhow::Result<()> {
     let mut in_diff = false;
     for line in patch_content.lines() {
@@ -1872,6 +1947,15 @@ fn validate_patch_paths(patch_content: &str) -> anyhow::Result<()> {
         {
             let path = line.splitn(3, ' ').nth(2).unwrap_or("").trim_matches('"');
             validate_single_path(path)?;
+        } else if line.starts_with("new file mode 120000")
+            || line.starts_with("old mode 120000")
+            || line.starts_with("new mode 120000")
+        {
+            // Reject symlink entries (git mode 120000 = symbolic link).
+            // Symlinks in a patch could be used to make Stage 3 follow them to
+            // arbitrary filesystem paths (e.g. /proc/self/environ) when collecting
+            // file changes to upload to ADO.
+            anyhow::bail!("Patch contains a symlink entry (mode 120000), which is not allowed");
         }
     }
     Ok(())
@@ -2222,6 +2306,37 @@ new file mode 100755
         assert!(
             result_copy.is_err(),
             "copy with spaces and traversal should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_patch_paths_symlink_rejected() {
+        // A patch that creates a new symlink (mode 120000) must be rejected.
+        // This is the primary attack vector for symlink exfiltration of Stage 3 secrets.
+        let patch = r#"diff --git a/secrets.txt b/secrets.txt
+new file mode 120000
+index 0000000..abcdefg
+--- /dev/null
++++ b/secrets.txt
+@@ -0,0 +1 @@
++/proc/self/environ
+\ No newline at end of file
+"#;
+        assert!(
+            validate_patch_paths(patch).is_err(),
+            "patch with symlink mode 120000 should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_patch_paths_symlink_mode_change_rejected() {
+        // A patch that changes a file to a symlink (old mode → new mode 120000) is rejected.
+        let patch = "diff --git a/file.txt b/file.txt\n\
+                     old mode 100644\n\
+                     new mode 120000\n";
+        assert!(
+            validate_patch_paths(patch).is_err(),
+            "patch that introduces symlink via mode change should be rejected"
         );
     }
 
