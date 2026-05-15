@@ -35,7 +35,7 @@
     flex: 1;
     min-width: 0;
     position: relative;
-    overflow: hidden;
+    overflow: visible;
     border-radius: 0.75rem;
   }
 
@@ -45,13 +45,14 @@
     border-radius: 0.75rem;
     height: 100%;
     font-size: 0.82rem;
+    padding-bottom: 2rem;
   }
 
   .compile-label {
     position: absolute;
-    top: 0.65rem;
-    right: 1rem;
-    z-index: 1;
+    top: 1.1rem;
+    left: 1rem;
+    z-index: 10;
     font-size: 0.7rem;
     font-weight: 600;
     text-transform: uppercase;
@@ -59,6 +60,7 @@
     color: var(--sl-color-accent);
     opacity: 0.7;
     font-family: var(--sl-font-mono, monospace);
+    pointer-events: none;
   }
 
   .compile-arrow {
