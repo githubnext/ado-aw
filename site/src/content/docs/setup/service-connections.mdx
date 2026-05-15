@@ -1,0 +1,182 @@
+---
+title: Service Connections
+description: Create the Azure Resource Manager service connections needed for ado-aw pipelines
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem, Steps } from '@astrojs/starlight/components';
+
+`ado-aw` pipelines use **Azure Resource Manager (ARM) service connections** to mint Azure DevOps-scoped tokens at runtime. These tokens grant the pipeline controlled access to ADO APIs — separately for the agent (read) and the executor (write).
+
+## Why service connections?
+
+The compiled pipeline uses the `AzureCLI@2` task to call `az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798` — this mints a short-lived ADO token scoped to the service connection's identity. This keeps credentials short-lived and auditable, and avoids storing long-lived PATs.
+
+| Connection | Used by | Purpose |
+|------------|---------|---------|
+| **Write** (required for safe outputs) | Stage 3 — SafeOutputs executor | Create PRs, work items, wiki pages, etc. |
+| **Read** (optional) | Stage 1 — Agent | Query ADO APIs (work items, repos, builds) |
+
+:::tip[Reusing existing connections]
+If your project already has ARM service connections with appropriate ADO permissions, you can reuse them — just reference their names in `permissions.write` / `permissions.read` in your agent file. Skip to [Verify your connection works](#verify-your-connection-works) to confirm they're suitable.
+:::
+
+---
+
+## Create the write service connection
+
+This is the minimum required connection. It powers Stage 3 safe-output execution.
+
+<Steps>
+1. Go to your **Azure DevOps Project → Project Settings → Service connections**
+2. Click **New service connection → Azure Resource Manager**
+3. Choose your authentication method:
+
+   <Tabs>
+     <TabItem label="Service principal (automatic)">
+       The simplest option — Azure DevOps creates the app registration and credentials for you.
+
+       - Select **Service principal (automatic)**
+       - Choose an Azure subscription (the identity needs at least **Reader** on the subscription — this is only used for `az` login, not for ADO operations)
+       - Scope to a resource group if preferred
+       - Name the connection (e.g. `ado-aw-write`) — this is the value you'll use in `permissions.write`
+       - Click **Save**
+
+       Azure DevOps creates an Entra ID app registration and configures everything automatically.
+     </TabItem>
+     <TabItem label="Workload Identity Federation (manual)">
+       Secretless — no client secrets to rotate. Use this if your organization requires manual control.
+
+       - Create an [App Registration in Entra ID](https://portal.azure.com/#view/Microsoft_AAD_IAM/ActiveDirectoryMenuBlade/~/RegisteredApps) (note the Application ID and Tenant ID)
+       - In ADO, select **Workload Identity federation (manual)**
+       - Fill in the Subscription ID, Service Principal Id (Application ID), and Tenant ID
+       - Name the connection (e.g. `ado-aw-write`)
+       - Click **Verify and save**
+       - Copy the generated **Issuer** and **Subject identifier** from the connection details
+       - Back in Azure Portal → App Registration → **Certificates & secrets → Federated credentials** → **Add credential** with the Issuer and Subject values
+     </TabItem>
+     <TabItem label="Service principal with secret (manual)">
+       Use if your organization doesn't support Workload Identity Federation or automatic provisioning.
+
+       - Create an [App Registration in Entra ID](https://portal.azure.com/#view/Microsoft_AAD_IAM/ActiveDirectoryMenuBlade/~/RegisteredApps) (note the Application ID and Tenant ID)
+       - In the App Registration → **Certificates & secrets** → **New client secret** (copy the value)
+       - In ADO, select **Service principal (manual)**
+       - Fill in the Subscription ID, Service Principal Id, Service principal key (secret), and Tenant ID
+       - Name the connection (e.g. `ado-aw-write`)
+       - Click **Verify and save**
+
+       :::caution[Secret rotation]
+       Client secrets expire. Set a reminder to rotate before expiry, or prefer Workload Identity Federation to avoid this overhead.
+       :::
+     </TabItem>
+   </Tabs>
+
+4. **Grant ADO permissions** to the service principal. The identity behind the connection needs permission to perform write operations in Azure DevOps:
+   - Go to **Azure DevOps Organization Settings → Users**
+   - Add the service principal (search by its app registration name)
+   - Set access level to **Basic**
+   - Add it to a project-level group with the permissions your safe outputs need — **Contributors** is sufficient for most use cases (PRs, work items, branches, tags, wiki pages)
+
+5. **Reference it** in your agent front matter:
+
+   ```yaml
+   permissions:
+     write: ado-aw-write   # ← name of the service connection you created
+   ```
+</Steps>
+
+:::caution[Least privilege]
+Only grant the permissions your workflows actually use. If your agents only create work item comments, you don't need full Contributor access. See [Safe Outputs reference](/ado-aw/reference/safe-outputs/) for what each tool requires.
+:::
+
+:::note[Compile-time safety check]
+If you configure safe outputs that require write access (e.g. `create-pull-request`, `create-work-item`, `add-pr-comment`) but omit `permissions.write`, compilation will fail with a clear error. This ensures write operations always have an explicitly configured credential.
+:::
+
+---
+
+## Create the read service connection (optional)
+
+If your agent needs to query Azure DevOps APIs (e.g. read work items, list PRs, fetch build results), create a second connection with **read-only** ADO permissions.
+
+Follow the same steps as above, but:
+
+- Name the connection `ado-aw-read` (or similar)
+- In ADO, grant the service principal **Readers** group access (or a custom group with only read permissions)
+
+Then reference both in your agent file:
+
+```yaml
+permissions:
+  read: ado-aw-read
+  write: ado-aw-write
+```
+
+:::note[Why separate connections?]
+Separation ensures the Stage 1 agent — which runs untrusted AI-generated code inside an AWF sandbox — can never perform write operations, even if prompt-injected. The write token only exists in Stage 3, after detection has passed.
+:::
+
+### Permission combinations
+
+| Configuration | Agent can read ADO? | Safe outputs can write? |
+|---|---|---|
+| Both `read` + `write` | ✅ | ✅ |
+| Only `read` | ✅ | ❌ |
+| Only `write` | ❌ | ✅ |
+| Neither (default) | ❌ | ❌ |
+
+---
+
+## Authorize the pipeline
+
+On the first run, Azure DevOps will prompt you to authorize the pipeline to use the service connections. You can also pre-authorize:
+
+<Steps>
+1. In the service connection's settings, go to **Security**
+2. Under **Pipeline permissions**, click **+** and add your ado-aw pipeline (or grant access to all pipelines in the project)
+</Steps>
+
+---
+
+## Verify your connection works
+
+To confirm your service connection can mint ADO tokens, create a test pipeline:
+
+```yaml
+trigger: none
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - task: AzureCLI@2
+    displayName: "Test ADO token mint"
+    inputs:
+      azureSubscription: 'ado-aw-write'  # your connection name
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+        TOKEN=$(az account get-access-token \
+          --resource 499b84ac-1321-427f-aa17-267ca6975798 \
+          --query accessToken -o tsv)
+        if [ -n "$TOKEN" ]; then
+          echo "✅ Successfully minted ADO token (${#TOKEN} chars)"
+        else
+          echo "❌ Failed to mint ADO token"
+          exit 1
+        fi
+```
+
+If this pipeline succeeds, your connection is correctly configured for `ado-aw`.
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely cause |
+|---------|-------------|
+| `AzureCLI@2` fails with "service connection not found" | The pipeline isn't authorized to use the connection — check pipeline permissions in the connection's Security tab |
+| Token mints but safe outputs return 401/403 | The service principal doesn't have sufficient ADO permissions — verify its group membership in ADO Organization Settings → Users |
+| "AADSTS700024: Client assertion is not within its valid time range" | Federated credential issuer/subject mismatch — regenerate in the App Registration |
+| Compilation error: "require write access to ADO, but no write service connection is configured" | Your agent uses write-requiring safe outputs but is missing `permissions.write` in front matter |

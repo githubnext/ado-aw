@@ -26,9 +26,9 @@ The second stage reviews the agent's proposed outputs. Its job is to detect prob
 
 Only approved proposals continue to the next stage.
 
-### 3. Execution
+### 3. SafeOutputs
 
-The third stage applies approved actions with a separate write-capable token. This stage can create or update Azure DevOps resources such as pull requests, comments, work items, and related artifacts.
+The third stage applies approved actions with a separate write-capable token.This stage can create or update Azure DevOps resources such as pull requests, comments, work items, and related artifacts.
 
 Because the write credential is isolated from the agent, the system keeps a strong boundary between reasoning and mutation.
 
@@ -61,7 +61,7 @@ flowchart TD
     B --> C["Azure DevOps pipeline YAML"]
     C --> D["Stage 1: Agent"]
     D -->|"safe-output proposals"| E["Stage 2: Detection"]
-    E -->|"approved proposals"| F["Stage 3: Execution"]
+    E -->|"approved proposals"| F["Stage 3: SafeOutputs"]
 
     style A fill:#7c3aed,color:#fff,stroke:#5b21b6
     style B fill:#6d28d9,color:#fff,stroke:#4c1d95

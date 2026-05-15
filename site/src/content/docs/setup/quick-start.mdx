@@ -86,11 +86,22 @@ This sets the `GITHUB_TOKEN` pipeline variable on the ADO build definition. The 
 - A **GitHub Personal Access Token (PAT)** -- used by the Copilot CLI at runtime (see [required permissions](#github-pat-permissions) below)
 - For Azure DevOps authentication, the command first tries the **Azure CLI** (`az` login session). If the Azure CLI is not available or not logged in, it falls back to prompting for an **Azure DevOps PAT**.
 
+#### Service connections for ADO access
+
+If your agent uses safe outputs that write to Azure DevOps (creating PRs, work items, comments, etc.), you need an **ARM service connection** referenced in your agent file's `permissions.write` field. This connection is used to mint short-lived ADO tokens for the executor stage.
+
+```yaml
+permissions:
+  write: my-write-connection  # ARM service connection name
+```
+
+See [Service Connections](/ado-aw/setup/service-connections/) for step-by-step creation instructions. You can use an existing connection if one is already configured in your project.
+
 :::caution[Temporary limitation: GitHub PAT required]
 The Copilot CLI does not yet support GitHub App tokens. You must provide a fine-grained GitHub PAT. This requirement will be removed once GitHub App token support is added to the Copilot CLI.
 :::
 
-Run the pipeline in Azure DevOps -- it executes the three-stage workflow: Agent -> Detection -> Execution.
+Run the pipeline in Azure DevOps -- it executes the three-stage workflow: Agent -> Detection -> SafeOutputs.
 
 ---
 
@@ -146,9 +157,11 @@ ado-aw configure
 
 This sets the `GITHUB_TOKEN` pipeline variable. See the [With Agents](#3-push-and-configure) section above for details on what the command prompts for and the current GitHub PAT limitation.
 
+If your workflow uses write-requiring safe outputs, you'll also need an ARM service connection — see [Service Connections](/ado-aw/setup/service-connections/).
+
 ### 5. Run the pipeline
 
-Back in Azure DevOps, run the pipeline. It executes the compiled three-stage workflow: Agent -> Detection -> Execution.
+Back in Azure DevOps, run the pipeline. It executes the compiled three-stage workflow: Agent -> Detection -> SafeOutputs.
 
 ---
 
