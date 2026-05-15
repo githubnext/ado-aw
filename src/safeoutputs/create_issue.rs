@@ -56,6 +56,8 @@ pub struct CreateIssueParams {
 
 impl Validate for CreateIssueParams {
     fn validate(&self) -> anyhow::Result<()> {
+        // Note: length checks are byte-based (`str::len()`), which is acceptable
+        // here because limits are defensive bounds rather than user-facing quotas.
         ensure!(self.title.len() >= 5, "title must be at least 5 characters");
         ensure!(self.body.len() >= 30, "body must be at least 30 characters");
         ensure!(self.title.len() <= 256, "title must be 256 characters or fewer");
@@ -207,12 +209,12 @@ fn build_footer(ctx: &ExecutionContext) -> String {
     lines.join("\n")
 }
 
-/// Merge static + agent-supplied labels (case-insensitive dedupe).
-fn merge_labels(static_labels: &[String], agent_labels: &[String]) -> Vec<String> {
-    let mut all = static_labels.to_vec();
-    for label in agent_labels {
-        if !all.iter().any(|t| t.eq_ignore_ascii_case(label)) {
-            all.push(label.clone());
+/// Merge static + agent-supplied strings (case-insensitive dedupe).
+fn merge_dedup_strings(static_items: &[String], agent_items: &[String]) -> Vec<String> {
+    let mut all = static_items.to_vec();
+    for item in agent_items {
+        if !all.iter().any(|existing| existing.eq_ignore_ascii_case(item)) {
+            all.push(item.clone());
         }
     }
     all
@@ -328,8 +330,8 @@ impl Executor for CreateIssueResult {
             )));
         }
         let body_with_footer = format!("{}\n\n{}", self.body, build_footer(ctx));
-        let all_labels = merge_labels(&config.labels, &self.labels);
-        let all_assignees = merge_labels(&config.assignees, &self.assignees);
+        let all_labels = merge_dedup_strings(&config.labels, &self.labels);
+        let all_assignees = merge_dedup_strings(&config.assignees, &self.assignees);
 
         // Split target-repo only after validation.
         let (owner, repo) = config
@@ -551,8 +553,11 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_labels_dedupes_case_insensitively() {
-        let merged = merge_labels(&["bug".into(), "Triage".into()], &["BUG".into(), "fresh".into()]);
+    fn test_merge_dedup_strings_dedupes_case_insensitively() {
+        let merged = merge_dedup_strings(
+            &["bug".into(), "Triage".into()],
+            &["BUG".into(), "fresh".into()],
+        );
         assert_eq!(merged, vec!["bug".to_string(), "Triage".to_string(), "fresh".to_string()]);
     }
 

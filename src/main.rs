@@ -313,12 +313,12 @@ async fn build_execution_context(
         match serde_json::to_value(ci) {
             Ok(v) => {
                 ctx.tool_configs.insert("create-issue".to_string(), v);
+                ctx.debug_enabled_tools.insert("create-issue".to_string());
             }
             Err(e) => log::warn!(
                 "Failed to serialize ado-aw-debug.create-issue config: {e}"
             ),
         }
-        ctx.debug_enabled_tools.insert("create-issue".to_string());
     }
     ctx.allowed_repositories = allowed_repositories;
     ctx.dry_run = dry_run;
