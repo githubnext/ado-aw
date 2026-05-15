@@ -19,7 +19,7 @@ DevOps pipeline with three jobs:
 
 ```
 ┌────────────────────────┐     ┌──────────────────────┐     ┌───────────────────────┐
-│  Agent                 │────▶│  Detection           │────▶│  Execution            │
+│  Agent                 │────▶│  Detection           │────▶│  SafeOutputs          │
 │  (Stage 1 — Agent)     │     │  (Stage 2 — Threats) │     │  (Stage 3 — Executor) │
 │                        │     │                      │     │                       │
 │  • Runs inside AWF     │     │  • Reviews proposed  │     │  • Creates PRs        │
@@ -173,7 +173,7 @@ project. To maintain security isolation between the agent and the executor,
 
 The agent runs in a network-isolated sandbox (AWF) with only the read token.
 Even if the agent were compromised or prompt-injected, it cannot perform write
-operations. Write actions are only executed in Stage 3 (`Execution`)
+operations. Write actions are only executed in Stage 3 (`SafeOutputs`)
 after threat analysis, using a completely separate token that the agent never
 sees.
 

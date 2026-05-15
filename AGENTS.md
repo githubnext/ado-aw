@@ -36,7 +36,7 @@ Every compiled pipeline runs as three sequential jobs:
    acting directly.
 2. **Detection (Stage 2)** — a separate agent inspects Stage 1's proposals for
    prompt injection, secret leaks, and other threats.
-3. **Execution (Stage 3)** — a non-agent executor applies approved safe outputs
+3. **SafeOutputs (Stage 3)** — a non-agent executor applies approved safe outputs
    using a write-capable ADO token that the agent never sees.
 
 ### Architecture

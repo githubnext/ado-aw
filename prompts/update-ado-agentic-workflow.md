@@ -216,7 +216,7 @@ setup:               # Separate job BEFORE Agent
   - bash: echo "Provisioning..."
     displayName: "Setup"
 
-teardown:            # Separate job AFTER Execution
+teardown:            # Separate job AFTER SafeOutputs
   - bash: echo "Cleanup..."
     displayName: "Teardown"
 ```

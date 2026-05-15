@@ -81,7 +81,7 @@ Examples of fuzzy schedule → cron conversion:
 
 Should be replaced with the `checkout: self` step. This generates a simple checkout of the triggering branch.
 
-All checkout steps across all jobs (Agent, Detection, Execution, Setup, Teardown) use this marker.
+All checkout steps across all jobs (Agent, Detection, SafeOutputs, Setup, Teardown) use this marker.
 
 ## {{ checkout_repositories }}
 Should be replaced with checkout steps for additional repositories the agent will work with. The behavior depends on the `repos:` front-matter field (each entry's `checkout:` flag, which defaults to `true`):
@@ -173,7 +173,7 @@ If `setup` is empty, this is replaced with an empty string.
 ## {{ teardown_job }}
 
 Generates a separate teardown job YAML if `teardown` contains steps. The job:
-- Runs after `Execution` (depends on it)
+- Runs after `SafeOutputs` (depends on it)
 - Uses the same pool as the main agentic task
 - Includes a checkout of self
 - Display name: `Teardown`
@@ -432,7 +432,7 @@ If `permissions.read` is not configured, this marker is replaced with an empty s
 
 ## {{ acquire_write_token }}
 
-Generates an `AzureCLI@2` step that acquires a write-capable ADO-scoped access token from the ARM service connection specified in `permissions.write`. This token is used only by the executor in Stage 3 (`Execution` job) and is never exposed to the agent.
+Generates an `AzureCLI@2` step that acquires a write-capable ADO-scoped access token from the ARM service connection specified in `permissions.write`. This token is used only by the executor in Stage 3 (`SafeOutputs` job) and is never exposed to the agent.
 
 The step:
 - Uses the ARM service connection from `permissions.write`
@@ -525,7 +525,7 @@ jobs:
   - job: DailyCodeReview_Agent
   - job: DailyCodeReview_Detection
     dependsOn: DailyCodeReview_Agent
-  - job: DailyCodeReview_Execution
+  - job: DailyCodeReview_SafeOutputs
     dependsOn: [DailyCodeReview_Agent, DailyCodeReview_Detection]
 ```
 
