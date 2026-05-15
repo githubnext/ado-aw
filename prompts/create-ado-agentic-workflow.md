@@ -173,7 +173,7 @@ pool:
 
 ### Step 7 — Target
 
-Defaults to `standalone`. Only include if using 1ES Pipeline Templates.
+Defaults to `standalone`. Only include if using a different target.
 
 ```yaml
 target: 1es
@@ -183,6 +183,10 @@ target: 1es
 |---|---|
 | `standalone` | Full 3-job pipeline with AWF network sandbox and Squid proxy |
 | `1es` | Pipeline extending `1ES.Unofficial.PipelineTemplate.yml`; no custom proxy; MCPs via MCPG |
+| `job` | Reusable ADO YAML template with `jobs:` at root — include in an existing pipeline (no triggers or pipeline name) |
+| `stage` | Reusable ADO YAML template with `stages:` at root — include as a stage in a multi-stage pipeline |
+
+> **Note**: For `target: job` and `target: stage`, triggers configured via `on:` are ignored with a warning — the parent pipeline controls triggers. Job names are prefixed with the agent name for uniqueness (e.g., `DailyReview_Agent`). See `docs/targets.md` for usage examples.
 
 ### Step 8 — MCP Servers
 

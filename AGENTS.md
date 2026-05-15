@@ -193,8 +193,8 @@ index to jump to the right page.
   `edit`, `cache-memory`, `azure-devops` MCP).
 - [`docs/runtimes.md`](docs/runtimes.md) — `runtimes:` configuration (Lean 4,
   Python, Node.js, .NET).
-- [`docs/targets.md`](docs/targets.md) — target platforms: `standalone` and
-  `1es`.
+- [`docs/targets.md`](docs/targets.md) — target platforms: `standalone`,
+  `1es`, `job`, and `stage`.
 - [`docs/safe-outputs.md`](docs/safe-outputs.md) — full reference for every
   safe-output tool agents can use to propose actions (PRs, work items, wiki
   pages, comments, etc.) plus their per-agent configuration.

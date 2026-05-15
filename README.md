@@ -235,7 +235,7 @@ the service connections. Approve the permissions and the pipeline is ready.
 |-------|------|---------|-------------|
 | `name` | string | **required** | Human-readable name for the agent |
 | `description` | string | **required** | One-line summary of the agent's purpose |
-| `target` | `standalone` \| `1es` | `standalone` | Pipeline output format |
+| `target` | `standalone` \| `1es` \| `job` \| `stage` | `standalone` | Pipeline output format. `job` and `stage` generate reusable ADO YAML templates rather than complete pipelines. |
 | `engine` | string or object | `copilot` | Engine identifier or object with `id`, `model`, `timeout-minutes`, etc. |
 | `on` | object | — | Unified trigger configuration (`schedule`, `pipeline` completion, `pr` triggers). See [schedule syntax](#schedule-syntax). |
 | `pool` | string or object | `vmImage: ubuntu-latest` (standalone) / `AZS-1ES-L-MMS-ubuntu-22.04` (1ES) | Agent pool |
