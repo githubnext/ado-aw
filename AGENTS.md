@@ -90,7 +90,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   ├── create_branch.rs
 │   │   ├── create_git_tag.rs
 │   │   ├── create_issue.rs
-│   │   ├── create_pr.rs
+│   │   ├── create_pull_request.rs
 │   │   ├── create_wiki_page.rs
 │   │   ├── create_work_item.rs
 │   │   ├── link_work_items.rs
@@ -206,7 +206,7 @@ index to jump to the right page.
 ### Compiler internals & operations
 
 - [`docs/template-markers.md`](docs/template-markers.md) — every `{{ marker }}`
-  in `src/data/base.yml` and `src/data/1es-base.yml` and how it is replaced.
+  in `src/data/base.yml`, `src/data/1es-base.yml`, `src/data/job-base.yml`, and `src/data/stage-base.yml` and how it is replaced.
 - [`docs/cli.md`](docs/cli.md) — `ado-aw` CLI commands (`init`, `compile`,
   `check`, `mcp`, `mcp-http`, `execute`, `configure`).
 - [`docs/mcp.md`](docs/mcp.md) — MCP server configuration (stdio containers,
