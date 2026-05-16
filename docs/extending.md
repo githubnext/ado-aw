@@ -34,7 +34,7 @@ The `src/compile/extensions/mod.rs` file owns the `CompilerExtension` trait, the
 Runtimes and first-party tools declare their compilation requirements via the `CompilerExtension` trait (`src/compile/extensions/mod.rs`). Instead of scattering special-case `if` blocks across the compiler, each runtime/tool implements this trait and the compiler collects requirements generically:
 
 ```rust
-pub trait CompilerExtension: Send {
+pub trait CompilerExtension {
     fn name(&self) -> &str;                                    // Display name
     fn phase(&self) -> ExtensionPhase;                         // Runtime (0) < Tool (1)
     fn required_hosts(&self) -> Vec<String>;                   // AWF network allowlist
