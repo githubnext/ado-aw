@@ -118,7 +118,8 @@ enum Commands {
         /// The new GITHUB_TOKEN value (defaults to GITHUB_TOKEN env var; prompted if omitted)
         #[arg(long, env = "GITHUB_TOKEN")]
         token: Option<String>,
-        /// Override: Azure DevOps organization URL (inferred from git remote by default)
+        /// Override: Azure DevOps organization (URL like `https://dev.azure.com/myorg`,
+        /// or just the org name `myorg`). Inferred from git remote by default.
         #[arg(long)]
         org: Option<String>,
         /// Override: Azure DevOps project name (inferred from git remote by default)
