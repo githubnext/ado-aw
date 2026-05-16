@@ -1633,11 +1633,10 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
             );
             continue;
         }
+        // Unreachable in practice: validate_safe_outputs_keys bails before
+        // the pipeline reaches this point. The check is kept as a defensive
+        // guard for callers that bypass the validation phase.
         if !ALL_KNOWN_SAFE_OUTPUTS.contains(&key.as_str()) {
-            eprintln!(
-                "Warning: unrecognized safe-output tool '{}' — skipping (no registered tool matches this name)",
-                key
-            );
             continue;
         }
         effective_mcp_tool_count += 1;
@@ -1654,8 +1653,9 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
     }
 
     if effective_mcp_tool_count == 0 {
-        // Every user-specified key was either invalid or unrecognized.
-        // Return empty to keep all tools available (backward compat).
+        // Every user-specified key was either a non-MCP key or a guard path
+        // from the defensive check above. Return empty to keep all tools
+        // available (backward compat).
         return String::new();
     }
 
@@ -1872,6 +1872,117 @@ pub fn validate_resolve_pr_thread_statuses(front_matter: &FrontMatter) -> Result
         }
     }
     Ok(())
+}
+
+/// Validate that every key under `safe-outputs:` is a known tool name.
+///
+/// Unknown keys (typos, stale renamed tools, debug-only tools used in the
+/// regular safe-output surface) used to be silently dropped with a warning
+/// in `generate_enabled_tools_args`, which made user-visible failures hide
+/// as "the tool just didn't run" at Stage 1. This validator promotes the
+/// warning to a hard compile error and points at candidates that share the
+/// typo's first hyphen-segment so users can spot the rename.
+///
+/// Special-cases preserved as warnings (with `continue` in
+/// `generate_enabled_tools_args`):
+///
+/// * `memory` — migrated to `tools: cache-memory:`. Surfaces as a warning
+///   in `generate_enabled_tools_args` for back-compat; this validator
+///   skips it so the migration path stays soft.
+///
+/// `DEBUG_ONLY_TOOLS` keys are independently rejected by
+/// `validate_ado_aw_debug_config` with a more specific error message;
+/// this validator skips them so the operator gets that better message.
+pub fn validate_safe_outputs_keys(front_matter: &FrontMatter) -> Result<()> {
+    use crate::safeoutputs::{
+        ALL_KNOWN_SAFE_OUTPUTS, DEBUG_ONLY_TOOLS, NON_MCP_SAFE_OUTPUT_KEYS,
+    };
+
+    let mut unknown: Vec<(String, Vec<&'static str>)> = Vec::new();
+    let mut invalid_names: Vec<String> = Vec::new();
+
+    for key in front_matter.safe_outputs.keys() {
+        if !validate::is_safe_tool_name(key) {
+            invalid_names.push(key.clone());
+            continue;
+        }
+        if NON_MCP_SAFE_OUTPUT_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        // `memory` is a known migration path — left as a warning in
+        // generate_enabled_tools_args. Don't promote it to an error.
+        if key == "memory" {
+            continue;
+        }
+        // Debug-only tools get a more specific error from
+        // validate_ado_aw_debug_config, so skip them here.
+        if DEBUG_ONLY_TOOLS.contains(&key.as_str()) {
+            continue;
+        }
+        if !ALL_KNOWN_SAFE_OUTPUTS.contains(&key.as_str()) {
+            let related = related_safe_output_names(key);
+            unknown.push((key.clone(), related));
+        }
+    }
+
+    if !invalid_names.is_empty() {
+        invalid_names.sort();
+        let list = invalid_names
+            .iter()
+            .map(|n| format!("  - {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        anyhow::bail!(
+            "safe-outputs contains tool name(s) with invalid characters:\n{list}\n\n\
+             Tool names must contain only ASCII letters, digits, and hyphens. Example:\n\n  \
+             safe-outputs:\n    create-work-item: {{}}\n",
+        );
+    }
+
+    if !unknown.is_empty() {
+        // Stable order for deterministic error messages.
+        unknown.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut msg = String::from("safe-outputs contains unrecognised tool name(s):\n");
+        for (name, related) in &unknown {
+            if related.is_empty() {
+                msg.push_str(&format!("  - {name}\n"));
+            } else {
+                msg.push_str(&format!(
+                    "  - {name} (similar known tools: {})\n",
+                    related.join(", ")
+                ));
+            }
+        }
+        msg.push_str(
+            "\nValid safe-output keys are listed in docs/safe-outputs.md. \
+             Each key must match exactly the kebab-case name registered by a \
+             tool in src/safeoutputs/ (e.g. `create-pull-request`, not \
+             `create-pr`).",
+        );
+        anyhow::bail!("{}", msg);
+    }
+
+    Ok(())
+}
+
+/// Return all known safe-output names that share `key`'s first
+/// hyphen-separated segment (e.g. `create-pr` → all `create-*` tools).
+/// If no candidate shares the head, returns an empty vec — better to give
+/// no suggestion than a misleading one (`update-pr` for `create-pr`).
+fn related_safe_output_names(key: &str) -> Vec<&'static str> {
+    use crate::safeoutputs::ALL_KNOWN_SAFE_OUTPUTS;
+
+    let head = key.split('-').next().unwrap_or_default();
+    if head.is_empty() {
+        return Vec::new();
+    }
+    let mut matches: Vec<&'static str> = ALL_KNOWN_SAFE_OUTPUTS
+        .iter()
+        .copied()
+        .filter(|name| name.split('-').next() == Some(head))
+        .collect();
+    matches.sort();
+    matches
 }
 
 /// Generate the setup job YAML.
@@ -2897,6 +3008,7 @@ pub async fn compile_shared(
 
     // 10. Validations
     validate_write_permissions(front_matter)?;
+    validate_safe_outputs_keys(front_matter)?;
     validate_comment_target(front_matter)?;
     validate_update_work_item_target(front_matter)?;
     validate_submit_pr_review_events(front_matter)?;
@@ -4769,6 +4881,158 @@ ado-aw-debug:
         let (fm, _) = parse_markdown(yaml).unwrap();
         let result = validate_ado_aw_debug_config(&fm);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_safe_outputs_keys_accepts_known_keys() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  noop: {}
+  create-pull-request:
+    target-branch: main
+  create-work-item: {}
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        assert!(validate_safe_outputs_keys(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_validate_safe_outputs_keys_accepts_empty_section() {
+        let (fm, _) = parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
+        assert!(validate_safe_outputs_keys(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_validate_safe_outputs_keys_rejects_unknown_typo_with_suggestion() {
+        // Common past-and-current bug: tool was renamed from `create-pr` to
+        // `create-pull-request` but a user (or our own smoke fixtures, before
+        // the rename) still references the old name. The compiler used to
+        // silently drop the key with only a warning.
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  create-pr:
+    target-branch: main
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let result = validate_safe_outputs_keys(&fm);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("create-pr"), "msg: {}", msg);
+        // The validator lists all `create-*` tools as hints, so the actual
+        // renamed-from match must appear among them.
+        assert!(
+            msg.contains("create-pull-request"),
+            "expected create-pull-request to appear in similar-tools list, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_validate_safe_outputs_keys_rejects_unknown_no_close_match() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  fabricated-tool-name: {}
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let result = validate_safe_outputs_keys(&fm);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("fabricated-tool-name"), "msg: {}", msg);
+        // No similar-tools line for keys that don't share a prefix with anything real.
+        assert!(!msg.contains("similar known tools"), "msg: {}", msg);
+    }
+
+    #[test]
+    fn test_validate_safe_outputs_keys_does_not_double_report_debug_only_tool() {
+        // create-issue is in DEBUG_ONLY_TOOLS — validate_ado_aw_debug_config
+        // gives a better error for it. This validator should skip rather
+        // than redundantly flag it as "unknown".
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  create-issue:
+    target-repo: githubnext/ado-aw
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        assert!(validate_safe_outputs_keys(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_validate_safe_outputs_keys_allows_memory_migration_key() {
+        // `memory` was migrated to `tools: cache-memory:`. The compiler
+        // emits a soft warning for it during enabled-tools generation,
+        // so this strict validator must not promote it to an error.
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  memory: {}
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        assert!(validate_safe_outputs_keys(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_validate_safe_outputs_keys_rejects_invalid_characters() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  bad name with spaces: {}
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let result = validate_safe_outputs_keys(&fm);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("ASCII letters, digits, and hyphens"),
+            "msg: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_validate_safe_outputs_keys_reports_all_invalid_characters() {
+        // Both invalid keys should appear in the single error (not just the first).
+        let yaml = "---\nname: test\ndescription: test\nsafe-outputs:\n  bad key: {}\n  also bad!: {}\n---\n";
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let result = validate_safe_outputs_keys(&fm);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("bad key") && msg.contains("also bad!"),
+            "expected both keys in error, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_related_safe_output_names_returns_all_create_tools_for_create_pr() {
+        let related = related_safe_output_names("create-pr");
+        assert!(related.contains(&"create-pull-request"));
+        assert!(related.contains(&"create-branch"));
+        assert!(related.contains(&"create-work-item"));
+        // Sanity check: nothing from a different first segment should leak in.
+        assert!(!related.contains(&"update-pr"));
+    }
+
+    #[test]
+    fn test_related_safe_output_names_returns_empty_for_distant_string() {
+        let related = related_safe_output_names("fabricated-tool-name");
+        assert!(related.is_empty());
     }
 
     #[test]

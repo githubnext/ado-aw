@@ -711,7 +711,7 @@ Use 'self' for the pipeline's own repository, or a repository alias from the che
         &self,
         params: Parameters<CreatePrParams>,
     ) -> Result<CallToolResult, McpError> {
-        info!("Tool called: create_pr - '{}'", params.0.title);
+        info!("Tool called: create-pull-request - '{}'", params.0.title);
         // Sanitize untrusted agent-provided text fields (IS-01)
         let mut sanitized = params.0;
         sanitized.title = sanitize_text(&sanitized.title);
@@ -1352,7 +1352,7 @@ submitted during safe output processing. Requires 'allowed-events' to be configu
     }
 
     #[tool(
-        name = "reply-to-pr-review-comment",
+        name = "reply-to-pr-comment",
         description = "Reply to an existing review comment thread on an Azure DevOps pull request. \
 Provide the PR ID, thread ID, and reply content. The reply will be posted during safe output processing."
     )]
@@ -1361,7 +1361,7 @@ Provide the PR ID, thread ID, and reply content. The reply will be posted during
         params: Parameters<ReplyToPrCommentParams>,
     ) -> Result<CallToolResult, McpError> {
         info!(
-            "Tool called: reply-to-pr-review-comment - PR #{} thread #{}",
+            "Tool called: reply-to-pr-comment - PR #{} thread #{}",
             params.0.pull_request_id, params.0.thread_id
         );
         let mut sanitized = params.0;
