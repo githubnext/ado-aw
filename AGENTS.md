@@ -89,6 +89,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   ├── comment_on_work_item.rs
 │   │   ├── create_branch.rs
 │   │   ├── create_git_tag.rs
+│   │   ├── create_issue.rs
 │   │   ├── create_pr.rs
 │   │   ├── create_wiki_page.rs
 │   │   ├── create_work_item.rs
