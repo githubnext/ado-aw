@@ -3156,6 +3156,8 @@ pub async fn compile_shared(
         ("{{ agent_name }}", &front_matter.name),
         ("{{ agent_display_name }}", &agent_display_name),
         ("{{ pipeline_agent_name }}", &pipeline_name),
+        // Backward-compatible alias for templates that still reference the
+        // older marker name.
         ("{{ pipeline_name }}", &pipeline_name),
         ("{{ agent_description }}", &front_matter.description),
         ("{{ engine_run }}", &engine_run),
