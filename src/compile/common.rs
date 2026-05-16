@@ -1022,6 +1022,9 @@ pub fn yaml_double_quoted(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            '\u{0085}' => out.push_str("\\x85"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
             c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:02x}", c as u32)),
             c => out.push(c),
         }
@@ -4077,6 +4080,13 @@ mod tests {
         assert_eq!(yaml_double_quoted("a\nb"), r#""a\nb""#);
         assert_eq!(yaml_double_quoted("a\rb"), r#""a\rb""#);
         assert_eq!(yaml_double_quoted("a\tb"), r#""a\tb""#);
+    }
+
+    #[test]
+    fn test_yaml_double_quoted_escapes_yaml_line_separators() {
+        assert_eq!(yaml_double_quoted("a\u{0085}b"), r#""a\x85b""#);
+        assert_eq!(yaml_double_quoted("a\u{2028}b"), r#""a\u2028b""#);
+        assert_eq!(yaml_double_quoted("a\u{2029}b"), r#""a\u2029b""#);
     }
 
     #[test]

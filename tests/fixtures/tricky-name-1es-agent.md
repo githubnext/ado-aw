@@ -12,4 +12,4 @@ Fixture used by `tests/compiler_tests.rs` to verify that agent names
 containing embedded double quotes and colons survive YAML escaping for
 the 1ES target, where the stage's `displayName:` is generated via
 `{{ agent_display_name }}` and the top-level pipeline `name:` is
-generated via `{{ pipeline_display_name }}`.
+generated via `{{ pipeline_name }}`.
