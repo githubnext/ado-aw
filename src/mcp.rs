@@ -711,7 +711,7 @@ Use 'self' for the pipeline's own repository, or a repository alias from the che
         &self,
         params: Parameters<CreatePrParams>,
     ) -> Result<CallToolResult, McpError> {
-        info!("Tool called: create_pr - '{}'", params.0.title);
+        info!("Tool called: create-pull-request - '{}'", params.0.title);
         // Sanitize untrusted agent-provided text fields (IS-01)
         let mut sanitized = params.0;
         sanitized.title = sanitize_text(&sanitized.title);
