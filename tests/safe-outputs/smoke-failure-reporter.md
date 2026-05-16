@@ -4,6 +4,8 @@ description: "Files [smoke-failure] issues on githubnext/ado-aw for failed daily
 on:
   schedule: daily around 04:30
 target: standalone
+pool:
+  name: AZS-1ES-L-Playground-ubuntu-22.04
 engine:
   id: copilot
   model: gpt-5-mini
