@@ -35,6 +35,10 @@ enum Commands {
         /// the input markdown (e.g. `foo.md` -> `<dir>/foo.lock.yml`).
         #[arg(short, long)]
         output: Option<String>,
+        /// Bypass the GitHub-remote guard (use when running inside a
+        /// GitHub-hosted repository like `githubnext/ado-aw` itself).
+        #[arg(long)]
+        force: bool,
         /// Omit the "Verify pipeline integrity" step from the generated pipeline.
         /// Only available in debug builds.
         #[cfg(debug_assertions)]
@@ -207,7 +211,10 @@ async fn ensure_non_github_remote_for_ado_aw(command_name: &str, repo_path: &Pat
         anyhow::bail!(
             "Cannot run `ado-aw {}` in a GitHub repository (origin: {}). \
              `ado-aw` is for Azure DevOps repositories. \
-             For GitHub repositories, use gh-aw instead: https://github.com/github/gh-aw",
+             For GitHub repositories, use gh-aw instead: https://github.com/github/gh-aw\n\
+             \n\
+             If you are working inside `githubnext/ado-aw` itself (or a fork), \
+             pass `--force` to bypass this check.",
             command_name,
             remote_url
         );
@@ -499,6 +506,7 @@ async fn main() -> Result<()> {
         Commands::Compile {
             path,
             output,
+            force,
             #[cfg(debug_assertions)]
             skip_integrity,
             #[cfg(debug_assertions)]
@@ -509,7 +517,12 @@ async fn main() -> Result<()> {
             #[cfg(not(debug_assertions))]
             let debug_pipeline = false;
 
-            ensure_non_github_remote_for_ado_aw("compile", Path::new(".")).await?;
+            // `--force` bypasses the GitHub-remote guard so maintainers can
+            // run `ado-aw compile` inside this repository (or other
+            // GitHub-hosted forks) for development and example regeneration.
+            if !force {
+                ensure_non_github_remote_for_ado_aw("compile", Path::new(".")).await?;
+            }
             run_compile(path, output, skip_integrity, debug_pipeline).await?;
         }
         Commands::Check { pipeline } => {
