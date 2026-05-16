@@ -214,7 +214,7 @@ Used by all templates under a `pool:` block and expands to:
 - 1ES target: two lines (`name: <pool>` and `os: <linux|windows>`)
 
 Defaults:
-- non-1ES: `vmImage: ubuntu-latest`
+- non-1ES: `vmImage: ubuntu-22.04`
 - 1ES: `name: AZS-1ES-L-MMS-ubuntu-22.04` + `os: linux`
 
 ## {{ setup_job }}

@@ -1036,7 +1036,7 @@ pub fn yaml_double_quoted(s: &str) -> String {
 /// Default self-hosted pool for 1ES templates.
 pub const DEFAULT_ONEES_POOL: &str = "AZS-1ES-L-MMS-ubuntu-22.04";
 /// Default Microsoft-hosted VM image for non-1ES templates.
-pub const DEFAULT_VM_IMAGE_POOL: &str = "ubuntu-latest";
+pub const DEFAULT_VM_IMAGE_POOL: &str = "ubuntu-22.04";
 
 /// Resolve the `{{ pool }}` replacement block.
 ///
@@ -7003,7 +7003,7 @@ safe-outputs:
     #[test]
     fn test_resolve_pool_block_non_onees_defaults_to_vm_image() {
         let block = resolve_pool_block(CompileTarget::Standalone, None).expect("pool block");
-        assert_eq!(block, "vmImage: ubuntu-latest");
+        assert_eq!(block, "vmImage: ubuntu-22.04");
     }
 
     #[test]
@@ -7044,7 +7044,7 @@ safe-outputs:
         });
         let block =
             resolve_pool_block(CompileTarget::Standalone, Some(&pool)).expect("pool block");
-        assert_eq!(block, "vmImage: ubuntu-latest");
+        assert_eq!(block, "vmImage: ubuntu-22.04");
     }
 
     #[test]

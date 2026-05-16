@@ -238,7 +238,7 @@ the service connections. Approve the permissions and the pipeline is ready.
 | `target` | `standalone` \| `1es` \| `job` \| `stage` | `standalone` | Pipeline output format. `job` and `stage` generate reusable ADO YAML templates rather than complete pipelines. |
 | `engine` | string or object | `copilot` | Engine identifier or object with `id`, `model`, `timeout-minutes`, etc. |
 | `on` | object | — | Unified trigger configuration (`schedule`, `pipeline` completion, `pr` triggers). See [schedule syntax](#schedule-syntax). |
-| `pool` | string or object | `vmImage: ubuntu-latest` (standalone) / `AZS-1ES-L-MMS-ubuntu-22.04` (1ES) | Agent pool |
+| `pool` | string or object | `vmImage: ubuntu-22.04` (standalone) / `AZS-1ES-L-MMS-ubuntu-22.04` (1ES) | Agent pool |
 | `workspace` | `root` \| `repo` \| `self` \| *alias* | auto | Working directory mode. `self` is an alias for `repo`; any checked-out repo alias is also accepted. |
 | `repos` | list | — | Compact repository declarations (replaces legacy `repositories:` + `checkout:`) |
 | `mcp-servers` | map | — | MCP server configuration |

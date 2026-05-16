@@ -18,7 +18,7 @@ engine: copilot # Engine identifier. Defaults to copilot. Currently only 'copilo
 #   timeout-minutes: 30
 workspace: repo # Optional: "root", "repo" (alias: "self"), or a checked-out repository alias. If not specified, defaults to "root" when no additional repositories are listed in `repos:`, and to "repo" when one or more additional repos are checked out. See "Workspace Defaults" below.
 pool:                          # Optional pool configuration
-  vmImage: ubuntu-latest       # Microsoft-hosted (default for non-1ES targets)
+  vmImage: ubuntu-22.04        # Microsoft-hosted (default for non-1ES targets)
 # pool:                        # Self-hosted pool
 #   name: MySelfHostedPool
 # pool:                        # 1ES pool format
