@@ -2,7 +2,7 @@
 # This template extends the 1ES Unofficial Pipeline Template with Copilot CLI,
 # AWF network isolation, and MCP Gateway — matching the standalone pipeline model.
 
-name: {{ pipeline_name }}
+name: {{ pipeline_agent_name }}
 {{ parameters }}
 {{ schedule }}
 {{ pr_trigger }}

@@ -105,7 +105,7 @@ have not been validated against YAML scalar rules.
 > ⚠️ This marker is only safe inside a position that is **not parsed as
 > YAML** (currently only `src/data/threat-analysis.md`, which is a
 > markdown body). YAML positions inside the generated pipelines use
-> [`{{ pipeline_name }}`](#-pipeline_name-) (top-level `name:` line)
+> [`{{ pipeline_agent_name }}`](#-pipeline_agent_name-) (top-level `name:` line)
 > or [`{{ agent_display_name }}`](#-agent_display_name-)
 > (`displayName:` positions). Both emit a fully-quoted-and-escaped
 > double-quoted YAML scalar, so colons, embedded `"`, and other
@@ -129,16 +129,19 @@ For an agent named `My "special": agent`, this expands to:
 Used in `src/data/1es-base.yml` (1ES stage display name) and
 `src/data/stage-base.yml` (stage-target stage display name). The marker
 deliberately does **not** include the `-$(BuildID)` suffix that
-[`{{ pipeline_name }}`](#-pipeline_name-) carries — stage labels are
+[`{{ pipeline_agent_name }}`](#-pipeline_agent_name-) carries — stage labels are
 static and don't need per-run uniqueness.
 
-## {{ pipeline_name }}
+## {{ pipeline_agent_name }}
 
-Should be replaced with the front-matter agent name plus the
-`-$(BuildID)` suffix, always emitted as a **YAML double-quoted scalar**
-with the same escaping rules as `{{ agent_display_name }}`. Used only
-for the top-level pipeline `name:` line, which in Azure DevOps is the
-build-number format string. The `-$(BuildID)` suffix is the
+Should be replaced with a sanitized front-matter agent name plus the
+`-$(BuildID)` suffix, emitted as a **YAML double-quoted scalar**. Used
+only for the top-level pipeline `name:` line, which in Azure DevOps is
+the build-number format string. The marker strips build-number-invalid
+characters (`"`, `/`, `:`, `<`, `>`, `\`, `|`, `?`, `@`, `*`), trims
+trailing `.` from the name fragment, and enforces the 255-character
+build-number limit when combined with the `-$(BuildID)` suffix. The
+suffix is the
 [varying token ADO requires](https://learn.microsoft.com/azure/devops/pipelines/process/run-number)
 to give each run a unique display name in the runs view; without it,
 every run shows the same name.
@@ -146,7 +149,7 @@ every run shows the same name.
 For an agent named `Daily safe-output smoke: noop`, this expands to:
 
 ```yaml
-name: "Daily safe-output smoke: noop-$(BuildID)"
+name: "Daily safe-output smoke noop-$(BuildID)"
 ```
 
 `$(BuildID)` is an ADO macro and is expanded at queue time after YAML

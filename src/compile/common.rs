@@ -996,6 +996,40 @@ pub fn sanitize_filename(name: &str) -> String {
         .join("-")
 }
 
+const ADO_BUILD_NUMBER_MAX_LEN: usize = 255;
+const ADO_BUILD_ID_SUFFIX: &str = "-$(BuildID)";
+
+/// Sanitize front-matter agent name for ADO build-number format strings.
+///
+/// Rules enforced:
+/// - Remove characters disallowed by Azure DevOps build numbers:
+///   `"`, `/`, `:`, `<`, `>`, `\`, `|`, `?`, `@`, `*`
+/// - Trim leading/trailing whitespace
+/// - Ensure the resulting build number format (`<name>-$(BuildID)`) fits in 255 chars
+/// - Ensure the name fragment does not end with `.`
+fn sanitize_pipeline_agent_name(name: &str) -> String {
+    let mut sanitized = String::with_capacity(name.len());
+    for ch in name.trim().chars() {
+        if matches!(ch, '"' | '/' | ':' | '<' | '>' | '\\' | '|' | '?' | '@' | '*') {
+            continue;
+        }
+        sanitized.push(ch);
+    }
+
+    let mut sanitized = sanitized.trim().trim_end_matches('.').to_string();
+    let max_agent_len = ADO_BUILD_NUMBER_MAX_LEN.saturating_sub(ADO_BUILD_ID_SUFFIX.len());
+    if sanitized.chars().count() > max_agent_len {
+        sanitized = sanitized.chars().take(max_agent_len).collect();
+        sanitized = sanitized.trim_end_matches('.').to_string();
+    }
+
+    if sanitized.is_empty() {
+        "pipeline".to_string()
+    } else {
+        sanitized
+    }
+}
+
 /// Emit `s` as a YAML double-quoted scalar (always quoted, never plain).
 ///
 /// We always quote because the value is substituted into YAML positions
@@ -2894,12 +2928,15 @@ pub async fn compile_shared(
     let checkout_self = generate_checkout_self();
     let agent_name = sanitize_filename(&front_matter.name);
     // Top-level pipeline `name:` value (the ADO build-number format).
-    // Always quoted so colons / embedded `"` in the agent name can't
-    // break parsing. Includes `-$(BuildID)` because ADO needs a varying
-    // token in the build-number format — without one, every run shows
-    // the same name in the runs view.
-    let pipeline_name =
-        yaml_double_quoted(&format!("{}-$(BuildID)", front_matter.name));
+    // We sanitize invalid build-number characters from the agent name and
+    // always quote the final scalar for YAML safety. Includes `-$(BuildID)`
+    // because ADO needs a varying token in the build-number format —
+    // without one, every run shows the same name in the runs view.
+    let pipeline_name = yaml_double_quoted(&format!(
+        "{}{}",
+        sanitize_pipeline_agent_name(&front_matter.name),
+        ADO_BUILD_ID_SUFFIX
+    ));
     // Stage / job `displayName:` value. Always quoted (same escaping
     // rationale as `pipeline_name`) but with NO BuildID suffix — stage
     // labels are static and shouldn't carry per-run uniqueness suffixes.
@@ -3118,6 +3155,9 @@ pub async fn compile_shared(
         ("{{ agent }}", &agent_name),
         ("{{ agent_name }}", &front_matter.name),
         ("{{ agent_display_name }}", &agent_display_name),
+        ("{{ pipeline_agent_name }}", &pipeline_name),
+        // Backward-compatible alias for templates that still reference the
+        // older marker name.
         ("{{ pipeline_name }}", &pipeline_name),
         ("{{ agent_description }}", &front_matter.description),
         ("{{ engine_run }}", &engine_run),
@@ -4044,6 +4084,36 @@ mod tests {
     fn test_sanitize_filename_special_chars() {
         assert_eq!(sanitize_filename("agent@v1.0"), "agent-v1-0");
         assert_eq!(sanitize_filename("test_case"), "test-case");
+    }
+
+    // ─── sanitize_pipeline_agent_name ───────────────────────────────────────
+
+    #[test]
+    fn test_sanitize_pipeline_agent_name_removes_invalid_build_number_chars() {
+        assert_eq!(
+            sanitize_pipeline_agent_name(r#"Daily safe-output smoke: "noop" @nightly"#),
+            "Daily safe-output smoke noop nightly"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_pipeline_agent_name_trims_trailing_dot() {
+        assert_eq!(sanitize_pipeline_agent_name("Agent name."), "Agent name");
+    }
+
+    #[test]
+    fn test_sanitize_pipeline_agent_name_enforces_length_budget() {
+        let input = "x".repeat(ADO_BUILD_NUMBER_MAX_LEN);
+        let sanitized = sanitize_pipeline_agent_name(&input);
+        assert_eq!(
+            sanitized.chars().count(),
+            ADO_BUILD_NUMBER_MAX_LEN - ADO_BUILD_ID_SUFFIX.len()
+        );
+    }
+
+    #[test]
+    fn test_sanitize_pipeline_agent_name_fallback_when_empty_after_sanitize() {
+        assert_eq!(sanitize_pipeline_agent_name(":@?*"), "pipeline");
     }
 
     // ─── yaml_double_quoted ──────────────────────────────────────────────────
