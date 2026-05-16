@@ -1,5 +1,5 @@
 
-name: {{ pipeline_name }}
+name: {{ pipeline_agent_name }}
 {{ parameters }}
 resources:
   repositories:
