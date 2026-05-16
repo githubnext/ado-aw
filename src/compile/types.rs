@@ -32,7 +32,7 @@ pub enum CompileTarget {
 ///
 /// # Object format (recommended)
 /// pool:
-///   vmImage: ubuntu-latest   # Microsoft-hosted
+///   vmImage: ubuntu-22.04   # Microsoft-hosted
 ///
 /// # Object format (self-hosted)
 /// pool:
@@ -56,7 +56,7 @@ impl Default for PoolConfig {
     fn default() -> Self {
         PoolConfig::Full(PoolConfigFull {
             name: None,
-            vm_image: Some("ubuntu-latest".to_string()),
+            vm_image: Some("ubuntu-22.04".to_string()),
             os: None,
         })
     }
@@ -1357,11 +1357,11 @@ mod tests {
 
     #[test]
     fn test_pool_config_object_vm_image_form() {
-        let yaml = "pool:\n  vmImage: ubuntu-latest";
+        let yaml = "pool:\n  vmImage: ubuntu-22.04";
         let fm: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let pool: PoolConfig = serde_yaml::from_value(fm["pool"].clone()).unwrap();
         assert_eq!(pool.name(), None);
-        assert_eq!(pool.vm_image(), Some("ubuntu-latest"));
+        assert_eq!(pool.vm_image(), Some("ubuntu-22.04"));
         assert_eq!(pool.os(), "linux");
     }
 
@@ -1369,7 +1369,7 @@ mod tests {
     fn test_pool_config_default_is_vm_image() {
         let pool = PoolConfig::default();
         assert_eq!(pool.name(), None);
-        assert_eq!(pool.vm_image(), Some("ubuntu-latest"));
+        assert_eq!(pool.vm_image(), Some("ubuntu-22.04"));
         assert_eq!(pool.os(), "linux");
     }
 

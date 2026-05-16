@@ -7,7 +7,7 @@
 //!
 //! When the pool field is **absent** and the compiler version is at or
 //! above `INTRODUCED_IN` (the release that changed the implicit
-//! default from the 1ES self-hosted pool to `vmImage: ubuntu-latest`),
+//! default from the 1ES self-hosted pool to `vmImage: ubuntu-22.04`),
 //! the codemod pins the legacy default explicitly so existing
 //! pipelines are not silently broken.
 
@@ -18,7 +18,7 @@ use super::{Codemod, CodemodContext};
 use crate::compile::common::DEFAULT_ONEES_POOL;
 
 /// Version where the pool default changed from the legacy self-hosted
-/// pool to `vmImage: ubuntu-latest`.
+/// pool to `vmImage: ubuntu-22.04`.
 const INTRODUCED_IN: &str = "0.30.0";
 
 pub static CODEMOD: Codemod = Codemod {
@@ -48,7 +48,7 @@ fn apply_codemod(fm: &mut Mapping, ctx: &CodemodContext) -> Result<bool> {
         // Pool absent — only inject the legacy default for 1ES
         // targets where the old implicit default was the self-hosted
         // pool. Non-1ES (standalone/job/stage) targets now default to
-        // `vmImage: ubuntu-latest`, which is the desired behaviour
+        // `vmImage: ubuntu-22.04`, which is the desired behaviour
         // for new pipelines that omit `pool:`.
         if !version_gte(ctx.compiler_version, INTRODUCED_IN) {
             return Ok(false);
@@ -104,13 +104,13 @@ mod tests {
     #[test]
     fn noops_when_pool_is_already_mapping() {
         let mut fm: Mapping =
-            serde_yaml::from_str("name: x\ndescription: y\npool:\n  vmImage: ubuntu-latest")
+            serde_yaml::from_str("name: x\ndescription: y\npool:\n  vmImage: ubuntu-22.04")
                 .unwrap();
         let changed = apply_codemod(&mut fm, &ctx("0.30.0")).expect("apply");
         assert!(!changed);
         assert_eq!(
             fm.get(Value::String("pool".into())).cloned(),
-            Some(serde_yaml::from_str::<Value>("vmImage: ubuntu-latest").unwrap())
+            Some(serde_yaml::from_str::<Value>("vmImage: ubuntu-22.04").unwrap())
         );
     }
 
@@ -129,7 +129,7 @@ mod tests {
     #[test]
     fn noops_when_pool_absent_standalone_and_version_gte() {
         // Standalone pipelines without pool should get the new
-        // vmImage: ubuntu-latest default, not the legacy 1ES pool.
+        // vmImage: ubuntu-22.04 default, not the legacy 1ES pool.
         let mut fm: Mapping = serde_yaml::from_str("name: x\ndescription: y").unwrap();
         let changed = apply_codemod(&mut fm, &ctx("0.30.0")).expect("apply");
         assert!(!changed);
