@@ -318,9 +318,9 @@ tools:
 | `create-wiki-page` | Create a new ADO wiki page (requires `wiki-name`) | ✅ |
 | `update-wiki-page` | Update an existing ADO wiki page (requires `wiki-name`) | ✅ |
 | **Diagnostics** | | |
-| `noop` | Report no action needed | — |
+| `noop` | Report no action needed; also files an ADO work item (configurable, gracefully skipped without write perms) | — |
 | `missing-data` | Report missing data/information | — |
-| `missing-tool` | Report a missing tool or capability | — |
+| `missing-tool` | Report a missing tool or capability; also files an ADO work item (configurable, gracefully skipped without write perms) | — |
 | `report-incomplete` | Report that a task could not be completed | — |
 
 Example configuration for additional tools:
@@ -339,11 +339,24 @@ safe-outputs:
   queue-build:
     allowed-pipelines: [42, 99]       # Required — pipeline definition IDs that can be triggered
     max: 1
+  # noop and missing-tool auto-file ADO work items (enabled by default, optional customisation):
+  noop:
+    work-item:
+      enabled: true                   # Set to false to disable work-item filing
+      title: "[ado-aw] Agent reported no operation"
+      work-item-type: Task
+      area-path: "MyProject\\MyTeam"  # Optional
+  missing-tool:
+    work-item:
+      enabled: true                   # Set to false to disable work-item filing
+      title: "[ado-aw] Agent encountered missing tool"
+      work-item-type: Task
+      area-path: "MyProject\\MyTeam"  # Optional
 ```
 
 > See `docs/safe-outputs.md` → "Available Safe Output Tools" for full configuration reference of every tool.
 
-Diagnostic tools (`noop`, `missing-data`, `missing-tool`, `report-incomplete`) are always available and require no configuration.
+Diagnostic tools (`noop`, `missing-data`, `missing-tool`, `report-incomplete`) are always available and require no required configuration. `noop` and `missing-tool` automatically file ADO work items by default — this requires `permissions.write` to actually create work items, but gracefully skips (with a warning) if credentials are unavailable.
 
 > **Validation**: The compiler enforces that if write-requiring safe outputs are configured, `permissions.write` must be set.
 
