@@ -97,7 +97,64 @@ This distinction allows resources (like templates) to be available as pipeline r
 
 ## {{ agent_name }}
 
-Should be replaced with the human-readable name from the front matter (e.g., "Daily Code Review"). This is used for display purposes like stage names.
+Should be replaced with the human-readable name from the front matter
+(e.g., `Daily Code Review`). The value is substituted **as-is**, with
+no quoting or escaping — front-matter `name` values are free-form and
+have not been validated against YAML scalar rules.
+
+> ⚠️ This marker is only safe inside a position that is **not parsed as
+> YAML** (currently only `src/data/threat-analysis.md`, which is a
+> markdown body). YAML positions inside the generated pipelines use
+> [`{{ pipeline_name }}`](#-pipeline_name-) (top-level `name:` line)
+> or [`{{ agent_display_name }}`](#-agent_display_name-)
+> (`displayName:` positions). Both emit a fully-quoted-and-escaped
+> double-quoted YAML scalar, so colons, embedded `"`, and other
+> plain-scalar-unsafe characters in the agent name cannot break parsing.
+
+## {{ agent_display_name }}
+
+Should be replaced with the front-matter agent name, emitted as a
+**YAML double-quoted scalar** with proper escaping for `\`, `"`,
+`\n`, `\r`, `\t`, and other ASCII control characters. Used for
+`displayName:` positions inside the generated YAML where the templates
+previously hand-wrapped `{{ agent_name }}` in double quotes (which
+silently corrupted any agent name containing an embedded `"`).
+
+For an agent named `My "special": agent`, this expands to:
+
+```yaml
+  displayName: "My \"special\": agent"
+```
+
+Used in `src/data/1es-base.yml` (1ES stage display name) and
+`src/data/stage-base.yml` (stage-target stage display name). The marker
+deliberately does **not** include the `-$(BuildID)` suffix that
+[`{{ pipeline_name }}`](#-pipeline_name-) carries — stage labels are
+static and don't need per-run uniqueness.
+
+## {{ pipeline_name }}
+
+Should be replaced with the front-matter agent name plus the
+`-$(BuildID)` suffix, always emitted as a **YAML double-quoted scalar**
+with the same escaping rules as `{{ agent_display_name }}`. Used only
+for the top-level pipeline `name:` line, which in Azure DevOps is the
+build-number format string. The `-$(BuildID)` suffix is the
+[varying token ADO requires](https://learn.microsoft.com/azure/devops/pipelines/process/run-number)
+to give each run a unique display name in the runs view; without it,
+every run shows the same name.
+
+For an agent named `Daily safe-output smoke: noop`, this expands to:
+
+```yaml
+name: "Daily safe-output smoke: noop-$(BuildID)"
+```
+
+`$(BuildID)` is an ADO macro and is expanded at queue time after YAML
+parsing; `$` has no special meaning inside a YAML double-quoted scalar
+so the macro passes through untouched.
+
+Used in `src/data/base.yml` and `src/data/1es-base.yml` only. The
+job- and stage-level templates don't emit a top-level pipeline name.
 
 ## {{ engine_install_steps }}
 

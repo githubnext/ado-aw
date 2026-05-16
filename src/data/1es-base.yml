@@ -2,7 +2,7 @@
 # This template extends the 1ES Unofficial Pipeline Template with Copilot CLI,
 # AWF network isolation, and MCP Gateway — matching the standalone pipeline model.
 
-name: {{ agent_name }}-$(BuildID)
+name: {{ pipeline_name }}
 {{ parameters }}
 {{ schedule }}
 {{ pr_trigger }}
@@ -34,7 +34,7 @@ extends:
       runPrerequisitesOnImage: false # Pool image has 1ES prerequisites preinstalled
     stages:
       - stage: AgentStage
-        displayName: "{{ agent_name }}"
+        displayName: {{ agent_display_name }}
         jobs:
           {{ setup_job }}
 
