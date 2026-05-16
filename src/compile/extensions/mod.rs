@@ -84,7 +84,7 @@ pub struct McpgConfig {
 // Compile context
 // ──────────────────────────────────────────────────────────────────────
 
-use crate::configure::AdoContext;
+use crate::ado::AdoContext;
 use crate::engine::{self, Engine};
 use std::path::Path;
 
@@ -138,8 +138,8 @@ impl<'a> CompileContext<'a> {
     }
 
     async fn infer_ado_context(dir: &Path) -> Option<AdoContext> {
-        match crate::configure::get_git_remote_url(dir).await {
-            Ok(url) => match crate::configure::parse_ado_remote(&url) {
+        match crate::ado::get_git_remote_url(dir).await {
+            Ok(url) => match crate::ado::parse_ado_remote(&url) {
                 Ok(ctx) => {
                     log::info!(
                         "Inferred ADO org from git remote: {}",

@@ -1,5 +1,6 @@
 mod agent_stats;
 mod allowed_hosts;
+pub mod ado;
 mod compile;
 mod configure;
 mod detect;
@@ -204,7 +205,7 @@ async fn ensure_non_github_remote_for_ado_aw(command_name: &str, repo_path: &Pat
         return Ok(());
     }
 
-    let Ok(remote_url) = configure::get_git_remote_url(repo_path).await else {
+    let Ok(remote_url) = ado::get_git_remote_url(repo_path).await else {
         return Ok(());
     };
 
