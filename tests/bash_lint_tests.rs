@@ -108,6 +108,7 @@ const REQUIRED_STEP_DISPLAY_NAMES: &[&str] = &[
     "Evaluate pipeline filters",              // src/compile/extensions/trigger_filters.rs + src/compile/filter_ir.rs
     "Evaluate PR filters",                    // src/compile/filter_ir.rs (GateContext::PullRequest)
     "Verify MCP backends",                    // src/compile/common.rs (--debug-pipeline only)
+    "Verify pipeline integrity",              // src/compile/common.rs generate_integrity_check
 ];
 
 fn ado_aw_binary() -> PathBuf {
