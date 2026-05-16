@@ -1633,11 +1633,10 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
             );
             continue;
         }
+        // Unreachable in practice: validate_safe_outputs_keys bails before
+        // the pipeline reaches this point. The check is kept as a defensive
+        // guard for callers that bypass the validation phase.
         if !ALL_KNOWN_SAFE_OUTPUTS.contains(&key.as_str()) {
-            eprintln!(
-                "Warning: unrecognized safe-output tool '{}' — skipping (no registered tool matches this name)",
-                key
-            );
             continue;
         }
         effective_mcp_tool_count += 1;
@@ -1654,8 +1653,9 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
     }
 
     if effective_mcp_tool_count == 0 {
-        // Every user-specified key was either invalid or unrecognized.
-        // Return empty to keep all tools available (backward compat).
+        // Every user-specified key was either a non-MCP key or a guard path
+        // from the defensive check above. Return empty to keep all tools
+        // available (backward compat).
         return String::new();
     }
 
@@ -1899,15 +1899,12 @@ pub fn validate_safe_outputs_keys(front_matter: &FrontMatter) -> Result<()> {
     };
 
     let mut unknown: Vec<(String, Vec<&'static str>)> = Vec::new();
+    let mut invalid_names: Vec<String> = Vec::new();
 
     for key in front_matter.safe_outputs.keys() {
         if !validate::is_safe_tool_name(key) {
-            anyhow::bail!(
-                "safe-outputs.{0} is not a valid tool name. Tool names must \
-                 contain only ASCII letters, digits, and hyphens. Example:\n\n  \
-                 safe-outputs:\n    create-work-item: {{}}\n",
-                key
-            );
+            invalid_names.push(key.clone());
+            continue;
         }
         if NON_MCP_SAFE_OUTPUT_KEYS.contains(&key.as_str()) {
             continue;
@@ -1926,6 +1923,20 @@ pub fn validate_safe_outputs_keys(front_matter: &FrontMatter) -> Result<()> {
             let related = related_safe_output_names(key);
             unknown.push((key.clone(), related));
         }
+    }
+
+    if !invalid_names.is_empty() {
+        invalid_names.sort();
+        let list = invalid_names
+            .iter()
+            .map(|n| format!("  - {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        anyhow::bail!(
+            "safe-outputs contains tool name(s) with invalid characters:\n{list}\n\n\
+             Tool names must contain only ASCII letters, digits, and hyphens. Example:\n\n  \
+             safe-outputs:\n    create-work-item: {{}}\n",
+        );
     }
 
     if !unknown.is_empty() {
@@ -1961,7 +1972,7 @@ pub fn validate_safe_outputs_keys(front_matter: &FrontMatter) -> Result<()> {
 fn related_safe_output_names(key: &str) -> Vec<&'static str> {
     use crate::safeoutputs::ALL_KNOWN_SAFE_OUTPUTS;
 
-    let head = key.split('-').next().unwrap_or(key);
+    let head = key.split('-').next().unwrap_or_default();
     if head.is_empty() {
         return Vec::new();
     }
@@ -4989,6 +5000,21 @@ safe-outputs:
         assert!(
             msg.contains("ASCII letters, digits, and hyphens"),
             "msg: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_validate_safe_outputs_keys_reports_all_invalid_characters() {
+        // Both invalid keys should appear in the single error (not just the first).
+        let yaml = "---\nname: test\ndescription: test\nsafe-outputs:\n  bad key: {}\n  also bad!: {}\n---\n";
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let result = validate_safe_outputs_keys(&fm);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("bad key") && msg.contains("also bad!"),
+            "expected both keys in error, got: {}",
             msg
         );
     }
