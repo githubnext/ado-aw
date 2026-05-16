@@ -37,7 +37,7 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
 
 - `configure` - Detect agentic pipelines in a local repository and update the `GITHUB_TOKEN` pipeline variable on their Azure DevOps build definitions
   - `--token <token>` / `GITHUB_TOKEN` env var - The new GITHUB_TOKEN value (prompted if omitted)
-  - `--org <url>` - Override: Azure DevOps organization URL (inferred from git remote by default)
+  - `--org <url>` - Override: Azure DevOps organization URL (e.g. `https://dev.azure.com/myorg`) or just the org name (e.g. `myorg`, auto-prefixed to the canonical URL). Inferred from git remote by default.
   - `--project <name>` - Override: Azure DevOps project name (inferred from git remote by default)
   - `--pat <pat>` / `AZURE_DEVOPS_EXT_PAT` env var - PAT for ADO API authentication (prompted if omitted)
   - `--path <path>` - Path to the repository root (defaults to current directory)

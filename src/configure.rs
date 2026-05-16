@@ -652,6 +652,33 @@ async fn resolve_auth(pat: Option<&str>) -> Result<AdoAuth> {
     }
 }
 
+/// Normalize a `--org` value to a full ADO organization URL.
+///
+/// Users commonly pass just the org name (e.g. `myorg`) instead of the full
+/// URL (`https://dev.azure.com/myorg`). Accept both forms by prefixing the
+/// canonical `https://dev.azure.com/` host when the input has no scheme.
+///
+/// Also accepts the legacy `{org}.visualstudio.com` form and rewrites it to
+/// the modern `dev.azure.com/{org}` form for consistency with `parse_ado_remote`.
+pub fn normalize_org_url(org: &str) -> String {
+    let trimmed = org.trim().trim_end_matches('/');
+
+    // Bare org name: no scheme, no dots — assume it's just the org.
+    if !trimmed.contains("://") && !trimmed.contains('/') && !trimmed.contains('.') {
+        return format!("https://dev.azure.com/{}", trimmed);
+    }
+
+    // Legacy `https://{org}.visualstudio.com` → `https://dev.azure.com/{org}`.
+    if let Ok(url) = url::Url::parse(trimmed)
+        && let Some(host) = url.host_str()
+        && let Some(org) = host.strip_suffix(".visualstudio.com")
+    {
+        return format!("https://dev.azure.com/{}", org);
+    }
+
+    trimmed.to_string()
+}
+
 /// Resolves the ADO context from the git remote (best-effort) with CLI overrides.
 /// Falls back to explicit `--org`/`--project` when the remote is absent or non-ADO.
 async fn resolve_ado_context(
@@ -677,7 +704,7 @@ async fn resolve_ado_context(
         // Git remote parsed — apply overrides
         (Some(mut ctx), org, project) => {
             if let Some(org) = org {
-                ctx.org_url = org.to_string();
+                ctx.org_url = normalize_org_url(org);
             }
             if let Some(project) = project {
                 ctx.project = project.to_string();
@@ -688,7 +715,7 @@ async fn resolve_ado_context(
         (None, Some(org), Some(project)) => {
             info!("No ADO git remote; using --org and --project");
             Ok(AdoContext {
-                org_url: org.to_string(),
+                org_url: normalize_org_url(org),
                 project: project.to_string(),
                 repo_name: String::new(),
             })
@@ -920,6 +947,52 @@ mod tests {
     fn test_parse_ado_remote_invalid() {
         assert!(parse_ado_remote("https://github.com/user/repo").is_err());
         assert!(parse_ado_remote("not-a-url").is_err());
+    }
+
+    // ==================== Org URL normalization ====================
+
+    #[test]
+    fn normalize_org_url_accepts_bare_name() {
+        assert_eq!(
+            normalize_org_url("myorg"),
+            "https://dev.azure.com/myorg"
+        );
+    }
+
+    #[test]
+    fn normalize_org_url_preserves_full_url() {
+        assert_eq!(
+            normalize_org_url("https://dev.azure.com/myorg"),
+            "https://dev.azure.com/myorg"
+        );
+    }
+
+    #[test]
+    fn normalize_org_url_strips_trailing_slash() {
+        assert_eq!(
+            normalize_org_url("https://dev.azure.com/myorg/"),
+            "https://dev.azure.com/myorg"
+        );
+    }
+
+    #[test]
+    fn normalize_org_url_rewrites_legacy_visualstudio() {
+        assert_eq!(
+            normalize_org_url("https://myorg.visualstudio.com"),
+            "https://dev.azure.com/myorg"
+        );
+        assert_eq!(
+            normalize_org_url("https://myorg.visualstudio.com/"),
+            "https://dev.azure.com/myorg"
+        );
+    }
+
+    #[test]
+    fn normalize_org_url_trims_whitespace() {
+        assert_eq!(
+            normalize_org_url("  myorg  "),
+            "https://dev.azure.com/myorg"
+        );
     }
 
     // ==================== Fuzzy name matching ====================
