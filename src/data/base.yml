@@ -1,5 +1,5 @@
 
-name: {{ agent_name }}-$(BuildID)
+name: {{ pipeline_name }}
 {{ parameters }}
 resources:
   repositories:

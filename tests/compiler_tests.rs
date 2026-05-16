@@ -69,7 +69,7 @@ fn assert_required_markers(content: &str) {
         "{{ checkout_repositories }}",
         "{{ allowed_domains }}",
         "{{ source_path }}",
-        "{{ agent_name }}",
+        "{{ pipeline_name }}",
         "{{ engine_run }}",
         "{{ compiler_version }}",
         "{{ integrity_check }}",
@@ -3525,6 +3525,46 @@ fn test_1es_compiled_output_is_valid_yaml() {
     assert!(
         !compiled.contains("commandOptions"),
         "1ES output should not contain commandOptions"
+    );
+}
+
+/// Names with embedded `"` and `:` must survive YAML escaping in both
+/// the top-level `name:` line and any `displayName:` positions.
+///
+/// Regression: until `{{ pipeline_name }}` was introduced both positions
+/// used a bare `{{ agent_name }}` substitution which broke if the
+/// front-matter name contained colons (`name: a: b` parsed as a YAML
+/// mapping) or embedded double quotes (`displayName: "a "b" c"` parsed
+/// as broken scalars). Now both positions go through `yaml_double_quoted`
+/// via a single `{{ pipeline_name }}` marker.
+#[test]
+fn test_compiled_yaml_survives_tricky_agent_name_standalone() {
+    let compiled = compile_fixture("tricky-name-agent.md");
+    assert_valid_yaml(&compiled, "tricky-name-agent.md");
+
+    // The top-level pipeline name must contain the escaped form of the
+    // embedded `"` (rendered as `\"`) AND retain the colon.
+    assert!(
+        compiled.contains(r#"name: "My \"special\": agent with quotes-$(BuildID)""#),
+        "standalone output should contain escaped pipeline name; got:\n{compiled}"
+    );
+}
+
+#[test]
+fn test_compiled_yaml_survives_tricky_agent_name_1es() {
+    let compiled = compile_fixture("tricky-name-1es-agent.md");
+    assert_valid_yaml(&compiled, "tricky-name-1es-agent.md");
+
+    // Top-level pipeline name carries the `-$(BuildID)` suffix because
+    // the ADO build-number format needs a varying token; the stage
+    // displayName does NOT carry the suffix (stage labels are static).
+    assert!(
+        compiled.contains(r#"name: "My \"special\": agent with quotes (1ES)-$(BuildID)""#),
+        "1ES output should contain escaped pipeline name; got:\n{compiled}"
+    );
+    assert!(
+        compiled.contains(r#"displayName: "My \"special\": agent with quotes (1ES)""#),
+        "1ES output should contain escaped stage displayName; got:\n{compiled}"
     );
 }
 

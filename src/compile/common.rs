@@ -996,6 +996,43 @@ pub fn sanitize_filename(name: &str) -> String {
         .join("-")
 }
 
+/// Emit `s` as a YAML double-quoted scalar (always quoted, never plain).
+///
+/// We always quote because the value is substituted into YAML positions
+/// where colons and other plain-scalar-unsafe characters are common in
+/// agent names (e.g. `"Daily safe-output smoke: noop"`). A bare scalar
+/// like `name: Daily safe-output smoke: noop-$(BuildID)` is invalid YAML
+/// because the second colon is interpreted as a mapping indicator.
+///
+/// `$(...)` ADO macros pass through untouched — `$` has no special meaning
+/// inside a YAML double-quoted scalar and ADO expands the macro at queue
+/// time after YAML parsing.
+///
+/// `reject_pipeline_injection` already strips newlines and template /
+/// pipeline-command sequences from front-matter `name` values, so the
+/// escape table only has to cover `\` and `"`. Tabs and ASCII control
+/// characters are escaped too as a belt-and-braces measure.
+pub fn yaml_double_quoted(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{0085}' => out.push_str("\\x85"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Default self-hosted pool for 1ES templates.
 pub const DEFAULT_ONEES_POOL: &str = "AZS-1ES-L-MMS-ubuntu-22.04";
 /// Default Microsoft-hosted VM image for non-1ES templates.
@@ -2856,6 +2893,17 @@ pub async fn compile_shared(
     let checkout_steps = generate_checkout_steps(&front_matter.checkout);
     let checkout_self = generate_checkout_self();
     let agent_name = sanitize_filename(&front_matter.name);
+    // Top-level pipeline `name:` value (the ADO build-number format).
+    // Always quoted so colons / embedded `"` in the agent name can't
+    // break parsing. Includes `-$(BuildID)` because ADO needs a varying
+    // token in the build-number format — without one, every run shows
+    // the same name in the runs view.
+    let pipeline_name =
+        yaml_double_quoted(&format!("{}-$(BuildID)", front_matter.name));
+    // Stage / job `displayName:` value. Always quoted (same escaping
+    // rationale as `pipeline_name`) but with NO BuildID suffix — stage
+    // labels are static and shouldn't carry per-run uniqueness suffixes.
+    let agent_display_name = yaml_double_quoted(&front_matter.name);
 
     // 3. Run extension validations
     for ext in extensions {
@@ -3069,6 +3117,8 @@ pub async fn compile_shared(
         ("{{ checkout_repositories }}", &checkout_steps),
         ("{{ agent }}", &agent_name),
         ("{{ agent_name }}", &front_matter.name),
+        ("{{ agent_display_name }}", &agent_display_name),
+        ("{{ pipeline_name }}", &pipeline_name),
         ("{{ agent_description }}", &front_matter.description),
         ("{{ engine_run }}", &engine_run),
         ("{{ engine_run_detection }}", &engine_run_detection),
@@ -3994,6 +4044,76 @@ mod tests {
     fn test_sanitize_filename_special_chars() {
         assert_eq!(sanitize_filename("agent@v1.0"), "agent-v1-0");
         assert_eq!(sanitize_filename("test_case"), "test-case");
+    }
+
+    // ─── yaml_double_quoted ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_yaml_double_quoted_plain_string() {
+        assert_eq!(yaml_double_quoted("hello"), r#""hello""#);
+    }
+
+    #[test]
+    fn test_yaml_double_quoted_string_with_colon_is_safe() {
+        // The bug this helper exists to fix: an agent name like
+        // "Daily safe-output smoke: noop" must not be emitted bare in the
+        // top-level pipeline `name:` line, where the second colon would
+        // be parsed as a YAML mapping indicator.
+        assert_eq!(
+            yaml_double_quoted("Daily safe-output smoke: noop-$(BuildID)"),
+            r#""Daily safe-output smoke: noop-$(BuildID)""#
+        );
+    }
+
+    #[test]
+    fn test_yaml_double_quoted_escapes_backslash() {
+        assert_eq!(yaml_double_quoted(r"a\b"), r#""a\\b""#);
+    }
+
+    #[test]
+    fn test_yaml_double_quoted_escapes_double_quote() {
+        assert_eq!(yaml_double_quoted(r#"say "hi""#), r#""say \"hi\"""#);
+    }
+
+    #[test]
+    fn test_yaml_double_quoted_escapes_whitespace_controls() {
+        assert_eq!(yaml_double_quoted("a\nb"), r#""a\nb""#);
+        assert_eq!(yaml_double_quoted("a\rb"), r#""a\rb""#);
+        assert_eq!(yaml_double_quoted("a\tb"), r#""a\tb""#);
+    }
+
+    #[test]
+    fn test_yaml_double_quoted_escapes_yaml_line_separators() {
+        assert_eq!(yaml_double_quoted("a\u{0085}b"), r#""a\x85b""#);
+        assert_eq!(yaml_double_quoted("a\u{2028}b"), r#""a\u2028b""#);
+        assert_eq!(yaml_double_quoted("a\u{2029}b"), r#""a\u2029b""#);
+    }
+
+    #[test]
+    fn test_yaml_double_quoted_escapes_other_control_chars() {
+        // Bell (0x07) is a low ASCII control char — should escape as \x07.
+        assert_eq!(yaml_double_quoted("a\u{0007}b"), r#""a\x07b""#);
+    }
+
+    #[test]
+    fn test_yaml_double_quoted_passes_through_ado_macros() {
+        // $(BuildID), $(Build.SourcesDirectory) etc. have no special meaning
+        // inside a YAML double-quoted scalar; ADO expands them at queue time
+        // after YAML parsing.
+        assert_eq!(
+            yaml_double_quoted("$(Build.BuildId)/$(System.JobId)"),
+            r#""$(Build.BuildId)/$(System.JobId)""#
+        );
+    }
+
+    #[test]
+    fn test_yaml_double_quoted_passes_through_unicode() {
+        // Non-ASCII characters pass through as-is — YAML 1.2 supports UTF-8
+        // in double-quoted scalars natively.
+        assert_eq!(
+            yaml_double_quoted("résumé — 你好"),
+            r#""résumé — 你好""#
+        );
     }
 
     // ─── generate_pr_trigger ─────────────────────────────────────────────────

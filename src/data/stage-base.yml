@@ -3,7 +3,7 @@
 
 stages:
 - stage: {{ stage_prefix }}
-  displayName: "{{ agent_name }}"
+  displayName: {{ agent_display_name }}
   jobs:
     {{ setup_job }}
     - job: {{ stage_prefix }}_Agent
