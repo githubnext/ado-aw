@@ -4,6 +4,8 @@ description: "Exercises the update-pr safe output once a day"
 on:
   schedule: daily around 03:00
 target: standalone
+pool:
+  name: AZS-1ES-L-Playground-ubuntu-22.04
 engine:
   id: copilot
   model: gpt-5-mini
