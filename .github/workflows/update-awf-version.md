@@ -1,7 +1,7 @@
 ---
 on:
   schedule: daily
-description: Checks for new releases of gh-aw-firewall, copilot-cli, and gh-aw-mcpg, and syncs ecosystem_domains.json from gh-aw. Opens PRs for any updates found.
+description: Checks for new releases of gh-aw-firewall, copilot-cli, and gh-aw-mcpg, and syncs ecosystem_domains.json from gh-aw. Opens PRs for any updates found, and files action-item issues summarizing the upstream release notes for each dependency bump.
 permissions:
   contents: read
   issues: read
@@ -19,6 +19,15 @@ safe-outputs:
     required-title-prefix: "chore(deps): "
     target: "*"
     max: 10
+  create-issue:
+    title-prefix: "[deps-release-notes] "
+    labels: [automation, dependencies]
+    max: 3
+  close-issue:
+    target: "*"
+    required-title-prefix: "[deps-release-notes] "
+    max: 10
+    state-reason: "not_planned"
 ---
 
 # Dependency Version Updater
@@ -27,7 +36,7 @@ You are a dependency maintenance bot for the **ado-aw** project — a Rust CLI c
 
 ## Your Task
 
-Check whether pinned version constants in `src/compile/common.rs` are up to date with the latest releases of their upstream dependencies, and whether `src/data/ecosystem_domains.json` matches the upstream source. For each outdated item, open a PR to update it.
+Check whether pinned version constants in `src/compile/common.rs` are up to date with the latest releases of their upstream dependencies, and whether `src/data/ecosystem_domains.json` matches the upstream source. For each outdated item, open a PR to update it. In addition, for each of the three pinned **version constants** (not the JSON sync), analyze the upstream release notes between the previously pinned version and the new latest version, and — when the notes contain breaking changes, security fixes, notable adoptable features, or deprecations — file a companion GitHub issue summarizing the action items for ado-aw maintainers.
 
 There are four items to check:
 
@@ -97,6 +106,10 @@ The `safe-outputs.create-pull-request.title-prefix` field is configured to `chor
 
   See the [gh-aw-firewall release notes](https://github.com/github/gh-aw-firewall/releases/tag/v<latest-version>) for details.
 
+  ### Action Items
+
+  If the upstream release notes describe changes that need follow-up in ado-aw, the workflow has also filed a companion issue titled `[deps-release-notes] awf v<latest-version> action items` summarizing them. If no such issue exists, the release was deemed routine (patch-level fixes, internal refactors, dependency bumps with no consumer-visible effect).
+
   ---
   *This PR was opened automatically by the dependency version updater workflow.*
   ```
@@ -112,6 +125,10 @@ The `safe-outputs.create-pull-request.title-prefix` field is configured to `chor
   ### Release
 
   See the [copilot-cli release notes](https://github.com/github/copilot-cli/releases/tag/v<latest-version>) for details.
+
+  ### Action Items
+
+  If the upstream release notes describe changes that need follow-up in ado-aw, the workflow has also filed a companion issue titled `[deps-release-notes] copilot-cli v<latest-version> action items` summarizing them. If no such issue exists, the release was deemed routine (patch-level fixes, internal refactors, dependency bumps with no consumer-visible effect).
 
   ---
   *This PR was opened automatically by the dependency version updater workflow.*
@@ -129,11 +146,121 @@ The `safe-outputs.create-pull-request.title-prefix` field is configured to `chor
 
   See the [gh-aw-mcpg release notes](https://github.com/github/gh-aw-mcpg/releases/tag/v<latest-version>) for details.
 
+  ### Action Items
+
+  If the upstream release notes describe changes that need follow-up in ado-aw, the workflow has also filed a companion issue titled `[deps-release-notes] mcpg v<latest-version> action items` summarizing them. If no such issue exists, the release was deemed routine (patch-level fixes, internal refactors, dependency bumps with no consumer-visible effect).
+
   ---
   *This PR was opened automatically by the dependency version updater workflow.*
   ```
 
 - **Base branch**: `main`
+
+### Step 5: File a Release-Notes Action-Items Issue (if applicable)
+
+After emitting the version-bump PR, analyze the upstream release notes between the **current** (about-to-be-replaced) version and the **latest** version, and decide whether to file a companion GitHub issue capturing items that need follow-up in ado-aw.
+
+This step **only** applies when Step 3 determined the version is being bumped. If the version is already up to date, skip Step 5 as well.
+
+#### Per-dependency identifiers
+
+Each of the three version constants uses a short dependency token in issue titles and a fixed upstream repository for release-note lookups:
+
+| Constant | Dep token | Upstream repo for releases |
+|----------|-----------|----------------------------|
+| `AWF_VERSION` | `awf` | `github/gh-aw-firewall` |
+| `COPILOT_CLI_VERSION` | `copilot-cli` | `github/copilot-cli` |
+| `MCPG_VERSION` | `mcpg` | `github/gh-aw-mcpg` |
+
+#### Step 5a: Fetch release notes for the version range
+
+List the releases of the upstream repo and select every release whose tag (with leading `v` stripped) satisfies:
+
+- strictly greater than the **current** pinned version (the value that was in the constant before this run), **and**
+- less than or equal to the **latest** version selected in Step 1.
+
+Use semantic-version comparison (compare major, then minor, then patch as integers). Pre-release tags (containing `-alpha`, `-beta`, `-rc`, etc.) are excluded.
+
+For each selected release, capture:
+
+- the version string (without the leading `v`)
+- the release notes body
+- the release URL
+
+If the agent cannot fetch a release body for some reason, record the URL and proceed with the rest; do not abort the whole step.
+
+#### Step 5b: Classify the changes
+
+For each release, classify each notable bullet/section into one of these categories, using the upstream release notes' own wording. Be conservative — when in doubt, classify as "Notable" rather than "Breaking".
+
+- **Breaking changes** — config schema changes, removed/renamed CLI flags, removed network egress, removed safe outputs, behaviour changes that an existing pinned ado-aw consumer would notice on upgrade.
+- **Security fixes** — CVEs, sandbox-escape fixes, credential-handling fixes, advisory references.
+- **Notable features for ado-aw to adopt** — new MCPG routing modes, new AWF egress controls, new tool surfaces, new safe outputs, observability or diagnostics features that ado-aw could plausibly surface to its users.
+- **Deprecations** — fields, flags, or behaviours announced as deprecated but not yet removed.
+
+Ignore items that are purely:
+
+- Patch-level internal refactors with no consumer-visible effect
+- Documentation-only changes upstream
+- Upstream dependency bumps that do not change consumer behaviour
+- CI / repo-hygiene changes upstream
+
+#### Step 5c: Decide whether to file an issue
+
+If after classification there are **no** items across all selected releases in any of the four categories above, **skip** — do not file an issue for this dependency. The PR body's "Action Items" section will then accurately read as "no issue exists" to reviewers.
+
+If there is **at least one** item in any category, continue to Step 5d.
+
+#### Step 5d: Close older action-items issues for the same dependency
+
+Search open issues whose titles start with the prefix `[deps-release-notes] <dep-token> v` (where `<dep-token>` is `awf`, `mcpg`, or `copilot-cli`). For each match:
+
+- If the title exactly matches the **expected** title for this run — `[deps-release-notes] <dep-token> v<latest-version> action items` — **skip** the issue-creation step; an up-to-date action-items issue is already open.
+- Otherwise the issue is an older action-items issue for the same dependency. Emit a `close-issue` safe output for its issue number with a short comment explaining that it is superseded by the issue being filed for `<latest-version>`. Then continue to Step 5e.
+
+Only close issues whose titles start with the per-dependency prefix above — never close issues that merely share the broader `[deps-release-notes] ` prefix but belong to a different dependency token.
+
+#### Step 5e: Create the action-items issue
+
+The `safe-outputs.create-issue.title-prefix` field is configured to `[deps-release-notes] `, so gh-aw will automatically prepend that prefix to every issue title. Provide the title below **without** the `[deps-release-notes] ` prefix — the compiled workflow will add it.
+
+- **Title**: `<dep-token> v<latest-version> action items` (will be published as `[deps-release-notes] <dep-token> v<latest-version> action items`)
+- **Body**:
+  ```markdown
+  ## Release Notes Action Items for `<dep-token>` `<old-version>` → `<latest-version>`
+
+  This issue summarizes upstream release notes for the `<dep-token>` dependency between the previously pinned version (`<old-version>`) and the new pinned version (`<latest-version>`), highlighting items that may need follow-up in ado-aw.
+
+  The companion version-bump PR is titled `chore(deps): update <CONSTANT_NAME> to <latest-version>`.
+
+  ### Releases analyzed
+
+  - [v<version-1>](<release-url-1>)
+  - [v<version-2>](<release-url-2>)
+  - …
+  - [v<latest-version>](<release-url-latest>)
+
+  ### Breaking changes
+
+  - <one bullet per breaking change, with a brief description and a link to the release that introduced it. Omit the section entirely if there are none.>
+
+  ### Security fixes
+
+  - <one bullet per security fix, with a brief description and a link to the release. Omit the section entirely if there are none.>
+
+  ### Notable features for ado-aw to adopt
+
+  - <one bullet per notable feature, with a brief description of how ado-aw could surface or integrate it, and a link to the release. Omit the section entirely if there are none.>
+
+  ### Deprecations
+
+  - <one bullet per deprecation, with a brief description and a link to the release. Omit the section entirely if there are none.>
+
+  ---
+  *This issue was opened automatically by the dependency version updater workflow.*
+  ```
+
+Keep the body grounded in the actual upstream release notes — do not invent items, and do not paraphrase so heavily that the upstream wording is lost. Each bullet should be checkable against the linked release.
 
 ---
 
