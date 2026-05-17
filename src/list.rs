@@ -15,8 +15,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::ado::{
-    AdoAuth, AdoContext, DefinitionSummary, MatchedDefinition, get_latest_build,
-    list_definitions, match_definitions, resolve_ado_context, resolve_auth,
+    DefinitionSummary, MatchedDefinition, get_latest_build, list_definitions, match_definitions,
+    resolve_ado_context, resolve_auth,
 };
 use crate::detect;
 
@@ -217,6 +217,9 @@ pub fn render_json(rows: &[ListRow]) -> Result<String> {
     let array: Vec<serde_json::Value> = rows
         .iter()
         .map(|r| {
+            // Keep this as a raw pass-through for scripting stability.
+            // Text output trims the leading slash for readability; JSON
+            // intentionally retains ADO/local-matcher path shape.
             serde_json::json!({
                 "name": r.name,
                 "id": r.id,
@@ -224,13 +227,7 @@ pub fn render_json(rows: &[ListRow]) -> Result<String> {
                 "queueStatus": r.queue_status,
                 "yamlFilename": r.yaml_filename,
                 "matched": r.matched,
-                "lastRun": r.last_run.as_ref().map(|lr| serde_json::json!({
-                    "id": lr.id,
-                    "result": lr.result,
-                    "status": lr.status,
-                    "finishTime": lr.finish_time,
-                    "url": lr.url,
-                })),
+                "lastRun": r.last_run.as_ref().map(|lr| &lr.raw),
             })
         })
         .collect();
@@ -258,9 +255,13 @@ pub async fn run(opts: ListOptions<'_>) -> Result<()> {
 
     let definitions = list_definitions(&client, &ado_ctx, &auth).await?;
     let detected = detect::detect_pipelines(&repo_path).await.unwrap_or_default();
-    let matched = match_definitions(&client, &ado_ctx, &auth, &detected)
-        .await
-        .unwrap_or_default();
+    let matched = match match_definitions(&client, &ado_ctx, &auth, &detected).await {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("  warning: could not match definitions: {:#}", e);
+            Vec::new()
+        }
+    };
 
     // Decide which IDs need a last-build fetch.
     let target_ids: HashSet<u64> = if opts.all {
@@ -478,6 +479,14 @@ mod tests {
 
     #[test]
     fn render_json_emits_expected_shape() {
+        let raw = serde_json::json!({
+            "id": 999,
+            "result": "succeeded",
+            "status": "completed",
+            "finishTime": "2026-05-17T08:00:00Z",
+            "requestedFor": { "displayName": "A User" },
+            "triggerInfo": { "ci.sourceSha": "abc123" },
+        });
         let rows = vec![ListRow {
             id: 123,
             name: "Daily noop".to_string(),
@@ -491,7 +500,7 @@ mod tests {
                 status: Some("completed".to_string()),
                 finish_time: Some("2026-05-17T08:00:00Z".to_string()),
                 url: Some("https://dev.azure.com/.../999".to_string()),
-                raw: serde_json::Value::Null,
+                raw: raw.clone(),
             }),
         }];
         let out = render_json(&rows).unwrap();
@@ -502,8 +511,7 @@ mod tests {
         assert_eq!(parsed[0]["queueStatus"], "enabled");
         assert_eq!(parsed[0]["yamlFilename"], "/tests/noop.lock.yml");
         assert_eq!(parsed[0]["matched"], true);
-        assert_eq!(parsed[0]["lastRun"]["id"], 999);
-        assert_eq!(parsed[0]["lastRun"]["result"], "succeeded");
+        assert_eq!(parsed[0]["lastRun"], raw);
     }
 
     #[test]
