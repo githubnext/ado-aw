@@ -955,12 +955,19 @@ impl Executor for CreatePrResult {
         };
 
         debug!("Change detection output:\n{}", status_str);
-        let changes = if use_diff_tree {
+        let (changes, skipped_symlinks) = if use_diff_tree {
             collect_changes_from_diff_tree(&worktree_path, &status_str).await?
         } else {
             collect_changes_from_worktree(&worktree_path, &status_str).await?
         };
         debug!("Collected {} file changes for push", changes.len());
+        if !skipped_symlinks.is_empty() {
+            warn!(
+                "Skipped {} symlink(s) when collecting PR file changes: {}",
+                skipped_symlinks.len(),
+                skipped_symlinks.join(", ")
+            );
+        }
 
         if changes.is_empty() {
             // Handle no-changes based on config
@@ -1189,12 +1196,19 @@ impl Executor for CreatePrResult {
 
         // Append agent stats then provenance footer to description.
         // Footer goes last as the final unambiguous provenance marker.
+        // If any symlinks were skipped during file collection, surface that in the
+        // PR description so the agent/PR author can see that some intended file
+        // content was dropped for safety (otherwise the warning only appears in
+        // Stage 3 infrastructure logs).
         let description_with_stats = crate::agent_stats::append_stats_to_body(
             &self.description,
             ctx,
             config.include_stats,
         );
-        let description_final = format!("{}{}", description_with_stats, generate_pr_footer());
+        let description_with_symlink_notice =
+            append_skipped_symlink_notice(&description_with_stats, &skipped_symlinks);
+        let description_final =
+            format!("{}{}", description_with_symlink_notice, generate_pr_footer());
 
         // Create the pull request via REST API
         info!("Creating pull request");
@@ -1623,8 +1637,9 @@ async fn add_reviewers_to_pr(
 async fn collect_changes_from_worktree(
     worktree_path: &std::path::Path,
     status_output: &str,
-) -> anyhow::Result<Vec<serde_json::Value>> {
+) -> anyhow::Result<(Vec<serde_json::Value>, Vec<String>)> {
     let mut changes = Vec::new();
+    let mut skipped_symlinks: Vec<String> = Vec::new();
 
     for line in status_output.lines() {
         if line.len() < 3 {
@@ -1656,13 +1671,25 @@ async fn collect_changes_from_worktree(
             }
             // New/untracked files
             "??" | "A " | " A" | "AM" => {
-                push_file_change_skipping_symlinks(&mut changes, "add", file_path, &full_path)
-                    .await?;
+                push_file_change_skipping_symlinks(
+                    &mut changes,
+                    &mut skipped_symlinks,
+                    "add",
+                    file_path,
+                    &full_path,
+                )
+                .await?;
             }
             // Modified files
             " M" | "M " | "MM" => {
-                push_file_change_skipping_symlinks(&mut changes, "edit", file_path, &full_path)
-                    .await?;
+                push_file_change_skipping_symlinks(
+                    &mut changes,
+                    &mut skipped_symlinks,
+                    "edit",
+                    file_path,
+                    &full_path,
+                )
+                .await?;
             }
             // Renamed files - format is "R  old_path -> new_path"
             // For "RM" (renamed + modified), we emit both a rename and an edit change.
@@ -1688,6 +1715,7 @@ async fn collect_changes_from_worktree(
                         let new_full_path = worktree_path.join(new_path_trimmed);
                         push_file_change_skipping_symlinks(
                             &mut changes,
+                            &mut skipped_symlinks,
                             "edit",
                             new_path_trimmed,
                             &new_full_path,
@@ -1698,13 +1726,19 @@ async fn collect_changes_from_worktree(
             }
             // Other statuses - try to handle as edit if file exists
             _ => {
-                push_file_change_skipping_symlinks(&mut changes, "edit", file_path, &full_path)
-                    .await?;
+                push_file_change_skipping_symlinks(
+                    &mut changes,
+                    &mut skipped_symlinks,
+                    "edit",
+                    file_path,
+                    &full_path,
+                )
+                .await?;
             }
         }
     }
 
-    Ok(changes)
+    Ok((changes, skipped_symlinks))
 }
 
 /// Collect file changes from a git diff-tree --name-status output.
@@ -1714,8 +1748,9 @@ async fn collect_changes_from_worktree(
 async fn collect_changes_from_diff_tree(
     worktree_path: &std::path::Path,
     diff_tree_output: &str,
-) -> anyhow::Result<Vec<serde_json::Value>> {
+) -> anyhow::Result<(Vec<serde_json::Value>, Vec<String>)> {
     let mut changes = Vec::new();
+    let mut skipped_symlinks: Vec<String> = Vec::new();
 
     for line in diff_tree_output.lines() {
         let line = line.trim();
@@ -1746,7 +1781,14 @@ async fn collect_changes_from_diff_tree(
             }));
         } else if status_code == "A" {
             // Added file
-            push_file_change_skipping_symlinks(&mut changes, "add", file_path, &full_path).await?;
+            push_file_change_skipping_symlinks(
+                &mut changes,
+                &mut skipped_symlinks,
+                "add",
+                file_path,
+                &full_path,
+            )
+            .await?;
         } else if status_code.starts_with('R') && parts.len() >= 3 {
             // Renamed file: R100\told_path\tnew_path
             let old_path = file_path;
@@ -1768,6 +1810,7 @@ async fn collect_changes_from_diff_tree(
             if status_code != "R100" {
                 push_file_change_skipping_symlinks(
                     &mut changes,
+                    &mut skipped_symlinks,
                     "edit",
                     new_path,
                     &new_full_path,
@@ -1780,16 +1823,28 @@ async fn collect_changes_from_diff_tree(
             validate_single_path(dest_path)?;
 
             let dest_full_path = worktree_path.join(dest_path);
-            push_file_change_skipping_symlinks(&mut changes, "add", dest_path, &dest_full_path)
-                .await?;
+            push_file_change_skipping_symlinks(
+                &mut changes,
+                &mut skipped_symlinks,
+                "add",
+                dest_path,
+                &dest_full_path,
+            )
+            .await?;
         } else {
             // Modified or other — read current content
-            push_file_change_skipping_symlinks(&mut changes, "edit", file_path, &full_path)
-                .await?;
+            push_file_change_skipping_symlinks(
+                &mut changes,
+                &mut skipped_symlinks,
+                "edit",
+                file_path,
+                &full_path,
+            )
+            .await?;
         }
     }
 
-    Ok(changes)
+    Ok((changes, skipped_symlinks))
 }
 
 /// Push a file change into `changes`, skipping symlinks with a warning.
@@ -1798,8 +1853,13 @@ async fn collect_changes_from_diff_tree(
 /// logic used in multiple places when collecting changes from a worktree or diff tree.
 /// Uses `symlink_metadata` so symlinks are detected without being followed — this is
 /// the primary defense against symlink-following exfiltration attacks in Stage 3.
+///
+/// Skipped symlink paths are appended to `skipped_symlinks` so the caller can surface
+/// them in the PR description (the agent that produced the PR would otherwise have no
+/// way to see that some of its intended file content was dropped).
 async fn push_file_change_skipping_symlinks(
     changes: &mut Vec<serde_json::Value>,
+    skipped_symlinks: &mut Vec<String>,
     change_type: &str,
     file_path: &str,
     full_path: &std::path::Path,
@@ -1813,6 +1873,7 @@ async fn push_file_change_skipping_symlinks(
                 "Skipping symlink in worktree: {} (symlink-following attack prevention)",
                 file_path
             );
+            skipped_symlinks.push(file_path.to_string());
         }
         Ok(_) => {
             // Not a regular file (e.g. directory, fifo, socket) — silently skip.
@@ -1825,6 +1886,29 @@ async fn push_file_change_skipping_symlinks(
         }
     }
     Ok(())
+}
+
+/// If any symlinks were skipped during PR file collection, append a clearly
+/// marked notice to the PR description so the agent/author can see that some
+/// intended content was deliberately dropped.
+fn append_skipped_symlink_notice(body: &str, skipped_symlinks: &[String]) -> String {
+    if skipped_symlinks.is_empty() {
+        return body.to_string();
+    }
+    let mut notice = String::from(
+        "\n\n> [!WARNING]\n\
+         > **Symbolic links omitted from this pull request**\n\
+         >\n\
+         > The following symlinked paths were detected in the worktree and skipped\n\
+         > when uploading file changes (symlinks are never followed for safety):\n\
+         >\n",
+    );
+    for path in skipped_symlinks {
+        notice.push_str("> - `");
+        notice.push_str(path);
+        notice.push_str("`\n");
+    }
+    format!("{}{}", body, notice)
 }
 
 /// Read a file and produce an ADO push change entry.
@@ -1912,9 +1996,10 @@ fn validate_patch_paths(patch_content: &str) -> anyhow::Result<()> {
         {
             let path = line.splitn(3, ' ').nth(2).unwrap_or("").trim_matches('"');
             validate_single_path(path)?;
-        } else if line.starts_with("new file mode 120000")
-            || line.starts_with("new mode 120000")
-        {
+        } else if {
+            let trimmed = line.trim_end();
+            trimmed == "new file mode 120000" || trimmed == "new mode 120000"
+        } {
             // Reject patch lines that INTRODUCE a symlink (git mode 120000).
             // Either of these lines means the resulting tree contains a symlink:
             //   - "new file mode 120000" — a freshly added symlink
@@ -1927,6 +2012,10 @@ fn validate_patch_paths(patch_content: &str) -> anyhow::Result<()> {
             // with "old mode 120000" + "new mode 100644" converts a symlink into a
             // regular file, which is a legitimate cleanup operation and produces a
             // safe worktree.
+            //
+            // The match is on the exact trimmed line (rather than `starts_with`) so
+            // we don't accidentally reject hypothetical future mode strings that
+            // happen to share the "120000" prefix.
             anyhow::bail!(
                 "Patch introduces a symlink (mode 120000), which is not allowed"
             );
@@ -2346,6 +2435,52 @@ index 0000000..abcdefg
             validate_patch_paths(patch).is_ok(),
             "patch deleting an existing symlink should be allowed"
         );
+    }
+
+    #[test]
+    fn test_validate_patch_paths_symlink_mode_suffix_not_bypass() {
+        // The mode check uses exact line equality (after trim_end), so a fake
+        // mode string with extra digits like "120000 1" or "1200001" must NOT
+        // be misclassified — but we still want any genuine "new file mode 120000"
+        // followed by trailing whitespace to be rejected.
+        let patch_trailing_ws = "diff --git a/x b/x\nnew file mode 120000 \n";
+        assert!(
+            validate_patch_paths(patch_trailing_ws).is_err(),
+            "trailing whitespace must not let a symlink mode line bypass the check"
+        );
+
+        // A line that merely happens to share a "120000" prefix segment must
+        // not pass the check accidentally either — but it's also not a real
+        // git mode line. We just want to make sure exact-match doesn't reject
+        // benign content that contains "120000" in a non-mode context.
+        let patch_benign = "diff --git a/x b/x\n\
+                            --- a/x\n\
+                            +++ b/x\n\
+                            @@ -1 +1 @@\n\
+                            -count: 1200000\n\
+                            +count: 1200001\n";
+        assert!(
+            validate_patch_paths(patch_benign).is_ok(),
+            "patch body lines containing '120000' as data must not be rejected"
+        );
+    }
+
+    #[test]
+    fn test_append_skipped_symlink_notice_empty_is_passthrough() {
+        let body = "Some PR description";
+        let out = append_skipped_symlink_notice(body, &[]);
+        assert_eq!(out, body);
+    }
+
+    #[test]
+    fn test_append_skipped_symlink_notice_lists_paths() {
+        let body = "Some PR description";
+        let skipped = vec!["secrets.txt".to_string(), "subdir/leak".to_string()];
+        let out = append_skipped_symlink_notice(body, &skipped);
+        assert!(out.starts_with(body));
+        assert!(out.contains("Symbolic links omitted"));
+        assert!(out.contains("`secrets.txt`"));
+        assert!(out.contains("`subdir/leak`"));
     }
 
     #[test]
