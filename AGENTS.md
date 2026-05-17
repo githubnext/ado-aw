@@ -75,7 +75,8 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── fuzzy_schedule.rs # Fuzzy schedule parsing
 │   ├── logging.rs        # File-based logging infrastructure
 │   ├── mcp.rs            # SafeOutputs MCP server (stdio + HTTP)
-│   ├── configure.rs      # `configure` CLI command — orchestration shim atop `src/ado/`
+│   ├── configure.rs      # `configure` CLI command (deprecated) — hidden alias forwarding to `secrets set GITHUB_TOKEN`
+│   ├── secrets.rs        # `secrets set/list/delete` subcommand group — manages pipeline variables (never prints values from `list`)
 │   ├── enable.rs         # `enable` CLI command — registers ADO build definitions for compiled pipelines and ensures they are enabled
 │   ├── disable.rs        # `disable` CLI command — sets queueStatus to disabled (default) or paused on matched definitions
 │   ├── remove.rs         # `remove` CLI command — deletes matched ADO build definitions (with --yes / tty-prompt safety)

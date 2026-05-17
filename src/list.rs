@@ -314,6 +314,7 @@ mod tests {
             name: name.to_string(),
             match_method: MatchMethod::YamlPath,
             yaml_path: yaml.to_string(),
+            queue_status: None,
         }
     }
 
