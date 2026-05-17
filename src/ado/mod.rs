@@ -205,6 +205,10 @@ pub struct DefinitionSummary {
     /// [`list_definitions`]). Older/cached responses may omit it.
     #[serde(rename = "queueStatus")]
     pub queue_status: Option<String>,
+    /// ADO folder path (e.g. `\smoke`, `\`). Populated when
+    /// `includeAllProperties=true`. May be absent on older API versions.
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -238,6 +242,12 @@ pub struct MatchedDefinition {
     pub name: String,
     pub match_method: MatchMethod,
     pub yaml_path: String,
+    /// `enabled`, `disabled`, `paused`, or `None` when the matcher
+    /// couldn't read the field (explicit-ID matches, older API
+    /// responses). Populated from `DefinitionSummary::queue_status`
+    /// when available, so command-level decision logic can skip
+    /// already-at-target definitions without an extra HTTP round-trip.
+    pub queue_status: Option<String>,
 }
 
 /// List all build definitions in the project, handling pagination.
@@ -253,7 +263,7 @@ pub async fn list_definitions(
         let base_url = format!(
             "{}/{}/_apis/build/definitions",
             ctx.org_url.trim_end_matches('/'),
-            ctx.project
+            percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT)
         );
 
         debug!("Listing definitions: {}", base_url);
@@ -366,24 +376,14 @@ pub fn normalize_ado_yaml_path(path: &str) -> String {
 /// Strategy:
 /// 1. Try to match by the `yamlFilename` field in the definition's process config
 /// 2. Fall back to matching by pipeline name containing the agent name
-pub async fn match_definitions(
-    client: &reqwest::Client,
-    ctx: &AdoContext,
-    auth: &AdoAuth,
+pub fn match_definitions_in(
+    definitions: &[DefinitionSummary],
     detected: &[detect::DetectedPipeline],
-) -> Result<Vec<MatchedDefinition>> {
-    let definitions = list_definitions(client, ctx, auth).await?;
-    info!(
-        "Found {} pipeline definitions in {}/{}",
-        definitions.len(),
-        ctx.org_url,
-        ctx.project
-    );
-
+) -> Vec<MatchedDefinition> {
     let mut matched = Vec::new();
 
     // Log all definition yaml paths for debugging
-    for def in &definitions {
+    for def in definitions {
         let yaml_path = def
             .process
             .as_ref()
@@ -425,6 +425,7 @@ pub async fn match_definitions(
                 name: def.name.clone(),
                 match_method: MatchMethod::YamlPath,
                 yaml_path: yaml_path_normalized.to_string(),
+                queue_status: def.queue_status.clone(),
             });
             continue;
         }
@@ -436,7 +437,7 @@ pub async fn match_definitions(
             .and_then(|s| s.to_str())
             .unwrap_or("");
 
-        match fuzzy_match_by_name(agent_name, &definitions) {
+        match fuzzy_match_by_name(agent_name, definitions) {
             FuzzyMatchResult::Single(idx) => {
                 let def = &definitions[idx];
                 eprintln!(
@@ -448,6 +449,7 @@ pub async fn match_definitions(
                     name: def.name.clone(),
                     match_method: MatchMethod::PipelineName,
                     yaml_path: yaml_path_normalized.to_string(),
+                    queue_status: def.queue_status.clone(),
                 });
                 continue;
             }
@@ -469,7 +471,29 @@ pub async fn match_definitions(
         );
     }
 
-    Ok(matched)
+    matched
+}
+
+/// Match detected pipeline YAML files to ADO pipeline definitions.
+///
+/// Strategy:
+/// 1. Try to match by the `yamlFilename` field in the definition's process config
+/// 2. Fall back to matching by pipeline name containing the agent name
+pub async fn match_definitions(
+    client: &reqwest::Client,
+    ctx: &AdoContext,
+    auth: &AdoAuth,
+    detected: &[detect::DetectedPipeline],
+) -> Result<Vec<MatchedDefinition>> {
+    let definitions = list_definitions(client, ctx, auth).await?;
+    info!(
+        "Found {} pipeline definitions in {}/{}",
+        definitions.len(),
+        ctx.org_url,
+        ctx.project
+    );
+
+    Ok(match_definitions_in(&definitions, detected))
 }
 
 /// Fetch the human-readable name of a pipeline definition by ID.
@@ -483,7 +507,7 @@ pub async fn get_definition_name(
     let url = format!(
         "{}/{}/_apis/build/definitions/{}?api-version=7.1",
         ctx.org_url.trim_end_matches('/'),
-        ctx.project,
+        percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
         definition_id
     );
 
@@ -534,7 +558,7 @@ pub async fn update_pipeline_variable(
     let get_url = format!(
         "{}/{}/_apis/build/definitions/{}?api-version=7.1",
         ctx.org_url.trim_end_matches('/'),
-        ctx.project,
+        percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
         definition_id
     );
 
@@ -593,7 +617,7 @@ pub async fn update_pipeline_variable(
     let put_url = format!(
         "{}/{}/_apis/build/definitions/{}?api-version=7.1",
         ctx.org_url.trim_end_matches('/'),
-        ctx.project,
+        percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
         definition_id
     );
 
@@ -752,6 +776,7 @@ pub async fn resolve_definitions(
                 name,
                 match_method: MatchMethod::Explicit,
                 yaml_path: String::new(),
+                queue_status: None,
             });
         }
         return Ok(Some(matched));
@@ -800,7 +825,7 @@ pub async fn resolve_definitions(
 /// just for symmetry with common path-encoding tables. Notably this
 /// preserves `-`, `_`, `.`, `~` which `NON_ALPHANUMERIC` would over-
 /// encode (e.g. `my-repo` → `my%2Drepo`).
-const PATH_SEGMENT: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
+pub const PATH_SEGMENT: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
     .add(b' ')
     .add(b'"')
     .add(b'#')
@@ -977,12 +1002,38 @@ pub async fn patch_queue_status(
 ///
 /// Calls `DELETE /_apis/build/definitions/{id}?api-version=7.1`.
 pub async fn delete_definition(
-    _client: &reqwest::Client,
-    _ctx: &AdoContext,
-    _auth: &AdoAuth,
-    _id: u64,
+    client: &reqwest::Client,
+    ctx: &AdoContext,
+    auth: &AdoAuth,
+    id: u64,
 ) -> Result<()> {
-    anyhow::bail!("not yet implemented: filled in by PR 4 (ado-aw remove)")
+    let url = format!(
+        "{}/{}/_apis/build/definitions/{}?api-version=7.1",
+        ctx.org_url.trim_end_matches('/'),
+        percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
+        id
+    );
+
+    debug!("DELETE definition {}: {}", id, url);
+
+    let resp = auth
+        .apply(client.delete(&url))
+        .send()
+        .await
+        .with_context(|| format!("Failed to delete definition {}", id))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "ADO API returned {} when deleting definition {}: {}",
+            status,
+            id,
+            body
+        );
+    }
+
+    Ok(())
 }
 
 /// Create a new build definition.
@@ -1038,26 +1089,99 @@ pub async fn create_definition(
 /// build's `id`. `branch` defaults to the definition's `defaultBranch` when
 /// `None`. `parameters` are passed through as ADO `templateParameters`.
 pub async fn queue_build(
-    _client: &reqwest::Client,
-    _ctx: &AdoContext,
-    _auth: &AdoAuth,
-    _definition_id: u64,
-    _branch: Option<&str>,
-    _parameters: &serde_json::Map<String, serde_json::Value>,
+    client: &reqwest::Client,
+    ctx: &AdoContext,
+    auth: &AdoAuth,
+    definition_id: u64,
+    branch: Option<&str>,
+    parameters: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<u64> {
-    anyhow::bail!("not yet implemented: filled in by PR 6 (ado-aw run)")
+    let url = format!(
+        "{}/{}/_apis/build/builds?api-version=7.1",
+        ctx.org_url.trim_end_matches('/'),
+        percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
+    );
+
+    let mut body = serde_json::json!({
+        "definition": { "id": definition_id }
+    });
+    if let Some(b) = branch {
+        body["sourceBranch"] = serde_json::Value::String(b.to_string());
+    }
+    if !parameters.is_empty() {
+        body["templateParameters"] = serde_json::Value::Object(parameters.clone());
+    }
+
+    debug!("POST queue build for definition {}: {}", definition_id, url);
+
+    let resp = auth
+        .apply(client.post(&url))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("Failed to queue build for definition {}", definition_id))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let resp_body = resp.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "ADO API returned {} when queuing build for definition {}: {}",
+            status,
+            definition_id,
+            resp_body
+        );
+    }
+
+    let resp_body: serde_json::Value = resp
+        .json()
+        .await
+        .context("Failed to parse queue-build response")?;
+
+    resp_body
+        .get("id")
+        .and_then(|v| v.as_u64())
+        .context("queue_build response has no numeric 'id' field")
 }
 
 /// Fetch the full JSON body of a build.
 ///
 /// Calls `GET /_apis/build/builds/{id}?api-version=7.1`.
 pub async fn get_build(
-    _client: &reqwest::Client,
-    _ctx: &AdoContext,
-    _auth: &AdoAuth,
-    _build_id: u64,
+    client: &reqwest::Client,
+    ctx: &AdoContext,
+    auth: &AdoAuth,
+    build_id: u64,
 ) -> Result<serde_json::Value> {
-    anyhow::bail!("not yet implemented: filled in by PR 6 (ado-aw run)")
+    let url = format!(
+        "{}/{}/_apis/build/builds/{}?api-version=7.1",
+        ctx.org_url.trim_end_matches('/'),
+        percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
+        build_id
+    );
+
+    debug!("GET build {}: {}", build_id, url);
+
+    let resp = auth
+        .apply(client.get(&url))
+        .send()
+        .await
+        .with_context(|| format!("Failed to fetch build {}", build_id))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "ADO API returned {} when fetching build {}: {}",
+            status,
+            build_id,
+            body
+        );
+    }
+
+    resp.json()
+        .await
+        .with_context(|| format!("Failed to parse build {} response", build_id))
 }
 
 /// Fetch the most recent build for a definition.
@@ -1065,12 +1189,47 @@ pub async fn get_build(
 /// Calls `GET /_apis/build/builds?definitions={id}&$top=1&api-version=7.1`
 /// and returns the first result (or `None` if the definition has never run).
 pub async fn get_latest_build(
-    _client: &reqwest::Client,
-    _ctx: &AdoContext,
-    _auth: &AdoAuth,
-    _definition_id: u64,
+    client: &reqwest::Client,
+    ctx: &AdoContext,
+    auth: &AdoAuth,
+    definition_id: u64,
 ) -> Result<Option<serde_json::Value>> {
-    anyhow::bail!("not yet implemented: filled in by PR 5 (ado-aw list) or PR 7 (ado-aw status)")
+    let url = format!(
+        "{}/{}/_apis/build/builds?definitions={}&$top=1&api-version=7.1",
+        ctx.org_url.trim_end_matches('/'),
+        percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
+        definition_id,
+    );
+
+    debug!("GET latest build for definition {}: {}", definition_id, url);
+
+    let resp = auth
+        .apply(client.get(&url))
+        .send()
+        .await
+        .with_context(|| format!("Failed to fetch latest build for definition {}", definition_id))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "ADO API returned {} when fetching latest build for definition {}: {}",
+            status,
+            definition_id,
+            body
+        );
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .with_context(|| format!("Failed to parse builds response for {}", definition_id))?;
+
+    Ok(body
+        .get("value")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .cloned())
 }
 
 #[cfg(test)]
@@ -1185,6 +1344,7 @@ mod tests {
             name: name.to_string(),
             process: None,
             queue_status: None,
+            path: None,
         }
     }
 
@@ -1196,6 +1356,7 @@ mod tests {
                 yaml_filename: Some(yaml_filename.to_string()),
             }),
             queue_status: None,
+            path: None,
         }
     }
 

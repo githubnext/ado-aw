@@ -35,14 +35,23 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - `--ado-project <name>` - Azure DevOps project name override
   - `--dry-run` - Validate inputs but skip ADO API calls (useful for local testing and QA review)
 
-- `configure` - Detect agentic pipelines in a local repository and update the `GITHUB_TOKEN` pipeline variable on their Azure DevOps build definitions
-  - `--token <token>` / `GITHUB_TOKEN` env var - The new GITHUB_TOKEN value (prompted if omitted)
-  - `--org <url>` - Override: Azure DevOps organization URL (e.g. `https://dev.azure.com/myorg`) or just the org name (e.g. `myorg`, auto-prefixed to the canonical URL). Inferred from git remote by default.
-  - `--project <name>` - Override: Azure DevOps project name (inferred from git remote by default)
-  - `--pat <pat>` / `AZURE_DEVOPS_EXT_PAT` env var - PAT for ADO API authentication (prompted if omitted)
-  - `--path <path>` - Path to the repository root (defaults to current directory)
-  - `--dry-run` - Preview changes without applying them
-  - `--definition-ids <ids>` - Explicit pipeline definition IDs to update (comma-separated, skips auto-detection)
+- `configure` *(deprecated; hidden in --help)* - Alias forwarding to `secrets set GITHUB_TOKEN`. Existing scripts keep working but get a stderr warning. The alias will be removed in the next minor release.
+
+- `secrets set <name> [<value>] [PATH]` - Set a pipeline variable (with `isSecret=true`) on every matched ADO definition. Value resolution: positional `<value>` → `--value-stdin` (one line) → interactive tty prompt with echo off.
+  - `--allow-override` - Force `allowOverride=true` on the set variable. When omitted, `allowOverride` is **preserved** on existing variables (so secret rotation does not silently downgrade an existing `allowOverride=true`) and defaults to `false` for new variables.
+  - `--value-stdin` - Read the value from a single line on stdin.
+  - `--dry-run` - Print the planned set without calling the ADO API.
+  - `--org / --project / --pat` - ADO context overrides (same semantics as the other lifecycle commands).
+  - `--definition-ids <ids>` - Explicit pipeline definition IDs (comma-separated; skips local-fixture auto-detection).
+
+- `secrets list [PATH]` - List variable names and their `isSecret` / `allowOverride` flags on every matched definition. **Never prints values.**
+  - `--json` - Emit machine-readable JSON.
+  - `--org / --project / --pat / --definition-ids` - As above.
+
+- `secrets delete <name> [PATH]` - Delete the named variable from every matched definition. No-op when the variable is absent.
+  - `--dry-run` - Print the planned deletion plan without calling the ADO API.
+  - `--org / --project / --pat / --definition-ids` - As above.
+
 
 - `enable [PATH]` - Register an ADO build definition for each compiled pipeline discovered under `PATH` (or the current directory) and ensure it is `enabled`. For each fixture, matches against the existing ADO definitions by `yamlFilename` first, then by sanitized display name; creates a new definition when neither matches, flips `queueStatus` to `enabled` when an existing definition is `disabled` / `paused`, and skips when it is already `enabled`. Fail-soft per fixture; exits non-zero if any fixture failed.
   - `--org <url>` - Override: Azure DevOps organization (URL or bare org name). Inferred from git remote by default.
@@ -55,3 +64,42 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - `--token <value>` - The token value for `--also-set-token`. Falls back to `$GITHUB_TOKEN`, then to an interactive prompt. Requires `--also-set-token`.
 
   **Source-repo scope (Phase 1):** `enable` requires the local git remote to be an Azure DevOps Git remote (the source repo is what gets registered as the definition's repository). GitHub-hosted source repos are gated on a follow-up.
+
+- `disable [PATH]`- Set `queueStatus` to `disabled` (default) or `paused` on every ADO build definition that matches a local fixture under `PATH`. Refuses to touch any ADO definition that is not the target of a local fixture match — that safety property falls naturally out of the same yaml-path + name match used by `configure`. Skips definitions that are already at the requested status; fail-soft per fixture; exits non-zero if any patch failed or if zero local fixtures matched ADO definitions.
+  - `--org <url>` - Override: Azure DevOps organization (URL or bare org name). Inferred from git remote by default.
+  - `--project <name>` - Override: Azure DevOps project name (inferred from git remote by default).
+  - `--pat <pat>` / `AZURE_DEVOPS_EXT_PAT` env var - PAT for ADO API authentication (Azure CLI fallback if omitted).
+  - `--paused` - Use `queueStatus: paused` instead of `disabled`. Paused definitions still queue scheduled runs but the queue is held; disabled definitions reject all queue requests.
+  - `--dry-run` - Print the planned `from → to` transitions without calling the ADO API.
+
+- `remove [PATH]` - **Destructive.** Delete every ADO build definition that matches a local fixture under `PATH`. The same `match_definitions` safety property as `disable` applies: definitions without a local fixture are never in scope. Bulk deletes (`>1` match) require `--yes`; a single match on a tty prompts interactively (`y/N`); non-tty contexts always require `--yes`. Fail-soft per fixture; exits non-zero if any deletion failed or if zero local fixtures matched ADO definitions.
+  - `--org <url>` - Override: Azure DevOps organization (URL or bare org name). Inferred from git remote by default.
+  - `--project <name>` - Override: Azure DevOps project name (inferred from git remote by default).
+  - `--pat <pat>` / `AZURE_DEVOPS_EXT_PAT` env var - PAT for ADO API authentication (Azure CLI fallback if omitted).
+  - `--yes` - Required for bulk deletes (>1 match) and for any delete in a non-tty context. A single match on a tty otherwise prompts interactively.
+  - `--dry-run` - Print the planned deletions without calling the ADO API.
+
+- `list [PATH]` - Render every ADO build definition that matches a local fixture (under `PATH`) along with its `queueStatus`, ADO folder, and latest-run summary. Pass `--all` to also include definitions with no matching local fixture. Output defaults to a human-readable table; `--json` emits a stable JSON array suitable for scripting.
+  - `--org <url>` - Override: Azure DevOps organization (URL or bare org name). Inferred from git remote by default.
+  - `--project <name>` - Override: Azure DevOps project name (inferred from git remote by default).
+  - `--pat <pat>` / `AZURE_DEVOPS_EXT_PAT` env var - PAT for ADO API authentication (Azure CLI fallback if omitted).
+  - `--all` - Include ADO definitions that do not match any local fixture.
+  - `--json` - Emit machine-readable JSON.
+
+- `status [PATH]` - Per-pipeline status: name, id, folder, `queueStatus`, latest-run summary, and a deep link — one block per matched definition. Read-only. `--json` emits the same shape as `list --json` so scripts can use either.
+  - `--org <url>` - Override: Azure DevOps organization (URL or bare org name). Inferred from git remote by default.
+  - `--project <name>` - Override: Azure DevOps project name (inferred from git remote by default).
+  - `--pat <pat>` / `AZURE_DEVOPS_EXT_PAT` env var - PAT for ADO API authentication (Azure CLI fallback if omitted).
+  - `--json` - Emit machine-readable JSON (same shape as `list --json`).
+
+- `run [PATH]` - Queue an ADO build for every ADO definition that matches a local fixture (under `PATH`). With `--wait`, poll each queued build until completion and exit with an aggregate result — 0 only if every queued build succeeded.
+  - `--org <url>` - Override: Azure DevOps organization (URL or bare org name). Inferred from git remote by default.
+  - `--project <name>` - Override: Azure DevOps project name (inferred from git remote by default).
+  - `--pat <pat>` / `AZURE_DEVOPS_EXT_PAT` env var - PAT for ADO API authentication (Azure CLI fallback if omitted).
+  - `--branch <ref>` - Source branch to queue. Defaults to the definition's `defaultBranch`.
+  - `--parameters <k=v[,k=v...]>` - ADO `templateParameters`. Repeatable and/or comma-separated. All values are strings (ADO coerces as the definition requires). Rejects malformed pairs (missing `=`). **Values must not contain commas** — each raw argument is split on `,` before the `=` split, so `key=https://a,b` is rejected. Use one `--parameters` flag per pair when values contain commas.
+  - `--wait` - Poll each queued build to completion before exiting.
+  - `--poll-interval <secs>` - Polling period when `--wait` is set (default 10).
+  - `--timeout <secs>` - Hard cap on the polling loop when `--wait` is set (default 1800).
+  - `--dry-run` - Print the planned `templateParameters` body without calling the ADO API.
+

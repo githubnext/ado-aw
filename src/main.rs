@@ -4,6 +4,7 @@ pub mod ado;
 mod compile;
 mod configure;
 mod detect;
+mod disable;
 mod ecosystem_domains;
 mod enable;
 mod engine;
@@ -11,18 +12,88 @@ mod execute;
 mod fuzzy_schedule;
 mod hash;
 mod init;
+mod list;
 mod logging;
 mod mcp;
 mod ndjson;
+mod remove;
+mod run;
 pub mod runtimes;
 pub mod sanitize;
 mod safeoutputs;
+mod secrets;
+mod status;
 mod tools;
 pub mod validate;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
+
+#[derive(Subcommand, Debug)]
+enum SecretsCmd {
+    /// Set a pipeline variable on every matched definition (isSecret=true).
+    Set {
+        /// Variable name to set (e.g. `GITHUB_TOKEN`).
+        name: String,
+        /// Variable value. If omitted, falls back to `--value-stdin` or an
+        /// interactive tty prompt with echo off.
+        value: Option<String>,
+        /// Path to the repository root (defaults to current directory).
+        path: Option<PathBuf>,
+        #[arg(long)]
+        org: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long, env = "AZURE_DEVOPS_EXT_PAT")]
+        pat: Option<String>,
+        /// Force `allowOverride=true` on the set variable. When omitted,
+        /// `allowOverride` is preserved on existing variables (so secret
+        /// rotation does not silently downgrade an existing
+        /// `allowOverride=true`) and defaults to `false` for new
+        /// variables.
+        #[arg(long)]
+        allow_override: bool,
+        /// Read the value from a single line on stdin. Mutually exclusive
+        /// with the positional `<value>` argument.
+        #[arg(long, conflicts_with = "value")]
+        value_stdin: bool,
+        #[arg(long)]
+        dry_run: bool,
+        /// Explicit definition IDs (skips local-fixture auto-detection).
+        #[arg(long, value_delimiter = ',')]
+        definition_ids: Option<Vec<u64>>,
+    },
+    /// List variable names + flags on every matched definition. Never prints values.
+    List {
+        path: Option<PathBuf>,
+        #[arg(long)]
+        org: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long, env = "AZURE_DEVOPS_EXT_PAT")]
+        pat: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, value_delimiter = ',')]
+        definition_ids: Option<Vec<u64>>,
+    },
+    /// Delete a named variable from every matched definition.
+    Delete {
+        name: String,
+        path: Option<PathBuf>,
+        #[arg(long)]
+        org: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long, env = "AZURE_DEVOPS_EXT_PAT")]
+        pat: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long, value_delimiter = ',')]
+        definition_ids: Option<Vec<u64>>,
+    },
+}
 
 #[derive(Subcommand, Debug)]
 enum Commands {
@@ -115,7 +186,9 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
-    /// Detect agentic pipelines and update GITHUB_TOKEN on their ADO definitions
+    /// (Deprecated) Set GITHUB_TOKEN on every matched ADO definition.
+    /// Use `secrets set GITHUB_TOKEN <value>` instead.
+    #[command(hide = true)]
     Configure {
         /// The new GITHUB_TOKEN value (defaults to GITHUB_TOKEN env var; prompted if omitted)
         #[arg(long, env = "GITHUB_TOKEN")]
@@ -139,6 +212,11 @@ enum Commands {
         /// Explicit pipeline definition IDs to update (skips auto-detection)
         #[arg(long, value_delimiter = ',')]
         definition_ids: Option<Vec<u64>>,
+    },
+    /// Manage pipeline-variable secrets on every matched ADO definition.
+    Secrets {
+        #[command(subcommand)]
+        action: SecretsCmd,
     },
     /// Register an ADO build definition for each compiled pipeline and ensure it's enabled.
     Enable {
@@ -173,6 +251,138 @@ enum Commands {
         /// Falls back to the GITHUB_TOKEN env var, then to an interactive prompt.
         #[arg(long, requires = "also_set_token")]
         token: Option<String>,
+    },
+    /// Disable (or pause) every ADO build definition that matches a local fixture.
+    Disable {
+        /// Path to the repository root (defaults to current directory). Used
+        /// to auto-discover compiled pipelines, same as `compile`.
+        path: Option<PathBuf>,
+        /// Override: Azure DevOps organization (URL like `https://dev.azure.com/myorg`,
+        /// or just the org name `myorg`). Inferred from git remote by default.
+        #[arg(long)]
+        org: Option<String>,
+        /// Override: Azure DevOps project name (inferred from git remote by default).
+        #[arg(long)]
+        project: Option<String>,
+        /// PAT for ADO API authentication (prefer setting AZURE_DEVOPS_EXT_PAT env var;
+        /// Azure CLI fallback if omitted).
+        #[arg(long, env = "AZURE_DEVOPS_EXT_PAT")]
+        pat: Option<String>,
+        /// Set queueStatus to `paused` instead of `disabled`. Paused
+        /// definitions still queue scheduled runs but the queue is held;
+        /// disabled definitions reject all queue requests.
+        #[arg(long)]
+        paused: bool,
+        /// Preview the planned actions without calling the ADO API.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Delete every ADO build definition that matches a local fixture.
+    Remove {
+        /// Path to the repository root (defaults to current directory). Used
+        /// to auto-discover compiled pipelines, same as `compile`.
+        path: Option<PathBuf>,
+        /// Override: Azure DevOps organization (URL like `https://dev.azure.com/myorg`,
+        /// or just the org name `myorg`). Inferred from git remote by default.
+        #[arg(long)]
+        org: Option<String>,
+        /// Override: Azure DevOps project name (inferred from git remote by default).
+        #[arg(long)]
+        project: Option<String>,
+        /// PAT for ADO API authentication (prefer setting AZURE_DEVOPS_EXT_PAT env var;
+        /// Azure CLI fallback if omitted).
+        #[arg(long, env = "AZURE_DEVOPS_EXT_PAT")]
+        pat: Option<String>,
+        /// Required for bulk deletes (>1 match) and for any delete in a non-tty
+        /// context. A single match on a tty otherwise prompts interactively.
+        #[arg(long)]
+        yes: bool,
+        /// Preview the planned deletions without calling the ADO API.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// List ADO build definitions (with their latest-run state) that match local fixtures.
+    List {
+        /// Path to the repository root (defaults to current directory). Used
+        /// to auto-discover compiled pipelines, same as `compile`.
+        path: Option<PathBuf>,
+        /// Override: Azure DevOps organization (URL like `https://dev.azure.com/myorg`,
+        /// or just the org name `myorg`). Inferred from git remote by default.
+        #[arg(long)]
+        org: Option<String>,
+        /// Override: Azure DevOps project name (inferred from git remote by default).
+        #[arg(long)]
+        project: Option<String>,
+        /// PAT for ADO API authentication (prefer setting AZURE_DEVOPS_EXT_PAT env var;
+        /// Azure CLI fallback if omitted).
+        #[arg(long, env = "AZURE_DEVOPS_EXT_PAT")]
+        pat: Option<String>,
+        /// Include ADO definitions that do not match any local fixture.
+        #[arg(long)]
+        all: bool,
+        /// Emit machine-readable JSON instead of the text table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Per-pipeline status: queueStatus + latest-run summary, for every matched definition.
+    Status {
+        /// Path to the repository root (defaults to current directory). Used
+        /// to auto-discover compiled pipelines, same as `compile`.
+        path: Option<PathBuf>,
+        /// Override: Azure DevOps organization (URL like `https://dev.azure.com/myorg`,
+        /// or just the org name `myorg`). Inferred from git remote by default.
+        #[arg(long)]
+        org: Option<String>,
+        /// Override: Azure DevOps project name (inferred from git remote by default).
+        #[arg(long)]
+        project: Option<String>,
+        /// PAT for ADO API authentication (prefer setting AZURE_DEVOPS_EXT_PAT env var;
+        /// Azure CLI fallback if omitted).
+        #[arg(long, env = "AZURE_DEVOPS_EXT_PAT")]
+        pat: Option<String>,
+        /// Emit machine-readable JSON (same shape as `list --json`).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Queue a build for every ADO definition that matches a local fixture (optionally wait for completion).
+    Run {
+        /// Path to the repository root (defaults to current directory). Used
+        /// to auto-discover compiled pipelines, same as `compile`.
+        path: Option<PathBuf>,
+        /// Override: Azure DevOps organization (URL like `https://dev.azure.com/myorg`,
+        /// or just the org name `myorg`). Inferred from git remote by default.
+        #[arg(long)]
+        org: Option<String>,
+        /// Override: Azure DevOps project name (inferred from git remote by default).
+        #[arg(long)]
+        project: Option<String>,
+        /// PAT for ADO API authentication (prefer setting AZURE_DEVOPS_EXT_PAT env var;
+        /// Azure CLI fallback if omitted).
+        #[arg(long, env = "AZURE_DEVOPS_EXT_PAT")]
+        pat: Option<String>,
+        /// Source branch to queue. Defaults to the definition's `defaultBranch`.
+        #[arg(long)]
+        branch: Option<String>,
+        /// ADO `templateParameters` as `key=value` pairs. Repeatable and/or
+        /// comma-separated (`--parameters a=1,b=2 --parameters c=3`).
+        /// VALUES MUST NOT CONTAIN COMMAS — each raw argument is split on
+        /// `,` before the `=` split, so `key=https://a,b` is rejected. Use
+        /// one `--parameters` flag per pair when values contain commas.
+        #[arg(long)]
+        parameters: Vec<String>,
+        /// Poll each queued build to completion before exiting; aggregate result
+        /// determines the exit code.
+        #[arg(long)]
+        wait: bool,
+        /// Seconds between polls when `--wait` is set.
+        #[arg(long, default_value_t = 10, requires = "wait")]
+        poll_interval: u64,
+        /// Maximum seconds to wait when `--wait` is set.
+        #[arg(long, default_value_t = 1800, requires = "wait")]
+        timeout: u64,
+        /// Print the planned queue body without calling the ADO API.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -523,7 +733,13 @@ async fn main() -> Result<()> {
         Some(Commands::McpHttp { .. }) => "mcp-http",
         Some(Commands::Init { .. }) => "init",
         Some(Commands::Configure { .. }) => "configure",
+        Some(Commands::Secrets { .. }) => "secrets",
         Some(Commands::Enable { .. }) => "enable",
+        Some(Commands::Disable { .. }) => "disable",
+        Some(Commands::Remove { .. }) => "remove",
+        Some(Commands::List { .. }) => "list",
+        Some(Commands::Status { .. }) => "status",
+        Some(Commands::Run { .. }) => "run",
         None => "ado-aw",
     };
 
@@ -632,6 +848,72 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
+        Commands::Secrets { action } => match action {
+            SecretsCmd::Set {
+                name,
+                value,
+                path,
+                org,
+                project,
+                pat,
+                allow_override,
+                value_stdin,
+                dry_run,
+                definition_ids,
+            } => {
+                secrets::run_set(secrets::SetOptions {
+                    name: &name,
+                    value: value.as_deref(),
+                    org: org.as_deref(),
+                    project: project.as_deref(),
+                    pat: pat.as_deref(),
+                    path: path.as_deref(),
+                    allow_override,
+                    value_stdin,
+                    dry_run,
+                    definition_ids: definition_ids.as_deref(),
+                })
+                .await?;
+            }
+            SecretsCmd::List {
+                path,
+                org,
+                project,
+                pat,
+                json,
+                definition_ids,
+            } => {
+                secrets::run_list(secrets::ListOptions {
+                    org: org.as_deref(),
+                    project: project.as_deref(),
+                    pat: pat.as_deref(),
+                    path: path.as_deref(),
+                    json,
+                    definition_ids: definition_ids.as_deref(),
+                })
+                .await?;
+            }
+            SecretsCmd::Delete {
+                name,
+                path,
+                org,
+                project,
+                pat,
+                dry_run,
+                definition_ids,
+            } => {
+                secrets::run_delete(secrets::DeleteOptions {
+                    name: &name,
+                    org: org.as_deref(),
+                    project: project.as_deref(),
+                    pat: pat.as_deref(),
+                    path: path.as_deref(),
+                    dry_run,
+                    definition_ids: definition_ids.as_deref(),
+                })
+                .await?;
+            }
+        },
         Commands::Enable {
             path,
             org,
@@ -653,6 +935,102 @@ async fn main() -> Result<()> {
                 dry_run,
                 also_set_token,
                 token: token.as_deref(),
+            })
+            .await?;
+        }
+        Commands::Disable {
+            path,
+            org,
+            project,
+            pat,
+            paused,
+            dry_run,
+        } => {
+            disable::run(disable::DisableOptions {
+                org: org.as_deref(),
+                project: project.as_deref(),
+                pat: pat.as_deref(),
+                path: path.as_deref(),
+                paused,
+                dry_run,
+            })
+            .await?;
+        }
+        Commands::Remove {
+            path,
+            org,
+            project,
+            pat,
+            yes,
+            dry_run,
+        } => {
+            remove::run(remove::RemoveOptions {
+                org: org.as_deref(),
+                project: project.as_deref(),
+                pat: pat.as_deref(),
+                path: path.as_deref(),
+                yes,
+                dry_run,
+            })
+            .await?;
+        }
+        Commands::List {
+            path,
+            org,
+            project,
+            pat,
+            all,
+            json,
+        } => {
+            list::run(list::ListOptions {
+                org: org.as_deref(),
+                project: project.as_deref(),
+                pat: pat.as_deref(),
+                path: path.as_deref(),
+                all,
+                json,
+            })
+            .await?;
+        }
+        Commands::Status {
+            path,
+            org,
+            project,
+            pat,
+            json,
+        } => {
+            status::run(status::StatusOptions {
+                org: org.as_deref(),
+                project: project.as_deref(),
+                pat: pat.as_deref(),
+                path: path.as_deref(),
+                json,
+            })
+            .await?;
+        }
+        Commands::Run {
+            path,
+            org,
+            project,
+            pat,
+            branch,
+            parameters,
+            wait,
+            poll_interval,
+            timeout,
+            dry_run,
+        } => {
+            run::dispatch(run::RunOptions {
+                org: org.as_deref(),
+                project: project.as_deref(),
+                pat: pat.as_deref(),
+                path: path.as_deref(),
+                branch: branch.as_deref(),
+                parameters: &parameters,
+                wait,
+                poll_interval_secs: poll_interval,
+                timeout_secs: timeout,
+                dry_run,
             })
             .await?;
         }
