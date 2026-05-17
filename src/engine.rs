@@ -43,6 +43,7 @@ pub const DEFAULT_COPILOT_MODEL: &str = "claude-opus-4.7";
 /// Default pinned version of the Copilot CLI.
 /// Override per-agent via `engine: { id: copilot, version: "1.0.35" }` in front matter.
 pub const COPILOT_CLI_VERSION: &str = "1.0.47";
+const COPILOT_CLI_RELEASES_BASE: &str = "https://github.com/github/copilot-cli/releases";
 
 /// Resolved engine — enum dispatch over supported engine identifiers.
 ///
@@ -561,21 +562,25 @@ fn copilot_install_steps(engine_config: &EngineConfig, target: &CompileTarget) -
 
     if version == "latest" {
         return copilot_install_from_github_release(
-            "https://github.com/github/copilot-cli/releases/latest/download",
+            &format!("{COPILOT_CLI_RELEASES_BASE}/latest/download"),
             "Install Copilot CLI (latest)",
         );
     }
 
-    let version_tag = if version.starts_with('v') {
-        version.to_string()
-    } else {
-        format!("v{version}")
-    };
-    let base_url = format!("https://github.com/github/copilot-cli/releases/download/{version_tag}");
+    let version_tag = normalize_version_tag(version);
+    let base_url = format!("{COPILOT_CLI_RELEASES_BASE}/download/{version_tag}");
     copilot_install_from_github_release(
         &base_url,
         &format!("Install Copilot CLI ({version_tag})"),
     )
+}
+
+fn normalize_version_tag(version: &str) -> String {
+    if version.starts_with('v') {
+        version.to_string()
+    } else {
+        format!("v{version}")
+    }
 }
 
 fn copilot_install_from_github_release(base_url: &str, display_name: &str) -> Result<String> {
