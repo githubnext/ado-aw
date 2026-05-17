@@ -135,9 +135,13 @@ impl Engine {
     /// Uses `engine_config.version()` if set in front matter, otherwise falls back
     /// to the pinned `COPILOT_CLI_VERSION` constant. Returns an empty string when
     /// `engine.command` is set (the user provides their own binary).
-    pub fn install_steps(&self, engine_config: &EngineConfig, target: &CompileTarget) -> Result<String> {
+    ///
+    /// `ado_org` is the ADO organization name inferred from the git remote at
+    /// compile time. For 1ES targets it is embedded directly into the NuGet
+    /// feed URL; when `None` a runtime extraction step is emitted instead.
+    pub fn install_steps(&self, engine_config: &EngineConfig, target: &CompileTarget, ado_org: Option<&str>) -> Result<String> {
         match self {
-            Engine::Copilot => copilot_install_steps(engine_config, target),
+            Engine::Copilot => copilot_install_steps(engine_config, target, ado_org),
         }
     }
 
@@ -504,7 +508,12 @@ fn copilot_env(engine_config: &EngineConfig) -> Result<String> {
 /// - Non-1ES: download Copilot CLI from GitHub Releases and verify SHA256.
 ///
 /// Both paths stage the binary at `/tmp/awf-tools/copilot`.
-fn copilot_install_steps(engine_config: &EngineConfig, target: &CompileTarget) -> Result<String> {
+///
+/// `ado_org` is the ADO organization name inferred from the git remote at
+/// compile time. For 1ES it is used to construct the NuGet feed URL; when
+/// `None` a runtime extraction step is emitted that derives the org from
+/// `$(System.CollectionUri)`.
+fn copilot_install_steps(engine_config: &EngineConfig, target: &CompileTarget, ado_org: Option<&str>) -> Result<String> {
     // Custom binary path → skip NuGet install entirely
     if engine_config.command().is_some() {
         return Ok(String::new());
@@ -534,16 +543,59 @@ fn copilot_install_steps(engine_config: &EngineConfig, target: &CompileTarget) -
             format!("-Version {version} ")
         };
 
+        // Build the NuGet feed URL using the org name.  When the org is known
+        // at compile time (inferred from the git remote) it is embedded
+        // directly.  When it is not available a preceding bash step extracts
+        // the org at runtime from the $(System.CollectionUri) ADO variable and
+        // exposes it as $(AW_ADO_ORG) for use in the NuGetCommand arguments.
+        let (org_resolve_step, nuget_org) = match ado_org {
+            Some(org) => {
+                // Validate the org name to prevent injection.
+                if !is_valid_hostname(org) {
+                    anyhow::bail!(
+                        "ADO organization '{}' contains invalid characters. \
+                         Only ASCII alphanumerics, '.', and '-' are allowed.",
+                        org
+                    );
+                }
+                (String::new(), org.to_string())
+            }
+            None => {
+                // Emit a bash step that extracts the org name from the ADO
+                // system variable $(System.CollectionUri) at runtime and
+                // stores it as a pipeline variable.
+                //
+                // $(System.CollectionUri) is expanded by ADO before bash runs
+                // (e.g. "https://dev.azure.com/myorg/"); the parameter
+                // expansions strip the prefix and trailing slash to yield just
+                // the org name ("myorg").
+                let step = "\
+- bash: |
+    set -eo pipefail
+    # $(System.CollectionUri) is expanded by ADO before bash runs,
+    # e.g. \"https://dev.azure.com/myorg/\".
+    _COLLECTION_URI=\"$(System.CollectionUri)\"
+    _ORG=\"${_COLLECTION_URI#https://dev.azure.com/}\"
+    _ORG=\"${_ORG%/}\"
+    echo \"##vso[task.setvariable variable=AW_ADO_ORG]$_ORG\"
+  displayName: \"Resolve ADO organization\"
+
+"
+                .to_string();
+                (step, "$(AW_ADO_ORG)".to_string())
+            }
+        };
+
         return Ok(format!(
             "\
-- task: NuGetAuthenticate@1
+{org_resolve_step}- task: NuGetAuthenticate@1
   displayName: \"Authenticate NuGet Feed\"
 
 - task: NuGetCommand@2
   displayName: \"Install Copilot CLI\"
   inputs:
     command: 'custom'
-    arguments: 'install Microsoft.Copilot.CLI.linux-x64 -Source \"https://pkgs.dev.azure.com/msazuresphere/_packaging/Guardian1ESPTUpstreamOrgFeed/nuget/v3/index.json\" {version_arg}-OutputDirectory $(Agent.TempDirectory)/tools -ExcludeVersion -NonInteractive'
+    arguments: 'install Microsoft.Copilot.CLI.linux-x64 -Source \"https://pkgs.dev.azure.com/{nuget_org}/_packaging/Guardian1ESPTUpstreamOrgFeed/nuget/v3/index.json\" {version_arg}-OutputDirectory $(Agent.TempDirectory)/tools -ExcludeVersion -NonInteractive'
 
 - bash: |
     ls -la \"$(Agent.TempDirectory)/tools\"
@@ -1003,7 +1055,7 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  version: '1.0.0 -Source https://evil.com'\n---\n",
         ).unwrap();
-        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target);
+        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("invalid characters"));
     }
@@ -1013,7 +1065,7 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  version: \"1.0.0'\"\n---\n",
         ).unwrap();
-        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target);
+        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target, None);
         assert!(result.is_err());
     }
 
@@ -1022,7 +1074,7 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  version: '1.0.34'\n---\n",
         ).unwrap();
-        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target).unwrap();
+        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target, None).unwrap();
         assert!(result.contains("releases/download/v1.0.34"));
         assert!(result.contains("Install Copilot CLI (v1.0.34)"));
     }
@@ -1032,7 +1084,7 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  version: 'v1.0.34'\n---\n",
         ).unwrap();
-        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target).unwrap();
+        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target, None).unwrap();
         assert!(result.contains("releases/download/v1.0.34"));
         assert!(result.contains("Install Copilot CLI (v1.0.34)"));
     }
@@ -1042,7 +1094,7 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  version: latest\n---\n",
         ).unwrap();
-        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target).unwrap();
+        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target, None).unwrap();
         assert!(result.contains("releases/latest/download"), "latest should resolve via latest release URL");
         assert!(result.contains("Install Copilot CLI (latest)"));
     }
@@ -1052,9 +1104,10 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\ntarget: 1es\nengine:\n  id: copilot\n  version: latest\n---\n",
         ).unwrap();
-        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target).unwrap();
+        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target, Some("myorg")).unwrap();
         assert!(result.contains("NuGetCommand@2"));
         assert!(result.contains("Guardian1ESPTUpstreamOrgFeed"));
+        assert!(result.contains("pkgs.dev.azure.com/myorg/"));
         assert!(!result.contains("-Version latest"));
     }
 
@@ -1063,10 +1116,46 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\ntarget: 1es\nengine:\n  id: copilot\n  version: '1.0.34'\n---\n",
         ).unwrap();
-        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target).unwrap();
+        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target, Some("myorg")).unwrap();
         assert!(result.contains("NuGetCommand@2"));
         assert!(result.contains("Guardian1ESPTUpstreamOrgFeed"));
+        assert!(result.contains("pkgs.dev.azure.com/myorg/"));
         assert!(result.contains("-Version 1.0.34"));
+    }
+
+    #[test]
+    fn engine_install_onees_uses_user_org_not_msazuresphere() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\ntarget: 1es\nengine:\n  id: copilot\n  version: '1.0.34'\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target, Some("contoso")).unwrap();
+        assert!(result.contains("pkgs.dev.azure.com/contoso/"));
+        assert!(!result.contains("msazuresphere"));
+    }
+
+    #[test]
+    fn engine_install_onees_runtime_fallback_when_org_unknown() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\ntarget: 1es\nengine:\n  id: copilot\n  version: '1.0.34'\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target, None).unwrap();
+        assert!(result.contains("NuGetCommand@2"));
+        assert!(result.contains("Guardian1ESPTUpstreamOrgFeed"));
+        // Runtime fallback: org extracted from $(System.CollectionUri)
+        assert!(result.contains("$(AW_ADO_ORG)"));
+        assert!(result.contains("$(System.CollectionUri)"));
+        assert!(result.contains("Resolve ADO organization"));
+        assert!(!result.contains("msazuresphere"));
+    }
+
+    #[test]
+    fn engine_install_onees_rejects_invalid_org() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\ntarget: 1es\nengine:\n  id: copilot\n  version: '1.0.34'\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target, Some("evil; rm -rf /"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid characters"));
     }
 
     #[test]

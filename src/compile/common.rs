@@ -2961,7 +2961,7 @@ pub async fn compile_shared(
         "/tmp/awf-tools/threat-analysis-prompt.md",
         None,
     )?;
-    let engine_install_steps = ctx.engine.install_steps(&front_matter.engine, &front_matter.target)?;
+    let engine_install_steps = ctx.engine.install_steps(&front_matter.engine, &front_matter.target, ctx.ado_org())?;
 
     // 5. Compute workspace, working directory, triggers
     let effective_workspace = compute_effective_workspace(
