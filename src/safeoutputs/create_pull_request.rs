@@ -955,33 +955,71 @@ impl Executor for CreatePrResult {
         };
 
         debug!("Change detection output:\n{}", status_str);
-        let changes = if use_diff_tree {
+        let (changes, skipped_symlinks) = if use_diff_tree {
             collect_changes_from_diff_tree(&worktree_path, &status_str).await?
         } else {
             collect_changes_from_worktree(&worktree_path, &status_str).await?
         };
         debug!("Collected {} file changes for push", changes.len());
+        if !skipped_symlinks.is_empty() {
+            warn!(
+                "Skipped {} symlink(s) when collecting PR file changes: {}",
+                skipped_symlinks.len(),
+                skipped_symlinks.join(", ")
+            );
+        }
 
         if changes.is_empty() {
+            // If every collected entry was a symlink, the agent's payload is
+            // effectively gone — surface that to the agent so it can debug
+            // (the per-symlink warn! only goes to Stage 3 infrastructure logs).
+            // Paths are passed through sanitize_path_for_markdown so adversarial
+            // filenames (bidi overrides, control chars, etc.) cannot garble the
+            // ExecutionResult message or the corresponding log line.
+            let symlink_suffix = if skipped_symlinks.is_empty() {
+                String::new()
+            } else {
+                let sanitized: Vec<String> = skipped_symlinks
+                    .iter()
+                    .map(|p| sanitize_path_for_markdown(p))
+                    .collect();
+                format!(
+                    " ({} symlink(s) were skipped for safety: {})",
+                    sanitized.len(),
+                    sanitized.join(", ")
+                )
+            };
             // Handle no-changes based on config
             match config.if_no_changes {
                 IfNoChanges::Error => {
-                    warn!("No changes detected after applying patch (if-no-changes: error)");
-                    return Ok(ExecutionResult::failure(
-                        "No changes detected after applying patch".to_string(),
-                    ));
+                    warn!(
+                        "No changes detected after applying patch (if-no-changes: error){}",
+                        symlink_suffix
+                    );
+                    return Ok(ExecutionResult::failure(format!(
+                        "No changes detected after applying patch{}",
+                        symlink_suffix
+                    )));
                 }
                 IfNoChanges::Ignore => {
-                    info!("No changes detected after applying patch (if-no-changes: ignore)");
-                    return Ok(ExecutionResult::success(
-                        "No changes detected — nothing to do".to_string(),
-                    ));
+                    info!(
+                        "No changes detected after applying patch (if-no-changes: ignore){}",
+                        symlink_suffix
+                    );
+                    return Ok(ExecutionResult::success(format!(
+                        "No changes detected — nothing to do{}",
+                        symlink_suffix
+                    )));
                 }
                 IfNoChanges::Warn => {
-                    warn!("No changes detected after applying patch (if-no-changes: warn)");
-                    return Ok(ExecutionResult::warning(
-                        "No changes detected after applying patch".to_string(),
-                    ));
+                    warn!(
+                        "No changes detected after applying patch (if-no-changes: warn){}",
+                        symlink_suffix
+                    );
+                    return Ok(ExecutionResult::warning(format!(
+                        "No changes detected after applying patch{}",
+                        symlink_suffix
+                    )));
                 }
             }
         }
@@ -1189,12 +1227,19 @@ impl Executor for CreatePrResult {
 
         // Append agent stats then provenance footer to description.
         // Footer goes last as the final unambiguous provenance marker.
+        // If any symlinks were skipped during file collection, surface that in the
+        // PR description so the agent/PR author can see that some intended file
+        // content was dropped for safety (otherwise the warning only appears in
+        // Stage 3 infrastructure logs).
         let description_with_stats = crate::agent_stats::append_stats_to_body(
             &self.description,
             ctx,
             config.include_stats,
         );
-        let description_final = format!("{}{}", description_with_stats, generate_pr_footer());
+        let description_with_symlink_notice =
+            append_skipped_symlink_notice(&description_with_stats, &skipped_symlinks);
+        let description_final =
+            format!("{}{}", description_with_symlink_notice, generate_pr_footer());
 
         // Create the pull request via REST API
         info!("Creating pull request");
@@ -1623,8 +1668,9 @@ async fn add_reviewers_to_pr(
 async fn collect_changes_from_worktree(
     worktree_path: &std::path::Path,
     status_output: &str,
-) -> anyhow::Result<Vec<serde_json::Value>> {
+) -> anyhow::Result<(Vec<serde_json::Value>, Vec<String>)> {
     let mut changes = Vec::new();
+    let mut skipped_symlinks: Vec<String> = Vec::new();
 
     for line in status_output.lines() {
         if line.len() < 3 {
@@ -1656,15 +1702,25 @@ async fn collect_changes_from_worktree(
             }
             // New/untracked files
             "??" | "A " | " A" | "AM" => {
-                if full_path.is_file() {
-                    changes.push(read_file_change("add", file_path, &full_path).await?);
-                }
+                push_file_change_skipping_symlinks(
+                    &mut changes,
+                    &mut skipped_symlinks,
+                    "add",
+                    file_path,
+                    &full_path,
+                )
+                .await?;
             }
             // Modified files
             " M" | "M " | "MM" => {
-                if full_path.is_file() {
-                    changes.push(read_file_change("edit", file_path, &full_path).await?);
-                }
+                push_file_change_skipping_symlinks(
+                    &mut changes,
+                    &mut skipped_symlinks,
+                    "edit",
+                    file_path,
+                    &full_path,
+                )
+                .await?;
             }
             // Renamed files - format is "R  old_path -> new_path"
             // For "RM" (renamed + modified), we emit both a rename and an edit change.
@@ -1686,23 +1742,34 @@ async fn collect_changes_from_worktree(
 
                     // If status is "RM" (renamed + modified), also emit content
                     if status_code == "RM" {
-                        let new_full_path = worktree_path.join(new_path.trim());
-                        if new_full_path.is_file() {
-                            changes.push(read_file_change("edit", new_path.trim(), &new_full_path).await?);
-                        }
+                        let new_path_trimmed = new_path.trim();
+                        let new_full_path = worktree_path.join(new_path_trimmed);
+                        push_file_change_skipping_symlinks(
+                            &mut changes,
+                            &mut skipped_symlinks,
+                            "edit",
+                            new_path_trimmed,
+                            &new_full_path,
+                        )
+                        .await?;
                     }
                 }
             }
             // Other statuses - try to handle as edit if file exists
             _ => {
-                if full_path.is_file() {
-                    changes.push(read_file_change("edit", file_path, &full_path).await?);
-                }
+                push_file_change_skipping_symlinks(
+                    &mut changes,
+                    &mut skipped_symlinks,
+                    "edit",
+                    file_path,
+                    &full_path,
+                )
+                .await?;
             }
         }
     }
 
-    Ok(changes)
+    Ok((changes, skipped_symlinks))
 }
 
 /// Collect file changes from a git diff-tree --name-status output.
@@ -1712,8 +1779,9 @@ async fn collect_changes_from_worktree(
 async fn collect_changes_from_diff_tree(
     worktree_path: &std::path::Path,
     diff_tree_output: &str,
-) -> anyhow::Result<Vec<serde_json::Value>> {
+) -> anyhow::Result<(Vec<serde_json::Value>, Vec<String>)> {
     let mut changes = Vec::new();
+    let mut skipped_symlinks: Vec<String> = Vec::new();
 
     for line in diff_tree_output.lines() {
         let line = line.trim();
@@ -1744,9 +1812,14 @@ async fn collect_changes_from_diff_tree(
             }));
         } else if status_code == "A" {
             // Added file
-            if full_path.is_file() {
-                changes.push(read_file_change("add", file_path, &full_path).await?);
-            }
+            push_file_change_skipping_symlinks(
+                &mut changes,
+                &mut skipped_symlinks,
+                "add",
+                file_path,
+                &full_path,
+            )
+            .await?;
         } else if status_code.starts_with('R') && parts.len() >= 3 {
             // Renamed file: R100\told_path\tnew_path
             let old_path = file_path;
@@ -1765,8 +1838,15 @@ async fn collect_changes_from_diff_tree(
 
             // If the file was also modified (similarity < 100), emit an edit with content
             let new_full_path = worktree_path.join(new_path);
-            if status_code != "R100" && new_full_path.is_file() {
-                changes.push(read_file_change("edit", new_path, &new_full_path).await?);
+            if status_code != "R100" {
+                push_file_change_skipping_symlinks(
+                    &mut changes,
+                    &mut skipped_symlinks,
+                    "edit",
+                    new_path,
+                    &new_full_path,
+                )
+                .await?;
             }
         } else if status_code.starts_with('C') && parts.len() >= 3 {
             // Copied file: C100\tsrc_path\tdest_path
@@ -1774,18 +1854,154 @@ async fn collect_changes_from_diff_tree(
             validate_single_path(dest_path)?;
 
             let dest_full_path = worktree_path.join(dest_path);
-            if dest_full_path.is_file() {
-                changes.push(read_file_change("add", dest_path, &dest_full_path).await?);
-            }
+            push_file_change_skipping_symlinks(
+                &mut changes,
+                &mut skipped_symlinks,
+                "add",
+                dest_path,
+                &dest_full_path,
+            )
+            .await?;
         } else {
             // Modified or other — read current content
-            if full_path.is_file() {
-                changes.push(read_file_change("edit", file_path, &full_path).await?);
-            }
+            push_file_change_skipping_symlinks(
+                &mut changes,
+                &mut skipped_symlinks,
+                "edit",
+                file_path,
+                &full_path,
+            )
+            .await?;
         }
     }
 
-    Ok(changes)
+    Ok((changes, skipped_symlinks))
+}
+
+/// Push a file change into `changes`, skipping symlinks with a warning.
+///
+/// Centralizes the "regular file → read & push; symlink → warn & skip; other → ignore"
+/// logic used in multiple places when collecting changes from a worktree or diff tree.
+/// Uses `symlink_metadata` so symlinks are detected without being followed — this is
+/// the primary defense against symlink-following exfiltration attacks in Stage 3.
+///
+/// Skipped symlink paths are appended to `skipped_symlinks` so the caller can surface
+/// them in the PR description (the agent that produced the PR would otherwise have no
+/// way to see that some of its intended file content was dropped).
+async fn push_file_change_skipping_symlinks(
+    changes: &mut Vec<serde_json::Value>,
+    skipped_symlinks: &mut Vec<String>,
+    change_type: &str,
+    file_path: &str,
+    full_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    // Note: there is a theoretical TOCTOU window between the symlink_metadata
+    // (lstat) call below and the subsequent tokio::fs::read inside
+    // read_file_change (which follows symlinks). A concurrent rename(2) could
+    // swap a regular file for a symlink between the two syscalls. This is not
+    // exploitable in Stage 3's deployment model: the worktree has no concurrent
+    // writer (the agent's patch has already been applied; only this serial
+    // collector reads from it). Closing the window fully would require platform-
+    // specific O_NOFOLLOW open syscalls, which is overkill given the threat
+    // model. If that ever changes, switch to opening the fd here with
+    // O_NOFOLLOW and reading from the fd inside read_file_change.
+    match tokio::fs::symlink_metadata(full_path).await {
+        Ok(meta) if meta.file_type().is_file() => {
+            changes.push(read_file_change(change_type, file_path, full_path).await?);
+        }
+        Ok(meta) if meta.file_type().is_symlink() => {
+            warn!(
+                "Skipping symlink in worktree: {} (symlink-following attack prevention)",
+                file_path
+            );
+            skipped_symlinks.push(file_path.to_string());
+        }
+        Ok(_) => {
+            // Not a regular file (e.g. directory, fifo, socket) — silently skip.
+        }
+        Err(e) => {
+            // NotFound is a normal transient condition (worktree mid-rebase, file
+            // already pruned by git apply, etc.). Anything else — most notably
+            // PermissionDenied — is unusual and worth flagging at warn for triage.
+            if e.kind() == std::io::ErrorKind::NotFound {
+                debug!("File no longer present for {} — skipping", file_path);
+            } else {
+                warn!(
+                    "Failed to read metadata for {}: {} (kind={:?}) — skipping",
+                    file_path,
+                    e,
+                    e.kind()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// If any symlinks were skipped during PR file collection, append a clearly
+/// marked notice to the PR description so the agent/author can see that some
+/// intended content was deliberately dropped.
+fn append_skipped_symlink_notice(body: &str, skipped_symlinks: &[String]) -> String {
+    if skipped_symlinks.is_empty() {
+        return body.to_string();
+    }
+    let mut notice = String::from(
+        "\n\n> [!WARNING]\n\
+         > **Symbolic links omitted from this pull request**\n\
+         >\n\
+         > The following symlinked paths were detected in the worktree and skipped\n\
+         > when uploading file changes (symlinks are never followed for safety):\n\
+         >\n",
+    );
+    for path in skipped_symlinks {
+        notice.push_str("> - `");
+        notice.push_str(&sanitize_path_for_markdown(path));
+        notice.push_str("`\n");
+    }
+    format!("{}{}", body, notice)
+}
+
+/// Make an arbitrary filesystem path safe to embed inside an inline-code span
+/// in a markdown PR description (and, by extension, any human-readable message
+/// such as the `ExecutionResult` failure suffix).
+///
+/// The agent that produced the PR is the adversary in this code path: it can
+/// plant filenames containing characters that would otherwise break out of the
+/// inline-code context, garble the description, or visually deceive the PR
+/// author. CommonMark code spans do NOT honour backslash escapes (the
+/// backtick-count rule terminates the span instead), so naive
+/// `path.replace('`', "\\`")` is not actually an escape — it just inserts a
+/// stray backslash. Instead we:
+///
+/// - Replace backticks with an apostrophe (visually clear, terminator-safe).
+/// - Collapse all ASCII control characters — including newlines, carriage
+///   returns, and tabs — to a single `?` so a multi-line filename can't break
+///   the blockquote.
+/// - Collapse Unicode bidirectional-control / zero-width characters to `?`.
+///   `char::is_control()` in Rust covers only U+0000–U+001F and U+007F–U+009F,
+///   so explicit ranges are required: U+200B–U+200F (ZW joiners + LRM/RLM),
+///   U+202A–U+202E (LRE/RLE/PDF/LRO/RLO), U+2066–U+2069 (LRI/RLI/FSI/PDI),
+///   U+FEFF (BOM / ZWNBSP). Without this, a filename containing U+202E could
+///   visually reverse a section of the displayed name and deceive the PR
+///   author into misreading the warning (no exfiltration vector, but a real
+///   display-spoofing concern).
+///
+/// This is display-only sanitisation; the canonical path the agent actually
+/// requested is unchanged in the upload pipeline.
+fn sanitize_path_for_markdown(path: &str) -> String {
+    path.chars()
+        .map(|c| match c {
+            '`' => '\'',
+            c if c.is_control() => '?',
+            // Bidi controls + zero-width formatting characters that
+            // `is_control()` does not cover. See doc comment above.
+            '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}' => '?',
+            c => c,
+        })
+        .collect()
 }
 
 /// Read a file and produce an ADO push change entry.
@@ -1833,6 +2049,7 @@ async fn read_file_change(
 /// - No .git directory modifications
 /// - No absolute paths
 /// - No null bytes
+/// - No symlink entries (mode 120000)
 fn validate_patch_paths(patch_content: &str) -> anyhow::Result<()> {
     let mut in_diff = false;
     for line in patch_content.lines() {
@@ -1872,6 +2089,38 @@ fn validate_patch_paths(patch_content: &str) -> anyhow::Result<()> {
         {
             let path = line.splitn(3, ' ').nth(2).unwrap_or("").trim_matches('"');
             validate_single_path(path)?;
+        } else if {
+            // Only consider this a real header line if it has no leading
+            // whitespace — diff context lines are space-prefixed, so a line
+            // body of "new file mode 120000" inside a hunk would look identical
+            // to a real mode header after trim(). Real git header lines never
+            // start with whitespace; we require the same here to avoid false
+            // positives on adversarial-but-benign diff content. Added (+)/
+            // removed (-) lines start with a non-whitespace prefix that
+            // survives trim() and so cannot match the exact mode-line strings.
+            let starts_with_ws = line
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_whitespace());
+            let trimmed = line.trim();
+            !starts_with_ws
+                && (trimmed == "new file mode 120000" || trimmed == "new mode 120000")
+        } {
+            // Reject patch lines that INTRODUCE a symlink (git mode 120000).
+            // Either of these lines means the resulting tree contains a symlink:
+            //   - "new file mode 120000" — a freshly added symlink
+            //   - "new mode 120000"      — an existing file converted to a symlink
+            // A symlink in the worktree could make Stage 3 follow it to arbitrary
+            // filesystem paths (e.g. /proc/self/environ) when collecting file
+            // changes to upload to ADO.
+            //
+            // We deliberately do NOT reject "old mode 120000" on its own: a patch
+            // with "old mode 120000" + "new mode 100644" converts a symlink into a
+            // regular file, which is a legitimate cleanup operation and produces a
+            // safe worktree.
+            anyhow::bail!(
+                "Patch introduces a symlink (mode 120000), which is not allowed"
+            );
         }
     }
     Ok(())
@@ -2222,6 +2471,221 @@ new file mode 100755
         assert!(
             result_copy.is_err(),
             "copy with spaces and traversal should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_patch_paths_symlink_rejected() {
+        // A patch that creates a new symlink (mode 120000) must be rejected.
+        // This is the primary attack vector for symlink exfiltration of Stage 3 secrets.
+        let patch = r#"diff --git a/secrets.txt b/secrets.txt
+new file mode 120000
+index 0000000..abcdefg
+--- /dev/null
++++ b/secrets.txt
+@@ -0,0 +1 @@
++/proc/self/environ
+\ No newline at end of file
+"#;
+        assert!(
+            validate_patch_paths(patch).is_err(),
+            "patch with symlink mode 120000 should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_patch_paths_symlink_mode_change_rejected() {
+        // A patch that changes a file to a symlink (old mode → new mode 120000) is rejected.
+        let patch = "diff --git a/file.txt b/file.txt\n\
+                     old mode 100644\n\
+                     new mode 120000\n";
+        assert!(
+            validate_patch_paths(patch).is_err(),
+            "patch that introduces symlink via mode change should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_patch_paths_symlink_to_file_allowed() {
+        // Converting a symlink into a regular file is a legitimate cleanup
+        // operation: the resulting worktree contains no symlinks, so there is
+        // no exfiltration risk. The "old mode 120000" line on its own must not
+        // cause rejection.
+        let patch = "diff --git a/file.txt b/file.txt\n\
+                     old mode 120000\n\
+                     new mode 100644\n\
+                     --- a/file.txt\n\
+                     +++ b/file.txt\n\
+                     @@ -1 +1 @@\n\
+                     -/etc/passwd\n\
+                     +hello world\n";
+        assert!(
+            validate_patch_paths(patch).is_ok(),
+            "patch converting symlink → regular file should be allowed"
+        );
+    }
+
+    #[test]
+    fn test_validate_patch_paths_symlink_deletion_allowed() {
+        // Deleting an existing symlink is also legitimate cleanup — no symlink
+        // remains in the worktree afterwards.
+        let patch = "diff --git a/link b/link\n\
+                     deleted file mode 120000\n\
+                     --- a/link\n\
+                     +++ /dev/null\n";
+        assert!(
+            validate_patch_paths(patch).is_ok(),
+            "patch deleting an existing symlink should be allowed"
+        );
+    }
+
+    #[test]
+    fn test_validate_patch_paths_symlink_mode_suffix_not_bypass() {
+        // The mode check is anchored to lines that have NO leading whitespace
+        // (real git header lines never start with whitespace; diff context
+        // lines always do). Trailing whitespace including \r is still stripped
+        // before equality, so a genuine header line cannot bypass via tail
+        // padding.
+        let patch_trailing_ws = "diff --git a/x b/x\nnew file mode 120000 \n";
+        assert!(
+            validate_patch_paths(patch_trailing_ws).is_err(),
+            "trailing whitespace must not let a symlink mode line bypass the check"
+        );
+
+        // Carriage returns (Windows line endings) are also whitespace and must
+        // not bypass.
+        let patch_crlf = "diff --git a/x b/x\nnew file mode 120000\r\n";
+        assert!(
+            validate_patch_paths(patch_crlf).is_err(),
+            "trailing \\r must not let a symlink mode line bypass the check"
+        );
+
+        // A diff CONTEXT line whose body happens to be the literal string
+        // "new file mode 120000" (i.e. a leading-space-prefixed hunk line)
+        // must NOT trigger the check — it's data, not a header. Git's own
+        // format-patch never emits leading-indented mode headers, so anchoring
+        // the check to no-leading-whitespace is airtight.
+        //
+        // Note: we build this patch with explicit "\n" concatenation rather
+        // than backslash continuation because backslash continuation in Rust
+        // string literals eats the leading whitespace on the next line, which
+        // would defeat the very property we're testing.
+        let patch_context_line = String::new()
+            + "diff --git a/x b/x\n"
+            + "--- a/x\n"
+            + "+++ b/x\n"
+            + "@@ -1,2 +1,2 @@\n"
+            + " new file mode 120000\n"
+            + " keep line\n";
+        assert!(
+            validate_patch_paths(&patch_context_line).is_ok(),
+            "diff context line containing the mode string as data must not be rejected"
+        );
+
+        // A line that merely happens to share a "120000" prefix segment must
+        // not pass the check accidentally either — but it's also not a real
+        // git mode line. We just want to make sure exact-match doesn't reject
+        // benign content that contains "120000" in a non-mode context.
+        let patch_benign = "diff --git a/x b/x\n\
+                            --- a/x\n\
+                            +++ b/x\n\
+                            @@ -1 +1 @@\n\
+                            -count: 1200000\n\
+                            +count: 1200001\n";
+        assert!(
+            validate_patch_paths(patch_benign).is_ok(),
+            "patch body lines containing '120000' as data must not be rejected"
+        );
+    }
+
+    #[test]
+    fn test_append_skipped_symlink_notice_empty_is_passthrough() {
+        let body = "Some PR description";
+        let out = append_skipped_symlink_notice(body, &[]);
+        assert_eq!(out, body);
+    }
+
+    #[test]
+    fn test_append_skipped_symlink_notice_lists_paths() {
+        let body = "Some PR description";
+        let skipped = vec!["secrets.txt".to_string(), "subdir/leak".to_string()];
+        let out = append_skipped_symlink_notice(body, &skipped);
+        assert!(out.starts_with(body));
+        assert!(out.contains("Symbolic links omitted"));
+        assert!(out.contains("`secrets.txt`"));
+        assert!(out.contains("`subdir/leak`"));
+    }
+
+    #[test]
+    fn test_sanitize_path_for_markdown_replaces_backticks() {
+        // Backticks would otherwise terminate the inline-code span and let the
+        // adversarial filename break out of the PR description's blockquote.
+        let out = sanitize_path_for_markdown("foo`bar`baz");
+        assert!(!out.contains('`'), "all backticks must be removed: {out}");
+        assert_eq!(out, "foo'bar'baz");
+    }
+
+    #[test]
+    fn test_sanitize_path_for_markdown_collapses_control_chars() {
+        // Newlines, carriage returns, tabs, and other ASCII control characters
+        // are all replaced with '?' so a multi-line filename can't break the
+        // blockquote / list layout.
+        let out = sanitize_path_for_markdown("evil\nname\rwith\ttabs\x07bell");
+        assert_eq!(out, "evil?name?with?tabs?bell");
+    }
+
+    #[test]
+    fn test_sanitize_path_for_markdown_passthrough_normal() {
+        let out = sanitize_path_for_markdown("src/safeoutputs/create_pull_request.rs");
+        assert_eq!(out, "src/safeoutputs/create_pull_request.rs");
+    }
+
+    #[test]
+    fn test_sanitize_path_for_markdown_filters_bidi_controls() {
+        // U+202E (RIGHT-TO-LEFT OVERRIDE) and friends can visually reverse a
+        // section of the displayed filename and deceive a PR author into
+        // misreading the warning. They are NOT covered by char::is_control(),
+        // so an explicit range filter is required.
+        let bidi_attack = "evil\u{202E}txt.sr"; // would display as "evilrs.txt" in some renderers
+        let out = sanitize_path_for_markdown(bidi_attack);
+        assert!(
+            !out.contains('\u{202E}'),
+            "U+202E (RLO) must be filtered: got {:?}",
+            out
+        );
+        assert_eq!(out, "evil?txt.sr");
+
+        // Sample of other bidi/zero-width formatting characters that must all
+        // be collapsed.
+        let various = "a\u{200B}b\u{200E}c\u{202A}d\u{2066}e\u{FEFF}f";
+        let out = sanitize_path_for_markdown(various);
+        assert_eq!(out, "a?b?c?d?e?f");
+    }
+
+    #[test]
+    fn test_sanitize_path_for_markdown_keeps_normal_unicode() {
+        // Ordinary non-ASCII characters (letters, accents, CJK, emoji) are
+        // legal in filenames and must not be replaced — only formatting
+        // characters that affect rendering are filtered.
+        let path = "café/日本語/💡.txt";
+        let out = sanitize_path_for_markdown(path);
+        assert_eq!(out, path);
+    }
+
+    #[test]
+    fn test_append_skipped_symlink_notice_sanitizes_paths() {
+        // End-to-end: backticks and newlines in a filename must not break the
+        // blockquote.
+        let body = "Some PR description";
+        let skipped = vec!["evil`name\nwith\rnewlines".to_string()];
+        let out = append_skipped_symlink_notice(body, &skipped);
+        // The sanitised path appears in the listing,
+        assert!(out.contains("`evil'name?with?newlines`"));
+        // and the raw garbling characters are not anywhere in the notice.
+        let notice_only = &out[body.len()..];
+        assert!(
+            !notice_only.contains('\n') || notice_only.lines().all(|l| l.is_empty() || l.starts_with('>')),
+            "every non-empty line of the notice must remain inside the blockquote"
         );
     }
 
