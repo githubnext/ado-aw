@@ -75,7 +75,9 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── fuzzy_schedule.rs # Fuzzy schedule parsing
 │   ├── logging.rs        # File-based logging infrastructure
 │   ├── mcp.rs            # SafeOutputs MCP server (stdio + HTTP)
-│   ├── configure.rs      # `configure` CLI command — detects and updates pipeline variables
+│   ├── configure.rs      # `configure` CLI command — orchestration shim atop `src/ado/`
+│   ├── ado/              # Shared Azure DevOps REST helpers (auth, list/match/PATCH/POST)
+│   │   └── mod.rs        # Used by `configure` and the lifecycle commands (enable, disable, remove, list, run, status, secrets)
 │   ├── detect.rs         # Agentic pipeline detection (helper for `configure`)
 │   ├── ndjson.rs         # NDJSON parsing utilities
 │   ├── sanitize.rs       # Input sanitization for safe outputs
