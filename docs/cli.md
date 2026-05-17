@@ -56,7 +56,7 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
 
   **Source-repo scope (Phase 1):** `enable` requires the local git remote to be an Azure DevOps Git remote (the source repo is what gets registered as the definition's repository). GitHub-hosted source repos are gated on a follow-up.
 
-- `disable [PATH]` - Set `queueStatus` to `disabled` (default) or `paused` on every ADO build definition that matches a local fixture under `PATH`. Refuses to touch any ADO definition that is not the target of a local fixture match — that safety property falls naturally out of the same yaml-path + name match used by `configure`. Skips definitions that are already at the requested status; fail-soft per fixture; exits non-zero if any patch failed or if zero local fixtures matched ADO definitions.
+- `disable [PATH]`- Set `queueStatus` to `disabled` (default) or `paused` on every ADO build definition that matches a local fixture under `PATH`. Refuses to touch any ADO definition that is not the target of a local fixture match — that safety property falls naturally out of the same yaml-path + name match used by `configure`. Skips definitions that are already at the requested status; fail-soft per fixture; exits non-zero if any patch failed or if zero local fixtures matched ADO definitions.
   - `--org <url>` - Override: Azure DevOps organization (URL or bare org name). Inferred from git remote by default.
   - `--project <name>` - Override: Azure DevOps project name (inferred from git remote by default).
   - `--pat <pat>` / `AZURE_DEVOPS_EXT_PAT` env var - PAT for ADO API authentication (Azure CLI fallback if omitted).
@@ -69,4 +69,11 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - `--pat <pat>` / `AZURE_DEVOPS_EXT_PAT` env var - PAT for ADO API authentication (Azure CLI fallback if omitted).
   - `--yes` - Required for bulk deletes (>1 match) and for any delete in a non-tty context. A single match on a tty otherwise prompts interactively.
   - `--dry-run` - Print the planned deletions without calling the ADO API.
+
+- `list [PATH]` - Render every ADO build definition that matches a local fixture (under `PATH`) along with its `queueStatus`, ADO folder, and latest-run summary. Pass `--all` to also include definitions with no matching local fixture. Output defaults to a human-readable table; `--json` emits a stable JSON array suitable for scripting.
+  - `--org <url>` - Override: Azure DevOps organization (URL or bare org name). Inferred from git remote by default.
+  - `--project <name>` - Override: Azure DevOps project name (inferred from git remote by default).
+  - `--pat <pat>` / `AZURE_DEVOPS_EXT_PAT` env var - PAT for ADO API authentication (Azure CLI fallback if omitted).
+  - `--all` - Include ADO definitions that do not match any local fixture.
+  - `--json` - Emit machine-readable JSON.
 

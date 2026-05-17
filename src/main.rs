@@ -12,6 +12,7 @@ mod execute;
 mod fuzzy_schedule;
 mod hash;
 mod init;
+mod list;
 mod logging;
 mod mcp;
 mod ndjson;
@@ -224,6 +225,29 @@ enum Commands {
         /// Preview the planned deletions without calling the ADO API.
         #[arg(long)]
         dry_run: bool,
+    },
+    /// List ADO build definitions (with their latest-run state) that match local fixtures.
+    List {
+        /// Path to the repository root (defaults to current directory). Used
+        /// to auto-discover compiled pipelines, same as `compile`.
+        path: Option<PathBuf>,
+        /// Override: Azure DevOps organization (URL like `https://dev.azure.com/myorg`,
+        /// or just the org name `myorg`). Inferred from git remote by default.
+        #[arg(long)]
+        org: Option<String>,
+        /// Override: Azure DevOps project name (inferred from git remote by default).
+        #[arg(long)]
+        project: Option<String>,
+        /// PAT for ADO API authentication (prefer setting AZURE_DEVOPS_EXT_PAT env var;
+        /// Azure CLI fallback if omitted).
+        #[arg(long, env = "AZURE_DEVOPS_EXT_PAT")]
+        pat: Option<String>,
+        /// Include ADO definitions that do not match any local fixture.
+        #[arg(long)]
+        all: bool,
+        /// Emit machine-readable JSON instead of the text table.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -577,6 +601,7 @@ async fn main() -> Result<()> {
         Some(Commands::Enable { .. }) => "enable",
         Some(Commands::Disable { .. }) => "disable",
         Some(Commands::Remove { .. }) => "remove",
+        Some(Commands::List { .. }) => "list",
         None => "ado-aw",
     };
 
@@ -742,6 +767,24 @@ async fn main() -> Result<()> {
                 path: path.as_deref(),
                 yes,
                 dry_run,
+            })
+            .await?;
+        }
+        Commands::List {
+            path,
+            org,
+            project,
+            pat,
+            all,
+            json,
+        } => {
+            list::run(list::ListOptions {
+                org: org.as_deref(),
+                project: project.as_deref(),
+                pat: pat.as_deref(),
+                path: path.as_deref(),
+                all,
+                json,
             })
             .await?;
         }

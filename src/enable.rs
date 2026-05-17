@@ -452,6 +452,7 @@ mod tests {
                 yaml_filename: Some(y.to_string()),
             }),
             queue_status: status.map(str::to_string),
+            path: None,
         }
     }
 

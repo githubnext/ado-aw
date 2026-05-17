@@ -205,6 +205,10 @@ pub struct DefinitionSummary {
     /// [`list_definitions`]). Older/cached responses may omit it.
     #[serde(rename = "queueStatus")]
     pub queue_status: Option<String>,
+    /// ADO folder path (e.g. `\smoke`, `\`). Populated when
+    /// `includeAllProperties=true`. May be absent on older API versions.
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1100,12 +1104,47 @@ pub async fn get_build(
 /// Calls `GET /_apis/build/builds?definitions={id}&$top=1&api-version=7.1`
 /// and returns the first result (or `None` if the definition has never run).
 pub async fn get_latest_build(
-    _client: &reqwest::Client,
-    _ctx: &AdoContext,
-    _auth: &AdoAuth,
-    _definition_id: u64,
+    client: &reqwest::Client,
+    ctx: &AdoContext,
+    auth: &AdoAuth,
+    definition_id: u64,
 ) -> Result<Option<serde_json::Value>> {
-    anyhow::bail!("not yet implemented: filled in by PR 5 (ado-aw list) or PR 7 (ado-aw status)")
+    let url = format!(
+        "{}/{}/_apis/build/builds?definitions={}&$top=1&api-version=7.1",
+        ctx.org_url.trim_end_matches('/'),
+        ctx.project,
+        definition_id,
+    );
+
+    debug!("GET latest build for definition {}: {}", definition_id, url);
+
+    let resp = auth
+        .apply(client.get(&url))
+        .send()
+        .await
+        .with_context(|| format!("Failed to fetch latest build for definition {}", definition_id))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "ADO API returned {} when fetching latest build for definition {}: {}",
+            status,
+            definition_id,
+            body
+        );
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .with_context(|| format!("Failed to parse builds response for {}", definition_id))?;
+
+    Ok(body
+        .get("value")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .cloned())
 }
 
 #[cfg(test)]
@@ -1220,6 +1259,7 @@ mod tests {
             name: name.to_string(),
             process: None,
             queue_status: None,
+            path: None,
         }
     }
 
@@ -1231,6 +1271,7 @@ mod tests {
                 yaml_filename: Some(yaml_filename.to_string()),
             }),
             queue_status: None,
+            path: None,
         }
     }
 
