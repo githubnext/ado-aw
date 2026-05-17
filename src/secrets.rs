@@ -20,7 +20,8 @@ use std::path::{Path, PathBuf};
 
 use crate::ado::{
     AdoAuth, AdoContext, MatchedDefinition, PATH_SEGMENT, get_definition_full,
-    resolve_ado_context, resolve_auth, resolve_definitions,
+    normalize_masked_secret_variable_values, resolve_ado_context, resolve_auth,
+    resolve_definitions,
 };
 
 /// Description of one pipeline variable, for listing only.
@@ -285,7 +286,8 @@ async fn apply_set_one(
     value: &str,
     allow_override: Option<bool>,
 ) -> Result<()> {
-    let definition = get_definition_full(client, ctx, auth, id).await?;
+    let mut definition = get_definition_full(client, ctx, auth, id).await?;
+    normalize_masked_secret_variable_values(&mut definition);
     let updated = apply_variable_set(definition, name, value, allow_override);
     put_definition(client, ctx, auth, id, &updated).await
 }
@@ -497,7 +499,8 @@ async fn apply_delete_one(
     id: u64,
     name: &str,
 ) -> Result<()> {
-    let definition = get_definition_full(client, ctx, auth, id).await?;
+    let mut definition = get_definition_full(client, ctx, auth, id).await?;
+    normalize_masked_secret_variable_values(&mut definition);
     let updated = apply_variable_delete(definition, name);
     put_definition(client, ctx, auth, id, &updated).await
 }

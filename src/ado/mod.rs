@@ -547,6 +547,29 @@ pub async fn get_definition_name(
 /// Note: The GET→PUT cycle is not atomic. Concurrent callers against
 /// the same definition could overwrite each other's variables. This is
 /// acceptable for a CLI tool typically run by a single operator.
+///
+/// ADO returns existing secret variables from definition GETs as masked
+/// `***`. For definition PUTs, `null` preserves the stored secret value,
+/// while the literal mask would overwrite it. Normalize the masked form
+/// before mutating the definition and PUTting it back.
+pub(crate) fn normalize_masked_secret_variable_values(definition: &mut serde_json::Value) {
+    let Some(vars) = definition.get_mut("variables").and_then(|v| v.as_object_mut()) else {
+        return;
+    };
+
+    for var in vars.values_mut() {
+        let is_masked_secret = var.get("isSecret").and_then(|v| v.as_bool()) == Some(true)
+            && var.get("value").and_then(|v| v.as_str()) == Some("***");
+        if !is_masked_secret {
+            continue;
+        }
+
+        if let Some(obj) = var.as_object_mut() {
+            obj.insert("value".to_string(), serde_json::Value::Null);
+        }
+    }
+}
+
 pub async fn update_pipeline_variable(
     client: &reqwest::Client,
     ctx: &AdoContext,
@@ -555,43 +578,10 @@ pub async fn update_pipeline_variable(
     variable_name: &str,
     variable_value: &str,
 ) -> Result<()> {
-    let get_url = format!(
-        "{}/{}/_apis/build/definitions/{}?api-version=7.1",
-        ctx.org_url.trim_end_matches('/'),
-        percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
-        definition_id
-    );
-
-    debug!("Fetching definition {}: {}", definition_id, get_url);
-
-    let resp = auth
-        .apply(client.get(&get_url))
-        .send()
+    let mut definition = get_definition_full(client, ctx, auth, definition_id)
         .await
-        .context("Failed to get pipeline definition")?;
-
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!(
-            "ADO API returned {} when getting definition {}: {}",
-            status,
-            definition_id,
-            body
-        );
-    }
-
-    let body = resp.text().await.context("Failed to read definition response body")?;
-    let mut definition: serde_json::Value = serde_json::from_str(&body)
-        .with_context(|| {
-            let snippet: String = body.chars().take(500).collect();
-            format!(
-                "Failed to parse definition {} as JSON. \
-                 This usually means the PAT is invalid or expired. \
-                 Response body (first 500 chars):\n{snippet}",
-                definition_id
-            )
-        })?;
+        .with_context(|| format!("Failed to fetch definition {} before updating", definition_id))?;
+    normalize_masked_secret_variable_values(&mut definition);
 
     // Ensure variables object exists
     if definition.get("variables").is_none() {
@@ -964,6 +954,7 @@ pub async fn patch_queue_status(
     let mut definition = get_definition_full(client, ctx, auth, id)
         .await
         .with_context(|| format!("Failed to fetch definition {} before patching", id))?;
+    normalize_masked_secret_variable_values(&mut definition);
 
     definition["queueStatus"] = serde_json::Value::String(status.to_string());
 
@@ -1235,6 +1226,36 @@ pub async fn get_latest_build(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_masked_secret_variable_values_rewrites_masked_secret_to_null() {
+        let mut def = serde_json::json!({
+            "variables": {
+                "SECRET": { "value": "***", "isSecret": true, "allowOverride": false },
+                "PLAIN": { "value": "visible", "isSecret": false, "allowOverride": false }
+            }
+        });
+
+        normalize_masked_secret_variable_values(&mut def);
+
+        assert!(def["variables"]["SECRET"]["value"].is_null());
+        assert_eq!(def["variables"]["PLAIN"]["value"], "visible");
+    }
+
+    #[test]
+    fn normalize_masked_secret_variable_values_leaves_non_secret_mask_alone() {
+        let mut def = serde_json::json!({
+            "variables": {
+                "LITERAL": { "value": "***", "isSecret": false, "allowOverride": false },
+                "SECRET": { "value": "new-value", "isSecret": true, "allowOverride": false }
+            }
+        });
+
+        normalize_masked_secret_variable_values(&mut def);
+
+        assert_eq!(def["variables"]["LITERAL"]["value"], "***");
+        assert_eq!(def["variables"]["SECRET"]["value"], "new-value");
+    }
 
     #[test]
     fn test_parse_ado_remote_https() {
