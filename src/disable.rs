@@ -18,8 +18,7 @@ use log::debug;
 use std::path::{Path, PathBuf};
 
 use crate::ado::{
-    AdoAuth, AdoContext, MatchedDefinition, match_definitions, patch_queue_status,
-    resolve_ado_context, resolve_auth,
+    MatchedDefinition, match_definitions, patch_queue_status, resolve_ado_context, resolve_auth,
 };
 use crate::detect;
 
@@ -127,10 +126,11 @@ pub async fn run(opts: DisableOptions<'_>) -> Result<()> {
     println!("Scanning for agentic pipelines...");
     let detected = detect::detect_pipelines(&repo_path).await?;
     if detected.is_empty() {
-        println!(
-            "No agentic pipelines found. Make sure your pipelines were compiled with the latest ado-aw."
+        anyhow::bail!(
+            "No local agentic pipeline fixtures were found under {}. \
+             Run `ado-aw compile` first (or point `ado-aw disable` at the repo root).",
+            repo_path.display()
         );
-        return Ok(());
     }
     println!("Found {} agentic pipeline(s).", detected.len());
     println!();
@@ -155,7 +155,8 @@ pub async fn run(opts: DisableOptions<'_>) -> Result<()> {
     println!("{} definition(s) matched.", matched.len());
     println!();
 
-    let mut success = 0usize;
+    let mut patched = 0usize;
+    let mut skipped = 0usize;
     let mut failure = 0usize;
     for m in &matched {
         let action = decide_action(m, target);
@@ -164,7 +165,7 @@ pub async fn run(opts: DisableOptions<'_>) -> Result<()> {
         match action {
             Action::Skip { id, name, reason } => {
                 println!("↻ skip: {} (id={}, {})", name, id, reason);
-                success += 1;
+                skipped += 1;
             }
             Action::Patch { id, name, from, to } => {
                 if opts.dry_run {
@@ -172,13 +173,13 @@ pub async fn run(opts: DisableOptions<'_>) -> Result<()> {
                         "[dry-run] ▶ would patch: {} (id={}, {} → {})",
                         name, id, from, to
                     );
-                    success += 1;
+                    patched += 1;
                     continue;
                 }
                 match patch_queue_status(&client, &ado_ctx, &auth, id, to).await {
                     Ok(()) => {
                         println!("▶ patched: {} (id={}, {} → {})", name, id, from, to);
-                        success += 1;
+                        patched += 1;
                     }
                     Err(e) => {
                         eprintln!("✗ failed: {} (id={}): {:#}", name, id, e);
@@ -190,7 +191,10 @@ pub async fn run(opts: DisableOptions<'_>) -> Result<()> {
     }
 
     println!();
-    println!("Done: {} succeeded, {} failed.", success, failure);
+    println!(
+        "Done: {} patched, {} skipped, {} failed.",
+        patched, skipped, failure
+    );
     if failure > 0 {
         anyhow::bail!("{} definition(s) failed", failure);
     }
