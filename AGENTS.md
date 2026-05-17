@@ -81,6 +81,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── remove.rs         # `remove` CLI command — deletes matched ADO build definitions (with --yes / tty-prompt safety)
 │   ├── list.rs           # `list` CLI command — renders matched ADO definitions with their latest-run state (text or JSON)
 │   ├── status.rs         # `status` CLI command — denser per-pipeline status block (thin renderer over `list`'s data path)
+│   ├── run.rs            # `run` CLI command — queues builds for matched definitions, optional polling to completion (module entry is `dispatch`)
 │   ├── ado/              # Shared Azure DevOps REST helpers (auth, list/match/PATCH/POST)
 │   │   └── mod.rs        # Used by `configure` and the `enable` command (ADO REST helpers: auth, list/match/PATCH/POST)
 │   ├── detect.rs         # Agentic pipeline detection (helper for `configure`)

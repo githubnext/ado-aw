@@ -83,3 +83,14 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - `--pat <pat>` / `AZURE_DEVOPS_EXT_PAT` env var - PAT for ADO API authentication (Azure CLI fallback if omitted).
   - `--json` - Emit machine-readable JSON (same shape as `list --json`).
 
+- `run [PATH]` - Queue an ADO build for every ADO definition that matches a local fixture (under `PATH`). With `--wait`, poll each queued build until completion and exit with an aggregate result — 0 only if every queued build succeeded.
+  - `--org <url>` - Override: Azure DevOps organization (URL or bare org name). Inferred from git remote by default.
+  - `--project <name>` - Override: Azure DevOps project name (inferred from git remote by default).
+  - `--pat <pat>` / `AZURE_DEVOPS_EXT_PAT` env var - PAT for ADO API authentication (Azure CLI fallback if omitted).
+  - `--branch <ref>` - Source branch to queue. Defaults to the definition's `defaultBranch`.
+  - `--parameters <k=v[,k=v...]>` - ADO `templateParameters`. Repeatable and/or comma-separated. All values are strings (ADO coerces as the definition requires). Rejects malformed pairs (missing `=`).
+  - `--wait` - Poll each queued build to completion before exiting.
+  - `--poll-interval <secs>` - Polling period when `--wait` is set (default 10).
+  - `--timeout <secs>` - Hard cap on the polling loop when `--wait` is set (default 1800).
+  - `--dry-run` - Print the planned `templateParameters` body without calling the ADO API.
+
