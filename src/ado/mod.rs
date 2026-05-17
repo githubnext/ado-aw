@@ -238,6 +238,12 @@ pub struct MatchedDefinition {
     pub name: String,
     pub match_method: MatchMethod,
     pub yaml_path: String,
+    /// `enabled`, `disabled`, `paused`, or `None` when the matcher
+    /// couldn't read the field (explicit-ID matches, older API
+    /// responses). Populated from `DefinitionSummary::queue_status`
+    /// when available, so command-level decision logic can skip
+    /// already-at-target definitions without an extra HTTP round-trip.
+    pub queue_status: Option<String>,
 }
 
 /// List all build definitions in the project, handling pagination.
@@ -425,6 +431,7 @@ pub async fn match_definitions(
                 name: def.name.clone(),
                 match_method: MatchMethod::YamlPath,
                 yaml_path: yaml_path_normalized.to_string(),
+                queue_status: def.queue_status.clone(),
             });
             continue;
         }
@@ -448,6 +455,7 @@ pub async fn match_definitions(
                     name: def.name.clone(),
                     match_method: MatchMethod::PipelineName,
                     yaml_path: yaml_path_normalized.to_string(),
+                    queue_status: def.queue_status.clone(),
                 });
                 continue;
             }
@@ -752,6 +760,7 @@ pub async fn resolve_definitions(
                 name,
                 match_method: MatchMethod::Explicit,
                 yaml_path: String::new(),
+                queue_status: None,
             });
         }
         return Ok(Some(matched));

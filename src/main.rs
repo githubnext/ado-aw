@@ -4,6 +4,7 @@ pub mod ado;
 mod compile;
 mod configure;
 mod detect;
+mod disable;
 mod ecosystem_domains;
 mod enable;
 mod engine;
@@ -173,6 +174,31 @@ enum Commands {
         /// Falls back to the GITHUB_TOKEN env var, then to an interactive prompt.
         #[arg(long, requires = "also_set_token")]
         token: Option<String>,
+    },
+    /// Disable (or pause) every ADO build definition that matches a local fixture.
+    Disable {
+        /// Path to the repository root (defaults to current directory). Used
+        /// to auto-discover compiled pipelines, same as `compile`.
+        path: Option<PathBuf>,
+        /// Override: Azure DevOps organization (URL like `https://dev.azure.com/myorg`,
+        /// or just the org name `myorg`). Inferred from git remote by default.
+        #[arg(long)]
+        org: Option<String>,
+        /// Override: Azure DevOps project name (inferred from git remote by default).
+        #[arg(long)]
+        project: Option<String>,
+        /// PAT for ADO API authentication (prefer setting AZURE_DEVOPS_EXT_PAT env var;
+        /// Azure CLI fallback if omitted).
+        #[arg(long, env = "AZURE_DEVOPS_EXT_PAT")]
+        pat: Option<String>,
+        /// Set queueStatus to `paused` instead of `disabled`. Paused
+        /// definitions still queue scheduled runs but the queue is held;
+        /// disabled definitions reject all queue requests.
+        #[arg(long)]
+        paused: bool,
+        /// Preview the planned actions without calling the ADO API.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -524,6 +550,7 @@ async fn main() -> Result<()> {
         Some(Commands::Init { .. }) => "init",
         Some(Commands::Configure { .. }) => "configure",
         Some(Commands::Enable { .. }) => "enable",
+        Some(Commands::Disable { .. }) => "disable",
         None => "ado-aw",
     };
 
@@ -653,6 +680,24 @@ async fn main() -> Result<()> {
                 dry_run,
                 also_set_token,
                 token: token.as_deref(),
+            })
+            .await?;
+        }
+        Commands::Disable {
+            path,
+            org,
+            project,
+            pat,
+            paused,
+            dry_run,
+        } => {
+            disable::run(disable::DisableOptions {
+                org: org.as_deref(),
+                project: project.as_deref(),
+                pat: pat.as_deref(),
+                path: path.as_deref(),
+                paused,
+                dry_run,
             })
             .await?;
         }
