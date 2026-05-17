@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use crate::compile::extensions::{CompilerExtension, Extension};
-use crate::compile::types::{EngineConfig, FrontMatter, McpConfig};
+use crate::compile::types::{CompileTarget, EngineConfig, FrontMatter, McpConfig};
 use crate::validate::{
     contains_ado_expression, contains_newline, contains_pipeline_command, is_valid_arg,
     is_valid_command_path, is_valid_env_var_name, is_valid_hostname, is_valid_identifier,
@@ -40,9 +40,10 @@ pub const BLOCKED_ENV_KEYS: &[&str] = &[
 /// Default model used by the Copilot engine when no model is specified in front matter.
 pub const DEFAULT_COPILOT_MODEL: &str = "claude-opus-4.7";
 
-/// Default pinned version of the Copilot CLI NuGet package.
+/// Default pinned version of the Copilot CLI.
 /// Override per-agent via `engine: { id: copilot, version: "1.0.35" }` in front matter.
 pub const COPILOT_CLI_VERSION: &str = "1.0.47";
+const COPILOT_CLI_RELEASES_BASE: &str = "https://github.com/github/copilot-cli/releases";
 
 /// Resolved engine — enum dispatch over supported engine identifiers.
 ///
@@ -134,9 +135,9 @@ impl Engine {
     /// Uses `engine_config.version()` if set in front matter, otherwise falls back
     /// to the pinned `COPILOT_CLI_VERSION` constant. Returns an empty string when
     /// `engine.command` is set (the user provides their own binary).
-    pub fn install_steps(&self, engine_config: &EngineConfig) -> Result<String> {
+    pub fn install_steps(&self, engine_config: &EngineConfig, target: &CompileTarget) -> Result<String> {
         match self {
-            Engine::Copilot => copilot_install_steps(engine_config),
+            Engine::Copilot => copilot_install_steps(engine_config, target),
         }
     }
 
@@ -498,10 +499,12 @@ fn copilot_env(engine_config: &EngineConfig) -> Result<String> {
 
 /// Generate Copilot CLI install steps for Azure DevOps pipelines.
 ///
-/// Produces the YAML block that authenticates with NuGet, installs the
-/// `Microsoft.Copilot.CLI.linux-x64` package, copies the binary to
-/// `/tmp/awf-tools/copilot`, and verifies the install.
-fn copilot_install_steps(engine_config: &EngineConfig) -> Result<String> {
+/// Produces target-specific YAML:
+/// - 1ES: authenticate with NuGet and install `Microsoft.Copilot.CLI.linux-x64`.
+/// - Non-1ES: download Copilot CLI from GitHub Releases and verify SHA256.
+///
+/// Both paths stage the binary at `/tmp/awf-tools/copilot`.
+fn copilot_install_steps(engine_config: &EngineConfig, target: &CompileTarget) -> Result<String> {
     // Custom binary path → skip NuGet install entirely
     if engine_config.command().is_some() {
         return Ok(String::new());
@@ -511,8 +514,9 @@ fn copilot_install_steps(engine_config: &EngineConfig) -> Result<String> {
         .version()
         .unwrap_or(COPILOT_CLI_VERSION);
 
-    // Validate version to prevent NuGet argument injection — the version string
-    // is embedded directly into NuGet command arguments.
+    // Validate version to prevent injection — this value is used in NuGet
+    // command arguments for 1ES and in GitHub Releases URL construction for
+    // non-1ES targets.
     if !is_valid_version(version) {
         anyhow::bail!(
             "engine.version '{}' contains invalid characters. \
@@ -521,16 +525,17 @@ fn copilot_install_steps(engine_config: &EngineConfig) -> Result<String> {
         );
     }
 
-    // "latest" means "install the newest available version" — NuGet doesn't
-    // recognise "latest" as a version string; omitting -Version installs the newest.
-    let version_arg = if version == "latest" {
-        String::new()
-    } else {
-        format!("-Version {version} ")
-    };
+    if *target == CompileTarget::OneES {
+        // "latest" means "install the newest available version" — NuGet doesn't
+        // recognise "latest" as a version string; omitting -Version installs the newest.
+        let version_arg = if version == "latest" {
+            String::new()
+        } else {
+            format!("-Version {version} ")
+        };
 
-    Ok(format!(
-        "\
+        return Ok(format!(
+            "\
 - task: NuGetAuthenticate@1
   displayName: \"Authenticate NuGet Feed\"
 
@@ -550,6 +555,82 @@ fn copilot_install_steps(engine_config: &EngineConfig) -> Result<String> {
     cp \"$(Agent.TempDirectory)/tools/Microsoft.Copilot.CLI.linux-x64/copilot\" /tmp/awf-tools/copilot
     chmod +x /tmp/awf-tools/copilot
   displayName: \"Add copilot to PATH\"
+
+- bash: |
+    copilot --version
+    copilot -h
+  displayName: \"Output copilot version\""
+        ));
+    }
+
+    if version == "latest" {
+        return copilot_install_from_github_release(
+            &format!("{COPILOT_CLI_RELEASES_BASE}/latest/download"),
+            "Install Copilot CLI (latest)",
+        );
+    }
+
+    let version_tag = normalize_version_tag(version);
+    let base_url = format!("{COPILOT_CLI_RELEASES_BASE}/download/{version_tag}");
+    copilot_install_from_github_release(
+        &base_url,
+        &format!("Install Copilot CLI ({version_tag})"),
+    )
+}
+
+fn normalize_version_tag(version: &str) -> String {
+    if version.starts_with('v') {
+        version.to_string()
+    } else {
+        format!("v{version}")
+    }
+}
+
+fn copilot_install_from_github_release(base_url: &str, display_name: &str) -> Result<String> {
+    Ok(format!(
+        "\
+- bash: |
+    set -euo pipefail
+    TARBALL_NAME=\"copilot-linux-x64.tar.gz\"
+    BASE_URL=\"{base_url}\"
+    TARBALL_URL=\"$BASE_URL/$TARBALL_NAME\"
+    CHECKSUMS_URL=\"$BASE_URL/SHA256SUMS.txt\"
+    TOOLS_DIR=\"$(Agent.TempDirectory)/tools\"
+    TEMP_DIR=\"$(mktemp -d)\"
+    trap 'rm -rf \"$TEMP_DIR\"' EXIT
+    mkdir -p \"$TOOLS_DIR\" /tmp/awf-tools
+
+    curl -fsSL --retry 3 --retry-delay 5 -o \"$TEMP_DIR/SHA256SUMS.txt\" \"$CHECKSUMS_URL\"
+    curl -fsSL --retry 3 --retry-delay 5 -o \"$TEMP_DIR/$TARBALL_NAME\" \"$TARBALL_URL\"
+
+    EXPECTED_CHECKSUM=$(awk -v fname=\"$TARBALL_NAME\" '$2 == fname {{print $1; exit}}' \"$TEMP_DIR/SHA256SUMS.txt\" | tr 'A-F' 'a-f')
+    if [ -z \"$EXPECTED_CHECKSUM\" ]; then
+      echo \"ERROR: failed to resolve expected checksum for $TARBALL_NAME\"
+      exit 1
+    fi
+
+    if command -v sha256sum > /dev/null 2>&1; then
+      ACTUAL_CHECKSUM=$(sha256sum \"$TEMP_DIR/$TARBALL_NAME\" | awk '{{print $1}}' | tr 'A-F' 'a-f')
+    elif command -v shasum > /dev/null 2>&1; then
+      ACTUAL_CHECKSUM=$(shasum -a 256 \"$TEMP_DIR/$TARBALL_NAME\" | awk '{{print $1}}' | tr 'A-F' 'a-f')
+    else
+      echo \"ERROR: neither sha256sum nor shasum is available\"
+      exit 1
+    fi
+
+    if [ \"$EXPECTED_CHECKSUM\" != \"$ACTUAL_CHECKSUM\" ]; then
+      echo \"ERROR: checksum verification failed\"
+      echo \"Expected: $EXPECTED_CHECKSUM\"
+      echo \"Actual:   $ACTUAL_CHECKSUM\"
+      exit 1
+    fi
+
+    tar -xz -C \"$TOOLS_DIR\" -f \"$TEMP_DIR/$TARBALL_NAME\"
+    ls -la \"$TOOLS_DIR\"
+    echo \"##vso[task.prependpath]$TOOLS_DIR\"
+    cp \"$TOOLS_DIR/copilot\" /tmp/awf-tools/copilot
+    chmod +x /tmp/awf-tools/copilot
+  displayName: \"{display_name}\"
 
 - bash: |
     copilot --version
@@ -585,7 +666,7 @@ fn copilot_invocation(
 
 #[cfg(test)]
 mod tests {
-    use super::{get_engine, Engine};
+    use super::{get_engine, normalize_version_tag, Engine};
     use crate::compile::{extensions::collect_extensions, parse_markdown};
 
     #[test]
@@ -922,7 +1003,7 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  version: '1.0.0 -Source https://evil.com'\n---\n",
         ).unwrap();
-        let result = Engine::Copilot.install_steps(&fm.engine);
+        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("invalid characters"));
     }
@@ -932,7 +1013,7 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  version: \"1.0.0'\"\n---\n",
         ).unwrap();
-        let result = Engine::Copilot.install_steps(&fm.engine);
+        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target);
         assert!(result.is_err());
     }
 
@@ -941,8 +1022,19 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  version: '1.0.34'\n---\n",
         ).unwrap();
-        let result = Engine::Copilot.install_steps(&fm.engine).unwrap();
-        assert!(result.contains("-Version 1.0.34"));
+        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target).unwrap();
+        assert!(result.contains("releases/download/v1.0.34"));
+        assert!(result.contains("Install Copilot CLI (v1.0.34)"));
+    }
+
+    #[test]
+    fn engine_version_accepts_valid_with_v_prefix() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  version: 'v1.0.34'\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target).unwrap();
+        assert!(result.contains("releases/download/v1.0.34"));
+        assert!(result.contains("Install Copilot CLI (v1.0.34)"));
     }
 
     #[test]
@@ -950,10 +1042,37 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  version: latest\n---\n",
         ).unwrap();
-        let result = Engine::Copilot.install_steps(&fm.engine).unwrap();
-        // "latest" omits -Version entirely so NuGet installs the newest available
-        assert!(!result.contains("-Version"), "should not contain -Version flag for 'latest'");
-        assert!(result.contains("-OutputDirectory"), "should still contain other NuGet args");
+        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target).unwrap();
+        assert!(result.contains("releases/latest/download"), "latest should resolve via latest release URL");
+        assert!(result.contains("Install Copilot CLI (latest)"));
+    }
+
+    #[test]
+    fn engine_install_onees_latest_omits_version_argument() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\ntarget: 1es\nengine:\n  id: copilot\n  version: latest\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target).unwrap();
+        assert!(result.contains("NuGetCommand@2"));
+        assert!(result.contains("Guardian1ESPTUpstreamOrgFeed"));
+        assert!(!result.contains("-Version latest"));
+    }
+
+    #[test]
+    fn engine_install_onees_uses_nuget_feed() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\ntarget: 1es\nengine:\n  id: copilot\n  version: '1.0.34'\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target).unwrap();
+        assert!(result.contains("NuGetCommand@2"));
+        assert!(result.contains("Guardian1ESPTUpstreamOrgFeed"));
+        assert!(result.contains("-Version 1.0.34"));
+    }
+
+    #[test]
+    fn normalize_version_tag_does_not_double_prefix_v() {
+        assert_eq!(normalize_version_tag("v1.0.34"), "v1.0.34");
+        assert_eq!(normalize_version_tag("1.0.34"), "v1.0.34");
     }
 
     // ─── engine.env empty key test ────────────────────────────────────────
