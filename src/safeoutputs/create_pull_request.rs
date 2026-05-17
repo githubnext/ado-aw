@@ -1905,10 +1905,37 @@ fn append_skipped_symlink_notice(body: &str, skipped_symlinks: &[String]) -> Str
     );
     for path in skipped_symlinks {
         notice.push_str("> - `");
-        notice.push_str(path);
+        notice.push_str(&sanitize_path_for_markdown(path));
         notice.push_str("`\n");
     }
     format!("{}{}", body, notice)
+}
+
+/// Make an arbitrary filesystem path safe to embed inside an inline-code span
+/// in a markdown PR description.
+///
+/// The agent that produced the PR is the adversary in this code path: it can
+/// plant filenames containing characters that would otherwise break out of the
+/// inline-code context and garble (or HTML-inject into) the description.
+/// CommonMark code spans do NOT honour backslash escapes (the backtick-count
+/// rule terminates the span instead), so naive `path.replace('`', "\\`")` is
+/// not actually an escape — it just inserts a stray backslash. Instead we:
+///
+/// - Replace backticks with an apostrophe (visually clear, terminator-safe).
+/// - Collapse all ASCII control characters — including newlines, carriage
+///   returns, and tabs — to a single `?` so a multi-line filename can't break
+///   the blockquote.
+///
+/// This is display-only sanitisation; the canonical path the agent actually
+/// requested is unchanged in the upload pipeline.
+fn sanitize_path_for_markdown(path: &str) -> String {
+    path.chars()
+        .map(|c| match c {
+            '`' => '\'',
+            c if c.is_control() => '?',
+            c => c,
+        })
+        .collect()
 }
 
 /// Read a file and produce an ADO push change entry.
@@ -2481,6 +2508,47 @@ index 0000000..abcdefg
         assert!(out.contains("Symbolic links omitted"));
         assert!(out.contains("`secrets.txt`"));
         assert!(out.contains("`subdir/leak`"));
+    }
+
+    #[test]
+    fn test_sanitize_path_for_markdown_replaces_backticks() {
+        // Backticks would otherwise terminate the inline-code span and let the
+        // adversarial filename break out of the PR description's blockquote.
+        let out = sanitize_path_for_markdown("foo`bar`baz");
+        assert!(!out.contains('`'), "all backticks must be removed: {out}");
+        assert_eq!(out, "foo'bar'baz");
+    }
+
+    #[test]
+    fn test_sanitize_path_for_markdown_collapses_control_chars() {
+        // Newlines, carriage returns, tabs, and other ASCII control characters
+        // are all replaced with '?' so a multi-line filename can't break the
+        // blockquote / list layout.
+        let out = sanitize_path_for_markdown("evil\nname\rwith\ttabs\x07bell");
+        assert_eq!(out, "evil?name?with?tabs?bell");
+    }
+
+    #[test]
+    fn test_sanitize_path_for_markdown_passthrough_normal() {
+        let out = sanitize_path_for_markdown("src/safeoutputs/create_pull_request.rs");
+        assert_eq!(out, "src/safeoutputs/create_pull_request.rs");
+    }
+
+    #[test]
+    fn test_append_skipped_symlink_notice_sanitizes_paths() {
+        // End-to-end: backticks and newlines in a filename must not break the
+        // blockquote.
+        let body = "Some PR description";
+        let skipped = vec!["evil`name\nwith\rnewlines".to_string()];
+        let out = append_skipped_symlink_notice(body, &skipped);
+        // The sanitised path appears in the listing,
+        assert!(out.contains("`evil'name?with?newlines`"));
+        // and the raw garbling characters are not anywhere in the notice.
+        let notice_only = &out[body.len()..];
+        assert!(
+            !notice_only.contains('\n') || notice_only.lines().all(|l| l.is_empty() || l.starts_with('>')),
+            "every non-empty line of the notice must remain inside the blockquote"
+        );
     }
 
     #[test]
