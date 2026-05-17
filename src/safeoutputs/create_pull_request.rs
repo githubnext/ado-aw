@@ -973,13 +973,20 @@ impl Executor for CreatePrResult {
             // If every collected entry was a symlink, the agent's payload is
             // effectively gone — surface that to the agent so it can debug
             // (the per-symlink warn! only goes to Stage 3 infrastructure logs).
+            // Paths are passed through sanitize_path_for_markdown so adversarial
+            // filenames (bidi overrides, control chars, etc.) cannot garble the
+            // ExecutionResult message or the corresponding log line.
             let symlink_suffix = if skipped_symlinks.is_empty() {
                 String::new()
             } else {
+                let sanitized: Vec<String> = skipped_symlinks
+                    .iter()
+                    .map(|p| sanitize_path_for_markdown(p))
+                    .collect();
                 format!(
                     " ({} symlink(s) were skipped for safety: {})",
-                    skipped_symlinks.len(),
-                    skipped_symlinks.join(", ")
+                    sanitized.len(),
+                    sanitized.join(", ")
                 )
             };
             // Handle no-changes based on config
@@ -1955,19 +1962,29 @@ fn append_skipped_symlink_notice(body: &str, skipped_symlinks: &[String]) -> Str
 }
 
 /// Make an arbitrary filesystem path safe to embed inside an inline-code span
-/// in a markdown PR description.
+/// in a markdown PR description (and, by extension, any human-readable message
+/// such as the `ExecutionResult` failure suffix).
 ///
 /// The agent that produced the PR is the adversary in this code path: it can
 /// plant filenames containing characters that would otherwise break out of the
-/// inline-code context and garble (or HTML-inject into) the description.
-/// CommonMark code spans do NOT honour backslash escapes (the backtick-count
-/// rule terminates the span instead), so naive `path.replace('`', "\\`")` is
-/// not actually an escape — it just inserts a stray backslash. Instead we:
+/// inline-code context, garble the description, or visually deceive the PR
+/// author. CommonMark code spans do NOT honour backslash escapes (the
+/// backtick-count rule terminates the span instead), so naive
+/// `path.replace('`', "\\`")` is not actually an escape — it just inserts a
+/// stray backslash. Instead we:
 ///
 /// - Replace backticks with an apostrophe (visually clear, terminator-safe).
 /// - Collapse all ASCII control characters — including newlines, carriage
 ///   returns, and tabs — to a single `?` so a multi-line filename can't break
 ///   the blockquote.
+/// - Collapse Unicode bidirectional-control / zero-width characters to `?`.
+///   `char::is_control()` in Rust covers only U+0000–U+001F and U+007F–U+009F,
+///   so explicit ranges are required: U+200B–U+200F (ZW joiners + LRM/RLM),
+///   U+202A–U+202E (LRE/RLE/PDF/LRO/RLO), U+2066–U+2069 (LRI/RLI/FSI/PDI),
+///   U+FEFF (BOM / ZWNBSP). Without this, a filename containing U+202E could
+///   visually reverse a section of the displayed name and deceive the PR
+///   author into misreading the warning (no exfiltration vector, but a real
+///   display-spoofing concern).
 ///
 /// This is display-only sanitisation; the canonical path the agent actually
 /// requested is unchanged in the upload pipeline.
@@ -1976,6 +1993,12 @@ fn sanitize_path_for_markdown(path: &str) -> String {
         .map(|c| match c {
             '`' => '\'',
             c if c.is_control() => '?',
+            // Bidi controls + zero-width formatting characters that
+            // `is_control()` does not cover. See doc comment above.
+            '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}' => '?',
             c => c,
         })
         .collect()
@@ -2615,6 +2638,38 @@ index 0000000..abcdefg
     fn test_sanitize_path_for_markdown_passthrough_normal() {
         let out = sanitize_path_for_markdown("src/safeoutputs/create_pull_request.rs");
         assert_eq!(out, "src/safeoutputs/create_pull_request.rs");
+    }
+
+    #[test]
+    fn test_sanitize_path_for_markdown_filters_bidi_controls() {
+        // U+202E (RIGHT-TO-LEFT OVERRIDE) and friends can visually reverse a
+        // section of the displayed filename and deceive a PR author into
+        // misreading the warning. They are NOT covered by char::is_control(),
+        // so an explicit range filter is required.
+        let bidi_attack = "evil\u{202E}txt.sr"; // would display as "evilrs.txt" in some renderers
+        let out = sanitize_path_for_markdown(bidi_attack);
+        assert!(
+            !out.contains('\u{202E}'),
+            "U+202E (RLO) must be filtered: got {:?}",
+            out
+        );
+        assert_eq!(out, "evil?txt.sr");
+
+        // Sample of other bidi/zero-width formatting characters that must all
+        // be collapsed.
+        let various = "a\u{200B}b\u{200E}c\u{202A}d\u{2066}e\u{FEFF}f";
+        let out = sanitize_path_for_markdown(various);
+        assert_eq!(out, "a?b?c?d?e?f");
+    }
+
+    #[test]
+    fn test_sanitize_path_for_markdown_keeps_normal_unicode() {
+        // Ordinary non-ASCII characters (letters, accents, CJK, emoji) are
+        // legal in filenames and must not be replaced — only formatting
+        // characters that affect rendering are filtered.
+        let path = "café/日本語/💡.txt";
+        let out = sanitize_path_for_markdown(path);
+        assert_eq!(out, path);
     }
 
     #[test]
