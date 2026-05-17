@@ -567,8 +567,13 @@ Both targets share the same execution model (Copilot CLI + AWF + MCPG) and the s
 ## Job/Stage Template Markers
 
 The `target: job` and `target: stage` targets use `job-base.yml` and `stage-base.yml`
-respectively. Both include all the standard AWF/MCPG markers above, plus the two
-template-specific markers below.
+respectively. Both include the AWF/MCPG execution and agent-lifecycle markers above, but
+omit the top-level pipeline structure markers that do not apply to reusable templates:
+`{{ schedule }}`, `{{ pr_trigger }}`, `{{ ci_trigger }}`, `{{ pipeline_resources }}`,
+`{{ repositories }}`, `{{ parameters }}`, and `{{ pipeline_agent_name }}`. These are
+owned by the parent pipeline that includes the template. Additionally, job/stage templates
+replace `{{ parameters }}` with `{{ template_parameters }}` (a `parameters:` block for
+callers to pass values in). The two template-specific markers below are added.
 
 ### {{ stage_prefix }}
 
