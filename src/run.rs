@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::ado::{
-    AdoAuth, AdoContext, MatchedDefinition, get_build, match_definitions, queue_build,
-    resolve_ado_context, resolve_auth,
+    AdoAuth, AdoContext, MatchedDefinition, PATH_SEGMENT, get_build, match_definitions,
+    queue_build, resolve_ado_context, resolve_auth,
 };
 use crate::detect;
 
@@ -158,7 +158,7 @@ pub async fn dispatch(opts: RunOptions<'_>) -> Result<()> {
                     m.id,
                     build_id,
                     ado_ctx.org_url.trim_end_matches('/'),
-                    ado_ctx.project,
+                    percent_encoding::utf8_percent_encode(&ado_ctx.project, PATH_SEGMENT),
                     build_id
                 );
                 targets.push(PollTarget {

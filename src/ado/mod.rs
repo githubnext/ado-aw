@@ -825,7 +825,7 @@ pub async fn resolve_definitions(
 /// just for symmetry with common path-encoding tables. Notably this
 /// preserves `-`, `_`, `.`, `~` which `NON_ALPHANUMERIC` would over-
 /// encode (e.g. `my-repo` → `my%2Drepo`).
-const PATH_SEGMENT: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
+pub const PATH_SEGMENT: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
     .add(b' ')
     .add(b'"')
     .add(b'#')

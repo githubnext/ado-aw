@@ -50,8 +50,9 @@ enum SecretsCmd {
         /// Mark the variable as `allowOverride=true` (default: false).
         #[arg(long)]
         allow_override: bool,
-        /// Read the value from a single line on stdin.
-        #[arg(long)]
+        /// Read the value from a single line on stdin. Mutually exclusive
+        /// with the positional `<value>` argument.
+        #[arg(long, conflicts_with = "value")]
         value_stdin: bool,
         #[arg(long)]
         dry_run: bool,

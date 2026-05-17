@@ -19,8 +19,8 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 use crate::ado::{
-    AdoAuth, AdoContext, MatchedDefinition, get_definition_full, resolve_ado_context,
-    resolve_auth, resolve_definitions,
+    AdoAuth, AdoContext, MatchedDefinition, PATH_SEGMENT, get_definition_full,
+    resolve_ado_context, resolve_auth, resolve_definitions,
 };
 
 /// Description of one pipeline variable, for listing only.
@@ -115,7 +115,7 @@ async fn put_definition(
     let url = format!(
         "{}/{}/_apis/build/definitions/{}?api-version=7.1",
         ctx.org_url.trim_end_matches('/'),
-        ctx.project,
+        percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
         id
     );
 

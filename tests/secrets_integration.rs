@@ -39,6 +39,25 @@ fn secrets_set_help_advertises_flags() {
 }
 
 #[test]
+fn secrets_set_rejects_value_with_value_stdin() {
+    // clap should reject the combination at parse time via
+    // `conflicts_with = "value"` on `--value-stdin`.
+    let output = std::process::Command::new(binary())
+        .args(["secrets", "set", "MY_VAR", "explicit", "--value-stdin"])
+        .output()
+        .expect("Failed to run ado-aw secrets set");
+    assert!(
+        !output.status.success(),
+        "Expected non-zero exit when both <value> and --value-stdin are supplied"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("value-stdin") || stderr.contains("value_stdin"),
+        "stderr should reference the conflict, got:\n{stderr}"
+    );
+}
+
+#[test]
 fn secrets_list_help_warns_no_values() {
     let output = std::process::Command::new(binary())
         .args(["secrets", "list", "--help"])
