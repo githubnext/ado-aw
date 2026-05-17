@@ -628,42 +628,42 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
     extensions.push(Extension::SafeOutputs(SafeOutputsExtension));
 
     // ── Runtimes (ExtensionPhase::Runtime) ──
-    if let Some(lean) = front_matter.runtimes.as_ref().and_then(|r| r.lean.as_ref()) {
-        if lean.is_enabled() {
-            extensions.push(Extension::Lean(LeanExtension::new(lean.clone())));
-        }
+    if let Some(lean) = front_matter.runtimes.as_ref().and_then(|r| r.lean.as_ref())
+        && lean.is_enabled()
+    {
+        extensions.push(Extension::Lean(LeanExtension::new(lean.clone())));
     }
-    if let Some(python) = front_matter.runtimes.as_ref().and_then(|r| r.python.as_ref()) {
-        if python.is_enabled() {
-            extensions.push(Extension::Python(PythonExtension::new(python.clone())));
-        }
+    if let Some(python) = front_matter.runtimes.as_ref().and_then(|r| r.python.as_ref())
+        && python.is_enabled()
+    {
+        extensions.push(Extension::Python(PythonExtension::new(python.clone())));
     }
-    if let Some(node) = front_matter.runtimes.as_ref().and_then(|r| r.node.as_ref()) {
-        if node.is_enabled() {
-            extensions.push(Extension::Node(NodeExtension::new(node.clone())));
-        }
+    if let Some(node) = front_matter.runtimes.as_ref().and_then(|r| r.node.as_ref())
+        && node.is_enabled()
+    {
+        extensions.push(Extension::Node(NodeExtension::new(node.clone())));
     }
-    if let Some(dotnet) = front_matter.runtimes.as_ref().and_then(|r| r.dotnet.as_ref()) {
-        if dotnet.is_enabled() {
-            extensions.push(Extension::Dotnet(DotnetExtension::new(dotnet.clone())));
-        }
+    if let Some(dotnet) = front_matter.runtimes.as_ref().and_then(|r| r.dotnet.as_ref())
+        && dotnet.is_enabled()
+    {
+        extensions.push(Extension::Dotnet(DotnetExtension::new(dotnet.clone())));
     }
 
     // ── First-party tools (ExtensionPhase::Tool) ──
     if let Some(tools) = front_matter.tools.as_ref() {
-        if let Some(ado) = tools.azure_devops.as_ref() {
-            if ado.is_enabled() {
-                extensions.push(Extension::AzureDevOps(
-                    AzureDevOpsExtension::new(ado.clone()),
-                ));
-            }
+        if let Some(ado) = tools.azure_devops.as_ref()
+            && ado.is_enabled()
+        {
+            extensions.push(Extension::AzureDevOps(
+                AzureDevOpsExtension::new(ado.clone()),
+            ));
         }
-        if let Some(memory) = tools.cache_memory.as_ref() {
-            if memory.is_enabled() {
-                extensions.push(Extension::CacheMemory(CacheMemoryExtension::new(
-                    memory.clone(),
-                )));
-            }
+        if let Some(memory) = tools.cache_memory.as_ref()
+            && memory.is_enabled()
+        {
+            extensions.push(Extension::CacheMemory(CacheMemoryExtension::new(
+                memory.clone(),
+            )));
         }
     }
 
