@@ -35,14 +35,23 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - `--ado-project <name>` - Azure DevOps project name override
   - `--dry-run` - Validate inputs but skip ADO API calls (useful for local testing and QA review)
 
-- `configure` - Detect agentic pipelines in a local repository and update the `GITHUB_TOKEN` pipeline variable on their Azure DevOps build definitions
-  - `--token <token>` / `GITHUB_TOKEN` env var - The new GITHUB_TOKEN value (prompted if omitted)
-  - `--org <url>` - Override: Azure DevOps organization URL (e.g. `https://dev.azure.com/myorg`) or just the org name (e.g. `myorg`, auto-prefixed to the canonical URL). Inferred from git remote by default.
-  - `--project <name>` - Override: Azure DevOps project name (inferred from git remote by default)
-  - `--pat <pat>` / `AZURE_DEVOPS_EXT_PAT` env var - PAT for ADO API authentication (prompted if omitted)
-  - `--path <path>` - Path to the repository root (defaults to current directory)
-  - `--dry-run` - Preview changes without applying them
-  - `--definition-ids <ids>` - Explicit pipeline definition IDs to update (comma-separated, skips auto-detection)
+- `configure` *(deprecated; hidden in --help)* - Alias forwarding to `secrets set GITHUB_TOKEN`. Existing scripts keep working but get a stderr warning. The alias will be removed in the next minor release.
+
+- `secrets set <name> [<value>] [PATH]` - Set a pipeline variable (with `isSecret=true`) on every matched ADO definition. Value resolution: positional `<value>` → `--value-stdin` (one line) → interactive tty prompt with echo off.
+  - `--allow-override` - Mark the variable as `allowOverride=true` (default: false).
+  - `--value-stdin` - Read the value from a single line on stdin.
+  - `--dry-run` - Print the planned set without calling the ADO API.
+  - `--org / --project / --pat` - ADO context overrides (same semantics as the other lifecycle commands).
+  - `--definition-ids <ids>` - Explicit pipeline definition IDs (comma-separated; skips local-fixture auto-detection).
+
+- `secrets list [PATH]` - List variable names and their `isSecret` / `allowOverride` flags on every matched definition. **Never prints values.**
+  - `--json` - Emit machine-readable JSON.
+  - `--org / --project / --pat / --definition-ids` - As above.
+
+- `secrets delete <name> [PATH]` - Delete the named variable from every matched definition. No-op when the variable is absent.
+  - `--dry-run` - Print the planned deletion plan without calling the ADO API.
+  - `--org / --project / --pat / --definition-ids` - As above.
+
 
 - `enable [PATH]` - Register an ADO build definition for each compiled pipeline discovered under `PATH` (or the current directory) and ensure it is `enabled`. For each fixture, matches against the existing ADO definitions by `yamlFilename` first, then by sanitized display name; creates a new definition when neither matches, flips `queueStatus` to `enabled` when an existing definition is `disabled` / `paused`, and skips when it is already `enabled`. Fail-soft per fixture; exits non-zero if any fixture failed.
   - `--org <url>` - Override: Azure DevOps organization (URL or bare org name). Inferred from git remote by default.

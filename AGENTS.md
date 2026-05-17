@@ -75,7 +75,8 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── fuzzy_schedule.rs # Fuzzy schedule parsing
 │   ├── logging.rs        # File-based logging infrastructure
 │   ├── mcp.rs            # SafeOutputs MCP server (stdio + HTTP)
-│   ├── configure.rs      # `configure` CLI command — orchestration shim atop `src/ado/`
+│   ├── configure.rs      # `configure` CLI command (deprecated) — hidden alias forwarding to `secrets set GITHUB_TOKEN`
+│   ├── secrets.rs        # `secrets set/list/delete` subcommand group — manages pipeline variables (never prints values from `list`)
 │   ├── enable.rs         # `enable` CLI command — registers ADO build definitions for compiled pipelines and ensures they are enabled
 │   ├── ado/              # Shared Azure DevOps REST helpers (auth, list/match/PATCH/POST)
 │   │   └── mod.rs        # Used by `configure` and the lifecycle commands (enable, disable, remove, list, run, status, secrets)

@@ -17,12 +17,73 @@ mod ndjson;
 pub mod runtimes;
 pub mod sanitize;
 mod safeoutputs;
+mod secrets;
 mod tools;
 pub mod validate;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
+
+#[derive(Subcommand, Debug)]
+enum SecretsCmd {
+    /// Set a pipeline variable on every matched definition (isSecret=true).
+    Set {
+        /// Variable name to set (e.g. `GITHUB_TOKEN`).
+        name: String,
+        /// Variable value. If omitted, falls back to `--value-stdin` or an
+        /// interactive tty prompt with echo off.
+        value: Option<String>,
+        /// Path to the repository root (defaults to current directory).
+        path: Option<PathBuf>,
+        #[arg(long)]
+        org: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long, env = "AZURE_DEVOPS_EXT_PAT")]
+        pat: Option<String>,
+        /// Mark the variable as `allowOverride=true` (default: false).
+        #[arg(long)]
+        allow_override: bool,
+        /// Read the value from a single line on stdin.
+        #[arg(long)]
+        value_stdin: bool,
+        #[arg(long)]
+        dry_run: bool,
+        /// Explicit definition IDs (skips local-fixture auto-detection).
+        #[arg(long, value_delimiter = ',')]
+        definition_ids: Option<Vec<u64>>,
+    },
+    /// List variable names + flags on every matched definition. Never prints values.
+    List {
+        path: Option<PathBuf>,
+        #[arg(long)]
+        org: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long, env = "AZURE_DEVOPS_EXT_PAT")]
+        pat: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, value_delimiter = ',')]
+        definition_ids: Option<Vec<u64>>,
+    },
+    /// Delete a named variable from every matched definition.
+    Delete {
+        name: String,
+        path: Option<PathBuf>,
+        #[arg(long)]
+        org: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long, env = "AZURE_DEVOPS_EXT_PAT")]
+        pat: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long, value_delimiter = ',')]
+        definition_ids: Option<Vec<u64>>,
+    },
+}
 
 #[derive(Subcommand, Debug)]
 enum Commands {
@@ -115,7 +176,9 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
-    /// Detect agentic pipelines and update GITHUB_TOKEN on their ADO definitions
+    /// (Deprecated) Set GITHUB_TOKEN on every matched ADO definition.
+    /// Use `secrets set GITHUB_TOKEN <value>` instead.
+    #[command(hide = true)]
     Configure {
         /// The new GITHUB_TOKEN value (defaults to GITHUB_TOKEN env var; prompted if omitted)
         #[arg(long, env = "GITHUB_TOKEN")]
@@ -139,6 +202,11 @@ enum Commands {
         /// Explicit pipeline definition IDs to update (skips auto-detection)
         #[arg(long, value_delimiter = ',')]
         definition_ids: Option<Vec<u64>>,
+    },
+    /// Manage pipeline-variable secrets on every matched ADO definition.
+    Secrets {
+        #[command(subcommand)]
+        action: SecretsCmd,
     },
     /// Register an ADO build definition for each compiled pipeline and ensure it's enabled.
     Enable {
@@ -523,6 +591,7 @@ async fn main() -> Result<()> {
         Some(Commands::McpHttp { .. }) => "mcp-http",
         Some(Commands::Init { .. }) => "init",
         Some(Commands::Configure { .. }) => "configure",
+        Some(Commands::Secrets { .. }) => "secrets",
         Some(Commands::Enable { .. }) => "enable",
         None => "ado-aw",
     };
@@ -632,6 +701,72 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
+        Commands::Secrets { action } => match action {
+            SecretsCmd::Set {
+                name,
+                value,
+                path,
+                org,
+                project,
+                pat,
+                allow_override,
+                value_stdin,
+                dry_run,
+                definition_ids,
+            } => {
+                secrets::run_set(secrets::SetOptions {
+                    name: &name,
+                    value: value.as_deref(),
+                    org: org.as_deref(),
+                    project: project.as_deref(),
+                    pat: pat.as_deref(),
+                    path: path.as_deref(),
+                    allow_override,
+                    value_stdin,
+                    dry_run,
+                    definition_ids: definition_ids.as_deref(),
+                })
+                .await?;
+            }
+            SecretsCmd::List {
+                path,
+                org,
+                project,
+                pat,
+                json,
+                definition_ids,
+            } => {
+                secrets::run_list(secrets::ListOptions {
+                    org: org.as_deref(),
+                    project: project.as_deref(),
+                    pat: pat.as_deref(),
+                    path: path.as_deref(),
+                    json,
+                    definition_ids: definition_ids.as_deref(),
+                })
+                .await?;
+            }
+            SecretsCmd::Delete {
+                name,
+                path,
+                org,
+                project,
+                pat,
+                dry_run,
+                definition_ids,
+            } => {
+                secrets::run_delete(secrets::DeleteOptions {
+                    name: &name,
+                    org: org.as_deref(),
+                    project: project.as_deref(),
+                    pat: pat.as_deref(),
+                    path: path.as_deref(),
+                    dry_run,
+                    definition_ids: definition_ids.as_deref(),
+                })
+                .await?;
+            }
+        },
         Commands::Enable {
             path,
             org,
