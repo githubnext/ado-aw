@@ -55,3 +55,10 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - `--token <value>` - The token value for `--also-set-token`. Falls back to `$GITHUB_TOKEN`, then to an interactive prompt. Requires `--also-set-token`.
 
   **Source-repo scope (Phase 1):** `enable` requires the local git remote to be an Azure DevOps Git remote (the source repo is what gets registered as the definition's repository). GitHub-hosted source repos are gated on a follow-up.
+
+- `remove [PATH]` - **Destructive.** Delete every ADO build definition that matches a local fixture under `PATH`. The same `match_definitions` safety property as `disable` applies: definitions without a local fixture are never in scope. Bulk deletes (`>1` match) require `--yes`; a single match on a tty prompts interactively (`y/N`); non-tty contexts always require `--yes`. Fail-soft per fixture; exits non-zero if any deletion failed or if zero local fixtures matched ADO definitions.
+  - `--org <url>` - Override: Azure DevOps organization (URL or bare org name). Inferred from git remote by default.
+  - `--project <name>` - Override: Azure DevOps project name (inferred from git remote by default).
+  - `--pat <pat>` / `AZURE_DEVOPS_EXT_PAT` env var - PAT for ADO API authentication (Azure CLI fallback if omitted).
+  - `--yes` - Required for bulk deletes (>1 match) and for any delete in a non-tty context. A single match on a tty otherwise prompts interactively.
+  - `--dry-run` - Print the planned deletions without calling the ADO API.
