@@ -15,6 +15,7 @@ mod init;
 mod logging;
 mod mcp;
 mod ndjson;
+mod remove;
 pub mod runtimes;
 pub mod sanitize;
 mod safeoutputs;
@@ -197,6 +198,30 @@ enum Commands {
         #[arg(long)]
         paused: bool,
         /// Preview the planned actions without calling the ADO API.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Delete every ADO build definition that matches a local fixture.
+    Remove {
+        /// Path to the repository root (defaults to current directory). Used
+        /// to auto-discover compiled pipelines, same as `compile`.
+        path: Option<PathBuf>,
+        /// Override: Azure DevOps organization (URL like `https://dev.azure.com/myorg`,
+        /// or just the org name `myorg`). Inferred from git remote by default.
+        #[arg(long)]
+        org: Option<String>,
+        /// Override: Azure DevOps project name (inferred from git remote by default).
+        #[arg(long)]
+        project: Option<String>,
+        /// PAT for ADO API authentication (prefer setting AZURE_DEVOPS_EXT_PAT env var;
+        /// Azure CLI fallback if omitted).
+        #[arg(long, env = "AZURE_DEVOPS_EXT_PAT")]
+        pat: Option<String>,
+        /// Required for bulk deletes (>1 match) and for any delete in a non-tty
+        /// context. A single match on a tty otherwise prompts interactively.
+        #[arg(long)]
+        yes: bool,
+        /// Preview the planned deletions without calling the ADO API.
         #[arg(long)]
         dry_run: bool,
     },
@@ -551,6 +576,7 @@ async fn main() -> Result<()> {
         Some(Commands::Configure { .. }) => "configure",
         Some(Commands::Enable { .. }) => "enable",
         Some(Commands::Disable { .. }) => "disable",
+        Some(Commands::Remove { .. }) => "remove",
         None => "ado-aw",
     };
 
@@ -697,6 +723,24 @@ async fn main() -> Result<()> {
                 pat: pat.as_deref(),
                 path: path.as_deref(),
                 paused,
+                dry_run,
+            })
+            .await?;
+        }
+        Commands::Remove {
+            path,
+            org,
+            project,
+            pat,
+            yes,
+            dry_run,
+        } => {
+            remove::run(remove::RemoveOptions {
+                org: org.as_deref(),
+                project: project.as_deref(),
+                pat: pat.as_deref(),
+                path: path.as_deref(),
+                yes,
                 dry_run,
             })
             .await?;

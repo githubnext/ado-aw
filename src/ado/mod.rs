@@ -986,12 +986,38 @@ pub async fn patch_queue_status(
 ///
 /// Calls `DELETE /_apis/build/definitions/{id}?api-version=7.1`.
 pub async fn delete_definition(
-    _client: &reqwest::Client,
-    _ctx: &AdoContext,
-    _auth: &AdoAuth,
-    _id: u64,
+    client: &reqwest::Client,
+    ctx: &AdoContext,
+    auth: &AdoAuth,
+    id: u64,
 ) -> Result<()> {
-    anyhow::bail!("not yet implemented: filled in by PR 4 (ado-aw remove)")
+    let url = format!(
+        "{}/{}/_apis/build/definitions/{}?api-version=7.1",
+        ctx.org_url.trim_end_matches('/'),
+        percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
+        id
+    );
+
+    debug!("DELETE definition {}: {}", id, url);
+
+    let resp = auth
+        .apply(client.delete(&url))
+        .send()
+        .await
+        .with_context(|| format!("Failed to delete definition {}", id))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "ADO API returned {} when deleting definition {}: {}",
+            status,
+            id,
+            body
+        );
+    }
+
+    Ok(())
 }
 
 /// Create a new build definition.

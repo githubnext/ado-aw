@@ -78,6 +78,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── configure.rs      # `configure` CLI command — orchestration shim atop `src/ado/`
 │   ├── enable.rs         # `enable` CLI command — registers ADO build definitions for compiled pipelines and ensures they are enabled
 │   ├── disable.rs        # `disable` CLI command — sets queueStatus to disabled (default) or paused on matched definitions
+│   ├── remove.rs         # `remove` CLI command — deletes matched ADO build definitions (with --yes / tty-prompt safety)
 │   ├── ado/              # Shared Azure DevOps REST helpers (auth, list/match/PATCH/POST)
 │   │   └── mod.rs        # Used by `configure` and the `enable` command (ADO REST helpers: auth, list/match/PATCH/POST)
 │   ├── detect.rs         # Agentic pipeline detection (helper for `configure`)
