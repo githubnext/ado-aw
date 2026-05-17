@@ -653,6 +653,10 @@ pub async fn resolve_auth(pat: Option<&str>) -> Result<AdoAuth> {
 ///
 /// Also accepts the legacy `{org}.visualstudio.com` form and rewrites it to
 /// the modern `dev.azure.com/{org}` form for consistency with `parse_ado_remote`.
+///
+/// Inputs that contain a dot but no scheme (for example `my-corp.com`) are
+/// treated as already-normalized and returned unchanged. This preserves
+/// historical behavior and avoids guessing how to interpret ambiguous values.
 pub fn normalize_org_url(org: &str) -> String {
     let trimmed = org.trim().trim_end_matches('/');
 
@@ -793,7 +797,7 @@ pub async fn get_repository_id(
     _auth: &AdoAuth,
     _repo_name: &str,
 ) -> Result<String> {
-    unimplemented!("filled in by PR 2 (ado-aw enable)")
+    anyhow::bail!("not yet implemented: filled in by PR 2 (ado-aw enable)")
 }
 
 /// Fetch the full JSON body of a build definition.
@@ -807,7 +811,7 @@ pub async fn get_definition_full(
     _auth: &AdoAuth,
     _id: u64,
 ) -> Result<serde_json::Value> {
-    unimplemented!("filled in by PR 2 (ado-aw enable) or PR 3 (ado-aw disable)")
+    anyhow::bail!("not yet implemented: filled in by PR 2 (ado-aw enable) or PR 3 (ado-aw disable)")
 }
 
 /// PATCH the `queueStatus` field on a build definition.
@@ -821,7 +825,7 @@ pub async fn patch_queue_status(
     _id: u64,
     _status: &str,
 ) -> Result<()> {
-    unimplemented!("filled in by PR 2 (ado-aw enable) or PR 3 (ado-aw disable)")
+    anyhow::bail!("not yet implemented: filled in by PR 2 (ado-aw enable) or PR 3 (ado-aw disable)")
 }
 
 /// Delete a build definition.
@@ -833,7 +837,7 @@ pub async fn delete_definition(
     _auth: &AdoAuth,
     _id: u64,
 ) -> Result<()> {
-    unimplemented!("filled in by PR 4 (ado-aw remove)")
+    anyhow::bail!("not yet implemented: filled in by PR 4 (ado-aw remove)")
 }
 
 /// Create a new build definition.
@@ -846,7 +850,7 @@ pub async fn create_definition(
     _auth: &AdoAuth,
     _body: &serde_json::Value,
 ) -> Result<u64> {
-    unimplemented!("filled in by PR 2 (ado-aw enable)")
+    anyhow::bail!("not yet implemented: filled in by PR 2 (ado-aw enable)")
 }
 
 /// Queue a build for a definition.
@@ -862,7 +866,7 @@ pub async fn queue_build(
     _branch: Option<&str>,
     _parameters: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<u64> {
-    unimplemented!("filled in by PR 6 (ado-aw run)")
+    anyhow::bail!("not yet implemented: filled in by PR 6 (ado-aw run)")
 }
 
 /// Fetch the full JSON body of a build.
@@ -874,7 +878,7 @@ pub async fn get_build(
     _auth: &AdoAuth,
     _build_id: u64,
 ) -> Result<serde_json::Value> {
-    unimplemented!("filled in by PR 6 (ado-aw run)")
+    anyhow::bail!("not yet implemented: filled in by PR 6 (ado-aw run)")
 }
 
 /// Fetch the most recent build for a definition.
@@ -887,7 +891,7 @@ pub async fn get_latest_build(
     _auth: &AdoAuth,
     _definition_id: u64,
 ) -> Result<Option<serde_json::Value>> {
-    unimplemented!("filled in by PR 5 (ado-aw list) or PR 7 (ado-aw status)")
+    anyhow::bail!("not yet implemented: filled in by PR 5 (ado-aw list) or PR 7 (ado-aw status)")
 }
 
 #[cfg(test)]
@@ -987,6 +991,11 @@ mod tests {
             normalize_org_url("  myorg  "),
             "https://dev.azure.com/myorg"
         );
+    }
+
+    #[test]
+    fn normalize_org_url_preserves_ambiguous_dotted_value() {
+        assert_eq!(normalize_org_url("my-corp.com"), "my-corp.com");
     }
 
     // ==================== Fuzzy name matching ====================
