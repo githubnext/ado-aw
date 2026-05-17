@@ -97,7 +97,7 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - `--project <name>` - Override: Azure DevOps project name (inferred from git remote by default).
   - `--pat <pat>` / `AZURE_DEVOPS_EXT_PAT` env var - PAT for ADO API authentication (Azure CLI fallback if omitted).
   - `--branch <ref>` - Source branch to queue. Defaults to the definition's `defaultBranch`.
-  - `--parameters <k=v[,k=v...]>` - ADO `templateParameters`. Repeatable and/or comma-separated. All values are strings (ADO coerces as the definition requires). Rejects malformed pairs (missing `=`).
+  - `--parameters <k=v[,k=v...]>` - ADO `templateParameters`. Repeatable and/or comma-separated. All values are strings (ADO coerces as the definition requires). Rejects malformed pairs (missing `=`). **Values must not contain commas** — each raw argument is split on `,` before the `=` split, so `key=https://a,b` is rejected. Use one `--parameters` flag per pair when values contain commas.
   - `--wait` - Poll each queued build to completion before exiting.
   - `--poll-interval <secs>` - Polling period when `--wait` is set (default 10).
   - `--timeout <secs>` - Hard cap on the polling loop when `--wait` is set (default 1800).

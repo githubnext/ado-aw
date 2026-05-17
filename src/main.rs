@@ -365,6 +365,9 @@ enum Commands {
         branch: Option<String>,
         /// ADO `templateParameters` as `key=value` pairs. Repeatable and/or
         /// comma-separated (`--parameters a=1,b=2 --parameters c=3`).
+        /// VALUES MUST NOT CONTAIN COMMAS — each raw argument is split on
+        /// `,` before the `=` split, so `key=https://a,b` is rejected. Use
+        /// one `--parameters` flag per pair when values contain commas.
         #[arg(long)]
         parameters: Vec<String>,
         /// Poll each queued build to completion before exiting; aggregate result

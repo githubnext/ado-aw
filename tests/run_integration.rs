@@ -34,6 +34,13 @@ fn run_help_describes_command() {
             "Expected --help to advertise {flag}, got:\n{stdout}"
         );
     }
+    // The comma-in-value constraint is surfaced in `--help` so users
+    // can self-diagnose without consulting the module doc-comment.
+    assert!(
+        stdout.contains("VALUES MUST NOT CONTAIN COMMAS")
+            || stdout.contains("must not contain commas"),
+        "Expected --help to advertise the no-commas-in-values constraint, got:\n{stdout}"
+    );
 }
 
 #[test]

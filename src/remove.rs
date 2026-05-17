@@ -97,10 +97,17 @@ pub async fn run(opts: RemoveOptions<'_>) -> Result<()> {
     println!("Scanning for agentic pipelines...");
     let detected = detect::detect_pipelines(&repo_path).await?;
     if detected.is_empty() {
-        println!(
-            "No agentic pipelines found. Make sure your pipelines were compiled with the latest ado-aw."
+        // Destructive command: returning Ok(()) here would let a
+        // misconfigured invocation (wrong directory, missing
+        // `compile`) exit success with no signal that nothing
+        // happened. Mirror `disable`'s bail and tell the operator
+        // exactly which path was scanned so they can correct it.
+        anyhow::bail!(
+            "No local agentic pipeline fixtures were found under {}. \
+             Run `ado-aw compile` first (or point `ado-aw remove` at the repo root). \
+             `remove` refuses to exit success in this state because it's destructive.",
+            repo_path.display()
         );
-        return Ok(());
     }
     println!("Found {} agentic pipeline(s).", detected.len());
     println!();
