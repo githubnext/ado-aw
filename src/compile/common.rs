@@ -1224,8 +1224,7 @@ pub fn generate_header_comment(input_path: &std::path::Path) -> String {
     let mut source_path = input_path
         .to_string_lossy()
         .replace('\\', "/")
-        .replace('\n', "")
-        .replace('\r', "")
+        .replace(['\n', '\r'], "")
         .replace('"', "\\\"");
 
     // Strip redundant leading "./" prefixes to prevent accumulation when
@@ -1545,11 +1544,11 @@ fn normalize_relative_path(path: &std::path::Path) -> Option<String> {
         // Try to make the path relative to the nearest git repo root so that
         // directory structure (e.g. `agents/ctf.md`) is preserved even when
         // the user invokes the compiler with an absolute path.
-        if let Some(git_root) = find_git_root(path) {
-            if let Ok(rel) = path.strip_prefix(&git_root) {
-                let s = rel.to_string_lossy().replace('\\', "/");
-                return Some(s);
-            }
+        if let Some(git_root) = find_git_root(path)
+            && let Ok(rel) = path.strip_prefix(&git_root)
+        {
+            let s = rel.to_string_lossy().replace('\\', "/");
+            return Some(s);
         }
         return None;
     }
@@ -1843,7 +1842,7 @@ pub fn validate_submit_pr_review_events(front_matter: &FrontMatter) -> Result<()
             let allowed_events = obj.get("allowed-events");
             let is_empty = match allowed_events {
                 None => true,
-                Some(v) => v.as_array().map_or(true, |a| a.is_empty()),
+                Some(v) => v.as_array().is_none_or(|a| a.is_empty()),
             };
             if is_empty {
                 anyhow::bail!(
@@ -1873,35 +1872,35 @@ pub fn validate_submit_pr_review_events(front_matter: &FrontMatter) -> Result<()
 /// runtime error. Catching this at compile time is consistent with how
 /// `validate_submit_pr_review_events` handles the analogous case.
 pub fn validate_update_pr_votes(front_matter: &FrontMatter) -> Result<()> {
-    if let Some(config_value) = front_matter.safe_outputs.get("update-pr") {
-        if let Some(obj) = config_value.as_object() {
-            // Determine whether the vote operation is reachable:
-            // - allowed-operations absent or empty → all operations allowed (includes vote)
-            // - allowed-operations non-empty → vote is allowed only if explicitly listed
-            let vote_reachable = match obj.get("allowed-operations") {
-                None => true,
-                Some(v) => v
-                    .as_array()
-                    .map_or(true, |a| a.is_empty() || a.iter().any(|x| x == "vote")),
-            };
+    if let Some(config_value) = front_matter.safe_outputs.get("update-pr")
+        && let Some(obj) = config_value.as_object()
+    {
+        // Determine whether the vote operation is reachable:
+        // - allowed-operations absent or empty → all operations allowed (includes vote)
+        // - allowed-operations non-empty → vote is allowed only if explicitly listed
+        let vote_reachable = match obj.get("allowed-operations") {
+            None => true,
+            Some(v) => v
+                .as_array()
+                .is_none_or(|a| a.is_empty() || a.iter().any(|x| x == "vote")),
+        };
 
-            if vote_reachable {
-                let allowed_votes_empty = match obj.get("allowed-votes") {
-                    None => true,
-                    Some(v) => v.as_array().map_or(true, |a| a.is_empty()),
-                };
-                if allowed_votes_empty {
-                    anyhow::bail!(
-                        "safe-outputs.update-pr enables the 'vote' operation but has no \
-                         'allowed-votes' list. This would reject all votes at Stage 3. \
-                         Either restrict 'allowed-operations' to exclude 'vote', or add an \
-                         explicit 'allowed-votes' list:\n\n  \
-                         safe-outputs:\n    update-pr:\n      allowed-votes:\n        \
-                         - approve-with-suggestions\n        - wait-for-author\n\n\
-                         Valid votes: approve, approve-with-suggestions, reject, \
-                         wait-for-author, reset\n"
-                    );
-                }
+        if vote_reachable {
+            let allowed_votes_empty = match obj.get("allowed-votes") {
+                None => true,
+                Some(v) => v.as_array().is_none_or(|a| a.is_empty()),
+            };
+            if allowed_votes_empty {
+                anyhow::bail!(
+                    "safe-outputs.update-pr enables the 'vote' operation but has no \
+                     'allowed-votes' list. This would reject all votes at Stage 3. \
+                     Either restrict 'allowed-operations' to exclude 'vote', or add an \
+                     explicit 'allowed-votes' list:\n\n  \
+                     safe-outputs:\n    update-pr:\n      allowed-votes:\n        \
+                     - approve-with-suggestions\n        - wait-for-author\n\n\
+                     Valid votes: approve, approve-with-suggestions, reject, \
+                     wait-for-author, reset\n"
+                );
             }
         }
         // If the value is a scalar (e.g. `update-pr: true`) we don't error here —
@@ -1921,7 +1920,7 @@ pub fn validate_resolve_pr_thread_statuses(front_matter: &FrontMatter) -> Result
             let allowed_statuses = obj.get("allowed-statuses");
             let is_empty = match allowed_statuses {
                 None => true,
-                Some(v) => v.as_array().map_or(true, |a| a.is_empty()),
+                Some(v) => v.as_array().is_none_or(|a| a.is_empty()),
             };
             if is_empty {
                 anyhow::bail!(
