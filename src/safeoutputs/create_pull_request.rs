@@ -1879,10 +1879,19 @@ async fn push_file_change_skipping_symlinks(
             // Not a regular file (e.g. directory, fifo, socket) — silently skip.
         }
         Err(e) => {
-            warn!(
-                "Failed to read metadata for {}: {} — skipping",
-                file_path, e
-            );
+            // NotFound is a normal transient condition (worktree mid-rebase, file
+            // already pruned by git apply, etc.). Anything else — most notably
+            // PermissionDenied — is unusual and worth flagging at warn for triage.
+            if e.kind() == std::io::ErrorKind::NotFound {
+                debug!("File no longer present for {} — skipping", file_path);
+            } else {
+                warn!(
+                    "Failed to read metadata for {}: {} (kind={:?}) — skipping",
+                    file_path,
+                    e,
+                    e.kind()
+                );
+            }
         }
     }
     Ok(())
@@ -2024,7 +2033,7 @@ fn validate_patch_paths(patch_content: &str) -> anyhow::Result<()> {
             let path = line.splitn(3, ' ').nth(2).unwrap_or("").trim_matches('"');
             validate_single_path(path)?;
         } else if {
-            let trimmed = line.trim_end();
+            let trimmed = line.trim();
             trimmed == "new file mode 120000" || trimmed == "new mode 120000"
         } {
             // Reject patch lines that INTRODUCE a symlink (git mode 120000).
@@ -2040,9 +2049,10 @@ fn validate_patch_paths(patch_content: &str) -> anyhow::Result<()> {
             // regular file, which is a legitimate cleanup operation and produces a
             // safe worktree.
             //
-            // The match is on the exact trimmed line (rather than `starts_with`) so
-            // we don't accidentally reject hypothetical future mode strings that
-            // happen to share the "120000" prefix.
+            // The match is on the fully trimmed line (rather than `starts_with` or
+            // `trim_end`) so neither leading nor trailing whitespace can bypass
+            // the check, and we don't accidentally reject hypothetical future mode
+            // strings that happen to share the "120000" prefix.
             anyhow::bail!(
                 "Patch introduces a symlink (mode 120000), which is not allowed"
             );
@@ -2466,14 +2476,31 @@ index 0000000..abcdefg
 
     #[test]
     fn test_validate_patch_paths_symlink_mode_suffix_not_bypass() {
-        // The mode check uses exact line equality (after trim_end), so a fake
-        // mode string with extra digits like "120000 1" or "1200001" must NOT
-        // be misclassified — but we still want any genuine "new file mode 120000"
-        // followed by trailing whitespace to be rejected.
+        // The mode check uses full trim() equality, so neither leading nor
+        // trailing whitespace can bypass the check, while genuine ASCII text
+        // before/after the keyword stays distinguishable.
         let patch_trailing_ws = "diff --git a/x b/x\nnew file mode 120000 \n";
         assert!(
             validate_patch_paths(patch_trailing_ws).is_err(),
             "trailing whitespace must not let a symlink mode line bypass the check"
+        );
+
+        // Git's own format-patch never produces leading-indented mode lines, but
+        // a hand-crafted patch could try to smuggle one through any matcher that
+        // anchored at the start of the line. Using trim() (not trim_end()) on the
+        // line ensures leading whitespace is no bypass either.
+        let patch_leading_ws = "diff --git a/x b/x\n new file mode 120000\n";
+        assert!(
+            validate_patch_paths(patch_leading_ws).is_err(),
+            "leading whitespace must not let a symlink mode line bypass the check"
+        );
+
+        // Carriage returns (Windows line endings) are also whitespace and must
+        // not bypass.
+        let patch_crlf = "diff --git a/x b/x\nnew file mode 120000\r\n";
+        assert!(
+            validate_patch_paths(patch_crlf).is_err(),
+            "trailing \\r must not let a symlink mode line bypass the check"
         );
 
         // A line that merely happens to share a "120000" prefix segment must
