@@ -78,6 +78,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── configure.rs      # `configure` CLI command — orchestration shim atop `src/ado/`
 │   ├── enable.rs         # `enable` CLI command — registers ADO build definitions for compiled pipelines and ensures they are enabled
 │   ├── list.rs           # `list` CLI command — renders matched ADO definitions with their latest-run state (text or JSON)
+│   ├── status.rs         # `status` CLI command — denser per-pipeline status block (thin renderer over `list`'s data path)
 │   ├── ado/              # Shared Azure DevOps REST helpers (auth, list/match/PATCH/POST)
 │   │   └── mod.rs        # Used by `configure` and the lifecycle commands (enable, disable, remove, list, run, status, secrets)
 │   ├── detect.rs         # Agentic pipeline detection (helper for `configure`)

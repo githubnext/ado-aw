@@ -62,3 +62,9 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - `--pat <pat>` / `AZURE_DEVOPS_EXT_PAT` env var - PAT for ADO API authentication (Azure CLI fallback if omitted).
   - `--all` - Include ADO definitions that do not match any local fixture.
   - `--json` - Emit machine-readable JSON.
+
+- `status [PATH]` - Per-pipeline status: name, id, folder, `queueStatus`, latest-run summary, and a deep link — one block per matched definition. Read-only. `--json` emits the same shape as `list --json` so scripts can use either.
+  - `--org <url>` - Override: Azure DevOps organization (URL or bare org name). Inferred from git remote by default.
+  - `--project <name>` - Override: Azure DevOps project name (inferred from git remote by default).
+  - `--pat <pat>` / `AZURE_DEVOPS_EXT_PAT` env var - PAT for ADO API authentication (Azure CLI fallback if omitted).
+  - `--json` - Emit machine-readable JSON (same shape as `list --json`).
