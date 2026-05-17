@@ -211,7 +211,7 @@ index to jump to the right page.
 - [`docs/template-markers.md`](docs/template-markers.md) — every `{{ marker }}`
   in `src/data/base.yml`, `src/data/1es-base.yml`, `src/data/job-base.yml`, and `src/data/stage-base.yml` and how it is replaced.
 - [`docs/cli.md`](docs/cli.md) — `ado-aw` CLI commands (`init`, `compile`,
-  `check`, `mcp`, `mcp-http`, `execute`, `configure`).
+  `check`, `mcp`, `mcp-http`, `execute`, `configure`, `enable`).
 - [`docs/mcp.md`](docs/mcp.md) — MCP server configuration (stdio containers,
   HTTP servers, env passthrough).
 - [`docs/mcpg.md`](docs/mcpg.md) — MCP Gateway architecture and pipeline
