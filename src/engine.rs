@@ -550,11 +550,15 @@ fn copilot_install_steps(engine_config: &EngineConfig, target: &CompileTarget, a
         // exposes it as $(AW_ADO_ORG) for use in the NuGetCommand arguments.
         let (org_resolve_step, nuget_org) = match ado_org {
             Some(org) => {
-                // Validate the org name to prevent injection.
-                if !is_valid_hostname(org) {
+                // Validate the org name against ADO organization naming rules to
+                // prevent injection.  ADO org names are composed of ASCII
+                // alphanumerics and hyphens only (no dots, no underscores).
+                let org_valid = !org.is_empty()
+                    && org.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+                if !org_valid {
                     anyhow::bail!(
                         "ADO organization '{}' contains invalid characters. \
-                         Only ASCII alphanumerics, '.', and '-' are allowed.",
+                         Only ASCII alphanumerics and '-' are allowed.",
                         org
                     );
                 }
