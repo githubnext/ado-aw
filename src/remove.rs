@@ -147,13 +147,13 @@ pub async fn run(opts: RemoveOptions<'_>) -> Result<()> {
     let mut failure = 0usize;
     for m in &matched {
         if opts.dry_run {
-            println!("[dry-run] ✗ would delete: {} (id={})", m.name, m.id);
+            println!("[dry-run] ✓ would delete: {} (id={})", m.name, m.id);
             success += 1;
             continue;
         }
         match delete_definition(&client, &ado_ctx, &auth, m.id).await {
             Ok(()) => {
-                println!("✗ deleted: {} (id={})", m.name, m.id);
+                println!("✓ deleted: {} (id={})", m.name, m.id);
                 success += 1;
             }
             Err(e) => {

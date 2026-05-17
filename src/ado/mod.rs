@@ -985,7 +985,7 @@ pub async fn delete_definition(
     let url = format!(
         "{}/{}/_apis/build/definitions/{}?api-version=7.1",
         ctx.org_url.trim_end_matches('/'),
-        ctx.project,
+        percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
         id
     );
 
