@@ -73,7 +73,7 @@ impl AgentStats {
                 e.get("type").and_then(|t| t.as_str()) == Some("span")
                     && e.get("name").and_then(|n| n.as_str()) == Some("invoke_agent")
             })
-            .last();
+            .next_back();
 
         if let Some(span) = last_agent_span {
             let attrs = span.get("attributes").cloned().unwrap_or(Value::Null);
