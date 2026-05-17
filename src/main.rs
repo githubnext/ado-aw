@@ -47,7 +47,11 @@ enum SecretsCmd {
         project: Option<String>,
         #[arg(long, env = "AZURE_DEVOPS_EXT_PAT")]
         pat: Option<String>,
-        /// Mark the variable as `allowOverride=true` (default: false).
+        /// Force `allowOverride=true` on the set variable. When omitted,
+        /// `allowOverride` is preserved on existing variables (so secret
+        /// rotation does not silently downgrade an existing
+        /// `allowOverride=true`) and defaults to `false` for new
+        /// variables.
         #[arg(long)]
         allow_override: bool,
         /// Read the value from a single line on stdin. Mutually exclusive

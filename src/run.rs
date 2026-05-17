@@ -54,12 +54,28 @@ use crate::detect;
 pub fn parse_parameters(values: &[String]) -> Result<serde_json::Map<String, serde_json::Value>> {
     let mut out = serde_json::Map::new();
     for raw in values {
+        // The argument-level comma split makes values containing
+        // commas impossible to express today. Detect the
+        // ambiguous-fragment case (a comma in the raw argument and
+        // a fragment with no `=`) and produce a self-diagnosable
+        // hint instead of the bare "no '=' found" error.
+        let raw_has_comma = raw.contains(',');
         for pair in raw.split(',') {
             let pair = pair.trim();
             if pair.is_empty() {
                 continue;
             }
             let Some((k, v)) = pair.split_once('=') else {
+                if raw_has_comma {
+                    anyhow::bail!(
+                        "Invalid --parameters pair '{}': expected key=value (no '=' found). \
+                         Hint: values must not contain commas. The raw argument '{}' was \
+                         split on ',' before the '=' split; use a separate --parameters flag \
+                         per pair.",
+                        pair,
+                        raw
+                    );
+                }
                 anyhow::bail!(
                     "Invalid --parameters pair '{}': expected key=value (no '=' found).",
                     pair
@@ -215,6 +231,22 @@ pub async fn dispatch(opts: RunOptions<'_>) -> Result<()> {
         return Ok(());
     }
 
+    // Deliberate design choice: when `--wait` is set and some builds
+    // failed to queue, we still poll the successfully-queued ones
+    // rather than bailing early. Three cases:
+    //
+    // - **Partial queue + at-least-one-queued**: `targets` is
+    //   non-empty; the operator wants to know how those builds
+    //   resolve. `queue_failure` is folded into the final exit code
+    //   (non_success below).
+    // - **Zero queued, queue_failure > 0**: `targets` is empty;
+    //   `poll_until_complete` returns immediately with a default
+    //   `PollOutcome`. We still print the wait summary so the
+    //   operator sees a uniform report shape.
+    // - **All queued**: the common path, no special handling needed.
+    //
+    // The early-exit path for `!opts.wait` above already bails on
+    // queue_failure, so no further special-casing is required here.
     let poll_outcome = poll_until_complete(
         &client,
         &ado_ctx,
@@ -253,7 +285,16 @@ fn print_queue_plan(
         body["templateParameters"] = serde_json::Value::Object(parameters.clone());
     }
     println!("[dry-run] ▶ would queue: {} (id={})", m.name, m.id);
-    println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+    // The body is constructed in-line from primitive types and is
+    // provably JSON-serializable, so `to_string_pretty` cannot fail
+    // in practice. Surface any future regression as a visible token
+    // rather than blank output (which would be invisible in the
+    // dry-run feedback path).
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&body)
+            .unwrap_or_else(|e| format!("<serialization error: {e}>"))
+    );
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

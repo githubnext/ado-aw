@@ -38,7 +38,7 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
 - `configure` *(deprecated; hidden in --help)* - Alias forwarding to `secrets set GITHUB_TOKEN`. Existing scripts keep working but get a stderr warning. The alias will be removed in the next minor release.
 
 - `secrets set <name> [<value>] [PATH]` - Set a pipeline variable (with `isSecret=true`) on every matched ADO definition. Value resolution: positional `<value>` → `--value-stdin` (one line) → interactive tty prompt with echo off.
-  - `--allow-override` - Mark the variable as `allowOverride=true` (default: false).
+  - `--allow-override` - Force `allowOverride=true` on the set variable. When omitted, `allowOverride` is **preserved** on existing variables (so secret rotation does not silently downgrade an existing `allowOverride=true`) and defaults to `false` for new variables.
   - `--value-stdin` - Read the value from a single line on stdin.
   - `--dry-run` - Print the planned set without calling the ADO API.
   - `--org / --project / --pat` - ADO context overrides (same semantics as the other lifecycle commands).

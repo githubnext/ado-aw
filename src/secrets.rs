@@ -48,23 +48,43 @@ pub fn validate_variable_name(name: &str) -> Result<()> {
 }
 
 /// Pure: produce a copy of `definition` with the named variable set
-/// to `(value, isSecret=true, allow_override)`. Preserves all other
+/// to `(value, isSecret=true, allowOverride)`. Preserves all other
 /// keys.
+///
+/// `allow_override` semantics:
+///
+/// - `Some(true)` / `Some(false)` — force the flag to the given
+///   value (this is what `--allow-override` does, and what the
+///   create path uses).
+/// - `None` — **preserve** the existing variable's `allowOverride`
+///   when overwriting; default to `false` when creating. This
+///   matters for secret rotation: running `secrets set TOKEN <new>`
+///   without `--allow-override` must not silently downgrade a
+///   variable that was previously created with
+///   `allowOverride=true`.
 pub fn apply_variable_set(
     mut definition: serde_json::Value,
     name: &str,
     value: &str,
-    allow_override: bool,
+    allow_override: Option<bool>,
 ) -> serde_json::Value {
     if definition.get("variables").is_none()
         || !definition["variables"].is_object()
     {
         definition["variables"] = serde_json::json!({});
     }
+    let resolved_override = allow_override.unwrap_or_else(|| {
+        definition
+            .get("variables")
+            .and_then(|vars| vars.get(name))
+            .and_then(|var| var.get("allowOverride"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    });
     definition["variables"][name] = serde_json::json!({
         "value": value,
         "isSecret": true,
-        "allowOverride": allow_override,
+        "allowOverride": resolved_override,
     });
     definition
 }
@@ -197,11 +217,27 @@ pub async fn run_set(opts: SetOptions<'_>) -> Result<()> {
 
     print_matched_summary(&matched);
 
+    // Translate the CLI bool flag into the `Option<bool>` shape that
+    // `apply_variable_set` understands: `--allow-override` forces
+    // `Some(true)`; its absence means `None` (preserve existing, or
+    // default to `false` on creation). This is the fix for the
+    // silent-downgrade bug where rotating a secret would flip an
+    // existing `allowOverride=true` back to `false`.
+    let override_action: Option<bool> = if opts.allow_override {
+        Some(true)
+    } else {
+        None
+    };
+
     if opts.dry_run {
+        let override_summary = match override_action {
+            Some(b) => format!("allowOverride={}", b),
+            None => "preserving existing allowOverride (default false on create)".to_string(),
+        };
         println!(
-            "[dry-run] Would set '{}' (isSecret=true, allowOverride={}) on {} definition(s).",
+            "[dry-run] Would set '{}' (isSecret=true, {}) on {} definition(s).",
             opts.name,
-            opts.allow_override,
+            override_summary,
             matched.len()
         );
         return Ok(());
@@ -217,7 +253,7 @@ pub async fn run_set(opts: SetOptions<'_>) -> Result<()> {
             m.id,
             opts.name,
             &value,
-            opts.allow_override,
+            override_action,
         )
         .await
         {
@@ -247,7 +283,7 @@ async fn apply_set_one(
     id: u64,
     name: &str,
     value: &str,
-    allow_override: bool,
+    allow_override: Option<bool>,
 ) -> Result<()> {
     let definition = get_definition_full(client, ctx, auth, id).await?;
     let updated = apply_variable_set(definition, name, value, allow_override);
@@ -559,7 +595,7 @@ mod tests {
     #[test]
     fn set_creates_variables_object_when_missing() {
         let def = serde_json::json!({ "name": "x" });
-        let out = apply_variable_set(def, "FOO", "bar", false);
+        let out = apply_variable_set(def, "FOO", "bar", Some(false));
         assert_eq!(out["variables"]["FOO"]["value"], "bar");
         assert_eq!(out["variables"]["FOO"]["isSecret"], true);
         assert_eq!(out["variables"]["FOO"]["allowOverride"], false);
@@ -570,7 +606,7 @@ mod tests {
         let def = serde_json::json!({
             "variables": { "OTHER": { "value": "x", "isSecret": true, "allowOverride": false } }
         });
-        let out = apply_variable_set(def, "FOO", "bar", true);
+        let out = apply_variable_set(def, "FOO", "bar", Some(true));
         assert_eq!(out["variables"]["OTHER"]["value"], "x");
         assert_eq!(out["variables"]["FOO"]["value"], "bar");
         assert_eq!(out["variables"]["FOO"]["allowOverride"], true);
@@ -581,9 +617,53 @@ mod tests {
         let def = serde_json::json!({
             "variables": { "FOO": { "value": "old", "isSecret": true, "allowOverride": false } }
         });
-        let out = apply_variable_set(def, "FOO", "new", true);
+        let out = apply_variable_set(def, "FOO", "new", Some(true));
         assert_eq!(out["variables"]["FOO"]["value"], "new");
         assert_eq!(out["variables"]["FOO"]["allowOverride"], true);
+    }
+
+    // ----- allow_override = None ("preserve") semantics ---------------
+
+    /// Rotation case: `secrets set TOKEN <new>` without
+    /// `--allow-override` must NOT downgrade a variable that was
+    /// previously created with `allowOverride=true`. This is the
+    /// silent-downgrade bug guard.
+    #[test]
+    fn set_preserves_existing_allow_override_true_when_none() {
+        let def = serde_json::json!({
+            "variables": { "FOO": { "value": "old", "isSecret": true, "allowOverride": true } }
+        });
+        let out = apply_variable_set(def, "FOO", "new", None);
+        assert_eq!(out["variables"]["FOO"]["value"], "new");
+        assert_eq!(out["variables"]["FOO"]["allowOverride"], true);
+    }
+
+    #[test]
+    fn set_preserves_existing_allow_override_false_when_none() {
+        let def = serde_json::json!({
+            "variables": { "FOO": { "value": "old", "isSecret": true, "allowOverride": false } }
+        });
+        let out = apply_variable_set(def, "FOO", "new", None);
+        assert_eq!(out["variables"]["FOO"]["allowOverride"], false);
+    }
+
+    #[test]
+    fn set_defaults_allow_override_false_on_create_when_none() {
+        let def = serde_json::json!({ "name": "x" });
+        let out = apply_variable_set(def, "FOO", "bar", None);
+        assert_eq!(out["variables"]["FOO"]["allowOverride"], false);
+    }
+
+    #[test]
+    fn set_some_false_forces_downgrade_explicit() {
+        // If a caller explicitly passes Some(false), they DO want to
+        // force the flag back to false (e.g. a future `--no-override`
+        // flag). Only None preserves.
+        let def = serde_json::json!({
+            "variables": { "FOO": { "value": "old", "isSecret": true, "allowOverride": true } }
+        });
+        let out = apply_variable_set(def, "FOO", "new", Some(false));
+        assert_eq!(out["variables"]["FOO"]["allowOverride"], false);
     }
 
     // ============ apply_variable_delete ============
