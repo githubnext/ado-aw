@@ -13,7 +13,12 @@ network:
   allowed: [defaults]
 safe-outputs:
   create-pull-request:
+    title-prefix: "chore(deps): "
     max: 4
+  close-pull-request:
+    required-title-prefix: "chore(deps): "
+    target: "*"
+    max: 10
 ---
 
 # Dependency Version Updater
@@ -57,7 +62,18 @@ Extract the version string.
 
 If the current constant already matches the latest release, **skip this dependency** — it is up to date.
 
-Before proceeding, also check whether a PR already exists with a title matching the expected PR title (see Step 4). If one is already open, **skip this dependency** to avoid duplicates.
+Before proceeding, search for any open PRs whose titles start with the item-specific prefix listed below (see Step 4 for the per-item prefix). For each match:
+
+- If the PR's title matches the **expected** title for the latest version exactly, **skip this dependency** — an up-to-date PR is already open.
+- Otherwise the PR is an **outdated** version-bump PR for the same constant. Emit a `close-pull-request` safe output for its PR number with a short comment explaining that it is superseded by a newer version bump. Then continue to Step 4 to open the fresh PR.
+
+Item-specific title prefixes (used to identify older outdated PRs for the same constant):
+
+- `AWF_VERSION` → `chore(deps): update AWF_VERSION to `
+- `COPILOT_CLI_VERSION` → `chore(deps): update COPILOT_CLI_VERSION to `
+- `MCPG_VERSION` → `chore(deps): update MCPG_VERSION to `
+
+Only close PRs whose titles start with one of these item-specific prefixes — never close PRs that merely share the broader `chore(deps): ` prefix but belong to a different constant.
 
 ### Step 4: Create an Update PR
 
@@ -67,8 +83,10 @@ If the latest version is newer than the current constant:
 
 2. Create a pull request:
 
+The `safe-outputs.create-pull-request.title-prefix` field is configured to `chore(deps): `, so gh-aw will automatically prepend that prefix to every PR title. Provide the titles below **without** the `chore(deps): ` prefix — the compiled workflow will add it.
+
 **For AWF_VERSION:**
-- **Title**: `chore: update AWF_VERSION to <latest-version>`
+- **Title**: `update AWF_VERSION to <latest-version>` (will be published as `chore(deps): update AWF_VERSION to <latest-version>`)
 - **Body**:
   ```markdown
   ## Dependency Update
@@ -84,7 +102,7 @@ If the latest version is newer than the current constant:
   ```
 
 **For COPILOT_CLI_VERSION:**
-- **Title**: `chore: update COPILOT_CLI_VERSION to <latest-version>`
+- **Title**: `update COPILOT_CLI_VERSION to <latest-version>` (will be published as `chore(deps): update COPILOT_CLI_VERSION to <latest-version>`)
 - **Body**:
   ```markdown
   ## Dependency Update
@@ -100,7 +118,7 @@ If the latest version is newer than the current constant:
   ```
 
 **For MCPG_VERSION:**
-- **Title**: `chore: update MCPG_VERSION to <latest-version>`
+- **Title**: `update MCPG_VERSION to <latest-version>` (will be published as `chore(deps): update MCPG_VERSION to <latest-version>`)
 - **Body**:
   ```markdown
   ## Dependency Update
@@ -140,7 +158,12 @@ Merge the two files as follows:
 
 If the merged result is identical to the current local file, **skip** — everything is up to date.
 
-Before proceeding, also check whether a PR already exists with the title `chore: sync ecosystem_domains.json from gh-aw`. If one is already open, **skip** to avoid duplicates.
+Before proceeding, search for any open PRs whose titles start with `chore(deps): sync ecosystem_domains.json from gh-aw`. Because the title contains no version number, only one such PR should ever be open at a time:
+
+- If exactly one such PR is already open, **skip** to avoid duplicates.
+- If multiple are somehow open, emit a `close-pull-request` safe output for the **older** ones (keep the most recently updated and skip; or close them all and let Step 4 open a fresh one).
+
+Only close PRs whose titles start with the prefix `chore(deps): sync ecosystem_domains.json from gh-aw` — never close PRs from other items.
 
 ### Step 4: Create a Sync PR
 
@@ -150,7 +173,7 @@ If the merged result differs from the current local file:
 
 2. Create a pull request:
 
-- **Title**: `chore: sync ecosystem_domains.json from gh-aw`
+- **Title**: `sync ecosystem_domains.json from gh-aw` (will be published as `chore(deps): sync ecosystem_domains.json from gh-aw`)
 - **Body**:
   ```markdown
   ## Ecosystem Domains Sync
