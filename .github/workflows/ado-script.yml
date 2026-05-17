@@ -9,6 +9,20 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/ado-script.yml"
+  # Also run on pushes to main so any drift that slips through (e.g. a
+  # merge that bypassed PR CI, or a force-push) is caught loudly the
+  # moment it lands. If this fails on main, file a fix-drift issue and
+  # land a PR to regenerate `src/shared/types.gen.ts` and re-bundle —
+  # the workflow itself does not auto-PR.
+  push:
+    branches: [main]
+    paths:
+      - "scripts/ado-script/**"
+      - "src/compile/filter_ir.rs"
+      - "src/compile/extensions/trigger_filters.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/ado-script.yml"
 
 env:
   CARGO_TERM_COLOR: always

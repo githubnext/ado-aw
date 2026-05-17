@@ -165,22 +165,142 @@ function stringsFromFact(raw: unknown): string[] {
     .filter(Boolean);
 }
 
-function globMatch(value: string, pattern: string): boolean {
-  // Glob → regex: only `*` (any chars) and `?` (single char) are
-  // recognised. Bracket expressions like `[abc]` are treated as literals.
-  // The IR currently never emits bracket patterns; warn if one appears so
-  // a compiler/evaluator parity drift is caught early.
+// Glob-hardening caps. Patterns come from the Rust IR (the compiler is
+// the trust boundary), so these are belt-and-braces caps that bound
+// pathological worst-case behaviour rather than a defence against a
+// realistic attacker. A 1024-char glob pattern is already nonsensical;
+// 64 `*` wildcards in one pattern produces a regex that backtracks
+// catastrophically against non-matching inputs.
+const MAX_GLOB_PATTERN_LEN = 1024;
+const MAX_GLOB_WILDCARDS = 64;
+const MAX_GLOB_CACHE_ENTRIES = 1024;
+
+// Pre-compiled regex cache. The gate process is one-shot per pipeline run,
+// so an unbounded cache would be fine for memory — we still cap defensively
+// so a future caller in a longer-lived process doesn't bloat indefinitely.
+const globRegexCache = new Map<string, RegExp | null>();
+
+function compileGlobRegex(pattern: string): RegExp | null {
+  const cached = globRegexCache.get(pattern);
+  if (cached !== undefined) return cached;
+
+  if (pattern.length > MAX_GLOB_PATTERN_LEN) {
+    logWarning(
+      `globMatch: pattern length ${pattern.length} exceeds cap ${MAX_GLOB_PATTERN_LEN}; rejecting (fail-closed)`,
+    );
+    cacheGlobResult(pattern, null);
+    return null;
+  }
+
+  let wildcardCount = 0;
+  for (let i = 0; i < pattern.length; i++) {
+    if (pattern.charCodeAt(i) === 42 /* '*' */) {
+      wildcardCount++;
+      if (wildcardCount > MAX_GLOB_WILDCARDS) {
+        logWarning(
+          `globMatch: pattern contains more than ${MAX_GLOB_WILDCARDS} '*' wildcards; rejecting (fail-closed)`,
+        );
+        cacheGlobResult(pattern, null);
+        return null;
+      }
+    }
+  }
+
   if (/\[/.test(pattern)) {
     logWarning(
       `globMatch: pattern "${pattern}" contains "[" which is treated as a literal, not a character class`,
     );
   }
+
   const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const regex = `^${escaped.replace(/\\\*/g, ".*").replace(/\\\?/g, ".")}$`;
-  return new RegExp(regex, "s").test(value);
+  const body = escaped.replace(/\\\*/g, ".*").replace(/\\\?/g, ".");
+  const compiled = new RegExp(`^${body}$`, "s");
+  cacheGlobResult(pattern, compiled);
+  return compiled;
+}
+
+function cacheGlobResult(pattern: string, compiled: RegExp | null): void {
+  if (globRegexCache.size >= MAX_GLOB_CACHE_ENTRIES) {
+    // Drop the oldest entry. Map iteration is insertion-ordered in JS,
+    // so .keys().next().value gives us the oldest.
+    const oldest = globRegexCache.keys().next().value;
+    if (oldest !== undefined) globRegexCache.delete(oldest);
+  }
+  globRegexCache.set(pattern, compiled);
+}
+
+/** For tests only: reset the glob regex cache. */
+export function _resetGlobCacheForTesting(): void {
+  globRegexCache.clear();
+}
+
+function globMatch(value: string, pattern: string): boolean {
+  // Glob → regex: only `*` (any chars) and `?` (single char) are
+  // recognised. Bracket expressions like `[abc]` are treated as literals.
+  // The IR currently never emits bracket patterns; warn if one appears so
+  // a compiler/evaluator parity drift is caught early.
+  const regex = compileGlobRegex(pattern);
+  if (regex === null) return false;
+  return regex.test(value);
 }
 
 function parseHm(s: string): number {
   const [h, m] = s.split(":").map((n) => parseInt(n, 10));
   return (h ?? 0) * 60 + (m ?? 0);
+}
+
+// Known predicate `type` discriminants. Kept in sync manually with the
+// switch in evaluatePredicate; the colocation makes drift obvious in
+// review. The codegen'd types.gen.ts is the source of truth for the
+// type names — if it adds a variant, this set must too.
+const KNOWN_PREDICATE_TYPES: ReadonlySet<string> = new Set([
+  "glob_match",
+  "equals",
+  "value_in_set",
+  "value_not_in_set",
+  "numeric_range",
+  "time_window",
+  "label_set_match",
+  "file_glob_match",
+  "and",
+  "or",
+  "not",
+]);
+
+/**
+ * Recursively walk a predicate tree and throw on any unknown `type`
+ * discriminant. Run *before* fact acquisition so version drift between
+ * compiler and bundled evaluator surfaces as a fast, loud failure rather
+ * than a silent skip when the required fact happens to be unavailable
+ * (`PolicyTracker.verdictForMissingFacts` would otherwise short-circuit
+ * `evaluatePredicate` and the fail-closed default would never run).
+ *
+ * Throws `Error` with a clear message naming the offending type and
+ * pointing at the version-mismatch likely cause. Caller is expected to
+ * translate this into a `##vso[task.logissue type=error]` + Failed
+ * complete via the index.ts entry point.
+ */
+export function validatePredicateTree(p: PredicateSpec): void {
+  const node = p as { type?: unknown; operands?: unknown; operand?: unknown };
+  const type = node.type;
+  if (typeof type !== "string" || !KNOWN_PREDICATE_TYPES.has(type)) {
+    throw new Error(
+      `Unknown predicate type '${String(type)}' encountered during pre-flight validation. ` +
+        "This usually indicates the bundled ado-script.zip is older than the ado-aw " +
+        "compiler that emitted this spec. Update the bundle to a release that supports " +
+        "this predicate, or pin the compiler to a matching version.",
+    );
+  }
+
+  if (type === "and" || type === "or") {
+    if (!Array.isArray(node.operands)) {
+      throw new Error(`Predicate '${type}' is missing required 'operands' array`);
+    }
+    for (const sub of node.operands) validatePredicateTree(sub as PredicateSpec);
+  } else if (type === "not") {
+    if (node.operand === undefined || node.operand === null) {
+      throw new Error("Predicate 'not' is missing required 'operand'");
+    }
+    validatePredicateTree(node.operand as PredicateSpec);
+  }
 }

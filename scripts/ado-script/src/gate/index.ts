@@ -9,10 +9,18 @@
 import type { GateSpec } from "../shared/types.gen.js";
 import { runBypass } from "./bypass.js";
 import { acquireFacts } from "./facts.js";
-import { evaluatePredicates } from "./predicates.js";
+import { evaluatePredicates, validatePredicateTree } from "./predicates.js";
 import { selfCancelIfRequested } from "./selfcancel.js";
 import { PolicyTracker } from "../shared/policy.js";
 import { setOutput, complete, logError } from "../shared/vso-logger.js";
+
+// Cap the decoded spec at 256 KiB. ADO pipeline env vars are bounded
+// (typically <32 KiB), so a legitimate spec is two orders of magnitude
+// smaller than this. The cap exists to short-circuit pathological payloads
+// (e.g. a deeply nested or extremely long JSON blob) before they reach
+// JSON.parse, which would otherwise allocate aggressively and could stall
+// the gate step.
+export const MAX_SPEC_DECODED_BYTES = 256 * 1024;
 
 async function main(): Promise<void> {
   const raw = process.env.GATE_SPEC;
@@ -24,9 +32,32 @@ async function main(): Promise<void> {
 
   let spec: GateSpec;
   try {
-    spec = JSON.parse(Buffer.from(raw, "base64").toString("utf8")) as GateSpec;
+    const decoded = Buffer.from(raw, "base64");
+    if (decoded.length > MAX_SPEC_DECODED_BYTES) {
+      logError(
+        `GATE_SPEC decoded size ${decoded.length} bytes exceeds cap of ${MAX_SPEC_DECODED_BYTES} bytes`,
+      );
+      complete("Failed");
+      process.exit(1);
+    }
+    spec = JSON.parse(decoded.toString("utf8")) as GateSpec;
   } catch (e) {
     logError(`Failed to decode GATE_SPEC: ${(e as Error).message}`);
+    complete("Failed");
+    process.exit(1);
+  }
+
+  // Pre-flight: walk the predicate tree and reject any unknown `type`
+  // discriminant *before* fact acquisition. Without this, an unknown
+  // predicate is only surfaced when evaluatePredicate is reached — and
+  // if the required fact is unavailable, evaluatePredicate is never
+  // called, masking the version drift.
+  try {
+    for (const check of spec.checks ?? []) {
+      validatePredicateTree(check.predicate);
+    }
+  } catch (e) {
+    logError((e as Error).message);
     complete("Failed");
     process.exit(1);
   }

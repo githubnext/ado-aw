@@ -446,3 +446,74 @@ describe("evaluatePredicates", () => {
     expect(writes).toContain("##vso[build.addbuildtag]gate:missing-title\n");
   });
 });
+
+describe("validatePredicateTree", () => {
+  it("accepts every known predicate type at the root", async () => {
+    const { validatePredicateTree } = await import("./predicates.js");
+    const samples: PredicateSpec[] = [
+      { type: "glob_match", fact: "pr_title", pattern: "*" },
+      { type: "equals", fact: "pr_title", value: "ok" },
+      { type: "value_in_set", fact: "pr_title", values: ["a"], case_insensitive: false },
+      { type: "value_not_in_set", fact: "pr_title", values: ["a"], case_insensitive: false },
+      { type: "numeric_range", fact: "current_utc_minutes", min: 0, max: 1440 },
+      { type: "time_window", start: "09:00", end: "17:00" },
+      { type: "label_set_match", fact: "pr_labels", any_of: ["x"], all_of: [], none_of: [] },
+      { type: "file_glob_match", fact: "changed_files", include: ["**/*.rs"], exclude: [] },
+      { type: "not", operand: { type: "equals", fact: "pr_title", value: "ok" } },
+    ];
+    for (const p of samples) {
+      expect(() => validatePredicateTree(p)).not.toThrow();
+    }
+  });
+
+  it("rejects an unknown type at the root", async () => {
+    const { validatePredicateTree } = await import("./predicates.js");
+    expect(() => validatePredicateTree({ type: "bogus" } as unknown as PredicateSpec)).toThrow(
+      /Unknown predicate type 'bogus'/,
+    );
+  });
+
+  it("rejects an unknown type nested under 'and'", async () => {
+    const { validatePredicateTree } = await import("./predicates.js");
+    const spec = {
+      type: "and",
+      operands: [
+        { type: "equals", fact: "pr_title", value: "ok" },
+        { type: "ref_glob_match", fact: "source_branch", pattern: "feature/*" },
+      ],
+    } as unknown as PredicateSpec;
+    expect(() => validatePredicateTree(spec)).toThrow(/Unknown predicate type 'ref_glob_match'/);
+  });
+
+  it("rejects an unknown type nested under 'or'", async () => {
+    const { validatePredicateTree } = await import("./predicates.js");
+    const spec = {
+      type: "or",
+      operands: [{ type: "made_up_predicate", fact: "x", value: "y" }],
+    } as unknown as PredicateSpec;
+    expect(() => validatePredicateTree(spec)).toThrow(/Unknown predicate type 'made_up_predicate'/);
+  });
+
+  it("rejects an unknown type nested under 'not'", async () => {
+    const { validatePredicateTree } = await import("./predicates.js");
+    const spec = {
+      type: "not",
+      operand: { type: "future_thing", fact: "x", value: "y" },
+    } as unknown as PredicateSpec;
+    expect(() => validatePredicateTree(spec)).toThrow(/Unknown predicate type 'future_thing'/);
+  });
+
+  it("rejects 'and' missing its operands array", async () => {
+    const { validatePredicateTree } = await import("./predicates.js");
+    expect(() => validatePredicateTree({ type: "and" } as unknown as PredicateSpec)).toThrow(
+      /missing required 'operands' array/,
+    );
+  });
+
+  it("rejects 'not' missing its operand", async () => {
+    const { validatePredicateTree } = await import("./predicates.js");
+    expect(() => validatePredicateTree({ type: "not" } as unknown as PredicateSpec)).toThrow(
+      /missing required 'operand'/,
+    );
+  });
+});

@@ -120,6 +120,19 @@ steps when any `filters:` block is active:
 The IR-to-bash codegen lives in `compile_gate_step_external`
 (`src/compile/filter_ir.rs:~1100`).
 
+### Runtime env-var contract
+
+The gate reads the following at runtime (in addition to the
+predicate-specific `ADO_*` facts emitted by `collect_ado_exports`):
+
+| Env var | Source | Purpose |
+|---|---|---|
+| `GATE_SPEC` | compiled inline | Base64-encoded `GateSpec` JSON |
+| `SYSTEM_ACCESSTOKEN` | `$(System.AccessToken)` | ADO REST auth |
+| `ADO_COLLECTION_URI` | `$(System.CollectionUri)` | ADO org base URL |
+| `ADO_PROJECT` / `ADO_REPO_ID` / `ADO_PR_ID` | compiler-injected | PR-derived facts |
+| `ADO_API_TIMEOUT_MS` | optional override | Per-attempt timeout in ms for every ADO REST call. Defaults to 30 000 (30 s). On timeout, the call is retried once; if the retry also times out, the gate falls back to the per-fact `FailurePolicy`. |
+
 ## Adding a new internal use site
 
 Suppose we want a `poll.js` bundle (e.g. for polling external systems):
