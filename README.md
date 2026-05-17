@@ -494,6 +494,7 @@ Commands:
   mcp-http      Run as an HTTP MCP server (for MCPG integration)
   execute       Execute safe outputs (Stage 3)
   configure     Detect agentic pipelines and update GITHUB_TOKEN on ADO definitions
+  enable        Register ADO build definitions for compiled pipelines and ensure they are enabled
 
 Options:
   -v, --verbose              Enable info-level logging

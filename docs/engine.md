@@ -29,7 +29,7 @@ engine:
 | `api-target` | string | *(none)* | Custom API endpoint hostname for GHES/GHEC (e.g., `"api.acme.ghe.com"`). Adds `--api-target <hostname>` to the CLI invocation and adds the hostname to the AWF network allowlist. |
 | `args` | list | `[]` | Custom CLI arguments appended after compiler-generated args. Subject to shell-safety validation and blocked from overriding compiler-controlled flags (`--prompt`, `--allow-tool`, `--disable-builtin-mcps`, etc.). |
 | `env` | map | *(none)* | Engine-specific environment variables merged into the sandbox step's `env:` block. Keys must be valid env var names; values must not contain ADO expressions (`$(`, `${{`) or pipeline command injection (`##vso[`). Compiler-controlled keys (`GITHUB_TOKEN`, `PATH`, `BASH_ENV`, etc.) are blocked. |
-| `command` | string | *(none)* | Custom engine executable path (skips default NuGet installation). The path must be accessible inside the AWF container (e.g., `/tmp/...` or workspace-mounted paths). |
+| `command` | string | *(none)* | Custom engine executable path (skips the default engine binary installation — NuGet for `target: 1es`, GitHub Releases for all other targets). The path must be accessible inside the AWF container (e.g., `/tmp/...` or workspace-mounted paths). |
 
 
 ### `timeout-minutes`
