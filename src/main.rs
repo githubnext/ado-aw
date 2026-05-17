@@ -20,6 +20,7 @@ mod remove;
 pub mod runtimes;
 pub mod sanitize;
 mod safeoutputs;
+mod status;
 mod tools;
 pub mod validate;
 
@@ -246,6 +247,26 @@ enum Commands {
         #[arg(long)]
         all: bool,
         /// Emit machine-readable JSON instead of the text table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Per-pipeline status: queueStatus + latest-run summary, for every matched definition.
+    Status {
+        /// Path to the repository root (defaults to current directory). Used
+        /// to auto-discover compiled pipelines, same as `compile`.
+        path: Option<PathBuf>,
+        /// Override: Azure DevOps organization (URL like `https://dev.azure.com/myorg`,
+        /// or just the org name `myorg`). Inferred from git remote by default.
+        #[arg(long)]
+        org: Option<String>,
+        /// Override: Azure DevOps project name (inferred from git remote by default).
+        #[arg(long)]
+        project: Option<String>,
+        /// PAT for ADO API authentication (prefer setting AZURE_DEVOPS_EXT_PAT env var;
+        /// Azure CLI fallback if omitted).
+        #[arg(long, env = "AZURE_DEVOPS_EXT_PAT")]
+        pat: Option<String>,
+        /// Emit machine-readable JSON (same shape as `list --json`).
         #[arg(long)]
         json: bool,
     },
@@ -602,6 +623,7 @@ async fn main() -> Result<()> {
         Some(Commands::Disable { .. }) => "disable",
         Some(Commands::Remove { .. }) => "remove",
         Some(Commands::List { .. }) => "list",
+        Some(Commands::Status { .. }) => "status",
         None => "ado-aw",
     };
 
@@ -784,6 +806,22 @@ async fn main() -> Result<()> {
                 pat: pat.as_deref(),
                 path: path.as_deref(),
                 all,
+                json,
+            })
+            .await?;
+        }
+        Commands::Status {
+            path,
+            org,
+            project,
+            pat,
+            json,
+        } => {
+            status::run(status::StatusOptions {
+                org: org.as_deref(),
+                project: project.as_deref(),
+                pat: pat.as_deref(),
+                path: path.as_deref(),
                 json,
             })
             .await?;
