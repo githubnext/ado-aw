@@ -25,21 +25,28 @@ use crate::detect;
 ///
 /// **Values must not contain commas.** Each raw argument is split on
 /// `,` *before* the `=` split, so a value like `redirect_uri=https://a,b`
-/// silently becomes `{"redirect_uri": "https://a", "b": "?"}` (and
-/// actually errors out since `b` has no `=`). When a parameter value
-/// must include a comma, pass it via a dedicated `--parameters`
-/// occurrence rather than a comma-joined one:
+/// is torn into two pairs and the trailing fragment (`b`) is rejected
+/// because it has no `=`.
 ///
-/// - ✅ `--parameters 'urls=a,b' --parameters mode=fast`  → two flags
-///   still split `urls=a,b` on the comma. Use the workaround below.
-/// - ✅ `--parameters mode=fast` plus an explicit subsequent
-///   `--parameters extra=…` — one pair per flag, no comma in values.
-/// - ❌ `--parameters key=a,b` will parse as two pairs and reject
-///   the second.
+/// There is currently no way to escape a comma inside a single
+/// `--parameters` argument. The CLI also splits any single argument
+/// on `,`, so passing the comma-containing value as a separate flag
+/// does **not** help either — it's the comma in the argument value
+/// (not the argument boundary) that matters.
 ///
-/// The CLI does not currently support escaping commas inside a single
-/// `--parameters` argument; users who need that should fall back to
-/// repeated `--parameters` flags (one pair each).
+/// - ❌ `--parameters key=a,b`
+///   → splits to `key=a` + `b`; the second pair fails with `no '='`.
+/// - ❌ `--parameters 'urls=a,b' --parameters mode=fast`
+///   → same split happens inside the first argument; the result is
+///   `key=urls=a` + `b` + `mode=fast` and the `b` fragment is rejected.
+/// - ✅ `--parameters mode=fast --parameters extra=x`
+///   → one pair per flag, no commas in values; both pairs parse.
+///
+/// If you need to pass a comma in a value, the only workaround today is
+/// to write the value without the comma (e.g. URL-encode it on the
+/// caller side and have the pipeline decode it). A follow-up could add
+/// escape syntax (`--parameters 'urls=a\,b'`) without breaking this
+/// rule.
 ///
 /// Only the first `=` in a pair is treated as the separator; subsequent
 /// `=` characters are part of the value, so `key=a=b=c` parses as
@@ -256,6 +263,12 @@ struct PollOutcome {
     in_progress: usize,
 }
 
+/// Maximum consecutive poll errors per build before the poller gives
+/// up on that specific target and counts it as failed. Bounds the
+/// damage of a permanent error (deleted build, revoked PAT, 404)
+/// without surrendering on a single transient blip.
+const MAX_CONSECUTIVE_POLL_ERRORS: usize = 3;
+
 async fn poll_until_complete(
     client: &reqwest::Client,
     ctx: &AdoContext,
@@ -267,6 +280,14 @@ async fn poll_until_complete(
     let started = Instant::now();
     let mut outcome = PollOutcome::default();
     let mut pending: Vec<PollTarget> = targets.to_vec();
+    // Consecutive poll-error count per build. A successful poll
+    // (Succeeded / Failed / InProgress) resets the counter via the
+    // implicit "we don't write to the map on success" — entries are
+    // removed when the build leaves `pending`. The counter is
+    // independent of `next_pending` so the bookkeeping stays
+    // round-stable.
+    let mut consecutive_errors: std::collections::HashMap<u64, usize> =
+        std::collections::HashMap::new();
 
     println!();
     println!(
@@ -305,32 +326,53 @@ async fn poll_until_complete(
                 break;
             }
             match get_build(client, ctx, auth, t.build_id).await {
-                Ok(body) => match classify_build(&body) {
-                    BuildOutcome::InProgress => next_pending.push(*t),
-                    BuildOutcome::Succeeded => {
-                        println!("✓ build {} (definition {}) succeeded", t.build_id, t.definition_id);
-                        outcome.succeeded += 1;
+                Ok(body) => {
+                    consecutive_errors.remove(&t.build_id);
+                    match classify_build(&body) {
+                        BuildOutcome::InProgress => next_pending.push(*t),
+                        BuildOutcome::Succeeded => {
+                            println!("✓ build {} (definition {}) succeeded", t.build_id, t.definition_id);
+                            outcome.succeeded += 1;
+                        }
+                        BuildOutcome::Failed => {
+                            let result = body
+                                .get("result")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown");
+                            println!(
+                                "✗ build {} (definition {}) finished with result={}",
+                                t.build_id, t.definition_id, result
+                            );
+                            outcome.failed += 1;
+                        }
                     }
-                    BuildOutcome::Failed => {
-                        let result = body
-                            .get("result")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unknown");
-                        println!(
-                            "✗ build {} (definition {}) finished with result={}",
-                            t.build_id, t.definition_id, result
-                        );
-                        outcome.failed += 1;
-                    }
-                },
+                }
                 Err(e) => {
-                    eprintln!(
-                        "  warning: poll error for build {} (definition {}): {:#}",
-                        t.build_id, t.definition_id, e
-                    );
-                    // Treat transient poll errors as still-in-progress;
-                    // we'll retry on the next tick.
-                    next_pending.push(*t);
+                    let count = consecutive_errors.entry(t.build_id).or_insert(0);
+                    *count += 1;
+                    if *count >= MAX_CONSECUTIVE_POLL_ERRORS {
+                        eprintln!(
+                            "✗ build {} (definition {}): giving up after {} consecutive poll errors; last error: {:#}",
+                            t.build_id, t.definition_id, count, e
+                        );
+                        // Count this as a failed build so the caller's
+                        // exit code reflects the persistent error
+                        // rather than waiting out --timeout.
+                        outcome.failed += 1;
+                        consecutive_errors.remove(&t.build_id);
+                    } else {
+                        eprintln!(
+                            "  warning: poll error for build {} (definition {}) (attempt {}/{}): {:#}",
+                            t.build_id,
+                            t.definition_id,
+                            count,
+                            MAX_CONSECUTIVE_POLL_ERRORS,
+                            e
+                        );
+                        // Treat as still-in-progress; we'll retry on
+                        // the next tick.
+                        next_pending.push(*t);
+                    }
                 }
             }
         }

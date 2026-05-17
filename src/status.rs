@@ -112,6 +112,18 @@ pub async fn run(opts: StatusOptions<'_>) -> Result<()> {
     });
     let matched = match_definitions_in(&definitions, &detected);
 
+    // Surface the "no matched fixtures" case explicitly. `status` is
+    // read-only and intentionally non-fatal (unlike `disable` which
+    // bails), but rendering "(no matched definitions)" without a
+    // warning is indistinguishable from running in the wrong
+    // directory. Mirror the existing "failed to scan" warning.
+    if matched.is_empty() {
+        eprintln!(
+            "warning: no local fixtures matched any ADO definition under {}",
+            repo_path.display()
+        );
+    }
+
     let target_ids: HashSet<u64> = matched.iter().map(|m| m.id).collect();
     let mut last_runs = std::collections::HashMap::new();
     for id in &target_ids {
