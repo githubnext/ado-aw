@@ -200,6 +200,11 @@ pub struct DefinitionSummary {
     pub id: u64,
     pub name: String,
     pub process: Option<ProcessInfo>,
+    /// `enabled`, `disabled`, or `paused`. Populated when `list_definitions`
+    /// is called with `includeAllProperties=true` (the default in
+    /// [`list_definitions`]). Older/cached responses may omit it.
+    #[serde(rename = "queueStatus")]
+    pub queue_status: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -792,12 +797,46 @@ pub async fn resolve_definitions(
 /// the `id` field. Required for `create_definition`, which needs a
 /// `repository.id` (not just a name) on the POST body.
 pub async fn get_repository_id(
-    _client: &reqwest::Client,
-    _ctx: &AdoContext,
-    _auth: &AdoAuth,
-    _repo_name: &str,
+    client: &reqwest::Client,
+    ctx: &AdoContext,
+    auth: &AdoAuth,
+    repo_name: &str,
 ) -> Result<String> {
-    anyhow::bail!("not yet implemented: filled in by PR 2 (ado-aw enable)")
+    let url = format!(
+        "{}/{}/_apis/git/repositories/{}?api-version=7.1",
+        ctx.org_url.trim_end_matches('/'),
+        ctx.project,
+        percent_encoding::utf8_percent_encode(repo_name, percent_encoding::NON_ALPHANUMERIC),
+    );
+
+    debug!("Looking up repository '{}': {}", repo_name, url);
+
+    let resp = auth
+        .apply(client.get(&url))
+        .send()
+        .await
+        .with_context(|| format!("Failed to look up repository '{}'", repo_name))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "ADO API returned {} when looking up repository '{}': {}",
+            status,
+            repo_name,
+            body
+        );
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .with_context(|| format!("Failed to parse repository response for '{}'", repo_name))?;
+
+    body.get("id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .with_context(|| format!("Repository '{}' response has no 'id' field", repo_name))
 }
 
 /// Fetch the full JSON body of a build definition.
@@ -806,26 +845,109 @@ pub async fn get_repository_id(
 /// the raw `serde_json::Value` so callers can mutate specific fields and
 /// PUT the result back (the standard GET → mutate → PUT cycle).
 pub async fn get_definition_full(
-    _client: &reqwest::Client,
-    _ctx: &AdoContext,
-    _auth: &AdoAuth,
-    _id: u64,
+    client: &reqwest::Client,
+    ctx: &AdoContext,
+    auth: &AdoAuth,
+    id: u64,
 ) -> Result<serde_json::Value> {
-    anyhow::bail!("not yet implemented: filled in by PR 2 (ado-aw enable) or PR 3 (ado-aw disable)")
+    let url = format!(
+        "{}/{}/_apis/build/definitions/{}?api-version=7.1",
+        ctx.org_url.trim_end_matches('/'),
+        ctx.project,
+        id
+    );
+
+    debug!("GET definition {}: {}", id, url);
+
+    let resp = auth
+        .apply(client.get(&url))
+        .send()
+        .await
+        .with_context(|| format!("Failed to fetch definition {}", id))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "ADO API returned {} when fetching definition {}: {}",
+            status,
+            id,
+            body
+        );
+    }
+
+    let body = resp
+        .text()
+        .await
+        .with_context(|| format!("Failed to read definition {} response body", id))?;
+
+    serde_json::from_str(&body).with_context(|| {
+        let snippet: String = body.chars().take(500).collect();
+        format!(
+            "Failed to parse definition {} as JSON. \
+             This usually means the PAT is invalid or expired. \
+             Response body (first 500 chars):\n{snippet}",
+            id
+        )
+    })
 }
 
 /// PATCH the `queueStatus` field on a build definition.
 ///
 /// `status` must be one of `"enabled"`, `"disabled"`, or `"paused"`.
-/// Implements the GET → mutate → PUT cycle internally.
+/// Implements the GET → mutate → PUT cycle internally; the full definition
+/// is round-tripped to satisfy the PUT API's "you must send the whole
+/// document" requirement.
 pub async fn patch_queue_status(
-    _client: &reqwest::Client,
-    _ctx: &AdoContext,
-    _auth: &AdoAuth,
-    _id: u64,
-    _status: &str,
+    client: &reqwest::Client,
+    ctx: &AdoContext,
+    auth: &AdoAuth,
+    id: u64,
+    status: &str,
 ) -> Result<()> {
-    anyhow::bail!("not yet implemented: filled in by PR 2 (ado-aw enable) or PR 3 (ado-aw disable)")
+    match status {
+        "enabled" | "disabled" | "paused" => {}
+        other => anyhow::bail!(
+            "patch_queue_status: invalid status '{}', expected one of enabled/disabled/paused",
+            other
+        ),
+    }
+
+    let mut definition = get_definition_full(client, ctx, auth, id)
+        .await
+        .with_context(|| format!("Failed to fetch definition {} before patching", id))?;
+
+    definition["queueStatus"] = serde_json::Value::String(status.to_string());
+
+    let put_url = format!(
+        "{}/{}/_apis/build/definitions/{}?api-version=7.1",
+        ctx.org_url.trim_end_matches('/'),
+        ctx.project,
+        id
+    );
+
+    debug!("PUT definition {} with queueStatus={}: {}", id, status, put_url);
+
+    let resp = auth
+        .apply(client.put(&put_url))
+        .header("Content-Type", "application/json")
+        .json(&definition)
+        .send()
+        .await
+        .with_context(|| format!("Failed to update queueStatus on definition {}", id))?;
+
+    let resp_status = resp.status();
+    if !resp_status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "ADO API returned {} when updating queueStatus on definition {}: {}",
+            resp_status,
+            id,
+            body
+        );
+    }
+
+    Ok(())
 }
 
 /// Delete a build definition.
@@ -845,12 +967,46 @@ pub async fn delete_definition(
 /// Calls `POST /_apis/build/definitions?api-version=7.1` with the supplied
 /// JSON body and returns the new definition's `id`.
 pub async fn create_definition(
-    _client: &reqwest::Client,
-    _ctx: &AdoContext,
-    _auth: &AdoAuth,
-    _body: &serde_json::Value,
+    client: &reqwest::Client,
+    ctx: &AdoContext,
+    auth: &AdoAuth,
+    body: &serde_json::Value,
 ) -> Result<u64> {
-    anyhow::bail!("not yet implemented: filled in by PR 2 (ado-aw enable)")
+    let url = format!(
+        "{}/{}/_apis/build/definitions?api-version=7.1",
+        ctx.org_url.trim_end_matches('/'),
+        ctx.project,
+    );
+
+    debug!("POST new definition: {}", url);
+
+    let resp = auth
+        .apply(client.post(&url))
+        .header("Content-Type", "application/json")
+        .json(body)
+        .send()
+        .await
+        .context("Failed to create build definition")?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let resp_body = resp.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "ADO API returned {} when creating definition: {}",
+            status,
+            resp_body
+        );
+    }
+
+    let resp_body: serde_json::Value = resp
+        .json()
+        .await
+        .context("Failed to parse create-definition response")?;
+
+    resp_body
+        .get("id")
+        .and_then(|v| v.as_u64())
+        .context("create_definition response has no numeric 'id' field")
 }
 
 /// Queue a build for a definition.
@@ -1005,6 +1161,7 @@ mod tests {
             id,
             name: name.to_string(),
             process: None,
+            queue_status: None,
         }
     }
 
@@ -1015,6 +1172,7 @@ mod tests {
             process: Some(ProcessInfo {
                 yaml_filename: Some(yaml_filename.to_string()),
             }),
+            queue_status: None,
         }
     }
 
@@ -1147,5 +1305,33 @@ mod tests {
         assert_eq!(format!("{}", MatchMethod::YamlPath), "yaml-path");
         assert_eq!(format!("{}", MatchMethod::PipelineName), "pipeline-name");
         assert_eq!(format!("{}", MatchMethod::Explicit), "explicit");
+    }
+
+    // ==================== DefinitionSummary deserialization ====================
+
+    #[test]
+    fn definition_summary_deserializes_queue_status() {
+        let raw = serde_json::json!({
+            "id": 42,
+            "name": "Daily noop",
+            "queueStatus": "disabled",
+            "process": { "yamlFilename": "/tests/noop.lock.yml" }
+        });
+        let def: DefinitionSummary = serde_json::from_value(raw).unwrap();
+        assert_eq!(def.id, 42);
+        assert_eq!(def.queue_status.as_deref(), Some("disabled"));
+        assert_eq!(
+            def.process
+                .as_ref()
+                .and_then(|p| p.yaml_filename.as_deref()),
+            Some("/tests/noop.lock.yml")
+        );
+    }
+
+    #[test]
+    fn definition_summary_queue_status_missing_is_none() {
+        let raw = serde_json::json!({ "id": 1, "name": "x" });
+        let def: DefinitionSummary = serde_json::from_value(raw).unwrap();
+        assert!(def.queue_status.is_none());
     }
 }
