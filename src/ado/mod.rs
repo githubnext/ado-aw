@@ -263,7 +263,7 @@ pub async fn list_definitions(
         let base_url = format!(
             "{}/{}/_apis/build/definitions",
             ctx.org_url.trim_end_matches('/'),
-            ctx.project
+            percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT)
         );
 
         debug!("Listing definitions: {}", base_url);
@@ -507,7 +507,7 @@ pub async fn get_definition_name(
     let url = format!(
         "{}/{}/_apis/build/definitions/{}?api-version=7.1",
         ctx.org_url.trim_end_matches('/'),
-        ctx.project,
+        percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
         definition_id
     );
 
@@ -558,7 +558,7 @@ pub async fn update_pipeline_variable(
     let get_url = format!(
         "{}/{}/_apis/build/definitions/{}?api-version=7.1",
         ctx.org_url.trim_end_matches('/'),
-        ctx.project,
+        percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
         definition_id
     );
 
@@ -617,7 +617,7 @@ pub async fn update_pipeline_variable(
     let put_url = format!(
         "{}/{}/_apis/build/definitions/{}?api-version=7.1",
         ctx.org_url.trim_end_matches('/'),
-        ctx.project,
+        percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
         definition_id
     );
 
@@ -1099,7 +1099,7 @@ pub async fn queue_build(
     let url = format!(
         "{}/{}/_apis/build/builds?api-version=7.1",
         ctx.org_url.trim_end_matches('/'),
-        ctx.project,
+        percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
     );
 
     let mut body = serde_json::json!({
@@ -1156,7 +1156,7 @@ pub async fn get_build(
     let url = format!(
         "{}/{}/_apis/build/builds/{}?api-version=7.1",
         ctx.org_url.trim_end_matches('/'),
-        ctx.project,
+        percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
         build_id
     );
 
@@ -1197,7 +1197,7 @@ pub async fn get_latest_build(
     let url = format!(
         "{}/{}/_apis/build/builds?definitions={}&$top=1&api-version=7.1",
         ctx.org_url.trim_end_matches('/'),
-        ctx.project,
+        percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
         definition_id,
     );
 
