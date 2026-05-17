@@ -39,6 +39,7 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
 
 - `secrets set <name> [<value>] [PATH]` - Set a pipeline variable (with `isSecret=true`) on every matched ADO definition. Value resolution: positional `<value>` → `--value-stdin` (one line) → interactive tty prompt with echo off.
   - `--allow-override` - Force `allowOverride=true` on the set variable. When omitted, `allowOverride` is **preserved** on existing variables (so secret rotation does not silently downgrade an existing `allowOverride=true`) and defaults to `false` for new variables.
+  - When ado-aw round-trips a definition through the ADO GET→PUT API, unchanged secret siblings returned by ADO as masked `***` are normalized to `null` before the PUT so their stored values are preserved instead of being overwritten by the literal mask.
   - `--value-stdin` - Read the value from a single line on stdin.
   - `--dry-run` - Print the planned set without calling the ADO API.
   - `--org / --project / --pat` - ADO context overrides (same semantics as the other lifecycle commands).
@@ -102,4 +103,3 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - `--poll-interval <secs>` - Polling period when `--wait` is set (default 10).
   - `--timeout <secs>` - Hard cap on the polling loop when `--wait` is set (default 1800).
   - `--dry-run` - Print the planned `templateParameters` body without calling the ADO API.
-
