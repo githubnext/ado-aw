@@ -830,7 +830,7 @@ pub async fn get_repository_id(
     let url = format!(
         "{}/{}/_apis/git/repositories/{}?api-version=7.1",
         ctx.org_url.trim_end_matches('/'),
-        ctx.project,
+        percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
         percent_encoding::utf8_percent_encode(repo_name, PATH_SEGMENT),
     );
 
@@ -878,11 +878,9 @@ pub async fn get_definition_full(
     let url = format!(
         "{}/{}/_apis/build/definitions/{}?api-version=7.1",
         ctx.org_url.trim_end_matches('/'),
-        ctx.project,
+        percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
         id
     );
-
-    debug!("GET definition {}: {}", id, url);
 
     let resp = auth
         .apply(client.get(&url))
@@ -947,7 +945,7 @@ pub async fn patch_queue_status(
     let put_url = format!(
         "{}/{}/_apis/build/definitions/{}?api-version=7.1",
         ctx.org_url.trim_end_matches('/'),
-        ctx.project,
+        percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
         id
     );
 
@@ -1000,7 +998,7 @@ pub async fn create_definition(
     let url = format!(
         "{}/{}/_apis/build/definitions?api-version=7.1",
         ctx.org_url.trim_end_matches('/'),
-        ctx.project,
+        percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
     );
 
     debug!("POST new definition: {}", url);

@@ -59,12 +59,16 @@ pub fn sanitize_ado_display_name(raw: &str) -> String {
 
     let stripped: String = raw.chars().filter(|c| !ADO_FORBIDDEN.contains(c)).collect();
     let collapsed = stripped.split_whitespace().collect::<Vec<_>>().join(" ");
-    let trimmed = collapsed.trim_end_matches('.').to_string();
+    // Trim trailing dots before *and* after capping: capping a string like
+    // "aaa....(254 a's)...suffix" at 255 chars can re-introduce a trailing dot
+    // if the 255th character is '.'.
+    let trimmed = collapsed.trim_end_matches('.');
     let bounded: String = trimmed.chars().take(255).collect();
+    let bounded = bounded.trim_end_matches('.');
     if bounded.is_empty() {
         "pipeline".to_string()
     } else {
-        bounded
+        bounded.to_string()
     }
 }
 
@@ -310,6 +314,12 @@ pub async fn run(opts: EnableOptions<'_>) -> Result<()> {
                 }
             }
         }
+    } else if opts.also_set_token && opts.dry_run && !newly_created_ids.is_empty() {
+        println!();
+        println!(
+            "[dry-run] would set GITHUB_TOKEN on {} newly-created definition(s)",
+            newly_created_ids.len()
+        );
     }
 
     println!();
@@ -475,6 +485,16 @@ mod tests {
         let raw = "a".repeat(300);
         let out = sanitize_ado_display_name(&raw);
         assert_eq!(out.chars().count(), 255);
+    }
+
+    #[test]
+    fn sanitize_truncation_does_not_leave_trailing_dot() {
+        // 254 'a' chars followed by ".extra" — the first 255 chars are
+        // "a".repeat(254) + "." which must be trimmed back to 254 chars.
+        let raw = "a".repeat(254) + ".extra";
+        let out = sanitize_ado_display_name(&raw);
+        assert!(!out.ends_with('.'), "result must not end with '.'");
+        assert_eq!(out, "a".repeat(254));
     }
 
     #[test]
