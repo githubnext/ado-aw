@@ -559,24 +559,32 @@ fn copilot_install_steps(engine_config: &EngineConfig, target: &CompileTarget) -
         ));
     }
 
+    if version == "latest" {
+        return copilot_install_from_github_release(
+            "https://github.com/github/copilot-cli/releases/latest/download",
+            "Install Copilot CLI (latest)",
+        );
+    }
+
+    let version_tag = if version.starts_with('v') {
+        version.to_string()
+    } else {
+        format!("v{version}")
+    };
+    let base_url = format!("https://github.com/github/copilot-cli/releases/download/{version_tag}");
+    copilot_install_from_github_release(
+        &base_url,
+        &format!("Install Copilot CLI ({version_tag})"),
+    )
+}
+
+fn copilot_install_from_github_release(base_url: &str, display_name: &str) -> Result<String> {
     Ok(format!(
         "\
 - bash: |
     set -euo pipefail
-    COPILOT_VERSION=\"{version}\"
     TARBALL_NAME=\"copilot-linux-x64.tar.gz\"
-
-    if [ \"$COPILOT_VERSION\" = \"latest\" ]; then
-      BASE_URL=\"https://github.com/github/copilot-cli/releases/latest/download\"
-    else
-      VERSION_TAG=\"$COPILOT_VERSION\"
-      case \"$VERSION_TAG\" in
-        v*) ;;
-        *) VERSION_TAG=\"v$VERSION_TAG\" ;;
-      esac
-      BASE_URL=\"https://github.com/github/copilot-cli/releases/download/$VERSION_TAG\"
-    fi
-
+    BASE_URL=\"{base_url}\"
     TARBALL_URL=\"$BASE_URL/$TARBALL_NAME\"
     CHECKSUMS_URL=\"$BASE_URL/SHA256SUMS.txt\"
     TOOLS_DIR=\"$(Agent.TempDirectory)/tools\"
@@ -613,7 +621,7 @@ fn copilot_install_steps(engine_config: &EngineConfig, target: &CompileTarget) -
     echo \"##vso[task.prependpath]$TOOLS_DIR\"
     cp \"$TOOLS_DIR/copilot\" /tmp/awf-tools/copilot
     chmod +x /tmp/awf-tools/copilot
-  displayName: \"Install Copilot CLI\"
+  displayName: \"{display_name}\"
 
 - bash: |
     copilot --version
@@ -1006,8 +1014,8 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  version: '1.0.34'\n---\n",
         ).unwrap();
         let result = Engine::Copilot.install_steps(&fm.engine, &fm.target).unwrap();
-        assert!(result.contains("COPILOT_VERSION=\"1.0.34\""));
-        assert!(result.contains("github/copilot-cli/releases"));
+        assert!(result.contains("releases/download/v1.0.34"));
+        assert!(result.contains("Install Copilot CLI (v1.0.34)"));
     }
 
     #[test]
@@ -1017,6 +1025,7 @@ mod tests {
         ).unwrap();
         let result = Engine::Copilot.install_steps(&fm.engine, &fm.target).unwrap();
         assert!(result.contains("releases/latest/download"), "latest should resolve via latest release URL");
+        assert!(result.contains("Install Copilot CLI (latest)"));
     }
 
     #[test]
