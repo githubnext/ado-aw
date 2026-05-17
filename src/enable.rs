@@ -287,9 +287,9 @@ pub async fn run(opts: EnableOptions<'_>) -> Result<()> {
     }
 
     if opts.also_set_token && !opts.dry_run && !newly_created_ids.is_empty() {
-        let token = github_token
-            .as_deref()
-            .expect("resolve_token_arg returns Some when also_set_token is true");
+        let Some(token) = github_token.as_deref() else {
+            unreachable!("resolve_token_arg guarantees Some when also_set_token is true");
+        };
         println!();
         println!(
             "Setting GITHUB_TOKEN on {} newly-created definition(s)...",

@@ -791,6 +791,31 @@ pub async fn resolve_definitions(
 // overhaul. Locking the surface here lets the parallel command PRs depend on
 // stable function signatures from day one.
 
+/// Characters that must be percent-encoded when used in a URL path
+/// segment. Built from RFC 3986 §3.3: `pchar` allows unreserved
+/// characters (`A-Z`, `a-z`, `0-9`, `-`, `_`, `.`, `~`),
+/// percent-encoded triplets, sub-delims, and `:` / `@`. We additionally
+/// encode `:`, `@`, `%`, and `/` so a repository name containing any
+/// of those does not break out of the segment, and the U+0021 (`!`)
+/// just for symmetry with common path-encoding tables. Notably this
+/// preserves `-`, `_`, `.`, `~` which `NON_ALPHANUMERIC` would over-
+/// encode (e.g. `my-repo` → `my%2Drepo`).
+const PATH_SEGMENT: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'{')
+    .add(b'}')
+    .add(b'/')
+    .add(b'%')
+    .add(b'@')
+    .add(b':')
+    .add(b'!');
+
 /// Look up an ADO Git repository's GUID by name.
 ///
 /// Calls `GET /_apis/git/repositories/{repoName}?api-version=7.1` and reads
@@ -806,7 +831,7 @@ pub async fn get_repository_id(
         "{}/{}/_apis/git/repositories/{}?api-version=7.1",
         ctx.org_url.trim_end_matches('/'),
         ctx.project,
-        percent_encoding::utf8_percent_encode(repo_name, percent_encoding::NON_ALPHANUMERIC),
+        percent_encoding::utf8_percent_encode(repo_name, PATH_SEGMENT),
     );
 
     debug!("Looking up repository '{}': {}", repo_name, url);
@@ -1333,5 +1358,34 @@ mod tests {
         let raw = serde_json::json!({ "id": 1, "name": "x" });
         let def: DefinitionSummary = serde_json::from_value(raw).unwrap();
         assert!(def.queue_status.is_none());
+    }
+
+    // ==================== PATH_SEGMENT percent-encoding ====================
+
+    #[test]
+    fn path_segment_preserves_rfc3986_unreserved_chars() {
+        // RFC 3986 unreserved set: A-Z / a-z / 0-9 / - / _ / . / ~
+        // These MUST NOT be percent-encoded in a URL path segment.
+        let encoded =
+            percent_encoding::utf8_percent_encode("my-repo_name.with~tilde", PATH_SEGMENT)
+                .to_string();
+        assert_eq!(encoded, "my-repo_name.with~tilde");
+    }
+
+    #[test]
+    fn path_segment_encodes_space_and_reserved_punctuation() {
+        let encoded =
+            percent_encoding::utf8_percent_encode("my repo/with?special#chars", PATH_SEGMENT)
+                .to_string();
+        // Spaces become %20, slashes %2F, ? becomes %3F, # becomes %23.
+        assert_eq!(encoded, "my%20repo%2Fwith%3Fspecial%23chars");
+    }
+
+    #[test]
+    fn path_segment_handles_non_ascii() {
+        let encoded =
+            percent_encoding::utf8_percent_encode("café-π", PATH_SEGMENT).to_string();
+        // Non-ASCII bytes get encoded per UTF-8.
+        assert_eq!(encoded, "caf%C3%A9-%CF%80");
     }
 }
