@@ -370,24 +370,14 @@ pub fn normalize_ado_yaml_path(path: &str) -> String {
 /// Strategy:
 /// 1. Try to match by the `yamlFilename` field in the definition's process config
 /// 2. Fall back to matching by pipeline name containing the agent name
-pub async fn match_definitions(
-    client: &reqwest::Client,
-    ctx: &AdoContext,
-    auth: &AdoAuth,
+pub fn match_definitions_in(
+    definitions: &[DefinitionSummary],
     detected: &[detect::DetectedPipeline],
-) -> Result<Vec<MatchedDefinition>> {
-    let definitions = list_definitions(client, ctx, auth).await?;
-    info!(
-        "Found {} pipeline definitions in {}/{}",
-        definitions.len(),
-        ctx.org_url,
-        ctx.project
-    );
-
+) -> Vec<MatchedDefinition> {
     let mut matched = Vec::new();
 
     // Log all definition yaml paths for debugging
-    for def in &definitions {
+    for def in definitions {
         let yaml_path = def
             .process
             .as_ref()
@@ -440,7 +430,7 @@ pub async fn match_definitions(
             .and_then(|s| s.to_str())
             .unwrap_or("");
 
-        match fuzzy_match_by_name(agent_name, &definitions) {
+        match fuzzy_match_by_name(agent_name, definitions) {
             FuzzyMatchResult::Single(idx) => {
                 let def = &definitions[idx];
                 eprintln!(
@@ -473,7 +463,29 @@ pub async fn match_definitions(
         );
     }
 
-    Ok(matched)
+    matched
+}
+
+/// Match detected pipeline YAML files to ADO pipeline definitions.
+///
+/// Strategy:
+/// 1. Try to match by the `yamlFilename` field in the definition's process config
+/// 2. Fall back to matching by pipeline name containing the agent name
+pub async fn match_definitions(
+    client: &reqwest::Client,
+    ctx: &AdoContext,
+    auth: &AdoAuth,
+    detected: &[detect::DetectedPipeline],
+) -> Result<Vec<MatchedDefinition>> {
+    let definitions = list_definitions(client, ctx, auth).await?;
+    info!(
+        "Found {} pipeline definitions in {}/{}",
+        definitions.len(),
+        ctx.org_url,
+        ctx.project
+    );
+
+    Ok(match_definitions_in(&definitions, detected))
 }
 
 /// Fetch the human-readable name of a pipeline definition by ID.
