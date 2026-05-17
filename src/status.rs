@@ -15,8 +15,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::ado::{
-    AdoAuth, AdoContext, get_latest_build, list_definitions, match_definitions,
-    resolve_ado_context, resolve_auth,
+    get_latest_build, list_definitions, match_definitions_in, resolve_ado_context, resolve_auth,
 };
 use crate::detect;
 use crate::list::{ListRow, build_rows, render_json};
@@ -102,9 +101,7 @@ pub async fn run(opts: StatusOptions<'_>) -> Result<()> {
 
     let definitions = list_definitions(&client, &ado_ctx, &auth).await?;
     let detected = detect::detect_pipelines(&repo_path).await.unwrap_or_default();
-    let matched = match_definitions(&client, &ado_ctx, &auth, &detected)
-        .await
-        .unwrap_or_default();
+    let matched = match_definitions_in(&definitions, &detected);
 
     let target_ids: HashSet<u64> = matched.iter().map(|m| m.id).collect();
     let mut last_runs = std::collections::HashMap::new();

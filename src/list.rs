@@ -15,8 +15,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::ado::{
-    DefinitionSummary, MatchedDefinition, get_latest_build, list_definitions, match_definitions,
-    resolve_ado_context, resolve_auth,
+    DefinitionSummary, MatchedDefinition, get_latest_build, list_definitions,
+    match_definitions_in, resolve_ado_context, resolve_auth,
 };
 use crate::detect;
 
@@ -255,16 +255,7 @@ pub async fn run(opts: ListOptions<'_>) -> Result<()> {
 
     let definitions = list_definitions(&client, &ado_ctx, &auth).await?;
     let detected = detect::detect_pipelines(&repo_path).await.unwrap_or_default();
-    let matched = match match_definitions(&client, &ado_ctx, &auth, &detected).await {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!(
-                "  warning: failed to match local pipeline files with ADO definitions: {:#}; continuing with unmatched results",
-                e
-            );
-            Vec::new()
-        }
-    };
+    let matched = match_definitions_in(&definitions, &detected);
 
     // Decide which IDs need a last-build fetch.
     let target_ids: HashSet<u64> = if opts.all {
