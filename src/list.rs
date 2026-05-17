@@ -258,7 +258,10 @@ pub async fn run(opts: ListOptions<'_>) -> Result<()> {
     let matched = match match_definitions(&client, &ado_ctx, &auth, &detected).await {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("  warning: could not match definitions: {:#}", e);
+            eprintln!(
+                "  warning: failed to match local pipeline files with ADO definitions: {:#}; continuing with unmatched results",
+                e
+            );
             Vec::new()
         }
     };
