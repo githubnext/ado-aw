@@ -377,9 +377,50 @@ permissions:
 | Both | Agent can read; safe-outputs can write |
 | Neither | No ADO tokens anywhere |
 
-### Step 11 — Pipeline Triggers (optional)
+### Step 11 — Triggers (optional)
 
-Trigger from another pipeline:
+#### PR Triggers (`on.pr`)
+
+Trigger on pull request events. Use `branches:` and `paths:` for native ADO filtering; use `filters:` for runtime gate conditions evaluated in the Setup job.
+
+```yaml
+on:
+  pr:
+    branches:
+      include: [main]          # only PRs targeting main
+      # exclude: [release/*]
+    paths:
+      include: [src/*]         # only PRs touching src/
+    filters:                   # optional runtime filters (compiled to gate step with self-cancellation)
+      title: "*[review]*"      # glob match on PR title
+      author:
+        include: ["alice@corp.com"]
+        # exclude: ["bot@corp.com"]
+      draft: false             # omit to match both draft and non-draft
+      labels:
+        any-of: ["run-agent"]  # PR must have at least one of these labels
+        # all-of: [...]        # PR must have ALL of these labels
+        # none-of: [...]       # PR must have NONE of these labels
+      source-branch: "feature/*"   # glob on PR source branch
+      target-branch: "main"        # glob on PR target branch
+      commit-message: "*[skip-agent]*"  # cancel if latest commit message matches
+      changed-files:
+        include: ["src/**/*.rs"]
+      min-changes: 1           # minimum number of changed files
+      max-changes: 100         # maximum number of changed files
+      time-window:
+        start: "09:00"
+        end: "17:00"
+      build-reason:
+        include: [PullRequest]
+      expression: "eq(variables['Custom.Flag'], 'true')"  # raw ADO condition
+```
+
+When `on.pr` is set: the native ADO `pr:` trigger block is generated from `branches:` and `paths:`. Runtime `filters:` compile to a gate step in the Setup job that self-cancels the build when they do not match.
+
+#### Pipeline Triggers (`on.pipeline`)
+
+Trigger from another pipeline completing:
 ```yaml
 on:
   pipeline:
@@ -662,21 +703,26 @@ safe-outputs:
 
 ### PR-Triggered Code Review
 
-Triggered by another pipeline; reviews and comments via ADO.
+Triggered when a pull request is opened or updated; reviews and comments via ADO.
 
 ```yaml
 on:
-  pipeline:
-    name: "CI Build"
-    branches: [main, feature/*]
+  pr:
+    branches:
+      include: [main]
+    filters:
+      draft: false             # Skip draft PRs
 tools:
   azure-devops: true
 permissions:
   read: my-read-sc
   write: my-write-sc
 safe-outputs:
-  create-work-item:
-    work-item-type: Task
+  add-pr-comment:
+    max: 5
+  noop:
+    work-item:
+      enabled: false
 ```
 
 ### Repository Maintenance with PRs
