@@ -970,25 +970,49 @@ impl Executor for CreatePrResult {
         }
 
         if changes.is_empty() {
+            // If every collected entry was a symlink, the agent's payload is
+            // effectively gone — surface that to the agent so it can debug
+            // (the per-symlink warn! only goes to Stage 3 infrastructure logs).
+            let symlink_suffix = if skipped_symlinks.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " ({} symlink(s) were skipped for safety: {})",
+                    skipped_symlinks.len(),
+                    skipped_symlinks.join(", ")
+                )
+            };
             // Handle no-changes based on config
             match config.if_no_changes {
                 IfNoChanges::Error => {
-                    warn!("No changes detected after applying patch (if-no-changes: error)");
-                    return Ok(ExecutionResult::failure(
-                        "No changes detected after applying patch".to_string(),
-                    ));
+                    warn!(
+                        "No changes detected after applying patch (if-no-changes: error){}",
+                        symlink_suffix
+                    );
+                    return Ok(ExecutionResult::failure(format!(
+                        "No changes detected after applying patch{}",
+                        symlink_suffix
+                    )));
                 }
                 IfNoChanges::Ignore => {
-                    info!("No changes detected after applying patch (if-no-changes: ignore)");
-                    return Ok(ExecutionResult::success(
-                        "No changes detected — nothing to do".to_string(),
-                    ));
+                    info!(
+                        "No changes detected after applying patch (if-no-changes: ignore){}",
+                        symlink_suffix
+                    );
+                    return Ok(ExecutionResult::success(format!(
+                        "No changes detected — nothing to do{}",
+                        symlink_suffix
+                    )));
                 }
                 IfNoChanges::Warn => {
-                    warn!("No changes detected after applying patch (if-no-changes: warn)");
-                    return Ok(ExecutionResult::warning(
-                        "No changes detected after applying patch".to_string(),
-                    ));
+                    warn!(
+                        "No changes detected after applying patch (if-no-changes: warn){}",
+                        symlink_suffix
+                    );
+                    return Ok(ExecutionResult::warning(format!(
+                        "No changes detected after applying patch{}",
+                        symlink_suffix
+                    )));
                 }
             }
         }
@@ -1864,6 +1888,16 @@ async fn push_file_change_skipping_symlinks(
     file_path: &str,
     full_path: &std::path::Path,
 ) -> anyhow::Result<()> {
+    // Note: there is a theoretical TOCTOU window between the symlink_metadata
+    // (lstat) call below and the subsequent tokio::fs::read inside
+    // read_file_change (which follows symlinks). A concurrent rename(2) could
+    // swap a regular file for a symlink between the two syscalls. This is not
+    // exploitable in Stage 3's deployment model: the worktree has no concurrent
+    // writer (the agent's patch has already been applied; only this serial
+    // collector reads from it). Closing the window fully would require platform-
+    // specific O_NOFOLLOW open syscalls, which is overkill given the threat
+    // model. If that ever changes, switch to opening the fd here with
+    // O_NOFOLLOW and reading from the fd inside read_file_change.
     match tokio::fs::symlink_metadata(full_path).await {
         Ok(meta) if meta.file_type().is_file() => {
             changes.push(read_file_change(change_type, file_path, full_path).await?);
@@ -2033,8 +2067,21 @@ fn validate_patch_paths(patch_content: &str) -> anyhow::Result<()> {
             let path = line.splitn(3, ' ').nth(2).unwrap_or("").trim_matches('"');
             validate_single_path(path)?;
         } else if {
+            // Only consider this a real header line if it has no leading
+            // whitespace — diff context lines are space-prefixed, so a line
+            // body of "new file mode 120000" inside a hunk would look identical
+            // to a real mode header after trim(). Real git header lines never
+            // start with whitespace; we require the same here to avoid false
+            // positives on adversarial-but-benign diff content. Added (+)/
+            // removed (-) lines start with a non-whitespace prefix that
+            // survives trim() and so cannot match the exact mode-line strings.
+            let starts_with_ws = line
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_whitespace());
             let trimmed = line.trim();
-            trimmed == "new file mode 120000" || trimmed == "new mode 120000"
+            !starts_with_ws
+                && (trimmed == "new file mode 120000" || trimmed == "new mode 120000")
         } {
             // Reject patch lines that INTRODUCE a symlink (git mode 120000).
             // Either of these lines means the resulting tree contains a symlink:
@@ -2048,11 +2095,6 @@ fn validate_patch_paths(patch_content: &str) -> anyhow::Result<()> {
             // with "old mode 120000" + "new mode 100644" converts a symlink into a
             // regular file, which is a legitimate cleanup operation and produces a
             // safe worktree.
-            //
-            // The match is on the fully trimmed line (rather than `starts_with` or
-            // `trim_end`) so neither leading nor trailing whitespace can bypass
-            // the check, and we don't accidentally reject hypothetical future mode
-            // strings that happen to share the "120000" prefix.
             anyhow::bail!(
                 "Patch introduces a symlink (mode 120000), which is not allowed"
             );
@@ -2476,23 +2518,15 @@ index 0000000..abcdefg
 
     #[test]
     fn test_validate_patch_paths_symlink_mode_suffix_not_bypass() {
-        // The mode check uses full trim() equality, so neither leading nor
-        // trailing whitespace can bypass the check, while genuine ASCII text
-        // before/after the keyword stays distinguishable.
+        // The mode check is anchored to lines that have NO leading whitespace
+        // (real git header lines never start with whitespace; diff context
+        // lines always do). Trailing whitespace including \r is still stripped
+        // before equality, so a genuine header line cannot bypass via tail
+        // padding.
         let patch_trailing_ws = "diff --git a/x b/x\nnew file mode 120000 \n";
         assert!(
             validate_patch_paths(patch_trailing_ws).is_err(),
             "trailing whitespace must not let a symlink mode line bypass the check"
-        );
-
-        // Git's own format-patch never produces leading-indented mode lines, but
-        // a hand-crafted patch could try to smuggle one through any matcher that
-        // anchored at the start of the line. Using trim() (not trim_end()) on the
-        // line ensures leading whitespace is no bypass either.
-        let patch_leading_ws = "diff --git a/x b/x\n new file mode 120000\n";
-        assert!(
-            validate_patch_paths(patch_leading_ws).is_err(),
-            "leading whitespace must not let a symlink mode line bypass the check"
         );
 
         // Carriage returns (Windows line endings) are also whitespace and must
@@ -2501,6 +2535,28 @@ index 0000000..abcdefg
         assert!(
             validate_patch_paths(patch_crlf).is_err(),
             "trailing \\r must not let a symlink mode line bypass the check"
+        );
+
+        // A diff CONTEXT line whose body happens to be the literal string
+        // "new file mode 120000" (i.e. a leading-space-prefixed hunk line)
+        // must NOT trigger the check — it's data, not a header. Git's own
+        // format-patch never emits leading-indented mode headers, so anchoring
+        // the check to no-leading-whitespace is airtight.
+        //
+        // Note: we build this patch with explicit "\n" concatenation rather
+        // than backslash continuation because backslash continuation in Rust
+        // string literals eats the leading whitespace on the next line, which
+        // would defeat the very property we're testing.
+        let patch_context_line = String::new()
+            + "diff --git a/x b/x\n"
+            + "--- a/x\n"
+            + "+++ b/x\n"
+            + "@@ -1,2 +1,2 @@\n"
+            + " new file mode 120000\n"
+            + " keep line\n";
+        assert!(
+            validate_patch_paths(&patch_context_line).is_ok(),
+            "diff context line containing the mode string as data must not be rejected"
         );
 
         // A line that merely happens to share a "120000" prefix segment must
