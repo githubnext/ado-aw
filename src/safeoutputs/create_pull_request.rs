@@ -1814,7 +1814,15 @@ async fn push_file_change_skipping_symlinks(
                 file_path
             );
         }
-        _ => {}
+        Ok(_) => {
+            // Not a regular file (e.g. directory, fifo, socket) — silently skip.
+        }
+        Err(e) => {
+            warn!(
+                "Failed to read metadata for {}: {} — skipping",
+                file_path, e
+            );
+        }
     }
     Ok(())
 }
@@ -1905,14 +1913,23 @@ fn validate_patch_paths(patch_content: &str) -> anyhow::Result<()> {
             let path = line.splitn(3, ' ').nth(2).unwrap_or("").trim_matches('"');
             validate_single_path(path)?;
         } else if line.starts_with("new file mode 120000")
-            || line.starts_with("old mode 120000")
             || line.starts_with("new mode 120000")
         {
-            // Reject symlink entries (git mode 120000 = symbolic link).
-            // Symlinks in a patch could be used to make Stage 3 follow them to
-            // arbitrary filesystem paths (e.g. /proc/self/environ) when collecting
-            // file changes to upload to ADO.
-            anyhow::bail!("Patch contains a symlink entry (mode 120000), which is not allowed");
+            // Reject patch lines that INTRODUCE a symlink (git mode 120000).
+            // Either of these lines means the resulting tree contains a symlink:
+            //   - "new file mode 120000" — a freshly added symlink
+            //   - "new mode 120000"      — an existing file converted to a symlink
+            // A symlink in the worktree could make Stage 3 follow it to arbitrary
+            // filesystem paths (e.g. /proc/self/environ) when collecting file
+            // changes to upload to ADO.
+            //
+            // We deliberately do NOT reject "old mode 120000" on its own: a patch
+            // with "old mode 120000" + "new mode 100644" converts a symlink into a
+            // regular file, which is a legitimate cleanup operation and produces a
+            // safe worktree.
+            anyhow::bail!(
+                "Patch introduces a symlink (mode 120000), which is not allowed"
+            );
         }
     }
     Ok(())
@@ -2294,6 +2311,40 @@ index 0000000..abcdefg
         assert!(
             validate_patch_paths(patch).is_err(),
             "patch that introduces symlink via mode change should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_patch_paths_symlink_to_file_allowed() {
+        // Converting a symlink into a regular file is a legitimate cleanup
+        // operation: the resulting worktree contains no symlinks, so there is
+        // no exfiltration risk. The "old mode 120000" line on its own must not
+        // cause rejection.
+        let patch = "diff --git a/file.txt b/file.txt\n\
+                     old mode 120000\n\
+                     new mode 100644\n\
+                     --- a/file.txt\n\
+                     +++ b/file.txt\n\
+                     @@ -1 +1 @@\n\
+                     -/etc/passwd\n\
+                     +hello world\n";
+        assert!(
+            validate_patch_paths(patch).is_ok(),
+            "patch converting symlink → regular file should be allowed"
+        );
+    }
+
+    #[test]
+    fn test_validate_patch_paths_symlink_deletion_allowed() {
+        // Deleting an existing symlink is also legitimate cleanup — no symlink
+        // remains in the worktree afterwards.
+        let patch = "diff --git a/link b/link\n\
+                     deleted file mode 120000\n\
+                     --- a/link\n\
+                     +++ /dev/null\n";
+        assert!(
+            validate_patch_paths(patch).is_ok(),
+            "patch deleting an existing symlink should be allowed"
         );
     }
 
