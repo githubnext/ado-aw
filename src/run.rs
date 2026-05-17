@@ -262,7 +262,26 @@ async fn poll_until_complete(
         }
 
         let mut next_pending = Vec::new();
-        for t in &pending {
+        let mut iter = pending.iter();
+        let mut timed_out_mid_round = false;
+        for t in iter.by_ref() {
+            // Re-check the wall-clock budget between each in-flight
+            // build, not just at the top of the round. With N targets
+            // and a 30s reqwest timeout, the previous "check once per
+            // round" loop could overshoot the operator's `--timeout`
+            // by up to N × 30s in the pathological all-stalled case
+            // — surprising behaviour when the poll interval is shorter
+            // than the per-call HTTP timeout.
+            if started.elapsed() >= timeout {
+                // Carry the current target and every remaining one
+                // forward so the caller's `in_progress` count is
+                // accurate (the loop owes a status for everything it
+                // queued).
+                next_pending.push(*t);
+                next_pending.extend(iter.by_ref().copied());
+                timed_out_mid_round = true;
+                break;
+            }
             match get_build(client, ctx, auth, t.build_id).await {
                 Ok(body) => match classify_build(&body) {
                     BuildOutcome::InProgress => next_pending.push(*t),
@@ -294,6 +313,12 @@ async fn poll_until_complete(
             }
         }
         pending = next_pending;
+
+        if timed_out_mid_round {
+            println!("⚠ wait timed out after {}s", timeout.as_secs());
+            outcome.in_progress = pending.len();
+            return Ok(outcome);
+        }
 
         if !pending.is_empty() {
             tokio::time::sleep(poll_interval).await;
