@@ -81,8 +81,10 @@ pub fn compute_yaml_filename(repo_relative: &Path) -> String {
 /// Pure function: decide what to do for one local fixture against a
 /// snapshot of the project's ADO definitions.
 ///
-/// Match order: yaml-path first, then exact name match. The first
-/// match wins. Returns [`Action::Create`] when nothing matches.
+/// Match order: yaml-path first, then exact name match. Two separate
+/// passes are made so that a yaml-path match on definition B always
+/// wins over a name match on definition A that appears earlier in the
+/// ADO listing. Returns [`Action::Create`] when nothing matches.
 pub fn decide_action(
     sanitized_name: &str,
     yaml_filename: &str,
@@ -90,20 +92,17 @@ pub fn decide_action(
 ) -> Action {
     let target_path = normalize_ado_yaml_path(yaml_filename);
 
-    let mut matched: Option<&DefinitionSummary> = None;
-    for def in definitions {
-        let path_match = def
-            .process
+    // Pass 1: yaml-path takes precedence.
+    let matched = definitions.iter().find(|def| {
+        def.process
             .as_ref()
             .and_then(|p| p.yaml_filename.as_ref())
             .map(|f| normalize_ado_yaml_path(f) == target_path)
-            .unwrap_or(false);
+            .unwrap_or(false)
+    });
 
-        if path_match || def.name == sanitized_name {
-            matched = Some(def);
-            break;
-        }
-    }
+    // Pass 2: fall back to exact name match.
+    let matched = matched.or_else(|| definitions.iter().find(|def| def.name == sanitized_name));
 
     match matched {
         None => Action::Create,
@@ -207,9 +206,14 @@ pub async fn run(opts: EnableOptions<'_>) -> Result<()> {
         ),
     };
 
-    // Resolve the pipeline token up-front so an interactive prompt
-    // happens before any HTTP work — fail-fast for the operator.
-    let github_token = resolve_token_arg(opts.also_set_token, opts.token)?;
+    // Skip interactive token resolution on dry-run: --also-set-token is
+    // silently suppressed in that path anyway, so prompting the operator
+    // for a credential they will never use is wrong UX.
+    let github_token = if opts.dry_run {
+        None
+    } else {
+        resolve_token_arg(opts.also_set_token, opts.token)?
+    };
     let auth = resolve_auth(opts.pat).await?;
     let ado_ctx = resolve_ado_context(&repo_path, opts.org, opts.project).await?;
 
@@ -626,6 +630,27 @@ mod tests {
             Action::AlreadyEnabled {
                 id: 5,
                 name: "n".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn decide_action_yaml_path_wins_over_earlier_name_match() {
+        // Definition A appears first and matches by name.
+        // Definition B appears second and matches by yaml path.
+        // yaml-path must win (definition B), even though A is earlier in the slice.
+        let defs = vec![
+            def(1, "My Pipeline", None, Some("enabled")),           // name match, no path
+            def(2, "Old Name", Some("/pipelines/agent.yml"), Some("disabled")), // path match, different name
+        ];
+        let action = decide_action("My Pipeline", "/pipelines/agent.yml", &defs);
+        // Should pick definition 2 (path match) not 1 (name match).
+        assert_eq!(
+            action,
+            Action::EnableExisting {
+                id: 2,
+                name: "Old Name".to_string(),
+                current_status: "disabled".to_string()
             }
         );
     }
