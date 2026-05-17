@@ -77,6 +77,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── mcp.rs            # SafeOutputs MCP server (stdio + HTTP)
 │   ├── configure.rs      # `configure` CLI command — orchestration shim atop `src/ado/`
 │   ├── enable.rs         # `enable` CLI command — registers ADO build definitions for compiled pipelines and ensures they are enabled
+│   ├── run.rs            # `run` CLI command — queues builds for matched definitions, optional polling to completion (module entry is `dispatch`)
 │   ├── ado/              # Shared Azure DevOps REST helpers (auth, list/match/PATCH/POST)
 │   │   └── mod.rs        # Used by `configure` and the lifecycle commands (enable, disable, remove, list, run, status, secrets)
 │   ├── detect.rs         # Agentic pipeline detection (helper for `configure`)

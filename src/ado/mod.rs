@@ -1038,26 +1038,102 @@ pub async fn create_definition(
 /// build's `id`. `branch` defaults to the definition's `defaultBranch` when
 /// `None`. `parameters` are passed through as ADO `templateParameters`.
 pub async fn queue_build(
-    _client: &reqwest::Client,
-    _ctx: &AdoContext,
-    _auth: &AdoAuth,
-    _definition_id: u64,
-    _branch: Option<&str>,
-    _parameters: &serde_json::Map<String, serde_json::Value>,
+    client: &reqwest::Client,
+    ctx: &AdoContext,
+    auth: &AdoAuth,
+    definition_id: u64,
+    branch: Option<&str>,
+    parameters: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<u64> {
-    anyhow::bail!("not yet implemented: filled in by PR 6 (ado-aw run)")
+    let url = format!(
+        "{}/{}/_apis/build/builds?api-version=7.1",
+        ctx.org_url.trim_end_matches('/'),
+        ctx.project,
+    );
+
+    let mut body = serde_json::json!({
+        "definition": { "id": definition_id }
+    });
+    if let Some(b) = branch {
+        body["sourceBranch"] = serde_json::Value::String(b.to_string());
+    }
+    if !parameters.is_empty() {
+        // ADO `templateParameters` is a string-keyed map of stringly-
+        // typed values; the caller has already coerced everything to
+        // strings via `parse_parameters`.
+        body["templateParameters"] = serde_json::Value::Object(parameters.clone());
+    }
+
+    debug!("POST queue build for definition {}: {}", definition_id, url);
+
+    let resp = auth
+        .apply(client.post(&url))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("Failed to queue build for definition {}", definition_id))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let resp_body = resp.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "ADO API returned {} when queuing build for definition {}: {}",
+            status,
+            definition_id,
+            resp_body
+        );
+    }
+
+    let resp_body: serde_json::Value = resp
+        .json()
+        .await
+        .context("Failed to parse queue-build response")?;
+
+    resp_body
+        .get("id")
+        .and_then(|v| v.as_u64())
+        .context("queue_build response has no numeric 'id' field")
 }
 
 /// Fetch the full JSON body of a build.
 ///
 /// Calls `GET /_apis/build/builds/{id}?api-version=7.1`.
 pub async fn get_build(
-    _client: &reqwest::Client,
-    _ctx: &AdoContext,
-    _auth: &AdoAuth,
-    _build_id: u64,
+    client: &reqwest::Client,
+    ctx: &AdoContext,
+    auth: &AdoAuth,
+    build_id: u64,
 ) -> Result<serde_json::Value> {
-    anyhow::bail!("not yet implemented: filled in by PR 6 (ado-aw run)")
+    let url = format!(
+        "{}/{}/_apis/build/builds/{}?api-version=7.1",
+        ctx.org_url.trim_end_matches('/'),
+        ctx.project,
+        build_id
+    );
+
+    debug!("GET build {}: {}", build_id, url);
+
+    let resp = auth
+        .apply(client.get(&url))
+        .send()
+        .await
+        .with_context(|| format!("Failed to fetch build {}", build_id))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "ADO API returned {} when fetching build {}: {}",
+            status,
+            build_id,
+            body
+        );
+    }
+
+    resp.json()
+        .await
+        .with_context(|| format!("Failed to parse build {} response", build_id))
 }
 
 /// Fetch the most recent build for a definition.

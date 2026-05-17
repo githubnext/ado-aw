@@ -14,6 +14,7 @@ mod init;
 mod logging;
 mod mcp;
 mod ndjson;
+mod run;
 pub mod runtimes;
 pub mod sanitize;
 mod safeoutputs;
@@ -173,6 +174,43 @@ enum Commands {
         /// Falls back to the GITHUB_TOKEN env var, then to an interactive prompt.
         #[arg(long, requires = "also_set_token")]
         token: Option<String>,
+    },
+    /// Queue a build for every ADO definition that matches a local fixture (optionally wait for completion).
+    Run {
+        /// Path to the repository root (defaults to current directory). Used
+        /// to auto-discover compiled pipelines, same as `compile`.
+        path: Option<PathBuf>,
+        /// Override: Azure DevOps organization (URL like `https://dev.azure.com/myorg`,
+        /// or just the org name `myorg`). Inferred from git remote by default.
+        #[arg(long)]
+        org: Option<String>,
+        /// Override: Azure DevOps project name (inferred from git remote by default).
+        #[arg(long)]
+        project: Option<String>,
+        /// PAT for ADO API authentication (prefer setting AZURE_DEVOPS_EXT_PAT env var;
+        /// Azure CLI fallback if omitted).
+        #[arg(long, env = "AZURE_DEVOPS_EXT_PAT")]
+        pat: Option<String>,
+        /// Source branch to queue. Defaults to the definition's `defaultBranch`.
+        #[arg(long)]
+        branch: Option<String>,
+        /// ADO `templateParameters` as `key=value` pairs. Repeatable and/or
+        /// comma-separated (`--parameters a=1,b=2 --parameters c=3`).
+        #[arg(long)]
+        parameters: Vec<String>,
+        /// Poll each queued build to completion before exiting; aggregate result
+        /// determines the exit code.
+        #[arg(long)]
+        wait: bool,
+        /// Seconds between polls when `--wait` is set.
+        #[arg(long, default_value_t = 10, requires = "wait")]
+        poll_interval: u64,
+        /// Maximum seconds to wait when `--wait` is set.
+        #[arg(long, default_value_t = 1800, requires = "wait")]
+        timeout: u64,
+        /// Print the planned queue body without calling the ADO API.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -524,6 +562,7 @@ async fn main() -> Result<()> {
         Some(Commands::Init { .. }) => "init",
         Some(Commands::Configure { .. }) => "configure",
         Some(Commands::Enable { .. }) => "enable",
+        Some(Commands::Run { .. }) => "run",
         None => "ado-aw",
     };
 
@@ -653,6 +692,32 @@ async fn main() -> Result<()> {
                 dry_run,
                 also_set_token,
                 token: token.as_deref(),
+            })
+            .await?;
+        }
+        Commands::Run {
+            path,
+            org,
+            project,
+            pat,
+            branch,
+            parameters,
+            wait,
+            poll_interval,
+            timeout,
+            dry_run,
+        } => {
+            run::dispatch(run::RunOptions {
+                org: org.as_deref(),
+                project: project.as_deref(),
+                pat: pat.as_deref(),
+                path: path.as_deref(),
+                branch: branch.as_deref(),
+                parameters: &parameters,
+                wait,
+                poll_interval_secs: poll_interval,
+                timeout_secs: timeout,
+                dry_run,
             })
             .await?;
         }

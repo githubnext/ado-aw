@@ -1,0 +1,415 @@
+//! The `run` CLI command.
+//!
+//! Queues a build for every ADO definition that matches a local
+//! fixture. With `--wait`, polls each queued build until completion
+//! and exits with a status code that reflects the aggregate result.
+//! Phase 1 of the pipeline-lifecycle CLI family — see `docs/cli.md`.
+//!
+//! Naming nit: the module-level entry point is `dispatch`, not `run`,
+//! so call sites don't end up reading `run::run(...)`. Don't rename
+//! it back to `run` — future contributors will find this comment if
+//! they try.
+
+use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use crate::ado::{
+    AdoAuth, AdoContext, MatchedDefinition, get_build, match_definitions, queue_build,
+    resolve_ado_context, resolve_auth,
+};
+use crate::detect;
+
+/// Parse `--parameters foo=bar,baz=qux` (and its repeatable form) into
+/// a JSON map. Pure function; reject malformed pairs.
+pub fn parse_parameters(values: &[String]) -> Result<serde_json::Map<String, serde_json::Value>> {
+    let mut out = serde_json::Map::new();
+    for raw in values {
+        for pair in raw.split(',') {
+            let pair = pair.trim();
+            if pair.is_empty() {
+                continue;
+            }
+            let Some((k, v)) = pair.split_once('=') else {
+                anyhow::bail!(
+                    "Invalid --parameters pair '{}': expected key=value (no '=' found).",
+                    pair
+                );
+            };
+            let key = k.trim();
+            if key.is_empty() {
+                anyhow::bail!("Invalid --parameters pair '{}': empty key.", pair);
+            }
+            // All values are strings — ADO coerces template-parameter
+            // values as the pipeline definition requires.
+            out.insert(key.to_string(), serde_json::Value::String(v.trim().to_string()));
+        }
+    }
+    Ok(out)
+}
+
+/// Build a `(definition_id, queued_build_id)` poll-target pair.
+#[derive(Debug, Clone, Copy)]
+struct PollTarget {
+    definition_id: u64,
+    build_id: u64,
+}
+
+/// Pure decision: given an ADO build JSON body, what's the terminal
+/// state from the operator's perspective?
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildOutcome {
+    /// `status` is anything but `completed`. Keep polling.
+    InProgress,
+    /// `status == "completed"` and `result == "succeeded"`.
+    Succeeded,
+    /// `status == "completed"` and `result` is anything else (failed,
+    /// canceled, partiallySucceeded).
+    Failed,
+}
+
+/// Pure function: classify a build's terminal state from its JSON
+/// body. Tested independently of any HTTP code.
+pub fn classify_build(body: &serde_json::Value) -> BuildOutcome {
+    let status = body.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    if status != "completed" {
+        return BuildOutcome::InProgress;
+    }
+    let result = body.get("result").and_then(|v| v.as_str()).unwrap_or("");
+    if result == "succeeded" {
+        BuildOutcome::Succeeded
+    } else {
+        BuildOutcome::Failed
+    }
+}
+
+/// CLI options for [`dispatch`].
+pub struct RunOptions<'a> {
+    pub org: Option<&'a str>,
+    pub project: Option<&'a str>,
+    pub pat: Option<&'a str>,
+    pub path: Option<&'a Path>,
+    pub branch: Option<&'a str>,
+    /// Raw `--parameters` arguments (one entry per CLI occurrence).
+    pub parameters: &'a [String],
+    pub wait: bool,
+    pub poll_interval_secs: u64,
+    pub timeout_secs: u64,
+    pub dry_run: bool,
+}
+
+/// Run the `run` command — kept as `dispatch` to avoid the awkward
+/// `run::run(...)` call site that a plain `run` would produce. See the
+/// module-level comment.
+pub async fn dispatch(opts: RunOptions<'_>) -> Result<()> {
+    let parameters = parse_parameters(opts.parameters)?;
+
+    let repo_path: PathBuf = match opts.path {
+        Some(p) => tokio::fs::canonicalize(p)
+            .await
+            .with_context(|| format!("Could not resolve path: {}", p.display()))?,
+        None => tokio::fs::canonicalize(".")
+            .await
+            .context("Could not resolve current directory")?,
+    };
+
+    let auth = resolve_auth(opts.pat).await?;
+    let ado_ctx = resolve_ado_context(&repo_path, opts.org, opts.project).await?;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("Failed to create HTTP client")?;
+
+    println!("Scanning for agentic pipelines...");
+    let detected = detect::detect_pipelines(&repo_path).await?;
+    if detected.is_empty() {
+        println!("No agentic pipelines found.");
+        return Ok(());
+    }
+
+    let matched = match_definitions(&client, &ado_ctx, &auth, &detected).await?;
+    if matched.is_empty() {
+        anyhow::bail!(
+            "No ADO definitions matched any local fixture. Run `ado-aw list` to \
+             diagnose."
+        );
+    }
+
+    println!("{} definition(s) to queue.", matched.len());
+    println!();
+
+    if opts.dry_run {
+        for m in &matched {
+            print_queue_plan(m, opts.branch, &parameters);
+        }
+        return Ok(());
+    }
+
+    let mut targets: Vec<PollTarget> = Vec::new();
+    let mut queue_failure = 0usize;
+
+    for m in &matched {
+        match queue_build(&client, &ado_ctx, &auth, m.id, opts.branch, &parameters).await {
+            Ok(build_id) => {
+                println!(
+                    "▶ queued: {} (id={}) → build {} at {}/{}/_build/results?buildId={}",
+                    m.name,
+                    m.id,
+                    build_id,
+                    ado_ctx.org_url.trim_end_matches('/'),
+                    ado_ctx.project,
+                    build_id
+                );
+                targets.push(PollTarget {
+                    definition_id: m.id,
+                    build_id,
+                });
+            }
+            Err(e) => {
+                eprintln!("✗ failed to queue: {} (id={}): {:#}", m.name, m.id, e);
+                queue_failure += 1;
+            }
+        }
+    }
+
+    if !opts.wait {
+        println!();
+        println!(
+            "Queued {} build(s); {} failed to queue.",
+            targets.len(),
+            queue_failure
+        );
+        if queue_failure > 0 {
+            anyhow::bail!("{} build(s) failed to queue", queue_failure);
+        }
+        return Ok(());
+    }
+
+    let poll_outcome = poll_until_complete(
+        &client,
+        &ado_ctx,
+        &auth,
+        &targets,
+        Duration::from_secs(opts.poll_interval_secs),
+        Duration::from_secs(opts.timeout_secs),
+    )
+    .await?;
+
+    println!();
+    println!(
+        "Wait summary: {} succeeded, {} failed, {} still in progress (timeout), {} failed to queue.",
+        poll_outcome.succeeded, poll_outcome.failed, poll_outcome.in_progress, queue_failure,
+    );
+
+    let non_success = poll_outcome.failed + poll_outcome.in_progress + queue_failure;
+    if non_success > 0 {
+        anyhow::bail!("not all builds succeeded");
+    }
+    Ok(())
+}
+
+fn print_queue_plan(
+    m: &MatchedDefinition,
+    branch: Option<&str>,
+    parameters: &serde_json::Map<String, serde_json::Value>,
+) {
+    let mut body = serde_json::json!({
+        "definition": { "id": m.id }
+    });
+    if let Some(b) = branch {
+        body["sourceBranch"] = serde_json::Value::String(b.to_string());
+    }
+    if !parameters.is_empty() {
+        body["templateParameters"] = serde_json::Value::Object(parameters.clone());
+    }
+    println!("[dry-run] ▶ would queue: {} (id={})", m.name, m.id);
+    println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct PollOutcome {
+    succeeded: usize,
+    failed: usize,
+    in_progress: usize,
+}
+
+async fn poll_until_complete(
+    client: &reqwest::Client,
+    ctx: &AdoContext,
+    auth: &AdoAuth,
+    targets: &[PollTarget],
+    poll_interval: Duration,
+    timeout: Duration,
+) -> Result<PollOutcome> {
+    let started = Instant::now();
+    let mut outcome = PollOutcome::default();
+    let mut pending: Vec<PollTarget> = targets.to_vec();
+
+    println!();
+    println!(
+        "Waiting for {} build(s) (poll every {}s, timeout {}s)...",
+        pending.len(),
+        poll_interval.as_secs(),
+        timeout.as_secs()
+    );
+
+    while !pending.is_empty() {
+        if started.elapsed() >= timeout {
+            println!("⚠ wait timed out after {}s", timeout.as_secs());
+            outcome.in_progress = pending.len();
+            return Ok(outcome);
+        }
+
+        let mut next_pending = Vec::new();
+        for t in &pending {
+            match get_build(client, ctx, auth, t.build_id).await {
+                Ok(body) => match classify_build(&body) {
+                    BuildOutcome::InProgress => next_pending.push(*t),
+                    BuildOutcome::Succeeded => {
+                        println!("✓ build {} (definition {}) succeeded", t.build_id, t.definition_id);
+                        outcome.succeeded += 1;
+                    }
+                    BuildOutcome::Failed => {
+                        let result = body
+                            .get("result")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        println!(
+                            "✗ build {} (definition {}) finished with result={}",
+                            t.build_id, t.definition_id, result
+                        );
+                        outcome.failed += 1;
+                    }
+                },
+                Err(e) => {
+                    eprintln!(
+                        "  warning: poll error for build {} (definition {}): {:#}",
+                        t.build_id, t.definition_id, e
+                    );
+                    // Treat transient poll errors as still-in-progress;
+                    // we'll retry on the next tick.
+                    next_pending.push(*t);
+                }
+            }
+        }
+        pending = next_pending;
+
+        if !pending.is_empty() {
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
+
+    Ok(outcome)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ============ parse_parameters ============
+
+    #[test]
+    fn parse_parameters_single_pair() {
+        let m = parse_parameters(&["foo=bar".to_string()]).unwrap();
+        assert_eq!(m.get("foo").unwrap().as_str(), Some("bar"));
+    }
+
+    #[test]
+    fn parse_parameters_comma_separated() {
+        let m = parse_parameters(&["foo=bar,baz=qux".to_string()]).unwrap();
+        assert_eq!(m.get("foo").unwrap().as_str(), Some("bar"));
+        assert_eq!(m.get("baz").unwrap().as_str(), Some("qux"));
+    }
+
+    #[test]
+    fn parse_parameters_repeated() {
+        let m = parse_parameters(&["a=1".to_string(), "b=2".to_string()]).unwrap();
+        assert_eq!(m.get("a").unwrap().as_str(), Some("1"));
+        assert_eq!(m.get("b").unwrap().as_str(), Some("2"));
+    }
+
+    #[test]
+    fn parse_parameters_repeated_comma_mix() {
+        let m =
+            parse_parameters(&["a=1,b=2".to_string(), "c=3".to_string()]).unwrap();
+        assert_eq!(m.len(), 3);
+    }
+
+    #[test]
+    fn parse_parameters_value_with_equals() {
+        // Split on first '=' only; subsequent equals are part of the value.
+        let m = parse_parameters(&["key=a=b=c".to_string()]).unwrap();
+        assert_eq!(m.get("key").unwrap().as_str(), Some("a=b=c"));
+    }
+
+    #[test]
+    fn parse_parameters_rejects_missing_equals() {
+        let err = parse_parameters(&["nope".to_string()]).unwrap_err();
+        assert!(err.to_string().contains("no '='"), "got: {}", err);
+    }
+
+    #[test]
+    fn parse_parameters_rejects_empty_key() {
+        let err = parse_parameters(&["=bar".to_string()]).unwrap_err();
+        assert!(err.to_string().contains("empty key"), "got: {}", err);
+    }
+
+    #[test]
+    fn parse_parameters_empty_input_returns_empty() {
+        let m = parse_parameters(&[]).unwrap();
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn parse_parameters_skips_blank_pairs() {
+        // Trailing/duplicate commas are forgiving.
+        let m = parse_parameters(&["foo=bar,,".to_string()]).unwrap();
+        assert_eq!(m.len(), 1);
+    }
+
+    // ============ classify_build ============
+
+    #[test]
+    fn classify_in_progress_when_status_not_completed() {
+        let body = serde_json::json!({ "status": "inProgress", "result": "succeeded" });
+        assert_eq!(classify_build(&body), BuildOutcome::InProgress);
+    }
+
+    #[test]
+    fn classify_in_progress_when_status_missing() {
+        let body = serde_json::json!({ "result": "succeeded" });
+        assert_eq!(classify_build(&body), BuildOutcome::InProgress);
+    }
+
+    #[test]
+    fn classify_succeeded_when_completed_and_succeeded() {
+        let body = serde_json::json!({ "status": "completed", "result": "succeeded" });
+        assert_eq!(classify_build(&body), BuildOutcome::Succeeded);
+    }
+
+    #[test]
+    fn classify_failed_when_completed_failed() {
+        let body = serde_json::json!({ "status": "completed", "result": "failed" });
+        assert_eq!(classify_build(&body), BuildOutcome::Failed);
+    }
+
+    #[test]
+    fn classify_failed_when_completed_canceled() {
+        let body = serde_json::json!({ "status": "completed", "result": "canceled" });
+        assert_eq!(classify_build(&body), BuildOutcome::Failed);
+    }
+
+    #[test]
+    fn classify_failed_when_completed_partial() {
+        let body =
+            serde_json::json!({ "status": "completed", "result": "partiallySucceeded" });
+        assert_eq!(classify_build(&body), BuildOutcome::Failed);
+    }
+
+    #[test]
+    fn classify_failed_when_completed_without_result() {
+        let body = serde_json::json!({ "status": "completed" });
+        assert_eq!(classify_build(&body), BuildOutcome::Failed);
+    }
+}
