@@ -5,6 +5,7 @@ mod compile;
 mod configure;
 mod detect;
 mod ecosystem_domains;
+mod enable;
 mod engine;
 mod execute;
 mod fuzzy_schedule;
@@ -138,6 +139,40 @@ enum Commands {
         /// Explicit pipeline definition IDs to update (skips auto-detection)
         #[arg(long, value_delimiter = ',')]
         definition_ids: Option<Vec<u64>>,
+    },
+    /// Register an ADO build definition for each compiled pipeline and ensure it's enabled.
+    Enable {
+        /// Path to the repository root (defaults to current directory). Used
+        /// to auto-discover compiled pipelines, same as `compile`.
+        path: Option<PathBuf>,
+        /// Override: Azure DevOps organization (URL like `https://dev.azure.com/myorg`,
+        /// or just the org name `myorg`). Inferred from git remote by default.
+        #[arg(long)]
+        org: Option<String>,
+        /// Override: Azure DevOps project name (inferred from git remote by default).
+        #[arg(long)]
+        project: Option<String>,
+        /// PAT for ADO API authentication (prefer setting AZURE_DEVOPS_EXT_PAT env var;
+        /// prompted if omitted).
+        #[arg(long, env = "AZURE_DEVOPS_EXT_PAT")]
+        pat: Option<String>,
+        /// ADO folder for newly-created definitions. Only applied on create;
+        /// existing definitions are left in their current folder.
+        #[arg(long, default_value = "\\")]
+        folder: String,
+        /// Default branch for newly-created definitions.
+        #[arg(long, default_value = "refs/heads/main")]
+        default_branch: String,
+        /// Preview the planned actions without calling the ADO API.
+        #[arg(long)]
+        dry_run: bool,
+        /// After creating new definitions, set their GITHUB_TOKEN variable.
+        #[arg(long)]
+        also_set_token: bool,
+        /// The GITHUB_TOKEN value to set when `--also-set-token` is used.
+        /// Falls back to the GITHUB_TOKEN env var, then to an interactive prompt.
+        #[arg(long, requires = "also_set_token")]
+        token: Option<String>,
     },
 }
 
@@ -488,6 +523,7 @@ async fn main() -> Result<()> {
         Some(Commands::McpHttp { .. }) => "mcp-http",
         Some(Commands::Init { .. }) => "init",
         Some(Commands::Configure { .. }) => "configure",
+        Some(Commands::Enable { .. }) => "enable",
         None => "ado-aw",
     };
 
@@ -594,6 +630,30 @@ async fn main() -> Result<()> {
                 dry_run,
                 definition_ids.as_deref(),
             )
+            .await?;
+        }
+        Commands::Enable {
+            path,
+            org,
+            project,
+            pat,
+            folder,
+            default_branch,
+            dry_run,
+            also_set_token,
+            token,
+        } => {
+            enable::run(enable::EnableOptions {
+                org: org.as_deref(),
+                project: project.as_deref(),
+                pat: pat.as_deref(),
+                path: path.as_deref(),
+                folder: &folder,
+                default_branch: &default_branch,
+                dry_run,
+                also_set_token,
+                token: token.as_deref(),
+            })
             .await?;
         }
     }

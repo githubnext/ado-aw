@@ -200,6 +200,11 @@ pub struct DefinitionSummary {
     pub id: u64,
     pub name: String,
     pub process: Option<ProcessInfo>,
+    /// `enabled`, `disabled`, or `paused`. Populated when `list_definitions`
+    /// is called with `includeAllProperties=true` (the default in
+    /// [`list_definitions`]). Older/cached responses may omit it.
+    #[serde(rename = "queueStatus")]
+    pub queue_status: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -786,18 +791,77 @@ pub async fn resolve_definitions(
 // overhaul. Locking the surface here lets the parallel command PRs depend on
 // stable function signatures from day one.
 
+/// Characters that must be percent-encoded when used in a URL path
+/// segment. Built from RFC 3986 §3.3: `pchar` allows unreserved
+/// characters (`A-Z`, `a-z`, `0-9`, `-`, `_`, `.`, `~`),
+/// percent-encoded triplets, sub-delims, and `:` / `@`. We additionally
+/// encode `:`, `@`, `%`, and `/` so a repository name containing any
+/// of those does not break out of the segment, and the U+0021 (`!`)
+/// just for symmetry with common path-encoding tables. Notably this
+/// preserves `-`, `_`, `.`, `~` which `NON_ALPHANUMERIC` would over-
+/// encode (e.g. `my-repo` → `my%2Drepo`).
+const PATH_SEGMENT: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'{')
+    .add(b'}')
+    .add(b'/')
+    .add(b'%')
+    .add(b'@')
+    .add(b':')
+    .add(b'!');
+
 /// Look up an ADO Git repository's GUID by name.
 ///
 /// Calls `GET /_apis/git/repositories/{repoName}?api-version=7.1` and reads
 /// the `id` field. Required for `create_definition`, which needs a
 /// `repository.id` (not just a name) on the POST body.
 pub async fn get_repository_id(
-    _client: &reqwest::Client,
-    _ctx: &AdoContext,
-    _auth: &AdoAuth,
-    _repo_name: &str,
+    client: &reqwest::Client,
+    ctx: &AdoContext,
+    auth: &AdoAuth,
+    repo_name: &str,
 ) -> Result<String> {
-    anyhow::bail!("not yet implemented: filled in by PR 2 (ado-aw enable)")
+    let url = format!(
+        "{}/{}/_apis/git/repositories/{}?api-version=7.1",
+        ctx.org_url.trim_end_matches('/'),
+        percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
+        percent_encoding::utf8_percent_encode(repo_name, PATH_SEGMENT),
+    );
+
+    debug!("Looking up repository '{}': {}", repo_name, url);
+
+    let resp = auth
+        .apply(client.get(&url))
+        .send()
+        .await
+        .with_context(|| format!("Failed to look up repository '{}'", repo_name))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "ADO API returned {} when looking up repository '{}': {}",
+            status,
+            repo_name,
+            body
+        );
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .with_context(|| format!("Failed to parse repository response for '{}'", repo_name))?;
+
+    body.get("id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .with_context(|| format!("Repository '{}' response has no 'id' field", repo_name))
 }
 
 /// Fetch the full JSON body of a build definition.
@@ -806,26 +870,107 @@ pub async fn get_repository_id(
 /// the raw `serde_json::Value` so callers can mutate specific fields and
 /// PUT the result back (the standard GET → mutate → PUT cycle).
 pub async fn get_definition_full(
-    _client: &reqwest::Client,
-    _ctx: &AdoContext,
-    _auth: &AdoAuth,
-    _id: u64,
+    client: &reqwest::Client,
+    ctx: &AdoContext,
+    auth: &AdoAuth,
+    id: u64,
 ) -> Result<serde_json::Value> {
-    anyhow::bail!("not yet implemented: filled in by PR 2 (ado-aw enable) or PR 3 (ado-aw disable)")
+    let url = format!(
+        "{}/{}/_apis/build/definitions/{}?api-version=7.1",
+        ctx.org_url.trim_end_matches('/'),
+        percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
+        id
+    );
+
+    let resp = auth
+        .apply(client.get(&url))
+        .send()
+        .await
+        .with_context(|| format!("Failed to fetch definition {}", id))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "ADO API returned {} when fetching definition {}: {}",
+            status,
+            id,
+            body
+        );
+    }
+
+    let body = resp
+        .text()
+        .await
+        .with_context(|| format!("Failed to read definition {} response body", id))?;
+
+    serde_json::from_str(&body).with_context(|| {
+        let snippet: String = body.chars().take(500).collect();
+        format!(
+            "Failed to parse definition {} as JSON. \
+             This usually means the PAT is invalid or expired. \
+             Response body (first 500 chars):\n{snippet}",
+            id
+        )
+    })
 }
 
 /// PATCH the `queueStatus` field on a build definition.
 ///
 /// `status` must be one of `"enabled"`, `"disabled"`, or `"paused"`.
-/// Implements the GET → mutate → PUT cycle internally.
+/// Implements the GET → mutate → PUT cycle internally; the full definition
+/// is round-tripped to satisfy the PUT API's "you must send the whole
+/// document" requirement.
 pub async fn patch_queue_status(
-    _client: &reqwest::Client,
-    _ctx: &AdoContext,
-    _auth: &AdoAuth,
-    _id: u64,
-    _status: &str,
+    client: &reqwest::Client,
+    ctx: &AdoContext,
+    auth: &AdoAuth,
+    id: u64,
+    status: &str,
 ) -> Result<()> {
-    anyhow::bail!("not yet implemented: filled in by PR 2 (ado-aw enable) or PR 3 (ado-aw disable)")
+    match status {
+        "enabled" | "disabled" | "paused" => {}
+        other => anyhow::bail!(
+            "patch_queue_status: invalid status '{}', expected one of enabled/disabled/paused",
+            other
+        ),
+    }
+
+    let mut definition = get_definition_full(client, ctx, auth, id)
+        .await
+        .with_context(|| format!("Failed to fetch definition {} before patching", id))?;
+
+    definition["queueStatus"] = serde_json::Value::String(status.to_string());
+
+    let put_url = format!(
+        "{}/{}/_apis/build/definitions/{}?api-version=7.1",
+        ctx.org_url.trim_end_matches('/'),
+        percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
+        id
+    );
+
+    debug!("PUT definition {} with queueStatus={}: {}", id, status, put_url);
+
+    let resp = auth
+        .apply(client.put(&put_url))
+        .header("Content-Type", "application/json")
+        .json(&definition)
+        .send()
+        .await
+        .with_context(|| format!("Failed to update queueStatus on definition {}", id))?;
+
+    let resp_status = resp.status();
+    if !resp_status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "ADO API returned {} when updating queueStatus on definition {}: {}",
+            resp_status,
+            id,
+            body
+        );
+    }
+
+    Ok(())
 }
 
 /// Delete a build definition.
@@ -845,12 +990,46 @@ pub async fn delete_definition(
 /// Calls `POST /_apis/build/definitions?api-version=7.1` with the supplied
 /// JSON body and returns the new definition's `id`.
 pub async fn create_definition(
-    _client: &reqwest::Client,
-    _ctx: &AdoContext,
-    _auth: &AdoAuth,
-    _body: &serde_json::Value,
+    client: &reqwest::Client,
+    ctx: &AdoContext,
+    auth: &AdoAuth,
+    body: &serde_json::Value,
 ) -> Result<u64> {
-    anyhow::bail!("not yet implemented: filled in by PR 2 (ado-aw enable)")
+    let url = format!(
+        "{}/{}/_apis/build/definitions?api-version=7.1",
+        ctx.org_url.trim_end_matches('/'),
+        percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
+    );
+
+    debug!("POST new definition: {}", url);
+
+    let resp = auth
+        .apply(client.post(&url))
+        .header("Content-Type", "application/json")
+        .json(body)
+        .send()
+        .await
+        .context("Failed to create build definition")?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let resp_body = resp.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "ADO API returned {} when creating definition: {}",
+            status,
+            resp_body
+        );
+    }
+
+    let resp_body: serde_json::Value = resp
+        .json()
+        .await
+        .context("Failed to parse create-definition response")?;
+
+    resp_body
+        .get("id")
+        .and_then(|v| v.as_u64())
+        .context("create_definition response has no numeric 'id' field")
 }
 
 /// Queue a build for a definition.
@@ -1005,6 +1184,7 @@ mod tests {
             id,
             name: name.to_string(),
             process: None,
+            queue_status: None,
         }
     }
 
@@ -1015,6 +1195,7 @@ mod tests {
             process: Some(ProcessInfo {
                 yaml_filename: Some(yaml_filename.to_string()),
             }),
+            queue_status: None,
         }
     }
 
@@ -1147,5 +1328,62 @@ mod tests {
         assert_eq!(format!("{}", MatchMethod::YamlPath), "yaml-path");
         assert_eq!(format!("{}", MatchMethod::PipelineName), "pipeline-name");
         assert_eq!(format!("{}", MatchMethod::Explicit), "explicit");
+    }
+
+    // ==================== DefinitionSummary deserialization ====================
+
+    #[test]
+    fn definition_summary_deserializes_queue_status() {
+        let raw = serde_json::json!({
+            "id": 42,
+            "name": "Daily noop",
+            "queueStatus": "disabled",
+            "process": { "yamlFilename": "/tests/noop.lock.yml" }
+        });
+        let def: DefinitionSummary = serde_json::from_value(raw).unwrap();
+        assert_eq!(def.id, 42);
+        assert_eq!(def.queue_status.as_deref(), Some("disabled"));
+        assert_eq!(
+            def.process
+                .as_ref()
+                .and_then(|p| p.yaml_filename.as_deref()),
+            Some("/tests/noop.lock.yml")
+        );
+    }
+
+    #[test]
+    fn definition_summary_queue_status_missing_is_none() {
+        let raw = serde_json::json!({ "id": 1, "name": "x" });
+        let def: DefinitionSummary = serde_json::from_value(raw).unwrap();
+        assert!(def.queue_status.is_none());
+    }
+
+    // ==================== PATH_SEGMENT percent-encoding ====================
+
+    #[test]
+    fn path_segment_preserves_rfc3986_unreserved_chars() {
+        // RFC 3986 unreserved set: A-Z / a-z / 0-9 / - / _ / . / ~
+        // These MUST NOT be percent-encoded in a URL path segment.
+        let encoded =
+            percent_encoding::utf8_percent_encode("my-repo_name.with~tilde", PATH_SEGMENT)
+                .to_string();
+        assert_eq!(encoded, "my-repo_name.with~tilde");
+    }
+
+    #[test]
+    fn path_segment_encodes_space_and_reserved_punctuation() {
+        let encoded =
+            percent_encoding::utf8_percent_encode("my repo/with?special#chars", PATH_SEGMENT)
+                .to_string();
+        // Spaces become %20, slashes %2F, ? becomes %3F, # becomes %23.
+        assert_eq!(encoded, "my%20repo%2Fwith%3Fspecial%23chars");
+    }
+
+    #[test]
+    fn path_segment_handles_non_ascii() {
+        let encoded =
+            percent_encoding::utf8_percent_encode("café-π", PATH_SEGMENT).to_string();
+        // Non-ASCII bytes get encoded per UTF-8.
+        assert_eq!(encoded, "caf%C3%A9-%CF%80");
     }
 }

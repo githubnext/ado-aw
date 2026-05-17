@@ -43,3 +43,15 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - `--path <path>` - Path to the repository root (defaults to current directory)
   - `--dry-run` - Preview changes without applying them
   - `--definition-ids <ids>` - Explicit pipeline definition IDs to update (comma-separated, skips auto-detection)
+
+- `enable [PATH]` - Register an ADO build definition for each compiled pipeline discovered under `PATH` (or the current directory) and ensure it is `enabled`. For each fixture, matches against the existing ADO definitions by `yamlFilename` first, then by sanitized display name; creates a new definition when neither matches, flips `queueStatus` to `enabled` when an existing definition is `disabled` / `paused`, and skips when it is already `enabled`. Fail-soft per fixture; exits non-zero if any fixture failed.
+  - `--org <url>` - Override: Azure DevOps organization (URL or bare org name). Inferred from git remote by default.
+  - `--project <name>` - Override: Azure DevOps project name (inferred from git remote by default).
+  - `--pat <pat>` / `AZURE_DEVOPS_EXT_PAT` env var - PAT for ADO API authentication (Azure CLI fallback if omitted).
+  - `--folder <ado-folder>` - ADO folder for newly-created definitions. Defaults to `\` (root). Only applied on create — existing definitions stay where they are.
+  - `--default-branch <ref>` - Default branch for newly-created definitions. Defaults to `refs/heads/main`.
+  - `--dry-run` - Print the planned actions (and the full POST body for creates) without calling the ADO API.
+  - `--also-set-token` - After creating a new definition, set its `GITHUB_TOKEN` variable (as an ADO secret).
+  - `--token <value>` - The token value for `--also-set-token`. Falls back to `$GITHUB_TOKEN`, then to an interactive prompt. Requires `--also-set-token`.
+
+  **Source-repo scope (Phase 1):** `enable` requires the local git remote to be an Azure DevOps Git remote (the source repo is what gets registered as the definition's repository). GitHub-hosted source repos are gated on a follow-up.
