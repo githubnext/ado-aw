@@ -15,7 +15,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::ado::{
-    get_latest_build, list_definitions, match_definitions_in, resolve_ado_context, resolve_auth,
+    PATH_SEGMENT, get_latest_build, list_definitions, match_definitions_in, resolve_ado_context,
+    resolve_auth,
 };
 use crate::detect;
 use crate::list::{ListRow, build_rows, render_json};
@@ -65,7 +66,7 @@ pub fn render_blocks(ado_org_url: &str, ado_project: &str, rows: &[ListRow]) -> 
                     format!(
                         "{}/{}/_build/results?buildId={}",
                         ado_org_url.trim_end_matches('/'),
-                        ado_project,
+                        percent_encoding::utf8_percent_encode(ado_project, PATH_SEGMENT),
                         lr.id,
                     )
                 });
@@ -100,7 +101,15 @@ pub async fn run(opts: StatusOptions<'_>) -> Result<()> {
         .context("Failed to create HTTP client")?;
 
     let definitions = list_definitions(&client, &ado_ctx, &auth).await?;
-    let detected = detect::detect_pipelines(&repo_path).await.unwrap_or_default();
+    let detected = detect::detect_pipelines(&repo_path).await.unwrap_or_else(|e| {
+        // Distinguish "detection failed" from "no pipelines compiled
+        // here": both produce zero matches downstream, but only the
+        // former is something the operator should know about. Don't
+        // bail outright — status is read-only and useful even with
+        // partial inputs.
+        eprintln!("warning: failed to scan local pipelines: {:#}", e);
+        Vec::new()
+    });
     let matched = match_definitions_in(&definitions, &detected);
 
     let target_ids: HashSet<u64> = matched.iter().map(|m| m.id).collect();

@@ -473,6 +473,17 @@ async fn apply_delete_one(
 /// matched definition. Same fail-soft + accumulated-counts pattern as
 /// the old `configure` body, lifted here verbatim so the deprecation
 /// alias is byte-equivalent.
+///
+/// **IMPORTANT — invariant for the integration test:** the deprecation
+/// warning MUST be emitted (via `eprintln!`) before any fallible I/O
+/// happens. The `configure_invocation_still_works_and_warns`
+/// integration test in `tests/secrets_integration.rs` drives this
+/// function with a bogus `--path` that causes `tokio::fs::canonicalize`
+/// inside `run_set` to fail; the test then asserts the warning text
+/// appears on stderr. If you reorder this function to defer the
+/// `eprintln!` (e.g. after auth resolution) the test will start
+/// catching a *side effect* of ordering rather than the deprecation
+/// behaviour itself, which is the opposite of what we want.
 pub async fn run_set_github_token(
     token: Option<&str>,
     org: Option<&str>,

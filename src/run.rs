@@ -22,6 +22,28 @@ use crate::detect;
 
 /// Parse `--parameters foo=bar,baz=qux` (and its repeatable form) into
 /// a JSON map. Pure function; reject malformed pairs.
+///
+/// **Values must not contain commas.** Each raw argument is split on
+/// `,` *before* the `=` split, so a value like `redirect_uri=https://a,b`
+/// silently becomes `{"redirect_uri": "https://a", "b": "?"}` (and
+/// actually errors out since `b` has no `=`). When a parameter value
+/// must include a comma, pass it via a dedicated `--parameters`
+/// occurrence rather than a comma-joined one:
+///
+/// - ✅ `--parameters 'urls=a,b' --parameters mode=fast`  → two flags
+///   still split `urls=a,b` on the comma. Use the workaround below.
+/// - ✅ `--parameters mode=fast` plus an explicit subsequent
+///   `--parameters extra=…` — one pair per flag, no comma in values.
+/// - ❌ `--parameters key=a,b` will parse as two pairs and reject
+///   the second.
+///
+/// The CLI does not currently support escaping commas inside a single
+/// `--parameters` argument; users who need that should fall back to
+/// repeated `--parameters` flags (one pair each).
+///
+/// Only the first `=` in a pair is treated as the separator; subsequent
+/// `=` characters are part of the value, so `key=a=b=c` parses as
+/// `{"key": "a=b=c"}`.
 pub fn parse_parameters(values: &[String]) -> Result<serde_json::Map<String, serde_json::Value>> {
     let mut out = serde_json::Map::new();
     for raw in values {
@@ -391,6 +413,31 @@ mod tests {
         // Trailing/duplicate commas are forgiving.
         let m = parse_parameters(&["foo=bar,,".to_string()]).unwrap();
         assert_eq!(m.len(), 1);
+    }
+
+    #[test]
+    fn parse_parameters_values_with_commas_split_pre_equals() {
+        // Documented sharp edge: each raw argument is split on `,` BEFORE
+        // the `=` split. A value containing a comma will be torn apart
+        // (and usually rejected because the trailing fragment has no `=`).
+        // If you ever change parse_parameters to escape or quote commas,
+        // update both the function doc and this test in lockstep — the
+        // doc comment promises this exact behaviour.
+        let err = parse_parameters(&["key=a,b".to_string()]).unwrap_err();
+        assert!(
+            err.to_string().contains("no '='"),
+            "expected 'no =' error on the second fragment, got: {}",
+            err
+        );
+
+        // The well-formed workaround is one --parameters flag per pair.
+        let m = parse_parameters(&[
+            "urls=https://a".to_string(),
+            "extra=b".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(m.get("urls").unwrap().as_str(), Some("https://a"));
+        assert_eq!(m.get("extra").unwrap().as_str(), Some("b"));
     }
 
     // ============ classify_build ============

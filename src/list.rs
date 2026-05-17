@@ -254,7 +254,15 @@ pub async fn run(opts: ListOptions<'_>) -> Result<()> {
         .context("Failed to create HTTP client")?;
 
     let definitions = list_definitions(&client, &ado_ctx, &auth).await?;
-    let detected = detect::detect_pipelines(&repo_path).await.unwrap_or_default();
+    let detected = detect::detect_pipelines(&repo_path).await.unwrap_or_else(|e| {
+        // Distinguish "detection failed" from "no pipelines compiled
+        // here": both produce zero matches downstream, but only the
+        // former is something the operator should know about. Don't
+        // bail outright — list is read-only and useful even with
+        // partial inputs (`--all` doesn't need fixtures at all).
+        eprintln!("warning: failed to scan local pipelines: {:#}", e);
+        Vec::new()
+    });
     let matched = match_definitions_in(&definitions, &detected);
 
     // Decide which IDs need a last-build fetch.
