@@ -108,11 +108,12 @@ async fn resolve_reviewer_identity(
     reviewer: &str,
 ) -> Option<String> {
     // Check if already a GUID (36 chars with 4 hyphens)
-    if reviewer.len() == 36 && reviewer.chars().filter(|c| *c == '-').count() == 4 {
-        if reviewer.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
-            debug!("Reviewer '{}' is already a GUID", reviewer);
-            return Some(reviewer.to_string());
-        }
+    if reviewer.len() == 36
+        && reviewer.chars().filter(|c| *c == '-').count() == 4
+        && reviewer.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+    {
+        debug!("Reviewer '{}' is already a GUID", reviewer);
+        return Some(reviewer.to_string());
     }
 
     // Use Identity Picker API on vssps.dev.azure.com to resolve email or display name
@@ -146,50 +147,46 @@ async fn resolve_reviewer_identity(
             match resp.json::<serde_json::Value>().await {
                 Ok(data) => {
                     // Navigate the response: results[0].identities[0].localId
-                    if let Some(results) = data.get("results").and_then(|r| r.as_array()) {
-                        if let Some(first_result) = results.first() {
-                            if let Some(identities) =
-                                first_result.get("identities").and_then(|i| i.as_array())
-                            {
-                                // Try to find exact match first (by email or display name)
-                                let reviewer_lower = reviewer.to_lowercase();
-                                for identity in identities {
-                                    let display_name = identity
-                                        .get("displayName")
-                                        .and_then(|d| d.as_str())
-                                        .unwrap_or_default()
-                                        .to_lowercase();
-                                    let mail = identity
-                                        .get("mail")
-                                        .and_then(|m| m.as_str())
-                                        .unwrap_or_default()
-                                        .to_lowercase();
+                    if let Some(results) = data.get("results").and_then(|r| r.as_array())
+                        && let Some(first_result) = results.first()
+                        && let Some(identities) =
+                            first_result.get("identities").and_then(|i| i.as_array())
+                    {
+                        // Try to find exact match first (by email or display name)
+                        let reviewer_lower = reviewer.to_lowercase();
+                        for identity in identities {
+                            let display_name = identity
+                                .get("displayName")
+                                .and_then(|d| d.as_str())
+                                .unwrap_or_default()
+                                .to_lowercase();
+                            let mail = identity
+                                .get("mail")
+                                .and_then(|m| m.as_str())
+                                .unwrap_or_default()
+                                .to_lowercase();
 
-                                    if display_name == reviewer_lower || mail == reviewer_lower {
-                                        if let Some(local_id) =
-                                            identity.get("localId").and_then(|id| id.as_str())
-                                        {
-                                            debug!(
-                                                "Resolved reviewer '{}' to ID '{}'",
-                                                reviewer, local_id
-                                            );
-                                            return Some(local_id.to_string());
-                                        }
-                                    }
-                                }
-                                // Fall back to first result if no exact match
-                                if let Some(first_identity) = identities.first() {
-                                    if let Some(local_id) =
-                                        first_identity.get("localId").and_then(|id| id.as_str())
-                                    {
-                                        debug!(
-                                            "Resolved reviewer '{}' to first match ID '{}'",
-                                            reviewer, local_id
-                                        );
-                                        return Some(local_id.to_string());
-                                    }
-                                }
+                            if (display_name == reviewer_lower || mail == reviewer_lower)
+                                && let Some(local_id) =
+                                    identity.get("localId").and_then(|id| id.as_str())
+                            {
+                                debug!(
+                                    "Resolved reviewer '{}' to ID '{}'",
+                                    reviewer, local_id
+                                );
+                                return Some(local_id.to_string());
                             }
+                        }
+                        // Fall back to first result if no exact match
+                        if let Some(first_identity) = identities.first()
+                            && let Some(local_id) =
+                                first_identity.get("localId").and_then(|id| id.as_str())
+                        {
+                            debug!(
+                                "Resolved reviewer '{}' to first match ID '{}'",
+                                reviewer, local_id
+                            );
+                            return Some(local_id.to_string());
                         }
                     }
                     warn!("No identity found for reviewer '{}'", reviewer);
