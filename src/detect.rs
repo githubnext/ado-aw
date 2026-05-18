@@ -61,15 +61,13 @@ fn scan_directory<'a>(
                     continue;
                 }
                 scan_directory(&path, root, results).await?;
-            } else if file_type.is_file() {
-                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                    if ext == "yml" || ext == "yaml" {
-                        if let Some(pipeline) = try_detect_pipeline(&path, root).await? {
-                            debug!("Detected agentic pipeline: {}", path.display());
-                            results.push(pipeline);
-                        }
-                    }
-                }
+            } else if file_type.is_file()
+                && let Some(ext) = path.extension().and_then(|e| e.to_str())
+                && (ext == "yml" || ext == "yaml")
+                && let Some(pipeline) = try_detect_pipeline(&path, root).await?
+            {
+                debug!("Detected agentic pipeline: {}", path.display());
+                results.push(pipeline);
             }
         }
 
