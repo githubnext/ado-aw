@@ -109,15 +109,21 @@ pub struct CompileContext<'a> {
     /// `nuget.config` should be resolved). `None` for unit-test contexts
     /// where no on-disk repo exists.
     pub compile_dir: Option<&'a Path>,
+    /// Path of the input markdown file being compiled (e.g.
+    /// `agents/release-readiness.md`). `None` for unit-test contexts.
+    /// Consumed by the always-on `ado-aw-marker` compiler extension to
+    /// embed source-path metadata in the compiled YAML.
+    pub input_path: Option<&'a Path>,
 }
 
 impl<'a> CompileContext<'a> {
     /// Build a fully-resolved compile context.
     ///
     /// Resolves the engine implementation from front matter and infers ADO
-    /// context from the git remote in `compile_dir`. Returns an error if
-    /// the engine identifier is unsupported.
-    pub async fn new(front_matter: &'a FrontMatter, compile_dir: &'a Path) -> Result<Self> {
+    /// context from the git remote in the directory containing `input_path`.
+    /// Returns an error if the engine identifier is unsupported.
+    pub async fn new(front_matter: &'a FrontMatter, input_path: &'a Path) -> Result<Self> {
+        let compile_dir = input_path.parent().unwrap_or(Path::new("."));
         let engine = engine::get_engine(front_matter.engine.engine_id())?;
         let ado_context = Self::infer_ado_context(compile_dir).await;
         Ok(Self {
@@ -126,6 +132,7 @@ impl<'a> CompileContext<'a> {
             ado_context,
             engine,
             compile_dir: Some(compile_dir),
+            input_path: Some(input_path),
         })
     }
 
@@ -175,6 +182,7 @@ impl<'a> CompileContext<'a> {
             ado_context: None,
             engine: crate::engine::Engine::Copilot,
             compile_dir: None,
+            input_path: None,
         }
     }
 
@@ -191,6 +199,7 @@ impl<'a> CompileContext<'a> {
             }),
             engine: crate::engine::Engine::Copilot,
             compile_dir: None,
+            input_path: None,
         }
     }
 
@@ -203,6 +212,7 @@ impl<'a> CompileContext<'a> {
             ado_context: None,
             engine: crate::engine::Engine::Copilot,
             compile_dir: Some(compile_dir),
+            input_path: None,
         }
     }
 }
@@ -572,11 +582,13 @@ macro_rules! extension_enum {
     };
 }
 
+mod ado_aw_marker;
 mod github;
 mod safe_outputs;
 pub(crate) mod trigger_filters;
 
 // Re-export tool/runtime extensions from their colocated homes
+pub use ado_aw_marker::AdoAwMarkerExtension;
 pub use crate::tools::azure_devops::AzureDevOpsExtension;
 pub use crate::tools::cache_memory::CacheMemoryExtension;
 pub use github::GitHubExtension;
@@ -593,6 +605,7 @@ extension_enum! {
     /// Uses static dispatch (no `Box<dyn>`) — each variant delegates to
     /// the inner type's [`CompilerExtension`] implementation.
     pub enum Extension {
+        AdoAwMarker(AdoAwMarkerExtension),
         GitHub(GitHubExtension),
         SafeOutputs(SafeOutputsExtension),
         Lean(LeanExtension),
@@ -624,6 +637,7 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
     let mut extensions = Vec::new();
 
     // ── Always-on internal extensions ──
+    extensions.push(Extension::AdoAwMarker(AdoAwMarkerExtension));
     extensions.push(Extension::GitHub(GitHubExtension));
     extensions.push(Extension::SafeOutputs(SafeOutputsExtension));
 

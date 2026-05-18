@@ -88,8 +88,9 @@ fn test_awf_mount_serde_roundtrip() {
 fn test_collect_extensions_empty_front_matter() {
     let fm = minimal_front_matter();
     let exts = collect_extensions(&fm);
-    // Always-on: GitHub + SafeOutputs
-    assert_eq!(exts.len(), 2);
+    // Always-on: ado-aw-marker + GitHub + SafeOutputs
+    assert_eq!(exts.len(), 3);
+    assert!(exts.iter().any(|e| e.name() == "ado-aw-marker"));
     assert!(exts.iter().any(|e| e.name() == "GitHub"));
     assert!(exts.iter().any(|e| e.name() == "SafeOutputs"));
 }
@@ -100,7 +101,7 @@ fn test_collect_extensions_lean_enabled() {
         parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  lean: true\n---\n")
             .unwrap();
     let exts = collect_extensions(&fm);
-    assert_eq!(exts.len(), 3); // GitHub + SafeOutputs + Lean
+    assert_eq!(exts.len(), 4); // ado-aw-marker + GitHub + SafeOutputs + Lean
     assert_eq!(exts[0].name(), "Lean 4"); // Runtime phase sorts first
 }
 
@@ -110,7 +111,7 @@ fn test_collect_extensions_lean_disabled() {
         parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  lean: false\n---\n")
             .unwrap();
     let exts = collect_extensions(&fm);
-    assert_eq!(exts.len(), 2); // Just always-on
+    assert_eq!(exts.len(), 3); // Just always-on
 }
 
 #[test]
@@ -119,7 +120,7 @@ fn test_collect_extensions_azure_devops_enabled() {
         parse_markdown("---\nname: test\ndescription: test\ntools:\n  azure-devops: true\n---\n")
             .unwrap();
     let exts = collect_extensions(&fm);
-    assert_eq!(exts.len(), 3); // GitHub + SafeOutputs + AzureDevOps
+    assert_eq!(exts.len(), 4); // ado-aw-marker + GitHub + SafeOutputs + AzureDevOps
     assert!(exts.iter().any(|e| e.name() == "Azure DevOps MCP"));
 }
 
@@ -129,7 +130,7 @@ fn test_collect_extensions_cache_memory_enabled() {
         parse_markdown("---\nname: test\ndescription: test\ntools:\n  cache-memory: true\n---\n")
             .unwrap();
     let exts = collect_extensions(&fm);
-    assert_eq!(exts.len(), 3); // GitHub + SafeOutputs + CacheMemory
+    assert_eq!(exts.len(), 4); // ado-aw-marker + GitHub + SafeOutputs + CacheMemory
     assert!(exts.iter().any(|e| e.name() == "Cache Memory"));
 }
 
@@ -140,7 +141,7 @@ fn test_collect_extensions_all_enabled() {
     )
     .unwrap();
     let exts = collect_extensions(&fm);
-    assert_eq!(exts.len(), 5); // GitHub + SafeOutputs + Lean + AzureDevOps + CacheMemory
+    assert_eq!(exts.len(), 6); // ado-aw-marker + GitHub + SafeOutputs + Lean + AzureDevOps + CacheMemory
     assert_eq!(exts[0].name(), "Lean 4"); // Runtime phase first
     // All tool-phase extensions follow
     assert!(exts[1..].iter().all(|e| e.phase() == ExtensionPhase::Tool));
@@ -156,7 +157,7 @@ fn test_collect_extensions_runtimes_always_before_tools() {
     )
     .unwrap();
     let exts = collect_extensions(&fm);
-    assert_eq!(exts.len(), 5); // GitHub + SafeOutputs + Lean + AzureDevOps + CacheMemory
+    assert_eq!(exts.len(), 6); // ado-aw-marker + GitHub + SafeOutputs + Lean + AzureDevOps + CacheMemory
 
     // Find the boundary: last Runtime and first Tool
     let last_runtime_idx = exts

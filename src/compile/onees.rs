@@ -47,8 +47,7 @@ impl Compiler for OneESCompiler {
         let extensions = super::extensions::collect_extensions(front_matter);
 
         // Build compile context for MCPG config generation
-        let input_dir = input_path.parent().unwrap_or(Path::new("."));
-        let ctx = super::extensions::CompileContext::new(front_matter, input_dir).await?;
+        let ctx = super::extensions::CompileContext::new(front_matter, input_path).await?;
 
         // Generate values shared with standalone that are passed as extra replacements
         let allowed_domains = generate_allowed_domains(front_matter, &extensions)?;
@@ -66,7 +65,7 @@ impl Compiler for OneESCompiler {
         // Generate 1ES-specific setup/teardown jobs(no per-job pool, uses templateContext).
         // These override the shared {{ setup_job }} / {{ teardown_job }} markers via
         // extra_replacements, which are applied before the shared replacements.
-        let setup_job = generate_setup_job(&front_matter.setup);
+        let setup_job = generate_setup_job(&front_matter.setup, &extensions, &ctx)?;
         let teardown_job = generate_teardown_job(&front_matter.teardown);
 
         let config = CompileConfig {
@@ -102,14 +101,45 @@ impl Compiler for OneESCompiler {
 /// Generate setup job for 1ES template.
 /// Unlike standalone, 1ES jobs don't have per-job `pool:` — the pool is at
 /// the top-level `parameters.pool`. Jobs use `templateContext: type: buildJob`.
-fn generate_setup_job(setup_steps: &[serde_yaml::Value]) -> String {
-    if setup_steps.is_empty() {
-        return String::new();
+///
+/// Extension `setup_steps()` are injected before user setup steps (mirrors the
+/// shared `generate_setup_job` in common.rs). The always-on ado-aw-marker
+/// extension is the primary contributor; user setup_steps are appended after.
+fn generate_setup_job(
+    setup_steps: &[serde_yaml::Value],
+    extensions: &[super::extensions::Extension],
+    ctx: &super::extensions::CompileContext,
+) -> anyhow::Result<String> {
+    use super::extensions::CompilerExtension;
+
+    // Collect setup_steps from ALL extensions
+    let mut ext_setup_steps: Vec<String> = Vec::new();
+    for ext in extensions {
+        ext_setup_steps.extend(ext.setup_steps(ctx)?);
     }
 
-    let steps_yaml = format_steps_yaml_indented(setup_steps, 6);
+    if setup_steps.is_empty() && ext_setup_steps.is_empty() {
+        return Ok(String::new());
+    }
 
-    format!(
+    // Steps in the 1ES templateContext.steps block are indented 6 spaces.
+    let mut body = String::new();
+
+    if !ext_setup_steps.is_empty() {
+        let ext_steps_combined = ext_setup_steps.join("\n\n");
+        let indented = indent_block(&ext_steps_combined, "      ");
+        body.push_str(&indented);
+        if !body.ends_with('\n') {
+            body.push('\n');
+        }
+    }
+
+    if !setup_steps.is_empty() {
+        let user_steps_yaml = format_steps_yaml_indented(setup_steps, 6);
+        body.push_str(&user_steps_yaml);
+    }
+
+    Ok(format!(
         r#"- job: Setup
   displayName: "Setup"
   templateContext:
@@ -118,8 +148,23 @@ fn generate_setup_job(setup_steps: &[serde_yaml::Value]) -> String {
       - checkout: self
 {}
 "#,
-        steps_yaml
-    )
+        body.trim_end_matches('\n')
+    ))
+}
+
+/// Indent every non-empty line in `block` with `prefix`.
+fn indent_block(block: &str, prefix: &str) -> String {
+    block
+        .lines()
+        .map(|line| {
+            if line.is_empty() {
+                String::new()
+            } else {
+                format!("{prefix}{line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Generate teardown job for 1ES template.
@@ -153,22 +198,36 @@ mod tests {
 
     #[test]
     fn test_generate_setup_job_empty_steps() {
-        let result = generate_setup_job(&[]);
-        assert!(result.is_empty(), "Empty setup steps should return empty string");
+        let fm = parse_test_fm("name: t\ndescription: x\n");
+        let ctx = super::super::extensions::CompileContext::for_test(&fm);
+        let result = generate_setup_job(&[], &[], &ctx).expect("call ok");
+        assert!(
+            result.is_empty(),
+            "Empty setup steps with no extensions should return empty string"
+        );
     }
 
     #[test]
     fn test_generate_setup_job_with_steps() {
         let step: serde_yaml::Value =
             serde_yaml::from_str("bash: echo setup").expect("valid yaml");
-        let result = generate_setup_job(&[step]);
+        let fm = parse_test_fm("name: t\ndescription: x\n");
+        let ctx = super::super::extensions::CompileContext::for_test(&fm);
+        let result = generate_setup_job(&[step], &[], &ctx).expect("call ok");
         assert!(result.contains("Setup"), "Should define a Setup job");
-        assert!(result.contains("displayName: \"Setup\""), "Should use simple display name");
+        assert!(
+            result.contains("displayName: \"Setup\""),
+            "Should use simple display name"
+        );
         assert!(result.contains("checkout: self"), "Should include self checkout");
         assert!(result.contains("echo setup"), "Should include the step content");
         assert!(result.contains("templateContext"), "Should include templateContext");
         assert!(result.contains("type: buildJob"), "Should use buildJob type");
         assert!(!result.contains("pool:"), "Should not include per-job pool");
+    }
+
+    fn parse_test_fm(yaml: &str) -> crate::compile::types::FrontMatter {
+        serde_yaml::from_str(yaml).expect("parse fm")
     }
 
     // ─── generate_teardown_job ───────────────────────────────────────────────

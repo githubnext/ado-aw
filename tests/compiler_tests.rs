@@ -3673,6 +3673,81 @@ fn assert_valid_yaml(compiled: &str, fixture_name: &str) {
     );
 }
 
+// ─── ado-aw marker step (always-on extension) ───────────────────────────────
+
+/// Assert that compiled YAML carries exactly one `# ado-aw-metadata: {…}`
+/// marker line whose JSON includes the expected source path and target.
+///
+/// The marker step is injected by the always-on `ado-aw-marker` compiler
+/// extension and is the canonical surface project-scope discovery uses
+/// to find ado-aw pipelines in expanded YAML (see `src/detect.rs::parse_marker_step`).
+fn assert_marker_step_present(
+    compiled: &str,
+    expected_source_suffix: &str,
+    expected_target: &str,
+    fixture_name: &str,
+) {
+    let marker_lines: Vec<&str> = compiled
+        .lines()
+        .filter(|l| l.trim_start().starts_with("# ado-aw-metadata:"))
+        .collect();
+    assert_eq!(
+        marker_lines.len(),
+        1,
+        "{fixture_name}: expected exactly one '# ado-aw-metadata:' marker in compiled YAML, found {}\nLines: {:#?}",
+        marker_lines.len(),
+        marker_lines,
+    );
+    let line = marker_lines[0];
+    assert!(
+        line.contains(&format!("\"target\":\"{expected_target}\"")),
+        "{fixture_name}: marker line does not declare target={expected_target}: {line}"
+    );
+    assert!(
+        line.contains("\"schema\":1"),
+        "{fixture_name}: marker line missing schema=1: {line}"
+    );
+    assert!(
+        line.contains(&format!("\"source\":\"")) && line.contains(expected_source_suffix),
+        "{fixture_name}: marker line does not include source suffix {expected_source_suffix}: {line}"
+    );
+    // The runtime echo on the next line should mirror the same data
+    // (this is the human-facing build-log surface).
+    assert!(
+        compiled.contains("ado-aw metadata: source="),
+        "{fixture_name}: compiled YAML missing runtime echo line for ado-aw marker"
+    );
+    // displayName: "ado-aw" identifies the injected step uniquely.
+    assert!(
+        compiled.contains("displayName: \"ado-aw\""),
+        "{fixture_name}: compiled YAML missing displayName: \"ado-aw\" on injected step"
+    );
+}
+
+#[test]
+fn test_marker_step_present_in_standalone_target() {
+    let compiled = compile_fixture("minimal-agent.md");
+    assert_marker_step_present(&compiled, "minimal-agent.md", "standalone", "minimal-agent.md");
+}
+
+#[test]
+fn test_marker_step_present_in_1es_target() {
+    let compiled = compile_fixture("1es-test-agent.md");
+    assert_marker_step_present(&compiled, "1es-test-agent.md", "1es", "1es-test-agent.md");
+}
+
+#[test]
+fn test_marker_step_present_in_job_target() {
+    let compiled = compile_fixture("job-agent.md");
+    assert_marker_step_present(&compiled, "job-agent.md", "job", "job-agent.md");
+}
+
+#[test]
+fn test_marker_step_present_in_stage_target() {
+    let compiled = compile_fixture("stage-agent.md");
+    assert_marker_step_present(&compiled, "stage-agent.md", "stage", "stage-agent.md");
+}
+
 /// Test that the 1ES fixture produces valid YAML with correct structure
 #[test]
 fn test_1es_compiled_output_is_valid_yaml() {
