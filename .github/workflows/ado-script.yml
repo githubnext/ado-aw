@@ -69,13 +69,13 @@ jobs:
         working-directory: scripts/ado-script
         run: npm run typecheck
 
-      - name: Build bundle (gate.js)
+      - name: Build bundles
         working-directory: scripts/ado-script
         run: npm run build
 
-      - name: Smoke-test bundle
+      - name: Smoke-test bundles
         working-directory: scripts/ado-script
-        run: npx vitest run -c vitest.config.smoke.ts
+        run: npm run test:smoke
 
       - name: E2E gate test
         run: cargo test --test gate_e2e -- --ignored --nocapture

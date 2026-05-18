@@ -933,7 +933,7 @@ pub fn generate_gate_spec_schema() -> String {
 // ─── Codegen ────────────────────────────────────────────────────────────────
 
 // The inline heredoc evaluator has been removed in favor of external script delivery.
-// See TriggerFiltersExtension for the external path (bundled TypeScript gate.js).
+// See AdoScriptExtension for the external path (bundled TypeScript gate.js).
 
 impl Fact {
     /// ADO macro exports required by this fact.

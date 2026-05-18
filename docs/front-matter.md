@@ -234,6 +234,27 @@ becomes a `repos:` entry, with `checkout: false` added for entries
 that weren't listed under `checkout:`. Mixing the legacy fields with
 an existing `repos:` block is rejected; pick one shape.
 
+## Inlined Imports
+
+The `inlined-imports:` field controls when `{{#runtime-import ...}}`
+markers in the markdown body are resolved. It defaults to `false`.
+See [`runtime-imports.md`](runtime-imports.md) for the full marker
+syntax, path resolution rules, and runtime behavior.
+
+When `inlined-imports: false`, the compiler leaves runtime-import
+markers to be resolved on the pipeline runner. This is the default
+behavior, and it means prompt-body edits do not require recompiling the
+generated YAML.
+
+When `inlined-imports: true`, the compiler resolves all runtime-import
+markers at compile time, including the implicit top-level marker that
+normally reloads the body itself. The emitted YAML contains the fully
+expanded prompt body, so the pipeline file is self-contained.
+
+The trade-off is that the generated YAML is larger, and prompt-body
+edits require `ado-aw compile` plus committing the updated pipeline
+file.
+
 ## Filter Validation
 
 The compiler validates filter configurations at compile time and will emit

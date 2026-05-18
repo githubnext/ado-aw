@@ -385,6 +385,8 @@ resources:
 
 Should be replaced with the markdown body (agent instructions) extracted from the source markdown file, excluding the YAML front matter. This content provides the agent with its task description and guidelines.
 
+When `inlined-imports: false` (the default), the compiler emits a top-level `{{#runtime-import ...}}` marker here so the prompt body is reloaded from the source markdown at pipeline runtime. When `inlined-imports: true`, any `{{#runtime-import ...}}` markers in the markdown body are resolved at compile time and the emitted YAML contains the expanded content directly.
+
 ## {{ mcpg_config }}
 
 Should be replaced with the MCP Gateway (MCPG) configuration JSON generated from the `mcp-servers:` front matter. This configuration defines the MCPG server entries and gateway settings.
@@ -486,6 +488,8 @@ Tool names are validated at compile time:
 ## {{ threat_analysis_prompt }}
 
 Should be replaced with the embedded threat detection analysis prompt from `src/data/threat-analysis.md`. This prompt template includes markers for `{{ source_path }}`, `{{ agent_name }}`, `{{ agent_description }}`, and `{{ working_directory }}` which are replaced during compilation.
+
+When `inlined-imports: false`, the compiler emits a top-level `{{#runtime-import ...}}` marker pointing at the bundled threat-analysis prompt that ships in `ado-script.zip`; when `inlined-imports: true`, the expanded prompt body is embedded directly into the YAML.
 
 The threat analysis prompt instructs the security analysis agent to check for:
 - Prompt injection attempts

@@ -350,24 +350,30 @@ The bash shim exports only the ADO macros needed by the spec's facts:
 
 ## Integration Points
 
-### TriggerFiltersExtension
+### AdoScriptExtension
 
-When Tier 2/3 filters are configured, the `TriggerFiltersExtension`
-(`src/compile/extensions/trigger_filters.rs`) activates via
-`collect_extensions()`. It implements `CompilerExtension` and controls:
+When `filters:` is configured (and lowers to non-empty checks), the
+always-on `AdoScriptExtension`
+(`src/compile/extensions/ado_script.rs`) emits the gate-side steps via
+the `setup_steps()` trait hook. The extension also owns the unrelated
+runtime-import resolver — see [`runtime-imports.md`](runtime-imports.md).
+
+For the gate path it controls:
 
 1. **Node install step** — emits a `NodeTool@0` step pinned to Node 20.x
-   LTS so `gate.js` has a runtime
+   LTS so `gate.js` has a runtime.
 2. **Download step** — fetches `ado-script.zip` from the ado-aw release
    artifacts, verifies its SHA256 checksum via `checksums.txt`, then
-   extracts `gate.js` to `/tmp/ado-aw-scripts/ado-script/dist/gate/index.js`
+   extracts `gate.js` to `/tmp/ado-aw-scripts/ado-script/dist/gate/index.js`.
 3. **Gate step** — calls `compile_gate_step_external()` to generate a step
-   that runs `node /tmp/ado-aw-scripts/ado-script/dist/gate/index.js` (no inline heredoc)
+   that runs `node /tmp/ado-aw-scripts/ado-script/dist/gate/index.js` (no inline heredoc).
 4. **Validation** — runs `validate_pr_filters()` / `validate_pipeline_filters()`
-   during compilation via the `validate()` trait method
+   during compilation via the `validate()` trait method.
 
-The extension uses the `setup_steps()` trait method (not `prepare_steps()`)
-because the gate must run in the **Setup job** (before the Agent job).
+The gate-side steps use `setup_steps()` (not `prepare_steps()`)
+because the gate must run in the **Setup job**, before the Agent job.
+Runtime-import resolver steps for the agent body use `prepare_steps()` and
+land in the Agent job — see [`runtime-imports.md`](runtime-imports.md).
 
 ### Tier 1 Inline Path
 
@@ -379,7 +385,7 @@ no Node evaluator and no download step.
 ### Gate Step Injection
 
 Gate steps are injected into the Setup job by `generate_setup_job()` in
-`common.rs`. When the `TriggerFiltersExtension` is active, its
+`common.rs`. When the `AdoScriptExtension` is active, its
 `setup_steps()` are collected and injected first (download + gate). When
 only Tier 1 filters are present, the inline gate step is injected directly.
 
