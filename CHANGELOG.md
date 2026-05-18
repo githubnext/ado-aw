@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.2](https://github.com/githubnext/ado-aw/compare/v0.30.1...v0.30.2) (2026-05-18)
+
+
+### Bug Fixes
+
+* **compile:** resolve autodiscovered source path relative to lock file directory ([#616](https://github.com/githubnext/ado-aw/issues/616)) ([be2e1c4](https://github.com/githubnext/ado-aw/commit/be2e1c4f55930846398650b55d430ec4e328c8d4))
+
 ## [0.30.1](https://github.com/githubnext/ado-aw/compare/v0.30.0...v0.30.1) (2026-05-18)
 
 
