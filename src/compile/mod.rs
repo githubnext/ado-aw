@@ -31,6 +31,7 @@ pub use common::parse_markdown;
 #[allow(unused_imports)]
 pub use common::{atomic_write, parse_markdown_detailed, reconstruct_source, ParsedSource};
 pub use common::HEADER_MARKER;
+pub use common::normalize_source_path;
 pub use common::ADO_MCP_ENTRYPOINT;
 pub use common::ADO_MCP_IMAGE;
 pub use common::ADO_MCP_PACKAGE;
