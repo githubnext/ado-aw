@@ -241,10 +241,24 @@ pub async fn discover_ado_aw_pipelines(
     // `match_definitions_in`.
     let lock_map = build_lock_path_map(local_lock_paths);
 
-    let permits = std::env::var("ADO_AW_PREVIEW_CONCURRENCY")
+    // Resolve concurrency from env; warn (not silently clamp) when an
+    // operator sets `=0`, since the deadlock-avoidance `.max(1)` would
+    // mask the typo and leave the user wondering why throughput hasn't
+    // changed.
+    let raw_permits = std::env::var("ADO_AW_PREVIEW_CONCURRENCY")
         .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_PREVIEW_CONCURRENCY);
+        .and_then(|v| v.parse::<usize>().ok());
+    let permits = match raw_permits {
+        Some(0) => {
+            warn!(
+                "ADO_AW_PREVIEW_CONCURRENCY=0 would deadlock the Preview semaphore; \
+                 clamping to 1. Set a positive integer to control concurrency.",
+            );
+            1
+        }
+        Some(n) => n,
+        None => DEFAULT_PREVIEW_CONCURRENCY,
+    };
     let semaphore = Arc::new(Semaphore::new(permits.max(1)));
 
     let mut handles = Vec::with_capacity(filtered.len());
@@ -310,11 +324,28 @@ fn apply_scope_filter(
     }
 }
 
-/// Normalize a repo URL for equality comparison. Strips trailing slash
-/// and lowercases the scheme/host portion (ADO is case-insensitive on
-/// org/project/repo names).
+/// Normalize a repo URL for equality comparison.
+///
+/// Two normalizations are applied so the comparison is robust to the
+/// shape ADO returns:
+///
+///  1. **Percent-decode** the URL so a project named e.g. `My Project`
+///     compares equal whether ADO returned `My%20Project` or the (rare
+///     but legal) decoded `My Project`. Lossy decoding on invalid UTF-8
+///     keeps us forward-compatible — anything ADO can return, we can
+///     compare.
+///  2. **ASCII-lowercase** because ADO is case-insensitive on org /
+///     project / repo identifiers, and trim any trailing `/`.
+///
+/// Without (1), the comparison would silently fail for any project
+/// name containing a percent-reserved character if `ado_ctx.repo_url()`
+/// emitted the encoded form and `repository.url` returned the decoded
+/// form (or vice-versa).
 fn normalize_repo_url(url: &str) -> String {
-    url.trim_end_matches('/').to_ascii_lowercase()
+    let decoded = percent_encoding::percent_decode_str(url)
+        .decode_utf8_lossy()
+        .into_owned();
+    decoded.trim_end_matches('/').to_ascii_lowercase()
 }
 
 /// Build a `(normalized yamlFilename → local lock path)` lookup table
@@ -518,19 +549,45 @@ pub fn discovered_to_matched(d: &DiscoveredPipeline) -> Option<MatchedDefinition
         | DiscoveryStatus::PreviewFailed(_) => return None,
     }
 
+    // Join every marker's source path so consumers that include
+    // multiple templates show up honestly in the CLI summary instead
+    // of silently truncating to whichever marker happened to be
+    // first. Also apply `sanitize_for_vso_logging` here: the
+    // `yaml_path` ends up in `print_matched_summary` (which writes to
+    // stdout), and if `ado-aw secrets set --all-repos` is ever invoked
+    // from inside an ADO pipeline step, an attacker-controlled marker
+    // source path containing `##vso[` would otherwise be processed by
+    // the agent's logging-command scanner.
+    let yaml_path = if d.markers.is_empty() {
+        String::new()
+    } else {
+        let joined = d
+            .markers
+            .iter()
+            .map(|m| m.source.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        sanitize_for_vso_logging(&joined)
+    };
+
     Some(MatchedDefinition {
         id: d.definition_id,
         name: d.definition_name.clone(),
         match_method: MatchMethod::Discovery,
-        // Prefer the first marker's source path so downstream summaries
-        // can show "→ agents/foo.md" without further lookup.
-        yaml_path: d
-            .markers
-            .first()
-            .map(|m| m.source.clone())
-            .unwrap_or_default(),
+        yaml_path,
         queue_status: d.queue_status.clone(),
     })
+}
+
+/// Neutralise ADO build-agent logging-command prefixes (`##vso[`,
+/// `##[`). Mirrors `crate::compile::extensions::ado_aw_marker` and
+/// `crate::agent_stats::sanitize_for_markdown` so that data flowing
+/// from a Preview-discovered marker through the CLI's own stdout
+/// cannot smuggle a `task.setvariable` (or similar) when the CLI is
+/// invoked from inside an ADO pipeline step.
+fn sanitize_for_vso_logging(s: &str) -> String {
+    s.replace("##vso[", "[vso-filtered][")
+        .replace("##[", "[filtered][")
 }
 
 /// CLI-facing wrapper: run Preview-driven discovery with the given
@@ -914,5 +971,96 @@ mod tests {
     fn discovered_to_matched_keeps_direct_and_consumer() {
         assert!(discovered_to_matched(&discovered(DiscoveryStatus::Direct)).is_some());
         assert!(discovered_to_matched(&discovered(DiscoveryStatus::Consumer)).is_some());
+    }
+
+    #[test]
+    fn discovered_to_matched_joins_multiple_marker_sources() {
+        // A consumer that includes two templates must surface both
+        // sources in the yaml_path summary, not silently truncate to
+        // whichever happened to be first.
+        let mut d = discovered(DiscoveryStatus::Consumer);
+        d.markers = vec![
+            MarkerMetadata {
+                schema: 1,
+                source: "agents/a.md".to_string(),
+                version: "1.0".to_string(),
+                target: "job".to_string(),
+            },
+            MarkerMetadata {
+                schema: 1,
+                source: "agents/b.md".to_string(),
+                version: "1.0".to_string(),
+                target: "stage".to_string(),
+            },
+        ];
+        let matched = discovered_to_matched(&d).expect("Consumer kept");
+        assert!(
+            matched.yaml_path.contains("agents/a.md")
+                && matched.yaml_path.contains("agents/b.md"),
+            "expected both marker sources in yaml_path, got: {}",
+            matched.yaml_path
+        );
+    }
+
+    #[test]
+    fn discovered_to_matched_sanitises_vso_in_yaml_path() {
+        // The yaml_path ends up in stdout via print_matched_summary.
+        // If the CLI is invoked from inside an ADO pipeline step, an
+        // attacker-controlled marker source path containing `##vso[`
+        // would otherwise be processed by the agent's logging-command
+        // scanner.
+        let mut d = discovered(DiscoveryStatus::Consumer);
+        d.markers = vec![MarkerMetadata {
+            schema: 1,
+            source: "agents/##vso[task.setvariable variable=X]value.md".to_string(),
+            version: "1.0".to_string(),
+            target: "job".to_string(),
+        }];
+        let matched = discovered_to_matched(&d).expect("Consumer kept");
+        assert!(
+            !matched.yaml_path.contains("##vso["),
+            "raw ##vso[ leaked into yaml_path: {}",
+            matched.yaml_path,
+        );
+        assert!(
+            matched.yaml_path.contains("[vso-filtered]["),
+            "expected `##vso[` neutralised to `[vso-filtered][`: {}",
+            matched.yaml_path,
+        );
+    }
+
+    // ── normalize_repo_url ───────────────────────────────────────────
+
+    #[test]
+    fn normalize_repo_url_is_encoding_independent() {
+        // ADO usually returns percent-encoded URLs (`My%20Project`),
+        // but the comparison must work whichever shape both sides
+        // happen to be in.
+        let encoded = "https://dev.azure.com/Org/My%20Project/_git/Repo";
+        let decoded = "https://dev.azure.com/Org/My Project/_git/Repo";
+        assert_eq!(normalize_repo_url(encoded), normalize_repo_url(decoded));
+    }
+
+    #[test]
+    fn normalize_repo_url_is_case_insensitive_and_trims_trailing_slash() {
+        assert_eq!(
+            normalize_repo_url("https://dev.azure.com/Org/P/_git/Repo/"),
+            normalize_repo_url("https://dev.azure.com/org/p/_git/repo")
+        );
+    }
+
+    // ── sanitize_for_vso_logging ─────────────────────────────────────
+
+    #[test]
+    fn discovery_sanitize_for_vso_logging_neutralises_prefixes() {
+        assert_eq!(
+            sanitize_for_vso_logging("##vso[task.setvariable variable=X]value"),
+            "[vso-filtered][task.setvariable variable=X]value"
+        );
+        assert_eq!(
+            sanitize_for_vso_logging("##[warning]ignore me"),
+            "[filtered][warning]ignore me"
+        );
+        assert_eq!(sanitize_for_vso_logging("agents/foo.md"), "agents/foo.md");
     }
 }
