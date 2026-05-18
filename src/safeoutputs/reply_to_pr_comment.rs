@@ -81,7 +81,7 @@ impl SanitizeContent for ReplyToPrCommentResult {
 ///       - self
 ///       - other-repo
 /// ```
-#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, SanitizeConfig, Serialize, Deserialize)]
 pub struct ReplyToPrCommentConfig {
     /// Prefix prepended to all replies (e.g., "[Agent] ")
     #[serde(default, rename = "comment-prefix")]
@@ -91,15 +91,6 @@ pub struct ReplyToPrCommentConfig {
     /// If empty, all repositories in the checkout list (plus "self") are allowed.
     #[serde(default, rename = "allowed-repositories")]
     pub allowed_repositories: Vec<String>,
-}
-
-impl Default for ReplyToPrCommentConfig {
-    fn default() -> Self {
-        Self {
-            comment_prefix: None,
-            allowed_repositories: Vec::new(),
-        }
-    }
 }
 
 #[async_trait::async_trait]

@@ -114,7 +114,7 @@ impl SanitizeContent for CreateBranchResult {
 ///       - main
 ///       - develop
 /// ```
-#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, SanitizeConfig, Serialize, Deserialize)]
 pub struct CreateBranchConfig {
     /// Regex pattern that branch names must match
     #[serde(default, rename = "branch-pattern")]
@@ -127,16 +127,6 @@ pub struct CreateBranchConfig {
     /// Source branches the agent is allowed to branch from
     #[serde(default, rename = "allowed-source-branches")]
     pub allowed_source_branches: Vec<String>,
-}
-
-impl Default for CreateBranchConfig {
-    fn default() -> Self {
-        Self {
-            branch_pattern: None,
-            allowed_repositories: Vec::new(),
-            allowed_source_branches: Vec::new(),
-        }
-    }
 }
 
 /// Resolve a branch name to its latest commit SHA via the Azure DevOps refs API

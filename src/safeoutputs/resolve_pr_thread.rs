@@ -113,7 +113,7 @@ impl SanitizeContent for ResolvePrThreadResult {
 ///       - fixed
 ///       - wont-fix
 /// ```
-#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, SanitizeConfig, Serialize, Deserialize)]
 pub struct ResolvePrThreadConfig {
     /// Restrict which repositories the agent can operate on.
     /// If empty, all repositories in the checkout list (plus "self") are allowed.
@@ -124,15 +124,6 @@ pub struct ResolvePrThreadConfig {
     /// REQUIRED — empty list rejects all status transitions.
     #[serde(default, rename = "allowed-statuses")]
     pub allowed_statuses: Vec<String>,
-}
-
-impl Default for ResolvePrThreadConfig {
-    fn default() -> Self {
-        Self {
-            allowed_repositories: Vec::new(),
-            allowed_statuses: Vec::new(),
-        }
-    }
 }
 
 #[async_trait::async_trait]

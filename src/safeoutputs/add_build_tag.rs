@@ -75,7 +75,7 @@ impl SanitizeContent for AddBuildTagResult {
 ///     tag-prefix: "agent-"
 ///     allow-any-build: false
 /// ```
-#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, SanitizeConfig, Serialize, Deserialize)]
 pub struct AddBuildTagConfig {
     /// Restrict which tags can be applied. Empty means any tag is allowed.
     /// Supports simple wildcard patterns: entries ending with `*` match by prefix.
@@ -90,16 +90,6 @@ pub struct AddBuildTagConfig {
     /// current pipeline build (BUILD_BUILDID) may be tagged.
     #[serde(default, rename = "allow-any-build")]
     pub allow_any_build: bool,
-}
-
-impl Default for AddBuildTagConfig {
-    fn default() -> Self {
-        Self {
-            allowed_tags: Vec::new(),
-            tag_prefix: None,
-            allow_any_build: false,
-        }
-    }
 }
 
 // ── Stage 3: Execution ────────────────────────────────────────────────────

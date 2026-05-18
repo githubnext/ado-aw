@@ -115,7 +115,7 @@ impl SanitizeContent for SubmitPrReviewResult {
 ///     allowed-repositories:
 ///       - self
 /// ```
-#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, SanitizeConfig, Serialize, Deserialize)]
 pub struct SubmitPrReviewConfig {
     /// Which events are permitted. REQUIRED — empty list rejects all.
     #[serde(default, rename = "allowed-events")]
@@ -124,15 +124,6 @@ pub struct SubmitPrReviewConfig {
     /// Which repositories the agent may target. Empty list means all allowed repos.
     #[serde(default, rename = "allowed-repositories")]
     pub allowed_repositories: Vec<String>,
-}
-
-impl Default for SubmitPrReviewConfig {
-    fn default() -> Self {
-        Self {
-            allowed_events: Vec::new(),
-            allowed_repositories: Vec::new(),
-        }
-    }
 }
 
 #[async_trait::async_trait]

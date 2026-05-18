@@ -101,7 +101,7 @@ impl SanitizeContent for QueueBuildResult {
 ///       - version
 ///     default-branch: main
 /// ```
-#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, SanitizeConfig, Serialize, Deserialize)]
 pub struct QueueBuildConfig {
     /// Pipeline definition IDs that are allowed to be triggered (REQUIRED — empty rejects all)
     #[serde(default, rename = "allowed-pipelines")]
@@ -118,17 +118,6 @@ pub struct QueueBuildConfig {
     /// Default branch to use when the agent does not specify one
     #[serde(default, rename = "default-branch")]
     pub default_branch: Option<String>,
-}
-
-impl Default for QueueBuildConfig {
-    fn default() -> Self {
-        Self {
-            allowed_pipelines: Vec::new(),
-            allowed_branches: Vec::new(),
-            allowed_parameters: Vec::new(),
-            default_branch: None,
-        }
-    }
 }
 
 #[async_trait::async_trait]

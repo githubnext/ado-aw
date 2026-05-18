@@ -111,7 +111,7 @@ impl SanitizeContent for LinkWorkItemsResult {
 ///       - child
 ///       - related
 /// ```
-#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, SanitizeConfig, Serialize, Deserialize)]
 pub struct LinkWorkItemsConfig {
     /// Restrict which link types the agent may use.
     /// An empty list (the default) means all link types are allowed.
@@ -123,15 +123,6 @@ pub struct LinkWorkItemsConfig {
     /// Accepts the same values as comment-on-work-item: "*", a single ID,
     /// a list of IDs, or an area path string.
     pub target: Option<CommentTarget>,
-}
-
-impl Default for LinkWorkItemsConfig {
-    fn default() -> Self {
-        Self {
-            allowed_link_types: Vec::new(),
-            target: None,
-        }
-    }
 }
 
 #[async_trait::async_trait]
