@@ -5,21 +5,23 @@ sidebar:
   order: 2
 ---
 
-The `ado-aw` CLI provides commands for initializing repositories, compiling pipelines, running MCP servers, executing safe outputs, and configuring Azure DevOps definitions.
+import { Aside } from '@astrojs/starlight/components';
+
+The `ado-aw` CLI provides commands for authoring, compiling, and managing the full lifecycle of Azure DevOps agentic pipelines.
 
 ## Global flags
 
 These flags apply to all commands:
 
 - `--verbose`, `-v` -- enable more detailed logging
-- `--debug`, `-d` -- enable debug logging
-- `--log-output-dir <path>` -- write log files to a specific directory
+- `--debug`, `-d` -- enable debug logging (implies verbose)
+- `--log-output-dir <path>` -- write log files to a specific directory (overrides `ADO_AW_LOG_DIR`)
 
-## Commands
+## Authoring commands
 
 ### `init`
 
-Initialize a repository for AI-first agentic pipeline authoring.
+Initialize a repository for AI-first agentic pipeline authoring. Creates `.github/agents/ado-aw.agent.md`, a Copilot dispatcher agent that routes to the create, update, and debug prompts.
 
 ```bash
 ado-aw init [--path <path>] [--force]
@@ -27,12 +29,12 @@ ado-aw init [--path <path>] [--force]
 
 Options:
 
-- `--path <path>` -- target directory
-- `--force` -- continue even when repository checks would normally block initialization
+- `--path <path>` -- target directory (defaults to current directory)
+- `--force` -- bypass the GitHub-remote guard (use when running inside a GitHub-hosted repository like `githubnext/ado-aw`)
 
 ### `compile [<path>]`
 
-Compile markdown into Azure DevOps pipeline YAML. If you omit the path, `ado-aw` auto-discovers agentic pipeline sources in the current directory.
+Compile a markdown agent file into Azure DevOps pipeline YAML. If you omit the path, `ado-aw` auto-discovers and recompiles all agentic pipeline sources in the current directory.
 
 ```bash
 ado-aw compile [<path>] [--output <path>]
@@ -40,21 +42,152 @@ ado-aw compile [<path>] [--output <path>]
 
 Options:
 
-- `--output`, `-o <path>` -- write the generated YAML to a specific file or directory
-- `--skip-integrity` -- debug-only option to skip the generated integrity check step
-- `--debug-pipeline` -- debug-only option to include extra pipeline diagnostics
+- `--output`, `-o <path>` -- write the generated YAML to a specific file or directory; if an existing directory is given, the filename is derived from the source (e.g. `agent.md` → `agent.lock.yml`)
+- `--force` -- bypass the GitHub-remote guard
+- `--skip-integrity` -- *(debug builds only)* skip the "Verify pipeline integrity" step
+- `--debug-pipeline` -- *(debug builds only)* include MCPG debug diagnostics in the generated pipeline
 
 ### `check <pipeline>`
 
-Verify that a compiled pipeline still matches its source markdown.
+Verify that a compiled pipeline still matches its source markdown. Useful as a CI gate to catch un-regenerated pipelines.
 
 ```bash
 ado-aw check <pipeline>
 ```
 
+The source markdown path is auto-detected from the `@ado-aw` header inside the compiled YAML.
+
+## Pipeline lifecycle commands
+
+These commands interact with Azure DevOps build definitions and require ADO API access. They infer the ADO organization and project from the local git remote by default; pass `--org` and `--project` to override.
+
+For ADO authentication, the commands try the **Azure CLI** (`az` login) first and fall back to prompting for a PAT. You can also set `AZURE_DEVOPS_EXT_PAT` in your environment to skip the prompt.
+
+### `secrets set <name> [<value>] [path]`
+
+Set a pipeline variable (stored as `isSecret=true`) on every matched ADO definition.
+
+```bash
+ado-aw secrets set GITHUB_TOKEN [path]
+```
+
+Value resolution order: positional `<value>` argument → `--value-stdin` (one line from stdin) → interactive prompt with echo off.
+
+Options:
+
+- `--allow-override` -- set `allowOverride=true`; when omitted, `allowOverride` is preserved on existing variables and defaults to `false` for new ones
+- `--value-stdin` -- read the value from a single line on stdin (mutually exclusive with the positional value)
+- `--org <url>` -- Azure DevOps organization URL or bare org name
+- `--project <name>` -- Azure DevOps project name
+- `--pat <pat>` -- PAT for ADO API authentication
+- `--definition-ids <ids>` -- explicit comma-separated definition IDs (skips auto-detection)
+- `--dry-run` -- print the planned set without calling the ADO API
+
+### `secrets list [path]`
+
+List variable names and their `isSecret` / `allowOverride` flags on every matched definition. **Never prints values.**
+
+Options:
+
+- `--json` -- emit machine-readable JSON
+- `--org`, `--project`, `--pat`, `--definition-ids` -- same as `secrets set`
+
+### `secrets delete <name> [path]`
+
+Delete a named variable from every matched definition. No-op when the variable is absent.
+
+Options:
+
+- `--org`, `--project`, `--pat`, `--definition-ids` -- same as `secrets set`
+- `--dry-run` -- print the planned deletion without calling the ADO API
+
+### `enable [path]`
+
+Register an ADO build definition for each compiled pipeline discovered under `path` and ensure it is `enabled`. Matches existing definitions by YAML filename first, then by display name; creates a new definition when no match is found.
+
+```bash
+ado-aw enable [path] [options]
+```
+
+Options:
+
+- `--org <url>` -- Azure DevOps organization URL or bare org name
+- `--project <name>` -- Azure DevOps project name
+- `--pat <pat>` -- PAT for ADO API authentication
+- `--folder <ado-folder>` -- ADO folder for newly-created definitions (default: `\`); only applies on create
+- `--default-branch <ref>` -- default branch for newly-created definitions (default: `refs/heads/main`)
+- `--also-set-token` -- set `GITHUB_TOKEN` as a secret variable after creating new definitions
+- `--token <value>` -- token value for `--also-set-token` (falls back to `$GITHUB_TOKEN`, then interactive prompt)
+- `--dry-run` -- print the planned actions without calling the ADO API
+
+<Aside type="note">
+`enable` requires the local git remote to be an Azure DevOps Git remote. GitHub-hosted source repos are not yet supported.
+</Aside>
+
+### `disable [path]`
+
+Set `queueStatus` to `disabled` (or `paused`) on every matched ADO definition.
+
+Options:
+
+- `--paused` -- use `queueStatus: paused` instead of `disabled`; paused definitions still queue scheduled runs but hold the queue, while disabled definitions reject all queue requests
+- `--org`, `--project`, `--pat` -- same as `enable`
+- `--dry-run` -- print the planned transitions without calling the ADO API
+
+### `remove [path]`
+
+**Destructive.** Delete every matched ADO build definition. Bulk deletes (more than one match) require `--yes`; a single match on a tty prompts interactively.
+
+Options:
+
+- `--yes` -- required for bulk deletes and for any delete in a non-tty context
+- `--org`, `--project`, `--pat` -- same as `enable`
+- `--dry-run` -- print the planned deletions without calling the ADO API
+
+### `list [path]`
+
+List every matched ADO build definition along with its `queueStatus`, ADO folder, and latest-run summary.
+
+Options:
+
+- `--all` -- also include ADO definitions that do not match any local fixture
+- `--json` -- emit machine-readable JSON
+- `--org`, `--project`, `--pat` -- same as `enable`
+
+### `status [path]`
+
+Show a denser per-pipeline status block for every matched definition: name, ID, folder, `queueStatus`, latest-run summary, and a deep link. `--json` emits the same shape as `list --json`.
+
+Options:
+
+- `--json` -- emit machine-readable JSON
+- `--org`, `--project`, `--pat` -- same as `enable`
+
+### `run [path]`
+
+Queue an ADO build for every matched definition. With `--wait`, polls each queued build to completion and exits with a non-zero code if any build failed.
+
+```bash
+ado-aw run [path] [--wait] [--parameters key=value]
+```
+
+Options:
+
+- `--branch <ref>` -- source branch to queue (defaults to the definition's `defaultBranch`)
+- `--parameters <k=v>` -- ADO `templateParameters` as `key=value` pairs; repeatable and/or comma-separated. Values must not contain commas — use one `--parameters` flag per pair when values contain commas.
+- `--wait` -- poll each queued build to completion before exiting
+- `--poll-interval <secs>` -- polling interval when `--wait` is set (default: `10`)
+- `--timeout <secs>` -- maximum wait time when `--wait` is set (default: `1800`)
+- `--org`, `--project`, `--pat` -- same as `enable`
+- `--dry-run` -- print the planned queue body without calling the ADO API
+
+## Internal / pipeline runtime commands
+
+These commands are used by the compiled pipeline itself and are not typically called by users directly.
+
 ### `mcp <output_directory> <bounding_directory>`
 
-Run SafeOutputs as a stdio MCP server.
+Run SafeOutputs as a stdio MCP server (used by Stage 1).
 
 ```bash
 ado-aw mcp <output_directory> <bounding_directory> [--enabled-tools <name>]
@@ -66,7 +199,7 @@ Options:
 
 ### `mcp-http <output_directory> <bounding_directory>`
 
-Run SafeOutputs as an HTTP MCP server.
+Run SafeOutputs as an HTTP MCP server (for MCPG integration).
 
 ```bash
 ado-aw mcp-http <output_directory> <bounding_directory> [options]
@@ -74,13 +207,13 @@ ado-aw mcp-http <output_directory> <bounding_directory> [options]
 
 Options:
 
-- `--port <port>` -- port to listen on
-- `--api-key <key>` -- API key used to authenticate requests
+- `--port <port>` -- port to listen on (default: `8100`)
+- `--api-key <key>` -- API key for authentication (auto-generated if not provided)
 - `--enabled-tools <name>` -- limit the server to specific tools; repeat to allow more than one
 
 ### `execute`
 
-Execute safe outputs as the final runtime stage.
+Execute safe outputs as the Stage 3 executor.
 
 ```bash
 ado-aw execute [options]
@@ -88,32 +221,12 @@ ado-aw execute [options]
 
 Options:
 
-- `--source`, `-s <path>` -- source markdown file
-- `--safe-output-dir <path>` -- directory containing safe output records
-- `--output-dir <path>` -- directory for processed artifacts
+- `--source`, `-s <path>` -- source markdown file (reads tool config from front matter)
+- `--safe-output-dir <path>` -- directory containing safe output NDJSON (default: current directory)
+- `--output-dir <path>` -- directory for processed artifacts (e.g., agent memory)
 - `--ado-org-url <url>` -- Azure DevOps organization URL override
 - `--ado-project <name>` -- Azure DevOps project name override
 - `--dry-run` -- validate inputs without making write calls
-
-### `configure`
-
-Detect agentic pipelines in a local repository and update the `GITHUB_TOKEN` pipeline variable on their Azure DevOps build definitions. The Copilot CLI engine needs this token to authenticate with GitHub.
-
-For Azure DevOps API authentication, the command first tries the **Azure CLI** (`az` login session) and falls back to prompting for a PAT if unavailable.
-
-```bash
-ado-aw configure [options]
-```
-
-Options:
-
-- `--token <token>` -- GitHub PAT value to apply (prompted if omitted). Must be a [fine-grained PAT](/ado-aw/setup/quick-start/#github-pat-permissions) with **Copilot Requests: Read** permission.
-- `--org <url>` -- Azure DevOps organization URL
-- `--project <name>` -- Azure DevOps project name
-- `--pat <pat>` -- PAT used for Azure DevOps API authentication (fallback if Azure CLI is unavailable)
-- `--path <path>` -- repository path to inspect
-- `--dry-run` -- preview changes without applying them
-- `--definition-ids <ids>` -- comma-separated definition IDs to update
 
 ## Common examples
 
@@ -126,4 +239,16 @@ ado-aw compile
 
 # Verify a generated pipeline
 ado-aw check agent.lock.yml
+
+# Set GITHUB_TOKEN on all matched pipelines
+ado-aw secrets set GITHUB_TOKEN
+
+# Register pipelines with ADO and set their token in one step
+ado-aw enable --also-set-token
+
+# Check which pipelines are registered and their latest status
+ado-aw status
+
+# Queue all matched pipelines and wait for them to finish
+ado-aw run --wait
 ```
