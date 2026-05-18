@@ -22,6 +22,7 @@ use crate::ado::{
     AdoAuth, AdoContext, MatchedDefinition, PATH_SEGMENT, get_definition_full,
     normalize_masked_secret_variable_values, resolve_ado_context, resolve_auth,
     resolve_definitions,
+    discovery::{DiscoveryScope, resolve_definitions_via_discovery},
 };
 
 /// Description of one pipeline variable, for listing only.
@@ -174,6 +175,45 @@ pub struct SetOptions<'a> {
     pub value_stdin: bool,
     pub dry_run: bool,
     pub definition_ids: Option<&'a [u64]>,
+    /// Use Preview-driven discovery across every definition in the
+    /// project (not just those whose root YAML is a local lock file).
+    pub all_repos: bool,
+    /// Filter discovery results to consumers of one specific ado-aw
+    /// template source path (e.g. `agents/security-scan.md`). When set
+    /// alongside `all_repos=false`, scopes discovery to the current repo.
+    pub source: Option<&'a str>,
+}
+
+/// Decide between the legacy lexical resolver and Preview-driven
+/// discovery based on which flags the caller passed. Returns
+/// `Ok(Some(vec))` on success, `Ok(None)` only when the legacy path
+/// signaled "no local fixtures found; exit clean".
+async fn resolve_for_command(
+    client: &reqwest::Client,
+    ado_ctx: &AdoContext,
+    auth: &AdoAuth,
+    definition_ids: Option<&[u64]>,
+    all_repos: bool,
+    source_filter: Option<&str>,
+    repo_path: &Path,
+) -> Result<Option<Vec<MatchedDefinition>>> {
+    // Discovery code path: activated by --all-repos or --source.
+    // Explicit definition_ids always takes precedence (escape hatch).
+    if definition_ids.is_none() && (all_repos || source_filter.is_some()) {
+        let scope = if all_repos {
+            DiscoveryScope::AllRepos
+        } else {
+            DiscoveryScope::CurrentRepo
+        };
+        let matched =
+            resolve_definitions_via_discovery(client, ado_ctx, auth, scope, None, source_filter)
+                .await?;
+        return Ok(Some(matched));
+    }
+
+    // Legacy behaviour: explicit --definition-ids, or local-fixture
+    // lexical matching. Unchanged from before the discovery work.
+    resolve_definitions(client, ado_ctx, auth, definition_ids, repo_path).await
 }
 
 pub async fn run_set(opts: SetOptions<'_>) -> Result<()> {
@@ -197,11 +237,13 @@ pub async fn run_set(opts: SetOptions<'_>) -> Result<()> {
         .build()
         .context("Failed to create HTTP client")?;
 
-    let Some(matched) = resolve_definitions(
+    let Some(matched) = resolve_for_command(
         &client,
         &ado_ctx,
         &auth,
         opts.definition_ids,
+        opts.all_repos,
+        opts.source,
         &repo_path,
     )
     .await?
@@ -210,10 +252,12 @@ pub async fn run_set(opts: SetOptions<'_>) -> Result<()> {
     };
 
     if matched.is_empty() {
-        anyhow::bail!(
-            "No ADO definitions matched any local fixture. Run `ado-aw list` to \
-             diagnose."
-        );
+        let hint = if opts.all_repos || opts.source.is_some() {
+            "No ado-aw pipelines found via Preview-driven discovery. Run `ado-aw list --all-repos` to diagnose."
+        } else {
+            "No ADO definitions matched any local fixture. Run `ado-aw list` to diagnose, or try `--all-repos`."
+        };
+        anyhow::bail!("{hint}");
     }
 
     print_matched_summary(&matched);
@@ -329,6 +373,8 @@ pub struct ListOptions<'a> {
     pub path: Option<&'a Path>,
     pub json: bool,
     pub definition_ids: Option<&'a [u64]>,
+    pub all_repos: bool,
+    pub source: Option<&'a str>,
 }
 
 pub async fn run_list(opts: ListOptions<'_>) -> Result<()> {
@@ -349,11 +395,13 @@ pub async fn run_list(opts: ListOptions<'_>) -> Result<()> {
         .build()
         .context("Failed to create HTTP client")?;
 
-    let Some(matched) = resolve_definitions(
+    let Some(matched) = resolve_for_command(
         &client,
         &ado_ctx,
         &auth,
         opts.definition_ids,
+        opts.all_repos,
+        opts.source,
         &repo_path,
     )
     .await?
@@ -362,10 +410,12 @@ pub async fn run_list(opts: ListOptions<'_>) -> Result<()> {
     };
 
     if matched.is_empty() {
-        anyhow::bail!(
-            "No ADO definitions matched any local fixture. Run `ado-aw list` to \
-             diagnose."
-        );
+        let hint = if opts.all_repos || opts.source.is_some() {
+            "No ado-aw pipelines found via Preview-driven discovery."
+        } else {
+            "No ADO definitions matched any local fixture. Run `ado-aw list` to diagnose, or try `--all-repos`."
+        };
+        anyhow::bail!("{hint}");
     }
 
     let mut payload = serde_json::json!({});
@@ -414,6 +464,8 @@ pub struct DeleteOptions<'a> {
     pub path: Option<&'a Path>,
     pub dry_run: bool,
     pub definition_ids: Option<&'a [u64]>,
+    pub all_repos: bool,
+    pub source: Option<&'a str>,
 }
 
 pub async fn run_delete(opts: DeleteOptions<'_>) -> Result<()> {
@@ -436,11 +488,13 @@ pub async fn run_delete(opts: DeleteOptions<'_>) -> Result<()> {
         .build()
         .context("Failed to create HTTP client")?;
 
-    let Some(matched) = resolve_definitions(
+    let Some(matched) = resolve_for_command(
         &client,
         &ado_ctx,
         &auth,
         opts.definition_ids,
+        opts.all_repos,
+        opts.source,
         &repo_path,
     )
     .await?
@@ -449,10 +503,12 @@ pub async fn run_delete(opts: DeleteOptions<'_>) -> Result<()> {
     };
 
     if matched.is_empty() {
-        anyhow::bail!(
-            "No ADO definitions matched any local fixture. Run `ado-aw list` to \
-             diagnose."
-        );
+        let hint = if opts.all_repos || opts.source.is_some() {
+            "No ado-aw pipelines found via Preview-driven discovery."
+        } else {
+            "No ADO definitions matched any local fixture. Run `ado-aw list` to diagnose, or try `--all-repos`."
+        };
+        anyhow::bail!("{hint}");
     }
 
     print_matched_summary(&matched);
@@ -547,6 +603,8 @@ pub async fn run_set_github_token(
         value_stdin: false,
         dry_run,
         definition_ids,
+        all_repos: false,
+        source: None,
     })
     .await
 }

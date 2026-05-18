@@ -48,8 +48,7 @@ impl Compiler for StandaloneCompiler {
         let extensions = super::extensions::collect_extensions(front_matter);
 
         // Build compile context for MCPG config generation
-        let input_dir = input_path.parent().unwrap_or(std::path::Path::new("."));
-        let ctx = super::extensions::CompileContext::new(front_matter, input_dir).await?;
+        let ctx = super::extensions::CompileContext::new(front_matter, input_path).await?;
 
         // Standalone-specific values
         let allowed_domains = generate_allowed_domains(front_matter, &extensions)?;

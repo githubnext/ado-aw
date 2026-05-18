@@ -23,6 +23,20 @@ pub enum CompileTarget {
     Stage,
 }
 
+impl CompileTarget {
+    /// Canonical lowercase string for this target (matches the serde rename).
+    /// Used by the always-on ado-aw-marker extension when emitting the
+    /// machine-readable metadata blob.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Standalone => "standalone",
+            Self::OneES => "1es",
+            Self::Job => "job",
+            Self::Stage => "stage",
+        }
+    }
+}
+
 /// Pool configuration - accepts both string and object formats
 ///
 /// Examples:

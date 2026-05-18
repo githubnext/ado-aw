@@ -453,6 +453,8 @@ mod tests {
             }),
             queue_status: status.map(str::to_string),
             path: None,
+            repository: None,
+            revision: None,
         }
     }
 

@@ -63,6 +63,17 @@ enum SecretsCmd {
         /// Explicit definition IDs (skips local-fixture auto-detection).
         #[arg(long, value_delimiter = ',')]
         definition_ids: Option<Vec<u64>>,
+        /// Use Preview-driven discovery against every definition in the
+        /// project (not just those in the current repo). Implies the
+        /// discovery code path; ignores local lock files for matching.
+        #[arg(long, conflicts_with = "definition_ids")]
+        all_repos: bool,
+        /// Filter discovered definitions to consumers of one specific
+        /// ado-aw template (e.g. `agents/security-scan.md`). Activates
+        /// the discovery code path; pairs with `--all-repos` to scope
+        /// across the project.
+        #[arg(long, conflicts_with = "definition_ids")]
+        source: Option<String>,
     },
     /// List variable names + flags on every matched definition. Never prints values.
     List {
@@ -77,6 +88,14 @@ enum SecretsCmd {
         json: bool,
         #[arg(long, value_delimiter = ',')]
         definition_ids: Option<Vec<u64>>,
+        /// Use Preview-driven discovery against every definition in the
+        /// project (not just those in the current repo).
+        #[arg(long, conflicts_with = "definition_ids")]
+        all_repos: bool,
+        /// Filter discovered definitions to consumers of one specific
+        /// ado-aw template.
+        #[arg(long, conflicts_with = "definition_ids")]
+        source: Option<String>,
     },
     /// Delete a named variable from every matched definition.
     Delete {
@@ -92,6 +111,14 @@ enum SecretsCmd {
         dry_run: bool,
         #[arg(long, value_delimiter = ',')]
         definition_ids: Option<Vec<u64>>,
+        /// Use Preview-driven discovery against every definition in the
+        /// project.
+        #[arg(long, conflicts_with = "definition_ids")]
+        all_repos: bool,
+        /// Filter discovered definitions to consumers of one specific
+        /// ado-aw template.
+        #[arg(long, conflicts_with = "definition_ids")]
+        source: Option<String>,
     },
 }
 
@@ -892,6 +919,8 @@ async fn main() -> Result<()> {
                 value_stdin,
                 dry_run,
                 definition_ids,
+                all_repos,
+                source,
             } => {
                 secrets::run_set(secrets::SetOptions {
                     name: &name,
@@ -904,6 +933,8 @@ async fn main() -> Result<()> {
                     value_stdin,
                     dry_run,
                     definition_ids: definition_ids.as_deref(),
+                    all_repos,
+                    source: source.as_deref(),
                 })
                 .await?;
             }
@@ -914,6 +945,8 @@ async fn main() -> Result<()> {
                 pat,
                 json,
                 definition_ids,
+                all_repos,
+                source,
             } => {
                 secrets::run_list(secrets::ListOptions {
                     org: org.as_deref(),
@@ -922,6 +955,8 @@ async fn main() -> Result<()> {
                     path: path.as_deref(),
                     json,
                     definition_ids: definition_ids.as_deref(),
+                    all_repos,
+                    source: source.as_deref(),
                 })
                 .await?;
             }
@@ -933,6 +968,8 @@ async fn main() -> Result<()> {
                 pat,
                 dry_run,
                 definition_ids,
+                all_repos,
+                source,
             } => {
                 secrets::run_delete(secrets::DeleteOptions {
                     name: &name,
@@ -942,6 +979,8 @@ async fn main() -> Result<()> {
                     path: path.as_deref(),
                     dry_run,
                     definition_ids: definition_ids.as_deref(),
+                    all_repos,
+                    source: source.as_deref(),
                 })
                 .await?;
             }
