@@ -164,7 +164,7 @@ export function evaluatePredicate(p: PredicateSpec, facts: Map<string, unknown>)
       const unknownType = (p as { type?: unknown }).type;
       logWarning(
         `Unknown predicate type '${String(unknownType)}'; failing closed. ` +
-          "Update scripts/ado-script/dist/gate/index.js (or the bundled ado-script.zip) to a " +
+          "Update the bundled ado-script.zip (which provides gate.js) to a " +
           "release that supports this predicate.",
       );
       return false;

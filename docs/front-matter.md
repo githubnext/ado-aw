@@ -146,6 +146,7 @@ parameters:                    # optional ADO runtime parameters (surfaced in UI
     displayName: "Clear agent memory"
     type: boolean
     default: false
+inlined-imports: false         # optional opt-out from runtime prompt injection (default: false)
 ---
 
 
@@ -153,6 +154,34 @@ parameters:                    # optional ADO runtime parameters (surfaced in UI
 
 Build the project and run all tests...
 ```
+
+## Prompt rendering: `inlined-imports`
+
+By default (`inlined-imports: false`, or unset), the agent body is **not
+embedded** in the compiled YAML. Instead, the compiled pipeline emits a
+single step that invokes the bundled
+[`prompt.js`](ado-script.md) helper at runtime; it reads the agent
+`.md` from the workspace, strips the front matter, appends any
+extension supplements, runs single-pass variable substitution, and
+writes the rendered prompt for the AWF sandbox. Body-only edits to the
+`.md` therefore no longer require a `ado-aw compile` rebuild.
+
+Set `inlined-imports: true` in front matter to opt out and restore the
+legacy compile-time behaviour: the body is embedded verbatim in a
+heredoc step at compile time, and extension supplements are emitted as
+per-extension `cat >>` steps. Use this when:
+
+- The agent `.md` source path will not be resolvable inside
+  `$(Build.SourcesDirectory)` at runtime (e.g., compile happens
+  outside the trigger repo).
+- The Agent pool cannot reach `github.com` for the release-asset
+  download.
+- You need a fully self-contained compiled YAML for offline review or
+  archival.
+
+The field name matches gh-aw's equivalent knob exactly so authors
+familiar with that ecosystem can reuse the same mental model.
+
 
 ## Workspace Defaults
 

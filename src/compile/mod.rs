@@ -17,6 +17,7 @@ pub(crate) mod codemods;
 mod job;
 mod onees;
 pub(crate) mod pr_filters;
+pub(crate) mod prompt_ir;
 mod stage;
 mod standalone;
 pub mod types;

@@ -4005,7 +4005,7 @@ fn test_pr_filter_tier1_has_evaluator_gate() {
         "Should include base64-encoded spec"
     );
     assert!(
-        compiled.contains("node '/tmp/ado-aw-scripts/ado-script/dist/gate/index.js'"),
+        compiled.contains("node '/tmp/ado-aw-scripts/gate.js'"),
         "Should invoke node gate evaluator"
     );
     assert!(
@@ -4043,7 +4043,7 @@ fn test_pr_filter_tier2_has_extension_gate() {
         "Tier 2 should include base64-encoded spec"
     );
     assert!(
-        compiled.contains("node '/tmp/ado-aw-scripts/ado-script/dist/gate/index.js'"),
+        compiled.contains("node '/tmp/ado-aw-scripts/gate.js'"),
         "Tier 2 should invoke node gate evaluator"
     );
     assert!(compiled.contains("name: prGate"), "Should have prGate step");
@@ -4282,3 +4282,122 @@ fn test_example_dogfood_failure_reporter_structure() {
         "Example should target githubnext/ado-aw"
     );
 }
+
+// ─── Runtime prompt injection (`prompt.js` bundle) ──────────────────────────
+
+/// Default mode: body is NOT embedded in the compiled YAML, prompt.js is
+/// invoked at runtime, and ADO_AW_PROMPT_SPEC is delivered via env.
+#[test]
+fn test_runtime_prompt_default_emits_prompt_js_invocation() {
+    let compiled = compile_fixture("runtime-prompt-default-agent.md");
+
+    assert!(
+        compiled.contains("node /tmp/ado-aw-scripts/prompt.js"),
+        "default path must invoke prompt.js: \n{compiled}"
+    );
+    assert!(
+        compiled.contains("ADO_AW_PROMPT_SPEC:"),
+        "default path must emit ADO_AW_PROMPT_SPEC env: \n{compiled}"
+    );
+    assert!(
+        compiled.contains("Render agent prompt"),
+        "default path must label step `Render agent prompt`: \n{compiled}"
+    );
+    assert!(
+        compiled.contains("Install Node.js 20.x for prompt renderer"),
+        "default path must install Node in the Agent job: \n{compiled}"
+    );
+    assert!(
+        compiled.contains("ado-script.zip"),
+        "default path must download the scripts bundle: \n{compiled}"
+    );
+}
+
+/// Default mode: the verbatim body line from the fixture must be ABSENT.
+#[test]
+fn test_runtime_prompt_default_omits_body_from_yaml() {
+    let compiled = compile_fixture("runtime-prompt-default-agent.md");
+
+    // A line that appears only in the body of the fixture.
+    let body_marker = "must NOT appear verbatim in the compiled YAML";
+    assert!(
+        !compiled.contains(body_marker),
+        "compiled YAML must not contain the prompt body verbatim (defeats the runtime injection point): \n{compiled}"
+    );
+    // Belt-and-suspenders: the legacy heredoc marker must not appear.
+    assert!(
+        !compiled.contains("AGENT_PROMPT_EOF"),
+        "default path must not emit the heredoc marker: \n{compiled}"
+    );
+}
+
+/// Default mode: the embedded `PromptSpec` resolves `source_path`
+/// against `$(Build.SourcesDirectory)` (i.e. `{{ trigger_repo_directory }}`
+/// is substituted at compile time so prompt.js sees a fully resolved
+/// path).
+#[test]
+fn test_runtime_prompt_default_spec_resolves_source_path() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+
+    let compiled = compile_fixture("runtime-prompt-default-agent.md");
+
+    // Extract the base64 spec from the emitted env line.
+    let needle = "ADO_AW_PROMPT_SPEC: \"";
+    let start = compiled.find(needle).expect("spec env not found") + needle.len();
+    let end = compiled[start..]
+        .find('"')
+        .expect("closing quote on spec env not found")
+        + start;
+    let b64 = &compiled[start..end];
+    let json_bytes = BASE64
+        .decode(b64.as_bytes())
+        .expect("base64 spec must decode");
+    let json = String::from_utf8(json_bytes).expect("spec must be UTF-8");
+
+    assert!(
+        json.contains("\"version\":1"),
+        "spec must pin schema version 1: {json}"
+    );
+    assert!(
+        json.contains("\"source_path\":\"$(Build.SourcesDirectory)/runtime-prompt-default-agent.md\""),
+        "spec source_path must be fully resolved at compile time: {json}"
+    );
+    assert!(
+        json.contains("\"output_path\":\"/tmp/awf-tools/agent-prompt.md\""),
+        "spec output_path must point at the canonical AWF path: {json}"
+    );
+    // Supplements may include SafeOutputs (always-on extension) — assert
+    // shape rather than exact contents.
+    assert!(
+        json.contains("\"supplements\":["),
+        "spec must include supplements array: {json}"
+    );
+}
+
+/// Inlined mode (`inlined-imports: true`): body is embedded verbatim in a
+/// heredoc step and prompt.js is NOT invoked.
+#[test]
+fn test_runtime_prompt_inlined_embeds_body_in_heredoc() {
+    let compiled = compile_fixture("runtime-prompt-inlined-agent.md");
+
+    let body_marker = "MUST appear verbatim in the compiled YAML";
+    assert!(
+        compiled.contains(body_marker),
+        "inlined-imports: true must embed the body in the YAML: \n{compiled}"
+    );
+    assert!(
+        compiled.contains("AGENT_PROMPT_EOF"),
+        "inlined branch must use the heredoc marker: \n{compiled}"
+    );
+    assert!(
+        !compiled.contains("prompt.js"),
+        "inlined branch must NOT invoke prompt.js: \n{compiled}"
+    );
+    assert!(
+        !compiled.contains("ADO_AW_PROMPT_SPEC"),
+        "inlined branch must NOT emit the runtime env contract: \n{compiled}"
+    );
+}
+
+
+

@@ -3,14 +3,22 @@
 `ado-script` is the umbrella name for the TypeScript workspace at
 [`scripts/ado-script/`](../scripts/ado-script/). It produces small,
 ncc-bundled Node programs that the **compiler injects into every emitted
-pipeline** as runtime helpers. The first (and currently only) bundle is
-`gate.js`, the trigger-filter gate evaluator.
+pipeline** as runtime helpers. The current bundles are:
+
+- **`gate.js`** — the trigger-filter gate evaluator (Setup job).
+- **`prompt.js`** — the agent prompt renderer (Agent job). Reads the
+  agent `.md` from the workspace at runtime, strips its front matter,
+  runs single-pass variable substitution, and writes the rendered
+  prompt for the AWF sandbox. See *What `prompt.js` does* below.
 
 > **Internal-only.** `ado-script` is not a user-facing front-matter
 > feature. Authors never write an `ado-script:` block in their agent
 > markdown. The compiler decides when an `ado-script` bundle is needed
 > and how to wire it. See [`docs/tools.md`](tools.md) for what *is*
-> user-facing.
+> user-facing. The one user-visible knob is
+> [`inlined-imports: true`](front-matter.md) which opts back into the
+> legacy compile-time prompt-embedding behaviour and skips
+> `prompt.js`.
 
 ## What `gate.js` does
 
@@ -141,27 +149,34 @@ scripts/ado-script/
 ├── tsconfig.json                # strict; noUncheckedIndexedAccess; NodeNext
 ├── src/
 │   ├── shared/                  # Reusable across all bundles
-│   │   ├── types.gen.ts         # AUTO-GENERATED from Rust IR — do not edit
+│   │   ├── types.gen.ts         # AUTO-GENERATED from GateSpec  — do not edit
+│   │   ├── types-prompt.gen.ts  # AUTO-GENERATED from PromptSpec — do not edit
 │   │   ├── auth.ts              # WebApi factory; SDK is dynamic-imported here
 │   │   ├── ado-client.ts        # azure-devops-node-api wrapper + retry + timeout + pagination
 │   │   ├── env-facts.ts         # Pipeline-variable readers + ENV_BY_FACT + BRANCH_FACTS + ref-prefix stripping
 │   │   ├── policy.ts            # PolicyTracker state machine
 │   │   └── vso-logger.ts        # ##vso[…] emitters with property/message escaping; complete() is idempotent
-│   └── gate/                    # gate.js entry point + per-concern modules
-│       ├── index.ts             # main(): decode → preflight → bypass → facts → eval → emit
-│       ├── bypass.ts            # build-reason auto-pass
-│       ├── facts.ts             # fact acquisition (env + REST)
-│       ├── predicates.ts        # 11 predicate evaluators + validatePredicateTree + glob ReDoS hardening
-│       └── selfcancel.ts        # best-effort build cancellation
-├── test/                        # End-to-end smoke tests
-└── dist/gate/index.js           # ncc bundle output (gitignored)
+│   ├── gate/                    # gate.js entry point + per-concern modules
+│   │   ├── index.ts             # main(): decode → preflight → bypass → facts → eval → emit
+│   │   ├── bypass.ts            # build-reason auto-pass
+│   │   ├── facts.ts             # fact acquisition (env + REST)
+│   │   ├── predicates.ts        # 11 predicate evaluators + validatePredicateTree + glob ReDoS hardening
+│   │   └── selfcancel.ts        # best-effort build cancellation
+│   └── prompt/                  # prompt.js entry point + per-concern modules
+│       ├── index.ts             # main(): decode → strip FM → assemble → substitute → write
+│       ├── frontmatter.ts       # stripFrontMatter (mirrors parse_markdown_detailed in Rust)
+│       └── substitute.ts        # single-pass substitution engine (block-the-chain attack)
+├── test/                        # End-to-end smoke tests for built bundles
+└── dist/<bundle>/index.js       # ncc bundle output per bundle (gitignored)
 ```
 
 The release workflow (`.github/workflows/release.yml`) runs
-`npm ci && npm run build`, then zips `scripts/ado-script/dist/` into
-the `ado-script.zip` release asset. Pipelines download that asset at
-runtime by URL pinned to the compiler's `CARGO_PKG_VERSION`, verify
-its SHA-256 against the `checksums.txt` asset, then extract.
+`npm ci && npm run build`, then **flattens** each `dist/<bundle>/index.js`
+into a top-level `<bundle>.js` inside `ado-script.zip` (e.g. `gate.js`,
+`prompt.js`). Pipelines download that asset at runtime by URL pinned to
+the compiler's `CARGO_PKG_VERSION`, verify its SHA-256 against the
+`checksums.txt` asset, then extract directly into `/tmp/ado-aw-scripts/`,
+where each bundle is referenced by `/tmp/ado-aw-scripts/<bundle>.js`.
 
 ## Schema codegen
 
@@ -182,24 +197,40 @@ its SHA-256 against the `checksums.txt` asset, then extract.
                                        └──────────────────────────────┘
 ```
 
-`npm run codegen` runs both stages. The CI workflow
-(`.github/workflows/ado-script.yml`) regenerates the file and runs
-`git diff --exit-code` to fail on drift, on both PRs and pushes to
-`main`. If you change the IR shape in Rust, run
+`npm run codegen` runs both schemas: `codegen:gate` regenerates
+`types.gen.ts` from `GateSpec`, and `codegen:prompt` regenerates
+`types-prompt.gen.ts` from `PromptSpec`. The CI workflow
+(`.github/workflows/ado-script.yml`) regenerates **both** files and
+runs `git diff --exit-code` to fail on drift, on both PRs and pushes
+to `main`. If you change either IR shape in Rust, run
 `cd scripts/ado-script && npm run codegen` and commit the regenerated
-`types.gen.ts`.
+type files.
 
-The Rust subcommand that emits the schema is intentionally hidden:
+The Rust subcommands that emit the schemas are intentionally hidden:
 
 ```sh
-cargo run -- export-gate-schema --output schema/gate-spec.schema.json
+cargo run -- export-gate-schema   --output schema/gate-spec.schema.json
+cargo run -- export-prompt-schema --output schema/prompt-spec.schema.json
 ```
 
 ## How the gate bundle is wired into emitted pipelines
 
 `TriggerFiltersExtension`
-(`src/compile/extensions/trigger_filters.rs`) injects three Setup-job
-steps when any `filters:` block is active:
+(`src/compile/extensions/trigger_filters.rs`) declares
+`needs_scripts_bundle() == true` when any `filters:` block produces
+checks. The compiler emits the shared install pair (NodeTool@0 +
+checksum-verified `ado-script.zip` download) **once per job**:
+
+- **Setup job** — the install pair is hoisted out of the extension via
+  `compile/extensions/mod.rs::scripts_install_steps_if_needed`. The
+  trigger-filters extension then contributes only the gate step.
+- **Agent job** — the runtime prompt path (when
+  `inlined-imports: false`, the default) emits its own copy of the
+  install pair via `generate_prepare_agent_prompt`. The Setup job's
+  download is on a different ADO agent VM, so the Agent VM must
+  re-download.
+
+The wiring for trigger filters specifically:
 
 1. **`NodeTool@0`** — installs Node 20.x LTS, capped at
    `timeoutInMinutes: 5`.
@@ -208,11 +239,73 @@ steps when any `filters:` block is active:
    `CARGO_PKG_VERSION`, verifies the zip's SHA-256, then
    `unzip -o /tmp/ado-aw-scripts/ado-script.zip -d /tmp/ado-aw-scripts/`.
    Also capped at `timeoutInMinutes: 5`.
-3. **`bash: node '/tmp/ado-aw-scripts/ado-script/dist/gate/index.js'`** —
+3. **`bash: node '/tmp/ado-aw-scripts/gate.js'`** —
    runs the gate with `GATE_SPEC` and the env-var contract above.
 
-The IR-to-bash codegen that produces these steps is
+The IR-to-bash codegen that produces step 3 is
 `compile_gate_step_external` in `src/compile/filter_ir.rs`.
+
+## What `prompt.js` does
+
+`prompt.js` is a single-shot Node program that runs in the **Agent
+job**, before the agent is launched. It:
+
+1. Decodes the base64-encoded [`PromptSpec`](../src/compile/prompt_ir.rs)
+   from `ADO_AW_PROMPT_SPEC` and refuses to run on a mismatched
+   schema version.
+2. Reads the agent `.md` source from the workspace at the absolute
+   path baked into the spec (already resolved from
+   `{{ trigger_repo_directory }}` at compile time, so the spec carries
+   a literal `$(Build.SourcesDirectory)/path/to/agent.md`).
+3. Strips the YAML front-matter block (mirroring
+   `parse_markdown_detailed` in Rust).
+4. Joins the body with any `PromptSpec.supplements` contributed by
+   extensions, in the same order
+   [`generate_prepare_steps`](../src/compile/common.rs) would have
+   emitted them in `inlined-imports: true` mode (Runtimes phase first,
+   then Tools).
+5. Runs **single-pass** substitution over the joined content. The
+   single regex pass recognises four token shapes, with replacement
+   values returned verbatim and **never re-scanned**:
+
+   | Token                          | Resolved via                                    | Notes                                                |
+   |--------------------------------|-------------------------------------------------|------------------------------------------------------|
+   | `\$(VAR)` / `\$(VAR.SUB)`      | escape                                          | Backslash stripped; `$(VAR)` stays literal.          |
+   | `${{ parameters.NAME }}`       | `ADO_AW_PARAM_<NAME upper, hyphen→underscore>`  | Only parameters listed in the spec substitute.       |
+   | `$(VAR)` / `$(VAR.SUB)`        | `<NAME upper, dot→underscore>` (process env)    | Unset vars left verbatim with a warning.             |
+   | `$[ ... ]`                     | not substituted                                 | Left verbatim with one warning per render.           |
+
+   **Single-pass is load-bearing.** It blocks the
+   "queue-with-malicious-parameter-value" chaining attack: if a caller
+   queues with `target = "$(System.AccessToken)"`, the substituted
+   value lands in the rendered prompt as the literal string
+   `$(System.AccessToken)` — not the access token itself. Same applies
+   in reverse: a `$(VAR)` value containing `${{ parameters.* }}` is
+   never re-expanded.
+
+6. Writes the rendered prompt to `/tmp/awf-tools/agent-prompt.md` for
+   the AWF sandbox.
+
+Like `gate.js`, `prompt.js` is a data interpreter, not a code
+evaluator — there is no `eval`, no `Function`, no `vm`. A compromised
+compiler cannot use the spec to execute arbitrary code on the agent
+runner.
+
+### Opt-out: `inlined-imports: true`
+
+Set `inlined-imports: true` in front matter to skip `prompt.js`
+entirely and restore the legacy compile-time behaviour: the body is
+embedded verbatim in a heredoc step at compile time, and extension
+supplements are emitted as per-extension `cat >>` steps. Use this
+when:
+
+- The agent `.md` source path will not be resolvable inside
+  `$(Build.SourcesDirectory)` at runtime (e.g., compile happens
+  outside the trigger repo).
+- The Agent pool cannot reach `github.com` for the release-asset
+  download.
+- You need a fully self-contained compiled YAML for offline review or
+  archival.
 
 ## Modifying `ado-script`
 
@@ -255,10 +348,12 @@ The IR-to-bash codegen that produces these steps is
 3. Add vitest tests under `src/poll/__tests__/`.
 4. Wire from a new `CompilerExtension` (or extend an existing one)
    that downloads `ado-script.zip` (already a release asset) and
-   invokes `node /tmp/ado-aw-scripts/ado-script/dist/poll/index.js`
+   invokes `node /tmp/ado-aw-scripts/poll.js`
    as a runtime step.
-5. No release-workflow change is needed — `zip -r ado-script/dist`
-   picks up the new bundle automatically.
+5. Extend the release workflow's package step in
+   `.github/workflows/release.yml` — the flatten loop iterates over
+   every `dist/*/index.js`, so a new bundle is picked up automatically
+   as long as its build step writes to `dist/<name>/index.js`.
 
 ### Local development loop
 
@@ -269,7 +364,7 @@ npm ci                 # one-time
 npm run codegen        # regenerate types.gen.ts (compiles ado-aw first)
 npm test               # vitest unit tests
 npm run typecheck      # strict tsc --noEmit
-npm run build          # ncc-bundle to dist/gate/index.js
+npm run build          # ncc-bundle each src/<bundle>/index.ts to dist/<bundle>/index.js
 npm run test:smoke     # build + smoke test the bundle end-to-end
 ```
 

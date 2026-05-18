@@ -381,9 +381,46 @@ resources:
             - release/*
 ```
 
-## {{ agent_content }}
+## {{ prepare_agent_prompt }}
 
-Should be replaced with the markdown body (agent instructions) extracted from the source markdown file, excluding the YAML front matter. This content provides the agent with its task description and guidelines.
+Replaces the entire "Prepare agent prompt" step in the Agent job.
+
+The compiler expands this to one of two shapes depending on the
+`inlined-imports:` front-matter field:
+
+- **`inlined-imports: false` (default — runtime injection).** Expands
+  to a three-step block in the Agent job:
+  1. `NodeTool@0` installing Node 20.x (timeout-capped at 5 minutes).
+  2. `bash:` step that downloads `ado-script.zip` from the release
+     matching the compiler version, verifies SHA-256 against the
+     `checksums.txt` asset, and unzips into `/tmp/ado-aw-scripts/`.
+  3. `bash: node /tmp/ado-aw-scripts/prompt.js` step that carries the
+     base64-encoded
+     [`PromptSpec`](../src/compile/prompt_ir.rs) in
+     `ADO_AW_PROMPT_SPEC`, plus one `ADO_AW_PARAM_<NAME>:
+     ${{ parameters.<name> }}` line per declared parameter. The
+     bundle reads the agent `.md` from the workspace, strips the
+     front matter, appends extension supplements, runs **single-pass**
+     `${{ parameters.* }}` / `$(VAR)` / `\$(...)` / `$[...]`
+     substitution, and writes the rendered prompt to
+     `/tmp/awf-tools/agent-prompt.md`. The substitution pass returns
+     replacement values verbatim — values are never re-scanned, which
+     blocks the "queue-with-malicious-parameter-value" chaining
+     attack.
+- **`inlined-imports: true` (opt-out).** Expands to the legacy
+  heredoc step that writes the markdown body verbatim into
+  `/tmp/awf-tools/agent-prompt.md`. Extension supplements are emitted
+  as separate `cat >>` steps via `wrap_prompt_append` (handled in
+  `{{ prepare_steps }}`).
+
+This marker replaces the older `{{ agent_content }}` placeholder. The
+compiler resolves `{{ trigger_repo_directory }}` inside the spec's
+`source_path` **before** base64-encoding the spec, so `prompt.js` sees
+a fully resolved `$(Build.SourcesDirectory)/...` path at runtime. If
+the source path cannot be expressed relative to the trigger repo
+(e.g., compile invoked from outside the repo), the compiler bails
+with an actionable error message pointing at `inlined-imports: true`
+as the escape hatch.
 
 ## {{ mcpg_config }}
 

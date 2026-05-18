@@ -76,7 +76,7 @@ export type PredicateSpec =
 
 /**
  * Serializable gate specification — the JSON document consumed by the
- * Node gate evaluator (`scripts/ado-script/dist/gate/index.js`) at pipeline runtime.
+ * Node gate evaluator (bundled as `gate.js`) at pipeline runtime.
  */
 export interface GateSpec {
   checks: CheckSpec[];

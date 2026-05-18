@@ -692,6 +692,22 @@ pub struct FrontMatter {
     /// Runtime parameters for the pipeline (surfaced in ADO UI when queuing a run)
     #[serde(default)]
     pub parameters: Vec<PipelineParameter>,
+    /// Opt out of runtime prompt injection.
+    ///
+    /// Default (`false`) ships the agent body **out** of the compiled
+    /// pipeline YAML and lets `prompt.js` read it from the workspace at
+    /// runtime, so body-only edits to the source `.md` no longer require
+    /// recompiling the pipeline.
+    ///
+    /// Setting `inlined-imports: true` restores the legacy behaviour:
+    /// the body is embedded verbatim in a heredoc step at compile time
+    /// and extension prompt supplements are emitted as `cat >>` steps.
+    /// Use this for self-contained YAML, restricted networks where
+    /// `github.com` is unreachable from the Agent pool, or when the
+    /// source `.md` path cannot be resolved relative to the trigger
+    /// repo. Matches gh-aw's field name exactly.
+    #[serde(default, rename = "inlined-imports")]
+    pub inlined_imports: bool,
 }
 
 impl FrontMatter {
@@ -2039,6 +2055,72 @@ Body
             err.contains("bogus-knob") || err.contains("unknown field"),
             "expected error to mention unknown field, got: {}",
             err
+        );
+    }
+
+    // ─── inlined-imports field ────────────────────────────────────────────────
+
+    #[test]
+    fn test_inlined_imports_defaults_to_false() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        assert!(
+            !fm.inlined_imports,
+            "inlined-imports should default to false (runtime prompt injection is the default)"
+        );
+    }
+
+    #[test]
+    fn test_inlined_imports_accepts_true() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+inlined-imports: true
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        assert!(fm.inlined_imports);
+    }
+
+    #[test]
+    fn test_inlined_imports_accepts_false_explicit() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+inlined-imports: false
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        assert!(!fm.inlined_imports);
+    }
+
+    #[test]
+    fn test_inlined_imports_uses_hyphen_not_underscore() {
+        // Snake-case `inlined_imports:` must NOT be accepted; the canonical
+        // YAML key is `inlined-imports:` (matches gh-aw and the rest of the
+        // front-matter naming convention).
+        let content = r#"---
+name: "Test"
+description: "Test"
+inlined_imports: true
+---
+
+Body
+"#;
+        let result = super::super::common::parse_markdown(content);
+        assert!(
+            result.is_err(),
+            "underscored alias should be rejected by deny_unknown_fields"
         );
     }
 

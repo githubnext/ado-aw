@@ -57,6 +57,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   ├── gitattributes.rs # .gitattributes management for compiled pipelines
 │   │   ├── filter_ir.rs  # Filter expression IR: Fact/Predicate types, lowering, validation, codegen
 │   │   ├── pr_filters.rs # PR trigger filter generation (native ADO + gate steps)
+│   │   ├── prompt_ir.rs  # Prompt spec IR: PromptSpec/PromptSupplement, schemars schema for prompt.js
 │   │   ├── extensions/   # CompilerExtension trait and infrastructure extensions
 │   │   │   ├── mod.rs    # Trait, Extension enum, collect_extensions(), re-exports
 │   │   │   ├── github.rs # Always-on GitHub MCP extension
@@ -156,8 +157,9 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── update-ado-agentic-workflow.md # Guide for modifying an existing agentic pipeline
 │   └── debug-ado-agentic-workflow.md  # Guide for troubleshooting a failing agentic pipeline
 ├── scripts/              # Supporting scripts shipped as release artifacts
-│   ├── ado-script/       # TypeScript workspace for bundled gate.js (and future bundles)
-│   └── gate.js           # Bundled gate evaluator (built from scripts/ado-script/, see docs/ado-script.md)
+│   ├── ado-script/       # TypeScript workspace for bundled gate.js, prompt.js, and future bundles
+│   ├── gate.js           # Bundled gate evaluator (Setup-job step; see docs/ado-script.md)
+│   └── prompt.js         # Bundled prompt renderer (Agent-job step; see docs/ado-script.md)
 ├── tests/                # Integration tests and fixtures
 ├── docs/                 # Per-concept reference documentation (see index below)
 ├── Cargo.toml            # Rust dependencies
@@ -237,8 +239,9 @@ index to jump to the right page.
   rewrite on breaking-change updates, contributor workflow for
   adding codemods.
 - [`docs/ado-script.md`](docs/ado-script.md) — `ado-script` workspace
-  (`scripts/ado-script/`): the bundled TypeScript runtime helpers (today:
-  `gate.js`), schemars-driven type codegen, and the A2 design decision.
+  (`scripts/ado-script/`): the bundled TypeScript runtime helpers
+  (`gate.js` for trigger gates, `prompt.js` for runtime prompt
+  rendering), schemars-driven type codegen, and the A2 design decision.
 - [`docs/local-development.md`](docs/local-development.md) — local development
   setup notes.
 

@@ -1,15 +1,22 @@
 //! Common helper functions shared across all compile targets.
 
 use anyhow::{Context, Result};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use super::types::{CompileTarget, FrontMatter, OnConfig, PipelineParameter, PoolConfig, Repository, ReposItem};
-use super::extensions::{CompilerExtension, Extension, McpgServerConfig, McpgGatewayConfig, McpgConfig, CompileContext};
-use crate::compile::types::McpConfig;
-use crate::fuzzy_schedule;
+use super::extensions::{
+    CompileContext, CompilerExtension, Extension, McpgConfig, McpgGatewayConfig, McpgServerConfig,
+    bundle_path,
+};
+use super::prompt_ir::{PROMPT_SPEC_VERSION, PromptSpec, PromptSupplement};
+use super::types::{
+    CompileTarget, FrontMatter, OnConfig, PipelineParameter, PoolConfig, Repository, ReposItem,
+};
 use crate::allowed_hosts::{CORE_ALLOWED_HOSTS, mcp_required_hosts};
+use crate::compile::types::McpConfig;
 use crate::ecosystem_domains::{get_ecosystem_domains, is_ecosystem_identifier, is_known_ecosystem};
+use crate::fuzzy_schedule;
 use crate::validate;
 
 /// Atomically write `contents` to `path`.
@@ -2081,6 +2088,14 @@ pub fn generate_setup_job(
 
     // Collect setup_steps from ALL extensions
     let mut ext_setup_steps: Vec<String> = Vec::new();
+    // Prepend the shared scripts-bundle install pair exactly once, if any
+    // extension declared a dependency on `ado-script.zip`. This keeps each
+    // consumer (gate.js Setup step, future prompt.js Agent step, …)
+    // emitting only its own invocation — see
+    // `compile/extensions/mod.rs::scripts_install_steps_if_needed`.
+    ext_setup_steps.extend(super::extensions::scripts_install_steps_if_needed(
+        extensions,
+    ));
     for ext in extensions {
         ext_setup_steps.extend(ext.setup_steps(ctx)?);
     }
@@ -2174,9 +2189,18 @@ pub fn generate_teardown_job(
 }
 
 /// Generate prepare steps (inline), including extension steps and user-defined steps.
+///
+/// When `inlined_imports` is `true`, extension prompt supplements are emitted
+/// as per-extension `cat >>` heredoc steps via [`wrap_prompt_append`],
+/// matching the legacy embedded-prompt path. When `false` (the default),
+/// supplements are instead delivered to `prompt.js` via the [`PromptSpec`]
+/// env contract emitted by [`generate_prepare_agent_prompt`], so this
+/// function omits the `wrap_prompt_append` calls — emitting them again
+/// would cause double inclusion in the rendered prompt.
 pub fn generate_prepare_steps(
     prepare_steps: &[serde_yaml::Value],
     extensions: &[super::extensions::Extension],
+    inlined_imports: bool,
 ) -> Result<String> {
     let mut parts = Vec::new();
 
@@ -2185,7 +2209,9 @@ pub fn generate_prepare_steps(
         for step in ext.prepare_steps() {
             parts.push(step);
         }
-        if let Some(prompt) = ext.prompt_supplement() {
+        if inlined_imports
+            && let Some(prompt) = ext.prompt_supplement()
+        {
             parts.push(super::extensions::wrap_prompt_append(&prompt, ext.name())?);
         }
     }
@@ -2195,6 +2221,163 @@ pub fn generate_prepare_steps(
     }
 
     Ok(parts.join("\n\n"))
+}
+
+/// Collect prompt supplements from extensions, preserving the same order
+/// [`generate_prepare_steps`] would emit `wrap_prompt_append` calls in
+/// (Runtimes phase first, then Tools phase, stable within each phase).
+///
+/// Used by the runtime-prompt branch to populate
+/// [`PromptSpec::supplements`].
+pub fn collect_prompt_supplements(extensions: &[Extension]) -> Vec<PromptSupplement> {
+    let mut out = Vec::new();
+    for ext in extensions {
+        if let Some(content) = ext.prompt_supplement() {
+            out.push(PromptSupplement {
+                name: ext.name().to_string(),
+                content,
+            });
+        }
+    }
+    out
+}
+
+/// Path inside the AWF sandbox where the rendered agent prompt is written.
+///
+/// Both branches of [`generate_prepare_agent_prompt`] target this path so
+/// downstream engine invocations (see `compile_shared`) can reference it
+/// unconditionally.
+const AGENT_PROMPT_PATH: &str = "/tmp/awf-tools/agent-prompt.md";
+
+/// Emit the YAML step(s) that prepare `/tmp/awf-tools/agent-prompt.md`
+/// for the agent.
+///
+/// - When `inlined_imports` is `true`, embeds the prompt body inline in a
+///   heredoc step (legacy behaviour). The body is re-indented by 4 spaces
+///   so that it aligns under the bash heredoc; the leading 4-space
+///   prefix is then stripped from the first line via
+///   [`str::strip_prefix`] (not `trim_start_matches`, which would
+///   over-strip any author-supplied leading whitespace in the first
+///   prompt line).
+/// - When `inlined_imports` is `false` (default), emits a single bash
+///   step that invokes the bundled `prompt.js` helper with the
+///   [`PromptSpec`] passed via the `ADO_AW_PROMPT_SPEC` env var
+///   (base64-encoded JSON). The shared `NodeTool@0` + scripts-download
+///   pair is emitted once by the compiler in `generate_setup_job`, so
+///   this function does not duplicate them.
+pub fn generate_prepare_agent_prompt(
+    inlined_imports: bool,
+    markdown_body: &str,
+    source_path: &str,
+    supplements: Vec<PromptSupplement>,
+    parameters: &[PipelineParameter],
+) -> Result<String> {
+    if inlined_imports {
+        // Re-indent body lines by 4 spaces to align under the heredoc,
+        // then strip exactly the 4-space prefix we added to the first
+        // line. `strip_prefix` is the correct primitive here:
+        // `trim_start_matches(' ')` would also strip author-supplied
+        // leading spaces (e.g., an indented code block as the first
+        // line of the prompt), which is a silent semantic change.
+        let body_indented = markdown_body
+            .lines()
+            .map(|l| {
+                if l.is_empty() {
+                    String::new()
+                } else {
+                    format!("    {l}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let trimmed = body_indented
+            .strip_prefix("    ")
+            .unwrap_or(&body_indented);
+        return Ok(format!(
+            r#"- bash: |
+    # Write agent instructions to /tmp so it's accessible inside AWF container
+    cat > "{path}" << 'AGENT_PROMPT_EOF'
+    {trimmed}
+    AGENT_PROMPT_EOF
+
+    echo "Agent prompt:"
+    cat "{path}"
+  displayName: "Prepare agent prompt""#,
+            path = AGENT_PROMPT_PATH,
+        ));
+    }
+
+    // Runtime branch — `prompt.js` reads the source from the workspace.
+    // Reject any source path that won't be resolvable at pipeline runtime
+    // ($(Build.SourcesDirectory) is the canonical workspace root). The
+    // caller (compile_shared) resolves `{{ trigger_repo_directory }}`
+    // before we get here, so a workspace-relative path always starts
+    // with that prefix; the only failure mode is the filename-only
+    // fallback that `generate_source_path` emits for absolute inputs
+    // outside the trigger repo.
+    if !source_path.starts_with("$(Build.SourcesDirectory)") {
+        anyhow::bail!(
+            "Cannot determine workspace-relative path for the agent .md \
+             ({source_path}). `prompt.js` cannot read the source at \
+             pipeline runtime. Either compile the agent from inside the \
+             repository it triggers, or set `inlined-imports: true` in \
+             the front matter to embed the prompt at compile time."
+        );
+    }
+
+    let spec = PromptSpec {
+        version: PROMPT_SPEC_VERSION,
+        source_path: source_path.to_string(),
+        output_path: AGENT_PROMPT_PATH.to_string(),
+        supplements,
+        parameters: parameters.iter().map(|p| p.name.clone()).collect(),
+    };
+    let json = serde_json::to_string(&spec).context("serializing PromptSpec to JSON")?;
+    let b64 = BASE64.encode(json.as_bytes());
+
+    // Each declared pipeline parameter gets its own env var. We resolve
+    // `${{ parameters.<NAME> }}` at compile time so ADO performs the
+    // substitution before `prompt.js` ever runs. The env var name is
+    // uppercased and `-` is replaced with `_` to match
+    // `substitute.ts::lookupParam`.
+    let mut env_lines = Vec::new();
+    env_lines.push(format!("    ADO_AW_PROMPT_SPEC: \"{b64}\""));
+    for p in parameters {
+        let upper = p.name.to_uppercase().replace('-', "_");
+        env_lines.push(format!(
+            "    ADO_AW_PARAM_{upper}: ${{{{ parameters.{name} }}}}",
+            name = p.name,
+        ));
+    }
+    let env_block = env_lines.join("\n");
+
+    let prompt_js = bundle_path("prompt");
+    let node_step = super::extensions::node_tool_step(
+        "Install Node.js 20.x for prompt renderer",
+    );
+    let download_step = super::extensions::scripts_download_step();
+
+    // The Agent job runs on a different ADO agent than the Setup job, so
+    // even when the gate has already downloaded `ado-script.zip` in the
+    // Setup job, the Agent VM must download it again. We therefore emit
+    // the full NodeTool@0 + download + invoke triple here, regardless of
+    // whether the gate path also fetches the bundle.
+    Ok(format!(
+        r#"{node_step}
+
+{download_step}
+
+- bash: |
+    set -euo pipefail
+    mkdir -p "$(dirname "{output}")"
+    node {prompt_js}
+    echo "Agent prompt:"
+    cat "{output}"
+  displayName: "Render agent prompt"
+  env:
+{env_block}"#,
+        output = AGENT_PROMPT_PATH,
+    ))
 }
 
 /// Generate finalize steps (inline)
@@ -3004,7 +3187,8 @@ pub async fn compile_shared(
         .is_some_and(|cm| cm.is_enabled());
     let parameters = build_parameters(&front_matter.parameters, has_memory);
     let parameters_yaml = generate_parameters(&parameters)?;
-    let prepare_steps = generate_prepare_steps(&front_matter.steps, extensions)?;
+    let prepare_steps =
+        generate_prepare_steps(&front_matter.steps, extensions, front_matter.inlined_imports)?;
     let finalize_steps = generate_finalize_steps(&front_matter.post_steps);
     let pr_expression = pr_filters.and_then(|f| f.expression.as_deref());
     let pipeline_expression = pipeline_filters.and_then(|f| f.expression.as_deref());
@@ -3133,6 +3317,22 @@ pub async fn compile_shared(
             .map(|d| d.skip_integrity)
             .unwrap_or(false);
     let integrity_check = generate_integrity_check(skip_integrity);
+
+    // Resolve `{{ trigger_repo_directory }}` inside `source_path` *before*
+    // we build the `PromptSpec`: the spec is base64-encoded into a single
+    // env value, so the outer template-substitution pass cannot reach
+    // inside the base64 blob to expand markers later.
+    let prompt_supplements = collect_prompt_supplements(extensions);
+    let resolved_source_path =
+        source_path.replace("{{ trigger_repo_directory }}", &trigger_repo_directory);
+    let prepare_agent_prompt = generate_prepare_agent_prompt(
+        front_matter.inlined_imports,
+        markdown_body,
+        &resolved_source_path,
+        prompt_supplements,
+        &front_matter.parameters,
+    )?;
+
     let replacements: Vec<(&str, &str)> = vec![
         ("{{ parameters }}", &parameters_yaml),
         ("{{ compiler_version }}", compiler_version),
@@ -3171,7 +3371,12 @@ pub async fn compile_shared(
         ("{{ trigger_repo_directory }}", &trigger_repo_directory),
         ("{{ working_directory }}", &working_directory),
         ("{{ workspace }}", &working_directory),
-        ("{{ agent_content }}", markdown_body),
+        // `{{ prepare_agent_prompt }}` expands to either the legacy
+        // heredoc step (when `inlined-imports: true`) or the
+        // NodeTool@0 + scripts download + `node prompt.js` triple
+        // (default). It replaces the older `{{ agent_content }}`
+        // placeholder.
+        ("{{ prepare_agent_prompt }}", &prepare_agent_prompt),
         ("{{ acquire_ado_token }}", &acquire_read_token),
         ("{{ engine_env }}", &engine_env),
         ("{{ engine_log_dir }}", engine_log_dir),
@@ -5937,7 +6142,7 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  cache-memory: true\n---\n",
         ).unwrap();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts).unwrap();
+        let result = generate_prepare_steps(&[], &exts, true).unwrap();
         assert!(
             !result.is_empty(),
             "memory steps must be emitted when cache-memory enabled"
@@ -5952,7 +6157,7 @@ safe-outputs:
     fn test_generate_prepare_steps_without_memory_and_no_steps_has_safeoutputs_prompt() {
         let fm = minimal_front_matter();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts).unwrap();
+        let result = generate_prepare_steps(&[], &exts, true).unwrap();
         // SafeOutputs always contributes a prompt supplement
         assert!(
             result.contains("Safe Outputs"),
@@ -5966,7 +6171,7 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  cache-memory: true\n---\n",
         ).unwrap();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts).unwrap();
+        let result = generate_prepare_steps(&[], &exts, true).unwrap();
         assert!(
             result.contains("DownloadPipelineArtifact"),
             "memory steps must include the artifact download task"
@@ -5983,7 +6188,7 @@ safe-outputs:
         let exts = crate::compile::extensions::collect_extensions(&fm);
         let step: serde_yaml::Value =
             serde_yaml::from_str("bash: echo hello\ndisplayName: greet").unwrap();
-        let result = generate_prepare_steps(&[step], &exts).unwrap();
+        let result = generate_prepare_steps(&[step], &exts, true).unwrap();
         assert!(!result.is_empty(), "user steps should be present");
         assert!(
             !result.contains("agent_memory"),
@@ -5999,7 +6204,7 @@ safe-outputs:
         let exts = crate::compile::extensions::collect_extensions(&fm);
         let step: serde_yaml::Value =
             serde_yaml::from_str("bash: echo hello\ndisplayName: greet").unwrap();
-        let result = generate_prepare_steps(&[step], &exts).unwrap();
+        let result = generate_prepare_steps(&[step], &exts, true).unwrap();
         assert!(
             result.contains("agent_memory"),
             "memory reference must be present"
@@ -6016,7 +6221,7 @@ safe-outputs:
             "---\nname: test\ndescription: test\nruntimes:\n  lean: true\n---\n",
         ).unwrap();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts).unwrap();
+        let result = generate_prepare_steps(&[], &exts, true).unwrap();
         assert!(result.contains("elan-init.sh"), "should include elan installer");
         assert!(result.contains("Lean 4"), "should include Lean prompt");
         assert!(result.contains("--default-toolchain stable"), "should default to stable");
@@ -6029,7 +6234,7 @@ safe-outputs:
             "---\nname: test\ndescription: test\nruntimes:\n  lean:\n    toolchain: \"leanprover/lean4:v4.29.1\"\n---\n",
         ).unwrap();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts).unwrap();
+        let result = generate_prepare_steps(&[], &exts, true).unwrap();
         assert!(
             result.contains("--default-toolchain leanprover/lean4:v4.29.1"),
             "should use specified toolchain"
@@ -6042,10 +6247,206 @@ safe-outputs:
             "---\nname: test\ndescription: test\nruntimes:\n  lean: true\ntools:\n  cache-memory: true\n---\n",
         ).unwrap();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts).unwrap();
+        let result = generate_prepare_steps(&[], &exts, true).unwrap();
         assert!(result.contains("agent_memory"), "memory steps present");
         assert!(result.contains("elan-init.sh"), "lean install present");
         assert!(result.contains("Lean 4"), "lean prompt present");
+    }
+
+    #[test]
+    fn test_generate_prepare_steps_runtime_branch_skips_supplements() {
+        // With the default `inlined_imports = false`, prompt supplements
+        // travel via `PromptSpec.supplements` (rendered by `prompt.js`),
+        // NOT via `wrap_prompt_append` heredoc steps. The prepare-steps
+        // string must therefore NOT contain the SafeOutputs supplement
+        // text — otherwise it would be appended twice at runtime.
+        let fm = minimal_front_matter();
+        let exts = crate::compile::extensions::collect_extensions(&fm);
+        let result = generate_prepare_steps(&[], &exts, false).unwrap();
+        assert!(
+            !result.contains("Safe Outputs"),
+            "runtime branch must not emit `cat >>` supplement steps; got:\n{result}"
+        );
+    }
+
+    // ─── generate_prepare_agent_prompt ────────────────────────────────────────
+
+    #[test]
+    fn test_prepare_agent_prompt_runtime_emits_prompt_js_invocation() {
+        let yaml = generate_prepare_agent_prompt(
+            false,
+            "Hello world",
+            "$(Build.SourcesDirectory)/agents/x.md",
+            vec![],
+            &[],
+        )
+        .unwrap();
+        assert!(
+            yaml.contains("node /tmp/ado-aw-scripts/prompt.js"),
+            "runtime branch must invoke prompt.js: {yaml}"
+        );
+        assert!(
+            yaml.contains("ADO_AW_PROMPT_SPEC:"),
+            "runtime branch must emit ADO_AW_PROMPT_SPEC env: {yaml}"
+        );
+        assert!(
+            yaml.contains("NodeTool@0"),
+            "runtime branch must install Node in the Agent job: {yaml}"
+        );
+        assert!(
+            yaml.contains("ado-script.zip"),
+            "runtime branch must download the scripts bundle: {yaml}"
+        );
+        // Body must NOT appear verbatim in the runtime branch output.
+        assert!(
+            !yaml.contains("Hello world"),
+            "runtime branch must not embed body verbatim: {yaml}"
+        );
+    }
+
+    #[test]
+    fn test_prepare_agent_prompt_inlined_embeds_body_in_heredoc() {
+        let yaml = generate_prepare_agent_prompt(
+            true,
+            "Hello world",
+            "agents/x.md",
+            vec![],
+            &[],
+        )
+        .unwrap();
+        assert!(
+            yaml.contains("AGENT_PROMPT_EOF"),
+            "inlined branch must use heredoc: {yaml}"
+        );
+        assert!(
+            yaml.contains("Hello world"),
+            "inlined branch must embed body verbatim: {yaml}"
+        );
+        assert!(
+            !yaml.contains("prompt.js"),
+            "inlined branch must not invoke prompt.js: {yaml}"
+        );
+        assert!(
+            !yaml.contains("ADO_AW_PROMPT_SPEC"),
+            "inlined branch must not emit the runtime env var: {yaml}"
+        );
+    }
+
+    #[test]
+    fn test_prepare_agent_prompt_inlined_preserves_first_line_indentation() {
+        // Regression: an earlier implementation used
+        // `trim_start_matches(' ')` to strip the 4-space prefix we
+        // inject for heredoc alignment. That call swallows ALL leading
+        // spaces from the joined body, silently de-indenting any
+        // intentionally-indented opening line (e.g., a code block as
+        // the first line of the prompt). The correct primitive is
+        // `strip_prefix("    ")`.
+        let body = "    indented opening\nplain line";
+        let yaml = generate_prepare_agent_prompt(true, body, "x.md", vec![], &[]).unwrap();
+        assert!(
+            yaml.contains("indented opening"),
+            "first line must survive: {yaml}"
+        );
+        // The author-supplied 4 spaces should still appear after the
+        // 4-space prefix injection + strip. Each line gets the
+        // alignment indent, then the first 4 chars of the joined string
+        // (the alignment) are stripped, leaving the author's 4 spaces
+        // intact.
+        assert!(
+            yaml.contains("    indented opening"),
+            "author's leading spaces must survive (not over-stripped): {yaml}"
+        );
+    }
+
+    #[test]
+    fn test_prepare_agent_prompt_runtime_rejects_non_workspace_source() {
+        // Filename-only / absolute-path source can't be read at runtime.
+        let err = generate_prepare_agent_prompt(
+            false,
+            "Hello",
+            "/absolute/elsewhere.md",
+            vec![],
+            &[],
+        )
+        .unwrap_err();
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("inlined-imports: true"),
+            "error must mention the escape hatch: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_prepare_agent_prompt_runtime_emits_param_env_mappings() {
+        let params = vec![
+            crate::compile::types::PipelineParameter {
+                name: "target-branch".into(),
+                display_name: None,
+                param_type: None,
+                default: None,
+                values: None,
+            },
+            crate::compile::types::PipelineParameter {
+                name: "verbose".into(),
+                display_name: None,
+                param_type: None,
+                default: None,
+                values: None,
+            },
+        ];
+        let yaml = generate_prepare_agent_prompt(
+            false,
+            "Hello",
+            "$(Build.SourcesDirectory)/x.md",
+            vec![],
+            &params,
+        )
+        .unwrap();
+        // Hyphens become underscores and the name is upper-cased.
+        assert!(
+            yaml.contains("ADO_AW_PARAM_TARGET_BRANCH: ${{ parameters.target-branch }}"),
+            "must emit env mapping for `target-branch`: {yaml}"
+        );
+        assert!(
+            yaml.contains("ADO_AW_PARAM_VERBOSE: ${{ parameters.verbose }}"),
+            "must emit env mapping for `verbose`: {yaml}"
+        );
+    }
+
+    // ─── collect_prompt_supplements ─────────────────────────────────────────
+
+    #[test]
+    fn test_collect_prompt_supplements_safeoutputs_only() {
+        let fm = minimal_front_matter();
+        let exts = crate::compile::extensions::collect_extensions(&fm);
+        let supps = collect_prompt_supplements(&exts);
+        assert_eq!(
+            supps.len(),
+            1,
+            "minimal front matter activates SafeOutputs only"
+        );
+        assert_eq!(supps[0].name, "SafeOutputs");
+        assert!(supps[0].content.contains("Safe Outputs"));
+    }
+
+    #[test]
+    fn test_collect_prompt_supplements_runtimes_before_tools() {
+        // Lean is a runtime; SafeOutputs is a tool. Runtimes must
+        // appear first in the supplements list (matches
+        // `generate_prepare_steps` ordering policy).
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nruntimes:\n  lean: true\n---\n",
+        )
+        .unwrap();
+        let exts = crate::compile::extensions::collect_extensions(&fm);
+        let supps = collect_prompt_supplements(&exts);
+        assert!(supps.len() >= 2, "should have at least Lean + SafeOutputs");
+        let lean_idx = supps.iter().position(|s| s.name.contains("Lean")).unwrap();
+        let so_idx = supps.iter().position(|s| s.name == "SafeOutputs").unwrap();
+        assert!(
+            lean_idx < so_idx,
+            "runtime supplement must precede tool supplement: {supps:?}"
+        );
     }
 
     // ─── generate_awf_mounts ──────────────────────────────────────────────

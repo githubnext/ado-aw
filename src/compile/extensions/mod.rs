@@ -355,6 +355,19 @@ pub trait CompilerExtension {
     fn agent_env_vars(&self) -> Vec<(String, String)> {
         vec![]
     }
+
+    /// Whether this extension needs the `ado-script.zip` bundle (containing
+    /// `gate.js`, `prompt.js`, …) to be installed at pipeline runtime.
+    ///
+    /// When any active extension returns `true`, the compiler emits a
+    /// single shared install block (NodeTool@0 + checksum-verified
+    /// download + unzip) at the start of the consuming job, and each
+    /// consumer simply invokes `node /tmp/ado-aw-scripts/<bundle>.js`.
+    /// Extensions that flag this **must not** emit their own install
+    /// steps — emit only the bundle invocation in their own steps.
+    fn needs_scripts_bundle(&self) -> bool {
+        false
+    }
 }
 
 /// Mount access mode for an AWF bind mount.
@@ -568,6 +581,9 @@ macro_rules! extension_enum {
             fn agent_env_vars(&self) -> Vec<(String, String)> {
                 match self { $( $Enum::$Variant(e) => e.agent_env_vars(), )+ }
             }
+            fn needs_scripts_bundle(&self) -> bool {
+                match self { $( $Enum::$Variant(e) => e.needs_scripts_bundle(), )+ }
+            }
         }
     };
 }
@@ -746,3 +762,85 @@ pub fn wrap_prompt_append(content: &str, display_name: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests;
+
+// ────────────────────────────────────────────────────────────────────
+// Shared scripts-bundle install helpers
+// ────────────────────────────────────────────────────────────────────
+
+/// Directory the `ado-script.zip` bundle is extracted into at pipeline
+/// runtime. Top-level helpers (`gate.js`, `prompt.js`, …) live directly
+/// under this path — see `SCRIPTS_BUNDLE_DIR/<bundle>.js`.
+pub const SCRIPTS_BUNDLE_DIR: &str = "/tmp/ado-aw-scripts";
+
+/// Absolute URL prefix for release artifacts shipped with this compiler
+/// version.
+pub const RELEASE_BASE_URL: &str = "https://github.com/githubnext/ado-aw/releases/download";
+
+/// Emit the `NodeTool@0` step that installs Node 20.x LTS.
+///
+/// Pinned to LTS major; the bundled scripts only need basic Node
+/// features, so any 20.x patch is acceptable. Capped at 5 minutes so a
+/// stalled image-install does not block the entire pipeline until the
+/// job-level timeout fires.
+pub fn node_tool_step(display_name: &str) -> String {
+    format!(
+        r#"- task: NodeTool@0
+  inputs:
+    versionSpec: "20.x"
+  displayName: "{display_name}"
+  timeoutInMinutes: 5
+  condition: succeeded()"#,
+    )
+}
+
+/// Emit the `bash:` step that downloads `ado-script.zip`, verifies its
+/// SHA-256 against the `checksums.txt` release asset, then extracts it
+/// into [`SCRIPTS_BUNDLE_DIR`].
+///
+/// The compiler version is embedded as the release tag, so each
+/// compiled pipeline downloads its compiler-version-matched zip and
+/// there is no cross-version contract. The same 5-minute cap as
+/// [`node_tool_step`] bounds curl + sha256sum + unzip.
+pub fn scripts_download_step() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    format!(
+        r#"- bash: |
+    set -eo pipefail
+    mkdir -p {dir}
+    curl -fsSL "{base}/v{version}/checksums.txt" -o {dir}/checksums.txt
+    curl -fsSL "{base}/v{version}/ado-script.zip" -o {dir}/ado-script.zip
+    cd {dir} && grep "ado-script.zip" checksums.txt | sha256sum -c -
+    unzip -o {dir}/ado-script.zip -d {dir}/
+  displayName: "Download ado-aw scripts (v{version})"
+  timeoutInMinutes: 5
+  condition: succeeded()"#,
+        dir = SCRIPTS_BUNDLE_DIR,
+        base = RELEASE_BASE_URL,
+        version = version,
+    )
+}
+
+/// Build the runtime path for a bundle name (e.g. `bundle_path("gate")`
+/// → `"/tmp/ado-aw-scripts/gate.js"`).
+pub fn bundle_path(name: &str) -> String {
+    format!("{SCRIPTS_BUNDLE_DIR}/{name}.js")
+}
+
+/// Returns the two-step install bundle ([`node_tool_step`] +
+/// [`scripts_download_step`]) when any of the supplied extensions need
+/// the scripts bundle, otherwise an empty `Vec`.
+///
+/// Both consumers (gate Setup job and prompt Agent job) call this and
+/// prepend the result to their own steps. Each consuming job emits the
+/// install pair exactly once.
+pub fn scripts_install_steps_if_needed(extensions: &[Extension]) -> Vec<String> {
+    if extensions.iter().any(|e| e.needs_scripts_bundle()) {
+        vec![
+            node_tool_step("Install Node.js 20.x for ado-aw scripts"),
+            scripts_download_step(),
+        ]
+    } else {
+        vec![]
+    }
+}
+

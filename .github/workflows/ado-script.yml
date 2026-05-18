@@ -5,6 +5,7 @@ on:
     paths:
       - "scripts/ado-script/**"
       - "src/compile/filter_ir.rs"
+      - "src/compile/prompt_ir.rs"
       - "src/compile/extensions/trigger_filters.rs"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -12,13 +13,14 @@ on:
   # Also run on pushes to main so any drift that slips through (e.g. a
   # merge that bypassed PR CI, or a force-push) is caught loudly the
   # moment it lands. If this fails on main, file a fix-drift issue and
-  # land a PR to regenerate `src/shared/types.gen.ts` and re-bundle —
-  # the workflow itself does not auto-PR.
+  # land a PR to regenerate the codegen outputs and re-bundle — the
+  # workflow itself does not auto-PR.
   push:
     branches: [main]
     paths:
       - "scripts/ado-script/**"
       - "src/compile/filter_ir.rs"
+      - "src/compile/prompt_ir.rs"
       - "src/compile/extensions/trigger_filters.rs"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -54,10 +56,13 @@ jobs:
 
       - name: Verify generated TypeScript is up to date
         run: |
-          if ! git diff --exit-code -- scripts/ado-script/src/shared/types.gen.ts; then
+          if ! git diff --exit-code -- \
+              scripts/ado-script/src/shared/types.gen.ts \
+              scripts/ado-script/src/shared/types-prompt.gen.ts; then
             echo ""
-            echo "::error::types.gen.ts is out of date with the Rust IR."
+            echo "::error::Generated TypeScript types are out of date with the Rust IR."
             echo "Run 'cd scripts/ado-script && npm run codegen' and commit the result."
+            echo "This covers both types.gen.ts (gate spec) and types-prompt.gen.ts (prompt spec)."
             exit 1
           fi
 
@@ -69,11 +74,11 @@ jobs:
         working-directory: scripts/ado-script
         run: npm run typecheck
 
-      - name: Build bundle (gate.js)
+      - name: Build bundles (gate.js, prompt.js)
         working-directory: scripts/ado-script
         run: npm run build
 
-      - name: Smoke-test bundle
+      - name: Smoke-test bundles
         working-directory: scripts/ado-script
         run: npx vitest run -c vitest.config.smoke.ts
 

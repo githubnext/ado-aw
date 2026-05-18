@@ -49,6 +49,7 @@ pub trait CompilerExtension {
     fn required_awf_mounts(&self) -> Vec<AwfMount>;            // AWF Docker volume mounts
     fn awf_path_prepends(&self) -> Vec<String>;                // Directories to add to chroot PATH
     fn agent_env_vars(&self) -> Vec<(String, String)>;         // Agent env vars (e.g., PIP_INDEX_URL)
+    fn needs_scripts_bundle(&self) -> bool;                    // Declare dependency on ado-script.zip
 }
 ```
 
@@ -61,6 +62,24 @@ gates or checks that must complete before the agent is launched.
 (`ExtensionPhase::Runtime`) execute before tools (`ExtensionPhase::Tool`).
 This guarantees runtime install steps run before tool steps that may depend
 on them.
+
+**`prompt_supplement()` delivery**: By default (`inlined-imports: false`),
+supplement strings travel via [`PromptSpec.supplements`](../src/compile/prompt_ir.rs)
+and are appended and substituted by `prompt.js` at pipeline runtime — they
+do **not** appear as `cat >>` steps in `prepare_steps`. The substitution
+applies the same `${{ parameters.* }}` / `$(VAR)` rules to supplement
+content as to the body, so an extension can parameterize its supplement
+the same way an author parameterizes the body. Only when
+`inlined-imports: true` does the compiler wrap each supplement in a
+heredoc `cat >>` step via `wrap_prompt_append`.
+
+**`needs_scripts_bundle()`**: Return `true` if the extension's emitted
+steps invoke a bundled `ado-script.zip` helper (e.g., `gate.js`,
+`prompt.js`). The compiler then emits the shared NodeTool@0 +
+checksum-verified download pair **once** in the consuming job; the
+extension itself emits only its `node /tmp/ado-aw-scripts/<bundle>.js`
+invocation. See `TriggerFiltersExtension` for the reference
+implementation.
 
 To add a new runtime or tool: (1) create a directory under `src/tools/` or `src/runtimes/`, (2) implement `CompilerExtension` in `extension.rs`, (3) add a variant to the `Extension` enum and a collection check in `collect_extensions()` in `src/compile/extensions/mod.rs`.
 

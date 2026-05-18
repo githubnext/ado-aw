@@ -1,9 +1,11 @@
 //! Trigger filters compiler extension.
 //!
 //! Activates when any `filters:` configuration is present under `on.pr`
-//! or `on.pipeline`. Injects into the Setup job: (1) a Node install step,
-//! (2) a download step for the gate evaluator scripts bundle, and (3) the
-//! gate step that evaluates the filter spec via the Node evaluator.
+//! or `on.pipeline`. Injects the gate step that evaluates the filter
+//! spec via the Node evaluator into the Setup job, and declares a need
+//! for the shared `ado-script.zip` bundle so the compiler emits a
+//! single `NodeTool@0` + download/extract pair shared with any other
+//! bundle consumers (e.g., the runtime prompt renderer).
 //!
 //! All filter types (simple and complex) are evaluated by the Node
 //! evaluator — there is no inline bash codegen path.
@@ -17,11 +19,8 @@ use crate::compile::filter_ir::{
 };
 use crate::compile::types::{PipelineFilters, PrFilters};
 
-/// The path where the gate evaluator is downloaded at pipeline runtime.
-const GATE_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/dist/gate/index.js";
-
-/// Base URL for ado-aw release artifacts.
-const RELEASE_BASE_URL: &str = "https://github.com/githubnext/ado-aw/releases/download";
+/// The path where the gate evaluator is invoked at pipeline runtime.
+const GATE_EVAL_PATH: &str = "/tmp/ado-aw-scripts/gate.js";
 
 /// Compiler extension that delivers and runs the gate evaluator for
 /// complex trigger filters.
@@ -63,7 +62,6 @@ impl CompilerExtension for TriggerFiltersExtension {
     }
 
     fn setup_steps(&self, _ctx: &CompileContext) -> Result<Vec<String>> {
-        let version = env!("CARGO_PKG_VERSION");
         let mut gate_steps = Vec::new();
 
         // PR gate step
@@ -90,49 +88,26 @@ impl CompilerExtension for TriggerFiltersExtension {
             }
         }
 
-        // Only download scripts when we actually have gate steps
-        if gate_steps.is_empty() {
-            return Ok(vec![]);
-        }
+        // The NodeTool@0 + scripts-download steps are NOT emitted here:
+        // they are inserted once by the compiler when any extension
+        // returns `needs_scripts_bundle() == true`. See
+        // `super::scripts_install_steps_if_needed`.
+        Ok(gate_steps)
+    }
 
-        let mut steps = Vec::new();
-
-        // Install Node 20.x for the gate evaluator. Pin to LTS major; ado-aw
-        // only requires basic Node features, so any 20.x patch release is
-        // acceptable. NodeTool@0 is preinstalled on Microsoft-hosted and 1ES
-        // images. A 5-minute timeout caps the worst-case cold-image install
-        // — a hung Node install would otherwise block the entire pipeline
-        // until the agent-level job timeout (often hours) fires.
-        steps.push(
-            r#"- task: NodeTool@0
-  inputs:
-    versionSpec: "20.x"
-  displayName: "Install Node.js 20.x for gate evaluator"
-  timeoutInMinutes: 5
-  condition: succeeded()"#
-                .to_string(),
-        );
-
-        // Same rationale for the download/extract step: bound the
-        // curl + sha256sum + unzip pipeline so a stalled CDN response
-        // doesn't tie up the whole pipeline. The unzip command also
-        // passes `-d` explicitly as a belt-and-suspenders zip-slip
-        // hardening on top of the sha256 verification above.
-        steps.push(format!(
-            r#"- bash: |
-    set -eo pipefail
-    mkdir -p /tmp/ado-aw-scripts
-    curl -fsSL "{RELEASE_BASE_URL}/v{version}/checksums.txt" -o /tmp/ado-aw-scripts/checksums.txt
-    curl -fsSL "{RELEASE_BASE_URL}/v{version}/ado-script.zip" -o /tmp/ado-aw-scripts/ado-script.zip
-    cd /tmp/ado-aw-scripts && grep "ado-script.zip" checksums.txt | sha256sum -c -
-    unzip -o /tmp/ado-aw-scripts/ado-script.zip -d /tmp/ado-aw-scripts/
-  displayName: "Download ado-aw scripts (v{version})"
-  timeoutInMinutes: 5
-  condition: succeeded()"#,
-        ));
-        steps.extend(gate_steps);
-
-        Ok(steps)
+    fn needs_scripts_bundle(&self) -> bool {
+        // The bundle is only needed if we actually emit a gate step.
+        let has_pr = self
+            .pr_filters
+            .as_ref()
+            .map(|f| !lower_pr_filters(f).is_empty())
+            .unwrap_or(false);
+        let has_pipeline = self
+            .pipeline_filters
+            .as_ref()
+            .map(|f| !lower_pipeline_filters(f).is_empty())
+            .unwrap_or(false);
+        has_pr || has_pipeline
     }
 
     fn validate(&self, _ctx: &CompileContext) -> Result<Vec<String>> {
@@ -225,7 +200,10 @@ mod tests {
     }
 
     #[test]
-    fn test_setup_steps_includes_download_and_gate() {
+    fn test_setup_steps_emits_only_gate_step() {
+        // After dedupe, setup_steps emits ONLY the gate step. The
+        // NodeTool@0 + scripts-download pair is hoisted into a
+        // compiler-level emission gated on needs_scripts_bundle().
         let filters = PrFilters {
             labels: Some(LabelFilter {
                 any_of: vec!["run-agent".into()],
@@ -240,43 +218,38 @@ mod tests {
         let steps = ext.setup_steps(&ctx).unwrap();
         assert_eq!(
             steps.len(),
-            3,
-            "should have Node install + download + gate step"
+            1,
+            "setup_steps should only emit the gate step now that install is dedup'd: {steps:?}"
         );
         assert!(
-            steps[0].contains("NodeTool@0"),
-            "first step should install Node"
-        );
-        assert!(steps[0].contains("20.x"), "should install Node 20.x");
-        assert!(steps[1].contains("curl"), "second step should download");
-        assert!(
-            steps[1].contains("ado-script.zip"),
-            "should download ado-script.zip"
+            steps[0].contains("prGate"),
+            "step should be the PR gate"
         );
         assert!(
-            steps[1].contains("checksums.txt"),
-            "should download checksums.txt"
-        );
-        assert!(
-            steps[1].contains("sha256sum -c -"),
-            "should verify ado-script.zip checksum"
-        );
-        assert!(
-            steps[1].contains("unzip -o /tmp/ado-aw-scripts/ado-script.zip -d /tmp/ado-aw-scripts/"),
-            "should extract ado-script.zip into the explicit target dir"
-        );
-        assert!(
-            steps[0].contains("timeoutInMinutes: 5"),
-            "Node install step should bound runtime"
-        );
-        assert!(
-            steps[1].contains("timeoutInMinutes: 5"),
-            "Download step should bound runtime"
-        );
-        assert!(steps[2].contains("prGate"), "third step should be PR gate");
-        assert!(
-            steps[2].contains("node '/tmp/ado-aw-scripts/ado-script/dist/gate/index.js'"),
+            steps[0].contains("node '/tmp/ado-aw-scripts/gate.js'"),
             "gate step should reference external script"
+        );
+        // No install/download leakage from this extension after dedupe.
+        assert!(
+            !steps[0].contains("NodeTool@0"),
+            "extension should NOT emit NodeTool@0 (compiler emits it once)"
+        );
+        assert!(
+            !steps[0].contains("ado-script.zip"),
+            "extension should NOT emit the download (compiler emits it once)"
+        );
+        assert!(
+            ext.needs_scripts_bundle(),
+            "extension must declare bundle dependency so compiler emits install"
+        );
+    }
+
+    #[test]
+    fn test_needs_scripts_bundle_false_without_filters() {
+        let ext = TriggerFiltersExtension::new(None, None);
+        assert!(
+            !ext.needs_scripts_bundle(),
+            "no filters → no gate step → no bundle dependency"
         );
     }
 

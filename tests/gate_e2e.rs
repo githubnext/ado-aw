@@ -22,7 +22,7 @@ fn find_gate_spec(value: &Value) -> Option<String> {
     match value {
         Value::Mapping(mapping) => {
             let script = string_field(mapping, "bash").or_else(|| string_field(mapping, "script"));
-            if script.is_some_and(|script| script.contains("node '/tmp/ado-aw-scripts/ado-script/dist/gate/index.js'")) {
+            if script.is_some_and(|script| script.contains("node '/tmp/ado-aw-scripts/gate.js'")) {
                 let env = value_field(mapping, "env")?.as_mapping()?;
                 return string_field(env, "GATE_SPEC").map(str::to_owned);
             }
