@@ -31,8 +31,6 @@
 //! `src/compile/extensions/ado_aw_marker.rs` solves the stripping
 //! problem by embedding the marker inside a bash heredoc.
 
-#![allow(dead_code)] // Wired into CLI commands in workstream S; tests below cover it now.
-
 use anyhow::{Context, Result};
 use log::{debug, warn};
 use serde::Deserialize;
@@ -509,11 +507,22 @@ pub fn discovered_to_matched(d: &DiscoveredPipeline) -> Option<MatchedDefinition
 /// markers reference that source path are kept. Match is by exact
 /// equality on the normalized source string in the marker JSON.
 ///
-/// Definitions whose Preview call failed in a known-recoverable way
-/// (`UnknownRequiredParams` / `UnknownForbidden` / `PreviewFailed`) are
-/// counted and surfaced as a `warn!` so the operator can see that
-/// some pipelines were skipped — silently dropping them would be a
-/// nasty surprise for `secrets set --all-repos`.
+/// Skip-summary warnings are emitted differently depending on whether
+/// `source_filter` is active:
+///
+/// - **Unfiltered (`--all-repos` alone)**: every `UnknownRequiredParams`
+///   / `UnknownForbidden` / `PreviewFailed` definition is counted —
+///   under `--all-repos` the user is operating on every ado-aw pipeline
+///   in scope, so each failure represents a real skip.
+///
+/// - **Filtered (`--source <path>`)**: we can't tell whether a failed
+///   definition would have been a consumer of `path` because we never
+///   got markers out of it. Emitting per-status counts would mislead
+///   the user into thinking they're missing consumers of their
+///   template. Instead, emit a single conservative warning ("N
+///   definitions could not be inspected; consumers of `<path>` among
+///   them may have been silently skipped") so the operator is informed
+///   without being told false specifics.
 pub async fn resolve_definitions_via_discovery(
     client: &reqwest::Client,
     ctx: &AdoContext,
@@ -527,18 +536,39 @@ pub async fn resolve_definitions_via_discovery(
     let mut skipped_required_params = 0usize;
     let mut skipped_forbidden = 0usize;
     let mut skipped_failed = 0usize;
+    let mut uninspectable = 0usize;
 
     let kept: Vec<_> = discovered
         .into_iter()
         .filter(|d| {
-            match &d.status {
-                DiscoveryStatus::UnknownRequiredParams => skipped_required_params += 1,
-                DiscoveryStatus::UnknownForbidden => skipped_forbidden += 1,
-                DiscoveryStatus::PreviewFailed(_) => skipped_failed += 1,
-                _ => {}
+            let matches_filter = match source_filter {
+                Some(src) => d.markers.iter().any(|m| m.source == src),
+                None => true,
+            };
+
+            // Count toward skip totals only when the failure is
+            // relevant to the requested operation:
+            //  - unfiltered: every failure is relevant (we're operating
+            //    on every ado-aw pipeline in scope);
+            //  - filtered: we can't attribute uninspectable definitions
+            //    to a specific source, so use a single combined counter.
+            if source_filter.is_none() {
+                match &d.status {
+                    DiscoveryStatus::UnknownRequiredParams => skipped_required_params += 1,
+                    DiscoveryStatus::UnknownForbidden => skipped_forbidden += 1,
+                    DiscoveryStatus::PreviewFailed(_) => skipped_failed += 1,
+                    _ => {}
+                }
+            } else if matches!(
+                d.status,
+                DiscoveryStatus::UnknownRequiredParams
+                    | DiscoveryStatus::UnknownForbidden
+                    | DiscoveryStatus::PreviewFailed(_)
+            ) {
+                uninspectable += 1;
             }
-            let Some(src) = source_filter else { return true };
-            d.markers.iter().any(|m| m.source == src)
+
+            matches_filter
         })
         .collect();
 
@@ -559,6 +589,15 @@ pub async fn resolve_definitions_via_discovery(
         warn!(
             "Discovery skipped {skipped_failed} definition(s) whose Pipeline Preview returned \
              an unexpected error. Re-run with --debug to see details.",
+        );
+    }
+    if uninspectable > 0
+        && let Some(src) = source_filter
+    {
+        warn!(
+            "Discovery could not inspect {uninspectable} definition(s) (Preview failure, \
+             forbidden, or required-parameters); any consumers of `{src}` among them have \
+             been silently skipped. Re-run with --debug for per-definition reasons.",
         );
     }
 
