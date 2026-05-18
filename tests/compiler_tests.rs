@@ -851,10 +851,16 @@ fn test_1es_compiled_output_no_unreplaced_markers() {
     ));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
-    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let fixture_src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
         .join("1es-test-agent.md");
+
+    // Copy the fixture into the temp dir before compiling so codemods
+    // (e.g. pool_object_form) can never rewrite the source tree, and
+    // parallel test runs cannot race on the same input file.
+    let fixture_path = temp_dir.join("1es-test-agent.md");
+    fs::copy(&fixture_src, &fixture_path).expect("Failed to copy 1ES fixture into temp dir");
 
     let output_path = temp_dir.join("1es-test-agent.yml");
 
@@ -3520,10 +3526,19 @@ fn compile_fixture_with_flags(fixture_name: &str, extra_flags: &[&str]) -> Strin
     ));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
-    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let fixture_src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
         .join(fixture_name);
+
+    // Copy the fixture into the temp dir before compiling. Codemods
+    // (e.g. pool_object_form) may rewrite the source on disk; copying
+    // keeps the canonical fixture under tests/fixtures pristine and
+    // prevents parallel tests that target the same fixture from
+    // racing on the lost-update guard in compile.
+    let fixture_path = temp_dir.join(fixture_name);
+    fs::copy(&fixture_src, &fixture_path)
+        .unwrap_or_else(|e| panic!("Failed to copy fixture {fixture_name} into temp dir: {e}"));
 
     let output_path = temp_dir.join(fixture_name.replace(".md", ".yml"));
 
