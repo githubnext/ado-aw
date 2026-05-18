@@ -20,7 +20,7 @@ safe-outputs:
     allowed-files:
       - "README.md"
       - "docs/**"
-      - "site/src/content/docs/**"
+      - "site/src/content/**"
       - "site/src/components/**"
       - "site/src/styles/**"
       - "site/src/content.config.ts"
@@ -51,6 +51,22 @@ Track:
 - last area touched
 - last PR title
 - whether the last PR is still open
+
+Recommended state shape:
+
+```json
+{
+  "history": [
+    {
+      "timestamp": "2026-01-01T00:00:00Z",
+      "area": "markdown",
+      "summary": "clarified MCP setup examples in docs/reference/mcp.mdx",
+      "pr_title": "docs(site): clarify MCP setup examples",
+      "pr_open": false
+    }
+  ]
+}
+```
 
 If the last docs-writer PR is still open, stop and emit `noop` with a short waiting message.
 
