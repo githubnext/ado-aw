@@ -1,24 +1,24 @@
 //! Trigger filters compiler extension.
 //!
 //! Activates when any `filters:` configuration is present under `on.pr`
-//! or `on.pipeline`. Injects into the Setup job: (1) a download step for
-//! the gate evaluator scripts bundle and (2) the gate step that evaluates
-//! the filter spec via the Python evaluator.
+//! or `on.pipeline`. Injects into the Setup job: (1) a Node install step,
+//! (2) a download step for the gate evaluator scripts bundle, and (3) the
+//! gate step that evaluates the filter spec via the Node evaluator.
 //!
-//! All filter types (simple and complex) are evaluated by the Python
+//! All filter types (simple and complex) are evaluated by the Node
 //! evaluator — there is no inline bash codegen path.
 
 use anyhow::Result;
 
 use super::{CompileContext, CompilerExtension, ExtensionPhase};
 use crate::compile::filter_ir::{
-    compile_gate_step_external, lower_pipeline_filters, lower_pr_filters,
-    validate_pipeline_filters, validate_pr_filters, GateContext, Severity,
+    GateContext, Severity, compile_gate_step_external, lower_pipeline_filters, lower_pr_filters,
+    validate_pipeline_filters, validate_pr_filters,
 };
 use crate::compile::types::{PipelineFilters, PrFilters};
 
 /// The path where the gate evaluator is downloaded at pipeline runtime.
-const GATE_EVAL_PATH: &str = "/tmp/ado-aw-scripts/gate-eval.py";
+const GATE_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/dist/gate/index.js";
 
 /// Base URL for ado-aw release artifacts.
 const RELEASE_BASE_URL: &str = "https://github.com/githubnext/ado-aw/releases/download";
@@ -31,10 +31,7 @@ pub struct TriggerFiltersExtension {
 }
 
 impl TriggerFiltersExtension {
-    pub fn new(
-        pr_filters: Option<PrFilters>,
-        pipeline_filters: Option<PipelineFilters>,
-    ) -> Self {
+    pub fn new(pr_filters: Option<PrFilters>, pipeline_filters: Option<PipelineFilters>) -> Self {
         Self {
             pr_filters,
             pipeline_filters,
@@ -99,15 +96,38 @@ impl CompilerExtension for TriggerFiltersExtension {
         }
 
         let mut steps = Vec::new();
+
+        // Install Node 20.x for the gate evaluator. Pin to LTS major; ado-aw
+        // only requires basic Node features, so any 20.x patch release is
+        // acceptable. NodeTool@0 is preinstalled on Microsoft-hosted and 1ES
+        // images. A 5-minute timeout caps the worst-case cold-image install
+        // — a hung Node install would otherwise block the entire pipeline
+        // until the agent-level job timeout (often hours) fires.
+        steps.push(
+            r#"- task: NodeTool@0
+  inputs:
+    versionSpec: "20.x"
+  displayName: "Install Node.js 20.x for gate evaluator"
+  timeoutInMinutes: 5
+  condition: succeeded()"#
+                .to_string(),
+        );
+
+        // Same rationale for the download/extract step: bound the
+        // curl + sha256sum + unzip pipeline so a stalled CDN response
+        // doesn't tie up the whole pipeline. The unzip command also
+        // passes `-d` explicitly as a belt-and-suspenders zip-slip
+        // hardening on top of the sha256 verification above.
         steps.push(format!(
             r#"- bash: |
     set -eo pipefail
     mkdir -p /tmp/ado-aw-scripts
     curl -fsSL "{RELEASE_BASE_URL}/v{version}/checksums.txt" -o /tmp/ado-aw-scripts/checksums.txt
-    curl -fsSL "{RELEASE_BASE_URL}/v{version}/scripts.zip" -o /tmp/ado-aw-scripts/scripts.zip
-    cd /tmp/ado-aw-scripts && grep "scripts.zip" checksums.txt | sha256sum -c -
-    cd /tmp/ado-aw-scripts && unzip -jo scripts.zip gate-eval.py
+    curl -fsSL "{RELEASE_BASE_URL}/v{version}/ado-script.zip" -o /tmp/ado-aw-scripts/ado-script.zip
+    cd /tmp/ado-aw-scripts && grep "ado-script.zip" checksums.txt | sha256sum -c -
+    unzip -o /tmp/ado-aw-scripts/ado-script.zip -d /tmp/ado-aw-scripts/
   displayName: "Download ado-aw scripts (v{version})"
+  timeoutInMinutes: 5
   condition: succeeded()"#,
         ));
         steps.extend(gate_steps);
@@ -151,8 +171,8 @@ impl CompilerExtension for TriggerFiltersExtension {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compile::types::*;
     use crate::compile::extensions::CompileContext;
+    use crate::compile::types::*;
 
     #[test]
     fn test_is_needed_any_filters() {
@@ -213,35 +233,49 @@ mod tests {
             }),
             ..Default::default()
         };
-        let ext = TriggerFiltersExtension::new(
-            Some(filters),
-            None,
-        );
+        let ext = TriggerFiltersExtension::new(Some(filters), None);
         let yaml = "name: test\ndescription: test";
         let fm: FrontMatter = serde_yaml::from_str(yaml).unwrap();
         let ctx = CompileContext::for_test(&fm);
         let steps = ext.setup_steps(&ctx).unwrap();
-        assert_eq!(steps.len(), 2, "should have download + gate step");
-        assert!(steps[0].contains("curl"), "first step should download");
-        assert!(
-            steps[0].contains("scripts.zip"),
-            "should download scripts.zip"
+        assert_eq!(
+            steps.len(),
+            3,
+            "should have Node install + download + gate step"
         );
         assert!(
-            steps[0].contains("checksums.txt"),
+            steps[0].contains("NodeTool@0"),
+            "first step should install Node"
+        );
+        assert!(steps[0].contains("20.x"), "should install Node 20.x");
+        assert!(steps[1].contains("curl"), "second step should download");
+        assert!(
+            steps[1].contains("ado-script.zip"),
+            "should download ado-script.zip"
+        );
+        assert!(
+            steps[1].contains("checksums.txt"),
             "should download checksums.txt"
         );
         assert!(
-            steps[0].contains("sha256sum -c -"),
-            "should verify scripts.zip checksum"
+            steps[1].contains("sha256sum -c -"),
+            "should verify ado-script.zip checksum"
         );
         assert!(
-            steps[0].contains("unzip -jo scripts.zip gate-eval.py"),
-            "should extract only gate-eval.py"
+            steps[1].contains("unzip -o /tmp/ado-aw-scripts/ado-script.zip -d /tmp/ado-aw-scripts/"),
+            "should extract ado-script.zip into the explicit target dir"
         );
-        assert!(steps[1].contains("prGate"), "second step should be PR gate");
         assert!(
-            steps[1].contains("python3 '/tmp/ado-aw-scripts/gate-eval.py'"),
+            steps[0].contains("timeoutInMinutes: 5"),
+            "Node install step should bound runtime"
+        );
+        assert!(
+            steps[1].contains("timeoutInMinutes: 5"),
+            "Download step should bound runtime"
+        );
+        assert!(steps[2].contains("prGate"), "third step should be PR gate");
+        assert!(
+            steps[2].contains("node '/tmp/ado-aw-scripts/ado-script/dist/gate/index.js'"),
             "gate step should reference external script"
         );
     }
@@ -260,10 +294,7 @@ mod tests {
             max_changes: Some(5),
             ..Default::default()
         };
-        let ext = TriggerFiltersExtension::new(
-            Some(filters),
-            None,
-        );
+        let ext = TriggerFiltersExtension::new(Some(filters), None);
         let yaml = r#"
 name: test
 description: test agent

@@ -55,11 +55,25 @@ jobs:
           set -euo pipefail
           cp target/release/ado-aw target/release/ado-aw-linux-x64
 
-      - name: Package scripts bundle
+      - name: Set up Node.js for ado-script bundle
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: scripts/ado-script/package-lock.json
+
+      - name: Build ado-script TypeScript bundle (gate.js)
+        working-directory: scripts/ado-script
+        run: |
+          npm ci
+          npm run build
+        # `npm run build` runs codegen + ncc and outputs dist/gate/index.js.
+
+      - name: Package ado-script bundle
         run: |
           set -euo pipefail
           cd scripts
-          zip -r ../scripts.zip .
+          zip -r ../ado-script.zip ado-script/dist
 
       - name: Upload release assets
         env:
@@ -68,7 +82,7 @@ jobs:
           TAG="${{ needs.release-please.outputs.tag_name || github.event.inputs.tag_name }}"
           gh release upload "$TAG" \
             target/release/ado-aw-linux-x64 \
-            scripts.zip \
+            ado-script.zip \
             --clobber
 
   build-windows:
@@ -158,13 +172,13 @@ jobs:
           TAG="${{ needs.release-please.outputs.tag_name || github.event.inputs.tag_name }}"
           gh release download "$TAG" \
             --pattern "ado-aw-*" \
-            --pattern "scripts.zip" \
+            --pattern "ado-script.zip" \
             --repo "${{ github.repository }}"
           test -f ado-aw-linux-x64 || { echo "Missing ado-aw-linux-x64"; exit 1; }
           test -f ado-aw-windows-x64.exe || { echo "Missing ado-aw-windows-x64.exe"; exit 1; }
           test -f ado-aw-darwin-arm64 || { echo "Missing ado-aw-darwin-arm64"; exit 1; }
-          test -f scripts.zip || { echo "Missing scripts.zip"; exit 1; }
-          sha256sum ado-aw-linux-x64 ado-aw-windows-x64.exe ado-aw-darwin-arm64 scripts.zip > checksums.txt
+          test -f ado-script.zip || { echo "Missing ado-script.zip"; exit 1; }
+          sha256sum ado-aw-linux-x64 ado-aw-windows-x64.exe ado-aw-darwin-arm64 ado-script.zip > checksums.txt
 
       - name: Upload checksums
         env:
