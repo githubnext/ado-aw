@@ -111,7 +111,7 @@ Always validate the edited paths:
 
 ```bash
 # From repo root
-cd site
+cd site || exit 1
 npm ci
 npm run build
 ```
