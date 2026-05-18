@@ -157,7 +157,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   └── debug-ado-agentic-workflow.md  # Guide for troubleshooting a failing agentic pipeline
 ├── scripts/              # Supporting scripts shipped as release artifacts
 │   ├── ado-script/       # TypeScript workspace for bundled gate.js (and future bundles)
-│   └── gate.js           # Bundled gate evaluator (built from scripts/ado-script/, see docs/ado-script.md)
+│   └── gate.js           # Bundled gate evaluator (Setup-job step; see docs/ado-script.md)
 ├── tests/                # Integration tests and fixtures
 ├── docs/                 # Per-concept reference documentation (see index below)
 ├── Cargo.toml            # Rust dependencies
@@ -237,8 +237,13 @@ index to jump to the right page.
   rewrite on breaking-change updates, contributor workflow for
   adding codemods.
 - [`docs/ado-script.md`](docs/ado-script.md) — `ado-script` workspace
-  (`scripts/ado-script/`): the bundled TypeScript runtime helpers (today:
-  `gate.js`), schemars-driven type codegen, and the A2 design decision.
+  (`scripts/ado-script/`): the bundled TypeScript runtime helpers
+  (`gate.js` for trigger gates), schemars-driven type codegen, and the
+  A2 design decision. Note: agent-prompt rendering is intentionally
+  *not* an `ado-script` bundle — it is an inline bash + awk step, see
+  [`docs/template-markers.md`](docs/template-markers.md) and
+  [`docs/front-matter.md`](docs/front-matter.md) for the
+  `inlined-imports` knob.
 - [`docs/local-development.md`](docs/local-development.md) — local development
   setup notes.
 

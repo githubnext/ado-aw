@@ -257,7 +257,7 @@ gate spec.
     export ADO_SYSTEM_ACCESS_TOKEN="$SYSTEM_ACCESSTOKEN"
 
     # 4. Run the bundled Node evaluator (downloaded by the Setup job)
-    node '/tmp/ado-aw-scripts/ado-script/dist/gate/index.js'
+    node '/tmp/ado-aw-scripts/gate.js'
   name: prGate
   displayName: "Evaluate PR filters"
   env:
@@ -360,9 +360,9 @@ When Tier 2/3 filters are configured, the `TriggerFiltersExtension`
    LTS so `gate.js` has a runtime
 2. **Download step** — fetches `ado-script.zip` from the ado-aw release
    artifacts, verifies its SHA256 checksum via `checksums.txt`, then
-   extracts `gate.js` to `/tmp/ado-aw-scripts/ado-script/dist/gate/index.js`
+   extracts `gate.js` to `/tmp/ado-aw-scripts/gate.js`
 3. **Gate step** — calls `compile_gate_step_external()` to generate a step
-   that runs `node /tmp/ado-aw-scripts/ado-script/dist/gate/index.js` (no inline heredoc)
+   that runs `node /tmp/ado-aw-scripts/gate.js` (no inline heredoc)
 4. **Validation** — runs `validate_pr_filters()` / `validate_pipeline_filters()`
    during compilation via the `validate()` trait method
 
@@ -419,9 +419,10 @@ the ado-aw version:
 A `checksums.txt` file is also published at the same URL base and used to
 verify the SHA256 integrity of `ado-script.zip` before extraction.
 
-The Setup-job download step pulls the zip, extracts `ado-script/dist/gate/index.js`,
-and discards the rest. New per-use-site bundles follow the same pattern
-(per-bundle ncc entry + per-bundle download step).
+The Setup-job download step pulls the zip and extracts top-level
+`gate.js` (and any sibling helpers like `prompt.js`) into
+`/tmp/ado-aw-scripts/`. New per-use-site bundles follow the same pattern
+(per-bundle ncc entry + the shared scripts-download step).
 
 ## Adding New Filter Types
 

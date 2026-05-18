@@ -4,12 +4,16 @@ use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use super::types::{CompileTarget, FrontMatter, OnConfig, PipelineParameter, PoolConfig, Repository, ReposItem};
-use super::extensions::{CompilerExtension, Extension, McpgServerConfig, McpgGatewayConfig, McpgConfig, CompileContext};
-use crate::compile::types::McpConfig;
-use crate::fuzzy_schedule;
+use super::extensions::{
+    CompileContext, CompilerExtension, Extension, McpgConfig, McpgGatewayConfig, McpgServerConfig,
+};
+use super::types::{
+    CompileTarget, FrontMatter, OnConfig, PipelineParameter, PoolConfig, Repository, ReposItem,
+};
 use crate::allowed_hosts::{CORE_ALLOWED_HOSTS, mcp_required_hosts};
+use crate::compile::types::McpConfig;
 use crate::ecosystem_domains::{get_ecosystem_domains, is_ecosystem_identifier, is_known_ecosystem};
+use crate::fuzzy_schedule;
 use crate::validate;
 
 /// Atomically write `contents` to `path`.
@@ -2081,6 +2085,15 @@ pub fn generate_setup_job(
 
     // Collect setup_steps from ALL extensions
     let mut ext_setup_steps: Vec<String> = Vec::new();
+    // Prepend the shared scripts-bundle install pair exactly once, if any
+    // extension declared a dependency on `ado-script.zip`. This keeps
+    // each consumer (today: gate.js in the Setup job; future helpers
+    // such as a queue poller could join the same dedupe) emitting only
+    // its own invocation — see
+    // `compile/extensions/mod.rs::scripts_install_steps_if_needed`.
+    ext_setup_steps.extend(super::extensions::scripts_install_steps_if_needed(
+        extensions,
+    ));
     for ext in extensions {
         ext_setup_steps.extend(ext.setup_steps(ctx)?);
     }
@@ -2174,9 +2187,19 @@ pub fn generate_teardown_job(
 }
 
 /// Generate prepare steps (inline), including extension steps and user-defined steps.
+///
+/// When `inlined_imports` is `true`, extension prompt supplements are emitted
+/// as per-extension `cat >>` heredoc steps via [`wrap_prompt_append`],
+/// matching the legacy embedded-prompt path. When `false` (the default),
+/// supplements are instead embedded as labelled heredocs inside the
+/// runtime-rendering compose step emitted by
+/// [`generate_prepare_agent_prompt`], so this function omits the
+/// `wrap_prompt_append` calls — emitting them again would cause double
+/// inclusion in the rendered prompt.
 pub fn generate_prepare_steps(
     prepare_steps: &[serde_yaml::Value],
     extensions: &[super::extensions::Extension],
+    inlined_imports: bool,
 ) -> Result<String> {
     let mut parts = Vec::new();
 
@@ -2185,7 +2208,9 @@ pub fn generate_prepare_steps(
         for step in ext.prepare_steps() {
             parts.push(step);
         }
-        if let Some(prompt) = ext.prompt_supplement() {
+        if inlined_imports
+            && let Some(prompt) = ext.prompt_supplement()
+        {
             parts.push(super::extensions::wrap_prompt_append(&prompt, ext.name())?);
         }
     }
@@ -2195,6 +2220,363 @@ pub fn generate_prepare_steps(
     }
 
     Ok(parts.join("\n\n"))
+}
+
+/// Collect prompt supplements from extensions, preserving the same order
+/// [`generate_prepare_steps`] would emit `wrap_prompt_append` calls in
+/// (Runtimes phase first, then Tools phase, stable within each phase).
+///
+/// Used by the runtime-rendering branch of
+/// [`generate_prepare_agent_prompt`] to embed each supplement as its own
+/// labelled heredoc inside the compose step so maintainers can read the
+/// supplement text directly in the compiled YAML.
+pub fn collect_prompt_supplements(extensions: &[Extension]) -> Vec<PromptSupplement> {
+    let mut out = Vec::new();
+    for ext in extensions {
+        if let Some(content) = ext.prompt_supplement() {
+            out.push(PromptSupplement {
+                name: ext.name().to_string(),
+                content,
+            });
+        }
+    }
+    out
+}
+
+/// In-memory representation of a single extension's prompt supplement.
+///
+/// The compiler walks [`collect_prompt_supplements`] in
+/// extension-phase order and embeds each entry as its own heredoc in
+/// the compose step. The `name` is used only for the heredoc delimiter
+/// and a debug log line; it is not rendered into the prompt.
+#[derive(Debug, Clone)]
+pub struct PromptSupplement {
+    pub name: String,
+    pub content: String,
+}
+
+/// Path inside the AWF sandbox where the rendered agent prompt is written.
+///
+/// Both branches of [`generate_prepare_agent_prompt`] target this path so
+/// downstream engine invocations (see `compile_shared`) can reference it
+/// unconditionally.
+const AGENT_PROMPT_PATH: &str = "/tmp/awf-tools/agent-prompt.md";
+
+/// Sanitise an extension name into a unique heredoc delimiter token
+/// (ASCII alphanumeric + `_`, uppercased). The compose step has
+/// multiple heredocs per extension, so collisions on the delimiter
+/// would be a silent correctness bug — we validate at compile time.
+fn supplement_delimiter(name: &str) -> Result<String> {
+    anyhow::ensure!(
+        name.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_')),
+        "Extension name '{}' contains characters unsafe for embedding in a bash heredoc delimiter. \
+         Only ASCII alphanumerics, spaces, hyphens, and underscores are allowed.",
+        name
+    );
+    let sanitized: String = name
+        .to_uppercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    Ok(format!("__ADO_AW_SUPP_{sanitized}_EOF__"))
+}
+
+/// Emit the YAML step that prepares `/tmp/awf-tools/agent-prompt.md`
+/// for the agent.
+///
+/// - When `inlined_imports` is `true`, embeds the prompt body inline
+///   in a heredoc step (legacy behaviour). The body is re-indented by
+///   4 spaces so that it aligns under the bash heredoc; the leading
+///   4-space prefix is then stripped from the first line via
+///   [`str::strip_prefix`] (not `trim_start_matches`, which would
+///   over-strip any author-supplied leading whitespace in the first
+///   prompt line).
+/// - When `inlined_imports` is `false` (the default — runtime body
+///   injection), emits a single bash step that:
+///   1. `cat`s the body from `source_path` (a path inside the
+///      workspace), so body-only edits to the source `.md` do not
+///      require recompiling the pipeline.
+///   2. Appends each [`PromptSupplement`] as a labelled heredoc, in
+///      Runtimes-then-Tools extension order. Supplement content is
+///      directly visible in the lock YAML.
+///   3. Strips the agent's YAML front matter via `awk`.
+///   4. Runs a single-pass `awk` substitution program that resolves
+///      `${{ parameters.NAME }}` and `$(VAR)` against env vars and
+///      strips `\$(...)` escapes — replacement values are looked up
+///      in `ENVIRON` and inserted verbatim, never re-scanned. This
+///      blocks the "queue-with-malicious-parameter-value" chaining
+///      attack (a parameter value containing `$(...)` does not get
+///      expanded against secrets in a follow-up pass).
+///
+/// The runtime branch deliberately avoids a Node bundle: the
+/// composition is pure bash + awk, both present on every ADO image,
+/// and the entire step is human-readable in the compiled YAML.
+pub fn generate_prepare_agent_prompt(
+    inlined_imports: bool,
+    markdown_body: &str,
+    source_path: &str,
+    supplements: Vec<PromptSupplement>,
+    parameters: &[PipelineParameter],
+) -> Result<String> {
+    if inlined_imports {
+        // Re-indent body lines by 4 spaces to align under the heredoc,
+        // then strip exactly the 4-space prefix we added to the first
+        // line. `strip_prefix` is the correct primitive here:
+        // `trim_start_matches(' ')` would also strip author-supplied
+        // leading spaces (e.g., an indented code block as the first
+        // line of the prompt), which is a silent semantic change.
+        let body_indented = markdown_body
+            .lines()
+            .map(|l| {
+                if l.is_empty() {
+                    String::new()
+                } else {
+                    format!("    {l}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let trimmed = body_indented
+            .strip_prefix("    ")
+            .unwrap_or(&body_indented);
+        return Ok(format!(
+            r#"- bash: |
+    # Write agent instructions to /tmp so it's accessible inside AWF container
+    cat > "{path}" << 'AGENT_PROMPT_EOF'
+    {trimmed}
+    AGENT_PROMPT_EOF
+
+    echo "Agent prompt:"
+    cat "{path}"
+  displayName: "Prepare agent prompt""#,
+            path = AGENT_PROMPT_PATH,
+        ));
+    }
+
+    // Runtime branch — body is read from the workspace at pipeline
+    // runtime. Reject any source path that won't be resolvable.
+    // `compile_shared` resolves `{{ trigger_repo_directory }}` before
+    // calling us, so a workspace-relative path always starts with
+    // $(Build.SourcesDirectory); a filename-only fallback (from an
+    // absolute input outside the trigger repo) is rejected.
+    if !source_path.starts_with("$(Build.SourcesDirectory)") {
+        anyhow::bail!(
+            "Cannot determine workspace-relative path for the agent .md \
+             ({source_path}). The pipeline cannot read the source at \
+             runtime. Either compile the agent from inside the repository \
+             it triggers, or set `inlined-imports: true` in the front \
+             matter to embed the prompt at compile time."
+        );
+    }
+
+    // Build per-supplement heredoc blocks. Each block has its own
+    // sanitised delimiter so multiple supplements cannot collide.
+    // Every content line is prefixed with the same 4-space base indent
+    // as the surrounding bash step so that, after the template's
+    // `replace_with_indent` adds the placeholder column indent, every
+    // line in the YAML block scalar shares the same prefix — YAML
+    // strips that prefix uniformly and bash sees the heredoc body
+    // (and its close delimiter) at column 0.
+    let mut supplement_blocks = String::new();
+    for supp in &supplements {
+        let delim = supplement_delimiter(&supp.name)?;
+        let content = supp.content.trim_end();
+        supplement_blocks.push_str("    printf '\\n\\n'\n");
+        supplement_blocks.push_str("    cat << '");
+        supplement_blocks.push_str(&delim);
+        supplement_blocks.push_str("'\n");
+        for line in content.lines() {
+            if line.is_empty() {
+                supplement_blocks.push('\n');
+            } else {
+                supplement_blocks.push_str("    ");
+                supplement_blocks.push_str(line);
+                supplement_blocks.push('\n');
+            }
+        }
+        supplement_blocks.push_str("    ");
+        supplement_blocks.push_str(&delim);
+        supplement_blocks.push('\n');
+    }
+
+    // Build the awk single-pass substitution program. We walk the
+    // body+supplements text once, looking for any of four token
+    // shapes at each position:
+    //
+    //   1. \$(...)              — escape (strip backslash, leave $(...) literal)
+    //   2. ${{ parameters.NAME }} — replace with $ADO_AW_PARAM_<UPPER_HYPHEN_TO_UNDERSCORE>
+    //   3. $(VAR) / $(VAR.SUB)   — replace with env <UPPER_DOT_TO_UNDERSCORE>
+    //   4. $[ ... ]              — leave verbatim, warn once
+    //
+    // Replacement values come from ENVIRON, never from string
+    // interpolation, so the awk program does NOT need to know the
+    // values at compile time. The list of *declared* parameter names
+    // IS baked in so we can distinguish "unknown parameter" from
+    // "declared but unset env" — see the `params` BEGIN assignment.
+    //
+    // The walk uses substring slicing rather than gsub() so the
+    // replacement text we return is never re-scanned for further
+    // matches. This is the single-pass property: a parameter value
+    // containing `$(...)` stays literal in the rendered prompt.
+    let parameter_whitelist: String = parameters
+        .iter()
+        .map(|p| format!("|{}|", p.name))
+        .collect();
+
+    let awk_program_template = r##"BEGIN {
+  params = "__PARAMS_WHITELIST__"
+}
+{
+  line = $0
+  out = ""
+  while (length(line) > 0) {
+    esc_i  = match(line, /\\\$\([^()]*\)/);                                             esc_len  = RLENGTH
+    par_i  = match(line, /\$\{\{[ \t]*parameters\.[A-Za-z_][A-Za-z0-9_-]*[ \t]*\}\}/);  par_len  = RLENGTH
+    var_i  = match(line, /\$\([A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?\)/);    var_len  = RLENGTH
+    expr_i = match(line, /\$\[[^\]]*\]/);                                               expr_len = RLENGTH
+
+    first = 0; kind = ""
+    if (esc_i  > 0)                                       { first = esc_i;  kind = "esc"  }
+    if (par_i  > 0 && (first == 0 || par_i  < first))     { first = par_i;  kind = "par"  }
+    if (var_i  > 0 && (first == 0 || var_i  < first))     { first = var_i;  kind = "var"  }
+    if (expr_i > 0 && (first == 0 || expr_i < first))     { first = expr_i; kind = "expr" }
+
+    if (first == 0) { out = out line; line = ""; break }
+
+    out = out substr(line, 1, first - 1)
+
+    if (kind == "esc") {
+      out = out substr(line, first + 1, esc_len - 1)
+      line = substr(line, first + esc_len)
+    } else if (kind == "par") {
+      tok = substr(line, first, par_len)
+      match(tok, /parameters\.[A-Za-z_][A-Za-z0-9_-]*/)
+      ref = substr(tok, RSTART + 11, RLENGTH - 11)
+      if (index(params, "|" ref "|") == 0) {
+        print "#" "#vso[task.logissue type=warning]Unknown parameter \x27" ref "\x27; left as-is." > "/dev/stderr"
+        out = out tok
+      } else {
+        envk = "ADO_AW_PARAM_" toupper(ref)
+        gsub(/-/, "_", envk)
+        if (envk in ENVIRON) {
+          out = out ENVIRON[envk]
+        } else {
+          print "#" "#vso[task.logissue type=warning]Parameter \x27" ref "\x27 is declared but env var \x27" envk "\x27 is unset; left as-is." > "/dev/stderr"
+          out = out tok
+        }
+      }
+      line = substr(line, first + par_len)
+    } else if (kind == "var") {
+      tok = substr(line, first, var_len)
+      ref = substr(tok, 3, var_len - 3)
+      envk = toupper(ref)
+      gsub(/\./, "_", envk)
+      if (envk in ENVIRON) {
+        out = out ENVIRON[envk]
+      } else {
+        print "#" "#vso[task.logissue type=warning]ADO variable \x27$(" ref ")\x27 is unset (env var \x27" envk "\x27); left as-is. Secrets are not auto-exposed." > "/dev/stderr"
+        out = out tok
+      }
+      line = substr(line, first + var_len)
+    } else {
+      tok = substr(line, first, expr_len)
+      print "#" "#vso[task.logissue type=warning]Runtime expression \x27" tok "\x27 is not substituted; left as-is." > "/dev/stderr"
+      out = out tok
+      line = substr(line, first + expr_len)
+    }
+  }
+  print out
+}"##;
+
+    let awk_program = awk_program_template.replace("__PARAMS_WHITELIST__", &parameter_whitelist);
+
+    // Re-indent the awk program by 6 spaces so it aligns under the
+    // surrounding YAML key indentation. The first line gets the same
+    // prefix manually below.
+    let awk_indented = awk_program
+        .lines()
+        .map(|l| if l.is_empty() { String::new() } else { format!("      {l}") })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Parameter env mappings expose declared params to the awk script
+    // via ENVIRON. ADO substitutes `${{ parameters.<name> }}` at queue
+    // time, so the value reaches the env without an extra hop.
+    let mut env_lines: Vec<String> = Vec::new();
+    for p in parameters {
+        let upper = p.name.to_uppercase().replace('-', "_");
+        env_lines.push(format!(
+            "    ADO_AW_PARAM_{upper}: ${{{{ parameters.{name} }}}}",
+            name = p.name,
+        ));
+    }
+    let env_block = if env_lines.is_empty() {
+        String::new()
+    } else {
+        format!("\n  env:\n{}", env_lines.join("\n"))
+    };
+
+    // Assemble the compose step via string concatenation rather than
+    // a format! macro: the bash + awk script contains many `{` and
+    // `}` characters that would otherwise need to be doubled, and a
+    // doubled-brace soup is exactly the kind of opaque thing this v3
+    // design is supposed to avoid.
+    let mut step = String::new();
+    step.push_str("- bash: |\n");
+    step.push_str("    set -euo pipefail\n");
+    step.push_str("    OUT=\"");
+    step.push_str(AGENT_PROMPT_PATH);
+    step.push_str("\"\n");
+    step.push_str("    mkdir -p \"$(dirname \"$OUT\")\"\n\n");
+
+    step.push_str("    # 1. Compose: body from the workspace + extension supplements.\n");
+    step.push_str("    # The body lives in the trigger repo and is read fresh on every\n");
+    step.push_str("    # pipeline run, so prose-only edits do not require recompiling\n");
+    step.push_str("    # this pipeline.\n");
+    step.push_str("    {\n");
+    step.push_str("      cat \"");
+    step.push_str(source_path);
+    step.push_str("\"\n");
+    // Each supplement_blocks entry contributes its own `printf` and
+    // `cat << 'EOF' ... EOF` lines at the same 4-space base indent as
+    // the surrounding step so YAML's block-scalar indent stripping
+    // keeps the heredoc body intact and the close delimiter at
+    // column 0 once bash sees it.
+    step.push_str(&supplement_blocks);
+    step.push_str("    } > \"$OUT.raw\"\n\n");
+
+    step.push_str("    # 2. Strip the agent's YAML front matter (everything between the\n");
+    step.push_str("    # first two `---` lines on their own at the start of the file).\n");
+    step.push_str("    awk 'BEGIN { skip = 0 }\n");
+    step.push_str("         NR == 1 && /^---$/ { skip = 1; next }\n");
+    step.push_str("         skip && /^---$/    { skip = 0; next }\n");
+    step.push_str("         !skip              { print }' \"$OUT.raw\" > \"$OUT.body\"\n\n");
+
+    step.push_str("    # 3. Single-pass substitution: `${{ parameters.NAME }}`, `$(VAR)`,\n");
+    step.push_str("    # `\\$(...)` escape, `$[...]` warning. Replacement values come\n");
+    step.push_str("    # from the env (ENVIRON in awk), so this step does not bake them\n");
+    step.push_str("    # into the YAML. Replacement text is never re-scanned, so a\n");
+    step.push_str("    # parameter value containing `$(...)` stays literal in the output.\n");
+    step.push_str("    awk '");
+    // The leading 6-space indent on the first line:
+    step.push_str(awk_indented.trim_start());
+    step.push_str("' \"$OUT.body\" > \"$OUT\"\n\n");
+
+    step.push_str("    # 4. Fail closed on empty rendered output — front-matter-only\n");
+    step.push_str("    # `.md` files are not valid agents.\n");
+    step.push_str("    if [ ! -s \"$OUT\" ]; then\n");
+    step.push_str("      echo \"##vso[task.logissue type=error]Rendered prompt is empty; refusing to launch agent.\"\n");
+    step.push_str("      exit 1\n");
+    step.push_str("    fi\n\n");
+
+    step.push_str("    rm -f \"$OUT.raw\" \"$OUT.body\"\n\n");
+    step.push_str("    echo \"Agent prompt:\"\n");
+    step.push_str("    cat \"$OUT\"\n");
+    step.push_str("  displayName: \"Render agent prompt\"");
+    step.push_str(&env_block);
+
+    Ok(step)
 }
 
 /// Generate finalize steps (inline)
@@ -3004,7 +3386,8 @@ pub async fn compile_shared(
         .is_some_and(|cm| cm.is_enabled());
     let parameters = build_parameters(&front_matter.parameters, has_memory);
     let parameters_yaml = generate_parameters(&parameters)?;
-    let prepare_steps = generate_prepare_steps(&front_matter.steps, extensions)?;
+    let prepare_steps =
+        generate_prepare_steps(&front_matter.steps, extensions, front_matter.inlined_imports)?;
     let finalize_steps = generate_finalize_steps(&front_matter.post_steps);
     let pr_expression = pr_filters.and_then(|f| f.expression.as_deref());
     let pipeline_expression = pipeline_filters.and_then(|f| f.expression.as_deref());
@@ -3133,6 +3516,23 @@ pub async fn compile_shared(
             .map(|d| d.skip_integrity)
             .unwrap_or(false);
     let integrity_check = generate_integrity_check(skip_integrity);
+
+    // Resolve `{{ trigger_repo_directory }}` inside `source_path` *before*
+    // we hand it to the compose-step generator: the runtime branch needs
+    // a literal `$(Build.SourcesDirectory)/...` path it can `cat` at
+    // runtime, and that path is what the AWF-aware integrity check will
+    // verify too.
+    let prompt_supplements = collect_prompt_supplements(extensions);
+    let resolved_source_path =
+        source_path.replace("{{ trigger_repo_directory }}", &trigger_repo_directory);
+    let prepare_agent_prompt = generate_prepare_agent_prompt(
+        front_matter.inlined_imports,
+        markdown_body,
+        &resolved_source_path,
+        prompt_supplements,
+        &front_matter.parameters,
+    )?;
+
     let replacements: Vec<(&str, &str)> = vec![
         ("{{ parameters }}", &parameters_yaml),
         ("{{ compiler_version }}", compiler_version),
@@ -3171,7 +3571,14 @@ pub async fn compile_shared(
         ("{{ trigger_repo_directory }}", &trigger_repo_directory),
         ("{{ working_directory }}", &working_directory),
         ("{{ workspace }}", &working_directory),
-        ("{{ agent_content }}", markdown_body),
+        // `{{ prepare_agent_prompt }}` expands to either the legacy
+        // heredoc step (when `inlined-imports: true`) or a single
+        // gh-aw-style bash step that `cat`s the body from the workspace,
+        // appends extension supplements as labelled heredocs, strips
+        // front matter, and runs a single-pass awk substitution
+        // (default). It replaces the older `{{ agent_content }}`
+        // placeholder.
+        ("{{ prepare_agent_prompt }}", &prepare_agent_prompt),
         ("{{ acquire_ado_token }}", &acquire_read_token),
         ("{{ engine_env }}", &engine_env),
         ("{{ engine_log_dir }}", engine_log_dir),
@@ -5937,7 +6344,7 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  cache-memory: true\n---\n",
         ).unwrap();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts).unwrap();
+        let result = generate_prepare_steps(&[], &exts, true).unwrap();
         assert!(
             !result.is_empty(),
             "memory steps must be emitted when cache-memory enabled"
@@ -5952,7 +6359,7 @@ safe-outputs:
     fn test_generate_prepare_steps_without_memory_and_no_steps_has_safeoutputs_prompt() {
         let fm = minimal_front_matter();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts).unwrap();
+        let result = generate_prepare_steps(&[], &exts, true).unwrap();
         // SafeOutputs always contributes a prompt supplement
         assert!(
             result.contains("Safe Outputs"),
@@ -5966,7 +6373,7 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  cache-memory: true\n---\n",
         ).unwrap();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts).unwrap();
+        let result = generate_prepare_steps(&[], &exts, true).unwrap();
         assert!(
             result.contains("DownloadPipelineArtifact"),
             "memory steps must include the artifact download task"
@@ -5983,7 +6390,7 @@ safe-outputs:
         let exts = crate::compile::extensions::collect_extensions(&fm);
         let step: serde_yaml::Value =
             serde_yaml::from_str("bash: echo hello\ndisplayName: greet").unwrap();
-        let result = generate_prepare_steps(&[step], &exts).unwrap();
+        let result = generate_prepare_steps(&[step], &exts, true).unwrap();
         assert!(!result.is_empty(), "user steps should be present");
         assert!(
             !result.contains("agent_memory"),
@@ -5999,7 +6406,7 @@ safe-outputs:
         let exts = crate::compile::extensions::collect_extensions(&fm);
         let step: serde_yaml::Value =
             serde_yaml::from_str("bash: echo hello\ndisplayName: greet").unwrap();
-        let result = generate_prepare_steps(&[step], &exts).unwrap();
+        let result = generate_prepare_steps(&[step], &exts, true).unwrap();
         assert!(
             result.contains("agent_memory"),
             "memory reference must be present"
@@ -6016,7 +6423,7 @@ safe-outputs:
             "---\nname: test\ndescription: test\nruntimes:\n  lean: true\n---\n",
         ).unwrap();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts).unwrap();
+        let result = generate_prepare_steps(&[], &exts, true).unwrap();
         assert!(result.contains("elan-init.sh"), "should include elan installer");
         assert!(result.contains("Lean 4"), "should include Lean prompt");
         assert!(result.contains("--default-toolchain stable"), "should default to stable");
@@ -6029,7 +6436,7 @@ safe-outputs:
             "---\nname: test\ndescription: test\nruntimes:\n  lean:\n    toolchain: \"leanprover/lean4:v4.29.1\"\n---\n",
         ).unwrap();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts).unwrap();
+        let result = generate_prepare_steps(&[], &exts, true).unwrap();
         assert!(
             result.contains("--default-toolchain leanprover/lean4:v4.29.1"),
             "should use specified toolchain"
@@ -6042,10 +6449,258 @@ safe-outputs:
             "---\nname: test\ndescription: test\nruntimes:\n  lean: true\ntools:\n  cache-memory: true\n---\n",
         ).unwrap();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts).unwrap();
+        let result = generate_prepare_steps(&[], &exts, true).unwrap();
         assert!(result.contains("agent_memory"), "memory steps present");
         assert!(result.contains("elan-init.sh"), "lean install present");
         assert!(result.contains("Lean 4"), "lean prompt present");
+    }
+
+    #[test]
+    fn test_generate_prepare_steps_runtime_branch_skips_supplements() {
+        // With the default `inlined_imports = false`, prompt supplements
+        // travel via labelled heredocs inside the compose step, NOT via
+        // `wrap_prompt_append` `cat >>` steps. The prepare-steps string
+        // (which precedes the compose step) must therefore NOT contain
+        // the SafeOutputs supplement text — otherwise it would be
+        // appended twice at runtime.
+        let fm = minimal_front_matter();
+        let exts = crate::compile::extensions::collect_extensions(&fm);
+        let result = generate_prepare_steps(&[], &exts, false).unwrap();
+        assert!(
+            !result.contains("Safe Outputs"),
+            "runtime branch must not emit `cat >>` supplement steps; got:\n{result}"
+        );
+    }
+
+    // ─── generate_prepare_agent_prompt ────────────────────────────────────────
+
+    #[test]
+    fn test_prepare_agent_prompt_runtime_cats_body_from_workspace() {
+        let yaml = generate_prepare_agent_prompt(
+            false,
+            "Hello world",
+            "$(Build.SourcesDirectory)/agents/x.md",
+            vec![],
+            &[],
+        )
+        .unwrap();
+        assert!(
+            yaml.contains(r#"cat "$(Build.SourcesDirectory)/agents/x.md""#),
+            "runtime branch must cat the body from the workspace: {yaml}"
+        );
+        assert!(
+            yaml.contains("Render agent prompt"),
+            "runtime branch must label step `Render agent prompt`: {yaml}"
+        );
+        // The body content is NOT inlined into the YAML — it stays on disk.
+        assert!(
+            !yaml.contains("Hello world"),
+            "runtime branch must not embed body verbatim: {yaml}"
+        );
+        // Single bash step, no Node, no scripts.zip download.
+        assert!(
+            !yaml.contains("NodeTool@0"),
+            "runtime branch must NOT install Node for prompt rendering: {yaml}"
+        );
+        assert!(
+            !yaml.contains("ado-script.zip"),
+            "runtime branch must NOT download the scripts bundle: {yaml}"
+        );
+        assert!(
+            !yaml.contains("prompt.js"),
+            "runtime branch must NOT invoke a JS bundle: {yaml}"
+        );
+    }
+
+    #[test]
+    fn test_prepare_agent_prompt_runtime_emits_awk_substitution() {
+        let yaml = generate_prepare_agent_prompt(
+            false,
+            "Hello",
+            "$(Build.SourcesDirectory)/x.md",
+            vec![],
+            &[],
+        )
+        .unwrap();
+        // Front-matter strip via awk.
+        assert!(
+            yaml.contains("Strip the agent's YAML front matter"),
+            "runtime branch must include the awk front-matter strip step: {yaml}"
+        );
+        assert!(
+            yaml.contains("NR == 1 && /^---$/"),
+            "runtime branch must use the awk front-matter sentinel: {yaml}"
+        );
+        // Substitution via awk single-pass program.
+        assert!(
+            yaml.contains("Single-pass substitution"),
+            "runtime branch must include the substitution comment: {yaml}"
+        );
+        assert!(
+            yaml.contains("ENVIRON"),
+            "runtime branch must read replacement values from ENVIRON: {yaml}"
+        );
+    }
+
+    #[test]
+    fn test_prepare_agent_prompt_inlined_embeds_body_in_heredoc() {
+        let yaml = generate_prepare_agent_prompt(
+            true,
+            "Hello world",
+            "agents/x.md",
+            vec![],
+            &[],
+        )
+        .unwrap();
+        assert!(
+            yaml.contains("AGENT_PROMPT_EOF"),
+            "inlined branch must use heredoc: {yaml}"
+        );
+        assert!(
+            yaml.contains("Hello world"),
+            "inlined branch must embed body verbatim: {yaml}"
+        );
+        assert!(
+            !yaml.contains("Render agent prompt"),
+            "inlined branch must not use the runtime step name: {yaml}"
+        );
+    }
+
+    #[test]
+    fn test_prepare_agent_prompt_inlined_preserves_first_line_indentation() {
+        // Regression: an earlier implementation used
+        // `trim_start_matches(' ')` to strip the 4-space prefix we
+        // inject for heredoc alignment. That call swallows ALL leading
+        // spaces from the joined body, silently de-indenting any
+        // intentionally-indented opening line (e.g., a code block as
+        // the first line of the prompt). The correct primitive is
+        // `strip_prefix("    ")`.
+        let body = "    indented opening\nplain line";
+        let yaml = generate_prepare_agent_prompt(true, body, "x.md", vec![], &[]).unwrap();
+        assert!(
+            yaml.contains("indented opening"),
+            "first line must survive: {yaml}"
+        );
+        assert!(
+            yaml.contains("    indented opening"),
+            "author's leading spaces must survive (not over-stripped): {yaml}"
+        );
+    }
+
+    #[test]
+    fn test_prepare_agent_prompt_runtime_rejects_non_workspace_source() {
+        // Filename-only / absolute-path source can't be read at runtime.
+        let err = generate_prepare_agent_prompt(
+            false,
+            "Hello",
+            "/absolute/elsewhere.md",
+            vec![],
+            &[],
+        )
+        .unwrap_err();
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("inlined-imports: true"),
+            "error must mention the escape hatch: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_prepare_agent_prompt_runtime_emits_param_env_mappings() {
+        let params = vec![
+            crate::compile::types::PipelineParameter {
+                name: "target-branch".into(),
+                display_name: None,
+                param_type: None,
+                default: None,
+                values: None,
+            },
+            crate::compile::types::PipelineParameter {
+                name: "verbose".into(),
+                display_name: None,
+                param_type: None,
+                default: None,
+                values: None,
+            },
+        ];
+        let yaml = generate_prepare_agent_prompt(
+            false,
+            "Hello",
+            "$(Build.SourcesDirectory)/x.md",
+            vec![],
+            &params,
+        )
+        .unwrap();
+        assert!(
+            yaml.contains("ADO_AW_PARAM_TARGET_BRANCH: ${{ parameters.target-branch }}"),
+            "must emit env mapping for `target-branch`: {yaml}"
+        );
+        assert!(
+            yaml.contains("ADO_AW_PARAM_VERBOSE: ${{ parameters.verbose }}"),
+            "must emit env mapping for `verbose`: {yaml}"
+        );
+    }
+
+    #[test]
+    fn test_prepare_agent_prompt_runtime_embeds_supplement_as_heredoc() {
+        // Extension supplements should appear as labelled heredocs inside
+        // the compose step so maintainers can read them in the lock yaml.
+        let supps = vec![PromptSupplement {
+            name: "SafeOutputs".into(),
+            content: "## SafeOutputs preamble".into(),
+        }];
+        let yaml = generate_prepare_agent_prompt(
+            false,
+            "Hello",
+            "$(Build.SourcesDirectory)/x.md",
+            supps,
+            &[],
+        )
+        .unwrap();
+        assert!(
+            yaml.contains("__ADO_AW_SUPP_SAFEOUTPUTS_EOF__"),
+            "supplement must use a sanitised heredoc delimiter: {yaml}"
+        );
+        assert!(
+            yaml.contains("## SafeOutputs preamble"),
+            "supplement content must be visible in the compose step: {yaml}"
+        );
+    }
+
+    // ─── collect_prompt_supplements ─────────────────────────────────────────
+
+    #[test]
+    fn test_collect_prompt_supplements_safeoutputs_only() {
+        let fm = minimal_front_matter();
+        let exts = crate::compile::extensions::collect_extensions(&fm);
+        let supps = collect_prompt_supplements(&exts);
+        assert_eq!(
+            supps.len(),
+            1,
+            "minimal front matter activates SafeOutputs only"
+        );
+        assert_eq!(supps[0].name, "SafeOutputs");
+        assert!(supps[0].content.contains("Safe Outputs"));
+    }
+
+    #[test]
+    fn test_collect_prompt_supplements_runtimes_before_tools() {
+        // Lean is a runtime; SafeOutputs is a tool. Runtimes must
+        // appear first in the supplements list (matches
+        // `generate_prepare_steps` ordering policy).
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nruntimes:\n  lean: true\n---\n",
+        )
+        .unwrap();
+        let exts = crate::compile::extensions::collect_extensions(&fm);
+        let supps = collect_prompt_supplements(&exts);
+        assert!(supps.len() >= 2, "should have at least Lean + SafeOutputs");
+        let lean_idx = supps.iter().position(|s| s.name.contains("Lean")).unwrap();
+        let so_idx = supps.iter().position(|s| s.name == "SafeOutputs").unwrap();
+        assert!(
+            lean_idx < so_idx,
+            "runtime supplement must precede tool supplement: {supps:?}"
+        );
     }
 
     // ─── generate_awf_mounts ──────────────────────────────────────────────

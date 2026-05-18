@@ -72,8 +72,18 @@ jobs:
       - name: Package ado-script bundle
         run: |
           set -euo pipefail
-          cd scripts
-          zip -r ../ado-script.zip ado-script/dist
+          # Flatten the ncc per-bundle layout (`dist/<name>/index.js`) into
+          # top-level `<name>.js` files in the zip. Pipelines extract the
+          # zip to `/tmp/ado-aw-scripts/` and reference each helper by name
+          # (e.g. `/tmp/ado-aw-scripts/gate.js`), so internal `dist/<name>/`
+          # nesting does not need to leak into the runtime path.
+          staging="$(mktemp -d)"
+          for bundle in scripts/ado-script/dist/*/index.js; do
+            name="$(basename "$(dirname "$bundle")")"
+            cp "$bundle" "$staging/$name.js"
+          done
+          (cd "$staging" && zip "$GITHUB_WORKSPACE/ado-script.zip" *.js)
+          unzip -l ado-script.zip
 
       - name: Upload release assets
         env:

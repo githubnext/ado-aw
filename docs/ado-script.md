@@ -12,6 +12,14 @@ pipeline** as runtime helpers. The first (and currently only) bundle is
 > and how to wire it. See [`docs/tools.md`](tools.md) for what *is*
 > user-facing.
 
+The runtime **agent-prompt rendering** path (the default for new
+agents, opt-out via `inlined-imports: true`) is *not* an `ado-script`
+bundle — it is an inline `bash` + `awk` step in the compiled YAML, kept
+deliberately small and transparent. See
+[`docs/template-markers.md`](template-markers.md) for the
+`{{ prepare_agent_prompt }}` marker and
+[`docs/front-matter.md`](front-matter.md) for `inlined-imports`.
+
 ## What `gate.js` does
 
 `gate.js` is a single-shot Node program that runs as a step in the
@@ -158,10 +166,12 @@ scripts/ado-script/
 ```
 
 The release workflow (`.github/workflows/release.yml`) runs
-`npm ci && npm run build`, then zips `scripts/ado-script/dist/` into
-the `ado-script.zip` release asset. Pipelines download that asset at
-runtime by URL pinned to the compiler's `CARGO_PKG_VERSION`, verify
-its SHA-256 against the `checksums.txt` asset, then extract.
+`npm ci && npm run build`, then **flattens** each `dist/<bundle>/index.js`
+into a top-level `<bundle>.js` inside `ado-script.zip` (today just
+`gate.js`). Pipelines download that asset at runtime by URL pinned to
+the compiler's `CARGO_PKG_VERSION`, verify its SHA-256 against the
+`checksums.txt` asset, then extract directly into `/tmp/ado-aw-scripts/`,
+where each bundle is referenced by `/tmp/ado-aw-scripts/<bundle>.js`.
 
 ## Schema codegen
 
@@ -208,7 +218,7 @@ steps when any `filters:` block is active:
    `CARGO_PKG_VERSION`, verifies the zip's SHA-256, then
    `unzip -o /tmp/ado-aw-scripts/ado-script.zip -d /tmp/ado-aw-scripts/`.
    Also capped at `timeoutInMinutes: 5`.
-3. **`bash: node '/tmp/ado-aw-scripts/ado-script/dist/gate/index.js'`** —
+3. **`bash: node '/tmp/ado-aw-scripts/gate.js'`** —
    runs the gate with `GATE_SPEC` and the env-var contract above.
 
 The IR-to-bash codegen that produces these steps is
@@ -255,10 +265,12 @@ The IR-to-bash codegen that produces these steps is
 3. Add vitest tests under `src/poll/__tests__/`.
 4. Wire from a new `CompilerExtension` (or extend an existing one)
    that downloads `ado-script.zip` (already a release asset) and
-   invokes `node /tmp/ado-aw-scripts/ado-script/dist/poll/index.js`
+   invokes `node /tmp/ado-aw-scripts/poll.js`
    as a runtime step.
-5. No release-workflow change is needed — `zip -r ado-script/dist`
-   picks up the new bundle automatically.
+5. Extend the release workflow's package step in
+   `.github/workflows/release.yml` — the flatten loop iterates over
+   every `dist/*/index.js`, so a new bundle is picked up automatically
+   as long as its build step writes to `dist/<name>/index.js`.
 
 ### Local development loop
 
@@ -269,7 +281,7 @@ npm ci                 # one-time
 npm run codegen        # regenerate types.gen.ts (compiles ado-aw first)
 npm test               # vitest unit tests
 npm run typecheck      # strict tsc --noEmit
-npm run build          # ncc-bundle to dist/gate/index.js
+npm run build          # ncc-bundle each src/<bundle>/index.ts to dist/<bundle>/index.js
 npm run test:smoke     # build + smoke test the bundle end-to-end
 ```
 

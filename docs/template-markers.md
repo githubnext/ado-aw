@@ -381,9 +381,67 @@ resources:
             - release/*
 ```
 
-## {{ agent_content }}
+## {{ prepare_agent_prompt }}
 
-Should be replaced with the markdown body (agent instructions) extracted from the source markdown file, excluding the YAML front matter. This content provides the agent with its task description and guidelines.
+Replaces the entire "Prepare agent prompt" step in the Agent job.
+
+The compiler expands this to one of two shapes depending on the
+`inlined-imports:` front-matter field:
+
+- **`inlined-imports: false` (default — runtime rendering).** Expands
+  to a single inline `bash` step (no JS bundle, no Node install) that:
+  1. Composes the prompt with a brace-grouped command list:
+     `cat "$(Build.SourcesDirectory)/<path>/agent.md"` for the body
+     followed by one heredoc per extension supplement
+     (`cat << '__ADO_AW_SUPP_<NAME>_EOF__' ... __ADO_AW_SUPP_<NAME>_EOF__`).
+     Every fragment is visible directly in the lock yaml.
+  2. Strips the agent's YAML front matter with an `awk` block.
+  3. Runs a single-pass `awk` substitution program over the body that
+     recognises four token shapes and resolves them in priority
+     order:
+
+     | Token                        | Resolved via                                           |
+     |------------------------------|--------------------------------------------------------|
+     | `\$(VAR)` / `\$(VAR.SUB)`    | escape — strip backslash, leave `$(VAR)` literal       |
+     | `${{ parameters.NAME }}`     | env `ADO_AW_PARAM_<NAME upper, hyphen→underscore>`     |
+     | `$(VAR)` / `$(VAR.SUB)`      | env `<NAME upper, dot→underscore>` (process env)       |
+     | `$[ ... ]`                   | left verbatim with a one-shot warning                  |
+
+     The walk uses substring slicing rather than `gsub()` so the
+     replacement text is **never re-scanned**. This blocks the
+     "queue-with-malicious-parameter-value" chaining attack: a
+     parameter value that contains `$(...)` stays literal in the
+     rendered prompt instead of expanding against a secret env var
+     on a follow-up pass.
+
+     Each declared pipeline parameter gets a separate
+     `ADO_AW_PARAM_<UPPER>: ${{ parameters.<name> }}` env line on
+     the step, so the value reaches the awk script via `ENVIRON`
+     without being baked into the compiled YAML.
+  4. Fails closed on empty output, then writes the rendered prompt
+     to `/tmp/awf-tools/agent-prompt.md` for the AWF sandbox.
+
+- **`inlined-imports: true` (opt-out).** Expands to the legacy
+  heredoc step that writes the markdown body verbatim into
+  `/tmp/awf-tools/agent-prompt.md`. Extension supplements are emitted
+  as separate `cat >>` steps via `wrap_prompt_append` (handled in
+  `{{ prepare_steps }}`).
+
+This marker replaces the older `{{ agent_content }}` placeholder. The
+compiler resolves `{{ trigger_repo_directory }}` inside the body
+path **before** emitting the step, so the `cat "$(Build.SourcesDirectory)/..."`
+reference uses a fully resolved path at runtime. If the source path
+cannot be expressed relative to the trigger repo (e.g., compile
+invoked from outside the repo), the compiler bails with an actionable
+error message pointing at `inlined-imports: true` as the escape
+hatch.
+
+The runtime branch deliberately ships **no JS bundle**: the compose +
+strip + substitute steps are pure bash + awk, both present on every
+ADO image, and the entire transformation is human-readable in the
+compiled YAML. See [`docs/ado-script.md`](ado-script.md) for the
+contrasting `gate.js` design where a Node bundle is justified by the
+much larger amount of logic involved.
 
 ## {{ mcpg_config }}
 

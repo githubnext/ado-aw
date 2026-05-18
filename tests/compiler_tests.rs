@@ -4082,7 +4082,7 @@ fn test_pr_filter_tier1_has_evaluator_gate() {
         "Should include base64-encoded spec"
     );
     assert!(
-        compiled.contains("node '/tmp/ado-aw-scripts/ado-script/dist/gate/index.js'"),
+        compiled.contains("node '/tmp/ado-aw-scripts/gate.js'"),
         "Should invoke node gate evaluator"
     );
     assert!(
@@ -4120,7 +4120,7 @@ fn test_pr_filter_tier2_has_extension_gate() {
         "Tier 2 should include base64-encoded spec"
     );
     assert!(
-        compiled.contains("node '/tmp/ado-aw-scripts/ado-script/dist/gate/index.js'"),
+        compiled.contains("node '/tmp/ado-aw-scripts/gate.js'"),
         "Tier 2 should invoke node gate evaluator"
     );
     assert!(compiled.contains("name: prGate"), "Should have prGate step");
@@ -4359,3 +4359,110 @@ fn test_example_dogfood_failure_reporter_structure() {
         "Example should target githubnext/ado-aw"
     );
 }
+
+// ─── Runtime prompt injection (gh-aw-style composable compose step) ─────────
+
+/// Default mode: body is NOT embedded in the compiled YAML; instead the
+/// compose step `cat`s it from `$(Build.SourcesDirectory)/<path>.md` at
+/// pipeline runtime. Body-only edits to the source `.md` therefore do not
+/// require recompiling the pipeline.
+#[test]
+fn test_runtime_prompt_default_cats_body_from_workspace() {
+    let compiled = compile_fixture("runtime-prompt-default-agent.md");
+
+    assert!(
+        compiled.contains(r#"cat "$(Build.SourcesDirectory)/runtime-prompt-default-agent.md""#),
+        "default path must cat the body from the workspace: \n{compiled}"
+    );
+    assert!(
+        compiled.contains("Render agent prompt"),
+        "default path must label step `Render agent prompt`: \n{compiled}"
+    );
+    // No JS bundle, no Node download, no opaque base64 spec — the
+    // whole compose step is plain bash + awk, visible in the lock yaml.
+    assert!(
+        !compiled.contains("prompt.js"),
+        "default path must NOT invoke a JS prompt bundle: \n{compiled}"
+    );
+    assert!(
+        !compiled.contains("ADO_AW_PROMPT_SPEC"),
+        "default path must NOT emit a base64 prompt spec: \n{compiled}"
+    );
+    assert!(
+        !compiled.contains("Install Node.js 20.x for prompt renderer"),
+        "default path must NOT install Node for prompt rendering: \n{compiled}"
+    );
+}
+
+/// Default mode: the compose step strips front matter via awk and runs
+/// the single-pass substitution awk program over the assembled prompt.
+#[test]
+fn test_runtime_prompt_default_uses_awk_strip_and_substitute() {
+    let compiled = compile_fixture("runtime-prompt-default-agent.md");
+
+    // Front-matter strip
+    assert!(
+        compiled.contains("NR == 1 && /^---$/"),
+        "default path must use the awk front-matter sentinel: \n{compiled}"
+    );
+    // Substitution program reads ENVIRON (no compile-time-baked values).
+    assert!(
+        compiled.contains("ENVIRON[envk]"),
+        "default path must read replacement values from ENVIRON: \n{compiled}"
+    );
+    // Token shapes the substitution recognises.
+    assert!(
+        compiled.contains(r"\\\$\("),
+        "default path must recognise the `\\$(...)` escape token: \n{compiled}"
+    );
+    assert!(
+        compiled.contains(r"parameters\."),
+        "default path must recognise `${{ parameters.* }}`: \n{compiled}"
+    );
+}
+
+/// Default mode: the verbatim body line from the fixture must be ABSENT.
+#[test]
+fn test_runtime_prompt_default_omits_body_from_yaml() {
+    let compiled = compile_fixture("runtime-prompt-default-agent.md");
+
+    // A line that appears only in the body of the fixture.
+    let body_marker = "must NOT appear verbatim in the compiled YAML";
+    assert!(
+        !compiled.contains(body_marker),
+        "compiled YAML must not contain the prompt body verbatim (defeats the runtime injection point): \n{compiled}"
+    );
+    // Belt-and-suspenders: the legacy heredoc marker must not appear.
+    assert!(
+        !compiled.contains("AGENT_PROMPT_EOF"),
+        "default path must not emit the heredoc marker: \n{compiled}"
+    );
+}
+
+/// Inlined mode (`inlined-imports: true`): body is embedded verbatim in a
+/// heredoc step and no awk substitution program is emitted.
+#[test]
+fn test_runtime_prompt_inlined_embeds_body_in_heredoc() {
+    let compiled = compile_fixture("runtime-prompt-inlined-agent.md");
+
+    let body_marker = "MUST appear verbatim in the compiled YAML";
+    assert!(
+        compiled.contains(body_marker),
+        "inlined-imports: true must embed the body in the YAML: \n{compiled}"
+    );
+    assert!(
+        compiled.contains("AGENT_PROMPT_EOF"),
+        "inlined branch must use the heredoc marker: \n{compiled}"
+    );
+    assert!(
+        !compiled.contains("prompt.js"),
+        "inlined branch must NOT invoke a JS bundle: \n{compiled}"
+    );
+    assert!(
+        !compiled.contains("Render agent prompt"),
+        "inlined branch must NOT use the runtime step name: \n{compiled}"
+    );
+}
+
+
+
