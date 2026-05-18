@@ -95,7 +95,7 @@ docker run -i --rm --name ado-aw-mcpg \
   -p "$MCPG_PORT:$MCPG_PORT" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   --entrypoint /app/awmg \
-  ghcr.io/github/gh-aw-mcpg:v0.3.0 \
+  ghcr.io/github/gh-aw-mcpg:v0.3.12 \
   --routed --listen "0.0.0.0:$MCPG_PORT" --config-stdin \
   < "$WORK_DIR/mcpg-config.json" \
   > "$WORK_DIR/gateway-output.json" 2>"$WORK_DIR/mcpg-stderr.log" &
