@@ -40,7 +40,7 @@ pub trait CompilerExtension {
     fn required_hosts(&self) -> Vec<String>;                   // AWF network allowlist
     fn required_bash_commands(&self) -> Vec<String>;           // Agent bash allow-list
     fn prompt_supplement(&self) -> Option<String>;              // Agent prompt markdown
-    fn prepare_steps(&self) -> Vec<String>;                    // Execution job steps (install, etc.)
+    fn prepare_steps(&self) -> Vec<String>;                    // Agent job steps (install, etc.)
     fn setup_steps(&self, ctx: &CompileContext) -> Result<Vec<String>>; // Setup job steps (gates, pre-checks)
     fn mcpg_servers(&self, ctx: &CompileContext) -> Result<Vec<(String, McpgServerConfig)>>; // MCPG entries
     fn allowed_copilot_tools(&self) -> Vec<String>;            // --allow-tool values
@@ -53,8 +53,8 @@ pub trait CompilerExtension {
 ```
 
 **`prepare_steps()` vs `setup_steps()`**: `prepare_steps()` injects into the
-Execution job (before the agent runs). `setup_steps()` injects into the Setup
-job (before the Execution job starts). Use `setup_steps()` for pre-activation
+Agent job (before the agent runs). `setup_steps()` injects into the Setup
+job (before the Agent job starts). Use `setup_steps()` for pre-activation
 gates or checks that must complete before the agent is launched.
 
 **Phase ordering**: Extensions are sorted by phase — runtimes

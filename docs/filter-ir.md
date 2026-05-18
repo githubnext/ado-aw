@@ -367,7 +367,7 @@ When Tier 2/3 filters are configured, the `TriggerFiltersExtension`
    during compilation via the `validate()` trait method
 
 The extension uses the `setup_steps()` trait method (not `prepare_steps()`)
-because the gate must run in the **Setup job** (before the Execution job).
+because the gate must run in the **Setup job** (before the Agent job).
 
 ### Tier 1 Inline Path
 
