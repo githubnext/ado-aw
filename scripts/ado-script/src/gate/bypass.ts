@@ -4,15 +4,15 @@
  * gate auto-passes.
  */
 import type { GateSpec } from "../shared/types.gen.js";
-import { setOutput, addBuildTag, complete } from "../shared/vso-logger.js";
+import { setOutput, addBuildTag, complete, logInfo } from "../shared/vso-logger.js";
 
 export async function runBypass(spec: GateSpec): Promise<boolean> {
   const buildReason = process.env.ADO_BUILD_REASON ?? "";
   if (buildReason !== spec.context.build_reason) {
-    // Mirror Python log line for parity in pipeline logs
-    process.stdout.write(
-      `Not a ${spec.context.bypass_label} build -- gate passes automatically\n`,
-    );
+    // Routed through logInfo so the (compiler-controlled but theoretically
+    // template-influenceable) bypass_label cannot smuggle a `##vso[` prefix
+    // into the line. Mirrors the Python log line for parity.
+    logInfo(`Not a ${spec.context.bypass_label} build -- gate passes automatically`);
     setOutput("SHOULD_RUN", "true");
     addBuildTag(`${spec.context.tag_prefix}:passed`);
     complete("Succeeded");

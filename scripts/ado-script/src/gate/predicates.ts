@@ -8,11 +8,18 @@
 import type { GateSpec, PredicateSpec } from "../shared/types.gen.js";
 import type { PolicyTracker } from "../shared/policy.js";
 import { addBuildTag, logWarning } from "../shared/vso-logger.js";
-import { stripRefPrefix } from "../shared/env-facts.js";
+import { stripRefPrefix, BRANCH_FACTS } from "../shared/env-facts.js";
 
 type CheckResult = "pass" | "fail" | "skip";
 
-const BRANCH_FACTS = new Set(["source_branch", "target_branch", "triggering_branch"]);
+// Set<FactKind>.has(p.fact) is rejected because p.fact is `string`. The
+// type-system narrowing isn't useful here — we just want runtime membership.
+const isBranchFact = (fact: string): boolean =>
+  (BRANCH_FACTS as ReadonlySet<string>).has(fact);
+
+// BRANCH_FACTS is sourced from env-facts.ts so the read-time strip (in
+// readEnvFact) and the match-time strip (here in glob_match below) cannot
+// drift. Adding a new branch-shaped fact requires updating exactly one set.
 
 export function evaluatePredicates(
   spec: GateSpec,
@@ -71,7 +78,7 @@ export function evaluatePredicate(p: PredicateSpec, facts: Map<string, unknown>)
   switch (p.type) {
     case "glob_match": {
       const value = String(facts.get(p.fact) ?? "");
-      const pattern = BRANCH_FACTS.has(p.fact) ? stripRefPrefix(p.pattern) : p.pattern;
+      const pattern = isBranchFact(p.fact) ? stripRefPrefix(p.pattern) : p.pattern;
       return globMatch(value, pattern);
     }
     case "equals":
@@ -93,7 +100,15 @@ export function evaluatePredicate(p: PredicateSpec, facts: Map<string, unknown>)
       return !p.values.includes(value);
     }
     case "numeric_range": {
-      const value = Number(facts.get(p.fact) ?? 0);
+      const raw = facts.get(p.fact);
+      // Fail-closed if the fact is missing or non-numeric. The PolicyTracker
+      // normally short-circuits before evaluatePredicate is reached for a
+      // missing fact, but defending here independently means a future change
+      // to the policy gate can't silently cause a missing fact to satisfy a
+      // range that includes 0 (the previous `?? 0` default did exactly that).
+      if (raw === undefined || raw === null) return false;
+      const value = Number(raw);
+      if (!Number.isFinite(value)) return false;
       if (p.min !== undefined && p.min !== null && value < p.min) return false;
       if (p.max !== undefined && p.max !== null && value > p.max) return false;
       return true;
@@ -178,6 +193,12 @@ const MAX_GLOB_CACHE_ENTRIES = 1024;
 // Pre-compiled regex cache. The gate process is one-shot per pipeline run,
 // so an unbounded cache would be fine for memory — we still cap defensively
 // so a future caller in a longer-lived process doesn't bloat indefinitely.
+//
+// IMPORTANT: the cache key is `pattern` alone. The compiled RegExp uses the
+// fixed `"s"` flag (dotall). If a future caller wants to vary flags (e.g.
+// case-insensitive globs), it must change the cache key to include flags —
+// e.g. `${pattern}|${flags}` — otherwise the cache will silently return a
+// regex compiled with the wrong flags for the same pattern string.
 const globRegexCache = new Map<string, RegExp | null>();
 
 function compileGlobRegex(pattern: string): RegExp | null {

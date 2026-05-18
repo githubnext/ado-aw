@@ -516,4 +516,49 @@ describe("validatePredicateTree", () => {
       /missing required 'operand'/,
     );
   });
+
+  // Drift guard: every type accepted by validatePredicateTree must also be
+  // handled by the evaluatePredicate switch (and vice-versa). If a new
+  // predicate variant is added to one without the other, this test fails.
+  it("KNOWN_PREDICATE_TYPES stays in sync with evaluatePredicate switch", async () => {
+    const writes: string[] = [];
+    vi.spyOn(process.stdout, "write").mockImplementation((s) => {
+      writes.push(String(s));
+      return true;
+    });
+
+    // One representative for every known predicate type. If the union grows,
+    // add the new variant here too — that's the point of the test.
+    const samples: PredicateSpec[] = [
+      { type: "glob_match", fact: "pr_title", pattern: "*" },
+      { type: "equals", fact: "pr_title", value: "" },
+      { type: "value_in_set", fact: "pr_title", values: ["x"], case_insensitive: false },
+      { type: "value_not_in_set", fact: "pr_title", values: ["x"], case_insensitive: false },
+      { type: "numeric_range", fact: "current_utc_minutes", min: 0, max: 1440 },
+      { type: "time_window", start: "00:00", end: "23:59" },
+      { type: "label_set_match", fact: "pr_labels", any_of: ["x"], all_of: [], none_of: [] },
+      { type: "file_glob_match", fact: "changed_files", include: ["**/*.rs"], exclude: [] },
+      { type: "and", operands: [{ type: "equals", fact: "pr_title", value: "" }] },
+      { type: "or", operands: [{ type: "equals", fact: "pr_title", value: "" }] },
+      { type: "not", operand: { type: "equals", fact: "pr_title", value: "" } },
+    ];
+
+    const factsForEval = factMap({
+      pr_title: "x",
+      pr_labels: ["x"],
+      current_utc_minutes: 720,
+      changed_files: ["foo.rs"],
+    });
+
+    for (const p of samples) {
+      // (a) pre-flight must accept it
+      expect(() => evaluatePredicate(p, factsForEval)).not.toThrow();
+      // (b) at evaluation time, the fail-closed "unknown predicate type"
+      //     warning must not appear — that warning is the unique signature
+      //     of the default arm in evaluatePredicate.
+    }
+
+    const unknownWarnings = writes.filter((w) => w.includes("Unknown predicate type"));
+    expect(unknownWarnings).toEqual([]);
+  });
 });

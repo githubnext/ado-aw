@@ -33,9 +33,14 @@ const ENV_BY_FACT: Record<FactKind, string> = {
   triggering_branch: "ADO_TRIGGERING_BRANCH",
 };
 
-const REF_PREFIXES = ["refs/heads/", "refs/tags/", "refs/pull/"] as const;
+export const REF_PREFIXES = ["refs/heads/", "refs/tags/", "refs/pull/"] as const;
 
-const BRANCH_FACTS: ReadonlySet<FactKind> = new Set<FactKind>([
+/** Facts whose values are ref-like (e.g. branch names) and need the
+ *  `refs/...` prefix stripped before predicate evaluation. Exported so the
+ *  predicate evaluator can apply the *same* stripping rules to user-supplied
+ *  patterns — keeping read-time and match-time behaviour in sync. Both sides
+ *  must reference this single set rather than duplicating it. */
+export const BRANCH_FACTS: ReadonlySet<FactKind> = new Set<FactKind>([
   "source_branch",
   "target_branch",
   "triggering_branch",

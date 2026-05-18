@@ -100,16 +100,24 @@ impl CompilerExtension for TriggerFiltersExtension {
         // Install Node 20.x for the gate evaluator. Pin to LTS major; ado-aw
         // only requires basic Node features, so any 20.x patch release is
         // acceptable. NodeTool@0 is preinstalled on Microsoft-hosted and 1ES
-        // images.
+        // images. A 5-minute timeout caps the worst-case cold-image install
+        // — a hung Node install would otherwise block the entire pipeline
+        // until the agent-level job timeout (often hours) fires.
         steps.push(
             r#"- task: NodeTool@0
   inputs:
     versionSpec: "20.x"
   displayName: "Install Node.js 20.x for gate evaluator"
+  timeoutInMinutes: 5
   condition: succeeded()"#
                 .to_string(),
         );
 
+        // Same rationale for the download/extract step: bound the
+        // curl + sha256sum + unzip pipeline so a stalled CDN response
+        // doesn't tie up the whole pipeline. The unzip command also
+        // passes `-d` explicitly as a belt-and-suspenders zip-slip
+        // hardening on top of the sha256 verification above.
         steps.push(format!(
             r#"- bash: |
     set -eo pipefail
@@ -117,8 +125,9 @@ impl CompilerExtension for TriggerFiltersExtension {
     curl -fsSL "{RELEASE_BASE_URL}/v{version}/checksums.txt" -o /tmp/ado-aw-scripts/checksums.txt
     curl -fsSL "{RELEASE_BASE_URL}/v{version}/ado-script.zip" -o /tmp/ado-aw-scripts/ado-script.zip
     cd /tmp/ado-aw-scripts && grep "ado-script.zip" checksums.txt | sha256sum -c -
-    cd /tmp/ado-aw-scripts && unzip -o ado-script.zip
+    unzip -o /tmp/ado-aw-scripts/ado-script.zip -d /tmp/ado-aw-scripts/
   displayName: "Download ado-aw scripts (v{version})"
+  timeoutInMinutes: 5
   condition: succeeded()"#,
         ));
         steps.extend(gate_steps);
@@ -253,8 +262,16 @@ mod tests {
             "should verify ado-script.zip checksum"
         );
         assert!(
-            steps[1].contains("unzip -o ado-script.zip"),
-            "should extract ado-script.zip"
+            steps[1].contains("unzip -o /tmp/ado-aw-scripts/ado-script.zip -d /tmp/ado-aw-scripts/"),
+            "should extract ado-script.zip into the explicit target dir"
+        );
+        assert!(
+            steps[0].contains("timeoutInMinutes: 5"),
+            "Node install step should bound runtime"
+        );
+        assert!(
+            steps[1].contains("timeoutInMinutes: 5"),
+            "Download step should bound runtime"
         );
         assert!(steps[2].contains("prGate"), "third step should be PR gate");
         assert!(

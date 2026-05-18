@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { runBypass } from "./bypass.js";
+import { _resetCompletedForTesting } from "../shared/vso-logger.js";
 import type { GateSpec } from "../shared/types.gen.js";
 
 const baseSpec: GateSpec = {
@@ -17,6 +18,7 @@ describe("runBypass", () => {
   let writes: string[];
   beforeEach(() => {
     writes = [];
+    _resetCompletedForTesting();
     vi.spyOn(process.stdout, "write").mockImplementation((c: any) => {
       writes.push(typeof c === "string" ? c : c.toString());
       return true;
@@ -46,5 +48,29 @@ describe("runBypass", () => {
     delete process.env.ADO_BUILD_REASON;
     const result = await runBypass(baseSpec);
     expect(result).toBe(true);
+  });
+
+  it("escapes an adversarial bypass_label so it cannot smuggle vso commands", async () => {
+    process.env.ADO_BUILD_REASON = "Manual";
+    const adversarial: GateSpec = {
+      ...baseSpec,
+      context: {
+        ...baseSpec.context,
+        bypass_label: "##vso[task.complete result=Failed;]X\nY",
+      },
+    };
+    const result = await runBypass(adversarial);
+    expect(result).toBe(true);
+    // The embedded newline must be encoded so it can't start a fresh
+    // ADO-interpreted line. The `##vso[` *inside* the label is allowed
+    // because it isn't at line-start (preceded by "Not a "), but we
+    // assert structurally that no second `##vso[task.complete result=Failed`
+    // command was emitted by the label itself — only the legitimate
+    // Succeeded complete from the bypass path.
+    const failedCompletes = writes.filter((w) =>
+      w.startsWith("##vso[task.complete result=Failed"),
+    );
+    expect(failedCompletes).toEqual([]);
+    expect(writes.join("")).toContain("%0A"); // embedded \n encoded
   });
 });

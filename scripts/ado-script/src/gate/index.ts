@@ -52,6 +52,11 @@ async function main(): Promise<void> {
   // predicate is only surfaced when evaluatePredicate is reached — and
   // if the required fact is unavailable, evaluatePredicate is never
   // called, masking the version drift.
+  //
+  // This deliberately runs BEFORE runBypass so a malformed spec fails fast
+  // regardless of build reason. A bypassed Manual build paying the (<10 ms)
+  // tree-walk cost is the right trade: a Manual build with a broken spec
+  // would otherwise mask the breakage until a subsequent PR run.
   try {
     for (const check of spec.checks ?? []) {
       validatePredicateTree(check.predicate);

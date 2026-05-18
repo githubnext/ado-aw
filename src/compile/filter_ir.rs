@@ -351,6 +351,10 @@ impl GateContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
     /// Informational — compilation continues.
+    /// Not yet produced by validation; reserved for future advisory
+    /// diagnostics that should appear in the compile log without
+    /// blocking or warning. Mirrors the And/Or/Not "reserved for future"
+    /// pattern at the top of `Predicate`.
     #[allow(dead_code)]
     Info,
     /// Warning — compilation continues but user should review.
@@ -936,6 +940,17 @@ impl Fact {
     ///
     /// Returns `(env_var_name, ado_macro)` pairs that must be set in the
     /// step's `env:` block for the gate evaluator to read.
+    ///
+    /// **Drift note:** the TypeScript gate evaluator carries its own copy of
+    /// this mapping in `scripts/ado-script/src/shared/env-facts.ts` as the
+    /// `ENV_BY_FACT` table plus the `FactKind` type union. Those are *not*
+    /// covered by the `types.gen.ts` codegen drift check (which only mirrors
+    /// `GateSpec` shape), so when adding a new pipeline-variable `Fact`
+    /// variant here you **must also** add an entry to `ENV_BY_FACT` and
+    /// extend `FactKind`. Failing to do so produces a silent wrong-answer
+    /// bug at runtime: `readEnvFact` returns `undefined`, the fact's failure
+    /// policy decides the verdict, and a `fail_open` fact would let the gate
+    /// pass without ever checking the predicate.
     pub fn ado_exports(&self) -> Vec<(&'static str, &'static str)> {
         match self {
             Fact::PrTitle => vec![("ADO_PR_TITLE", "$(System.PullRequest.Title)")],
