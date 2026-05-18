@@ -119,7 +119,7 @@ on:
 | `tri-weekly` | Every 21 days |
 | `hourly` | Every hour, scattered minute |
 | `every 2h` / `every 6h` | Every N hours (valid: 1, 2, 3, 4, 6, 8, 12) |
-| `every 15 minutes` | Minimum 5 min interval |
+| `every 15 minutes` | Fixed interval, not scattered (minimum 5 min) |
 
 **Timezone**: Append `utc+N` or `utc-N` to any time: `daily around 9:00 utc-5`
 
