@@ -493,14 +493,21 @@ Commands:
   mcp           Run as an MCP server (safe outputs)
   mcp-http      Run as an HTTP MCP server (for MCPG integration)
   execute       Execute safe outputs (Stage 3)
-  configure     Detect agentic pipelines and update GITHUB_TOKEN on ADO definitions
+  secrets       Manage pipeline-variable secrets on matched ADO definitions (set/list/delete)
   enable        Register ADO build definitions for compiled pipelines and ensure they are enabled
+  disable       Set queueStatus to disabled (or paused) on matched ADO definitions
+  remove        Delete matched ADO build definitions (destructive)
+  list          List matched ADO definitions with their latest-run state
+  status        Per-pipeline status block for matched ADO definitions
+  run           Queue builds for matched ADO definitions (optionally poll to completion)
 
 Options:
   -v, --verbose              Enable info-level logging
   -d, --debug                Enable debug-level logging
       --log-output-dir <path>  Write ado-aw logs to a specific directory (overrides ADO_AW_LOG_DIR)
 ```
+
+> **Note:** The `configure` command is deprecated (hidden from `--help`) and is now just an alias for `secrets set GITHUB_TOKEN`. Use `secrets set GITHUB_TOKEN` directly.
 
 ---
 
