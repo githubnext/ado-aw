@@ -200,6 +200,20 @@ async fn resolve_for_command(
     // Discovery code path: activated by --all-repos or --source.
     // Explicit definition_ids always takes precedence (escape hatch).
     if definition_ids.is_none() && (all_repos || source_filter.is_some()) {
+        // CurrentRepo scope without a resolvable git remote is a
+        // user-friendly footgun: discovery would silently return zero
+        // results. Surface a targeted hint *before* spending an HTTP
+        // round-trip on a doomed listing.
+        if !all_repos && ado_ctx.repo_name.is_empty() {
+            anyhow::bail!(
+                "--source filters by the current repository, but no Azure DevOps git remote \
+                 was detected in `{}`.\n\
+                 Either run from a checkout of an ADO repo, or pass --all-repos to search \
+                 the entire project.",
+                repo_path.display()
+            );
+        }
+
         let scope = if all_repos {
             DiscoveryScope::AllRepos
         } else {

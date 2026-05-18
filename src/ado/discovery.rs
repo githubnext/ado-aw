@@ -60,7 +60,15 @@ pub enum DiscoveryScope {
     /// Every definition in the project, regardless of repository.
     AllRepos,
     /// A pre-resolved list of definition IDs; bypasses listing and
-    /// scope filtering entirely. Used by `--definition-ids` callers.
+    /// scope filtering entirely.
+    ///
+    /// **Reserved for future use.** No production callsite constructs
+    /// this variant today — the `--definition-ids` CLI flag is handled
+    /// by `crate::ado::resolve_definitions` (the legacy lexical
+    /// matcher), which short-circuits before discovery is invoked. The
+    /// variant exists so callers that want to feed an explicit ID list
+    /// into the discovery pipeline (e.g. for future automation that
+    /// has pre-filtered definitions) don't need a parallel API.
     Explicit(Vec<u64>),
 }
 
@@ -83,6 +91,12 @@ pub enum DiscoveryStatus {
     /// Preview returned 403 — the calling identity lacks read access
     /// on the definition or one of its referenced repos.
     UnknownForbidden,
+    /// Preview returned 404 — the definition disappeared between
+    /// `list_definitions` and `preview_pipeline` (race with a
+    /// concurrent delete). Tracked as a distinct status so it can be
+    /// filtered out of the skip-warning counts: there's no operator
+    /// action to take for a definition that no longer exists.
+    NotFound,
     /// Preview returned some other error (5xx, network failure, etc.).
     PreviewFailed(String),
     /// Preview succeeded but no ado-aw marker was found in the
@@ -380,6 +394,25 @@ async fn classify_definition(
             markers: vec![],
             status: DiscoveryStatus::UnknownForbidden,
         },
+        Err(PreviewError::NotFound) => {
+            // Definition was deleted between `list_definitions` and the
+            // Preview call (TOCTOU race with a concurrent delete).
+            // Track as a distinct status so it's excluded from the
+            // "Preview Failed" warning — there's no operator action to
+            // take for a definition that no longer exists.
+            debug!(
+                "Definition {} ({}) disappeared between list and preview (404); skipping",
+                def.id, def.name
+            );
+            DiscoveredPipeline {
+                definition_id: def.id,
+                definition_name: def.name,
+                repository_url,
+                queue_status: def.queue_status,
+                markers: vec![],
+                status: DiscoveryStatus::NotFound,
+            }
+        }
         Err(e) => DiscoveredPipeline {
             definition_id: def.id,
             definition_name: def.name,
@@ -479,6 +512,7 @@ pub fn discovered_to_matched(d: &DiscoveredPipeline) -> Option<MatchedDefinition
     match d.status {
         DiscoveryStatus::Direct | DiscoveryStatus::Consumer => {}
         DiscoveryStatus::NotAdoAw
+        | DiscoveryStatus::NotFound
         | DiscoveryStatus::UnknownForbidden
         | DiscoveryStatus::UnknownRequiredParams
         | DiscoveryStatus::PreviewFailed(_) => return None,
@@ -538,10 +572,18 @@ pub async fn resolve_definitions_via_discovery(
     let mut skipped_failed = 0usize;
     let mut uninspectable = 0usize;
 
+    // Normalize the user-supplied `--source` value through the same
+    // canonical form the compiler uses for the marker JSON's `source`
+    // field. Without this, `--source ./agents/foo.md` or
+    // `--source agents\foo.md` (Windows) silently matches nothing
+    // because the marker stores `agents/foo.md`.
+    let normalized_filter: Option<String> = source_filter
+        .map(|s| crate::compile::normalize_source_path(Path::new(s)));
+
     let kept: Vec<_> = discovered
         .into_iter()
         .filter(|d| {
-            let matches_filter = match source_filter {
+            let matches_filter = match normalized_filter.as_deref() {
                 Some(src) => d.markers.iter().any(|m| m.source == src),
                 None => true,
             };
@@ -552,7 +594,7 @@ pub async fn resolve_definitions_via_discovery(
             //    on every ado-aw pipeline in scope);
             //  - filtered: we can't attribute uninspectable definitions
             //    to a specific source, so use a single combined counter.
-            if source_filter.is_none() {
+            if normalized_filter.is_none() {
                 match &d.status {
                     DiscoveryStatus::UnknownRequiredParams => skipped_required_params += 1,
                     DiscoveryStatus::UnknownForbidden => skipped_forbidden += 1,
@@ -592,7 +634,7 @@ pub async fn resolve_definitions_via_discovery(
         );
     }
     if uninspectable > 0
-        && let Some(src) = source_filter
+        && let Some(src) = normalized_filter.as_deref()
     {
         warn!(
             "Discovery could not inspect {uninspectable} definition(s) (Preview failure, \
@@ -803,5 +845,74 @@ mod tests {
         );
         assert!(PreviewError::Forbidden.to_string().contains("403"));
         assert!(PreviewError::NotFound.to_string().contains("404"));
+    }
+
+    // ── source_filter normalization ──────────────────────────────────
+
+    #[test]
+    fn source_filter_normalization_matches_marker_form() {
+        // The marker stores normalized form (`agents/foo.md`). Verify
+        // that the same normalization applied to user input produces
+        // matchable strings for the common variants.
+        use crate::compile::normalize_source_path;
+        use std::path::Path;
+
+        let canonical = normalize_source_path(Path::new("agents/foo.md"));
+        assert_eq!(canonical, "agents/foo.md");
+
+        // Leading `./` is stripped.
+        assert_eq!(
+            normalize_source_path(Path::new("./agents/foo.md")),
+            canonical
+        );
+
+        // Backslashes are normalized to forward slashes.
+        assert_eq!(
+            normalize_source_path(Path::new(r"agents\foo.md")),
+            canonical
+        );
+    }
+
+    // ── discovered_to_matched ────────────────────────────────────────
+
+    fn discovered(status: DiscoveryStatus) -> DiscoveredPipeline {
+        DiscoveredPipeline {
+            definition_id: 42,
+            definition_name: "test".to_string(),
+            repository_url: None,
+            queue_status: None,
+            markers: vec![],
+            status,
+        }
+    }
+
+    #[test]
+    fn discovered_to_matched_drops_not_found() {
+        // 404 from Preview (definition deleted in flight) must not
+        // surface as a matched definition that a write command would
+        // act on — there's nothing to act on.
+        assert!(discovered_to_matched(&discovered(DiscoveryStatus::NotFound)).is_none());
+    }
+
+    #[test]
+    fn discovered_to_matched_drops_unactionable_statuses() {
+        for status in [
+            DiscoveryStatus::NotAdoAw,
+            DiscoveryStatus::NotFound,
+            DiscoveryStatus::UnknownForbidden,
+            DiscoveryStatus::UnknownRequiredParams,
+            DiscoveryStatus::PreviewFailed("boom".to_string()),
+        ] {
+            assert!(
+                discovered_to_matched(&discovered(status.clone())).is_none(),
+                "expected {status:?} to map to None"
+            );
+        }
+    }
+
+    #[test]
+    fn discovered_to_matched_keeps_direct_and_consumer() {
+        assert!(discovered_to_matched(&discovered(DiscoveryStatus::Direct)).is_some());
+        assert!(discovered_to_matched(&discovered(DiscoveryStatus::Consumer)).is_some());
     }
 }

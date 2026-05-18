@@ -218,8 +218,11 @@ pub struct DefinitionSummary {
     #[serde(default)]
     pub repository: Option<Repository>,
     /// Monotonic revision counter ADO bumps on every definition edit.
-    /// Used as a cache key by Preview-driven discovery so an unchanged
-    /// definition is only previewed once per session.
+    /// Deserialised here so a future Preview-driven discovery cache
+    /// can key on `(definition_id, revision)`. **No caching is
+    /// implemented yet** — see the discovery module for the current
+    /// in-process behaviour. Track in a follow-up before depending on
+    /// this for staleness checks.
     #[serde(default)]
     pub revision: Option<u64>,
 }
