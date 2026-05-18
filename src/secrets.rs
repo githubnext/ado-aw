@@ -704,6 +704,48 @@ mod tests {
         assert_eq!(out["variables"]["FOO"]["allowOverride"], false);
     }
 
+    // ============ resolve_for_command precondition ============
+
+    #[tokio::test]
+    async fn source_without_all_repos_bails_when_no_git_remote() {
+        // CurrentRepo scope + empty repo_name = no git remote was
+        // detected. `--source` users hitting this case must get a
+        // targeted error mentioning `--all-repos`, not a generic
+        // "no pipelines found" further down the pipeline.
+        let ctx = AdoContext {
+            org_url: "https://dev.azure.com/example".to_string(),
+            project: "p".to_string(),
+            repo_name: String::new(),
+        };
+        let auth = AdoAuth::Pat("token".to_string());
+        let client = reqwest::Client::builder()
+            .build()
+            .expect("client builds");
+        let tmp = tempfile::tempdir().unwrap();
+
+        let err = resolve_for_command(
+            &client,
+            &ctx,
+            &auth,
+            None,
+            false,
+            Some("agents/foo.md"),
+            tmp.path(),
+        )
+        .await
+        .expect_err("expected bail");
+
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("--all-repos"),
+            "error should suggest --all-repos; got: {msg}"
+        );
+        assert!(
+            msg.contains("no Azure DevOps git remote"),
+            "error should explain the root cause; got: {msg}"
+        );
+    }
+
     #[test]
     fn set_preserves_other_variables() {
         let def = serde_json::json!({
