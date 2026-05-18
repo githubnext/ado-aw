@@ -126,7 +126,7 @@ impl SanitizeContent for CreateGitTagResult {
 ///       - my-lib
 ///     message-prefix: "[release] "
 /// ```
-#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, SanitizeConfig, Serialize, Deserialize)]
 pub struct CreateGitTagConfig {
     /// Regex pattern that tag names must match (if configured)
     #[serde(default, rename = "tag-pattern")]
@@ -139,16 +139,6 @@ pub struct CreateGitTagConfig {
     /// Prefix prepended to the tag message
     #[serde(default, rename = "message-prefix")]
     pub message_prefix: Option<String>,
-}
-
-impl Default for CreateGitTagConfig {
-    fn default() -> Self {
-        Self {
-            tag_pattern: None,
-            allowed_repositories: Vec::new(),
-            message_prefix: None,
-        }
-    }
 }
 
 /// Resolve HEAD commit for a repository by querying the repository's default branch.
