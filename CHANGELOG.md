@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.30.0](https://github.com/githubnext/ado-aw/compare/v0.29.0...v0.30.0) (2026-05-18)
+
+
+### Features
+
+* **cli:** add ado-aw enable ([#583](https://github.com/githubnext/ado-aw/issues/583)) ([1b4273b](https://github.com/githubnext/ado-aw/commit/1b4273b860ba58db7381bb0f61b36158682df4c7))
+* **cli:** consolidate Phase 1 pipeline-lifecycle commands (disable/remove/list/status/run/secrets) ([#602](https://github.com/githubnext/ado-aw/issues/602)) ([096b7a4](https://github.com/githubnext/ado-aw/commit/096b7a48ff35a8205c55aaa8954eec6ffc7f9623))
+* **compile:** add --force flag to bypass GitHub-remote guard ([#577](https://github.com/githubnext/ado-aw/issues/577)) ([562ff7f](https://github.com/githubnext/ado-aw/commit/562ff7fd92b56e810a2ea247d08c1a212e044136))
+* **compile:** replace Python gate evaluator with bundled TypeScript gate.js ([#389](https://github.com/githubnext/ado-aw/issues/389)) ([a2ce38c](https://github.com/githubnext/ado-aw/commit/a2ce38c7dbf027e8c9cefb1c3bb37b850cb5111f))
+* **engine:** split copilot CLI install path by compile target ([#584](https://github.com/githubnext/ado-aw/issues/584)) ([4fe2175](https://github.com/githubnext/ado-aw/commit/4fe2175861bbfe5ab6c02ba06cf7e68e010e047a))
+* **safeoutputs:** add daily smoke suite and reject unknown safe-output keys ([#563](https://github.com/githubnext/ado-aw/issues/563)) ([29b221e](https://github.com/githubnext/ado-aw/commit/29b221e8a613ee11cac667368a6063e5c8149218))
+* **workflows:** add clippy-fixer agentic workflow ([#575](https://github.com/githubnext/ado-aw/issues/575)) ([ca914f1](https://github.com/githubnext/ado-aw/commit/ca914f1dd814f0d1a2e70b5e2005e96051d928d1))
+* **workflows:** allow update-awf-version to close superseded PRs ([#590](https://github.com/githubnext/ado-aw/issues/590)) ([e0ddc2c](https://github.com/githubnext/ado-aw/commit/e0ddc2ca24a324cbaf73756313cc01e7ee2e1d78))
+* **workflows:** file release-notes action-item issues from update-awf-version ([#593](https://github.com/githubnext/ado-aw/issues/593)) ([d4fedd5](https://github.com/githubnext/ado-aw/commit/d4fedd511bd0d88170f2033f80a925bc0a972819))
+
+
+### Bug Fixes
+
+* **compile:** default non-1es vmImage to ubuntu-22.04 ([#578](https://github.com/githubnext/ado-aw/issues/578)) ([b841998](https://github.com/githubnext/ado-aw/commit/b8419985215c56eb6280a9bf3e6c50534512fc83))
+* **compile:** enforce ADO build-number rules for pipeline_agent_name ([#576](https://github.com/githubnext/ado-aw/issues/576)) ([1c7c407](https://github.com/githubnext/ado-aw/commit/1c7c407dfc339dea14becea6e22861669ef85255))
+* **compile:** quote pipeline name in generated YAML to handle colons and quotes ([#568](https://github.com/githubnext/ado-aw/issues/568)) ([ebd2f17](https://github.com/githubnext/ado-aw/commit/ebd2f170aceab8ece5e04c946ad8adf89e59ec05))
+* **compile:** tighten ADO org name validation to alphanumeric and hyphen only ([#598](https://github.com/githubnext/ado-aw/issues/598)) ([91d39a9](https://github.com/githubnext/ado-aw/commit/91d39a9acb6cabb53c7ee6b9f7df7c942abdbd93))
+* **configure:** accept bare org name for --org ([#579](https://github.com/githubnext/ado-aw/issues/579)) ([8029980](https://github.com/githubnext/ado-aw/commit/8029980aceb432ec52c3b074fd1ad946b8cb3aa1))
+* **safeoutputs:** prevent symlink exfiltration in create-pr Stage 3 ([#549](https://github.com/githubnext/ado-aw/issues/549)) ([f04c033](https://github.com/githubnext/ado-aw/commit/f04c0338525466bb7ffad050c203a6c9639b5e7a))
+* **secrets:** preserve masked ADO secrets on definition PUT ([#604](https://github.com/githubnext/ado-aw/issues/604)) ([2e0a0bb](https://github.com/githubnext/ado-aw/commit/2e0a0bb5b6d4396701d5967c2a0f2c82be0a39c8))
+
 ## [0.29.0](https://github.com/githubnext/ado-aw/compare/v0.28.0...v0.29.0) (2026-05-15)
 
 
