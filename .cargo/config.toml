@@ -1,0 +1,14 @@
+# Windows MSVC: bump the main-thread stack from the default 1 MiB to 8 MiB.
+#
+# Rust debug builds produce very large async state machines (no optimisation
+# collapses them), and `#[tokio::main]` polls the top-level future on the main
+# thread. The compile path nests many async fns whose combined Future state
+# easily exceeds 1 MiB, crashing with `thread 'main' has overflowed its stack`
+# on a stock `cargo build` + `target\debug\ado-aw.exe compile <fixture>` run.
+#
+# 8 MiB matches the Linux default and is what the binary already gets on
+# Linux/macOS, so applying it on Windows just restores parity rather than
+# introducing a platform-specific quirk. Release builds work either way; this
+# only matters in practice for debug/test builds.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "link-arg=/STACK:8388608"]
