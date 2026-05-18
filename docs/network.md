@@ -128,7 +128,7 @@ permissions:
 ### Security Model
 
 - **`permissions.read`**: Mints a read-only ADO-scoped token given to the agent inside the AWF sandbox (Stage 1). The agent can query ADO APIs but cannot write.
-- **`permissions.write`**: Mints a write-capable ADO-scoped token used **only** by the executor in Stage 3 (`Execution` job). This token is never exposed to the agent.
+- **`permissions.write`**: Mints a write-capable ADO-scoped token used **only** by the executor in Stage 3 (`SafeOutputs` job). This token is never exposed to the agent.
 - **Both omitted**: No ADO tokens are passed anywhere. The agent has no ADO API access.
 
 ### Compile-Time Validation
