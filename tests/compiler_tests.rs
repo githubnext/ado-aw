@@ -1661,6 +1661,83 @@ This agent tests the auto-discovery feature.
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
+/// Test that auto-discover resolves a bare source path relative to the lock file directory
+#[test]
+fn test_compile_auto_discover_resolves_source_relative_to_lock_file_dir() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-autodiscover-relative-source-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&temp_dir);
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let templates_dir = temp_dir.join("azure-pipelines").join("templates");
+    fs::create_dir_all(&templates_dir).expect("Failed to create templates directory");
+
+    let source_content = r#"---
+name: "Nested Agent"
+description: "An agent in a nested directory"
+---
+
+## Nested Agent
+"#;
+    let source_path = templates_dir.join("nested-agent.md");
+    fs::write(&source_path, source_content).expect("Failed to write source markdown");
+
+    // Compile from the lock-file directory so the header stores a bare source filename.
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args(["compile", "nested-agent.md"])
+        .current_dir(&templates_dir)
+        .output()
+        .expect("Failed to run initial compile");
+
+    assert!(
+        output.status.success(),
+        "Initial compile should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let yaml_path = templates_dir.join("nested-agent.lock.yml");
+    assert!(yaml_path.exists(), "Compiled YAML should exist");
+
+    let initial_yaml = fs::read_to_string(&yaml_path).expect("Should read initial YAML");
+    assert!(
+        initial_yaml.contains(r#"source="nested-agent.md""#),
+        "Expected bare source path in header, got:\n{}",
+        initial_yaml
+    );
+
+    // Re-run auto-discover from repo root. This should find nested-agent.md next to the lock file.
+    let output = std::process::Command::new(&binary_path)
+        .args(["compile"])
+        .current_dir(&temp_dir)
+        .output()
+        .expect("Failed to run auto-discover compile");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "Auto-discover compile should succeed.\nstdout: {}\nstderr: {}",
+        stdout,
+        stderr
+    );
+    assert!(
+        stdout.contains("1 compiled"),
+        "Should report 1 compiled, got stdout: {}",
+        stdout
+    );
+    assert!(
+        !stderr.contains("not found"),
+        "Should not report missing source, got stderr: {}",
+        stderr
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
 /// Test that auto-discover mode gracefully skips missing source files
 #[test]
 fn test_compile_auto_discover_skips_missing_source() {

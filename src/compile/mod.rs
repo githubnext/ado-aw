@@ -382,8 +382,17 @@ pub async fn compile_all_pipelines(skip_integrity: bool, debug_pipeline: bool) -
     let mut rewrote_count = 0;
 
     for pipeline in &detected {
-        let source_path = root.join(&pipeline.source);
         let yaml_output_path = root.join(&pipeline.yaml_path);
+        let source_candidate_from_yaml_dir = yaml_output_path
+            .parent()
+            .unwrap_or(root)
+            .join(&pipeline.source);
+        let source_candidate_from_root = root.join(&pipeline.source);
+        let source_path = if source_candidate_from_yaml_dir.exists() {
+            source_candidate_from_yaml_dir
+        } else {
+            source_candidate_from_root
+        };
 
         if !source_path.exists() {
             eprintln!(
