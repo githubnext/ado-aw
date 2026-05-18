@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.1](https://github.com/githubnext/ado-aw/compare/v0.30.0...v0.30.1) (2026-05-18)
+
+
+### Bug Fixes
+
+* **tests:** isolate fixtures from codemod rewrites and bump Windows debug stack ([#613](https://github.com/githubnext/ado-aw/issues/613)) ([a628d09](https://github.com/githubnext/ado-aw/commit/a628d09c4b00a2a61a02c3b213c7a2b9e944f5d0))
+
 ## [0.30.0](https://github.com/githubnext/ado-aw/compare/v0.29.0...v0.30.0) (2026-05-18)
 
 
