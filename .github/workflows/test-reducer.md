@@ -1,6 +1,6 @@
 ---
 on:
-  schedule: weekly on monday
+  schedule: every 12h
 description: Holistically audits the test suite for duplicate, redundant, and incorrect tests, then fixes them in a pull request
 permissions:
   contents: read
