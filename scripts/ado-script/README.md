@@ -24,5 +24,5 @@ This invokes `cargo run -- export-gate-schema` to write the JSON Schema, then ru
 
 ## See also
 
-- Plan: `ado-script-design.md` at the repo root.
+- Architecture and runtime contract: [`docs/ado-script.md`](../../docs/ado-script.md).
 - Compiler integration: `src/compile/extensions/trigger_filters.rs`.
