@@ -69,12 +69,21 @@ impl CompilerExtension for AdoAwMarkerExtension {
         // the build log at runtime, which is a free human-discoverability
         // bonus and costs nothing because the step runs in milliseconds.
         //
-        // The echo uses single quotes to keep the literal intact at
-        // runtime; we apply the bash `'\''` idiom to any `'` inside the
-        // source path so a markdown filename like `agents/foo's.md`
-        // doesn't produce broken bash. `version` and `target` are
-        // controlled inputs and can't contain `'`.
-        let echo_source = bash_single_quote_escape(&source);
+        // The echo's source value goes through two sanitisations:
+        //
+        //  1. `sanitize_for_vso_logging` neutralises `##vso[` and `##[`
+        //     prefixes. The ADO build agent scans stdout for those
+        //     sequences and treats them as logging commands (e.g.
+        //     `task.setvariable`). An attacker who controls a markdown
+        //     filename could otherwise inject a logging command into
+        //     the build log via the echoed source path. Same convention
+        //     used by `agent_stats::sanitize_for_markdown`.
+        //
+        //  2. `bash_single_quote_escape` applies the `'\''` idiom so a
+        //     filename containing `'` (e.g. `agents/foo's.md`) doesn't
+        //     produce syntactically broken bash. `version` and `target`
+        //     are controlled inputs and can't contain either.
+        let echo_source = bash_single_quote_escape(&sanitize_for_vso_logging(&source));
         let step = format!(
             "- bash: |\n    \
                 # ado-aw-metadata: {metadata}\n    \
@@ -95,6 +104,15 @@ impl CompilerExtension for AdoAwMarkerExtension {
 /// reopen-quote — the canonical idiom).
 fn bash_single_quote_escape(s: &str) -> String {
     s.replace('\'', "'\\''")
+}
+
+/// Neutralise ADO build-agent logging-command prefixes (`##vso[`, `##[`).
+/// Mirrors `crate::agent_stats::sanitize_for_markdown` so a malicious
+/// filename can't smuggle a `task.setvariable` (or similar) through the
+/// runtime `echo` line in the marker step.
+fn sanitize_for_vso_logging(s: &str) -> String {
+    s.replace("##vso[", "[vso-filtered][")
+        .replace("##[", "[filtered][")
 }
 
 #[cfg(test)]
@@ -205,6 +223,62 @@ mod tests {
         assert!(
             step.contains("\"source\":\"agents/foo's-agent.md\""),
             "JSON marker should carry raw source unchanged:\n{step}",
+        );
+    }
+
+    #[test]
+    fn sanitize_for_vso_logging_neutralises_known_prefixes() {
+        assert_eq!(
+            sanitize_for_vso_logging("##vso[task.setvariable variable=X]value"),
+            "[vso-filtered][task.setvariable variable=X]value"
+        );
+        assert_eq!(
+            sanitize_for_vso_logging("##[warning]ignore me"),
+            "[filtered][warning]ignore me"
+        );
+        assert_eq!(sanitize_for_vso_logging("agents/foo.md"), "agents/foo.md");
+        assert_eq!(sanitize_for_vso_logging(""), "");
+    }
+
+    #[test]
+    fn echo_line_neutralises_vso_injection_attempt() {
+        // An attacker who controls a markdown filename must not be able
+        // to inject ADO logging commands into the build log via the
+        // echoed source path. The ADO agent scans stdout for `##vso[`
+        // and `##[` prefixes and treats matching sequences as task
+        // commands (setvariable, setoutput, etc.).
+        let fm = parse_fm("name: t\ndescription: x\n");
+        let input_path = Path::new("agents/##vso[task.setvariable variable=FOO]value.md");
+        let ctx = CompileContext {
+            agent_name: &fm.name,
+            front_matter: &fm,
+            ado_context: None,
+            engine: crate::engine::Engine::Copilot,
+            compile_dir: None,
+            input_path: Some(input_path),
+        };
+        let steps = AdoAwMarkerExtension.setup_steps(&ctx).unwrap();
+        assert_eq!(steps.len(), 1);
+        let step = &steps[0];
+
+        // Find the `echo` line specifically — the `# ado-aw-metadata`
+        // JSON line is allowed to carry the raw source (it's not echoed
+        // to stdout by ADO; it's a comment in the bash heredoc, not
+        // output at runtime). The JSON line *does* get written to the
+        // build log when ADO renders the step body, but as `# ...`
+        // comments inside the rendered yaml; those don't trip the
+        // logging-command scanner.
+        let echo_line = step
+            .lines()
+            .find(|l| l.trim_start().starts_with("echo 'ado-aw metadata:"))
+            .expect("must have echo line");
+        assert!(
+            !echo_line.contains("##vso["),
+            "raw ##vso[ leaked into echo line: {echo_line}"
+        );
+        assert!(
+            echo_line.contains("[vso-filtered]["),
+            "expected `##vso[` neutralised to `[vso-filtered][` in echo line: {echo_line}"
         );
     }
 }
