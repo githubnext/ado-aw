@@ -205,9 +205,37 @@ async fn resolve_for_command(
         } else {
             DiscoveryScope::CurrentRepo
         };
-        let matched =
-            resolve_definitions_via_discovery(client, ado_ctx, auth, scope, None, source_filter)
-                .await?;
+
+        // Feed local lock files into discovery so its yamlFilename
+        // fast-path can skip a Preview call per locally-compiled
+        // pipeline. Best-effort: scan failures aren't fatal — discovery
+        // simply falls back to Preview for everything.
+        let local_lock_paths: Vec<PathBuf> = match crate::detect::detect_pipelines(repo_path).await
+        {
+            Ok(detected) => detected.into_iter().map(|p| p.yaml_path).collect(),
+            Err(e) => {
+                log::debug!(
+                    "Local-fixture scan failed during discovery ({e}); falling back to Preview \
+                     for every definition."
+                );
+                Vec::new()
+            }
+        };
+        let local_lock_slice = if local_lock_paths.is_empty() {
+            None
+        } else {
+            Some(local_lock_paths.as_slice())
+        };
+
+        let matched = resolve_definitions_via_discovery(
+            client,
+            ado_ctx,
+            auth,
+            scope,
+            local_lock_slice,
+            source_filter,
+        )
+        .await?;
         return Ok(Some(matched));
     }
 

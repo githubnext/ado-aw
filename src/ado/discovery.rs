@@ -399,11 +399,21 @@ async fn classify_definition(
 /// markdown referenced by the marker has the same stem as the root
 /// YAML, the definition is the direct owner. Anything else is a
 /// consumer that pulls the template in via `template:` indirection.
+///
+/// Returns `false` for the marker-less case — `classify_definition`
+/// only routes here when at least one marker was found, but defensive
+/// against future callers.
 fn is_direct_match(def: &DefinitionSummary, markers: &[MarkerMetadata]) -> bool {
-    if markers.len() != 1 {
+    if markers.is_empty() {
+        // 0 markers means "not ado-aw at all", which is neither direct
+        // nor consumer. Belt-and-braces — `classify_definition`
+        // currently guards this, but the guard could move.
+        return false;
+    }
+    if markers.len() > 1 {
         // Multiple markers means a consumer pulling in more than one
         // template; can't be a direct ado-aw pipeline.
-        return markers.is_empty();
+        return false;
     }
     let marker = &markers[0];
     let Some(yaml_filename) = def
@@ -459,16 +469,17 @@ async fn parse_local_lock(path: &Path) -> Option<MarkerMetadata> {
 /// etc.). This keeps the rest of the codebase unchanged when commands
 /// opt into discovery via `--all-repos` / `--source`.
 ///
-/// Returns `None` for non-ado-aw definitions and for failures we don't
-/// want to silently surface as matched (forbidden, preview failed).
-/// `UnknownRequiredParams` is propagated *with* a marker-less
-/// MatchedDefinition because the user explicitly opted in and may
-/// want to act on it.
+/// Returns `None` for any classification that isn't safely actionable
+/// by a write command. In particular `UnknownRequiredParams`,
+/// `UnknownForbidden`, and `PreviewFailed` are dropped because we
+/// have no markers to attach (so we can't even tell the user which
+/// template a write would affect); `NotAdoAw` is dropped because it
+/// isn't ado-aw at all. Callers that want a richer summary (e.g. a
+/// future `list --all-repos`) should inspect `DiscoveredPipeline`
+/// directly rather than going through this adapter.
 pub fn discovered_to_matched(d: &DiscoveredPipeline) -> Option<MatchedDefinition> {
     match d.status {
         DiscoveryStatus::Direct | DiscoveryStatus::Consumer => {}
-        // Skip non-actionable classifications. The caller can inspect
-        // d.status directly for `list`-style reporting if needed.
         DiscoveryStatus::NotAdoAw
         | DiscoveryStatus::UnknownForbidden
         | DiscoveryStatus::UnknownRequiredParams
@@ -497,6 +508,12 @@ pub fn discovered_to_matched(d: &DiscoveredPipeline) -> Option<MatchedDefinition
 /// `source_filter` filters discovery results so only definitions whose
 /// markers reference that source path are kept. Match is by exact
 /// equality on the normalized source string in the marker JSON.
+///
+/// Definitions whose Preview call failed in a known-recoverable way
+/// (`UnknownRequiredParams` / `UnknownForbidden` / `PreviewFailed`) are
+/// counted and surfaced as a `warn!` so the operator can see that
+/// some pipelines were skipped — silently dropping them would be a
+/// nasty surprise for `secrets set --all-repos`.
 pub async fn resolve_definitions_via_discovery(
     client: &reqwest::Client,
     ctx: &AdoContext,
@@ -507,13 +524,43 @@ pub async fn resolve_definitions_via_discovery(
 ) -> Result<Vec<MatchedDefinition>> {
     let discovered = discover_ado_aw_pipelines(client, ctx, auth, scope, local_lock_paths).await?;
 
+    let mut skipped_required_params = 0usize;
+    let mut skipped_forbidden = 0usize;
+    let mut skipped_failed = 0usize;
+
     let kept: Vec<_> = discovered
         .into_iter()
         .filter(|d| {
+            match &d.status {
+                DiscoveryStatus::UnknownRequiredParams => skipped_required_params += 1,
+                DiscoveryStatus::UnknownForbidden => skipped_forbidden += 1,
+                DiscoveryStatus::PreviewFailed(_) => skipped_failed += 1,
+                _ => {}
+            }
             let Some(src) = source_filter else { return true };
             d.markers.iter().any(|m| m.source == src)
         })
         .collect();
+
+    if skipped_required_params > 0 {
+        warn!(
+            "Discovery skipped {skipped_required_params} definition(s) whose Pipeline Preview \
+             requires templateParameters with no defaults. Use --definition-ids to act on them \
+             directly.",
+        );
+    }
+    if skipped_forbidden > 0 {
+        warn!(
+            "Discovery skipped {skipped_forbidden} definition(s) the calling identity lacks \
+             read access to. Check your PAT or AAD permissions.",
+        );
+    }
+    if skipped_failed > 0 {
+        warn!(
+            "Discovery skipped {skipped_failed} definition(s) whose Pipeline Preview returned \
+             an unexpected error. Re-run with --debug to see details.",
+        );
+    }
 
     Ok(kept.iter().filter_map(discovered_to_matched).collect())
 }
@@ -522,6 +569,12 @@ pub async fn resolve_definitions_via_discovery(
 // `CurrentRepo` scoping. Lives here (rather than on `AdoContext`)
 // because the context only stores org+project+repo_name today;
 // reconstructing the URL is a local detail of discovery.
+//
+// Percent-encodes `project` and `repo_name` to match the form ADO
+// returns in `repository.url` — without this, projects whose names
+// contain spaces or other reserved chars would silently match nothing
+// because the lowercase comparison can't reconcile e.g. `my project`
+// with `my%20project`.
 impl AdoContext {
     fn repo_url(&self) -> Option<String> {
         if self.repo_name.is_empty() {
@@ -530,8 +583,8 @@ impl AdoContext {
         Some(format!(
             "{}/{}/_git/{}",
             self.org_url.trim_end_matches('/'),
-            self.project,
-            self.repo_name
+            percent_encoding::utf8_percent_encode(&self.project, super::PATH_SEGMENT),
+            percent_encoding::utf8_percent_encode(&self.repo_name, super::PATH_SEGMENT),
         ))
     }
 }

@@ -133,7 +133,6 @@ async fn try_detect_pipeline(
 /// (unlike top-of-file YAML comments) survives ADO Pipeline Preview
 /// expansion, so this prefix is the canonical surface project-scope
 /// discovery searches for in expanded YAML.
-#[allow(dead_code)] // Consumed by upcoming Preview-driven discovery (workstream P).
 pub const MARKER_STEP_PREFIX: &str = "# ado-aw-metadata:";
 
 /// Parsed metadata from a `# ado-aw-metadata: {…}` marker step line.
@@ -141,7 +140,6 @@ pub const MARKER_STEP_PREFIX: &str = "# ado-aw-metadata:";
 /// The schema is forward-compatible: unknown JSON fields are ignored,
 /// and missing fields fall through to defaults (empty string / zero).
 /// Callers that need a specific field should check it explicitly.
-#[allow(dead_code)] // Consumed by upcoming Preview-driven discovery (workstream P).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct MarkerMetadata {
     /// Schema version; `1` for the initial release.
@@ -172,7 +170,6 @@ pub struct MarkerMetadata {
 /// - Raw compiled-on-disk lock-file YAML, or
 /// - The `finalYaml` returned by ADO's Pipeline Preview API (which
 ///   strips top-of-file comments but preserves step bodies).
-#[allow(dead_code)] // Consumed by upcoming Preview-driven discovery (workstream P).
 pub fn parse_marker_step(yaml: &str) -> Vec<MarkerMetadata> {
     let mut results = Vec::new();
 

@@ -69,22 +69,32 @@ impl CompilerExtension for AdoAwMarkerExtension {
         // the build log at runtime, which is a free human-discoverability
         // bonus and costs nothing because the step runs in milliseconds.
         //
-        // Single quotes around the echo argument keep the JSON literal
-        // intact; the metadata contains no single quotes (JSON strings
-        // escape them via \u0027 if ever needed).
+        // The echo uses single quotes to keep the literal intact at
+        // runtime; we apply the bash `'\''` idiom to any `'` inside the
+        // source path so a markdown filename like `agents/foo's.md`
+        // doesn't produce broken bash. `version` and `target` are
+        // controlled inputs and can't contain `'`.
+        let echo_source = bash_single_quote_escape(&source);
         let step = format!(
             "- bash: |\n    \
                 # ado-aw-metadata: {metadata}\n    \
-                echo 'ado-aw metadata: source={source} version={version} target={target}'\n  \
+                echo 'ado-aw metadata: source={echo_source} version={version} target={target}'\n  \
             displayName: \"ado-aw\"\n",
             metadata = metadata_json,
-            source = source,
+            echo_source = echo_source,
             version = version,
             target = target,
         );
 
         Ok(vec![step])
     }
+}
+
+/// Escape any `'` in `s` so it can be safely embedded inside a single-quoted
+/// bash string. Replaces each `'` with `'\''` (close-quote, escaped quote,
+/// reopen-quote — the canonical idiom).
+fn bash_single_quote_escape(s: &str) -> String {
+    s.replace('\'', "'\\''")
 }
 
 #[cfg(test)]
@@ -157,5 +167,44 @@ mod tests {
                 steps[0]
             );
         }
+    }
+
+    #[test]
+    fn bash_single_quote_escape_idiom_is_correct() {
+        // Standard bash idiom: close-quote, escaped quote, reopen.
+        assert_eq!(bash_single_quote_escape("a'b"), "a'\\''b");
+        assert_eq!(bash_single_quote_escape("''"), "'\\'''\\''");
+        assert_eq!(bash_single_quote_escape("plain"), "plain");
+        assert_eq!(bash_single_quote_escape(""), "");
+    }
+
+    #[test]
+    fn echo_line_handles_single_quote_in_source_path() {
+        // A markdown filename with `'` in it must produce syntactically
+        // valid bash. Without the escape, the generated step would
+        // break with "unexpected EOF while looking for matching `''".
+        let fm = parse_fm("name: t\ndescription: x\n");
+        let input_path = Path::new("agents/foo's-agent.md");
+        let ctx = CompileContext {
+            agent_name: &fm.name,
+            front_matter: &fm,
+            ado_context: None,
+            engine: crate::engine::Engine::Copilot,
+            compile_dir: None,
+            input_path: Some(input_path),
+        };
+        let steps = AdoAwMarkerExtension.setup_steps(&ctx).unwrap();
+        assert_eq!(steps.len(), 1);
+        let step = &steps[0];
+        assert!(
+            step.contains("echo 'ado-aw metadata: source=agents/foo'\\''s-agent.md "),
+            "single-quote in source should be escaped via the '\\'' idiom; got:\n{step}",
+        );
+        // The JSON marker line should still carry the raw (un-bash-escaped)
+        // source — JSON has no quoting concern with `'`.
+        assert!(
+            step.contains("\"source\":\"agents/foo's-agent.md\""),
+            "JSON marker should carry raw source unchanged:\n{step}",
+        );
     }
 }
