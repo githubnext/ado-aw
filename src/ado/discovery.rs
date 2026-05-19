@@ -490,6 +490,15 @@ fn is_direct_match(def: &DefinitionSummary, markers: &[MarkerMetadata]) -> bool 
     // Map e.g. `agents/foo.md` → `agents/foo.lock.yml` and compare to
     // the definition's root YAML. Convention: `<stem>.md` compiles to
     // `<stem>.lock.yml`.
+    //
+    // Non-`.md` sources are treated conservatively as `Consumer`: this
+    // branch is unreachable today (the compiler always emits `.md`
+    // source paths) but stays defensive against future extensions that
+    // allow `.yaml` / `.json` / etc. agent sources. Returning `false`
+    // here means the definition will be classified as `Consumer`
+    // rather than `Direct`, which is the safe default — a write
+    // command still acts on it, just labelled differently in the
+    // summary.
     let Some(stem) = marker
         .source
         .strip_suffix(".md")
@@ -552,12 +561,14 @@ pub fn discovered_to_matched(d: &DiscoveredPipeline) -> Option<MatchedDefinition
     // Join every marker's source path so consumers that include
     // multiple templates show up honestly in the CLI summary instead
     // of silently truncating to whichever marker happened to be
-    // first. Also apply `sanitize_for_vso_logging` here: the
-    // `yaml_path` ends up in `print_matched_summary` (which writes to
-    // stdout), and if `ado-aw secrets set --all-repos` is ever invoked
-    // from inside an ADO pipeline step, an attacker-controlled marker
-    // source path containing `##vso[` would otherwise be processed by
-    // the agent's logging-command scanner.
+    // first. Also apply the canonical pipeline-command neutraliser:
+    // the `yaml_path` ends up in `print_matched_summary` (which writes
+    // to stdout), and if `ado-aw secrets set --all-repos` is ever
+    // invoked from inside an ADO pipeline step, an attacker-controlled
+    // marker source path containing `##vso[` would otherwise be
+    // processed by the agent's logging-command scanner. Reusing the
+    // shared helper keeps this in sync with every other sanitisation
+    // surface (front matter, safe outputs, agent stats).
     let yaml_path = if d.markers.is_empty() {
         String::new()
     } else {
@@ -567,7 +578,7 @@ pub fn discovered_to_matched(d: &DiscoveredPipeline) -> Option<MatchedDefinition
             .map(|m| m.source.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        sanitize_for_vso_logging(&joined)
+        crate::sanitize::neutralize_pipeline_commands(&joined)
     };
 
     Some(MatchedDefinition {
@@ -577,17 +588,6 @@ pub fn discovered_to_matched(d: &DiscoveredPipeline) -> Option<MatchedDefinition
         yaml_path,
         queue_status: d.queue_status.clone(),
     })
-}
-
-/// Neutralise ADO build-agent logging-command prefixes (`##vso[`,
-/// `##[`). Mirrors `crate::compile::extensions::ado_aw_marker` and
-/// `crate::agent_stats::sanitize_for_markdown` so that data flowing
-/// from a Preview-discovered marker through the CLI's own stdout
-/// cannot smuggle a `task.setvariable` (or similar) when the CLI is
-/// invoked from inside an ADO pipeline step.
-fn sanitize_for_vso_logging(s: &str) -> String {
-    s.replace("##vso[", "[vso-filtered][")
-        .replace("##[", "[filtered][")
 }
 
 /// CLI-facing wrapper: run Preview-driven discovery with the given
@@ -624,11 +624,6 @@ pub async fn resolve_definitions_via_discovery(
 ) -> Result<Vec<MatchedDefinition>> {
     let discovered = discover_ado_aw_pipelines(client, ctx, auth, scope, local_lock_paths).await?;
 
-    let mut skipped_required_params = 0usize;
-    let mut skipped_forbidden = 0usize;
-    let mut skipped_failed = 0usize;
-    let mut uninspectable = 0usize;
-
     // Normalize the user-supplied `--source` value through the same
     // canonical form the compiler uses for the marker JSON's `source`
     // field. Without this, `--source ./agents/foo.md` or
@@ -637,40 +632,53 @@ pub async fn resolve_definitions_via_discovery(
     let normalized_filter: Option<String> = source_filter
         .map(|s| crate::compile::normalize_source_path(Path::new(s)));
 
-    let kept: Vec<_> = discovered
-        .into_iter()
-        .filter(|d| {
-            let matches_filter = match normalized_filter.as_deref() {
-                Some(src) => d.markers.iter().any(|m| m.source == src),
-                None => true,
-            };
+    // Pass 1: classify each discovered definition into "keep / skip
+    // silently / skip with reason". The previous shape stuffed all of
+    // this into a side-effecting `.filter()` closure that mutated
+    // counters while deciding inclusion — explicit two-pass form keeps
+    // the counts honestly derived from the same iteration and makes it
+    // obvious what ends up in the returned vec.
+    let mut skipped_required_params = 0usize;
+    let mut skipped_forbidden = 0usize;
+    let mut skipped_failed = 0usize;
+    let mut uninspectable = 0usize;
+    let mut selected: Vec<DiscoveredPipeline> = Vec::with_capacity(discovered.len());
 
-            // Count toward skip totals only when the failure is
-            // relevant to the requested operation:
-            //  - unfiltered: every failure is relevant (we're operating
-            //    on every ado-aw pipeline in scope);
-            //  - filtered: we can't attribute uninspectable definitions
-            //    to a specific source, so use a single combined counter.
-            if normalized_filter.is_none() {
-                match &d.status {
-                    DiscoveryStatus::UnknownRequiredParams => skipped_required_params += 1,
-                    DiscoveryStatus::UnknownForbidden => skipped_forbidden += 1,
-                    DiscoveryStatus::PreviewFailed(_) => skipped_failed += 1,
-                    _ => {}
-                }
-            } else if matches!(
-                d.status,
+    for d in discovered {
+        let matches_filter = match normalized_filter.as_deref() {
+            Some(src) => d.markers.iter().any(|m| m.source == src),
+            None => true,
+        };
+
+        // Count toward skip totals only when the failure is relevant
+        // to the requested operation:
+        //  - unfiltered: every failure is relevant (we're operating
+        //    on every ado-aw pipeline in scope);
+        //  - filtered: we can't attribute uninspectable definitions
+        //    to a specific source, so use a single combined counter.
+        match (&d.status, normalized_filter.is_some()) {
+            (DiscoveryStatus::UnknownRequiredParams, false) => skipped_required_params += 1,
+            (DiscoveryStatus::UnknownForbidden, false) => skipped_forbidden += 1,
+            (DiscoveryStatus::PreviewFailed(_), false) => skipped_failed += 1,
+            (
                 DiscoveryStatus::UnknownRequiredParams
-                    | DiscoveryStatus::UnknownForbidden
-                    | DiscoveryStatus::PreviewFailed(_)
-            ) {
-                uninspectable += 1;
-            }
+                | DiscoveryStatus::UnknownForbidden
+                | DiscoveryStatus::PreviewFailed(_),
+                true,
+            ) => uninspectable += 1,
+            _ => {}
+        }
 
-            matches_filter
-        })
-        .collect();
+        if matches_filter {
+            selected.push(d);
+        }
+    }
 
+    // Pass 2: emit warnings and convert the selected items into
+    // `MatchedDefinition`. `discovered_to_matched` further filters out
+    // non-actionable statuses (NotAdoAw / NotFound / UnknownForbidden /
+    // UnknownRequiredParams / PreviewFailed); the count warnings above
+    // are what tells the operator why those drops happened.
     if skipped_required_params > 0 {
         warn!(
             "Discovery skipped {skipped_required_params} definition(s) whose Pipeline Preview \
@@ -700,7 +708,7 @@ pub async fn resolve_definitions_via_discovery(
         );
     }
 
-    Ok(kept.iter().filter_map(discovered_to_matched).collect())
+    Ok(selected.iter().filter_map(discovered_to_matched).collect())
 }
 
 // AdoContext helper: derive the resolved git remote URL for
@@ -1009,6 +1017,12 @@ mod tests {
         // attacker-controlled marker source path containing `##vso[`
         // would otherwise be processed by the agent's logging-command
         // scanner.
+        //
+        // The canonical `neutralize_pipeline_commands` wraps the
+        // prefix in backticks (`` `##vso[` ``) — the literal `##vso[`
+        // token no longer matches the agent's scanner. The canonical
+        // helper's own behaviour is exhaustively tested in
+        // `src/sanitize.rs`; this test is just the integration point.
         let mut d = discovered(DiscoveryStatus::Consumer);
         d.markers = vec![MarkerMetadata {
             schema: 1,
@@ -1018,13 +1032,13 @@ mod tests {
         }];
         let matched = discovered_to_matched(&d).expect("Consumer kept");
         assert!(
-            !matched.yaml_path.contains("##vso["),
+            !matched.yaml_path.contains("agents/##vso["),
             "raw ##vso[ leaked into yaml_path: {}",
             matched.yaml_path,
         );
         assert!(
-            matched.yaml_path.contains("[vso-filtered]["),
-            "expected `##vso[` neutralised to `[vso-filtered][`: {}",
+            matched.yaml_path.contains("`##vso[`"),
+            "expected `##vso[` neutralised via canonical backtick-wrap: {}",
             matched.yaml_path,
         );
     }
@@ -1047,20 +1061,5 @@ mod tests {
             normalize_repo_url("https://dev.azure.com/Org/P/_git/Repo/"),
             normalize_repo_url("https://dev.azure.com/org/p/_git/repo")
         );
-    }
-
-    // ── sanitize_for_vso_logging ─────────────────────────────────────
-
-    #[test]
-    fn discovery_sanitize_for_vso_logging_neutralises_prefixes() {
-        assert_eq!(
-            sanitize_for_vso_logging("##vso[task.setvariable variable=X]value"),
-            "[vso-filtered][task.setvariable variable=X]value"
-        );
-        assert_eq!(
-            sanitize_for_vso_logging("##[warning]ignore me"),
-            "[filtered][warning]ignore me"
-        );
-        assert_eq!(sanitize_for_vso_logging("agents/foo.md"), "agents/foo.md");
     }
 }

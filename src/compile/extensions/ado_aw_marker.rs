@@ -71,19 +71,22 @@ impl CompilerExtension for AdoAwMarkerExtension {
         //
         // The echo's source value goes through two sanitisations:
         //
-        //  1. `sanitize_for_vso_logging` neutralises `##vso[` and `##[`
-        //     prefixes. The ADO build agent scans stdout for those
-        //     sequences and treats them as logging commands (e.g.
-        //     `task.setvariable`). An attacker who controls a markdown
-        //     filename could otherwise inject a logging command into
-        //     the build log via the echoed source path. Same convention
-        //     used by `agent_stats::sanitize_for_markdown`.
+        //  1. `crate::sanitize::neutralize_pipeline_commands` neutralises
+        //     `##vso[` and `##[` prefixes by wrapping them in backticks.
+        //     The ADO build agent scans stdout for those sequences and
+        //     treats them as logging commands (e.g. `task.setvariable`).
+        //     An attacker who controls a markdown filename could
+        //     otherwise inject a logging command into the build log via
+        //     the echoed source path. Reusing the canonical helper keeps
+        //     this in sync with the rest of the sanitisation surfaces.
         //
         //  2. `bash_single_quote_escape` applies the `'\''` idiom so a
         //     filename containing `'` (e.g. `agents/foo's.md`) doesn't
         //     produce syntactically broken bash. `version` and `target`
         //     are controlled inputs and can't contain either.
-        let echo_source = bash_single_quote_escape(&sanitize_for_vso_logging(&source));
+        let echo_source = bash_single_quote_escape(
+            &crate::sanitize::neutralize_pipeline_commands(&source),
+        );
         let step = format!(
             "- bash: |\n    \
                 # ado-aw-metadata: {metadata}\n    \
@@ -104,15 +107,6 @@ impl CompilerExtension for AdoAwMarkerExtension {
 /// reopen-quote — the canonical idiom).
 fn bash_single_quote_escape(s: &str) -> String {
     s.replace('\'', "'\\''")
-}
-
-/// Neutralise ADO build-agent logging-command prefixes (`##vso[`, `##[`).
-/// Mirrors `crate::agent_stats::sanitize_for_markdown` so a malicious
-/// filename can't smuggle a `task.setvariable` (or similar) through the
-/// runtime `echo` line in the marker step.
-fn sanitize_for_vso_logging(s: &str) -> String {
-    s.replace("##vso[", "[vso-filtered][")
-        .replace("##[", "[filtered][")
 }
 
 #[cfg(test)]
@@ -227,26 +221,17 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_for_vso_logging_neutralises_known_prefixes() {
-        assert_eq!(
-            sanitize_for_vso_logging("##vso[task.setvariable variable=X]value"),
-            "[vso-filtered][task.setvariable variable=X]value"
-        );
-        assert_eq!(
-            sanitize_for_vso_logging("##[warning]ignore me"),
-            "[filtered][warning]ignore me"
-        );
-        assert_eq!(sanitize_for_vso_logging("agents/foo.md"), "agents/foo.md");
-        assert_eq!(sanitize_for_vso_logging(""), "");
-    }
-
-    #[test]
     fn echo_line_neutralises_vso_injection_attempt() {
         // An attacker who controls a markdown filename must not be able
         // to inject ADO logging commands into the build log via the
         // echoed source path. The ADO agent scans stdout for `##vso[`
         // and `##[` prefixes and treats matching sequences as task
         // commands (setvariable, setoutput, etc.).
+        //
+        // Marker uses the canonical `crate::sanitize::neutralize_pipeline_commands`
+        // which backtick-wraps the prefix (`` `##vso[` ``) — the literal
+        // `##vso[` no longer starts a token in the agent's scanner. See
+        // `src/sanitize.rs` for the canonical helper's own tests.
         let fm = parse_fm("name: t\ndescription: x\n");
         let input_path = Path::new("agents/##vso[task.setvariable variable=FOO]value.md");
         let ctx = CompileContext {
@@ -272,13 +257,17 @@ mod tests {
             .lines()
             .find(|l| l.trim_start().starts_with("echo 'ado-aw metadata:"))
             .expect("must have echo line");
+        // `neutralize_pipeline_commands` wraps the matched prefix in
+        // backticks, breaking the `##vso[` token at the start of the
+        // sequence. The agent's scanner is anchored to the literal
+        // prefix; the backtick-wrapped form passes through unprocessed.
         assert!(
-            !echo_line.contains("##vso["),
-            "raw ##vso[ leaked into echo line: {echo_line}"
+            !echo_line.contains(" ##vso["),
+            "raw ##vso[ leaked into echo line (must be backtick-wrapped): {echo_line}"
         );
         assert!(
-            echo_line.contains("[vso-filtered]["),
-            "expected `##vso[` neutralised to `[vso-filtered][` in echo line: {echo_line}"
+            echo_line.contains("`##vso[`"),
+            "expected `##vso[` neutralised via canonical backtick-wrap in echo line: {echo_line}"
         );
     }
 }
