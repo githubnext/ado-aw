@@ -113,6 +113,7 @@ on:
 | `daily between 9:00 and 17:00` | Business hours |
 | `weekly on monday` | Every Monday, scattered time |
 | `weekly on friday around 17:00` | Friday ~5 PM |
+| `weekly on wednesday between 9:00 and 12:00` | Wednesday, constrained to morning window |
 | `every 2 days` | Every N days, time scattered |
 | `every 2 weeks` | Every N weeks (converted to N×7 days) |
 | `bi-weekly` | Every 14 days |

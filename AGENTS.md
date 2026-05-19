@@ -156,8 +156,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── update-ado-agentic-workflow.md # Guide for modifying an existing agentic pipeline
 │   └── debug-ado-agentic-workflow.md  # Guide for troubleshooting a failing agentic pipeline
 ├── scripts/              # Supporting scripts shipped as release artifacts
-│   ├── ado-script/       # TypeScript workspace for bundled gate.js (and future bundles)
-│   └── gate.js           # Bundled gate evaluator (built from scripts/ado-script/, see docs/ado-script.md)
+│   └── ado-script/       # TypeScript workspace for the gate evaluator and future bundles; builds ado-script.zip (see docs/ado-script.md)
 ├── tests/                # Integration tests and fixtures
 ├── docs/                 # Per-concept reference documentation (see index below)
 ├── Cargo.toml            # Rust dependencies

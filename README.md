@@ -286,6 +286,8 @@ on:
 # Weekly
 on:
   schedule: weekly on monday around 9:00   # Monday morning
+on:
+  schedule: weekly on friday between 9:00 and 17:00  # Friday, business hours window
 
 # Multi-day / Special periods
 on:
