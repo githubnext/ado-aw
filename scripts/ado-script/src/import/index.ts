@@ -8,6 +8,14 @@ const MARKER = /\{\{#runtime-import(\?)?\s+([^\s}]+)\s*\}\}/g;
 //   * `]`  — closes the VSO command bracket prematurely.
 //   * `\r`, `\n` — split the diagnostic line so subsequent text would be
 //      parsed as a new ADO logging command.
+//
+// Note: `[` is intentionally NOT stripped. ADO's `##vso[…]` syntax
+// requires a balanced `[…]` pair *and* the leading `##vso` literal to
+// be parsed as a logging command. A path containing only `[` (without
+// a closing `]` and without a fresh `##vso` prefix) cannot open a new
+// command, so leaving `[` intact in the diagnostic message is safe and
+// avoids mangling legitimate paths that happen to contain it.
+//
 // Marker paths normally come from a compile-time-generated location, but
 // `import.js` is also invoked against arbitrary author-written markers in
 // the agent body, so this is a defence-in-depth guard.

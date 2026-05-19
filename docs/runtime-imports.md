@@ -36,11 +36,18 @@ along with any author-written markers.
 
 ## Path resolution
 
-- **Absolute paths** are used as-is. The compiler always emits an
-  absolute marker path for the agent body itself (`$(Build.SourcesDirectory)/…`)
-  so the resolver step never has to resolve a relative path at runtime.
-- **Relative paths at compile time** (`inlined-imports: true`) are resolved
-  against the source `.md` file's directory.
+- **Author-written markers** must use **relative paths** rooted at the agent
+  `.md` file's directory. Absolute paths and `..` segments are rejected. This
+  protects the compile host (`ado-aw compile`, which may run on a CI agent
+  carrying privileged material like SSH keys and service-connection tokens)
+  from untrusted PR branches embedding host files into the compiled YAML —
+  e.g. `{{#runtime-import /home/runner/.ssh/id_rsa}}` or
+  `{{#runtime-import ../../../../etc/passwd}}` are both compile-time errors.
+- **Compiler-generated marker for the agent body** uses an absolute path
+  (`$(Build.SourcesDirectory)/…`) built from the trigger-repo checkout root,
+  so the runtime resolver never has to resolve a relative path. The
+  compile-time restriction does not apply here because the path is
+  tooling-generated, not author-supplied.
 
 ## Single-pass behavior
 

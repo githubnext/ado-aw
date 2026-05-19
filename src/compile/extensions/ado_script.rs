@@ -41,18 +41,36 @@ pub struct AdoScriptExtension {
 }
 
 impl AdoScriptExtension {
-    fn has_gate(&self) -> bool {
-        let has_pr = self
+    /// Compute the lowered PR and pipeline checks once. Returns
+    /// `(pr_checks, pipeline_checks)`; either may be empty, in which
+    /// case the corresponding gate step is not emitted.
+    ///
+    /// Lowering is cheap but `setup_steps()` and `has_gate()`-style
+    /// callers used to invoke `lower_*_filters()` twice (once to test
+    /// emptiness, once to materialize). This helper folds both passes
+    /// into a single computation that callers reuse.
+    fn lowered_checks(
+        &self,
+    ) -> (
+        Vec<crate::compile::filter_ir::FilterCheck>,
+        Vec<crate::compile::filter_ir::FilterCheck>,
+    ) {
+        let pr_checks = self
             .pr_filters
             .as_ref()
-            .map(|f| !lower_pr_filters(f).is_empty())
-            .unwrap_or(false);
-        let has_pipeline = self
+            .map(lower_pr_filters)
+            .unwrap_or_default();
+        let pipeline_checks = self
             .pipeline_filters
             .as_ref()
-            .map(|f| !lower_pipeline_filters(f).is_empty())
-            .unwrap_or(false);
-        has_pr || has_pipeline
+            .map(lower_pipeline_filters)
+            .unwrap_or_default();
+        (pr_checks, pipeline_checks)
+    }
+
+    fn has_gate(&self) -> bool {
+        let (pr, pipeline) = self.lowered_checks();
+        !pr.is_empty() || !pipeline.is_empty()
     }
 
     fn runtime_imports_active(&self) -> bool {
@@ -133,29 +151,24 @@ impl CompilerExtension for AdoScriptExtension {
     }
 
     fn setup_steps(&self, _ctx: &CompileContext) -> Result<Vec<String>> {
-        if !self.has_gate() {
+        let (pr_checks, pipeline_checks) = self.lowered_checks();
+        if pr_checks.is_empty() && pipeline_checks.is_empty() {
             return Ok(vec![]);
         }
         let mut steps = install_and_download_steps();
-        if let Some(filters) = &self.pr_filters {
-            let checks = lower_pr_filters(filters);
-            if !checks.is_empty() {
-                steps.push(compile_gate_step_external(
-                    GateContext::PullRequest,
-                    &checks,
-                    GATE_EVAL_PATH,
-                )?);
-            }
+        if !pr_checks.is_empty() {
+            steps.push(compile_gate_step_external(
+                GateContext::PullRequest,
+                &pr_checks,
+                GATE_EVAL_PATH,
+            )?);
         }
-        if let Some(filters) = &self.pipeline_filters {
-            let checks = lower_pipeline_filters(filters);
-            if !checks.is_empty() {
-                steps.push(compile_gate_step_external(
-                    GateContext::PipelineCompletion,
-                    &checks,
-                    GATE_EVAL_PATH,
-                )?);
-            }
+        if !pipeline_checks.is_empty() {
+            steps.push(compile_gate_step_external(
+                GateContext::PipelineCompletion,
+                &pipeline_checks,
+                GATE_EVAL_PATH,
+            )?);
         }
         Ok(steps)
     }
@@ -215,8 +228,15 @@ impl CompilerExtension for AdoScriptExtension {
 /// Used by `compile_shared` when `inlined-imports: true` so author-written
 /// markers inside the agent's markdown body still work in inlined mode.
 ///
-/// Path resolution: absolute paths are used as-is; relative paths are
+/// Path resolution: only **relative** paths are accepted. They are
 /// resolved against `base_dir` (the source `.md` file's directory).
+/// Absolute paths and `..` segments are rejected because compile-time
+/// resolution against an untrusted branch (e.g. `ado-aw compile` on a
+/// hostile PR) would otherwise embed arbitrary host files
+/// (`{{#runtime-import /home/runner/.ssh/id_rsa}}`,
+/// `{{#runtime-import ../../../../etc/passwd}}`) verbatim into the
+/// compiled YAML.
+///
 /// Required markers fail with an error; optional `?`-form markers
 /// silently drop if the referenced file is missing.
 pub fn resolve_imports_inline(body: &str, base_dir: &std::path::Path) -> Result<String> {
@@ -269,12 +289,27 @@ pub fn resolve_imports_inline(body: &str, base_dir: &std::path::Path) -> Result<
             "runtime-import: invalid path '{}': '..' path components are not allowed",
             path_str
         );
+        // Reject absolute paths at compile time. An untrusted PR branch
+        // could otherwise embed arbitrary host files into the compiled
+        // YAML (e.g. `{{#runtime-import /home/runner/.ssh/id_rsa}}`,
+        // `{{#runtime-import C:\Users\…\secrets.txt}}`). Only relative
+        // imports rooted in `base_dir` (the source `.md` file's
+        // directory, which is part of the same repo) are safe. Detect
+        // POSIX absolute (`/foo`), Windows drive-letter absolute
+        // (`C:\foo`, `C:/foo`), and UNC (`\\server\share`) — `Path::is_absolute`
+        // is platform-dependent, so add an explicit prefix check for
+        // forward-slash forms on Windows builds that wouldn't otherwise
+        // see `/etc/passwd` as absolute.
+        let is_absolute = std::path::Path::new(path_str).is_absolute()
+            || path_str.starts_with('/')
+            || path_str.starts_with("\\\\");
+        anyhow::ensure!(
+            !is_absolute,
+            "runtime-import: invalid path '{}': absolute paths are not allowed (use a relative path rooted at the agent's directory)",
+            path_str
+        );
 
-        let abs = if std::path::Path::new(path_str).is_absolute() {
-            std::path::PathBuf::from(path_str)
-        } else {
-            base_dir.join(path_str)
-        };
+        let abs = base_dir.join(path_str);
 
         match std::fs::read_to_string(&abs) {
             Ok(contents) => result.push_str(&contents),
@@ -501,24 +536,69 @@ mod tests {
         assert_eq!(result, "prepost");
     }
 
+    /// Relative paths under `base_dir` resolve correctly. Absolute paths
+    /// are explicitly rejected — see `rejects_absolute_path_at_compile_time`.
     #[test]
-    fn supports_relative_and_absolute_paths() {
+    fn supports_relative_path_resolution() {
         let workspace = TestWorkspace::new();
         let nested_base = workspace.path.join("nested");
         fs::create_dir_all(&nested_base).unwrap();
-        let absolute = workspace.write("absolute.md", "absolute-body");
         workspace.write("nested/relative.md", "relative-body");
 
         let relative =
             resolve_imports_inline("{{#runtime-import relative.md}}", &nested_base).unwrap();
-        let absolute_body = resolve_imports_inline(
-            &format!("{{{{#runtime-import {}}}}}", absolute.display()),
-            &nested_base,
-        )
-        .unwrap();
 
         assert_eq!(relative, "relative-body");
-        assert_eq!(absolute_body, "absolute-body");
+    }
+
+    /// Compile-time absolute-path rejection. The compile machine has
+    /// privileged filesystem access (e.g. CI runners hold `.ssh/id_rsa`,
+    /// hosted-pool service-connection material, dotfiles under the
+    /// runner's home dir). An untrusted PR branch's markdown body must
+    /// NOT be able to embed those files via
+    /// `{{#runtime-import /home/runner/.ssh/id_rsa}}`. Only relative
+    /// imports rooted under the agent's `.md` file's directory — which
+    /// is itself inside the repo — are safe in adversarial scenarios.
+    #[test]
+    fn rejects_absolute_posix_path_at_compile_time() {
+        let workspace = TestWorkspace::new();
+        let err = resolve_imports_inline(
+            "{{#runtime-import /etc/passwd}}",
+            &workspace.path,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("absolute paths are not allowed"),
+            "expected absolute-path rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_absolute_windows_drive_path_at_compile_time() {
+        let workspace = TestWorkspace::new();
+        let err = resolve_imports_inline(
+            r"{{#runtime-import C:\Users\runner\secret.txt}}",
+            &workspace.path,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("absolute paths are not allowed"),
+            "expected absolute-path rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_unc_path_at_compile_time() {
+        let workspace = TestWorkspace::new();
+        let err = resolve_imports_inline(
+            r"{{#runtime-import \\server\share\file.md}}",
+            &workspace.path,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("absolute paths are not allowed"),
+            "expected absolute-path rejection, got: {err}"
+        );
     }
 
     #[test]
@@ -571,10 +651,10 @@ mod tests {
     #[test]
     fn rejects_absolute_path_with_dotdot_segment() {
         let workspace = TestWorkspace::new();
-        // Absolute paths are otherwise accepted (see
-        // `supports_relative_and_absolute_paths`), but `..` segments
-        // make path-confinement reasoning unsound and must still be
-        // rejected.
+        // The `..`-segment guard fires before the absolute-path guard,
+        // so an absolute path with embedded `..` is reported as a
+        // traversal violation. Either rejection is acceptable for this
+        // input shape.
         let err = resolve_imports_inline(
             "{{#runtime-import /tmp/agents/../../etc/passwd}}",
             &workspace.path,
