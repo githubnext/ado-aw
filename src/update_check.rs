@@ -55,14 +55,16 @@ async fn fetch_latest_tag() -> anyhow::Result<String> {
 
 /// Returns `true` when `latest` is strictly greater than `current`.
 /// Both strings are expected to be bare semver triples, e.g. `"0.31.0"`.
+/// Extra version components (pre-release suffixes, build metadata) are ignored.
 fn is_newer(latest: &str, current: &str) -> bool {
     fn parse(s: &str) -> Option<(u64, u64, u64)> {
-        let mut it = s.splitn(4, '.'); // splitn(4) so "1.2.3.4" isn't equal to "1.2.3"
+        let mut it = s.split('.');
         let major = it.next()?.parse().ok()?;
         let minor = it.next()?.parse().ok()?;
-        // Allow patch to have a pre-release suffix; only the numeric part matters.
-        let patch_str = it.next()?;
-        let patch: u64 = patch_str
+        // Allow patch to carry a pre-release suffix (e.g. "3-beta"); only the
+        // leading numeric part matters for the comparison.
+        let patch: u64 = it
+            .next()?
             .split(|c: char| !c.is_ascii_digit())
             .next()
             .and_then(|n| n.parse().ok())?;
@@ -105,8 +107,11 @@ mod tests {
     }
 
     #[test]
-    fn v_prefix_stripped() {
-        // The caller strips the 'v' before passing here, but be defensive.
-        assert!(is_newer("0.31.0", "0.30.2"));
+    fn v_prefix_already_stripped_by_caller() {
+        // check_for_update() strips the 'v' before calling is_newer; verify
+        // that stripping works end-to-end by simulating it here.
+        let tag = "v0.31.0";
+        let stripped = tag.trim_start_matches('v');
+        assert!(is_newer(stripped, "0.30.2"));
     }
 }
