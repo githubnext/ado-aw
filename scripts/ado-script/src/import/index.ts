@@ -1,6 +1,12 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 
+// The path capture `[^\s}]+` deliberately excludes `}` so the regex
+// terminates cleanly at the closing `}}`. The compile-time resolver
+// (`resolve_imports_inline` in `src/compile/extensions/ado_script.rs`)
+// rejects `}` in paths up front so a marker like `{{#runtime-import foo}bar.md}}`
+// fails with a clear compile-time error rather than being silently
+// accepted at compile time and silently dropped at runtime.
 const MARKER = /\{\{#runtime-import(\?)?\s+([^\s}]+)\s*\}\}/g;
 
 // Strip characters that would let an attacker-controlled `rawPath` break

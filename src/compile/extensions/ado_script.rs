@@ -275,6 +275,22 @@ pub fn resolve_imports_inline(body: &str, base_dir: &std::path::Path) -> Result<
             "runtime-import: invalid path '{}': whitespace is not allowed",
             path_str
         );
+        // Reject `}` in paths so the compile-time resolver stays in
+        // strict parity with the runtime regex
+        // (`scripts/ado-script/src/import/index.ts` — `[^\s}]+`). The
+        // runtime regex stops the path capture at any `}`; the
+        // compile-time resolver, by contrast, terminates only at the
+        // closing `}}` and would otherwise happily accept a path like
+        // `foo}bar.md`. Allowing `}` here would silently produce
+        // different behaviour on the two paths (compile-time: file
+        // looked up as `foo}bar.md`; runtime: marker survives
+        // unexpanded). Reject up front so the failure mode is one
+        // clear compile-time error in both modes.
+        anyhow::ensure!(
+            !path_str.contains('}'),
+            "runtime-import: invalid path '{}': '}}' is not allowed (incompatible with the runtime resolver's path regex)",
+            path_str
+        );
         // Reject any path whose segments contain `..`. A malicious agent
         // body could otherwise reach files outside `base_dir` and embed
         // them verbatim into the compiled YAML — e.g.
@@ -614,6 +630,25 @@ mod tests {
         .unwrap();
 
         assert_eq!(result, "A ONE B TWO C");
+    }
+
+    /// `}` rejection keeps the compile-time resolver in strict parity
+    /// with the runtime regex (`[^\s}]+`). Without this guard, a path
+    /// like `foo}bar.md` would be accepted at compile time but cause
+    /// the runtime resolver to either truncate it or leave the marker
+    /// unexpanded — silent divergence. Reject up front.
+    #[test]
+    fn rejects_path_containing_closing_brace() {
+        let workspace = TestWorkspace::new();
+        let err = resolve_imports_inline(
+            "{{#runtime-import foo}bar.md}}",
+            &workspace.path,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("is not allowed"),
+            "expected `}}` rejection, got: {err}"
+        );
     }
 
     /// Path traversal: `..` segments would let a malicious agent body
