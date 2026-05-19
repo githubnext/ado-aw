@@ -56,9 +56,28 @@ impl CompilerExtension for AdoAwMarkerExtension {
         let version = env!("CARGO_PKG_VERSION");
         let target = ctx.front_matter.target.as_str();
 
+        // ADO origin of the source markdown — disambiguates the
+        // `source` field when two repos in the same project happen to
+        // have files of the same name (e.g. both define `agents/foo.md`).
+        // Lower-cased so case-insensitive ADO identifiers compare cleanly.
+        // Empty strings when no ADO context could be inferred — production
+        // runs always have one thanks to the non-GitHub-remote guard, but
+        // unit-test contexts via `CompileContext::for_test` will not.
+        let org = ctx
+            .ado_org()
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
+        let repo = ctx
+            .ado_context
+            .as_ref()
+            .map(|c| c.repo_name.to_ascii_lowercase())
+            .unwrap_or_default();
+
         let metadata_json = serde_json::json!({
             "schema": 1,
             "source": source,
+            "org": org,
+            "repo": repo,
             "version": version,
             "target": target,
         })
@@ -69,7 +88,7 @@ impl CompilerExtension for AdoAwMarkerExtension {
         // the build log at runtime, which is a free human-discoverability
         // bonus and costs nothing because the step runs in milliseconds.
         //
-        // The echo's source value goes through two sanitisations:
+        // The echo's user-controlled values go through two sanitisations:
         //
         //  1. `crate::sanitize::neutralize_pipeline_commands` neutralises
         //     `##vso[` and `##[` prefixes by wrapping them in backticks.
@@ -84,16 +103,28 @@ impl CompilerExtension for AdoAwMarkerExtension {
         //     filename containing `'` (e.g. `agents/foo's.md`) doesn't
         //     produce syntactically broken bash. `version` and `target`
         //     are controlled inputs and can't contain either.
+        //
+        // `org` and `repo` are derived from ADO remote parsing, which
+        // already restricts them to a safe character set, but we apply
+        // the same defence-in-depth pattern for consistency.
         let echo_source = bash_single_quote_escape(
             &crate::sanitize::neutralize_pipeline_commands(&source),
+        );
+        let echo_org = bash_single_quote_escape(
+            &crate::sanitize::neutralize_pipeline_commands(&org),
+        );
+        let echo_repo = bash_single_quote_escape(
+            &crate::sanitize::neutralize_pipeline_commands(&repo),
         );
         let step = format!(
             "- bash: |\n    \
                 # ado-aw-metadata: {metadata}\n    \
-                echo 'ado-aw metadata: source={echo_source} version={version} target={target}'\n  \
+                echo 'ado-aw metadata: source={echo_source} org={echo_org} repo={echo_repo} version={version} target={target}'\n  \
             displayName: \"ado-aw\"\n",
             metadata = metadata_json,
             echo_source = echo_source,
+            echo_org = echo_org,
+            echo_repo = echo_repo,
             version = version,
             target = target,
         );
@@ -150,6 +181,49 @@ mod tests {
         assert!(step.contains("\"source\":\"agents/foo.md\""), "step missing source field:\n{step}");
         assert!(step.contains("\"target\":\"standalone\""), "step missing target field:\n{step}");
         assert!(step.contains("\"schema\":1"), "step missing schema field:\n{step}");
+        // No ado_context => org/repo emit as empty strings.
+        assert!(step.contains("\"org\":\"\""), "step missing org field:\n{step}");
+        assert!(step.contains("\"repo\":\"\""), "step missing repo field:\n{step}");
+    }
+
+    #[test]
+    fn org_and_repo_embed_from_ado_context_lowercased() {
+        // When the compiler runs inside an ADO checkout (the production
+        // path — the non-GitHub-remote guard enforces this), the JSON
+        // marker carries `org` and `repo` so discovery can disambiguate
+        // a same-named `source` across two repos in the same project.
+        let fm = parse_fm("name: t\ndescription: x\n");
+        let input_path = Path::new("agents/foo.md");
+        let ctx = CompileContext {
+            agent_name: &fm.name,
+            front_matter: &fm,
+            ado_context: Some(crate::ado::AdoContext {
+                org_url: "https://dev.azure.com/MyOrg".to_string(),
+                project: "MyProject".to_string(),
+                repo_name: "Templates-A".to_string(),
+            }),
+            engine: crate::engine::Engine::Copilot,
+            compile_dir: None,
+            input_path: Some(input_path),
+        };
+        let steps = AdoAwMarkerExtension.setup_steps(&ctx).unwrap();
+        assert_eq!(steps.len(), 1);
+        let step = &steps[0];
+        // ADO identifiers are case-insensitive; lowercase to make
+        // comparisons in discovery deterministic.
+        assert!(
+            step.contains("\"org\":\"myorg\""),
+            "expected lowercased org field:\n{step}"
+        );
+        assert!(
+            step.contains("\"repo\":\"templates-a\""),
+            "expected lowercased repo field:\n{step}"
+        );
+        // The echo line surfaces them too for build-log readability.
+        assert!(
+            step.contains("org=myorg repo=templates-a"),
+            "expected echo to include org/repo:\n{step}"
+        );
     }
 
     #[test]

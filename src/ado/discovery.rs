@@ -519,6 +519,27 @@ fn is_direct_match(def: &DefinitionSummary, markers: &[MarkerMetadata]) -> bool 
     yaml_normalized == stem
 }
 
+/// Decide whether a marker's `(org, repo)` identifies the same
+/// repository as the discovery context. Empty marker fields (legacy
+/// markers produced before the org/repo embed landed, or markers from
+/// non-ADO compile environments) are treated as wildcards so existing
+/// deployments are not silently excluded. Once those lock files are
+/// recompiled, the match becomes strict.
+fn marker_origin_matches(
+    marker: &MarkerMetadata,
+    current_org_lc: &str,
+    current_repo_lc: &str,
+) -> bool {
+    if marker.org.is_empty() && marker.repo.is_empty() {
+        return true;
+    }
+    // Marker fields are already lower-cased at emit time. Be defensive
+    // anyway — round-tripping through serde_json doesn't change case
+    // but a hand-edited fixture or future producer might.
+    marker.org.eq_ignore_ascii_case(current_org_lc)
+        && marker.repo.eq_ignore_ascii_case(current_repo_lc)
+}
+
 async fn parse_local_lock(path: &Path) -> Option<MarkerMetadata> {
     let content = tokio::fs::read_to_string(path).await.ok()?;
     // Two surfaces, in order of preference:
@@ -535,6 +556,8 @@ async fn parse_local_lock(path: &Path) -> Option<MarkerMetadata> {
             return Some(MarkerMetadata {
                 schema: 0,
                 source: h.source,
+                org: String::new(),
+                repo: String::new(),
                 version: h.version,
                 target: String::new(),
             });
@@ -614,6 +637,17 @@ pub fn discovered_to_matched(d: &DiscoveredPipeline) -> Option<MatchedDefinition
 /// **case-sensitive** even on Windows; pass the path in the same case
 /// it was compiled with.
 ///
+/// Source-only matching is ambiguous when two repos in the same ADO
+/// project happen to define a file of the same name (e.g. both have
+/// `agents/foo.md`). To disambiguate, the marker carries the ADO
+/// `org` and `repo` of the compiling repository (lower-cased). When
+/// `source_filter` is active, the marker's `(org, repo)` must also
+/// equal `ctx`'s — i.e. the operator gets only consumers whose
+/// template originated in the **current repo**. Markers with empty
+/// `org` / `repo` (legacy or non-ADO compilers) match leniently so
+/// pre-existing deployments are not silently excluded; once everything
+/// is recompiled with this version, the match becomes strict.
+///
 /// Skip-summary warnings are emitted differently depending on whether
 /// `source_filter` is active:
 ///
@@ -648,6 +682,20 @@ pub async fn resolve_definitions_via_discovery(
     let normalized_filter: Option<String> = source_filter
         .map(|s| crate::compile::normalize_source_path(Path::new(s)));
 
+    // Origin scoping: when filtering by `--source`, also require the
+    // marker's (org, repo) to identify the current repository. This
+    // disambiguates the source field when two repos in the same
+    // project define files of the same name. Lower-cased to align with
+    // the marker's lower-casing at emit time (ADO identifiers are
+    // case-insensitive). Markers with empty fields (legacy / non-ADO
+    // compiles) match leniently so already-deployed pipelines remain
+    // discoverable until they are recompiled.
+    let current_org = ctx
+        .org_name()
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    let current_repo = ctx.repo_name.to_ascii_lowercase();
+
     // Pass 1: classify each discovered definition into "keep / skip
     // silently / skip with reason". The previous shape stuffed all of
     // this into a side-effecting `.filter()` closure that mutated
@@ -662,7 +710,9 @@ pub async fn resolve_definitions_via_discovery(
 
     for d in discovered {
         let matches_filter = match normalized_filter.as_deref() {
-            Some(src) => d.markers.iter().any(|m| m.source == src),
+            Some(src) => d.markers.iter().any(|m| {
+                m.source == src && marker_origin_matches(m, &current_org, &current_repo)
+            }),
             None => true,
         };
 
@@ -844,6 +894,7 @@ mod tests {
             source: "agents/foo.md".to_string(),
             version: "0.30.0".to_string(),
             target: "standalone".to_string(),
+            ..Default::default()
         }];
         assert!(is_direct_match(&def, &markers));
     }
@@ -859,6 +910,7 @@ mod tests {
             source: "agents/foo.md".to_string(),
             version: "0.30.0".to_string(),
             target: "standalone".to_string(),
+            ..Default::default()
         }];
         assert!(is_direct_match(&def, &markers));
     }
@@ -877,6 +929,7 @@ mod tests {
             source: "agents/foo.md".to_string(),
             version: "0.30.0".to_string(),
             target: "standalone".to_string(),
+            ..Default::default()
         }];
         assert!(!is_direct_match(&def, &markers));
     }
@@ -889,6 +942,7 @@ mod tests {
             source: "agents/foo.md".to_string(),
             version: "0.30.0".to_string(),
             target: "stage".to_string(),
+            ..Default::default()
         }];
         assert!(!is_direct_match(&def, &markers));
     }
@@ -902,12 +956,14 @@ mod tests {
                 source: "agents/foo.md".to_string(),
                 version: "0.30.0".to_string(),
                 target: "stage".to_string(),
+                ..Default::default()
             },
             MarkerMetadata {
                 schema: 1,
                 source: "agents/bar.md".to_string(),
                 version: "0.30.0".to_string(),
                 target: "job".to_string(),
+                ..Default::default()
             },
         ];
         // Multiple markers = at least one template is being included
@@ -972,6 +1028,62 @@ mod tests {
         );
     }
 
+    // ── marker_origin_matches ────────────────────────────────────────
+
+    #[test]
+    fn origin_matches_strict_when_marker_has_org_and_repo() {
+        let marker = MarkerMetadata {
+            org: "myorg".to_string(),
+            repo: "templates-a".to_string(),
+            source: "agents/foo.md".to_string(),
+            ..Default::default()
+        };
+        assert!(marker_origin_matches(&marker, "myorg", "templates-a"));
+        assert!(!marker_origin_matches(&marker, "myorg", "templates-b"));
+        assert!(!marker_origin_matches(&marker, "otherorg", "templates-a"));
+    }
+
+    #[test]
+    fn origin_matches_case_insensitively() {
+        // ADO identifiers are case-insensitive. Marker fields are
+        // lower-cased at emit time, but a fixture or hand-edited
+        // marker might carry uppercase — accept either.
+        let marker = MarkerMetadata {
+            org: "MyOrg".to_string(),
+            repo: "Templates-A".to_string(),
+            source: "agents/foo.md".to_string(),
+            ..Default::default()
+        };
+        assert!(marker_origin_matches(&marker, "myorg", "templates-a"));
+    }
+
+    #[test]
+    fn origin_matches_leniently_when_marker_org_repo_empty() {
+        // Legacy markers (pre-org/repo embed) and markers compiled
+        // outside an ADO checkout carry empty org/repo. Match anything
+        // so existing deployments keep working until recompiled.
+        let marker = MarkerMetadata {
+            source: "agents/foo.md".to_string(),
+            ..Default::default()
+        };
+        assert!(marker_origin_matches(&marker, "myorg", "templates-a"));
+        assert!(marker_origin_matches(&marker, "", ""));
+    }
+
+    #[test]
+    fn origin_matches_strictly_when_only_one_field_empty() {
+        // If only one half of (org, repo) is set, we treat the marker
+        // as non-legacy and require both to match. Pre-empts a
+        // malformed fixture passing through the lenient path.
+        let half_marker = MarkerMetadata {
+            org: "myorg".to_string(),
+            repo: String::new(),
+            source: "agents/foo.md".to_string(),
+            ..Default::default()
+        };
+        assert!(!marker_origin_matches(&half_marker, "myorg", "templates-a"));
+    }
+
     // ── discovered_to_matched ────────────────────────────────────────
 
     fn discovered(status: DiscoveryStatus) -> DiscoveredPipeline {
@@ -1027,12 +1139,14 @@ mod tests {
                 source: "agents/a.md".to_string(),
                 version: "1.0".to_string(),
                 target: "job".to_string(),
+                ..Default::default()
             },
             MarkerMetadata {
                 schema: 1,
                 source: "agents/b.md".to_string(),
                 version: "1.0".to_string(),
                 target: "stage".to_string(),
+                ..Default::default()
             },
         ];
         let matched = discovered_to_matched(&d).expect("Consumer kept");
@@ -1063,6 +1177,7 @@ mod tests {
             source: "agents/##vso[task.setvariable variable=X]value.md".to_string(),
             version: "1.0".to_string(),
             target: "job".to_string(),
+            ..Default::default()
         }];
         let matched = discovered_to_matched(&d).expect("Consumer kept");
         assert!(

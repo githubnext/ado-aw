@@ -79,6 +79,17 @@ pub struct AdoContext {
     pub repo_name: String,
 }
 
+impl AdoContext {
+    /// Extract just the org slug from `org_url` (e.g.
+    /// `https://dev.azure.com/MyOrg/` → `Some("MyOrg")`). Mirrors the
+    /// inline parse in `CompileContext::ado_org`; lives here so
+    /// non-compile callers (Preview-driven discovery) can reuse it.
+    pub fn org_name(&self) -> Option<&str> {
+        let org = self.org_url.trim_end_matches('/').rsplit('/').next()?;
+        if org.is_empty() { None } else { Some(org) }
+    }
+}
+
 /// Parse the ADO org, project, and repo from a git remote URL.
 ///
 /// Supports:

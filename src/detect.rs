@@ -140,7 +140,7 @@ pub const MARKER_STEP_PREFIX: &str = "# ado-aw-metadata:";
 /// The schema is forward-compatible: unknown JSON fields are ignored,
 /// and missing fields fall through to defaults (empty string / zero).
 /// Callers that need a specific field should check it explicitly.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 pub struct MarkerMetadata {
     /// Schema version; `1` for the initial release.
     #[serde(default)]
@@ -149,6 +149,22 @@ pub struct MarkerMetadata {
     /// `agents/release-readiness.md`).
     #[serde(default)]
     pub source: String,
+    /// ADO organisation name the source markdown was compiled in
+    /// (e.g. `myorg`). Lowercased at emit time. Combined with
+    /// [`MarkerMetadata::repo`] this disambiguates the marker's
+    /// `source` field when two repos in the same ADO project happen
+    /// to have files of the same name (e.g. both define
+    /// `agents/foo.md`). Empty string when the compiler ran outside
+    /// an ADO checkout (rare in production thanks to the
+    /// non-GitHub-remote guard).
+    #[serde(default)]
+    pub org: String,
+    /// ADO repository name the source markdown was compiled in
+    /// (e.g. `templates-a`). Lowercased at emit time. See
+    /// [`MarkerMetadata::org`] for rationale. Empty string when the
+    /// compiler ran outside an ADO checkout.
+    #[serde(default)]
+    pub repo: String,
     /// Compiler version that produced this YAML (`CARGO_PKG_VERSION`).
     #[serde(default)]
     pub version: String,
