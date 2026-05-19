@@ -508,7 +508,7 @@ mod tests {
     fn test_enforce_byte_limit() {
         let big = "a".repeat(MAX_CONTENT_BYTES + 100);
         let result = enforce_content_limits(&big);
-        assert!(result.len() <= MAX_CONTENT_BYTES + 100); // room for truncation notice
+        assert!(result.len() < big.len()); // truncation must have shortened the content
         assert!(result.contains("[Content truncated"));
     }
 
@@ -520,6 +520,8 @@ mod tests {
             .join("\n");
         let result = enforce_content_limits(&lines);
         assert!(result.contains("[Content truncated"));
+        // Verify lines were actually truncated (not just the notice appended to the full input)
+        assert!(result.lines().count() <= MAX_LINE_COUNT + 2);
     }
 
     #[test]
@@ -553,8 +555,9 @@ mod tests {
     #[test]
     fn test_sanitize_ab_work_item_link() {
         let input = "This relates to AB#12345";
-        let result = sanitize(&input);
-        assert!(result.contains("`AB#12345`"));
+        let result = sanitize(input);
+        // Input has no HTML, ANSI, mentions, or unsafe protocols, so only AB# is transformed
+        assert_eq!(result, "This relates to `AB#12345`");
     }
 
     #[test]
@@ -583,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn test_neutralize_vso_preserves_single_hash() {
+    fn test_sanitize_preserves_markdown_headings() {
         let input = "# Heading\n## Sub-heading\nIssue #123";
         let result = sanitize(input);
         assert!(result.contains("# Heading"));
