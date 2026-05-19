@@ -1216,12 +1216,29 @@ pub const HEADER_MARKER: &str = "# @ado-aw";
 /// - A human-readable "do not edit" warning
 /// - A machine-readable `@ado-aw` marker with source path and compiler version
 ///
-/// The source path is the input path as provided to the compiler (e.g., `agents/my-agent.md`,
-/// `.azdo/pipelines/review.md`, or any other location the user chose). Path separators
-/// are normalized to forward slashes for cross-platform consistency.
+/// The source path is stored as a relative path so that `--source` filters
+/// and auto-discovery recompile work regardless of how the user invoked the
+/// compiler (relative path, absolute path, etc.). Path separators are
+/// normalised to forward slashes for cross-platform consistency.
 pub fn generate_header_comment(input_path: &std::path::Path) -> String {
     let version = env!("CARGO_PKG_VERSION");
-    let mut source_path = input_path
+
+    // If the caller supplied an absolute path (e.g. `ado-aw compile
+    // /repo/agents/foo.md`), make it relative to the current working directory
+    // so that `--source agents/foo.md` filters can match it.  When the path is
+    // not under the CWD (unusual), fall back to the original path rather than
+    // silently producing a wrong value.
+    let relative: std::borrow::Cow<std::path::Path> = if input_path.is_absolute() {
+        std::env::current_dir()
+            .ok()
+            .and_then(|cwd| input_path.strip_prefix(&cwd).ok().map(|p| p.to_path_buf()))
+            .map(std::borrow::Cow::Owned)
+            .unwrap_or(std::borrow::Cow::Borrowed(input_path))
+    } else {
+        std::borrow::Cow::Borrowed(input_path)
+    };
+
+    let mut source_path = relative
         .to_string_lossy()
         .replace('\\', "/")
         .replace(['\n', '\r'], "")
@@ -4401,6 +4418,34 @@ mod tests {
         assert!(
             header.contains(r#"source="agents/my-agent.md""#),
             "Single ./ prefix should be stripped: {}",
+            header
+        );
+    }
+
+    #[test]
+    fn test_generate_header_comment_absolute_path_under_cwd() {
+        // Build an absolute path by joining CWD with a relative agent path.
+        // generate_header_comment should strip the CWD prefix so the stored
+        // source remains relative (matching what --source filters expect).
+        let cwd = std::env::current_dir().expect("current dir");
+        let abs_path = cwd.join("agents/my-agent.md");
+        let header = generate_header_comment(&abs_path);
+        assert!(
+            header.contains(r#"source="agents/my-agent.md""#),
+            "Absolute path under CWD should be stored as relative: {}",
+            header
+        );
+    }
+
+    #[test]
+    fn test_generate_header_comment_absolute_path_subdir() {
+        // Absolute path that is nested several directories deep under CWD.
+        let cwd = std::env::current_dir().expect("current dir");
+        let abs_path = cwd.join(".azdo/pipelines/review.md");
+        let header = generate_header_comment(&abs_path);
+        assert!(
+            header.contains(r#"source=".azdo/pipelines/review.md""#),
+            "Nested absolute path should be stored as relative: {}",
             header
         );
     }
