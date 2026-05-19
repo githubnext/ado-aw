@@ -62,6 +62,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   │   ├── github.rs # Always-on GitHub MCP extension
 │   │   │   ├── safe_outputs.rs # Always-on SafeOutputs MCP extension
 │   │   │   ├── trigger_filters.rs # Trigger filter extension (gate evaluator delivery)
+│   │   │   ├── ado_aw_marker.rs # Always-on ado-aw metadata marker extension
 │   │   │   └── tests.rs  # Extension integration tests
 │   │   ├── codemods/     # Front-matter codemods (one file per transformation)
 │   │   │   ├── mod.rs    # Codemod struct, CODEMODS registry, runner
@@ -84,13 +85,15 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── status.rs         # `status` CLI command — denser per-pipeline status block (thin renderer over `list`'s data path)
 │   ├── run.rs            # `run` CLI command — queues builds for matched definitions, optional polling to completion (module entry is `dispatch`)
 │   ├── ado/              # Shared Azure DevOps REST helpers (auth, list/match/PATCH/POST)
-│   │   └── mod.rs        # Shared ADO REST helpers used by all lifecycle commands (`enable`, `disable`, `list`, `status`, `run`, `remove`, `secrets`)
+│   │   ├── mod.rs        # Shared ADO REST helpers used by all lifecycle commands (`enable`, `disable`, `list`, `status`, `run`, `remove`, `secrets`)
+│   │   └── discovery.rs  # Preview-driven pipeline discovery (`--all-repos` / `--source` for `secrets`)
 │   ├── detect.rs         # Agentic pipeline detection — discovers compiled pipelines; used by all lifecycle commands
 │   ├── ndjson.rs         # NDJSON parsing utilities
 │   ├── sanitize.rs       # Input sanitization for safe outputs
 │   ├── validate.rs       # Structural input validators (char allowlists, format checks, injection detectors)
 │   ├── agent_stats.rs    # OTel-based agent statistics parsing (token usage, duration, turns)
 │   ├── hash.rs           # SHA-256 utilities for safe-output file integrity
+│   ├── update_check.rs   # Background check for newer ado-aw releases (runs on every invocation)
 │   ├── safeoutputs/      # Safe-output MCP tool implementations (Stage 1 → NDJSON → Stage 3)
 │   │   ├── mod.rs
 │   │   ├── add_build_tag.rs
