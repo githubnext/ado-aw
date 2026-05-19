@@ -91,6 +91,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── validate.rs       # Structural input validators (char allowlists, format checks, injection detectors)
 │   ├── agent_stats.rs    # OTel-based agent statistics parsing (token usage, duration, turns)
 │   ├── hash.rs           # SHA-256 utilities for safe-output file integrity
+│   ├── update_check.rs   # Background version update check — queries GitHub Releases on every invocation and prints an advisory to stderr if a newer release is available
 │   ├── safeoutputs/      # Safe-output MCP tool implementations (Stage 1 → NDJSON → Stage 3)
 │   │   ├── mod.rs
 │   │   ├── add_build_tag.rs
