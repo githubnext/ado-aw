@@ -233,16 +233,32 @@ impl<'a> CompileContext<'a> {
 
 /// Execution phase for extension ordering.
 ///
-/// Extensions are collected and processed in phase order. Runtimes run
-/// before tools because tools may depend on runtimes (e.g., `uv` requires
-/// a Python runtime to already be installed).
+/// Extensions are collected and processed in phase order. The compiler
+/// emits steps in this order: **System → Runtime → Tool**.
+///
+/// - **System** is reserved for compiler-internal infrastructure that
+///   downstream phases assume is already in place (e.g.
+///   `AdoScriptExtension`'s prompt-file resolver). System steps emit
+///   their own self-contained tool installs and **must finish before
+///   any other phase runs**, so that later phases can override shared
+///   tool versions (notably the `node` on PATH).
+/// - **Runtime** installs language toolchains (Lean, Python, Node, etc.)
+///   for the user agent. A `NodeTool@0` here will land on top of any
+///   System-phase Node install, so the user's pinned version wins on
+///   PATH for everything after Runtime.
+/// - **Tool** is first-party tooling (azure-devops, cache-memory, …)
+///   that may depend on runtimes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ExtensionPhase {
-    /// Language runtimes (Lean, Python, Node, etc.) — installed first.
-    Runtime = 0,
-    /// First-party tools (azure-devops, cache-memory, etc.) — may depend
-    /// on runtimes being available.
-    Tool = 1,
+    /// Compiler-internal infrastructure that everything else depends on.
+    /// Reserved for ado-aw's own extensions (e.g. ado-script). Not for
+    /// user-facing extension authors.
+    System = 0,
+    /// Language runtimes (Lean, Python, Node, etc.).
+    Runtime = 1,
+    /// First-party tools (azure-devops, cache-memory, etc.) — may
+    /// depend on runtimes being available.
+    Tool = 2,
 }
 
 /// Unified interface for runtimes and first-party tools to declare
@@ -410,22 +426,24 @@ impl FromStr for AwfMountMode {
         match s {
             "ro" => Ok(Self::ReadOnly),
             "rw" => Ok(Self::ReadWrite),
-            other => anyhow::bail!(
-                "Unknown AWF mount mode '{}': expected 'ro' or 'rw'",
-                other
-            ),
+            other => anyhow::bail!("Unknown AWF mount mode '{}': expected 'ro' or 'rw'", other),
         }
     }
 }
 
 impl serde::Serialize for AwfMountMode {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.to_string())
     }
 }
 
 impl<'de> serde::Deserialize<'de> for AwfMountMode {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
         s.parse().map_err(serde::de::Error::custom)
     }
@@ -467,7 +485,11 @@ impl AwfMount {
 
 impl fmt::Display for AwfMount {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}:{}", self.host_path, self.container_path, self.mode)
+        write!(
+            f,
+            "{}:{}:{}",
+            self.host_path, self.container_path, self.mode
+        )
     }
 }
 
@@ -496,13 +518,18 @@ impl FromStr for AwfMount {
 }
 
 impl serde::Serialize for AwfMount {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.to_string())
     }
 }
 
 impl<'de> serde::Deserialize<'de> for AwfMount {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
         s.parse().map_err(serde::de::Error::custom)
     }
@@ -597,21 +624,21 @@ macro_rules! extension_enum {
 }
 
 mod ado_aw_marker;
+pub mod ado_script;
 mod github;
 mod safe_outputs;
-pub(crate) mod trigger_filters;
 
 // Re-export tool/runtime extensions from their colocated homes
 pub use ado_aw_marker::AdoAwMarkerExtension;
-pub use crate::tools::azure_devops::AzureDevOpsExtension;
-pub use crate::tools::cache_memory::CacheMemoryExtension;
-pub use github::GitHubExtension;
 pub use crate::runtimes::dotnet::DotnetExtension;
 pub use crate::runtimes::lean::LeanExtension;
 pub use crate::runtimes::node::NodeExtension;
 pub use crate::runtimes::python::PythonExtension;
+pub use crate::tools::azure_devops::AzureDevOpsExtension;
+pub use crate::tools::cache_memory::CacheMemoryExtension;
+pub use ado_script::AdoScriptExtension;
+pub use github::GitHubExtension;
 pub use safe_outputs::SafeOutputsExtension;
-pub use trigger_filters::TriggerFiltersExtension;
 
 extension_enum! {
     /// All known compiler extensions, collected via [`collect_extensions`].
@@ -622,13 +649,13 @@ extension_enum! {
         AdoAwMarker(AdoAwMarkerExtension),
         GitHub(GitHubExtension),
         SafeOutputs(SafeOutputsExtension),
+        AdoScript(AdoScriptExtension),
         Lean(LeanExtension),
         Python(PythonExtension),
         Node(NodeExtension),
         Dotnet(DotnetExtension),
         AzureDevOps(AzureDevOpsExtension),
         CacheMemory(CacheMemoryExtension),
-        TriggerFilters(TriggerFiltersExtension),
     }
 }
 // ──────────────────────────────────────────────────────────────────────
@@ -640,9 +667,11 @@ extension_enum! {
 /// ## Ordering policy
 ///
 /// Extensions are sorted by [`ExtensionPhase`] before being returned:
-/// runtimes run before tools. This guarantees that runtime install steps
-/// execute before tool steps — critical when a tool depends on a runtime
-/// (e.g., a Python-based tool like `uv` needs the Python runtime first).
+/// **System → Runtime → Tool**. System owns compiler-internal
+/// infrastructure (ado-script bundle download + prompt resolver) that
+/// must complete before user-facing toolchains land — notably so that a
+/// later `NodeTool@0` from `NodeExtension` wins on PATH instead of
+/// being silently overridden by the System-phase Node install.
 ///
 /// Within the same phase, extensions preserve definition order
 /// (runtimes in `RuntimesConfig` field order, tools in `ToolsConfig`
@@ -654,6 +683,20 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
     extensions.push(Extension::AdoAwMarker(AdoAwMarkerExtension));
     extensions.push(Extension::GitHub(GitHubExtension));
     extensions.push(Extension::SafeOutputs(SafeOutputsExtension));
+    // Always-on ado-script extension. Owns both the gate evaluator
+    // (Setup job) and the runtime-import resolver (Agent job). Internal
+    // gating on `filters:` and `inlined-imports` means the extension
+    // emits no steps when neither feature is needed.
+    //
+    // Phase: `System` — so its `NodeTool@0` install + bundle download +
+    // resolver step run BEFORE any user-facing Runtime extension (e.g.
+    // `NodeExtension`). The user's pinned Node version then "wins last"
+    // on PATH for the rest of the Agent job.
+    extensions.push(Extension::AdoScript(AdoScriptExtension {
+        pr_filters: front_matter.pr_filters().cloned(),
+        pipeline_filters: front_matter.pipeline_filters().cloned(),
+        inlined_imports: front_matter.inlined_imports,
+    }));
 
     // ── Runtimes (ExtensionPhase::Runtime) ──
     if let Some(lean) = front_matter.runtimes.as_ref().and_then(|r| r.lean.as_ref())
@@ -661,7 +704,10 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
     {
         extensions.push(Extension::Lean(LeanExtension::new(lean.clone())));
     }
-    if let Some(python) = front_matter.runtimes.as_ref().and_then(|r| r.python.as_ref())
+    if let Some(python) = front_matter
+        .runtimes
+        .as_ref()
+        .and_then(|r| r.python.as_ref())
         && python.is_enabled()
     {
         extensions.push(Extension::Python(PythonExtension::new(python.clone())));
@@ -671,7 +717,10 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
     {
         extensions.push(Extension::Node(NodeExtension::new(node.clone())));
     }
-    if let Some(dotnet) = front_matter.runtimes.as_ref().and_then(|r| r.dotnet.as_ref())
+    if let Some(dotnet) = front_matter
+        .runtimes
+        .as_ref()
+        .and_then(|r| r.dotnet.as_ref())
         && dotnet.is_enabled()
     {
         extensions.push(Extension::Dotnet(DotnetExtension::new(dotnet.clone())));
@@ -682,9 +731,9 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
         if let Some(ado) = tools.azure_devops.as_ref()
             && ado.is_enabled()
         {
-            extensions.push(Extension::AzureDevOps(
-                AzureDevOpsExtension::new(ado.clone()),
-            ));
+            extensions.push(Extension::AzureDevOps(AzureDevOpsExtension::new(
+                ado.clone(),
+            )));
         }
         if let Some(memory) = tools.cache_memory.as_ref()
             && memory.is_enabled()
@@ -695,21 +744,10 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
         }
     }
 
-    // ── Trigger filters (ExtensionPhase::Tool) ──
-    // Activated when filters require the gate evaluator (TypeScript gate.js).
-    let pr_filters = front_matter.pr_filters().cloned();
-    let pipeline_filters = front_matter.pipeline_filters().cloned();
-    if TriggerFiltersExtension::is_needed(
-        pr_filters.as_ref(),
-        pipeline_filters.as_ref(),
-    ) {
-        extensions.push(Extension::TriggerFilters(TriggerFiltersExtension::new(
-            pr_filters,
-            pipeline_filters,
-        )));
-    }
+    // ── Trigger filters + runtime imports are owned by AdoScriptExtension
+    // pushed above; no separate trigger-filters extension push is needed.
 
-    // Enforce phase ordering: runtimes before tools.
+    // Enforce phase ordering: System → Runtime → Tool.
     // sort_by_key is stable, preserving definition order within the same phase.
     extensions.sort_by_key(|ext| ext.phase());
 

@@ -4,7 +4,8 @@ Bundled TypeScript scripts shipped in `ado-script.zip` alongside the ado-aw rele
 
 ## Bundles
 
-- `gate.js` — trigger filter gate evaluator (consumed by `TriggerFiltersExtension` in the Rust compiler)
+- `gate.js` — trigger filter gate evaluator (consumed by `AdoScriptExtension::setup_steps` in the Rust compiler)
+- `import.js` — runtime `{{#runtime-import …}}` resolver (consumed by `AdoScriptExtension::prepare_steps` in the Rust compiler)
 
 ## Type generation
 
@@ -20,9 +21,10 @@ This invokes `cargo run -- export-gate-schema` to write the JSON Schema, then ru
 
 - `src/shared/` — modules shared across all bundles (auth, ado-client, vso-logger, env-facts, policy state machine)
 - `src/gate/` — gate evaluator entry point and per-concern modules
-- `dist/` — ncc bundle output (gitignored); `npm run build` writes `dist/gate/index.js`, which ships in `ado-script.zip`
+- `src/import/` — runtime-import resolver entry point
+- `dist/` — ncc bundle output (gitignored); `npm run build` writes `dist/gate/index.js` and `dist/import/index.js`, both of which ship in `ado-script.zip`
 
 ## See also
 
 - Architecture and runtime contract: [`docs/ado-script.md`](../../docs/ado-script.md).
-- Compiler integration: `src/compile/extensions/trigger_filters.rs`.
+- Compiler integration: `src/compile/extensions/ado_script.rs`.

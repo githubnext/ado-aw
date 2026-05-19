@@ -322,10 +322,7 @@ fn test_fixture_complete_agent() {
     assert!(content.contains("name:"), "Should have name");
     assert!(content.contains("description:"), "Should have description");
     assert!(content.contains("schedule:"), "Should have schedule");
-    assert!(
-        content.contains("repos:"),
-        "Should have repos"
-    );
+    assert!(content.contains("repos:"), "Should have repos");
     assert!(content.contains("mcp-servers:"), "Should have mcp-servers");
 
     // Verify it has MCP configuration and custom MCPs
@@ -3010,10 +3007,8 @@ Prove theorems and build Lean 4 projects.
 /// domains in the AWF allow-domains list.
 #[test]
 fn test_dotnet_runtime_compiled_output() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-dotnet-{}",
-        std::process::id()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("agentic-pipeline-dotnet-{}", std::process::id()));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
     let input = r#"---
@@ -3066,10 +3061,7 @@ Build and test .NET projects.
 
     // The dotnet command should be referenced (e.g. via the bash allow-list
     // or the install step displayName).
-    assert!(
-        compiled.contains("dotnet"),
-        "Should include dotnet command"
-    );
+    assert!(compiled.contains("dotnet"), "Should include dotnet command");
 
     // .NET ecosystem domains (e.g. nuget.org) should be in the AWF
     // allow-domains list.
@@ -3161,10 +3153,8 @@ runtimes:
 /// the `UsePythonVersion@0` task and defaults to Python `3.x`.
 #[test]
 fn test_python_runtime_compiled_output() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-python-{}",
-        std::process::id()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("agentic-pipeline-python-{}", std::process::id()));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
     let input = r#"---
@@ -3268,10 +3258,8 @@ safe-outputs:
 /// Integration test: `runtimes: node: true` end-to-end compilation
 #[test]
 fn test_node_runtime_compiled_output() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-node-{}",
-        std::process::id()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("agentic-pipeline-node-{}", std::process::id()));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
     let input = r#"---
@@ -3390,10 +3378,8 @@ safe-outputs:
 /// and injects `NPM_CONFIG_REGISTRY` env var into the agent step.
 #[test]
 fn test_node_runtime_with_feed_url_compiled_output() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-node-feed-{}",
-        std::process::id()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("agentic-pipeline-node-feed-{}", std::process::id()));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
     let input = r#"---
@@ -3584,13 +3570,23 @@ network:
 
 // ─── YAML validation tests ──────────────────────────────────────────────────
 
+const RUNTIME_IMPORT_BODY_SENTINEL: &str = "RUNTIME_IMPORT_BODY_MARKER_DO_NOT_INLINE";
+const RUNTIME_IMPORT_SNIPPET_SENTINEL: &str = "RUNTIME_IMPORT_SNIPPET_INLINED_OK";
+
 /// Helper: compile a fixture and return the compiled YAML string.
 fn compile_fixture(fixture_name: &str) -> String {
     compile_fixture_with_flags(fixture_name, &[])
 }
 
-/// Compile a fixture with additional CLI flags (e.g., --skip-integrity, --debug-pipeline).
-fn compile_fixture_with_flags(fixture_name: &str, extra_flags: &[&str]) -> String {
+fn compile_fixture_tree_with_flags<F>(
+    fixture_name: &str,
+    extra_fixture_paths: &[&str],
+    extra_flags: &[&str],
+    transform_fixture: F,
+) -> String
+where
+    F: FnOnce(String) -> String,
+{
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let unique_id = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -3603,10 +3599,10 @@ fn compile_fixture_with_flags(fixture_name: &str, extra_flags: &[&str]) -> Strin
     ));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
-    let fixture_src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
-        .join("fixtures")
-        .join(fixture_name);
+        .join("fixtures");
+    let fixture_src = fixtures_dir.join(fixture_name);
 
     // Copy the fixture into the temp dir before compiling. Codemods
     // (e.g. pool_object_form) may rewrite the source on disk; copying
@@ -3614,10 +3610,31 @@ fn compile_fixture_with_flags(fixture_name: &str, extra_flags: &[&str]) -> Strin
     // prevents parallel tests that target the same fixture from
     // racing on the lost-update guard in compile.
     let fixture_path = temp_dir.join(fixture_name);
-    fs::copy(&fixture_src, &fixture_path)
-        .unwrap_or_else(|e| panic!("Failed to copy fixture {fixture_name} into temp dir: {e}"));
+    if let Some(parent) = fixture_path.parent() {
+        fs::create_dir_all(parent).expect("Failed to create fixture parent directory in temp dir");
+    }
+    let fixture_contents = fs::read_to_string(&fixture_src)
+        .unwrap_or_else(|e| panic!("Failed to read fixture {fixture_name}: {e}"));
+    fs::write(&fixture_path, transform_fixture(fixture_contents))
+        .unwrap_or_else(|e| panic!("Failed to write copied fixture {fixture_name}: {e}"));
+
+    for extra_fixture_path in extra_fixture_paths {
+        let extra_src = fixtures_dir.join(extra_fixture_path);
+        let extra_dst = temp_dir.join(extra_fixture_path);
+        if let Some(parent) = extra_dst.parent() {
+            fs::create_dir_all(parent).unwrap_or_else(|e| {
+                panic!("Failed to create temp dir for {extra_fixture_path}: {e}")
+            });
+        }
+        fs::copy(&extra_src, &extra_dst).unwrap_or_else(|e| {
+            panic!("Failed to copy extra fixture {extra_fixture_path} into temp dir: {e}")
+        });
+    }
 
     let output_path = temp_dir.join(fixture_name.replace(".md", ".yml"));
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent).expect("Failed to create output parent directory in temp dir");
+    }
 
     let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
     let mut args = vec![
@@ -3646,6 +3663,11 @@ fn compile_fixture_with_flags(fixture_name: &str, extra_flags: &[&str]) -> Strin
     let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
     let _ = fs::remove_dir_all(&temp_dir);
     compiled
+}
+
+/// Compile a fixture with additional CLI flags (e.g., --skip-integrity, --debug-pipeline).
+fn compile_fixture_with_flags(fixture_name: &str, extra_flags: &[&str]) -> String {
+    compile_fixture_tree_with_flags(fixture_name, &[], extra_flags, |contents| contents)
 }
 
 /// Validate that compiled YAML is parseable as valid YAML.
@@ -3724,6 +3746,99 @@ fn assert_marker_step_present(
     );
 }
 
+fn compile_fixture_with_inlined_imports(fixture_name: &str) -> String {
+    compile_fixture_tree_with_flags(fixture_name, &[], &[], |contents| {
+        // If the fixture already declares `inlined-imports:` (either
+        // value), don't inject a second key. serde_yaml silently uses the
+        // last key on duplicates, so the test would still pass — but the
+        // rewritten fixture would have a confusing duplicate and a
+        // future fixture that hard-codes `inlined-imports: false` would
+        // silently get flipped to `true` by this helper. Detect line-
+        // starting `inlined-imports:` so we don't false-positive on the
+        // string appearing inside body content.
+        let already_present = contents.lines().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("inlined-imports:")
+        });
+        if already_present {
+            panic!(
+                "Fixture {fixture_name} already declares `inlined-imports:`; \
+                 `compile_fixture_with_inlined_imports` would produce a duplicate key. \
+                 Use `compile_fixture` directly, or remove the existing key from the fixture."
+            );
+        }
+        if let Some((front_matter, body)) = contents.split_once("\r\n---\r\n") {
+            format!("{front_matter}\r\ninlined-imports: true\r\n---\r\n{body}")
+        } else if let Some((front_matter, body)) = contents.split_once("\n---\n") {
+            format!("{front_matter}\ninlined-imports: true\n---\n{body}")
+        } else {
+            panic!("Fixture {fixture_name} should contain a closing front matter delimiter");
+        }
+    })
+}
+
+fn assert_runtime_imports_default_output(fixture_name: &str) {
+    let compiled = compile_fixture(fixture_name);
+
+    // Exactly one runtime-import marker (agent body) — the threat-analysis
+    // prompt is tooling-shipped and always inlined, so it never carries a
+    // marker.
+    assert_eq!(
+        compiled.matches("{{#runtime-import ").count(),
+        1,
+        "Compiled YAML for {fixture_name} should contain exactly one runtime-import marker (agent body)"
+    );
+    assert!(
+        compiled.contains("Resolve runtime imports (agent prompt)"),
+        "Compiled YAML for {fixture_name} should resolve agent prompt imports"
+    );
+    assert!(
+        !compiled.contains("Resolve runtime imports (threat"),
+        "Compiled YAML for {fixture_name} should NOT emit a threat-prompt resolver step (threat is always inlined)"
+    );
+    assert!(
+        compiled.contains("Download ado-aw scripts"),
+        "Compiled YAML for {fixture_name} should download shared ado-aw scripts"
+    );
+    assert!(
+        !compiled.contains(RUNTIME_IMPORT_BODY_SENTINEL),
+        "Compiled YAML for {fixture_name} should not inline the markdown body in default mode"
+    );
+}
+
+fn assert_runtime_imports_inlined_output(fixture_name: &str) {
+    let compiled = compile_fixture_with_inlined_imports(fixture_name);
+
+    assert!(
+        compiled.contains(RUNTIME_IMPORT_BODY_SENTINEL),
+        "Compiled YAML for {fixture_name} should inline the markdown body when inlined-imports is true"
+    );
+    assert!(
+        !compiled.contains("{{#runtime-import "),
+        "Compiled YAML for {fixture_name} should not contain runtime-import markers when inlined-imports is true"
+    );
+    assert!(
+        !compiled.contains("Resolve runtime imports"),
+        "Compiled YAML for {fixture_name} should not emit runtime import resolver steps when inlined-imports is true"
+    );
+}
+
+fn assert_runtime_imports_author_marker_output(fixture_name: &str) {
+    let compiled =
+        compile_fixture_tree_with_flags(fixture_name, &["shared/snippet.md"], &[], |contents| {
+            contents
+        });
+
+    assert!(
+        compiled.contains(RUNTIME_IMPORT_SNIPPET_SENTINEL),
+        "Compiled YAML for {fixture_name} should inline author-written runtime imports"
+    );
+    assert!(
+        !compiled.contains("{{#runtime-import shared/snippet.md}}"),
+        "Compiled YAML for {fixture_name} should not retain the author-written runtime-import marker"
+    );
+}
+
 #[test]
 fn test_marker_step_present_in_standalone_target() {
     let compiled = compile_fixture("minimal-agent.md");
@@ -3770,7 +3885,186 @@ fn test_marker_does_not_create_setup_job_for_minimal_pipeline() {
     );
 }
 
-/// Test that the 1ES fixture produces valid YAML with correct structure
+#[test]
+fn test_standalone_runtime_imports_default_emits_marker_and_resolver() {
+    assert_runtime_imports_default_output("runtime_imports_standalone.md");
+}
+
+#[test]
+fn test_standalone_inlined_imports_true_inlines_body() {
+    assert_runtime_imports_inlined_output("runtime_imports_standalone.md");
+}
+
+#[test]
+fn test_standalone_inlined_imports_true_resolves_author_markers() {
+    assert_runtime_imports_author_marker_output("runtime_imports_author_marker_standalone.md");
+}
+
+#[test]
+fn test_1es_runtime_imports_default_emits_marker_and_resolver() {
+    assert_runtime_imports_default_output("runtime_imports_1es.md");
+}
+
+#[test]
+fn test_1es_inlined_imports_true_inlines_body() {
+    assert_runtime_imports_inlined_output("runtime_imports_1es.md");
+}
+
+#[test]
+fn test_1es_inlined_imports_true_resolves_author_markers() {
+    assert_runtime_imports_author_marker_output("runtime_imports_author_marker_1es.md");
+}
+
+#[test]
+fn test_job_runtime_imports_default_emits_marker_and_resolver() {
+    assert_runtime_imports_default_output("runtime_imports_job.md");
+}
+
+#[test]
+fn test_job_inlined_imports_true_inlines_body() {
+    assert_runtime_imports_inlined_output("runtime_imports_job.md");
+}
+
+#[test]
+fn test_job_inlined_imports_true_resolves_author_markers() {
+    assert_runtime_imports_author_marker_output("runtime_imports_author_marker_job.md");
+}
+
+#[test]
+fn test_stage_runtime_imports_default_emits_marker_and_resolver() {
+    assert_runtime_imports_default_output("runtime_imports_stage.md");
+}
+
+#[test]
+fn test_stage_inlined_imports_true_inlines_body() {
+    assert_runtime_imports_inlined_output("runtime_imports_stage.md");
+}
+
+#[test]
+fn test_stage_inlined_imports_true_resolves_author_markers() {
+    assert_runtime_imports_author_marker_output("runtime_imports_author_marker_stage.md");
+}
+
+/// Compile a default-mode (inlined-imports: false) agent whose source path
+/// contains a space. The runtime resolver matches marker bodies with
+/// `[^\s}]+`, so a space would silently truncate the marker at runtime and
+/// surface a confusing "file not found" error (or, for optional markers,
+/// leave the marker unexpanded). Reject at compile time so the failure is
+/// a clear, actionable compile error rather than a runtime data-integrity
+/// bug.
+#[test]
+fn test_runtime_imports_default_rejects_source_path_with_whitespace() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique_id = COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    // Use a top-level temp dir (NOT under the repo) so the compiler can't
+    // discover a git root and rebase the path on it.
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-spaced-path-{}-{}",
+        std::process::id(),
+        unique_id,
+    ));
+    let spaced_dir = temp_dir.join("my agents");
+    fs::create_dir_all(&spaced_dir).expect("Failed to create spaced temp dir");
+    // generate_source_path falls back to the filename only when it can't
+    // locate a git root above the input path — which would hide the space
+    // from the marker. Create an empty `.git` marker so the spaced dir is
+    // resolved relative to a discoverable repo root and the space ends up
+    // in the runtime-import marker (i.e. exercises the new guard).
+    fs::create_dir_all(temp_dir.join(".git")).expect("Failed to create .git marker");
+
+    let input = "---\nname: \"Spaced Path Agent\"\ndescription: \"Agent whose source path contains a space\"\n---\n\n## Body\n\nhello\n";
+    let input_path = spaced_dir.join("pipeline.md");
+    let output_path = spaced_dir.join("pipeline.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should fail when source path contains whitespace and inlined-imports is false"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("contains whitespace"),
+        "Error message should mention whitespace: {stderr}"
+    );
+    assert!(
+        stderr.contains("inlined-imports: true"),
+        "Error message should suggest inlined-imports as an escape hatch: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Sibling regression of the whitespace guard: the same threat model
+/// applies to `}` in the source path. The runtime regex `[^\s}]+`
+/// stops at the first `}` and then expects `\s*\}\}`, so a marker
+/// emitted with `}` in its path silently fails to match — the marker
+/// survives as literal text in the LLM's prompt. Reject at compile
+/// time, matching the same `}` guard in `resolve_imports_inline`.
+#[test]
+fn test_runtime_imports_default_rejects_source_path_with_closing_brace() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique_id = COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-brace-path-{}-{}",
+        std::process::id(),
+        unique_id,
+    ));
+    // Filename contains `}` which is valid on Linux/macOS/NTFS but
+    // forbidden in shell-injected contexts. The whole point of the
+    // guard is to reject the marker before any such surface is hit.
+    let agent_dir = temp_dir.join("agents");
+    fs::create_dir_all(&agent_dir).expect("Failed to create temp dir tree");
+    fs::create_dir_all(temp_dir.join(".git")).expect("Failed to create .git marker");
+
+    let input = "---\nname: \"Brace Path Agent\"\ndescription: \"Agent whose source path contains '}'\"\n---\n\n## Body\n\nhello\n";
+    let input_path = agent_dir.join("fo}o.md");
+    let output_path = agent_dir.join("foo.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should fail when source path contains '}}' and inlined-imports is false"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("contains '}'"),
+        "Error message should mention the `}}` character: {stderr}"
+    );
+    assert!(
+        stderr.contains("inlined-imports: true"),
+        "Error message should suggest inlined-imports as an escape hatch: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
 #[test]
 fn test_1es_compiled_output_is_valid_yaml() {
     let compiled = compile_fixture("1es-test-agent.md");
@@ -4192,6 +4486,139 @@ fn test_pr_filter_tier1_has_evaluator_gate() {
     );
 }
 
+/// Returns the substring of `yaml` from `- job: {name}` (inclusive) to the
+/// next `- job:` line or end-of-file. Returns None if no matching job exists.
+///
+/// Used by the per-job download placement tests to scope substring
+/// assertions to a single job's block. Matches the `- job: <name>` line
+/// literally (ignores `displayName`, indentation tolerated by `find`).
+fn extract_job_block<'a>(yaml: &'a str, name: &str) -> Option<&'a str> {
+    let needle = format!("- job: {name}");
+    let start = yaml.find(&needle)?;
+    let after = &yaml[start + needle.len()..];
+    let end = after
+        .find("\n- job: ")
+        .map(|i| start + needle.len() + i)
+        .unwrap_or(yaml.len());
+    Some(&yaml[start..end])
+}
+
+/// Per-job download placement: gate-only pipeline must put the download in
+/// Setup and NOT in Agent. ADO jobs run on isolated VMs, so the gate's
+/// install/download has to land in the same job as the gate step.
+#[test]
+fn test_gate_only_pipeline_downloads_bundle_in_setup_job_not_agent() {
+    let yaml = compile_fixture("dedupe_gate_only.md");
+    let setup = extract_job_block(&yaml, "Setup").expect("Setup job should exist");
+    let agent = extract_job_block(&yaml, "Agent").expect("Agent job should exist");
+    assert!(
+        setup.contains("Download ado-aw scripts"),
+        "Setup job is missing the script bundle download (gate consumer lives here)"
+    );
+    assert!(
+        !agent.contains("Download ado-aw scripts"),
+        "Agent job should NOT have the script bundle download (gate-only, no runtime imports). \
+         Agent block contents: {}",
+        agent
+    );
+}
+
+/// Per-job download placement: imports-only pipeline must put the download in
+/// Agent and NOT in Setup. The import resolver runs in the Agent job, so the
+/// install/download has to land on the same VM.
+#[test]
+fn test_imports_only_pipeline_downloads_bundle_in_agent_job_not_setup() {
+    let yaml = compile_fixture("dedupe_imports_only.md");
+    let agent = extract_job_block(&yaml, "Agent").expect("Agent job should exist");
+    assert!(
+        agent.contains("Download ado-aw scripts"),
+        "Agent job is missing the script bundle download (import resolver consumer lives here)"
+    );
+    if let Some(setup) = extract_job_block(&yaml, "Setup") {
+        assert!(
+            !setup.contains("Download ado-aw scripts"),
+            "Setup job should NOT have the script bundle download (imports-only). \
+             Setup block contents: {}",
+            setup
+        );
+    }
+}
+
+/// Per-job download placement: when both gate and runtime imports are active,
+/// the bundle is downloaded twice — once per consuming job. ADO's VM
+/// isolation makes this correct architecture, not duplication waste.
+#[test]
+fn test_both_features_active_downloads_bundle_in_both_jobs() {
+    let yaml = compile_fixture("dedupe_both.md");
+    let setup = extract_job_block(&yaml, "Setup").expect("Setup job should exist");
+    let agent = extract_job_block(&yaml, "Agent").expect("Agent job should exist");
+    assert!(
+        setup.contains("Download ado-aw scripts"),
+        "Setup job is missing the script bundle download"
+    );
+    assert!(
+        agent.contains("Download ado-aw scripts"),
+        "Agent job is missing the script bundle download"
+    );
+    assert_eq!(
+        yaml.matches("Download ado-aw scripts").count(),
+        2,
+        "Expected exactly two downloads — one per consuming job (Setup + Agent)"
+    );
+}
+
+/// Per-job download placement: with neither gate nor runtime imports active,
+/// no Node install or script-bundle download should appear anywhere.
+#[test]
+fn test_neither_feature_active_emits_no_node_or_download_anywhere() {
+    let yaml = compile_fixture("dedupe_neither.md");
+    assert!(
+        !yaml.contains("NodeTool@0"),
+        "No NodeTool@0 expected when neither gate nor runtime imports are active"
+    );
+    assert!(
+        !yaml.contains("Download ado-aw scripts"),
+        "No script bundle download expected when neither gate nor runtime imports are active"
+    );
+}
+
+/// When a user pins a Node version via `runtimes.node:` AND runtime imports
+/// are active, both extensions emit `NodeTool@0` into the Agent job. ADO's
+/// `NodeTool@0` prepends to PATH, so the LAST install wins. The ado-script
+/// extension must run in the `System` phase so its Node 20.x install lands
+/// FIRST, and the user's Runtime-phase `NodeTool@0 22.x` lands second —
+/// the user's pinned version then wins on PATH for the rest of the job.
+#[test]
+fn test_node_runtime_install_orders_after_ado_script_so_user_version_wins() {
+    let yaml = compile_fixture("dedupe_node_runtime_and_imports.md");
+    let agent = extract_job_block(&yaml, "Agent").expect("Agent job should exist");
+
+    // Find offsets within the Agent block. The ado-script Node install
+    // is identifiable by its displayName; the user's runtime install
+    // carries the explicit user-pinned versionSpec.
+    let ado_script_install_idx = agent
+        .find("displayName: \"Install Node.js 20.x\"")
+        .expect("ado-script Node 20.x install step missing from Agent job");
+    let user_runtime_install_idx = agent
+        .find("'Install Node.js 22.x'")
+        .expect("user runtime Node 22.x install step missing from Agent job");
+
+    assert!(
+        ado_script_install_idx < user_runtime_install_idx,
+        "ado-script NodeTool@0 must precede user NodeTool@0 in the Agent job so the \
+         user's pinned Node version wins on PATH after both run. \
+         ado-script idx = {ado_script_install_idx}, user idx = {user_runtime_install_idx}"
+    );
+
+    // Both downloads of ado-script.zip remain unaffected (still exactly one
+    // in the Agent job in this fixture — no filters, so no Setup-side download).
+    assert_eq!(
+        yaml.matches("Download ado-aw scripts").count(),
+        1,
+        "Expected exactly one ado-script.zip download (Agent job only; no gate active)"
+    );
+}
+
 /// Tier 2 PR filter fixture produces valid YAML.
 #[test]
 fn test_pr_filter_tier2_compiled_output_is_valid_yaml() {
@@ -4448,9 +4875,18 @@ fn test_example_dogfood_failure_reporter_structure() {
         "examples/dogfood-failure-reporter.md should exist"
     );
     let content = fs::read_to_string(&example_path).expect("Should be able to read example");
-    assert!(content.starts_with("---"), "Example should start with front matter");
-    assert!(content.contains("ado-aw-debug:"), "Example should declare ado-aw-debug section");
-    assert!(content.contains("create-issue:"), "Example should configure create-issue");
+    assert!(
+        content.starts_with("---"),
+        "Example should start with front matter"
+    );
+    assert!(
+        content.contains("ado-aw-debug:"),
+        "Example should declare ado-aw-debug section"
+    );
+    assert!(
+        content.contains("create-issue:"),
+        "Example should configure create-issue"
+    );
     assert!(
         content.contains("target-repo: githubnext/ado-aw"),
         "Example should target githubnext/ado-aw"

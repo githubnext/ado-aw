@@ -2,10 +2,10 @@
 //!
 //! This module defines the front matter grammar that is shared across all compile targets.
 
+use crate::sanitize::SanitizeConfig as SanitizeConfigTrait;
 use ado_aw_derive::SanitizeConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use crate::sanitize::SanitizeConfig as SanitizeConfigTrait;
 
 /// Target platform for compiled pipeline
 #[derive(Debug, Deserialize, Clone, Default, PartialEq)]
@@ -379,7 +379,9 @@ pub struct ToolsConfig {
 impl SanitizeConfigTrait for ToolsConfig {
     fn sanitize_config_fields(&mut self) {
         self.bash = self.bash.as_ref().map(|v| {
-            v.iter().map(|s| crate::sanitize::sanitize_config(s)).collect()
+            v.iter()
+                .map(|s| crate::sanitize::sanitize_config(s))
+                .collect()
         });
         if let Some(ref mut cm) = self.cache_memory {
             cm.sanitize_config_fields();
@@ -700,6 +702,13 @@ pub struct FrontMatter {
     /// - `write`: MI for Stage 3 (executor) — write access for safe-outputs, never given to agent
     #[serde(default)]
     pub permissions: Option<PermissionsConfig>,
+    /// When `true`, the compiler inlines all `{{#runtime-import …}}` markers
+    /// (including the implicit top-level body marker) at compile time,
+    /// embedding referenced content directly into the emitted YAML. When
+    /// `false` (default), markers are preserved and resolved at pipeline
+    /// runtime, so prompt-body edits do not require recompilation.
+    #[serde(rename = "inlined-imports", default)]
+    pub inlined_imports: bool,
     /// Workflow-level environment variables
     #[serde(default)]
     pub env: HashMap<String, String>,
@@ -736,8 +745,7 @@ impl FrontMatter {
 
     /// Get the pipeline runtime filters (if any).
     pub fn pipeline_filters(&self) -> Option<&PipelineFilters> {
-        self.pipeline_trigger()
-            .and_then(|pt| pt.filters.as_ref())
+        self.pipeline_trigger().and_then(|pt| pt.filters.as_ref())
     }
 }
 
@@ -745,7 +753,10 @@ impl SanitizeConfigTrait for FrontMatter {
     fn sanitize_config_fields(&mut self) {
         self.name = crate::sanitize::sanitize_config(&self.name);
         self.description = crate::sanitize::sanitize_config(&self.description);
-        self.workspace = self.workspace.as_deref().map(crate::sanitize::sanitize_config);
+        self.workspace = self
+            .workspace
+            .as_deref()
+            .map(crate::sanitize::sanitize_config);
         if let Some(ref mut p) = self.pool {
             p.sanitize_config_fields();
         }
@@ -762,7 +773,11 @@ impl SanitizeConfigTrait for FrontMatter {
         for repo in &mut self.repositories {
             repo.sanitize_config_fields();
         }
-        self.checkout = self.checkout.iter().map(|s| crate::sanitize::sanitize_config(s)).collect();
+        self.checkout = self
+            .checkout
+            .iter()
+            .map(|s| crate::sanitize::sanitize_config(s))
+            .collect();
         for mcp in self.mcp_servers.values_mut() {
             mcp.sanitize_config_fields();
         }
@@ -1094,7 +1109,11 @@ impl SanitizeConfigTrait for PipelineTrigger {
         if let Some(ref mut p) = self.project {
             *p = crate::sanitize::sanitize_config(p);
         }
-        self.branches = self.branches.iter().map(|s| crate::sanitize::sanitize_config(s)).collect();
+        self.branches = self
+            .branches
+            .iter()
+            .map(|s| crate::sanitize::sanitize_config(s))
+            .collect();
         if let Some(ref mut f) = self.filters {
             f.sanitize_config_fields();
         }
@@ -1327,9 +1346,21 @@ pub struct LabelFilter {
 
 impl SanitizeConfigTrait for LabelFilter {
     fn sanitize_config_fields(&mut self) {
-        self.any_of = self.any_of.iter().map(|s| crate::sanitize::sanitize_config(s)).collect();
-        self.all_of = self.all_of.iter().map(|s| crate::sanitize::sanitize_config(s)).collect();
-        self.none_of = self.none_of.iter().map(|s| crate::sanitize::sanitize_config(s)).collect();
+        self.any_of = self
+            .any_of
+            .iter()
+            .map(|s| crate::sanitize::sanitize_config(s))
+            .collect();
+        self.all_of = self
+            .all_of
+            .iter()
+            .map(|s| crate::sanitize::sanitize_config(s))
+            .collect();
+        self.none_of = self
+            .none_of
+            .iter()
+            .map(|s| crate::sanitize::sanitize_config(s))
+            .collect();
     }
 }
 
@@ -1484,8 +1515,7 @@ mod tests {
 
     #[test]
     fn test_engine_config_deserialized_as_object() {
-        let yaml =
-            "engine:\n  id: copilot\n  model: claude-opus-4.5\n  timeout-minutes: 30";
+        let yaml = "engine:\n  id: copilot\n  model: claude-opus-4.5\n  timeout-minutes: 30";
         let fm: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let ec: EngineConfig = serde_yaml::from_value(fm["engine"].clone()).unwrap();
         assert_eq!(ec.engine_id(), "copilot");
@@ -1594,6 +1624,49 @@ Body
 "#;
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
         assert!(fm.permissions.is_none());
+    }
+
+    // ─── FrontMatter inlined-imports deserialization ───────────────────────
+
+    #[test]
+    fn test_frontmatter_inlined_imports_defaults_to_false() {
+        let content = r#"---
+name: "Test Agent"
+description: "Test"
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        assert!(!fm.inlined_imports);
+    }
+
+    #[test]
+    fn test_frontmatter_inlined_imports_true_explicit() {
+        let content = r#"---
+name: "Test Agent"
+description: "Test"
+inlined-imports: true
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        assert!(fm.inlined_imports);
+    }
+
+    #[test]
+    fn test_frontmatter_inlined_imports_false_explicit() {
+        let content = r#"---
+name: "Test Agent"
+description: "Test"
+inlined-imports: false
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        assert!(!fm.inlined_imports);
     }
 
     // ─── CacheMemoryToolConfig deserialization ──────────────────────────────
@@ -1891,7 +1964,10 @@ network:
 Body
 "#;
         let result = super::super::common::parse_markdown(content);
-        assert!(result.is_err(), "network.allow (old field name) should be rejected");
+        assert!(
+            result.is_err(),
+            "network.allow (old field name) should be rejected"
+        );
         let err = format!("{:#}", result.unwrap_err());
         assert!(
             err.contains("unknown field `allow`"),
@@ -1930,7 +2006,10 @@ network:
 Body
 "#;
         let result = super::super::common::parse_markdown(content);
-        assert!(result.is_err(), "unknown fields in network should be rejected");
+        assert!(
+            result.is_err(),
+            "unknown fields in network should be rejected"
+        );
     }
 
     // ─── FrontMatter deny_unknown_fields ─────────────────────────────────────
@@ -1947,7 +2026,10 @@ safeoutputs:
 Body
 "#;
         let result = super::super::common::parse_markdown(content);
-        assert!(result.is_err(), "unknown top-level field 'safeoutputs' should be rejected");
+        assert!(
+            result.is_err(),
+            "unknown top-level field 'safeoutputs' should be rejected"
+        );
         let err = format!("{:#}", result.unwrap_err());
         assert!(
             err.contains("unknown field `safeoutputs`"),
@@ -1967,7 +2049,10 @@ schedule: daily around 14:00
 Body
 "#;
         let result = super::super::common::parse_markdown(content);
-        assert!(result.is_err(), "top-level 'schedule' should be rejected (use on.schedule)");
+        assert!(
+            result.is_err(),
+            "top-level 'schedule' should be rejected (use on.schedule)"
+        );
         let err = format!("{:#}", result.unwrap_err());
         assert!(
             err.contains("unknown field `schedule`"),
@@ -2047,7 +2132,10 @@ ado-aw-debug:
 Body
 "#;
         let result = super::super::common::parse_markdown(content);
-        assert!(result.is_err(), "unknown ado-aw-debug field should be rejected");
+        assert!(
+            result.is_err(),
+            "unknown ado-aw-debug field should be rejected"
+        );
         let err = format!("{:#}", result.unwrap_err());
         assert!(
             err.contains("bogus-knob") || err.contains("unknown field"),
@@ -2195,7 +2283,10 @@ triggers:
         let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
         assert!(tc.pipeline.is_some());
         assert!(tc.pr.is_some());
-        assert_eq!(tc.pr.unwrap().filters.unwrap().title.unwrap().pattern, "*[review]*");
+        assert_eq!(
+            tc.pr.unwrap().filters.unwrap().title.unwrap().pattern,
+            "*[review]*"
+        );
     }
 
     #[test]

@@ -21,6 +21,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 
+fn fixture_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join(name)
+}
+
 /// Set up a unique temp directory for each test run. Returned as a
 /// `TempDir` so RAII cleans the directory up even if a test panics.
 fn fresh_temp_dir() -> TempDir {
@@ -67,12 +74,23 @@ fn write_source(dir: &Path, content: &str) -> PathBuf {
     path
 }
 
+/// Copy a fixture into the test workspace before compiling so any source
+/// rewrites stay isolated to that workspace.
+fn copy_fixture(dir: &Path, fixture_name: &str) -> PathBuf {
+    let source = fixture_path(fixture_name);
+    let dest = dir.join(fixture_name);
+    fs::copy(&source, &dest)
+        .unwrap_or_else(|e| panic!("copy fixture {} into test workspace: {e}", fixture_name));
+    dest
+}
+
 // ─── Healthy compile (no codemods needed) ──────────────────────────────────
 
 #[test]
 fn compile_succeeds_on_current_source() {
     let dir = fresh_temp_dir();
-    let original = "---\nname: smoketest\ndescription: smoketest description\n---\n## Body\n\nHello.\n";
+    let original =
+        "---\nname: smoketest\ndescription: smoketest description\n---\n## Body\n\nHello.\n";
     let source = write_source(dir.path(), original);
 
     let output = run_compile(&source);
@@ -133,6 +151,104 @@ fn compile_then_check_round_trip_passes() {
         "check should succeed: stdout={:?} stderr={:?}",
         String::from_utf8_lossy(&check_output.stdout),
         String::from_utf8_lossy(&check_output.stderr)
+    );
+}
+
+// ─── Integrity check semantics ─────────────────────────────────────────────
+
+#[test]
+fn test_integrity_check_inlined_imports_false_passes_on_body_edit() {
+    let dir = fresh_git_temp_dir();
+    let source = copy_fixture(dir.path(), "integrity-check-default.md");
+
+    let compile_output = run_compile(&source);
+    assert!(
+        compile_output.status.success(),
+        "compile should succeed: {}",
+        String::from_utf8_lossy(&compile_output.stderr)
+    );
+
+    let lock = source.with_extension("lock.yml");
+    assert!(lock.exists(), "expected lock file at {}", lock.display());
+
+    let original = fs::read_to_string(&source).expect("read source after compile");
+    fs::write(&source, format!("{original}\n\nAdditional body content.\n"))
+        .expect("append body-only edit");
+
+    let check_output = run_check(&lock);
+    assert!(
+        check_output.status.success(),
+        "body-only edits should not trip integrity check when imports are not inlined: stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&check_output.stdout),
+        String::from_utf8_lossy(&check_output.stderr)
+    );
+}
+
+#[test]
+fn test_integrity_check_inlined_imports_false_fails_on_frontmatter_edit() {
+    let dir = fresh_git_temp_dir();
+    let source = copy_fixture(dir.path(), "integrity-check-default.md");
+
+    let compile_output = run_compile(&source);
+    assert!(
+        compile_output.status.success(),
+        "compile should succeed: {}",
+        String::from_utf8_lossy(&compile_output.stderr)
+    );
+
+    let lock = source.with_extension("lock.yml");
+    assert!(lock.exists(), "expected lock file at {}", lock.display());
+
+    let original = fs::read_to_string(&source).expect("read source after compile");
+    let edited = original.replace(
+        "name: integrity-default-agent",
+        "name: integrity-default-agent-renamed",
+    );
+    assert_ne!(edited, original, "front matter edit should change fixture");
+    fs::write(&source, edited).expect("write front matter edit");
+
+    let check_output = run_check(&lock);
+    assert!(
+        !check_output.status.success(),
+        "front-matter edits must fail integrity check: stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&check_output.stdout),
+        String::from_utf8_lossy(&check_output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&check_output.stderr).contains("Integrity check failed"),
+        "front-matter edits should fail with the integrity-check error"
+    );
+}
+
+#[test]
+fn test_integrity_check_inlined_imports_true_fails_on_body_edit() {
+    let dir = fresh_git_temp_dir();
+    let source = copy_fixture(dir.path(), "integrity-check-inlined.md");
+
+    let compile_output = run_compile(&source);
+    assert!(
+        compile_output.status.success(),
+        "compile should succeed: {}",
+        String::from_utf8_lossy(&compile_output.stderr)
+    );
+
+    let lock = source.with_extension("lock.yml");
+    assert!(lock.exists(), "expected lock file at {}", lock.display());
+
+    let original = fs::read_to_string(&source).expect("read source after compile");
+    fs::write(&source, format!("{original}\n\nAdditional body content.\n"))
+        .expect("append body-only edit");
+
+    let check_output = run_check(&lock);
+    assert!(
+        !check_output.status.success(),
+        "body edits must fail integrity check when imports are inlined: stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&check_output.stdout),
+        String::from_utf8_lossy(&check_output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&check_output.stderr).contains("Integrity check failed"),
+        "inlined body edits should fail with the integrity-check error"
     );
 }
 

@@ -71,8 +71,8 @@ pub(super) fn generate_native_pr_trigger(pr: &PrTriggerConfig) -> String {
 
 // ─── Gate step generation ───────────────────────────────────────────────────
 
-// Gate step generation is now handled entirely by TriggerFiltersExtension.
-// See src/compile/extensions/trigger_filters.rs.
+// Gate step generation is now handled entirely by AdoScriptExtension's
+// `setup_steps()` hook. See src/compile/extensions/ado_script.rs.
 
 /// Add a `condition:` to each step in a list of serde_yaml::Value steps.
 pub(super) fn add_condition_to_steps(
@@ -208,11 +208,12 @@ mod tests {
     }
 
     // Gate step tests now use the spec/extension directly since generate_setup_job
-    // delegates to TriggerFiltersExtension for all filter gate generation.
+    // delegates to AdoScriptExtension (in `src/compile/extensions/ado_script.rs`)
+    // for all filter gate generation.
 
     #[test]
     fn test_generate_setup_job_with_filters_no_extension_creates_empty() {
-        // Without the TriggerFiltersExtension, filters don't produce a gate step
+        // Without AdoScriptExtension, filters don't produce a gate step
         let fm = test_fm();
         let ctx = make_ctx(&fm);
         let filters = PrFilters {

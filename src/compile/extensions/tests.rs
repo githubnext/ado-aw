@@ -88,9 +88,10 @@ fn test_awf_mount_serde_roundtrip() {
 fn test_collect_extensions_empty_front_matter() {
     let fm = minimal_front_matter();
     let exts = collect_extensions(&fm);
-    // Always-on: ado-aw-marker + GitHub + SafeOutputs
-    assert_eq!(exts.len(), 3);
+    // Always-on: ado-aw-marker + ado-script + GitHub + SafeOutputs
+    assert_eq!(exts.len(), 4);
     assert!(exts.iter().any(|e| e.name() == "ado-aw-marker"));
+    assert!(exts.iter().any(|e| e.name() == "ado-script"));
     assert!(exts.iter().any(|e| e.name() == "GitHub"));
     assert!(exts.iter().any(|e| e.name() == "SafeOutputs"));
 }
@@ -101,8 +102,9 @@ fn test_collect_extensions_lean_enabled() {
         parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  lean: true\n---\n")
             .unwrap();
     let exts = collect_extensions(&fm);
-    assert_eq!(exts.len(), 4); // ado-aw-marker + GitHub + SafeOutputs + Lean
-    assert_eq!(exts[0].name(), "Lean 4"); // Runtime phase sorts first
+    assert_eq!(exts.len(), 5); // ado-aw-marker + ado-script + GitHub + SafeOutputs + Lean
+    assert_eq!(exts[0].name(), "ado-script"); // System phase sorts first
+    assert_eq!(exts[1].name(), "Lean 4"); // Runtime phase follows System
 }
 
 #[test]
@@ -111,7 +113,7 @@ fn test_collect_extensions_lean_disabled() {
         parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  lean: false\n---\n")
             .unwrap();
     let exts = collect_extensions(&fm);
-    assert_eq!(exts.len(), 3); // Just always-on
+    assert_eq!(exts.len(), 4); // Just always-on (ado-aw-marker + ado-script + GitHub + SafeOutputs)
 }
 
 #[test]
@@ -120,7 +122,7 @@ fn test_collect_extensions_azure_devops_enabled() {
         parse_markdown("---\nname: test\ndescription: test\ntools:\n  azure-devops: true\n---\n")
             .unwrap();
     let exts = collect_extensions(&fm);
-    assert_eq!(exts.len(), 4); // ado-aw-marker + GitHub + SafeOutputs + AzureDevOps
+    assert_eq!(exts.len(), 5); // ado-aw-marker + ado-script + GitHub + SafeOutputs + AzureDevOps
     assert!(exts.iter().any(|e| e.name() == "Azure DevOps MCP"));
 }
 
@@ -130,7 +132,7 @@ fn test_collect_extensions_cache_memory_enabled() {
         parse_markdown("---\nname: test\ndescription: test\ntools:\n  cache-memory: true\n---\n")
             .unwrap();
     let exts = collect_extensions(&fm);
-    assert_eq!(exts.len(), 4); // ado-aw-marker + GitHub + SafeOutputs + CacheMemory
+    assert_eq!(exts.len(), 5); // ado-aw-marker + ado-script + GitHub + SafeOutputs + CacheMemory
     assert!(exts.iter().any(|e| e.name() == "Cache Memory"));
 }
 
@@ -141,25 +143,29 @@ fn test_collect_extensions_all_enabled() {
     )
     .unwrap();
     let exts = collect_extensions(&fm);
-    assert_eq!(exts.len(), 6); // ado-aw-marker + GitHub + SafeOutputs + Lean + AzureDevOps + CacheMemory
-    assert_eq!(exts[0].name(), "Lean 4"); // Runtime phase first
-    // All tool-phase extensions follow
-    assert!(exts[1..].iter().all(|e| e.phase() == ExtensionPhase::Tool));
+    assert_eq!(exts.len(), 7); // ado-aw-marker + ado-script + GitHub + SafeOutputs + Lean + AzureDevOps + CacheMemory
+    assert_eq!(exts[0].name(), "ado-script"); // System phase first
+    assert_eq!(exts[1].name(), "Lean 4"); // Runtime phase next
+    // All trailing extensions are Tool phase
+    assert!(exts[2..].iter().all(|e| e.phase() == ExtensionPhase::Tool));
 }
 
 #[test]
 fn test_collect_extensions_runtimes_always_before_tools() {
-    // Verify the phase ordering policy: all Runtime-phase extensions
-    // must appear before any Tool-phase extensions, regardless of
-    // front matter field order.
+    // Verify the phase ordering policy: System → Runtime → Tool. All
+    // System-phase extensions appear first, then Runtime, then Tool —
+    // regardless of front matter field order.
     let (fm, _) = parse_markdown(
         "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\n  cache-memory: true\nruntimes:\n  lean: true\n---\n",
     )
     .unwrap();
     let exts = collect_extensions(&fm);
-    assert_eq!(exts.len(), 6); // ado-aw-marker + GitHub + SafeOutputs + Lean + AzureDevOps + CacheMemory
+    assert_eq!(exts.len(), 7); // ado-aw-marker + ado-script + GitHub + SafeOutputs + Lean + AzureDevOps + CacheMemory
 
-    // Find the boundary: last Runtime and first Tool
+    // System sorts first
+    assert_eq!(exts[0].phase(), ExtensionPhase::System);
+
+    // Runtime extensions all sit between System and Tool
     let last_runtime_idx = exts
         .iter()
         .rposition(|e| e.phase() == ExtensionPhase::Runtime)
@@ -173,6 +179,17 @@ fn test_collect_extensions_runtimes_always_before_tools() {
         last_runtime_idx < first_tool_idx,
         "Runtime extensions must come before Tool extensions. \
          Last runtime at index {last_runtime_idx}, first tool at index {first_tool_idx}"
+    );
+
+    // System must come strictly before Runtime
+    let first_runtime_idx = exts
+        .iter()
+        .position(|e| e.phase() == ExtensionPhase::Runtime)
+        .expect("expected at least one Runtime extension");
+    assert!(
+        0 < first_runtime_idx,
+        "System extensions must come before any Runtime extension. \
+         First runtime at index {first_runtime_idx}"
     );
 }
 

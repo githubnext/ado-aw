@@ -11,16 +11,13 @@ use std::path::Path;
 
 use super::Compiler;
 use super::common::{
-    AWF_VERSION, MCPG_VERSION, MCPG_IMAGE, MCPG_PORT, MCPG_DOMAIN,
-    CompileConfig, compile_shared,
-    generate_allowed_domains,
-    generate_awf_mounts,
-    generate_awf_path_step,
-    collect_awf_path_prepends,
-    generate_enabled_tools_args,
-    generate_mcpg_config, generate_mcpg_docker_env, generate_mcpg_step_env,
-    format_steps_yaml_indented,
+    AWF_VERSION, CompileConfig, MCPG_DOMAIN, MCPG_IMAGE, MCPG_PORT, MCPG_VERSION,
+    collect_awf_path_prepends, compile_shared, format_steps_yaml_indented,
+    generate_allowed_domains, generate_awf_mounts, generate_awf_path_step,
+    generate_enabled_tools_args, generate_mcpg_config, generate_mcpg_docker_env,
+    generate_mcpg_step_env,
 };
+use super::extensions::CompilerExtension;
 use super::types::FrontMatter;
 
 /// 1ES Pipeline Template compiler.
@@ -65,6 +62,10 @@ impl Compiler for OneESCompiler {
         // Generate 1ES-specific setup/teardown jobs(no per-job pool, uses templateContext).
         // These override the shared {{ setup_job }} / {{ teardown_job }} markers via
         // extra_replacements, which are applied before the shared replacements.
+        // compile_shared detects that `{{ setup_job }}` is already bound in
+        // extra_replacements and skips its own redundant `setup_steps()`
+        // aggregation, so each extension's `setup_steps()` is invoked
+        // exactly once per pipeline.
         let setup_job = generate_setup_job(&front_matter.setup, &extensions, &ctx)?;
         let teardown_job = generate_teardown_job(&front_matter.teardown);
 
@@ -92,7 +93,16 @@ impl Compiler for OneESCompiler {
             skip_header: false,
         };
 
-        compile_shared(input_path, output_path, front_matter, markdown_body, &extensions, &ctx, config).await
+        compile_shared(
+            input_path,
+            output_path,
+            front_matter,
+            markdown_body,
+            &extensions,
+            &ctx,
+            config,
+        )
+        .await
     }
 }
 
@@ -105,6 +115,12 @@ impl Compiler for OneESCompiler {
 /// Extension `setup_steps()` are injected before user setup steps (mirrors the
 /// shared `generate_setup_job` in common.rs). The always-on ado-aw-marker
 /// extension is the primary contributor; user setup_steps are appended after.
+///
+/// `compile_shared` detects when `{{ setup_job }}` is already bound via
+/// `extra_replacements` (the 1ES path does this) and skips its own
+/// `generate_setup_job` call, so each extension's `setup_steps()` is
+/// invoked exactly once per pipeline despite both paths owning a
+/// `generate_setup_job`.
 fn generate_setup_job(
     setup_steps: &[serde_yaml::Value],
     extensions: &[super::extensions::Extension],
@@ -235,7 +251,10 @@ mod tests {
     #[test]
     fn test_generate_teardown_job_empty_steps() {
         let result = generate_teardown_job(&[]);
-        assert!(result.is_empty(), "Empty teardown steps should return empty string");
+        assert!(
+            result.is_empty(),
+            "Empty teardown steps should return empty string"
+        );
     }
 
     #[test]
@@ -252,9 +271,18 @@ mod tests {
             result.contains("dependsOn: SafeOutputs"),
             "Should depend on SafeOutputs"
         );
-        assert!(result.contains("checkout: self"), "Should include self checkout");
-        assert!(result.contains("echo teardown"), "Should include the step content");
-        assert!(result.contains("templateContext"), "Should include templateContext");
+        assert!(
+            result.contains("checkout: self"),
+            "Should include self checkout"
+        );
+        assert!(
+            result.contains("echo teardown"),
+            "Should include the step content"
+        );
+        assert!(
+            result.contains("templateContext"),
+            "Should include templateContext"
+        );
         assert!(!result.contains("pool:"), "Should not include per-job pool");
     }
 }
