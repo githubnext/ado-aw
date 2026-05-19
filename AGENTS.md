@@ -84,8 +84,8 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── status.rs         # `status` CLI command — denser per-pipeline status block (thin renderer over `list`'s data path)
 │   ├── run.rs            # `run` CLI command — queues builds for matched definitions, optional polling to completion (module entry is `dispatch`)
 │   ├── ado/              # Shared Azure DevOps REST helpers (auth, list/match/PATCH/POST)
-│   │   └── mod.rs        # Used by `configure` and the `enable` command (ADO REST helpers: auth, list/match/PATCH/POST)
-│   ├── detect.rs         # Agentic pipeline detection (helper for `configure`)
+│   │   └── mod.rs        # Shared by all ADO-touching commands (`secrets`, `enable`, `disable`, `remove`, `list`, `status`, `run`, `configure`) — ADO REST helpers: auth, list/match/PATCH/POST
+│   ├── detect.rs         # Agentic pipeline detection (discover compiled `.lock.yml` files; used by `compile`, `enable`, `disable`, `list`, `remove`, `run`, `status`)
 │   ├── ndjson.rs         # NDJSON parsing utilities
 │   ├── sanitize.rs       # Input sanitization for safe outputs
 │   ├── validate.rs       # Structural input validators (char allowlists, format checks, injection detectors)
