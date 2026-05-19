@@ -24,6 +24,7 @@ pub mod sanitize;
 mod secrets;
 mod status;
 mod tools;
+mod update_check;
 pub mod validate;
 
 use anyhow::{Context, Result};
@@ -772,6 +773,17 @@ async fn main() -> Result<()> {
         println!("No subcommand was used. Try `compile <path>`");
         return Ok(());
     };
+
+    // Check for a newer release on GitHub and nudge the user to update.
+    // Skipped for pipeline-internal commands (execute, mcp, mcp-http) that
+    // run inside network-isolated sandboxes and are not invoked by humans.
+    let is_pipeline_internal = matches!(
+        command,
+        Commands::Execute { .. } | Commands::Mcp { .. } | Commands::McpHttp { .. }
+    );
+    if !is_pipeline_internal {
+        update_check::check_for_update().await;
+    }
 
     match command {
         Commands::Compile {
