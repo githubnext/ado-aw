@@ -19,9 +19,10 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 use crate::ado::{
-    AdoAuth, AdoContext, MatchedDefinition, PATH_SEGMENT, get_definition_full,
-    normalize_masked_secret_variable_values, resolve_ado_context, resolve_auth,
-    resolve_definitions,
+    AdoAuth, AdoContext, MatchedDefinition, PATH_SEGMENT,
+    discovery::{DiscoveryScope, resolve_definitions_via_discovery},
+    get_definition_full, normalize_masked_secret_variable_values, resolve_ado_context,
+    resolve_auth, resolve_definitions,
 };
 
 /// Description of one pipeline variable, for listing only.
@@ -69,9 +70,7 @@ pub fn apply_variable_set(
     value: &str,
     allow_override: Option<bool>,
 ) -> serde_json::Value {
-    if definition.get("variables").is_none()
-        || !definition["variables"].is_object()
-    {
+    if definition.get("variables").is_none() || !definition["variables"].is_object() {
         definition["variables"] = serde_json::json!({});
     }
     let resolved_override = allow_override.unwrap_or_else(|| {
@@ -92,11 +91,11 @@ pub fn apply_variable_set(
 
 /// Pure: produce a copy of `definition` with the named variable
 /// removed. No-op if it wasn't present.
-pub fn apply_variable_delete(
-    mut definition: serde_json::Value,
-    name: &str,
-) -> serde_json::Value {
-    if let Some(vars) = definition.get_mut("variables").and_then(|v| v.as_object_mut()) {
+pub fn apply_variable_delete(mut definition: serde_json::Value, name: &str) -> serde_json::Value {
+    if let Some(vars) = definition
+        .get_mut("variables")
+        .and_then(|v| v.as_object_mut())
+    {
         vars.remove(name);
     }
     definition
@@ -174,6 +173,133 @@ pub struct SetOptions<'a> {
     pub value_stdin: bool,
     pub dry_run: bool,
     pub definition_ids: Option<&'a [u64]>,
+    /// Use Preview-driven discovery across every definition in the
+    /// project (not just those whose root YAML is a local lock file).
+    pub all_repos: bool,
+    /// Filter discovery results to consumers of one specific ado-aw
+    /// template source path (e.g. `agents/security-scan.md`). When set
+    /// alongside `all_repos=false`, scopes discovery to the current repo.
+    pub source: Option<&'a str>,
+}
+
+/// Decide between the legacy lexical resolver and Preview-driven
+/// discovery based on which flags the caller passed. Returns
+/// `Ok(Some(vec))` on success, `Ok(None)` only when the legacy path
+/// signaled "no local fixtures found; exit clean".
+async fn resolve_for_command(
+    client: &reqwest::Client,
+    ado_ctx: &AdoContext,
+    auth: &AdoAuth,
+    definition_ids: Option<&[u64]>,
+    all_repos: bool,
+    source_filter: Option<&str>,
+    repo_path: &Path,
+) -> Result<Option<Vec<MatchedDefinition>>> {
+    // Discovery code path: activated by --all-repos or --source.
+    // Explicit definition_ids always takes precedence (escape hatch).
+    if definition_ids.is_none() && (all_repos || source_filter.is_some()) {
+        // CurrentRepo scope without a resolvable git remote is a
+        // user-friendly footgun: discovery would silently return zero
+        // results. Surface a targeted hint *before* spending an HTTP
+        // round-trip on a doomed listing.
+        if !all_repos && ado_ctx.repo_name.is_empty() {
+            anyhow::bail!(
+                "--source filters by the current repository, but no Azure DevOps git remote \
+                 was detected in `{}`.\n\
+                 Either run from a checkout of an ADO repo, or pass --all-repos to search \
+                 the entire project.",
+                repo_path.display()
+            );
+        }
+
+        // `--source` requires an identifiable current (org, repo) so
+        // the marker-origin filter in discovery can disambiguate
+        // same-named source paths across repos. Without it, a strict
+        // marker (one carrying `org` / `repo`) would silently fail the
+        // origin check and the operator would see "no pipelines
+        // matched" with no explanation. The `!all_repos` guard above
+        // covers the missing-`repo_name` case for current-repo scope;
+        // here we also catch `--all-repos --source` paired with a
+        // missing or malformed `org_url` (e.g. `org_name()` resolves
+        // to `None`).
+        if source_filter.is_some() && (ado_ctx.org_name().is_none() || ado_ctx.repo_name.is_empty())
+        {
+            anyhow::bail!(
+                "--source needs the current repository's Azure DevOps org and repo to \
+                 disambiguate same-named source paths across the project, but neither \
+                 could be resolved from `{}`.\n\
+                 Run from a checkout of an ADO repo, or use --definition-ids to act on \
+                 specific pipelines directly.",
+                repo_path.display()
+            );
+        }
+
+        let scope = if all_repos {
+            DiscoveryScope::AllRepos
+        } else {
+            DiscoveryScope::CurrentRepo
+        };
+
+        // Feed local lock files into discovery so its yamlFilename
+        // fast-path can skip a Preview call per locally-compiled
+        // pipeline. Best-effort: scan failures aren't fatal — discovery
+        // simply falls back to Preview for everything.
+        let local_lock_paths: Vec<PathBuf> = match crate::detect::detect_pipelines(repo_path).await
+        {
+            Ok(detected) => detected.into_iter().map(|p| p.yaml_path).collect(),
+            Err(e) => {
+                log::debug!(
+                    "Local-fixture scan failed during discovery ({e}); falling back to Preview \
+                     for every definition."
+                );
+                Vec::new()
+            }
+        };
+        let local_lock_slice = if local_lock_paths.is_empty() {
+            None
+        } else {
+            Some(local_lock_paths.as_slice())
+        };
+
+        let matched = resolve_definitions_via_discovery(
+            client,
+            ado_ctx,
+            auth,
+            scope,
+            local_lock_slice,
+            source_filter,
+        )
+        .await?;
+        return Ok(Some(matched));
+    }
+
+    // Legacy behaviour: explicit --definition-ids, or local-fixture
+    // lexical matching. Unchanged from before the discovery work.
+    resolve_definitions(client, ado_ctx, auth, definition_ids, repo_path).await
+}
+
+/// Build the user-facing "no matches" hint, tailored to the flag
+/// combination the caller used. Centralised here so `run_set`,
+/// `run_list`, and `run_delete` keep the messages in sync.
+fn empty_match_hint(all_repos: bool, source: Option<&str>) -> String {
+    match (all_repos, source) {
+        (false, Some(src)) => format!(
+            "No consumers of `{src}` were found in this repository. \
+             If the template is consumed by pipelines in other repos in this \
+             project, try `--all-repos` to widen the search."
+        ),
+        (true, Some(src)) => format!(
+            "No consumers of `{src}` were found anywhere in this project via \
+             Preview-driven discovery. Run `ado-aw list --all-repos --source {src}` \
+             to diagnose."
+        ),
+        (true, None) => "No ado-aw pipelines found in this project via Preview-driven discovery. \
+             Run `ado-aw list --all-repos` to diagnose."
+            .to_string(),
+        (false, None) => "No ADO definitions matched any local fixture. Run `ado-aw list` to \
+             diagnose, or try `--all-repos` to search the entire project."
+            .to_string(),
+    }
 }
 
 pub async fn run_set(opts: SetOptions<'_>) -> Result<()> {
@@ -197,11 +323,13 @@ pub async fn run_set(opts: SetOptions<'_>) -> Result<()> {
         .build()
         .context("Failed to create HTTP client")?;
 
-    let Some(matched) = resolve_definitions(
+    let Some(matched) = resolve_for_command(
         &client,
         &ado_ctx,
         &auth,
         opts.definition_ids,
+        opts.all_repos,
+        opts.source,
         &repo_path,
     )
     .await?
@@ -210,10 +338,7 @@ pub async fn run_set(opts: SetOptions<'_>) -> Result<()> {
     };
 
     if matched.is_empty() {
-        anyhow::bail!(
-            "No ADO definitions matched any local fixture. Run `ado-aw list` to \
-             diagnose."
-        );
+        anyhow::bail!("{}", empty_match_hint(opts.all_repos, opts.source));
     }
 
     print_matched_summary(&matched);
@@ -295,11 +420,7 @@ async fn apply_set_one(
 /// Resolve the variable value from the CLI inputs: explicit positional
 /// `value` first, then `--value-stdin` (reads exactly one line), then
 /// an interactive tty prompt with echo off.
-fn resolve_value(
-    name: &str,
-    explicit: Option<&str>,
-    value_stdin: bool,
-) -> Result<String> {
+fn resolve_value(name: &str, explicit: Option<&str>, value_stdin: bool) -> Result<String> {
     if let Some(v) = explicit {
         return Ok(v.to_string());
     }
@@ -307,7 +428,10 @@ fn resolve_value(
         use std::io::BufRead;
         let mut line = String::new();
         let stdin = std::io::stdin();
-        stdin.lock().read_line(&mut line).context("Failed to read value from stdin")?;
+        stdin
+            .lock()
+            .read_line(&mut line)
+            .context("Failed to read value from stdin")?;
         let trimmed = line.trim_end_matches(['\r', '\n']).to_string();
         if trimmed.is_empty() {
             anyhow::bail!("--value-stdin read an empty value");
@@ -329,6 +453,8 @@ pub struct ListOptions<'a> {
     pub path: Option<&'a Path>,
     pub json: bool,
     pub definition_ids: Option<&'a [u64]>,
+    pub all_repos: bool,
+    pub source: Option<&'a str>,
 }
 
 pub async fn run_list(opts: ListOptions<'_>) -> Result<()> {
@@ -349,11 +475,13 @@ pub async fn run_list(opts: ListOptions<'_>) -> Result<()> {
         .build()
         .context("Failed to create HTTP client")?;
 
-    let Some(matched) = resolve_definitions(
+    let Some(matched) = resolve_for_command(
         &client,
         &ado_ctx,
         &auth,
         opts.definition_ids,
+        opts.all_repos,
+        opts.source,
         &repo_path,
     )
     .await?
@@ -362,10 +490,7 @@ pub async fn run_list(opts: ListOptions<'_>) -> Result<()> {
     };
 
     if matched.is_empty() {
-        anyhow::bail!(
-            "No ADO definitions matched any local fixture. Run `ado-aw list` to \
-             diagnose."
-        );
+        anyhow::bail!("{}", empty_match_hint(opts.all_repos, opts.source));
     }
 
     let mut payload = serde_json::json!({});
@@ -414,6 +539,8 @@ pub struct DeleteOptions<'a> {
     pub path: Option<&'a Path>,
     pub dry_run: bool,
     pub definition_ids: Option<&'a [u64]>,
+    pub all_repos: bool,
+    pub source: Option<&'a str>,
 }
 
 pub async fn run_delete(opts: DeleteOptions<'_>) -> Result<()> {
@@ -436,11 +563,13 @@ pub async fn run_delete(opts: DeleteOptions<'_>) -> Result<()> {
         .build()
         .context("Failed to create HTTP client")?;
 
-    let Some(matched) = resolve_definitions(
+    let Some(matched) = resolve_for_command(
         &client,
         &ado_ctx,
         &auth,
         opts.definition_ids,
+        opts.all_repos,
+        opts.source,
         &repo_path,
     )
     .await?
@@ -449,10 +578,7 @@ pub async fn run_delete(opts: DeleteOptions<'_>) -> Result<()> {
     };
 
     if matched.is_empty() {
-        anyhow::bail!(
-            "No ADO definitions matched any local fixture. Run `ado-aw list` to \
-             diagnose."
-        );
+        anyhow::bail!("{}", empty_match_hint(opts.all_repos, opts.source));
     }
 
     print_matched_summary(&matched);
@@ -471,7 +597,10 @@ pub async fn run_delete(opts: DeleteOptions<'_>) -> Result<()> {
     for m in &matched {
         match apply_delete_one(&client, &ado_ctx, &auth, m.id, opts.name).await {
             Ok(()) => {
-                println!("  ✓ '{}' removed from '{}' (id={})", opts.name, m.name, m.id);
+                println!(
+                    "  ✓ '{}' removed from '{}' (id={})",
+                    opts.name, m.name, m.id
+                );
                 success += 1;
             }
             Err(e) => {
@@ -547,6 +676,8 @@ pub async fn run_set_github_token(
         value_stdin: false,
         dry_run,
         definition_ids,
+        all_repos: false,
+        source: None,
     })
     .await
 }
@@ -602,6 +733,86 @@ mod tests {
         assert_eq!(out["variables"]["FOO"]["value"], "bar");
         assert_eq!(out["variables"]["FOO"]["isSecret"], true);
         assert_eq!(out["variables"]["FOO"]["allowOverride"], false);
+    }
+
+    // ============ resolve_for_command precondition ============
+
+    #[tokio::test]
+    async fn source_without_all_repos_bails_when_no_git_remote() {
+        // CurrentRepo scope + empty repo_name = no git remote was
+        // detected. `--source` users hitting this case must get a
+        // targeted error mentioning `--all-repos`, not a generic
+        // "no pipelines found" further down the pipeline.
+        let ctx = AdoContext {
+            org_url: "https://dev.azure.com/example".to_string(),
+            project: "p".to_string(),
+            repo_name: String::new(),
+        };
+        let auth = AdoAuth::Pat("token".to_string());
+        let client = reqwest::Client::builder().build().expect("client builds");
+        let tmp = tempfile::tempdir().unwrap();
+
+        let err = resolve_for_command(
+            &client,
+            &ctx,
+            &auth,
+            None,
+            false,
+            Some("agents/foo.md"),
+            tmp.path(),
+        )
+        .await
+        .expect_err("expected bail");
+
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("--all-repos"),
+            "error should suggest --all-repos; got: {msg}"
+        );
+        assert!(
+            msg.contains("no Azure DevOps git remote"),
+            "error should explain the root cause; got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn source_with_all_repos_bails_when_org_url_unresolvable() {
+        // `--all-repos --source` still needs the current (org, repo)
+        // to disambiguate same-named source paths via the marker's
+        // origin fields. If `org_url` doesn't yield an org slug (or
+        // `repo_name` is empty), the marker-origin filter would
+        // silently exclude every strict marker — surface a targeted
+        // error instead.
+        //
+        // Empty `org_url` is the realistic failure mode: a hand-built
+        // AdoContext from `--org "" --project p` or a corrupted ADO
+        // remote that parsed past `parse_ado_remote` would land here.
+        let ctx = AdoContext {
+            org_url: String::new(), // org_name() resolves to None
+            project: "p".to_string(),
+            repo_name: "some-repo".to_string(),
+        };
+        let auth = AdoAuth::Pat("token".to_string());
+        let client = reqwest::Client::builder().build().expect("client builds");
+        let tmp = tempfile::tempdir().unwrap();
+
+        let err = resolve_for_command(
+            &client,
+            &ctx,
+            &auth,
+            None,
+            true, // --all-repos
+            Some("agents/foo.md"),
+            tmp.path(),
+        )
+        .await
+        .expect_err("expected bail");
+
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("--source needs the current repository's"),
+            "error should explain the root cause; got: {msg}"
+        );
     }
 
     #[test]

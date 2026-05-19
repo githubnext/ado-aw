@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result};
 use log::{debug, info};
+use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncBufReadExt;
 
@@ -124,6 +125,100 @@ async fn try_detect_pipeline(
     Ok(None)
 }
 
+/// Prefix of the machine-readable marker emitted into every compiled
+/// pipeline by the always-on `ado-aw-marker` compiler extension.
+///
+/// The marker is a `# ado-aw-metadata: { … JSON … }` line embedded
+/// inside the bash body of an injected Agent-job prepare step. The
+/// step body (unlike top-of-file YAML comments) survives ADO Pipeline
+/// Preview expansion, so this prefix is the canonical surface
+/// project-scope discovery searches for in expanded YAML.
+pub const MARKER_STEP_PREFIX: &str = "# ado-aw-metadata:";
+
+/// Parsed metadata from a `# ado-aw-metadata: {…}` marker step line.
+///
+/// The schema is forward-compatible: unknown JSON fields are ignored,
+/// and missing fields fall through to defaults (empty string / zero).
+/// Callers that need a specific field should check it explicitly.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct MarkerMetadata {
+    /// Schema version; `1` for the initial release.
+    #[serde(default)]
+    pub schema: u32,
+    /// Source markdown path, normalised forward-slash form (e.g.
+    /// `agents/release-readiness.md`).
+    #[serde(default)]
+    pub source: String,
+    /// ADO organisation name the source markdown was compiled in
+    /// (e.g. `myorg`). Lowercased at emit time. Combined with
+    /// [`MarkerMetadata::repo`] this disambiguates the marker's
+    /// `source` field when two repos in the same ADO project happen
+    /// to have files of the same name (e.g. both define
+    /// `agents/foo.md`). Empty string when the compiler ran outside
+    /// an ADO checkout (rare in production thanks to the
+    /// non-GitHub-remote guard).
+    #[serde(default)]
+    pub org: String,
+    /// ADO repository name the source markdown was compiled in
+    /// (e.g. `templates-a`). Lowercased at emit time. See
+    /// [`MarkerMetadata::org`] for rationale. Empty string when the
+    /// compiler ran outside an ADO checkout.
+    #[serde(default)]
+    pub repo: String,
+    /// Compiler version that produced this YAML (`CARGO_PKG_VERSION`).
+    #[serde(default)]
+    pub version: String,
+    /// Compile target: `standalone` / `1es` / `job` / `stage`.
+    #[serde(default)]
+    pub target: String,
+}
+
+/// Scan raw pipeline YAML for `# ado-aw-metadata: {…}` marker lines.
+///
+/// Returns one [`MarkerMetadata`] per parseable hit. Multiple hits in a
+/// single document indicate a consumer pipeline that includes more than
+/// one ado-aw-generated template; project-scope discovery uses that to
+/// classify the definition as `Consumer`. Malformed JSON entries are
+/// skipped (logged at debug) rather than panicking — defensive against
+/// future schema drift inside the JSON blob.
+///
+/// Designed to be called against either:
+/// - Raw compiled-on-disk lock-file YAML, or
+/// - The `finalYaml` returned by ADO's Pipeline Preview API (which
+///   strips top-of-file comments but preserves step bodies).
+pub fn parse_marker_step(yaml: &str) -> Vec<MarkerMetadata> {
+    let mut results = Vec::new();
+
+    for line in yaml.lines() {
+        // Trim leading whitespace; the marker lives inside an indented
+        // bash heredoc, so the actual `#` may be indented arbitrarily.
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix(MARKER_STEP_PREFIX) else {
+            continue;
+        };
+
+        let json_str = rest.trim();
+        if !json_str.starts_with('{') {
+            // Marker prefix matched but no JSON payload — likely
+            // documentation or a non-marker comment. Skip silently.
+            continue;
+        }
+
+        match serde_json::from_str::<MarkerMetadata>(json_str) {
+            Ok(meta) => results.push(meta),
+            Err(e) => {
+                log::debug!(
+                    "Skipping malformed ado-aw-metadata marker: {} (payload: {})",
+                    e,
+                    json_str
+                );
+            }
+        }
+    }
+
+    results
+}
+
 /// Parsed metadata from a `# @ado-aw` header line.
 pub struct HeaderMetadata {
     pub source: String,
@@ -200,6 +295,86 @@ pub fn parse_header_line(line: &str) -> Option<HeaderMetadata> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_marker_step_single() {
+        let yaml = "\
+- bash: |
+    # ado-aw-metadata: {\"schema\":1,\"source\":\"agents/foo.md\",\"version\":\"0.28.0\",\"target\":\"standalone\"}
+    echo hello
+  displayName: \"ado-aw\"
+";
+        let metas = parse_marker_step(yaml);
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].schema, 1);
+        assert_eq!(metas[0].source, "agents/foo.md");
+        assert_eq!(metas[0].version, "0.28.0");
+        assert_eq!(metas[0].target, "standalone");
+    }
+
+    #[test]
+    fn test_parse_marker_step_multiple() {
+        // A consumer pipeline pulling in two templates expands to two
+        // marker steps in finalYaml.
+        let yaml = "\
+jobs:
+  - job: a
+    steps:
+      - bash: |
+          # ado-aw-metadata: {\"schema\":1,\"source\":\"agents/a.md\",\"version\":\"0.28.0\",\"target\":\"job\"}
+          echo a
+        displayName: \"ado-aw\"
+  - job: b
+    steps:
+      - bash: |
+          # ado-aw-metadata: {\"schema\":1,\"source\":\"agents/b.md\",\"version\":\"0.27.0\",\"target\":\"job\"}
+          echo b
+        displayName: \"ado-aw\"
+";
+        let metas = parse_marker_step(yaml);
+        assert_eq!(metas.len(), 2);
+        let sources: Vec<&str> = metas.iter().map(|m| m.source.as_str()).collect();
+        assert!(sources.contains(&"agents/a.md"));
+        assert!(sources.contains(&"agents/b.md"));
+    }
+
+    #[test]
+    fn test_parse_marker_step_no_match_returns_empty() {
+        let yaml = "name: foo\njobs:\n  - job: x\n    steps:\n      - bash: echo hi\n";
+        assert!(parse_marker_step(yaml).is_empty());
+    }
+
+    #[test]
+    fn test_parse_marker_step_skips_malformed_json() {
+        // The prefix matches but the JSON is broken; the parser must
+        // skip silently rather than panic. A valid marker on a later
+        // line is still returned.
+        let yaml = "\
+- bash: |
+    # ado-aw-metadata: {not valid json
+    # ado-aw-metadata: {\"schema\":1,\"source\":\"agents/ok.md\",\"version\":\"1.0.0\",\"target\":\"stage\"}
+";
+        let metas = parse_marker_step(yaml);
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].source, "agents/ok.md");
+    }
+
+    #[test]
+    fn test_parse_marker_step_tolerates_extra_json_fields() {
+        // Forward-compatibility: an unknown future field shouldn't
+        // break the parser.
+        let yaml = "    # ado-aw-metadata: {\"schema\":2,\"source\":\"agents/x.md\",\"version\":\"1.0.0\",\"target\":\"standalone\",\"future_field\":[1,2,3]}\n";
+        let metas = parse_marker_step(yaml);
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].source, "agents/x.md");
+        assert_eq!(metas[0].schema, 2);
+    }
+
+    #[test]
+    fn test_parse_marker_step_ignores_prefix_without_json() {
+        let yaml = "# ado-aw-metadata: (manual documentation note, not a marker)\n";
+        assert!(parse_marker_step(yaml).is_empty());
+    }
 
     #[test]
     fn test_parse_header_line_valid() {

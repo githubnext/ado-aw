@@ -16,6 +16,8 @@ use std::path::Path;
 
 use crate::detect;
 
+pub mod discovery;
+
 /// ADO resource ID for minting ADO-scoped tokens via Azure CLI.
 const ADO_RESOURCE_ID: &str = "499b84ac-1321-427f-aa17-267ca6975798";
 
@@ -75,6 +77,17 @@ pub struct AdoContext {
     pub project: String,
     /// Repository name
     pub repo_name: String,
+}
+
+impl AdoContext {
+    /// Extract just the org slug from `org_url` (e.g.
+    /// `https://dev.azure.com/MyOrg/` → `Some("MyOrg")`). Mirrors the
+    /// inline parse in `CompileContext::ado_org`; lives here so
+    /// non-compile callers (Preview-driven discovery) can reuse it.
+    pub fn org_name(&self) -> Option<&str> {
+        let org = self.org_url.trim_end_matches('/').rsplit('/').next()?;
+        if org.is_empty() { None } else { Some(org) }
+    }
 }
 
 /// Parse the ADO org, project, and repo from a git remote URL.
@@ -209,6 +222,38 @@ pub struct DefinitionSummary {
     /// `includeAllProperties=true`. May be absent on older API versions.
     #[serde(default)]
     pub path: Option<String>,
+    /// Backing git repository (URL, name, type, id). Populated by ADO's
+    /// list endpoint without any extra query parameters. Used by
+    /// project-scope discovery to filter definitions by the current
+    /// git remote (`DiscoveryScope::CurrentRepo`).
+    #[serde(default)]
+    pub repository: Option<Repository>,
+    /// Monotonic revision counter ADO bumps on every definition edit.
+    /// Deserialised here so a future Preview-driven discovery cache
+    /// can key on `(definition_id, revision)`. **No caching is
+    /// implemented yet** — see the discovery module for the current
+    /// in-process behaviour. Track in a follow-up before depending on
+    /// this for staleness checks.
+    #[serde(default)]
+    pub revision: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct Repository {
+    /// Browse URL of the backing repo (e.g.
+    /// `https://dev.azure.com/{org}/{project}/_git/{repo}`). Used for
+    /// `DiscoveryScope::CurrentRepo` filtering.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Human-readable repo name.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Repository provider (e.g. `"TfsGit"`, `"GitHub"`).
+    #[serde(rename = "type", default)]
+    pub repo_type: Option<String>,
+    /// Backing repository ID (GUID for TfsGit, owner/repo for GitHub).
+    #[serde(default)]
+    pub id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -223,6 +268,11 @@ pub enum MatchMethod {
     YamlPath,
     PipelineName,
     Explicit,
+    /// Found via Preview-driven discovery (Workstream P). Uniquely
+    /// identifies definitions that ADO knows about but where the
+    /// caller has no corresponding local lock file — i.e. consumer
+    /// pipelines and ado-aw definitions in other repos.
+    Discovery,
 }
 
 impl std::fmt::Display for MatchMethod {
@@ -231,6 +281,7 @@ impl std::fmt::Display for MatchMethod {
             MatchMethod::YamlPath => write!(f, "yaml-path"),
             MatchMethod::PipelineName => write!(f, "pipeline-name"),
             MatchMethod::Explicit => write!(f, "explicit"),
+            MatchMethod::Discovery => write!(f, "discovery"),
         }
     }
 }
@@ -1366,6 +1417,8 @@ mod tests {
             process: None,
             queue_status: None,
             path: None,
+            repository: None,
+            revision: None,
         }
     }
 
@@ -1378,6 +1431,8 @@ mod tests {
             }),
             queue_status: None,
             path: None,
+            repository: None,
+            revision: None,
         }
     }
 
