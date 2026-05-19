@@ -73,7 +73,9 @@ enum SecretsCmd {
         /// ado-aw template (e.g. `agents/security-scan.md`). Activates
         /// the discovery code path. **Without `--all-repos`, only
         /// definitions in the current repository are searched** — pair
-        /// with `--all-repos` to search the full project.
+        /// with `--all-repos` to search the full project. Path matching
+        /// is case-sensitive and forward-slash-normalised; on Windows,
+        /// pass the path in the same case it was compiled with.
         #[arg(long, conflicts_with = "definition_ids")]
         source: Option<String>,
     },
@@ -96,7 +98,9 @@ enum SecretsCmd {
         all_repos: bool,
         /// Filter discovered definitions to consumers of one specific
         /// ado-aw template. **Without `--all-repos`, only definitions
-        /// in the current repository are searched.**
+        /// in the current repository are searched.** Path matching is
+        /// case-sensitive and forward-slash-normalised; on Windows,
+        /// pass the path in the same case it was compiled with.
         #[arg(long, conflicts_with = "definition_ids")]
         source: Option<String>,
     },
@@ -120,7 +124,9 @@ enum SecretsCmd {
         all_repos: bool,
         /// Filter discovered definitions to consumers of one specific
         /// ado-aw template. **Without `--all-repos`, only definitions
-        /// in the current repository are searched.**
+        /// in the current repository are searched.** Path matching is
+        /// case-sensitive and forward-slash-normalised; on Windows,
+        /// pass the path in the same case it was compiled with.
         #[arg(long, conflicts_with = "definition_ids")]
         source: Option<String>,
     },

@@ -491,6 +491,16 @@ fn is_direct_match(def: &DefinitionSummary, markers: &[MarkerMetadata]) -> bool 
     // the definition's root YAML. Convention: `<stem>.md` compiles to
     // `<stem>.lock.yml`.
     //
+    // Equality is required — an earlier version also accepted
+    // `yaml_normalized.ends_with("/{stem}")` for a defensive
+    // tail-match, but that produced false-positives when an unrelated
+    // pipeline happened to live under a same-named lock file in a
+    // different directory (e.g. marker `agents/foo.md` + yamlFilename
+    // `other/agents/foo.lock.yml` would mislabel a Consumer as Direct).
+    // Both `marker.source` and the post-`normalize_ado_yaml_path`
+    // form of `yaml_filename` are repo-root-relative without a leading
+    // slash, so strict equality is the correct check.
+    //
     // Non-`.md` sources are treated conservatively as `Consumer`: this
     // branch is unreachable today (the compiler always emits `.md`
     // source paths) but stays defensive against future extensions that
@@ -506,7 +516,7 @@ fn is_direct_match(def: &DefinitionSummary, markers: &[MarkerMetadata]) -> bool 
     else {
         return false;
     };
-    yaml_normalized == stem || yaml_normalized.ends_with(&format!("/{stem}"))
+    yaml_normalized == stem
 }
 
 async fn parse_local_lock(path: &Path) -> Option<MarkerMetadata> {
@@ -597,6 +607,12 @@ pub fn discovered_to_matched(d: &DiscoveredPipeline) -> Option<MatchedDefinition
 /// `source_filter` filters discovery results so only definitions whose
 /// markers reference that source path are kept. Match is by exact
 /// equality on the normalized source string in the marker JSON.
+/// Normalisation is applied to the user-supplied value too
+/// ([`crate::compile::normalize_source_path`] — forward-slash separators,
+/// CR/LF stripping, leading `./` collapsed) so the common variants
+/// (`./agents/foo.md`, `agents\foo.md` on Windows) match. Matching is
+/// **case-sensitive** even on Windows; pass the path in the same case
+/// it was compiled with.
 ///
 /// Skip-summary warnings are emitted differently depending on whether
 /// `source_filter` is active:
@@ -833,10 +849,10 @@ mod tests {
     }
 
     #[test]
-    fn direct_when_yaml_filename_has_extra_path_prefix() {
-        // ADO sometimes stores yamlFilename with a project-relative
-        // leading slash + extra path components. The marker source is
-        // just the markdown path the user passed at compile time.
+    fn direct_when_yaml_filename_has_leading_slash() {
+        // ADO sometimes returns yamlFilename with a leading slash. The
+        // `normalize_ado_yaml_path` helper strips it, so equality with
+        // the derived `<stem>.lock.yml` still holds.
         let def = def_with(1, "a", Some("/agents/foo.lock.yml"), None);
         let markers = vec![MarkerMetadata {
             schema: 1,
@@ -845,6 +861,24 @@ mod tests {
             target: "standalone".to_string(),
         }];
         assert!(is_direct_match(&def, &markers));
+    }
+
+    #[test]
+    fn consumer_when_same_stem_in_different_directory() {
+        // Regression: previously `yaml_normalized.ends_with("/{stem}")`
+        // would mislabel a Consumer pipeline as Direct whenever a
+        // same-named lock file lived under any unrelated prefix
+        // (e.g. marker `agents/foo.md` + yamlFilename
+        // `other/agents/foo.lock.yml`). The fix requires strict
+        // equality after normalisation.
+        let def = def_with(1, "a", Some("other/agents/foo.lock.yml"), None);
+        let markers = vec![MarkerMetadata {
+            schema: 1,
+            source: "agents/foo.md".to_string(),
+            version: "0.30.0".to_string(),
+            target: "standalone".to_string(),
+        }];
+        assert!(!is_direct_match(&def, &markers));
     }
 
     #[test]

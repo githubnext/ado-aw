@@ -270,4 +270,39 @@ mod tests {
             "expected `##vso[` neutralised via canonical backtick-wrap in echo line: {echo_line}"
         );
     }
+
+    #[test]
+    fn json_marker_quote_in_source_round_trips_correctly() {
+        // Regression: `normalize_source_path` previously escaped `"` to
+        // `\"` before embedding the path. `serde_json::json!` then
+        // double-encoded the backslash, so the marker JSON looked like
+        // `"source":"agents/foo\\\"bar.md"` — and the path returned by
+        // `parse_marker_step` carried a spurious `\` that did not exist
+        // in the original filename. The fix is to feed the canonical
+        // (unescaped) path into the JSON value and let serde_json do
+        // the JSON-level escaping.
+        let fm = parse_fm("name: t\ndescription: x\n");
+        let input_path = Path::new(r#"agents/foo"bar.md"#);
+        let ctx = CompileContext {
+            agent_name: &fm.name,
+            front_matter: &fm,
+            ado_context: None,
+            engine: crate::engine::Engine::Copilot,
+            compile_dir: None,
+            input_path: Some(input_path),
+        };
+        let steps = AdoAwMarkerExtension.setup_steps(&ctx).unwrap();
+        assert_eq!(steps.len(), 1);
+
+        // Parse the marker step back via the canonical discovery parser
+        // and confirm the source field reconstructs to the original
+        // path (forward-slash-normalised, no spurious backslashes).
+        let parsed = crate::detect::parse_marker_step(&steps[0]);
+        assert_eq!(parsed.len(), 1, "expected exactly one marker in step");
+        assert_eq!(
+            parsed[0].source,
+            r#"agents/foo"bar.md"#,
+            "marker source should round-trip without spurious backslash"
+        );
+    }
 }
