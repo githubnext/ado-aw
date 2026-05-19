@@ -1,9 +1,15 @@
 //! Always-on ado-aw marker extension.
 //!
-//! Injects a single informational step into the Setup job of every
-//! compiled pipeline. The step's bash body carries a machine-readable
-//! JSON metadata blob keyed by a `# ado-aw-metadata:` prefix, plus a
-//! runtime `echo` for build-log visibility.
+//! Injects a single informational step into the prepare phase of the
+//! Agent job of every compiled pipeline. The step's bash body carries a
+//! machine-readable JSON metadata blob keyed by a `# ado-aw-metadata:`
+//! prefix, plus a runtime `echo` for build-log visibility.
+//!
+//! Why `prepare_steps` (Agent job) and not `setup_steps` (Setup job):
+//! a Setup-job injection would force every compiled pipeline to spin
+//! up a dedicated pool agent just to emit a metadata comment, even for
+//! pipelines that have no other reason to need a Setup job. The Agent
+//! job is always present, so `prepare_steps` is free.
 //!
 //! Why a step (and not a top-of-file comment): ADO's Pipeline Preview
 //! API strips top-of-document leading comments during YAML expansion
@@ -21,7 +27,8 @@ use super::{CompileContext, CompilerExtension, ExtensionPhase};
 // ─── ado-aw marker (always-on, internal) ─────────────────────────────
 
 /// Always-on internal extension that embeds machine-readable
-/// `# ado-aw-metadata: {…}` JSON inside an injected Setup-job step.
+/// `# ado-aw-metadata: {…}` JSON inside an injected Agent-job prepare
+/// step.
 ///
 /// The metadata is the canonical surface consumed by Preview-driven
 /// project-scope discovery in [`crate::ado`]. Discovery enumerates ADO

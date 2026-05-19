@@ -483,8 +483,8 @@ fn is_direct_match(def: &DefinitionSummary, markers: &[MarkerMetadata]) -> bool 
     }
     if markers.len() > 1 {
         // A compiled ado-aw pipeline's expanded YAML carries exactly
-        // one marker — its own Setup-job step. More than one means
-        // the YAML was produced by expanding a consumer that
+        // one marker — its own Agent-job prepare step. More than one
+        // means the YAML was produced by expanding a consumer that
         // `template:`-includes multiple ado-aw lock files (each
         // contributing its own marker step). None of those templates
         // are the consumer's own root YAML, so it can't be Direct.

@@ -129,10 +129,10 @@ async fn try_detect_pipeline(
 /// pipeline by the always-on `ado-aw-marker` compiler extension.
 ///
 /// The marker is a `# ado-aw-metadata: { … JSON … }` line embedded
-/// inside the bash body of an injected Setup-job step. The step body
-/// (unlike top-of-file YAML comments) survives ADO Pipeline Preview
-/// expansion, so this prefix is the canonical surface project-scope
-/// discovery searches for in expanded YAML.
+/// inside the bash body of an injected Agent-job prepare step. The
+/// step body (unlike top-of-file YAML comments) survives ADO Pipeline
+/// Preview expansion, so this prefix is the canonical surface
+/// project-scope discovery searches for in expanded YAML.
 pub const MARKER_STEP_PREFIX: &str = "# ado-aw-metadata:";
 
 /// Parsed metadata from a `# ado-aw-metadata: {…}` marker step line.
