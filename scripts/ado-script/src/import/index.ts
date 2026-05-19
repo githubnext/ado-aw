@@ -9,6 +9,31 @@ import { dirname, isAbsolute, resolve } from "node:path";
 // accepted at compile time and silently dropped at runtime.
 const MARKER = /\{\{#runtime-import(\?)?\s+([^\s}]+)\s*\}\}/g;
 
+// Detect Windows drive-letter absolute paths (`C:\foo`, `C:/foo`) on
+// any host. Node's `path.isAbsolute` is platform-dependent — on Linux
+// it doesn't recognise `C:\foo` as absolute — so this string-level
+// check guarantees the same rejection regardless of where `import.js`
+// runs. POSIX absolute (`/foo`) and UNC (`\\server\share`) are caught
+// by `path.isAbsolute` on Linux/Windows respectively, and by the
+// explicit prefix checks below otherwise.
+function isDriveLetterAbsolute(path: string): boolean {
+  return (
+    path.length >= 3 &&
+    /^[A-Za-z]$/.test(path.charAt(0)) &&
+    path.charAt(1) === ":" &&
+    (path.charAt(2) === "/" || path.charAt(2) === "\\")
+  );
+}
+
+function isAbsolutePathStrict(path: string): boolean {
+  return (
+    isAbsolute(path) ||
+    path.startsWith("/") ||
+    path.startsWith("\\\\") ||
+    isDriveLetterAbsolute(path)
+  );
+}
+
 // Strip characters that would let an attacker-controlled `rawPath` break
 // out of the `##vso[task.logissue type=error]…` framing:
 //   * `]`  — closes the VSO command bracket prematurely.
@@ -36,16 +61,45 @@ function fail(messages: string[]): never {
   process.exit(1);
 }
 
-function main(): void {
-  const target = process.argv[2];
-  if (!target) {
+// Parse the CLI:
+//   node import.js <target> [--base <path>]
+// The optional --base flag sets the root that relative marker paths
+// resolve against. When omitted, falls back to `dirname(target)`.
+// In pipeline use the compiler always passes
+// `--base "$(Build.SourcesDirectory)"` so that the marker is a
+// trigger-repo-relative path (NOT absolute) — see
+// `AdoScriptExtension::resolver_step` in
+// src/compile/extensions/ado_script.rs.
+function parseArgs(argv: string[]): { target: string; base: string | null } {
+  if (argv.length === 0) {
     fail(["missing target file argument"]);
   }
+  const target = argv[0]!;
+  let base: string | null = null;
+  let i = 1;
+  while (i < argv.length) {
+    const arg = argv[i]!;
+    if (arg === "--base") {
+      const value = argv[i + 1];
+      if (value === undefined) {
+        fail(["--base requires a value"]);
+      }
+      base = value;
+      i += 2;
+    } else {
+      fail([`unknown argument: ${sanitizeForVsoMessage(arg)}`]);
+    }
+  }
+  return { target, base };
+}
+
+function main(): void {
+  const { target, base: baseArg } = parseArgs(process.argv.slice(2));
   if (!existsSync(target)) {
     fail([`target file not found: ${sanitizeForVsoMessage(target)}`]);
   }
 
-  const base = dirname(target);
+  const base = baseArg ?? dirname(target);
   const original = readFileSync(target, "utf8");
   const errors: string[] = [];
 
@@ -54,9 +108,9 @@ function main(): void {
   // gh-aw's runtime-import behaviour.
   const expanded = original.replace(MARKER, (_whole, optional: string | undefined, rawPath: string) => {
     // Reject `..` segments — a malicious or compromised agent body could
-    // otherwise reach files outside `base` (which on the agent VM is
-    // `$(Build.SourcesDirectory)`, the trigger-repo checkout). Mirrors
-    // `resolve_imports_inline` in src/compile/extensions/ado_script.rs.
+    // otherwise reach files outside `base` (the trigger-repo checkout on
+    // the agent VM). Mirrors `resolve_imports_inline` in
+    // src/compile/extensions/ado_script.rs.
     const hasDotDotSegment = rawPath.split(/[\/\\]/).some((segment) => segment === "..");
     if (hasDotDotSegment) {
       errors.push(
@@ -65,7 +119,23 @@ function main(): void {
       return "";
     }
 
-    const absPath = isAbsolute(rawPath) ? rawPath : resolve(base, rawPath);
+    // Reject absolute paths — defence in depth, matching the
+    // compile-time resolver. The agent VM has privileged material in
+    // well-known locations (`/tmp/awf-tools/staging/mcpg-config.json`
+    // contains MCP server config, `$SC_READ_TOKEN` etc.). Author
+    // markers in the agent body don't actually reach this code path
+    // today (single-pass means nested markers in the inlined body
+    // aren't re-expanded), but enforcing the same restriction the
+    // compiler enforces keeps the two resolvers in strict parity and
+    // protects against future design changes (e.g. multi-pass).
+    if (isAbsolutePathStrict(rawPath)) {
+      errors.push(
+        `invalid path '${sanitizeForVsoMessage(rawPath)}': absolute paths are not allowed (use a relative path rooted at --base)`,
+      );
+      return "";
+    }
+
+    const absPath = resolve(base, rawPath);
 
     if (!existsSync(absPath)) {
       if (optional === "?") {

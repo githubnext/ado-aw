@@ -3244,8 +3244,24 @@ pub async fn compile_shared(
             .unwrap_or_else(|| std::path::Path::new("."));
         crate::compile::extensions::ado_script::resolve_imports_inline(markdown_body, base_dir)?
     } else {
-        let agent_marker_path =
+        // Build the trigger-repo-relative marker path (i.e. relative to
+        // `$(Build.SourcesDirectory)`). For the default no-checkout
+        // case the relative form is `agents/foo.md`; for multi-repo
+        // checkout it is `$(Build.Repository.Name)/agents/foo.md`
+        // (the ADO variable substitutes to a directory name at runtime,
+        // so the final string is still a relative path with no leading
+        // `/`). The resolver step passes `--base "$(Build.SourcesDirectory)"`
+        // to `import.js`, which rejects absolute paths — see
+        // `AdoScriptExtension::resolver_step` and `import.js`. This
+        // mirrors the compile-time `resolve_imports_inline` policy
+        // (relative-only) and matches the same defence-in-depth
+        // posture on the runtime side.
+        let absolute_marker_path =
             source_path.replace("{{ trigger_repo_directory }}", &trigger_repo_directory);
+        let agent_marker_path = absolute_marker_path
+            .strip_prefix("$(Build.SourcesDirectory)/")
+            .unwrap_or(&absolute_marker_path)
+            .to_string();
         // The runtime resolver (`scripts/ado-script/src/import/index.ts`)
         // matches marker bodies with `[^\s}]+`, which truncates at the
         // first whitespace character. If the agent's source path contains

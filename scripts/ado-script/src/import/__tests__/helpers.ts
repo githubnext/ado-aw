@@ -41,7 +41,13 @@ export function readText(filePath: string): string {
   return readFileSync(filePath, "utf8");
 }
 
-export function runImportSource(target: string, env: NodeJS.ProcessEnv = {}): RunResult {
+export type RunOptions = {
+  env?: NodeJS.ProcessEnv;
+  /** Optional `--base <path>` argument forwarded to `import.js`. */
+  base?: string;
+};
+
+export function runImportSource(target: string, options: RunOptions = {}): RunResult {
   const runnerPath = resolve(dirname(target), "__runtime-import-runner.mjs");
   const compiled = transpileModule(readFileSync(sourceEntryPath, "utf8"), {
     compilerOptions: {
@@ -52,8 +58,13 @@ export function runImportSource(target: string, env: NodeJS.ProcessEnv = {}): Ru
 
   writeFileSync(runnerPath, compiled, "utf8");
 
-  const result = spawnSync(process.execPath, [runnerPath, target], {
-    env: { ...process.env, ...env },
+  const args = [runnerPath, target];
+  if (options.base !== undefined) {
+    args.push("--base", options.base);
+  }
+
+  const result = spawnSync(process.execPath, args, {
+    env: { ...process.env, ...(options.env ?? {}) },
     encoding: "utf8",
   });
 
