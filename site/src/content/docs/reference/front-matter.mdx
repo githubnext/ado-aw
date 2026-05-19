@@ -18,8 +18,12 @@ engine: copilot # Engine identifier. Defaults to copilot. Currently only 'copilo
 #   model: claude-opus-4.7
 #   timeout-minutes: 30
 workspace: repo # Optional: "root", "repo" (alias: "self"), or a checked-out repository alias. If not specified, defaults to "root" when no additional repositories are listed in `repos:`, and to "repo" when one or more additional repos are checked out. See "Workspace Defaults" below.
-pool: AZS-1ES-L-MMS-ubuntu-22.04 # Agent pool name (string format). Defaults to AZS-1ES-L-MMS-ubuntu-22.04.
-# pool:                        # Alternative object format (required for 1ES if specifying os)
+pool:                          # Microsoft-hosted agent (default for standalone target)
+  vmImage: ubuntu-22.04        # defaults to ubuntu-22.04 when pool is omitted entirely
+# pool: MySelfHostedPool       # String form -- legacy shorthand for a self-hosted pool name
+# pool:                        # Self-hosted pool object form
+#   name: MySelfHostedPool
+# pool:                        # 1ES pool object form (set os: when needed)
 #   name: AZS-1ES-L-MMS-ubuntu-22.04
 #   os: linux                  # Operating system: "linux" or "windows". Defaults to "linux".
 repos:                           # compact repository declarations (replaces repositories: + checkout:)
@@ -84,10 +88,15 @@ on:                            # trigger configuration (unified under on: key)
       - main
       - release/*
     filters:                   # optional runtime filters (compiled to gate step)
-      source-pipeline: "Build*"
+      source-pipeline: "Build*" # glob match on upstream pipeline name (Build.TriggeredBy.DefinitionName)
+      branch: "refs/heads/main" # glob match on triggering branch (Build.SourceBranch)
       time-window:
         start: "09:00"
         end: "17:00"
+      build-reason:
+        include: [IndividualCI]  # only run when triggered by a commit push (not a schedule)
+        exclude: [Schedule]
+      expression: "eq(variables['Custom.Flag'], 'true')"  # raw ADO condition escape hatch
   pr:                          # PR trigger
     branches:
       include: [main]
