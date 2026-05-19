@@ -45,9 +45,11 @@ syntax.
 
 ### Env-var contract
 
-| Env var | Required | Purpose |
-|---|---|---|
-| `ADO_AW_IMPORT_BASE` | No | Base directory for relative imports. Defaults to `dirname(argv[2])`. |
+`import.js` takes no environment variables. Relative-path markers
+resolve against `dirname(argv[2])`; in pipeline use this is irrelevant
+because the compiler always embeds an absolute marker path and
+`import.js` is single-pass (nested markers inside the inlined body are
+not re-expanded).
 
 The bundle lives at `dist/import/index.js` and ships in the same
 `ado-script.zip` release asset as `gate.js`, so pipelines download it

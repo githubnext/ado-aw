@@ -36,10 +36,9 @@ along with any author-written markers.
 
 ## Path resolution
 
-- **Absolute paths** are used as-is.
-- **Relative paths at runtime** are resolved against the `ADO_AW_IMPORT_BASE`
-  environment variable. For user-facing imports, the compiler sets this to
-  `{{ trigger_repo_directory }}`.
+- **Absolute paths** are used as-is. The compiler always emits an
+  absolute marker path for the agent body itself (`$(Build.SourcesDirectory)/…`)
+  so the resolver step never has to resolve a relative path at runtime.
 - **Relative paths at compile time** (`inlined-imports: true`) are resolved
   against the source `.md` file's directory.
 

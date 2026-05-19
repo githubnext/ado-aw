@@ -31,7 +31,7 @@ function main(): void {
     fail([`target file not found: ${sanitizeForVsoMessage(target)}`]);
   }
 
-  const base = process.env.ADO_AW_IMPORT_BASE ?? dirname(target);
+  const base = dirname(target);
   const original = readFileSync(target, "utf8");
   const errors: string[] = [];
 

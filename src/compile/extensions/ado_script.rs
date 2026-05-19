@@ -100,17 +100,16 @@ fn install_and_download_steps() -> Vec<String> {
 /// The resolver step that runs in the Agent job to expand
 /// `{{#runtime-import …}}` markers in the agent prompt file in place.
 ///
-/// `ADO_AW_IMPORT_BASE` is `$(Build.SourcesDirectory)` so that
-/// author-written relative imports (e.g.
-/// `{{#runtime-import shared/snippet.md}}`) resolve against the trigger
-/// repo's checkout root — matching gh-aw's path-resolution semantics.
+/// The compiler always emits an absolute marker path (built from
+/// `$(Build.SourcesDirectory)` plus the repo-relative source path) and
+/// the resolver is single-pass, so relative-path resolution never
+/// happens in practice; `import.js` falls back to `dirname(target)` for
+/// the unreachable relative-path case.
 fn resolver_step() -> String {
     format!(
         r#"- bash: |
     set -eo pipefail
     node '{IMPORT_EVAL_PATH}' /tmp/awf-tools/agent-prompt.md
-  env:
-    ADO_AW_IMPORT_BASE: $(Build.SourcesDirectory)
   displayName: "Resolve runtime imports (agent prompt)"
   condition: succeeded()"#
     )
@@ -372,7 +371,10 @@ mod tests {
         assert!(steps[1].contains("Download ado-aw scripts"));
         assert!(steps[2].contains("node '/tmp/ado-aw-scripts/ado-script/dist/import/index.js'"));
         assert!(steps[2].contains("Resolve runtime imports (agent prompt)"));
-        assert!(steps[2].contains("ADO_AW_IMPORT_BASE: $(Build.SourcesDirectory)"));
+        assert!(
+            !steps[2].contains("ADO_AW_IMPORT_BASE"),
+            "resolver step must not export ADO_AW_IMPORT_BASE — the compiler emits absolute marker paths and import.js is single-pass, so the env var would never be consulted"
+        );
     }
 
     #[test]

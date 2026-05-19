@@ -1,4 +1,3 @@
-import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { readText, runImportSource, withScratchDir, writeFixture } from "./helpers.js";
 
@@ -19,21 +18,23 @@ describe("runtime-import path resolution", () => {
     });
   });
 
-  it("resolves relative paths against ADO_AW_IMPORT_BASE when set", () => {
-    withScratchDir("base-override", (dir) => {
-      writeFixture(dir, "imports/nested/snippet.md", "OVERRIDE\n");
+  it("resolves relative paths against dirname(target)", () => {
+    // The compiler always emits an absolute marker path, so this branch
+    // is unreachable in pipeline use. The test pins the fallback so a
+    // standalone invocation of `import.js` (e.g. local dev or future
+    // callers) behaves predictably.
+    withScratchDir("relative-default-base", (dir) => {
+      writeFixture(dir, "snippet.md", "SIBLING\n");
       const target = writeFixture(
         dir,
-        "prompt/prompt.md",
-        "start\n{{#runtime-import nested/snippet.md}}\nend\n",
+        "prompt.md",
+        "start\n{{#runtime-import ./snippet.md}}\nend\n",
       );
 
-      const result = runImportSource(target, {
-        ADO_AW_IMPORT_BASE: resolve(dir, "imports"),
-      });
+      const result = runImportSource(target);
 
       expect(result.status).toBe(0);
-      expect(readText(target)).toBe("start\nOVERRIDE\n\nend\n");
+      expect(readText(target)).toBe("start\nSIBLING\n\nend\n");
     });
   });
 });
