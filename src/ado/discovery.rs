@@ -702,10 +702,19 @@ pub async fn resolve_definitions_via_discovery(
     // counters while deciding inclusion — explicit two-pass form keeps
     // the counts honestly derived from the same iteration and makes it
     // obvious what ends up in the returned vec.
-    let mut skipped_required_params = 0usize;
-    let mut skipped_forbidden = 0usize;
-    let mut skipped_failed = 0usize;
-    let mut uninspectable = 0usize;
+    //
+    // The per-status counters (`uninspectable_required_params` /
+    // `_forbidden` / `_failed`) tally Preview failures by reason. They
+    // intentionally do NOT distinguish "ado-aw consumer" from
+    // "unrelated pipeline" — Preview failed for these, so we have no
+    // markers to tell which is which. A non-ado-aw project may have
+    // hundreds of definitions that legitimately require
+    // templateParameters; we can't claim any of them were ado-aw
+    // consumers without inspecting them, so the warning text below is
+    // written to be honest about that uncertainty.
+    let mut uninspectable_required_params = 0usize;
+    let mut uninspectable_forbidden = 0usize;
+    let mut uninspectable_failed = 0usize;
     let mut selected: Vec<DiscoveredPipeline> = Vec::with_capacity(discovered.len());
 
     for d in discovered {
@@ -716,22 +725,10 @@ pub async fn resolve_definitions_via_discovery(
             None => true,
         };
 
-        // Count toward skip totals only when the failure is relevant
-        // to the requested operation:
-        //  - unfiltered: every failure is relevant (we're operating
-        //    on every ado-aw pipeline in scope);
-        //  - filtered: we can't attribute uninspectable definitions
-        //    to a specific source, so use a single combined counter.
-        match (&d.status, normalized_filter.is_some()) {
-            (DiscoveryStatus::UnknownRequiredParams, false) => skipped_required_params += 1,
-            (DiscoveryStatus::UnknownForbidden, false) => skipped_forbidden += 1,
-            (DiscoveryStatus::PreviewFailed(_), false) => skipped_failed += 1,
-            (
-                DiscoveryStatus::UnknownRequiredParams
-                | DiscoveryStatus::UnknownForbidden
-                | DiscoveryStatus::PreviewFailed(_),
-                true,
-            ) => uninspectable += 1,
+        match d.status {
+            DiscoveryStatus::UnknownRequiredParams => uninspectable_required_params += 1,
+            DiscoveryStatus::UnknownForbidden => uninspectable_forbidden += 1,
+            DiscoveryStatus::PreviewFailed(_) => uninspectable_failed += 1,
             _ => {}
         }
 
@@ -740,37 +737,38 @@ pub async fn resolve_definitions_via_discovery(
         }
     }
 
-    // Pass 2: emit warnings and convert the selected items into
-    // `MatchedDefinition`. `discovered_to_matched` further filters out
-    // non-actionable statuses (NotAdoAw / NotFound / UnknownForbidden /
-    // UnknownRequiredParams / PreviewFailed); the count warnings above
-    // are what tells the operator why those drops happened.
-    if skipped_required_params > 0 {
-        warn!(
-            "Discovery skipped {skipped_required_params} definition(s) whose Pipeline Preview \
-             requires templateParameters with no defaults. Use --definition-ids to act on them \
-             directly.",
-        );
-    }
-    if skipped_forbidden > 0 {
-        warn!(
-            "Discovery skipped {skipped_forbidden} definition(s) the calling identity lacks \
-             read access to. Check your PAT or AAD permissions.",
-        );
-    }
-    if skipped_failed > 0 {
-        warn!(
-            "Discovery skipped {skipped_failed} definition(s) whose Pipeline Preview returned \
-             an unexpected error. Re-run with --debug to see details.",
-        );
-    }
-    if uninspectable > 0
-        && let Some(src) = normalized_filter.as_deref()
-    {
-        warn!(
-            "Discovery could not inspect {uninspectable} definition(s) (Preview failure, \
-             forbidden, or required-parameters); any consumers of `{src}` among them have \
-             been silently skipped. Re-run with --debug for per-definition reasons.",
+    let uninspectable =
+        uninspectable_required_params + uninspectable_forbidden + uninspectable_failed;
+
+    // Pass 2: emit a single warning that's honest about uncertainty,
+    // and surface the per-status breakdown at debug level for
+    // operators who want to know whether the misses were
+    // permission-related or template-parameter-related.
+    //
+    // Previously we emitted three separate warn-level messages keyed
+    // on the per-status counts (e.g. "Discovery skipped N definitions
+    // whose Pipeline Preview requires templateParameters") — but in
+    // `--all-repos` mode that's misleading: a project with hundreds of
+    // non-ado-aw pipelines that legitimately require parameters would
+    // make the operator think they'd missed N ado-aw consumers, when
+    // none of them were ado-aw in the first place. We can't tell
+    // which is which without successful Preview output.
+    if uninspectable > 0 {
+        match normalized_filter.as_deref() {
+            Some(src) => warn!(
+                "Discovery could not inspect {uninspectable} definition(s) (Preview failure, \
+                 forbidden, or required-parameters); any consumers of `{src}` among them have \
+                 been silently skipped. Re-run with --debug for per-definition reasons.",
+            ),
+            None => warn!(
+                "Discovery could not inspect {uninspectable} definition(s) (Preview failure, \
+                 forbidden, or required-parameters); any ado-aw pipelines among them have been \
+                 silently skipped. Re-run with --debug for per-definition reasons.",
+            ),
+        }
+        debug!(
+            "Uninspectable breakdown: {uninspectable_required_params} required-parameters, \
+             {uninspectable_forbidden} forbidden, {uninspectable_failed} other Preview errors.",
         );
     }
 

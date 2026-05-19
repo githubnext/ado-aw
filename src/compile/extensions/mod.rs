@@ -123,7 +123,17 @@ impl<'a> CompileContext<'a> {
     /// context from the git remote in the directory containing `input_path`.
     /// Returns an error if the engine identifier is unsupported.
     pub async fn new(front_matter: &'a FrontMatter, input_path: &'a Path) -> Result<Self> {
-        let compile_dir = input_path.parent().unwrap_or(Path::new("."));
+        // `Path::parent()` is subtle: for a bare filename like `foo.md`
+        // it returns `Some(Path::new(""))` rather than `None`, so the
+        // `unwrap_or(Path::new("."))` fallback wouldn't catch it. An
+        // empty path passed to `git -C ""` behaves differently from
+        // `git -C "."` (some platforms reject it, others quietly use
+        // the parent process's cwd), so we normalise both the
+        // `None` and empty-`Some` cases to `.`.
+        let compile_dir = match input_path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
         let engine = engine::get_engine(front_matter.engine.engine_id())?;
         let ado_context = Self::infer_ado_context(compile_dir).await;
         Ok(Self {

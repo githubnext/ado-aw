@@ -214,6 +214,29 @@ async fn resolve_for_command(
             );
         }
 
+        // `--source` requires an identifiable current (org, repo) so
+        // the marker-origin filter in discovery can disambiguate
+        // same-named source paths across repos. Without it, a strict
+        // marker (one carrying `org` / `repo`) would silently fail the
+        // origin check and the operator would see "no pipelines
+        // matched" with no explanation. The `!all_repos` guard above
+        // covers the missing-`repo_name` case for current-repo scope;
+        // here we also catch `--all-repos --source` paired with a
+        // missing or malformed `org_url` (e.g. `org_name()` resolves
+        // to `None`).
+        if source_filter.is_some()
+            && (ado_ctx.org_name().is_none() || ado_ctx.repo_name.is_empty())
+        {
+            anyhow::bail!(
+                "--source needs the current repository's Azure DevOps org and repo to \
+                 disambiguate same-named source paths across the project, but neither \
+                 could be resolved from `{}`.\n\
+                 Run from a checkout of an ADO repo, or use --definition-ids to act on \
+                 specific pipelines directly.",
+                repo_path.display()
+            );
+        }
+
         let scope = if all_repos {
             DiscoveryScope::AllRepos
         } else {
@@ -742,6 +765,48 @@ mod tests {
         );
         assert!(
             msg.contains("no Azure DevOps git remote"),
+            "error should explain the root cause; got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn source_with_all_repos_bails_when_org_url_unresolvable() {
+        // `--all-repos --source` still needs the current (org, repo)
+        // to disambiguate same-named source paths via the marker's
+        // origin fields. If `org_url` doesn't yield an org slug (or
+        // `repo_name` is empty), the marker-origin filter would
+        // silently exclude every strict marker — surface a targeted
+        // error instead.
+        //
+        // Empty `org_url` is the realistic failure mode: a hand-built
+        // AdoContext from `--org "" --project p` or a corrupted ADO
+        // remote that parsed past `parse_ado_remote` would land here.
+        let ctx = AdoContext {
+            org_url: String::new(), // org_name() resolves to None
+            project: "p".to_string(),
+            repo_name: "some-repo".to_string(),
+        };
+        let auth = AdoAuth::Pat("token".to_string());
+        let client = reqwest::Client::builder()
+            .build()
+            .expect("client builds");
+        let tmp = tempfile::tempdir().unwrap();
+
+        let err = resolve_for_command(
+            &client,
+            &ctx,
+            &auth,
+            None,
+            true, // --all-repos
+            Some("agents/foo.md"),
+            tmp.path(),
+        )
+        .await
+        .expect_err("expected bail");
+
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("--source needs the current repository's"),
             "error should explain the root cause; got: {msg}"
         );
     }
