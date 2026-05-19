@@ -115,15 +115,12 @@ impl CompilerExtension for AdoAwMarkerExtension {
         // `org` and `repo` are derived from ADO remote parsing, which
         // already restricts them to a safe character set, but we apply
         // the same defence-in-depth pattern for consistency.
-        let echo_source = bash_single_quote_escape(
-            &crate::sanitize::neutralize_pipeline_commands(&source),
-        );
-        let echo_org = bash_single_quote_escape(
-            &crate::sanitize::neutralize_pipeline_commands(&org),
-        );
-        let echo_repo = bash_single_quote_escape(
-            &crate::sanitize::neutralize_pipeline_commands(&repo),
-        );
+        let echo_source =
+            bash_single_quote_escape(&crate::sanitize::neutralize_pipeline_commands(&source));
+        let echo_org =
+            bash_single_quote_escape(&crate::sanitize::neutralize_pipeline_commands(&org));
+        let echo_repo =
+            bash_single_quote_escape(&crate::sanitize::neutralize_pipeline_commands(&repo));
         let step = format!(
             "- bash: |\n    \
                 # ado-aw-metadata: {metadata}\n    \
@@ -164,7 +161,10 @@ mod tests {
         let fm = parse_fm("name: t\ndescription: x\n");
         let ctx = CompileContext::for_test(&fm);
         let steps = AdoAwMarkerExtension.prepare_steps(&ctx);
-        assert!(steps.is_empty(), "expected no marker when input_path is None");
+        assert!(
+            steps.is_empty(),
+            "expected no marker when input_path is None"
+        );
     }
 
     #[test]
@@ -184,14 +184,35 @@ mod tests {
         let steps = AdoAwMarkerExtension.prepare_steps(&ctx);
         assert_eq!(steps.len(), 1);
         let step = &steps[0];
-        assert!(step.contains("displayName: \"ado-aw\""), "step missing displayName:\n{step}");
-        assert!(step.contains("# ado-aw-metadata:"), "step missing JSON marker line:\n{step}");
-        assert!(step.contains("\"source\":\"agents/foo.md\""), "step missing source field:\n{step}");
-        assert!(step.contains("\"target\":\"standalone\""), "step missing target field:\n{step}");
-        assert!(step.contains("\"schema\":1"), "step missing schema field:\n{step}");
+        assert!(
+            step.contains("displayName: \"ado-aw\""),
+            "step missing displayName:\n{step}"
+        );
+        assert!(
+            step.contains("# ado-aw-metadata:"),
+            "step missing JSON marker line:\n{step}"
+        );
+        assert!(
+            step.contains("\"source\":\"agents/foo.md\""),
+            "step missing source field:\n{step}"
+        );
+        assert!(
+            step.contains("\"target\":\"standalone\""),
+            "step missing target field:\n{step}"
+        );
+        assert!(
+            step.contains("\"schema\":1"),
+            "step missing schema field:\n{step}"
+        );
         // No ado_context => org/repo emit as empty strings.
-        assert!(step.contains("\"org\":\"\""), "step missing org field:\n{step}");
-        assert!(step.contains("\"repo\":\"\""), "step missing repo field:\n{step}");
+        assert!(
+            step.contains("\"org\":\"\""),
+            "step missing org field:\n{step}"
+        );
+        assert!(
+            step.contains("\"repo\":\"\""),
+            "step missing repo field:\n{step}"
+        );
     }
 
     #[test]
@@ -382,8 +403,7 @@ mod tests {
         let parsed = crate::detect::parse_marker_step(&steps[0]);
         assert_eq!(parsed.len(), 1, "expected exactly one marker in step");
         assert_eq!(
-            parsed[0].source,
-            r#"agents/foo"bar.md"#,
+            parsed[0].source, r#"agents/foo"bar.md"#,
             "marker source should round-trip without spurious backslash"
         );
     }

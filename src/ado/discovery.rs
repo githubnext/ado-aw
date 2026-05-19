@@ -39,7 +39,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
-use super::{AdoAuth, AdoContext, DefinitionSummary, MatchMethod, MatchedDefinition, list_definitions};
+use super::{
+    AdoAuth, AdoContext, DefinitionSummary, MatchMethod, MatchedDefinition, list_definitions,
+};
 use crate::detect::{MarkerMetadata, parse_marker_step};
 
 /// Default permits used to throttle concurrent Preview HTTP calls.
@@ -136,7 +138,10 @@ pub enum PreviewError {
 impl std::fmt::Display for PreviewError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PreviewError::RequiredParams => write!(f, "preview returned 400 (required parameters without defaults)"),
+            PreviewError::RequiredParams => write!(
+                f,
+                "preview returned 400 (required parameters without defaults)"
+            ),
             PreviewError::Forbidden => write!(f, "preview returned 403 (forbidden)"),
             PreviewError::NotFound => write!(f, "preview returned 404 (not found)"),
             PreviewError::Other(msg) => write!(f, "preview failed: {msg}"),
@@ -350,16 +355,20 @@ fn normalize_repo_url(url: &str) -> String {
 
 /// Build a `(normalized yamlFilename → local lock path)` lookup table
 /// from `--source agents/foo.lock.yml` or similar inputs.
+///
+/// The key is produced by [`super::normalize_ado_yaml_path`], the same
+/// helper applied to ADO's returned `process.yamlFilename` during
+/// classification. Routing both sides through one function future-proofs
+/// the lookup: if `normalize_ado_yaml_path` ever gains case-folding or
+/// URL-decoding, the keys stay in sync without a second edit.
 fn build_lock_path_map(local_lock_paths: Option<&[PathBuf]>) -> HashMap<String, PathBuf> {
     let mut map = HashMap::new();
     let Some(paths) = local_lock_paths else {
         return map;
     };
     for path in paths {
-        let normalized = path.to_string_lossy().replace('\\', "/");
-        // Match the same trim that `normalize_ado_yaml_path` applies.
-        let trimmed = normalized.trim_start_matches('/').to_string();
-        map.insert(trimmed, path.clone());
+        let key = super::normalize_ado_yaml_path(&path.to_string_lossy());
+        map.insert(key, path.clone());
     }
     map
 }
@@ -473,16 +482,16 @@ fn is_direct_match(def: &DefinitionSummary, markers: &[MarkerMetadata]) -> bool 
         return false;
     }
     if markers.len() > 1 {
-        // Multiple markers means a consumer pulling in more than one
-        // template; can't be a direct ado-aw pipeline.
+        // A compiled ado-aw pipeline's expanded YAML carries exactly
+        // one marker — its own Setup-job step. More than one means
+        // the YAML was produced by expanding a consumer that
+        // `template:`-includes multiple ado-aw lock files (each
+        // contributing its own marker step). None of those templates
+        // are the consumer's own root YAML, so it can't be Direct.
         return false;
     }
     let marker = &markers[0];
-    let Some(yaml_filename) = def
-        .process
-        .as_ref()
-        .and_then(|p| p.yaml_filename.as_ref())
-    else {
+    let Some(yaml_filename) = def.process.as_ref().and_then(|p| p.yaml_filename.as_ref()) else {
         return false;
     };
     let yaml_normalized = super::normalize_ado_yaml_path(yaml_filename);
@@ -679,8 +688,8 @@ pub async fn resolve_definitions_via_discovery(
     // field. Without this, `--source ./agents/foo.md` or
     // `--source agents\foo.md` (Windows) silently matches nothing
     // because the marker stores `agents/foo.md`.
-    let normalized_filter: Option<String> = source_filter
-        .map(|s| crate::compile::normalize_source_path(Path::new(s)));
+    let normalized_filter: Option<String> =
+        source_filter.map(|s| crate::compile::normalize_source_path(Path::new(s)));
 
     // Origin scoping: when filtering by `--source`, also require the
     // marker's (org, repo) to identify the current repository. This
@@ -719,12 +728,16 @@ pub async fn resolve_definitions_via_discovery(
 
     for d in discovered {
         let matches_filter = match normalized_filter.as_deref() {
-            Some(src) => d.markers.iter().any(|m| {
-                m.source == src && marker_origin_matches(m, &current_org, &current_repo)
-            }),
+            Some(src) => d
+                .markers
+                .iter()
+                .any(|m| m.source == src && marker_origin_matches(m, &current_org, &current_repo)),
             None => true,
         };
 
+        // Tally uninspectable statuses *before* the actionability
+        // guard below so the count is accurate regardless of whether
+        // the definition makes it into `selected`.
         match d.status {
             DiscoveryStatus::UnknownRequiredParams => uninspectable_required_params += 1,
             DiscoveryStatus::UnknownForbidden => uninspectable_forbidden += 1,
@@ -732,7 +745,18 @@ pub async fn resolve_definitions_via_discovery(
             _ => {}
         }
 
-        if matches_filter {
+        // Drop non-actionable statuses up-front instead of letting
+        // them ride along in `selected` only to be filtered out by
+        // `discovered_to_matched` at the end. In an `--all-repos` run
+        // against a large project where most definitions are
+        // `NotAdoAw` or `PreviewFailed`, this keeps the intermediate
+        // vec tight and makes the filter pass's intent obvious.
+        let actionable = matches!(
+            d.status,
+            DiscoveryStatus::Direct | DiscoveryStatus::Consumer
+        );
+
+        if matches_filter && actionable {
             selected.push(d);
         }
     }
@@ -865,7 +889,12 @@ mod tests {
 
     #[test]
     fn scope_current_repo_with_no_remote_returns_empty() {
-        let defs = vec![def_with(1, "a", None, Some("https://dev.azure.com/o/p/_git/x"))];
+        let defs = vec![def_with(
+            1,
+            "a",
+            None,
+            Some("https://dev.azure.com/o/p/_git/x"),
+        )];
         let kept = apply_scope_filter(defs, &DiscoveryScope::CurrentRepo, &None);
         assert!(kept.is_empty());
     }
@@ -1149,8 +1178,7 @@ mod tests {
         ];
         let matched = discovered_to_matched(&d).expect("Consumer kept");
         assert!(
-            matched.yaml_path.contains("agents/a.md")
-                && matched.yaml_path.contains("agents/b.md"),
+            matched.yaml_path.contains("agents/a.md") && matched.yaml_path.contains("agents/b.md"),
             "expected both marker sources in yaml_path, got: {}",
             matched.yaml_path
         );

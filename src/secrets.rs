@@ -19,10 +19,10 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 use crate::ado::{
-    AdoAuth, AdoContext, MatchedDefinition, PATH_SEGMENT, get_definition_full,
-    normalize_masked_secret_variable_values, resolve_ado_context, resolve_auth,
-    resolve_definitions,
+    AdoAuth, AdoContext, MatchedDefinition, PATH_SEGMENT,
     discovery::{DiscoveryScope, resolve_definitions_via_discovery},
+    get_definition_full, normalize_masked_secret_variable_values, resolve_ado_context,
+    resolve_auth, resolve_definitions,
 };
 
 /// Description of one pipeline variable, for listing only.
@@ -70,9 +70,7 @@ pub fn apply_variable_set(
     value: &str,
     allow_override: Option<bool>,
 ) -> serde_json::Value {
-    if definition.get("variables").is_none()
-        || !definition["variables"].is_object()
-    {
+    if definition.get("variables").is_none() || !definition["variables"].is_object() {
         definition["variables"] = serde_json::json!({});
     }
     let resolved_override = allow_override.unwrap_or_else(|| {
@@ -93,11 +91,11 @@ pub fn apply_variable_set(
 
 /// Pure: produce a copy of `definition` with the named variable
 /// removed. No-op if it wasn't present.
-pub fn apply_variable_delete(
-    mut definition: serde_json::Value,
-    name: &str,
-) -> serde_json::Value {
-    if let Some(vars) = definition.get_mut("variables").and_then(|v| v.as_object_mut()) {
+pub fn apply_variable_delete(mut definition: serde_json::Value, name: &str) -> serde_json::Value {
+    if let Some(vars) = definition
+        .get_mut("variables")
+        .and_then(|v| v.as_object_mut())
+    {
         vars.remove(name);
     }
     definition
@@ -224,8 +222,7 @@ async fn resolve_for_command(
         // here we also catch `--all-repos --source` paired with a
         // missing or malformed `org_url` (e.g. `org_name()` resolves
         // to `None`).
-        if source_filter.is_some()
-            && (ado_ctx.org_name().is_none() || ado_ctx.repo_name.is_empty())
+        if source_filter.is_some() && (ado_ctx.org_name().is_none() || ado_ctx.repo_name.is_empty())
         {
             anyhow::bail!(
                 "--source needs the current repository's Azure DevOps org and repo to \
@@ -281,6 +278,30 @@ async fn resolve_for_command(
     resolve_definitions(client, ado_ctx, auth, definition_ids, repo_path).await
 }
 
+/// Build the user-facing "no matches" hint, tailored to the flag
+/// combination the caller used. Centralised here so `run_set`,
+/// `run_list`, and `run_delete` keep the messages in sync.
+fn empty_match_hint(all_repos: bool, source: Option<&str>) -> String {
+    match (all_repos, source) {
+        (false, Some(src)) => format!(
+            "No consumers of `{src}` were found in this repository. \
+             If the template is consumed by pipelines in other repos in this \
+             project, try `--all-repos` to widen the search."
+        ),
+        (true, Some(src)) => format!(
+            "No consumers of `{src}` were found anywhere in this project via \
+             Preview-driven discovery. Run `ado-aw list --all-repos --source {src}` \
+             to diagnose."
+        ),
+        (true, None) => "No ado-aw pipelines found in this project via Preview-driven discovery. \
+             Run `ado-aw list --all-repos` to diagnose."
+            .to_string(),
+        (false, None) => "No ADO definitions matched any local fixture. Run `ado-aw list` to \
+             diagnose, or try `--all-repos` to search the entire project."
+            .to_string(),
+    }
+}
+
 pub async fn run_set(opts: SetOptions<'_>) -> Result<()> {
     validate_variable_name(opts.name)?;
 
@@ -317,12 +338,7 @@ pub async fn run_set(opts: SetOptions<'_>) -> Result<()> {
     };
 
     if matched.is_empty() {
-        let hint = if opts.all_repos || opts.source.is_some() {
-            "No ado-aw pipelines found via Preview-driven discovery. Run `ado-aw list --all-repos` to diagnose."
-        } else {
-            "No ADO definitions matched any local fixture. Run `ado-aw list` to diagnose, or try `--all-repos`."
-        };
-        anyhow::bail!("{hint}");
+        anyhow::bail!("{}", empty_match_hint(opts.all_repos, opts.source));
     }
 
     print_matched_summary(&matched);
@@ -404,11 +420,7 @@ async fn apply_set_one(
 /// Resolve the variable value from the CLI inputs: explicit positional
 /// `value` first, then `--value-stdin` (reads exactly one line), then
 /// an interactive tty prompt with echo off.
-fn resolve_value(
-    name: &str,
-    explicit: Option<&str>,
-    value_stdin: bool,
-) -> Result<String> {
+fn resolve_value(name: &str, explicit: Option<&str>, value_stdin: bool) -> Result<String> {
     if let Some(v) = explicit {
         return Ok(v.to_string());
     }
@@ -416,7 +428,10 @@ fn resolve_value(
         use std::io::BufRead;
         let mut line = String::new();
         let stdin = std::io::stdin();
-        stdin.lock().read_line(&mut line).context("Failed to read value from stdin")?;
+        stdin
+            .lock()
+            .read_line(&mut line)
+            .context("Failed to read value from stdin")?;
         let trimmed = line.trim_end_matches(['\r', '\n']).to_string();
         if trimmed.is_empty() {
             anyhow::bail!("--value-stdin read an empty value");
@@ -475,12 +490,7 @@ pub async fn run_list(opts: ListOptions<'_>) -> Result<()> {
     };
 
     if matched.is_empty() {
-        let hint = if opts.all_repos || opts.source.is_some() {
-            "No ado-aw pipelines found via Preview-driven discovery."
-        } else {
-            "No ADO definitions matched any local fixture. Run `ado-aw list` to diagnose, or try `--all-repos`."
-        };
-        anyhow::bail!("{hint}");
+        anyhow::bail!("{}", empty_match_hint(opts.all_repos, opts.source));
     }
 
     let mut payload = serde_json::json!({});
@@ -568,12 +578,7 @@ pub async fn run_delete(opts: DeleteOptions<'_>) -> Result<()> {
     };
 
     if matched.is_empty() {
-        let hint = if opts.all_repos || opts.source.is_some() {
-            "No ado-aw pipelines found via Preview-driven discovery."
-        } else {
-            "No ADO definitions matched any local fixture. Run `ado-aw list` to diagnose, or try `--all-repos`."
-        };
-        anyhow::bail!("{hint}");
+        anyhow::bail!("{}", empty_match_hint(opts.all_repos, opts.source));
     }
 
     print_matched_summary(&matched);
@@ -592,7 +597,10 @@ pub async fn run_delete(opts: DeleteOptions<'_>) -> Result<()> {
     for m in &matched {
         match apply_delete_one(&client, &ado_ctx, &auth, m.id, opts.name).await {
             Ok(()) => {
-                println!("  ✓ '{}' removed from '{}' (id={})", opts.name, m.name, m.id);
+                println!(
+                    "  ✓ '{}' removed from '{}' (id={})",
+                    opts.name, m.name, m.id
+                );
                 success += 1;
             }
             Err(e) => {
@@ -741,9 +749,7 @@ mod tests {
             repo_name: String::new(),
         };
         let auth = AdoAuth::Pat("token".to_string());
-        let client = reqwest::Client::builder()
-            .build()
-            .expect("client builds");
+        let client = reqwest::Client::builder().build().expect("client builds");
         let tmp = tempfile::tempdir().unwrap();
 
         let err = resolve_for_command(
@@ -787,9 +793,7 @@ mod tests {
             repo_name: "some-repo".to_string(),
         };
         let auth = AdoAuth::Pat("token".to_string());
-        let client = reqwest::Client::builder()
-            .build()
-            .expect("client builds");
+        let client = reqwest::Client::builder().build().expect("client builds");
         let tmp = tempfile::tempdir().unwrap();
 
         let err = resolve_for_command(
