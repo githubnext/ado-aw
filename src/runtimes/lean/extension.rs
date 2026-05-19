@@ -52,7 +52,7 @@ the toolchain. Lean files use the `.lean` extension.\n"
         )
     }
 
-    fn prepare_steps(&self) -> Vec<String> {
+    fn prepare_steps(&self, _ctx: &CompileContext) -> Vec<String> {
         vec![generate_lean_install(&self.config)]
     }
 

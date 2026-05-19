@@ -288,7 +288,11 @@ pub trait CompilerExtension {
     /// Pipeline steps (YAML strings) to run before the agent.
     ///
     /// Each element is a complete YAML step (e.g., `- bash: |...`).
-    fn prepare_steps(&self) -> Vec<String> {
+    /// These are injected into the Agent job's `{{ prepare_steps }}`
+    /// block — no new job/stage is created, so always-on extensions
+    /// (like `ado-aw-marker`) can emit metadata steps with zero impact
+    /// on pipeline structure.
+    fn prepare_steps(&self, _ctx: &CompileContext) -> Vec<String> {
         vec![]
     }
 
@@ -561,8 +565,8 @@ macro_rules! extension_enum {
             fn prompt_supplement(&self) -> Option<String> {
                 match self { $( $Enum::$Variant(e) => e.prompt_supplement(), )+ }
             }
-            fn prepare_steps(&self) -> Vec<String> {
-                match self { $( $Enum::$Variant(e) => e.prepare_steps(), )+ }
+            fn prepare_steps(&self, ctx: &CompileContext) -> Vec<String> {
+                match self { $( $Enum::$Variant(e) => e.prepare_steps(ctx), )+ }
             }
             fn setup_steps(&self, ctx: &CompileContext) -> Result<Vec<String>> {
                 match self { $( $Enum::$Variant(e) => e.setup_steps(ctx), )+ }

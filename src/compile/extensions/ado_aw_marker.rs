@@ -17,7 +17,6 @@
 //! older parsers, mirroring gh-aw's `# gh-aw-metadata: {...}` shape.
 
 use super::{CompileContext, CompilerExtension, ExtensionPhase};
-use anyhow::Result;
 
 // ─── ado-aw marker (always-on, internal) ─────────────────────────────
 
@@ -43,13 +42,22 @@ impl CompilerExtension for AdoAwMarkerExtension {
         ExtensionPhase::Tool
     }
 
-    fn setup_steps(&self, ctx: &CompileContext) -> Result<Vec<String>> {
+    fn prepare_steps(&self, ctx: &CompileContext) -> Vec<String> {
+        // Inject the marker step into the Agent job's prepare phase
+        // (NOT a separate Setup job). Setup-job injection would force
+        // every compiled pipeline to spin up an extra agent pool job
+        // just to emit a metadata comment — wasteful for pipelines
+        // that have no other reason to need a Setup job. prepare_steps
+        // lands inside the always-present Agent job's
+        // `{{ prepare_steps }}` block, so it costs zero extra
+        // jobs/agents/pool time.
+        //
         // In unit-test contexts that build a CompileContext without an
         // input_path (e.g. CompileContext::for_test), skip the marker.
         // Production paths always populate input_path via
         // CompileContext::new.
         let Some(input_path) = ctx.input_path else {
-            return Ok(vec![]);
+            return vec![];
         };
 
         let source = super::super::common::normalize_source_path(input_path);
@@ -129,7 +137,7 @@ impl CompilerExtension for AdoAwMarkerExtension {
             target = target,
         );
 
-        Ok(vec![step])
+        vec![step]
     }
 }
 
@@ -155,7 +163,7 @@ mod tests {
     fn returns_no_step_when_input_path_absent() {
         let fm = parse_fm("name: t\ndescription: x\n");
         let ctx = CompileContext::for_test(&fm);
-        let steps = AdoAwMarkerExtension.setup_steps(&ctx).unwrap();
+        let steps = AdoAwMarkerExtension.prepare_steps(&ctx);
         assert!(steps.is_empty(), "expected no marker when input_path is None");
     }
 
@@ -173,7 +181,7 @@ mod tests {
             compile_dir: None,
             input_path: Some(input_path),
         };
-        let steps = AdoAwMarkerExtension.setup_steps(&ctx).unwrap();
+        let steps = AdoAwMarkerExtension.prepare_steps(&ctx);
         assert_eq!(steps.len(), 1);
         let step = &steps[0];
         assert!(step.contains("displayName: \"ado-aw\""), "step missing displayName:\n{step}");
@@ -206,7 +214,7 @@ mod tests {
             compile_dir: None,
             input_path: Some(input_path),
         };
-        let steps = AdoAwMarkerExtension.setup_steps(&ctx).unwrap();
+        let steps = AdoAwMarkerExtension.prepare_steps(&ctx);
         assert_eq!(steps.len(), 1);
         let step = &steps[0];
         // ADO identifiers are case-insensitive; lowercase to make
@@ -245,7 +253,7 @@ mod tests {
                 compile_dir: None,
                 input_path: Some(input_path),
             };
-            let steps = AdoAwMarkerExtension.setup_steps(&ctx).unwrap();
+            let steps = AdoAwMarkerExtension.prepare_steps(&ctx);
             assert_eq!(steps.len(), 1, "target={raw_target}");
             assert!(
                 steps[0].contains(&format!("\"target\":\"{expected}\"")),
@@ -279,7 +287,7 @@ mod tests {
             compile_dir: None,
             input_path: Some(input_path),
         };
-        let steps = AdoAwMarkerExtension.setup_steps(&ctx).unwrap();
+        let steps = AdoAwMarkerExtension.prepare_steps(&ctx);
         assert_eq!(steps.len(), 1);
         let step = &steps[0];
         assert!(
@@ -316,7 +324,7 @@ mod tests {
             compile_dir: None,
             input_path: Some(input_path),
         };
-        let steps = AdoAwMarkerExtension.setup_steps(&ctx).unwrap();
+        let steps = AdoAwMarkerExtension.prepare_steps(&ctx);
         assert_eq!(steps.len(), 1);
         let step = &steps[0];
 
@@ -365,7 +373,7 @@ mod tests {
             compile_dir: None,
             input_path: Some(input_path),
         };
-        let steps = AdoAwMarkerExtension.setup_steps(&ctx).unwrap();
+        let steps = AdoAwMarkerExtension.prepare_steps(&ctx);
         assert_eq!(steps.len(), 1);
 
         // Parse the marker step back via the canonical discovery parser

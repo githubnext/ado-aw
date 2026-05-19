@@ -2221,12 +2221,13 @@ pub fn generate_teardown_job(
 pub fn generate_prepare_steps(
     prepare_steps: &[serde_yaml::Value],
     extensions: &[super::extensions::Extension],
+    ctx: &CompileContext,
 ) -> Result<String> {
     let mut parts = Vec::new();
 
     // Extension prepare steps and prompt supplements (runtimes + first-party tools)
     for ext in extensions {
-        for step in ext.prepare_steps() {
+        for step in ext.prepare_steps(ctx) {
             parts.push(step);
         }
         if let Some(prompt) = ext.prompt_supplement() {
@@ -3048,7 +3049,7 @@ pub async fn compile_shared(
         .is_some_and(|cm| cm.is_enabled());
     let parameters = build_parameters(&front_matter.parameters, has_memory);
     let parameters_yaml = generate_parameters(&parameters)?;
-    let prepare_steps = generate_prepare_steps(&front_matter.steps, extensions)?;
+    let prepare_steps = generate_prepare_steps(&front_matter.steps, extensions, ctx)?;
     let finalize_steps = generate_finalize_steps(&front_matter.post_steps);
     let pr_expression = pr_filters.and_then(|f| f.expression.as_deref());
     let pipeline_expression = pipeline_filters.and_then(|f| f.expression.as_deref());
@@ -6008,7 +6009,8 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  cache-memory: true\n---\n",
         ).unwrap();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts).unwrap();
+        let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
+        let result = generate_prepare_steps(&[], &exts, &ctx).unwrap();
         assert!(
             !result.is_empty(),
             "memory steps must be emitted when cache-memory enabled"
@@ -6023,7 +6025,8 @@ safe-outputs:
     fn test_generate_prepare_steps_without_memory_and_no_steps_has_safeoutputs_prompt() {
         let fm = minimal_front_matter();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts).unwrap();
+        let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
+        let result = generate_prepare_steps(&[], &exts, &ctx).unwrap();
         // SafeOutputs always contributes a prompt supplement
         assert!(
             result.contains("Safe Outputs"),
@@ -6037,7 +6040,8 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  cache-memory: true\n---\n",
         ).unwrap();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts).unwrap();
+        let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
+        let result = generate_prepare_steps(&[], &exts, &ctx).unwrap();
         assert!(
             result.contains("DownloadPipelineArtifact"),
             "memory steps must include the artifact download task"
@@ -6052,9 +6056,10 @@ safe-outputs:
     fn test_generate_prepare_steps_without_memory_with_user_steps() {
         let fm = minimal_front_matter();
         let exts = crate::compile::extensions::collect_extensions(&fm);
+        let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
         let step: serde_yaml::Value =
             serde_yaml::from_str("bash: echo hello\ndisplayName: greet").unwrap();
-        let result = generate_prepare_steps(&[step], &exts).unwrap();
+        let result = generate_prepare_steps(&[step], &exts, &ctx).unwrap();
         assert!(!result.is_empty(), "user steps should be present");
         assert!(
             !result.contains("agent_memory"),
@@ -6068,9 +6073,10 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  cache-memory: true\n---\n",
         ).unwrap();
         let exts = crate::compile::extensions::collect_extensions(&fm);
+        let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
         let step: serde_yaml::Value =
             serde_yaml::from_str("bash: echo hello\ndisplayName: greet").unwrap();
-        let result = generate_prepare_steps(&[step], &exts).unwrap();
+        let result = generate_prepare_steps(&[step], &exts, &ctx).unwrap();
         assert!(
             result.contains("agent_memory"),
             "memory reference must be present"
@@ -6087,7 +6093,8 @@ safe-outputs:
             "---\nname: test\ndescription: test\nruntimes:\n  lean: true\n---\n",
         ).unwrap();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts).unwrap();
+        let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
+        let result = generate_prepare_steps(&[], &exts, &ctx).unwrap();
         assert!(result.contains("elan-init.sh"), "should include elan installer");
         assert!(result.contains("Lean 4"), "should include Lean prompt");
         assert!(result.contains("--default-toolchain stable"), "should default to stable");
@@ -6100,7 +6107,8 @@ safe-outputs:
             "---\nname: test\ndescription: test\nruntimes:\n  lean:\n    toolchain: \"leanprover/lean4:v4.29.1\"\n---\n",
         ).unwrap();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts).unwrap();
+        let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
+        let result = generate_prepare_steps(&[], &exts, &ctx).unwrap();
         assert!(
             result.contains("--default-toolchain leanprover/lean4:v4.29.1"),
             "should use specified toolchain"
@@ -6113,7 +6121,8 @@ safe-outputs:
             "---\nname: test\ndescription: test\nruntimes:\n  lean: true\ntools:\n  cache-memory: true\n---\n",
         ).unwrap();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts).unwrap();
+        let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
+        let result = generate_prepare_steps(&[], &exts, &ctx).unwrap();
         assert!(result.contains("agent_memory"), "memory steps present");
         assert!(result.contains("elan-init.sh"), "lean install present");
         assert!(result.contains("Lean 4"), "lean prompt present");
@@ -6125,6 +6134,7 @@ safe-outputs:
     fn test_generate_awf_mounts_no_extensions() {
         let fm = minimal_front_matter();
         let exts = crate::compile::extensions::collect_extensions(&fm);
+        let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
         let result = generate_awf_mounts(&exts);
         assert_eq!(result, "\\", "no mounts should produce bare continuation");
     }
@@ -6135,6 +6145,7 @@ safe-outputs:
             "---\nname: test\ndescription: test\nruntimes:\n  lean: true\n---\n",
         ).unwrap();
         let exts = crate::compile::extensions::collect_extensions(&fm);
+        let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
         let result = generate_awf_mounts(&exts);
         assert!(result.contains("--mount"), "should contain --mount flag");
         assert!(result.contains(".elan"), "should reference .elan directory");

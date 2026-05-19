@@ -207,7 +207,9 @@ fn test_lean_prompt_supplement() {
 #[test]
 fn test_lean_prepare_steps() {
     let ext = LeanExtension::new(LeanRuntimeConfig::Enabled(true));
-    let steps = ext.prepare_steps();
+    let fm = minimal_front_matter();
+    let ctx = ctx_from(&fm);
+    let steps = ext.prepare_steps(&ctx);
     assert_eq!(steps.len(), 1);
     assert!(steps[0].contains("elan-init.sh"));
 }
@@ -324,7 +326,9 @@ fn test_ado_validate_duplicate_mcp_warning() {
 #[test]
 fn test_cache_memory_prepare_steps() {
     let ext = CacheMemoryExtension::new(CacheMemoryToolConfig::Enabled(true));
-    let steps = ext.prepare_steps();
+    let fm = minimal_front_matter();
+    let ctx = ctx_from(&fm);
+    let steps = ext.prepare_steps(&ctx);
     assert_eq!(steps.len(), 1);
     assert!(steps[0].contains("DownloadPipelineArtifact"));
 }
@@ -401,7 +405,9 @@ fn test_python_prepare_steps() {
     let ext = crate::runtimes::python::PythonExtension::new(
         crate::runtimes::python::PythonRuntimeConfig::Enabled(true),
     );
-    let steps = ext.prepare_steps();
+    let fm = minimal_front_matter();
+    let ctx = ctx_from(&fm);
+    let steps = ext.prepare_steps(&ctx);
     assert_eq!(steps.len(), 1, "no auth step without feed-url/config");
     assert!(steps[0].contains("UsePythonVersion@0"));
 }
@@ -413,7 +419,9 @@ fn test_python_prepare_steps_with_feed_url() {
     ).unwrap();
     let python = fm.runtimes.as_ref().unwrap().python.as_ref().unwrap();
     let ext = crate::runtimes::python::PythonExtension::new(python.clone());
-    let steps = ext.prepare_steps();
+    let fm = minimal_front_matter();
+    let ctx = ctx_from(&fm);
+    let steps = ext.prepare_steps(&ctx);
     assert_eq!(steps.len(), 2);
     assert!(steps[0].contains("UsePythonVersion@0"));
     assert!(steps[1].contains("PipAuthenticate@1"));
@@ -543,7 +551,9 @@ fn test_node_prepare_steps() {
     let ext = crate::runtimes::node::NodeExtension::new(
         crate::runtimes::node::NodeRuntimeConfig::Enabled(true),
     );
-    let steps = ext.prepare_steps();
+    let fm = minimal_front_matter();
+    let ctx = ctx_from(&fm);
+    let steps = ext.prepare_steps(&ctx);
     assert_eq!(steps.len(), 1, "no auth steps without feed-url/config");
     assert!(steps[0].contains("NodeTool@0"));
 }
@@ -555,7 +565,9 @@ fn test_node_prepare_steps_with_feed_url() {
     ).unwrap();
     let node = fm.runtimes.as_ref().unwrap().node.as_ref().unwrap();
     let ext = crate::runtimes::node::NodeExtension::new(node.clone());
-    let steps = ext.prepare_steps();
+    let fm = minimal_front_matter();
+    let ctx = ctx_from(&fm);
+    let steps = ext.prepare_steps(&ctx);
     assert_eq!(steps.len(), 3);
     assert!(steps[0].contains("NodeTool@0"));
     assert!(steps[1].contains("Ensure .npmrc"));
@@ -708,7 +720,9 @@ fn test_dotnet_prepare_steps() {
     let ext = crate::runtimes::dotnet::DotnetExtension::new(
         crate::runtimes::dotnet::DotnetRuntimeConfig::Enabled(true),
     );
-    let steps = ext.prepare_steps();
+    let fm = minimal_front_matter();
+    let ctx = ctx_from(&fm);
+    let steps = ext.prepare_steps(&ctx);
     assert_eq!(steps.len(), 1, "no auth steps without feed-url/config");
     assert!(steps[0].contains("UseDotNet@2"));
     assert!(steps[0].contains("packageType: 'sdk'"));
@@ -721,7 +735,9 @@ fn test_dotnet_prepare_steps_with_feed_url() {
     ).unwrap();
     let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
     let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
-    let steps = ext.prepare_steps();
+    let fm = minimal_front_matter();
+    let ctx = ctx_from(&fm);
+    let steps = ext.prepare_steps(&ctx);
     assert_eq!(steps.len(), 3);
     assert!(steps[0].contains("UseDotNet@2"));
     assert!(steps[1].contains("Ensure nuget.config"));
@@ -735,7 +751,9 @@ fn test_dotnet_prepare_steps_with_config_only() {
     ).unwrap();
     let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
     let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
-    let steps = ext.prepare_steps();
+    let fm = minimal_front_matter();
+    let ctx = ctx_from(&fm);
+    let steps = ext.prepare_steps(&ctx);
     // config: alone trusts the user-checked-in nuget.config — no shim,
     // just the auth step.
     assert_eq!(steps.len(), 2);
@@ -796,7 +814,9 @@ fn test_dotnet_global_json_sentinel_emits_use_global_json() {
     let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
     assert!(dotnet.use_global_json());
     let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
-    let steps = ext.prepare_steps();
+    let fm = minimal_front_matter();
+    let ctx = ctx_from(&fm);
+    let steps = ext.prepare_steps(&ctx);
     assert!(steps[0].contains("useGlobalJson: true"));
     assert!(!steps[0].contains("version:"), "explicit version must be omitted in global.json mode");
     assert!(steps[0].contains("from global.json"));

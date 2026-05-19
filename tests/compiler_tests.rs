@@ -3748,6 +3748,28 @@ fn test_marker_step_present_in_stage_target() {
     assert_marker_step_present(&compiled, "stage-agent.md", "stage", "stage-agent.md");
 }
 
+/// Regression: the always-on `ado-aw-marker` extension used to inject
+/// the marker step via `setup_steps`, which forced every compiled
+/// pipeline to spawn a dedicated Setup job (a whole pool agent + the
+/// extra build-log noise) just to emit a single metadata comment.
+/// After moving emission to `prepare_steps`, the marker lives inside
+/// the always-present Agent job — a minimal fixture without `setup:`,
+/// PR filters, or other extensions that need Setup must NOT emit a
+/// `- job: Setup` block.
+#[test]
+fn test_marker_does_not_create_setup_job_for_minimal_pipeline() {
+    let compiled = compile_fixture("minimal-agent.md");
+    assert!(
+        !compiled.contains("- job: Setup"),
+        "minimal pipeline must not emit a Setup job just for the ado-aw marker; got:\n{compiled}"
+    );
+    // Still must carry the marker — just inside the Agent job now.
+    assert!(
+        compiled.contains("# ado-aw-metadata:"),
+        "minimal pipeline must still carry the marker line:\n{compiled}"
+    );
+}
+
 /// Test that the 1ES fixture produces valid YAML with correct structure
 #[test]
 fn test_1es_compiled_output_is_valid_yaml() {

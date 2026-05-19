@@ -1,4 +1,4 @@
-use crate::compile::extensions::{CompilerExtension, ExtensionPhase};
+use crate::compile::extensions::{CompileContext, CompilerExtension, ExtensionPhase};
 use crate::compile::types::CacheMemoryToolConfig;
 
 /// Cache memory tool extension.
@@ -28,7 +28,7 @@ impl CompilerExtension for CacheMemoryExtension {
         ExtensionPhase::Tool
     }
 
-    fn prepare_steps(&self) -> Vec<String> {
+    fn prepare_steps(&self, _ctx: &CompileContext) -> Vec<String> {
         vec![generate_memory_download()]
     }
 

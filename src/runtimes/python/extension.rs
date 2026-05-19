@@ -55,7 +55,7 @@ management, install it first with `pip install uv`.\n"
         )
     }
 
-    fn prepare_steps(&self) -> Vec<String> {
+    fn prepare_steps(&self, _ctx: &CompileContext) -> Vec<String> {
         let mut steps = vec![generate_python_install(&self.config)];
         // Emit PipAuthenticate only when feed-url is set (config alone is not
         // sufficient — PipAuthenticate needs a feed to authenticate against)

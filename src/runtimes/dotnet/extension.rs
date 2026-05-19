@@ -62,7 +62,7 @@ in the repository.\n"
         )
     }
 
-    fn prepare_steps(&self) -> Vec<String> {
+    fn prepare_steps(&self, _ctx: &CompileContext) -> Vec<String> {
         let mut steps = vec![generate_dotnet_install(&self.config)];
         // Emit ensure-nuget.config + NuGetAuthenticate when an internal feed
         // is configured. When only `config:` is set, the user-checked-in
