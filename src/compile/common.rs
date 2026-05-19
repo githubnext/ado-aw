@@ -1219,7 +1219,7 @@ pub const HEADER_MARKER: &str = "# @ado-aw";
 /// The source path is stored as a relative path so that `--source` filters
 /// and auto-discovery recompile work regardless of how the user invoked the
 /// compiler (relative path, absolute path, etc.). Path separators are
-/// normalised to forward slashes for cross-platform consistency.
+/// normalized to forward slashes for cross-platform consistency.
 pub fn generate_header_comment(input_path: &std::path::Path) -> String {
     let version = env!("CARGO_PKG_VERSION");
 
