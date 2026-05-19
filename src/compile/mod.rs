@@ -199,6 +199,10 @@ async fn compile_pipeline_inner(
     };
     info!("Using {} compiler", compiler.target_name());
 
+    // Snapshot the version in the existing output file before overwriting it.
+    // Used below to emit an upgrade note when the compiler version changes.
+    let existing_version = read_existing_pipeline_version(&yaml_output_path).await;
+
     // Compile (no source mutation yet — a failure here must leave the
     // source byte-identical).
     let pipeline_yaml = compiler
@@ -250,6 +254,21 @@ async fn compile_pipeline_inner(
             kind,
             yaml_output_path.display()
         );
+    }
+
+    // Emit an upgrade note when an existing compiled file was produced by
+    // a different compiler version. This makes version bumps visible in the
+    // terminal and in CI logs without requiring the user to diff the output.
+    let current_version = env!("CARGO_PKG_VERSION");
+    if let Some(ref old_version) = existing_version {
+        if old_version != current_version {
+            println!(
+                "note: upgraded {} (was v{}, now v{})",
+                yaml_output_path.display(),
+                old_version,
+                current_version,
+            );
+        }
     }
 
     // Update .gitattributes at the repo root so every compiled pipeline is
@@ -366,13 +385,35 @@ pub async fn compile_all_pipelines(skip_integrity: bool, debug_pipeline: bool) -
         return Ok(());
     }
 
+    let current_version = env!("CARGO_PKG_VERSION");
+
+    // Count pipelines whose compiled version differs from the current compiler.
+    let outdated_count = detected
+        .iter()
+        .filter(|p| !p.version.is_empty() && p.version != current_version)
+        .count();
+
     println!("Found {} agentic pipeline(s):", detected.len());
     for p in &detected {
+        let version_status = if p.version.is_empty() {
+            "(version unknown)".to_string()
+        } else if p.version == current_version {
+            "(up to date)".to_string()
+        } else {
+            format!("(out of date, compiled by v{})", p.version)
+        };
         println!(
-            "  {} (source: {}, version: {})",
+            "  {} (source: {}) {}",
             p.yaml_path.display(),
             p.source,
-            p.version
+            version_status,
+        );
+    }
+
+    if outdated_count > 0 {
+        println!(
+            "\n{} pipeline(s) need recompilation with the current compiler (v{}).",
+            outdated_count, current_version,
         );
     }
     println!();
@@ -691,6 +732,22 @@ fn format_diff(existing: &str, expected: &str, pipeline_path: &Path) -> String {
     ));
 
     output
+}
+
+/// Read the compiler version embedded in an existing compiled pipeline file.
+///
+/// Scans the first five lines of `path` for the `# @ado-aw source=… version=…`
+/// header written by every compilation. Returns the version string when found,
+/// `None` when the file does not exist, is unreadable, or has no recognisable
+/// header.
+async fn read_existing_pipeline_version(path: &Path) -> Option<String> {
+    let content = tokio::fs::read_to_string(path).await.ok()?;
+    content
+        .lines()
+        .take(5)
+        .find_map(crate::detect::parse_header_line)
+        .filter(|meta| !meta.version.is_empty())
+        .map(|meta| meta.version)
 }
 
 /// Walk up from `start` to find the nearest directory containing `.git`.
@@ -1019,5 +1076,71 @@ description: "A test agent for directory output"
         );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    // ─── read_existing_pipeline_version ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn read_existing_pipeline_version_returns_none_for_missing_file() {
+        let version = read_existing_pipeline_version(Path::new("/tmp/does-not-exist.lock.yml")).await;
+        assert!(version.is_none(), "expected None for a non-existent file");
+    }
+
+    #[tokio::test]
+    async fn read_existing_pipeline_version_returns_none_without_header() {
+        let temp = std::env::temp_dir().join(format!(
+            "ado-aw-ver-test-no-header-{}-{}.yml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&temp, "# plain yaml\nname: foo\n").unwrap();
+        let version = read_existing_pipeline_version(&temp).await;
+        assert!(version.is_none(), "expected None when file has no @ado-aw header");
+        let _ = std::fs::remove_file(&temp);
+    }
+
+    #[tokio::test]
+    async fn read_existing_pipeline_version_extracts_version_from_header() {
+        let temp = std::env::temp_dir().join(format!(
+            "ado-aw-ver-test-header-{}-{}.yml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // Simulate a compiled lock file header (only the first 5 lines matter).
+        let header = "# This file is auto-generated by ado-aw.\n\
+                      # @ado-aw source=\"agents/my-agent.md\" version=0.28.0\n\
+                      name: my-pipeline\n";
+        std::fs::write(&temp, header).unwrap();
+        let version = read_existing_pipeline_version(&temp).await;
+        assert_eq!(version.as_deref(), Some("0.28.0"));
+        let _ = std::fs::remove_file(&temp);
+    }
+
+    #[tokio::test]
+    async fn read_existing_pipeline_version_returns_none_for_empty_version() {
+        let temp = std::env::temp_dir().join(format!(
+            "ado-aw-ver-test-empty-ver-{}-{}.yml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // Header with source but no version field.
+        let header = "# @ado-aw source=\"agents/my-agent.md\"\n";
+        std::fs::write(&temp, header).unwrap();
+        let version = read_existing_pipeline_version(&temp).await;
+        assert!(
+            version.is_none(),
+            "expected None when version field is absent; got {:?}",
+            version
+        );
+        let _ = std::fs::remove_file(&temp);
     }
 }
