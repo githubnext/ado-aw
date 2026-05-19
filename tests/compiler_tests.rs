@@ -4444,6 +4444,43 @@ fn test_neither_feature_active_emits_no_node_or_download_anywhere() {
     );
 }
 
+/// When a user pins a Node version via `runtimes.node:` AND runtime imports
+/// are active, both extensions emit `NodeTool@0` into the Agent job. ADO's
+/// `NodeTool@0` prepends to PATH, so the LAST install wins. The ado-script
+/// extension must run in the `System` phase so its Node 20.x install lands
+/// FIRST, and the user's Runtime-phase `NodeTool@0 22.x` lands second —
+/// the user's pinned version then wins on PATH for the rest of the job.
+#[test]
+fn test_node_runtime_install_orders_after_ado_script_so_user_version_wins() {
+    let yaml = compile_fixture("dedupe_node_runtime_and_imports.md");
+    let agent = extract_job_block(&yaml, "Agent").expect("Agent job should exist");
+
+    // Find offsets within the Agent block. The ado-script Node install
+    // is identifiable by its displayName; the user's runtime install
+    // carries the explicit user-pinned versionSpec.
+    let ado_script_install_idx = agent
+        .find("displayName: \"Install Node.js 20.x\"")
+        .expect("ado-script Node 20.x install step missing from Agent job");
+    let user_runtime_install_idx = agent
+        .find("'Install Node.js 22.x'")
+        .expect("user runtime Node 22.x install step missing from Agent job");
+
+    assert!(
+        ado_script_install_idx < user_runtime_install_idx,
+        "ado-script NodeTool@0 must precede user NodeTool@0 in the Agent job so the \
+         user's pinned Node version wins on PATH after both run. \
+         ado-script idx = {ado_script_install_idx}, user idx = {user_runtime_install_idx}"
+    );
+
+    // Both downloads of ado-script.zip remain unaffected (still exactly one
+    // in the Agent job in this fixture — no filters, so no Setup-side download).
+    assert_eq!(
+        yaml.matches("Download ado-aw scripts").count(),
+        1,
+        "Expected exactly one ado-script.zip download (Agent job only; no gate active)"
+    );
+}
+
 /// Tier 2 PR filter fixture produces valid YAML.
 #[test]
 fn test_pr_filter_tier2_compiled_output_is_valid_yaml() {

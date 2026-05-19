@@ -122,7 +122,15 @@ impl CompilerExtension for AdoScriptExtension {
     }
 
     fn phase(&self) -> ExtensionPhase {
-        ExtensionPhase::Tool
+        // System phase: ado-script's NodeTool@0 install + bundle download +
+        // resolver step must complete BEFORE any user-facing Runtime
+        // extension (e.g. NodeExtension) runs. Otherwise our Node 20
+        // install would prepend onto PATH after the user's pinned Node,
+        // silently overriding the user's choice for the rest of the
+        // Agent job. By running first, our install lives only during the
+        // brief window before the user's Runtime install, and the
+        // resolver step inside that window picks up our Node 20.
+        ExtensionPhase::System
     }
 
     fn setup_steps(&self, _ctx: &CompileContext) -> Result<Vec<String>> {
@@ -294,7 +302,11 @@ mod tests {
     fn name_and_phase() {
         let ext = ext_with(None, None, true);
         assert_eq!(ext.name(), "ado-script");
-        assert_eq!(ext.phase(), ExtensionPhase::Tool);
+        // System phase ensures NodeTool@0 install + bundle download +
+        // resolver run BEFORE user-facing Runtime extensions (e.g. the
+        // Node runtime), so the user's pinned Node version wins on PATH
+        // for the rest of the Agent job.
+        assert_eq!(ext.phase(), ExtensionPhase::System);
     }
 
     #[test]
