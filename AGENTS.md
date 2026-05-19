@@ -84,8 +84,8 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── status.rs         # `status` CLI command — denser per-pipeline status block (thin renderer over `list`'s data path)
 │   ├── run.rs            # `run` CLI command — queues builds for matched definitions, optional polling to completion (module entry is `dispatch`)
 │   ├── ado/              # Shared Azure DevOps REST helpers (auth, list/match/PATCH/POST)
-│   │   └── mod.rs        # Used by `configure` and the `enable` command (ADO REST helpers: auth, list/match/PATCH/POST)
-│   ├── detect.rs         # Agentic pipeline detection (helper for `configure`)
+│   │   └── mod.rs        # Shared ADO REST helpers used by all lifecycle commands (`enable`, `disable`, `list`, `status`, `run`, `remove`, `secrets`)
+│   ├── detect.rs         # Agentic pipeline detection — discovers compiled pipelines; used by all lifecycle commands
 │   ├── ndjson.rs         # NDJSON parsing utilities
 │   ├── sanitize.rs       # Input sanitization for safe outputs
 │   ├── validate.rs       # Structural input validators (char allowlists, format checks, injection detectors)
@@ -218,7 +218,8 @@ index to jump to the right page.
 - [`docs/template-markers.md`](docs/template-markers.md) — every `{{ marker }}`
   in `src/data/base.yml`, `src/data/1es-base.yml`, `src/data/job-base.yml`, and `src/data/stage-base.yml` and how it is replaced.
 - [`docs/cli.md`](docs/cli.md) — `ado-aw` CLI commands (`init`, `compile`,
-  `check`, `mcp`, `mcp-http`, `execute`, `configure`).
+  `check`, `mcp`, `mcp-http`, `execute`, `secrets`, `enable`, `disable`,
+  `remove`, `list`, `status`, `run`; `configure` is a deprecated hidden alias).
 - [`docs/mcp.md`](docs/mcp.md) — MCP server configuration (stdio containers,
   HTTP servers, env passthrough).
 - [`docs/mcpg.md`](docs/mcpg.md) — MCP Gateway architecture and pipeline
