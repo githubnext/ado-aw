@@ -489,7 +489,7 @@ Tool names are validated at compile time:
 
 Should be replaced with the embedded threat detection analysis prompt from `src/data/threat-analysis.md`. This prompt template includes markers for `{{ source_path }}`, `{{ agent_name }}`, `{{ agent_description }}`, and `{{ working_directory }}` which are replaced during compilation.
 
-When `inlined-imports: false`, the compiler emits a top-level `{{#runtime-import ...}}` marker pointing at the bundled threat-analysis prompt that ships in `ado-script.zip`; when `inlined-imports: true`, the expanded prompt body is embedded directly into the YAML.
+When `inlined-imports: false`, the compiler emits a top-level `{{#runtime-import ...}}` marker pointing at the agent's source `.md` file so the agent body is reloaded from the trigger-repo checkout at pipeline runtime. The threat-analysis prompt itself is **always** inlined at compile time via `include_str!` regardless of `inlined-imports`, because it is tooling-shipped (compiled into the `ado-aw` binary) rather than authored alongside agents. See the comment block at step 11 of `compile_shared` in `src/compile/common.rs` for the rationale; this mirrors gh-aw's model.
 
 The threat analysis prompt instructs the security analysis agent to check for:
 - Prompt injection attempts

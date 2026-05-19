@@ -195,11 +195,18 @@ impl CompilerExtension for AdoScriptExtension {
     }
 
     fn required_hosts(&self) -> Vec<String> {
-        // Either consumer (gate or import resolver) needs github.com to
-        // pull the release artifact at runtime. Conservatively always
-        // requested; the host list is allowlist-additive across
-        // extensions, so a always-on contribution is benign.
-        vec!["github.com".to_string()]
+        // Only request github.com when the bundle is actually downloaded.
+        // When `inlined-imports: true` AND no filters are configured,
+        // neither `setup_steps()` nor `prepare_steps()` emits the
+        // NodeTool@0 + curl pair, so the github.com release-asset host
+        // is never reached and shouldn't be on the allowlist. The host
+        // list is allowlist-additive across extensions, so this stays
+        // safe even when other extensions independently need github.com.
+        if self.has_gate() || self.runtime_imports_active() {
+            vec!["github.com".to_string()]
+        } else {
+            vec![]
+        }
     }
 }
 
@@ -388,6 +395,37 @@ mod tests {
         let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
         let ctx = CompileContext::for_test(&fm);
         assert!(ext.validate(&ctx).is_err());
+    }
+
+    #[test]
+    fn required_hosts_empty_when_no_consumer_active() {
+        // inlined-imports: true AND no filters ⇒ no NodeTool / no
+        // download / no gate / no resolver step. The github.com host
+        // (used to fetch the release asset) is therefore unreachable
+        // and must NOT be requested.
+        let ext = ext_with(None, None, true);
+        assert!(ext.required_hosts().is_empty());
+    }
+
+    #[test]
+    fn required_hosts_requests_github_when_gate_active() {
+        let filters = PrFilters {
+            labels: Some(LabelFilter {
+                any_of: vec!["run-agent".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let ext = ext_with(Some(filters), None, true);
+        assert_eq!(ext.required_hosts(), vec!["github.com".to_string()]);
+    }
+
+    #[test]
+    fn required_hosts_requests_github_when_runtime_imports_active() {
+        // inlined-imports: false (default) ⇒ resolver step runs ⇒
+        // github.com is needed for the bundle download.
+        let ext = ext_with(None, None, false);
+        assert_eq!(ext.required_hosts(), vec!["github.com".to_string()]);
     }
 
     // ── resolve_imports_inline ─────────────────────────────────────────
