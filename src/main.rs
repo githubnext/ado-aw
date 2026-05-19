@@ -777,13 +777,16 @@ async fn main() -> Result<()> {
     // Check for a newer release on GitHub and nudge the user to update.
     // Skipped for pipeline-internal commands (execute, mcp, mcp-http) that
     // run inside network-isolated sandboxes and are not invoked by humans.
+    // Also skipped in CI environments to avoid unnecessary outbound calls.
     let is_pipeline_internal = matches!(
         command,
         Commands::Execute { .. } | Commands::Mcp { .. } | Commands::McpHttp { .. }
     );
-    if !is_pipeline_internal {
-        update_check::check_for_update().await;
-    }
+    let update_handle = if !is_pipeline_internal && std::env::var_os("CI").is_none() {
+        Some(tokio::spawn(update_check::check_for_update()))
+    } else {
+        None
+    };
 
     match command {
         Commands::Compile {
@@ -1094,6 +1097,13 @@ async fn main() -> Result<()> {
             }
         }
     }
+
+    // Wait for the background update check to finish so the advisory (if any)
+    // is printed before the process exits.
+    if let Some(handle) = update_handle {
+        let _ = handle.await;
+    }
+
     Ok(())
 }
 
