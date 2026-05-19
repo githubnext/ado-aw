@@ -607,7 +607,7 @@ mod tests {
         assert!(reject_pipeline_injection("$(SYSTEM_ACCESSTOKEN)", "field").is_err());
         assert!(reject_pipeline_injection("value\ninjected", "field").is_err());
         assert!(reject_pipeline_injection("{{ agent_content }}", "field").is_err());
-        assert!(reject_pipeline_injection("{{ copilot_params }}", "field").is_err());
+        assert!(reject_pipeline_injection("$[variables.x]", "field").is_err());
         assert!(reject_pipeline_injection("##vso[task.setvariable]x", "field").is_err());
         assert!(reject_pipeline_injection("##[section]foo", "field").is_err());
     }
@@ -632,8 +632,12 @@ mod tests {
     fn test_validate_container_image() {
         assert!(validate_container_image("node:20-slim", "mcp").is_empty());
         assert!(validate_container_image("ghcr.io/org/tool:latest", "mcp").is_empty());
-        assert!(!validate_container_image("", "mcp").is_empty());
-        assert!(!validate_container_image("$(malicious)", "mcp").is_empty());
+        let empty_warnings = validate_container_image("", "mcp");
+        assert!(!empty_warnings.is_empty());
+        assert!(empty_warnings[0].contains("empty"));
+        let injection_warnings = validate_container_image("$(malicious)", "mcp");
+        assert!(!injection_warnings.is_empty());
+        assert!(injection_warnings[0].contains("unexpected characters"));
     }
 
     #[test]
@@ -661,13 +665,16 @@ mod tests {
         );
         assert!(warnings.len() >= 2); // bypass warning + sensitive path
         assert!(warnings[0].contains("bypasses mounts"));
+        assert!(warnings[1].contains("sensitive"));
     }
 
     #[test]
     fn test_validate_mcp_url() {
         assert!(validate_mcp_url("https://mcp.example.com", "mcp").is_empty());
         assert!(validate_mcp_url("http://localhost:8080", "mcp").is_empty());
-        assert!(!validate_mcp_url("ftp://example.com", "mcp").is_empty());
+        let warnings = validate_mcp_url("ftp://example.com", "mcp");
+        assert!(!warnings.is_empty());
+        assert!(warnings[0].contains("http://") || warnings[0].contains("https://"));
     }
 
     #[test]
@@ -705,12 +712,8 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_feed_url_rejects_double_quote() {
+    fn test_validate_feed_url_rejects_quotes() {
         assert!(validate_feed_url("https://example.com/feed\"name", "test").is_err());
-    }
-
-    #[test]
-    fn test_validate_feed_url_rejects_single_quote() {
         assert!(validate_feed_url("https://example.com/feed'name", "test").is_err());
     }
 }
