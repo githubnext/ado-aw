@@ -310,15 +310,31 @@ pub fn resolve_imports_inline(body: &str, base_dir: &std::path::Path) -> Result<
         // YAML (e.g. `{{#runtime-import /home/runner/.ssh/id_rsa}}`,
         // `{{#runtime-import C:\Users\…\secrets.txt}}`). Only relative
         // imports rooted in `base_dir` (the source `.md` file's
-        // directory, which is part of the same repo) are safe. Detect
-        // POSIX absolute (`/foo`), Windows drive-letter absolute
-        // (`C:\foo`, `C:/foo`), and UNC (`\\server\share`) — `Path::is_absolute`
-        // is platform-dependent, so add an explicit prefix check for
-        // forward-slash forms on Windows builds that wouldn't otherwise
-        // see `/etc/passwd` as absolute.
+        // directory, which is part of the same repo) are safe.
+        //
+        // `Path::is_absolute` is platform-dependent: on Linux it
+        // doesn't recognize `C:\foo` as absolute, and on Windows it
+        // doesn't recognize a POSIX-style `/foo` UNC path. To make the
+        // guard equally strict on every host where `ado-aw compile`
+        // runs, also explicitly detect:
+        //   - POSIX absolute (`/foo`)
+        //   - Windows drive-letter absolute (`C:\foo`, `C:/foo`, any letter)
+        //   - UNC (`\\server\share`)
+        let is_drive_letter_absolute = {
+            let mut chars = path_str.chars();
+            match (chars.next(), chars.next(), chars.next()) {
+                (Some(c), Some(':'), Some(sep))
+                    if c.is_ascii_alphabetic() && (sep == '/' || sep == '\\') =>
+                {
+                    true
+                }
+                _ => false,
+            }
+        };
         let is_absolute = std::path::Path::new(path_str).is_absolute()
             || path_str.starts_with('/')
-            || path_str.starts_with("\\\\");
+            || path_str.starts_with("\\\\")
+            || is_drive_letter_absolute;
         anyhow::ensure!(
             !is_absolute,
             "runtime-import: invalid path '{}': absolute paths are not allowed (use a relative path rooted at the agent's directory)",
