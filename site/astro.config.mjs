@@ -63,6 +63,7 @@ export default defineConfig({
             { label: 'MCP', slug: 'reference/mcp' },
             { label: 'MCP Gateway', slug: 'reference/mcpg' },
             { label: 'Template Markers', slug: 'reference/template-markers' },
+            { label: 'Runtime Imports', slug: 'reference/runtime-imports' },
             { label: 'Filter IR', slug: 'reference/filter-ir' },
             { label: 'Codemods', slug: 'reference/codemods' },
           ],
