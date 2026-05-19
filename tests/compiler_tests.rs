@@ -4008,7 +4008,63 @@ fn test_runtime_imports_default_rejects_source_path_with_whitespace() {
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
-/// Test that the 1ES fixture produces valid YAML with correct structure
+/// Sibling regression of the whitespace guard: the same threat model
+/// applies to `}` in the source path. The runtime regex `[^\s}]+`
+/// stops at the first `}` and then expects `\s*\}\}`, so a marker
+/// emitted with `}` in its path silently fails to match — the marker
+/// survives as literal text in the LLM's prompt. Reject at compile
+/// time, matching the same `}` guard in `resolve_imports_inline`.
+#[test]
+fn test_runtime_imports_default_rejects_source_path_with_closing_brace() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique_id = COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-brace-path-{}-{}",
+        std::process::id(),
+        unique_id,
+    ));
+    // Filename contains `}` which is valid on Linux/macOS/NTFS but
+    // forbidden in shell-injected contexts. The whole point of the
+    // guard is to reject the marker before any such surface is hit.
+    let agent_dir = temp_dir.join("agents");
+    fs::create_dir_all(&agent_dir).expect("Failed to create temp dir tree");
+    fs::create_dir_all(temp_dir.join(".git")).expect("Failed to create .git marker");
+
+    let input = "---\nname: \"Brace Path Agent\"\ndescription: \"Agent whose source path contains '}'\"\n---\n\n## Body\n\nhello\n";
+    let input_path = agent_dir.join("fo}o.md");
+    let output_path = agent_dir.join("foo.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should fail when source path contains '}}' and inlined-imports is false"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("contains '}'"),
+        "Error message should mention the `}}` character: {stderr}"
+    );
+    assert!(
+        stderr.contains("inlined-imports: true"),
+        "Error message should suggest inlined-imports as an escape hatch: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
 #[test]
 fn test_1es_compiled_output_is_valid_yaml() {
     let compiled = compile_fixture("1es-test-agent.md");

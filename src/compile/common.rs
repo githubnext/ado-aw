@@ -3264,17 +3264,30 @@ pub async fn compile_shared(
             .to_string();
         // The runtime resolver (`scripts/ado-script/src/import/index.ts`)
         // matches marker bodies with `[^\s}]+`, which truncates at the
-        // first whitespace character. If the agent's source path contains
-        // a space (e.g. `my agents/pipeline.md`), the resolver would
-        // silently parse a truncated path, fail the existence check, and
-        // surface a misleading error — or, worse, leave the marker
-        // unexpanded if optional. Reject at compile time so the failure
-        // mode is a clear compile error, not a confusing runtime one.
-        // This mirrors the same guard in `resolve_imports_inline` for the
-        // inlined-imports path.
+        // first whitespace or `}` character. Reject both at compile
+        // time so a malformed marker can never reach the runtime:
+        //
+        //   * Whitespace (e.g. `my agents/pipeline.md`) → the regex
+        //     truncates at the space, fails the existence check, and
+        //     surfaces a misleading error (or, worse, leaves an
+        //     optional marker unexpanded).
+        //   * `}` in the path (e.g. `agents/fo}o.md`) → the regex
+        //     stops at `}`, then expects `\s*\}\}` to follow but
+        //     finds `}o.md}}` — the regex fails to match entirely
+        //     and the marker survives as literal text in the
+        //     agent's prompt.
+        //
+        // Both guards mirror the same checks in `resolve_imports_inline`
+        // (the `inlined-imports: true` path), so authoring the same
+        // path triggers the same compile-time error in either mode.
         anyhow::ensure!(
             !agent_marker_path.chars().any(char::is_whitespace),
             "runtime-import: agent source path '{}' contains whitespace, which is not supported by the runtime resolver (rename the path to remove spaces, or set `inlined-imports: true`)",
+            agent_marker_path
+        );
+        anyhow::ensure!(
+            !agent_marker_path.contains('}'),
+            "runtime-import: agent source path '{}' contains '}}', which is not supported by the runtime resolver (rename the path to remove '}}' characters, or set `inlined-imports: true`)",
             agent_marker_path
         );
         format!("{{{{#runtime-import {}}}}}", agent_marker_path)
