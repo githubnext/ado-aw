@@ -3246,6 +3246,21 @@ pub async fn compile_shared(
     } else {
         let agent_marker_path =
             source_path.replace("{{ trigger_repo_directory }}", &trigger_repo_directory);
+        // The runtime resolver (`scripts/ado-script/src/import/index.ts`)
+        // matches marker bodies with `[^\s}]+`, which truncates at the
+        // first whitespace character. If the agent's source path contains
+        // a space (e.g. `my agents/pipeline.md`), the resolver would
+        // silently parse a truncated path, fail the existence check, and
+        // surface a misleading error — or, worse, leave the marker
+        // unexpanded if optional. Reject at compile time so the failure
+        // mode is a clear compile error, not a confusing runtime one.
+        // This mirrors the same guard in `resolve_imports_inline` for the
+        // inlined-imports path.
+        anyhow::ensure!(
+            !agent_marker_path.chars().any(char::is_whitespace),
+            "runtime-import: agent source path '{}' contains whitespace, which is not supported by the runtime resolver (rename the path to remove spaces, or set `inlined-imports: true`)",
+            agent_marker_path
+        );
         format!("{{{{#runtime-import {}}}}}", agent_marker_path)
     };
 

@@ -3926,6 +3926,69 @@ fn test_stage_inlined_imports_true_resolves_author_markers() {
     assert_runtime_imports_author_marker_output("runtime_imports_author_marker_stage.md");
 }
 
+/// Compile a default-mode (inlined-imports: false) agent whose source path
+/// contains a space. The runtime resolver matches marker bodies with
+/// `[^\s}]+`, so a space would silently truncate the marker at runtime and
+/// surface a confusing "file not found" error (or, for optional markers,
+/// leave the marker unexpanded). Reject at compile time so the failure is
+/// a clear, actionable compile error rather than a runtime data-integrity
+/// bug.
+#[test]
+fn test_runtime_imports_default_rejects_source_path_with_whitespace() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique_id = COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    // Use a top-level temp dir (NOT under the repo) so the compiler can't
+    // discover a git root and rebase the path on it.
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-spaced-path-{}-{}",
+        std::process::id(),
+        unique_id,
+    ));
+    let spaced_dir = temp_dir.join("my agents");
+    fs::create_dir_all(&spaced_dir).expect("Failed to create spaced temp dir");
+    // generate_source_path falls back to the filename only when it can't
+    // locate a git root above the input path — which would hide the space
+    // from the marker. Create an empty `.git` marker so the spaced dir is
+    // resolved relative to a discoverable repo root and the space ends up
+    // in the runtime-import marker (i.e. exercises the new guard).
+    fs::create_dir_all(temp_dir.join(".git")).expect("Failed to create .git marker");
+
+    let input = "---\nname: \"Spaced Path Agent\"\ndescription: \"Agent whose source path contains a space\"\n---\n\n## Body\n\nhello\n";
+    let input_path = spaced_dir.join("pipeline.md");
+    let output_path = spaced_dir.join("pipeline.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should fail when source path contains whitespace and inlined-imports is false"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("contains whitespace"),
+        "Error message should mention whitespace: {stderr}"
+    );
+    assert!(
+        stderr.contains("inlined-imports: true"),
+        "Error message should suggest inlined-imports as an escape hatch: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
 /// Test that the 1ES fixture produces valid YAML with correct structure
 #[test]
 fn test_1es_compiled_output_is_valid_yaml() {
