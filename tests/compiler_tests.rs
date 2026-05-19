@@ -3748,6 +3748,25 @@ fn assert_marker_step_present(
 
 fn compile_fixture_with_inlined_imports(fixture_name: &str) -> String {
     compile_fixture_tree_with_flags(fixture_name, &[], &[], |contents| {
+        // If the fixture already declares `inlined-imports:` (either
+        // value), don't inject a second key. serde_yaml silently uses the
+        // last key on duplicates, so the test would still pass — but the
+        // rewritten fixture would have a confusing duplicate and a
+        // future fixture that hard-codes `inlined-imports: false` would
+        // silently get flipped to `true` by this helper. Detect line-
+        // starting `inlined-imports:` so we don't false-positive on the
+        // string appearing inside body content.
+        let already_present = contents.lines().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("inlined-imports:")
+        });
+        if already_present {
+            panic!(
+                "Fixture {fixture_name} already declares `inlined-imports:`; \
+                 `compile_fixture_with_inlined_imports` would produce a duplicate key. \
+                 Use `compile_fixture` directly, or remove the existing key from the fixture."
+            );
+        }
         if let Some((front_matter, body)) = contents.split_once("\r\n---\r\n") {
             format!("{front_matter}\r\ninlined-imports: true\r\n---\r\n{body}")
         } else if let Some((front_matter, body)) = contents.split_once("\n---\n") {

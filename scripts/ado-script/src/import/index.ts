@@ -39,6 +39,18 @@ function main(): void {
   // nested runtime-import markers inside them are not expanded. This matches
   // gh-aw's runtime-import behaviour.
   const expanded = original.replace(MARKER, (_whole, optional: string | undefined, rawPath: string) => {
+    // Reject `..` segments — a malicious or compromised agent body could
+    // otherwise reach files outside `base` (which on the agent VM is
+    // `$(Build.SourcesDirectory)`, the trigger-repo checkout). Mirrors
+    // `resolve_imports_inline` in src/compile/extensions/ado_script.rs.
+    const hasDotDotSegment = rawPath.split(/[\/\\]/).some((segment) => segment === "..");
+    if (hasDotDotSegment) {
+      errors.push(
+        `invalid path '${sanitizeForVsoMessage(rawPath)}': '..' path components are not allowed`,
+      );
+      return "";
+    }
+
     const absPath = isAbsolute(rawPath) ? rawPath : resolve(base, rawPath);
 
     if (!existsSync(absPath)) {

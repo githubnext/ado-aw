@@ -249,6 +249,20 @@ pub fn resolve_imports_inline(body: &str, base_dir: &std::path::Path) -> Result<
             "runtime-import: invalid path '{}': whitespace is not allowed",
             path_str
         );
+        // Reject any path whose segments contain `..`. A malicious agent
+        // body could otherwise reach files outside `base_dir` and embed
+        // them verbatim into the compiled YAML — e.g.
+        // `{{#runtime-import ../../../../etc/passwd}}` if `ado-aw compile`
+        // is run on an untrusted PR branch. This guard applies to both
+        // relative and absolute paths because `..` segments make any
+        // path-confinement check unsound.
+        anyhow::ensure!(
+            !path_str
+                .split(['/', '\\'])
+                .any(|component| component == ".."),
+            "runtime-import: invalid path '{}': '..' path components are not allowed",
+            path_str
+        );
 
         let abs = if std::path::Path::new(path_str).is_absolute() {
             std::path::PathBuf::from(path_str)
@@ -480,5 +494,93 @@ mod tests {
         .unwrap();
 
         assert_eq!(result, "A ONE B TWO C");
+    }
+
+    /// Path traversal: `..` segments would let a malicious agent body
+    /// reach files outside `base_dir` (e.g. `../../../../etc/passwd` when
+    /// `ado-aw compile` runs over an untrusted PR branch). Reject at
+    /// resolution time regardless of whether the file actually exists.
+    #[test]
+    fn rejects_relative_path_with_dotdot_segment() {
+        let workspace = TestWorkspace::new();
+        let err = resolve_imports_inline(
+            "{{#runtime-import ../escape.md}}",
+            &workspace.path,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("'..' path components are not allowed"),
+            "expected '..' rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_path_with_embedded_dotdot_segment() {
+        let workspace = TestWorkspace::new();
+        let err = resolve_imports_inline(
+            "{{#runtime-import sub/../../escape.md}}",
+            &workspace.path,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("'..' path components are not allowed"),
+            "expected '..' rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_absolute_path_with_dotdot_segment() {
+        let workspace = TestWorkspace::new();
+        // Absolute paths are otherwise accepted (see
+        // `supports_relative_and_absolute_paths`), but `..` segments
+        // make path-confinement reasoning unsound and must still be
+        // rejected.
+        let err = resolve_imports_inline(
+            "{{#runtime-import /tmp/agents/../../etc/passwd}}",
+            &workspace.path,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("'..' path components are not allowed"),
+            "expected '..' rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_backslash_dotdot_segment_on_windows_style_paths() {
+        let workspace = TestWorkspace::new();
+        let err = resolve_imports_inline(
+            r"{{#runtime-import sub\..\..\escape.md}}",
+            &workspace.path,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("'..' path components are not allowed"),
+            "expected '..' rejection, got: {err}"
+        );
+    }
+
+    /// `..filename.md` and `name..md` are not path-traversal — they're
+    /// literal filenames where `..` is part of the name, not a segment.
+    /// Make sure the segment-aware check doesn't false-positive on these.
+    #[test]
+    fn allows_literal_double_dot_in_filename() {
+        let workspace = TestWorkspace::new();
+        workspace.write("..hidden.md", "DOTHIDDEN");
+        workspace.write("name..md", "DOUBLE");
+
+        let a = resolve_imports_inline(
+            "{{#runtime-import ..hidden.md}}",
+            &workspace.path,
+        )
+        .unwrap();
+        let b = resolve_imports_inline(
+            "{{#runtime-import name..md}}",
+            &workspace.path,
+        )
+        .unwrap();
+
+        assert_eq!(a, "DOTHIDDEN");
+        assert_eq!(b, "DOUBLE");
     }
 }
