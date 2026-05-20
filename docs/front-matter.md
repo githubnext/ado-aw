@@ -59,6 +59,10 @@ runtimes:                      # optional runtime configuration (language enviro
   #   feed-url: "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/nuget/v3/index.json"
 # env:                          # RESERVED: workflow-level environment variables (not yet implemented)
 #   CUSTOM_VAR: "value"
+# inlined-imports: false        # When true, resolve {{#runtime-import ...}} markers at compile time
+#                               # (default: false — markers are resolved at pipeline runtime, so
+#                               # prompt-body edits do not require recompilation).
+#                               # See docs/runtime-imports.md for full details.
 mcp-servers:
   my-custom-tool:              # containerized MCP server (requires container field)
     container: "node:20-slim"

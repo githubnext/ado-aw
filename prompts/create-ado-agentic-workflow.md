@@ -561,6 +561,21 @@ parameters:
 
 Omit `parameters:` if no runtime configuration knobs are needed.
 
+### Step 16 — Inlined Imports (advanced, optional)
+
+Controls when `{{#runtime-import ...}}` markers in the markdown body are resolved. Defaults to `false` — leave it unset for most workflows.
+
+```yaml
+inlined-imports: true   # Resolve all runtime-import markers at compile time
+```
+
+| Value | Behavior |
+|-------|----------|
+| `false` (default) | Markers resolved at pipeline runtime — prompt-body edits do **not** require recompiling |
+| `true` | Markers resolved at compile time — the generated `.lock.yml` is fully self-contained, but prompt-body edits require `ado-aw compile` |
+
+Only set `inlined-imports: true` if you need the pipeline file to be completely standalone (e.g., for environments where the source `.md` file is not accessible at pipeline runtime). See `docs/runtime-imports.md` for full details.
+
 ---
 
 ## Agent Instruction Body
