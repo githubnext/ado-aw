@@ -12,7 +12,7 @@
  * (e.g. a manual build that hits the bypass branch in `bypass.ts`, or
  * a pipeline whose facts are all pipeline variables). The dynamic
  * `import()` below is statically analysable by ncc, so the SDK is
- * still bundled into `dist/gate/index.js` — only its module-evaluation
+ * still bundled into `gate.js` — only its module-evaluation
  * cost is deferred until the first `getWebApi()` call.
  *
  * Env-var contract (set by the compiler in

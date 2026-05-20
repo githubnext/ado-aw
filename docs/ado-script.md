@@ -51,7 +51,7 @@ because the compiler always embeds an absolute marker path and
 `import.js` is single-pass (nested markers inside the inlined body are
 not re-expanded).
 
-The bundle lives at `dist/import/index.js` and ships in the same
+The bundle lives at `import.js` and ships in the same
 `ado-script.zip` release asset as `gate.js`, so pipelines download it
 through the same Setup-job asset flow. `import.js` uses only the Node
 standard library, so the ncc bundle is small (~1.5 KB) and carries no
@@ -137,7 +137,7 @@ job.
 ## Runtime env-var contract
 
 The compiler injects these environment variables on the
-`bash: node gate/index.js` step. `gate.js` reads them via
+`bash: node gate.js` step. `gate.js` reads them via
 `process.env`:
 
 | Env var | Source | Purpose |
@@ -187,13 +187,13 @@ scripts/ado-script/
 │       ├── index.ts             # main(): expand runtime-import markers in place
 │       └── __tests__/           # marker, path-resolution, and single-pass coverage
 ├── test/                        # End-to-end smoke tests
-└── dist/                        # ncc bundle output (gitignored)
-    ├── gate/index.js
-    └── import/index.js
+├── gate.js                      # ncc bundle output (gitignored)
+└── import.js                    # ncc bundle output (gitignored)
 ```
 
 The release workflow (`.github/workflows/release.yml`) runs
-`npm ci && npm run build`, then zips `scripts/ado-script/dist/` into
+`npm ci && npm run build`, then zips `scripts/ado-script/gate.js` and
+`scripts/ado-script/import.js` into
 the `ado-script.zip` release asset. Pipelines download that asset at
 runtime by URL pinned to the compiler's `CARGO_PKG_VERSION`, verify
 its SHA-256 against the `checksums.txt` asset, then extract.
@@ -250,7 +250,7 @@ three step strings into the Setup job:
    `CARGO_PKG_VERSION`, verifies the zip's SHA-256, then
    `unzip -o /tmp/ado-aw-scripts/ado-script.zip -d /tmp/ado-aw-scripts/`.
    Also capped at `timeoutInMinutes: 5`.
-3. **`bash: node '/tmp/ado-aw-scripts/ado-script/dist/gate/index.js'`** —
+3. **`bash: node '/tmp/ado-aw-scripts/ado-script/gate.js'`** —
    runs the gate with `GATE_SPEC` and the env-var contract documented
    above.
 
@@ -263,7 +263,7 @@ the Agent job's existing `{{ prepare_steps }}` block:
 1. **`NodeTool@0`** — same shape as above.
 2. **`curl` download + verify + extract** — same artefact, same
    verification.
-3. **`bash: node '/tmp/ado-aw-scripts/ado-script/dist/import/index.js'`** —
+3. **`bash: node '/tmp/ado-aw-scripts/ado-script/import.js'`** —
    expands `{{#runtime-import …}}` markers in
    `/tmp/awf-tools/agent-prompt.md` in place. See
    [`runtime-imports.md`](runtime-imports.md) for marker syntax.
@@ -324,16 +324,16 @@ The IR-to-bash codegen that produces the gate step is
    `scripts/ado-script/src/poll/`. Reuse anything in `src/shared/`.
 2. Add a build script to `package.json`:
    ```json
-   "build:poll": "ncc build src/poll/index.ts -o dist/poll -m -t"
+   "build:poll": "ncc build src/poll/index.ts -o .ado-build/poll -m -t && node -e \"const fs=require('node:fs'); fs.copyFileSync('.ado-build/poll/index.js','poll.js'); fs.rmSync('.ado-build/poll',{recursive:true,force:true});\""
    ```
    and extend `build` to also run it.
 3. Add vitest tests under `src/poll/__tests__/`.
 4. Wire from a new `CompilerExtension` (or extend an existing one)
    that downloads `ado-script.zip` (already a release asset) and
-   invokes `node /tmp/ado-aw-scripts/ado-script/dist/poll/index.js`
+   invokes `node /tmp/ado-aw-scripts/ado-script/poll.js`
    as a runtime step.
-5. No release-workflow change is needed — `zip -r ado-script/dist`
-   picks up the new bundle automatically.
+5. Update release packaging to include `scripts/ado-script/poll.js`
+   in `ado-script.zip` alongside other bundles.
 
 ### Local development loop
 
@@ -344,7 +344,7 @@ npm ci                 # one-time
 npm run codegen        # regenerate types.gen.ts (compiles ado-aw first)
 npm test               # vitest unit tests
 npm run typecheck      # strict tsc --noEmit
-npm run build          # ncc-bundle to dist/gate/index.js
+npm run build          # ncc-bundle to gate.js
 npm run test:smoke     # build + smoke test the bundle end-to-end
 ```
 

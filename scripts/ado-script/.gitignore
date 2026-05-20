@@ -1,4 +1,6 @@
 node_modules
-dist
+.ado-build
+gate.js
+import.js
 schema
 *.tsbuildinfo

@@ -161,8 +161,8 @@ Every compiled pipeline runs as three sequential jobs:
 ├── scripts/              # Supporting scripts shipped as release artifacts
 │   └── ado-script/       # TypeScript workspace for bundled gate.js, import.js, and future bundles
 │       └── src/
-│           ├── gate/     # Gate evaluator source (bundled to dist/gate/index.js)
-│           ├── import/   # Runtime prompt resolver source (bundled to dist/import/index.js)
+│           ├── gate/     # Gate evaluator source (bundled to gate.js)
+│           ├── import/   # Runtime prompt resolver source (bundled to import.js)
 │           └── shared/   # Shared modules across bundles (auth, ado-client, env-facts, types.gen.ts)
 ├── tests/                # Integration tests and fixtures
 ├── docs/                 # Per-concept reference documentation (see index below)
