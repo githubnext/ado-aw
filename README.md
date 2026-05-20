@@ -252,7 +252,7 @@ the service connections. Approve the permissions and the pipeline is ready.
 | `setup` | list | — | Separate job before agentic task |
 | `teardown` | list | — | Separate job after safe outputs |
 | `network` | object | — | Additional allowed/blocked hosts |
-| `inlined-imports` | boolean | `false` | Resolve `{{#runtime-import …}}` markers at compile time instead of at pipeline runtime. When `false` (default), prompt-body edits do not require recompilation. |
+| `inlined-imports` | boolean | `false` | When `true`, resolves all `{{#runtime-import …}}` markers at compile time; the generated YAML is self-contained but prompt-body edits require recompilation. See [runtime-imports.md](docs/runtime-imports.md). |
 | `env` | map | — | Workflow-level environment variables (reserved, not yet implemented) |
 
 ### Markdown Body

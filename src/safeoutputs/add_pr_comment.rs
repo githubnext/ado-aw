@@ -269,13 +269,13 @@ impl Executor for AddPrCommentResult {
         };
 
         // Validate file_path if present
-        if let Some(ref fp) = self.file_path {
-            if let Err(e) = validate_file_path(fp) {
-                return Ok(ExecutionResult::failure(format!(
-                    "Invalid file_path: {}",
-                    e
-                )));
-            }
+        if let Some(ref fp) = self.file_path
+            && let Err(e) = validate_file_path(fp)
+        {
+            return Ok(ExecutionResult::failure(format!(
+                "Invalid file_path: {}",
+                e
+            )));
         }
 
         // Determine the repository name for the API call

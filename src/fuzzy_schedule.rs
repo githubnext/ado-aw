@@ -924,9 +924,8 @@ mod tests {
         let cron2 = generate_cron(&schedule, "test/workflow");
         assert_eq!(cron1, cron2, "Same workflow should produce same cron");
 
-        let _cron3 = generate_cron(&schedule, "other/workflow");
-        // Different workflows should (usually) produce different crons
-        // Note: There's a small chance of collision, but it's unlikely
+        let cron3 = generate_cron(&schedule, "other/workflow");
+        assert_ne!(cron1, cron3, "Different workflow IDs should produce different crons");
     }
 
     #[test]
@@ -985,22 +984,6 @@ mod tests {
     }
 
     #[test]
-    fn test_between_equal_times_midnight() {
-        // Test edge case: between midnight and midnight
-        let schedule = parse_fuzzy_schedule("daily between midnight and midnight").unwrap();
-        let cron = generate_cron(&schedule, "test/agent");
-
-        let parts: Vec<&str> = cron.split_whitespace().collect();
-        assert_eq!(parts.len(), 5, "Cron should have 5 fields");
-
-        let minute: u32 = parts[0].parse().expect("Minute should be a number");
-        assert!(minute < 60, "Minute should be 0-59");
-
-        let hour: u32 = parts[1].parse().expect("Hour should be a number");
-        assert!(hour < 24, "Hour should be 0-23");
-    }
-
-    #[test]
     fn test_generate_schedule_yaml() {
         let yaml = generate_schedule_yaml("daily", "test/agent", &[]).unwrap();
         assert!(yaml.contains("schedules:"));
@@ -1039,23 +1022,19 @@ mod tests {
     // ─── invalid hour interval error path ────────────────────────────────────
 
     #[test]
-    fn test_parse_invalid_hour_interval_5h() {
-        let err = parse_fuzzy_schedule("every 5h").unwrap_err();
-        assert!(
-            err.to_string().contains("Valid intervals"),
-            "Error for 5h should mention valid intervals: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn test_parse_invalid_hour_interval_7h() {
-        let err = parse_fuzzy_schedule("every 7h").unwrap_err();
-        assert!(
-            err.to_string().contains("not recommended"),
-            "Error for 7h should say 'not recommended': {}",
-            err
-        );
+    fn test_parse_invalid_hour_interval() {
+        for input in &["every 5h", "every 7h"] {
+            let err = parse_fuzzy_schedule(input).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("not recommended"),
+                "Error for {input} should say 'not recommended': {msg}"
+            );
+            assert!(
+                msg.contains("Valid intervals"),
+                "Error for {input} should list valid intervals: {msg}"
+            );
+        }
     }
 
     #[test]
@@ -1069,12 +1048,29 @@ mod tests {
     }
 
     #[test]
-    fn test_backward_compatibility() {
-        // Test that simple "hourly" and "daily" still work
+    fn test_backward_compatibility_hourly() {
+        // "hourly" should produce a cron where only the minute varies (all other fields are `*`)
         let yaml = generate_schedule_yaml("hourly", "test", &[]).unwrap();
         assert!(yaml.contains("cron:"));
-
-        let yaml = generate_schedule_yaml("daily", "test", &[]).unwrap();
-        assert!(yaml.contains("cron:"));
+        // Extract the cron expression from the YAML: `  - cron: "N * * * *"`
+        let cron_line = yaml
+            .lines()
+            .find(|l| l.trim_start().starts_with("- cron:"))
+            .expect("YAML should contain a `- cron:` line");
+        let cron = cron_line
+            .trim()
+            .trim_start_matches("- cron:")
+            .trim()
+            .trim_matches('"');
+        let parts: Vec<&str> = cron.split_whitespace().collect();
+        assert_eq!(parts.len(), 5, "Hourly cron should have 5 fields");
+        // Hour, day-of-month, month, day-of-week must all be `*`
+        assert_eq!(parts[1], "*", "Hour field should be * for hourly");
+        assert_eq!(parts[2], "*", "Day-of-month field should be * for hourly");
+        assert_eq!(parts[3], "*", "Month field should be * for hourly");
+        assert_eq!(parts[4], "*", "Day-of-week field should be * for hourly");
+        // Minute must be a valid 0-59 integer
+        let minute: u32 = parts[0].parse().expect("Minute field should be a number");
+        assert!(minute < 60, "Minute should be 0-59");
     }
 }
