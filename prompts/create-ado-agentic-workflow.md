@@ -72,8 +72,6 @@ The default model is `claude-opus-4.7`. To use a different model, use the object
 |---|---|
 | `claude-opus-4.7` | Default. Best reasoning, complex tasks. |
 | `claude-sonnet-4.5` | Faster, cheaper, simpler tasks. |
-| `gpt-5.2-codex` | Code-heavy tasks. |
-| `gemini-3-pro-preview` | Google ecosystem tasks. |
 
 Object form with model selection and extra options:
 ```yaml

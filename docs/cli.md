@@ -35,7 +35,7 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - `--ado-project <name>` - Azure DevOps project name override
   - `--dry-run` - Validate inputs but skip ADO API calls (useful for local testing and QA review)
 
-- `configure` *(deprecated; hidden in --help)* - Alias forwarding to `secrets set GITHUB_TOKEN`. Existing scripts keep working but get a stderr warning. The alias will be removed in the next minor release.
+- `configure` *(deprecated; hidden in --help)* - Alias forwarding to `secrets set GITHUB_TOKEN`. Existing scripts keep working but get a stderr warning.
 
 - `secrets set <name> [<value>] [PATH]` - Set a pipeline variable (with `isSecret=true`) on every matched ADO definition. Value resolution: positional `<value>` → `--value-stdin` (one line) → interactive tty prompt with echo off.
   - `--allow-override` - Force `allowOverride=true` on the set variable. When omitted, `allowOverride` is **preserved** on existing variables (so secret rotation does not silently downgrade an existing `allowOverride=true`) and defaults to `false` for new variables.
