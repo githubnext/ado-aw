@@ -322,14 +322,14 @@ impl Executor for UploadBuildAttachmentResult {
         // Validate name-prefix length before applying. A long prefix would
         // be caught later by the final_name.len() > 100 check, but rejecting
         // early gives operators a clearer error message.
-        if let Some(prefix) = &config.name_prefix {
-            if prefix.len() > 50 {
-                return Ok(ExecutionResult::failure(format!(
-                    "name-prefix '{}...' is too long ({} chars, max 50)",
-                    prefix.chars().take(20).collect::<String>(),
-                    prefix.len()
-                )));
-            }
+        if let Some(prefix) = &config.name_prefix
+            && prefix.len() > 50
+        {
+            return Ok(ExecutionResult::failure(format!(
+                "name-prefix '{}...' is too long ({} chars, max 50)",
+                prefix.chars().take(20).collect::<String>(),
+                prefix.len()
+            )));
         }
 
         // Apply name-prefix and re-validate the resulting name's charset (the

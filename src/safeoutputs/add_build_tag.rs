@@ -127,20 +127,20 @@ impl Executor for AddBuildTagResult {
         // Compare in u64 space so that ADO build IDs larger than i32::MAX are
         // still enforced (the agent-supplied i32 simply cannot match such
         // values, which is the desired behavior).
-        if !config.allow_any_build {
-            if let Some(current_id) = ctx.build_id {
-                // self.build_id is validated > 0, so the cast to u64 is exact;
-                // values that don't fit in i32 simply cannot match current_id.
-                if self.build_id as u64 != current_id {
-                    return Ok(ExecutionResult::failure(format!(
-                        "Build #{} cannot be tagged: only the current build (#{}) is \
-                         allowed unless 'allow-any-build: true' is configured",
-                        self.build_id, current_id
-                    )));
-                }
+        if !config.allow_any_build
+            && let Some(current_id) = ctx.build_id
+        {
+            // self.build_id is validated > 0, so the cast to u64 is exact;
+            // values that don't fit in i32 simply cannot match current_id.
+            if self.build_id as u64 != current_id {
+                return Ok(ExecutionResult::failure(format!(
+                    "Build #{} cannot be tagged: only the current build (#{}) is \
+                     allowed unless 'allow-any-build: true' is configured",
+                    self.build_id, current_id
+                )));
             }
-            // If build_id is not set (e.g. local execution), allow any build
         }
+        // If build_id is not set (e.g. local execution), allow any build
 
         // 3. Apply tag prefix if configured
         let final_tag = match &config.tag_prefix {

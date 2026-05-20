@@ -232,12 +232,12 @@ impl Executor for QueueBuildResult {
         });
 
         // Add template parameters as a JSON string if provided
-        if let Some(params) = &self.parameters {
-            if !params.is_empty() {
-                let params_json = serde_json::to_string(params)
-                    .context("Failed to serialize template parameters")?;
-                body["parameters"] = serde_json::Value::String(params_json);
-            }
+        if let Some(params) = &self.parameters
+            && !params.is_empty()
+        {
+            let params_json = serde_json::to_string(params)
+                .context("Failed to serialize template parameters")?;
+            body["parameters"] = serde_json::Value::String(params_json);
         }
 
         // Build the API URL
