@@ -252,6 +252,7 @@ the service connections. Approve the permissions and the pipeline is ready.
 | `setup` | list | — | Separate job before agentic task |
 | `teardown` | list | — | Separate job after safe outputs |
 | `network` | object | — | Additional allowed/blocked hosts |
+| `inlined-imports` | boolean | `false` | Resolve `{{#runtime-import ...}}` markers at compile time. When `false` (default), markers are resolved at pipeline runtime from the trigger-repo checkout. See [runtime imports](docs/runtime-imports.md). |
 | `env` | map | — | Workflow-level environment variables (reserved, not yet implemented) |
 
 ### Markdown Body

@@ -523,11 +523,12 @@ network:
   allowed:
     - "*.mycompany.com"
     - "api.external-service.com"
+    - python                    # ecosystem identifier — expands to all Python/PyPI domains
   blocked:
     - "evil.example.com"
 ```
 
-The built-in allowlist includes: Azure DevOps, GitHub, Microsoft identity, Azure services, Application Insights, and MCP-specific endpoints for each enabled server.
+`allowed` accepts raw domain patterns (wildcards supported) or ecosystem identifiers (`python`, `node`, `rust`, `dotnet`, `lean`) that expand to the full set of package registry domains for that ecosystem. The built-in allowlist includes: Azure DevOps, GitHub, Microsoft identity, Azure services, Application Insights, and MCP-specific endpoints for each enabled server.
 
 ### Step 15 — Parameters (optional)
 
@@ -560,6 +561,25 @@ parameters:
 > **Auto-injected `clearMemory` parameter**: When `tools.cache-memory` is configured, the compiler automatically injects a `clearMemory: boolean` parameter (default: `false`) at the start of the parameters list. It lets users clear the agent's persisted memory from the ADO UI without editing the source. Defining your own `clearMemory` parameter suppresses the auto-injected one.
 
 Omit `parameters:` if no runtime configuration knobs are needed.
+
+### Step 16 — Inlined Imports (optional, advanced)
+
+By default, the compiler leaves `{{#runtime-import ...}}` markers in the generated pipeline YAML so the agent instruction body is re-read from the trigger-repo checkout at pipeline runtime. This means you can edit the markdown body without recompiling the pipeline.
+
+Set `inlined-imports: true` to embed the body at compile time instead. Use this when the prompt must be immutable (e.g., compliance workflows) or when the runtime repo checkout is unavailable:
+
+```yaml
+inlined-imports: true
+```
+
+**When to use each mode:**
+
+| Mode | Default | Prompt edits require recompile? | Use case |
+|------|---------|--------------------------------|----------|
+| `inlined-imports: false` | ✅ | No — edit and commit `.md` directly | Most workflows |
+| `inlined-imports: true` | | Yes — must run `ado-aw compile` | Immutable/audited prompts |
+
+You can also reference shared files from the agent body using `{{#runtime-import path/to/file.md}}` markers. Omit `inlined-imports:` for the default runtime-resolution behavior.
 
 ---
 
