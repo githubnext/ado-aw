@@ -523,11 +523,12 @@ network:
   allowed:
     - "*.mycompany.com"
     - "api.external-service.com"
+    - python                    # ecosystem identifier — expands to all Python/PyPI domains
   blocked:
     - "evil.example.com"
 ```
 
-The built-in allowlist includes: Azure DevOps, GitHub, Microsoft identity, Azure services, Application Insights, and MCP-specific endpoints for each enabled server.
+`allowed` accepts raw domain patterns (wildcards supported) or ecosystem identifiers (`python`, `node`, `rust`, `dotnet`, `lean`) that expand to the full set of package registry domains for that ecosystem. The built-in allowlist includes: Azure DevOps, GitHub, Microsoft identity, Azure services, Application Insights, and MCP-specific endpoints for each enabled server.
 
 ### Step 15 — Parameters (optional)
 
@@ -563,7 +564,7 @@ Omit `parameters:` if no runtime configuration knobs are needed.
 
 ### Step 16 — Inlined Imports (advanced, optional)
 
-By default (`inlined-imports: false`), any `{{#runtime-import …}}` markers in the agent body — including the implicit marker that reloads the body itself — are resolved at **pipeline runtime**. This means editing the `.md` agent body does not require recompiling the `.lock.yml` pipeline.
+By default (`inlined-imports: false`), any `{{#runtime-import ...}}` markers in the agent body — including the implicit marker that reloads the body itself — are resolved at **pipeline runtime**. This means editing the `.md` agent body does not require recompiling the `.lock.yml` pipeline.
 
 Set `inlined-imports: true` only when you need a fully self-contained pipeline YAML (e.g., for auditing or air-gapped deployment):
 
@@ -571,7 +572,16 @@ Set `inlined-imports: true` only when you need a fully self-contained pipeline Y
 inlined-imports: true
 ```
 
+**When to use each mode:**
+
+| Mode | Default | Prompt edits require recompile? | Use case |
+|------|---------|--------------------------------|----------|
+| `inlined-imports: false` | ✅ | No — edit and commit `.md` directly | Most workflows |
+| `inlined-imports: true` | | Yes — must run `ado-aw compile` | Immutable/audited prompts |
+
 **Trade-off**: with `inlined-imports: true`, every change to the agent instructions requires running `ado-aw compile` and committing the updated `.lock.yml`. Omit this field (or set it to `false`) for the typical edit-without-recompile workflow.
+
+You can also reference shared files from the agent body using `{{#runtime-import path/to/file.md}}` markers.
 
 ---
 
