@@ -562,11 +562,11 @@ parameters:
 
 Omit `parameters:` if no runtime configuration knobs are needed.
 
-### Step 16 — Inlined Imports (optional, advanced)
+### Step 16 — Inlined Imports (advanced, optional)
 
-By default, the compiler leaves `{{#runtime-import ...}}` markers in the generated pipeline YAML so the agent instruction body is re-read from the trigger-repo checkout at pipeline runtime. This means you can edit the markdown body without recompiling the pipeline.
+By default (`inlined-imports: false`), any `{{#runtime-import ...}}` markers in the agent body — including the implicit marker that reloads the body itself — are resolved at **pipeline runtime**. This means editing the `.md` agent body does not require recompiling the `.lock.yml` pipeline.
 
-Set `inlined-imports: true` to embed the body at compile time instead. Use this when the prompt must be immutable (e.g., compliance workflows) or when the runtime repo checkout is unavailable:
+Set `inlined-imports: true` only when you need a fully self-contained pipeline YAML (e.g., for auditing or air-gapped deployment):
 
 ```yaml
 inlined-imports: true
@@ -579,7 +579,9 @@ inlined-imports: true
 | `inlined-imports: false` | ✅ | No — edit and commit `.md` directly | Most workflows |
 | `inlined-imports: true` | | Yes — must run `ado-aw compile` | Immutable/audited prompts |
 
-You can also reference shared files from the agent body using `{{#runtime-import path/to/file.md}}` markers. Omit `inlined-imports:` for the default runtime-resolution behavior.
+**Trade-off**: with `inlined-imports: true`, every change to the agent instructions requires running `ado-aw compile` and committing the updated `.lock.yml`. Omit this field (or set it to `false`) for the typical edit-without-recompile workflow.
+
+You can also reference shared files from the agent body using `{{#runtime-import path/to/file.md}}` markers.
 
 ---
 

@@ -80,7 +80,9 @@ Options:
 - `--org <url>` -- Azure DevOps organization URL or bare org name
 - `--project <name>` -- Azure DevOps project name
 - `--pat <pat>` -- PAT for ADO API authentication
-- `--definition-ids <ids>` -- explicit comma-separated definition IDs (skips auto-detection)
+- `--definition-ids <ids>` -- explicit comma-separated definition IDs (skips auto-detection); mutually exclusive with `--all-repos` / `--source`
+- `--all-repos` -- **project-scope mode**: search every ado-aw definition in the ADO project, not just those with a local lock file; mutually exclusive with `--definition-ids`
+- `--source <path>` -- filter to definitions whose `# ado-aw-metadata` marker references this template path (e.g. `agents/security-scan.md`); activates the discovery code path; pairs with `--all-repos` to scope across the whole project
 - `--dry-run` -- print the planned set without calling the ADO API
 
 ### `secrets list [path]`
@@ -91,6 +93,7 @@ Options:
 
 - `--json` -- emit machine-readable JSON
 - `--org`, `--project`, `--pat`, `--definition-ids` -- same as `secrets set`
+- `--all-repos`, `--source` -- same as `secrets set`
 
 ### `secrets delete <name> [path]`
 
@@ -99,7 +102,28 @@ Delete a named variable from every matched definition. No-op when the variable i
 Options:
 
 - `--org`, `--project`, `--pat`, `--definition-ids` -- same as `secrets set`
+- `--all-repos`, `--source` -- same as `secrets set`
 - `--dry-run` -- print the planned deletion without calling the ADO API
+
+### Project-scope discovery (`--all-repos` / `--source`)
+
+By default, `secrets` commands match ADO definitions by scanning local lock files. Two opt-in flags activate **Preview-driven discovery** instead — useful when local checkouts of every consumer pipeline aren't available:
+
+- **`--all-repos`** — search every ado-aw definition in the ADO project, including consumer pipelines that include ado-aw templates but live in other repos. No local checkout of those repos is required.
+- **`--source <path>`** — restrict results to definitions whose `# ado-aw-metadata` marker references the given template path. Useful for fan-out token rotation: `ado-aw secrets set GITHUB_TOKEN --source agents/security-scan.md` updates every pipeline that includes that template across the entire project.
+
+Both flags are mutually exclusive with `--definition-ids`. `enable`, `disable`, and `remove` are **not** affected — they retain their source-scoped safety semantics.
+
+```bash
+# Rotate GITHUB_TOKEN on every ado-aw pipeline in the project
+ado-aw secrets set GITHUB_TOKEN --all-repos
+
+# Update only pipelines that include a specific template
+ado-aw secrets set GITHUB_TOKEN --all-repos --source agents/security-scan.md
+
+# Preview which definitions would be updated
+ado-aw secrets set GITHUB_TOKEN --all-repos --dry-run
+```
 
 ### `enable [path]`
 
@@ -240,8 +264,11 @@ ado-aw compile
 # Verify a generated pipeline
 ado-aw check agent.lock.yml
 
-# Set GITHUB_TOKEN on all matched pipelines
+# Set GITHUB_TOKEN on all matched pipelines (local lock files)
 ado-aw secrets set GITHUB_TOKEN
+
+# Set GITHUB_TOKEN on every ado-aw pipeline in the project (no local checkout needed)
+ado-aw secrets set GITHUB_TOKEN --all-repos
 
 # Register pipelines with ADO and set their token in one step
 ado-aw enable --also-set-token
