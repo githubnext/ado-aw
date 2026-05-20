@@ -149,12 +149,12 @@ pub(crate) fn neutralize_pipeline_commands(input: &str) -> String {
     while let Some(pos) = rest.find("##") {
         result.push_str(&rest[..pos]);
         let after = &rest[pos + 2..];
-        if after.starts_with("vso[") {
+        if let Some(stripped) = after.strip_prefix("vso[") {
             result.push_str("`##vso[`");
-            rest = &after[4..];
-        } else if after.starts_with('[') {
+            rest = stripped;
+        } else if let Some(stripped) = after.strip_prefix('[') {
             result.push_str("`##[`");
-            rest = &after[1..];
+            rest = stripped;
         } else {
             // Harmless "##" (e.g. markdown heading)
             result.push_str("##");
