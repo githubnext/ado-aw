@@ -75,7 +75,7 @@ compile time instead of on the pipeline runner.
 
 ## Implementation notes
 
-- **Runtime**: `dist/import/index.js` is ncc-bundled into `ado-script.zip`.
+- **Runtime**: `import.js` is ncc-bundled into `ado-script.zip`.
   The always-on `AdoScriptExtension`'s `prepare_steps()` injects three
   steps into the Agent job's existing `{{ prepare_steps }}` block:
   `NodeTool@0` install, the `ado-script.zip` download/verify/extract,

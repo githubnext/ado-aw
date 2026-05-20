@@ -22,7 +22,7 @@ This invokes `cargo run -- export-gate-schema` to write the JSON Schema, then ru
 - `src/shared/` — modules shared across all bundles (auth, ado-client, vso-logger, env-facts, policy state machine)
 - `src/gate/` — gate evaluator entry point and per-concern modules
 - `src/import/` — runtime-import resolver entry point
-- `dist/` — ncc bundle output (gitignored); `npm run build` writes `dist/gate/index.js` and `dist/import/index.js`, both of which ship in `ado-script.zip`
+- `gate.js` / `import.js` — ncc bundle outputs (gitignored); `npm run build` writes both at the workspace root, and both ship in `ado-script.zip`
 
 ## See also
 

@@ -818,7 +818,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 /// Serializable gate specification — the JSON document consumed by the
-/// Node gate evaluator (`scripts/ado-script/dist/gate/index.js`) at pipeline runtime.
+/// Node gate evaluator (`scripts/ado-script/gate.js`) at pipeline runtime.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct GateSpec {
     pub context: GateContextSpec,
@@ -1534,7 +1534,7 @@ mod tests {
         let result = compile_gate_step_external(
             GateContext::PullRequest,
             &[],
-            "/tmp/ado-aw-scripts/ado-script/dist/gate/index.js",
+            "/tmp/ado-aw-scripts/ado-script/gate.js",
         )
         .unwrap();
         assert!(result.is_empty());
@@ -1553,7 +1553,7 @@ mod tests {
         let result = compile_gate_step_external(
             GateContext::PullRequest,
             &checks,
-            "/tmp/ado-aw-scripts/ado-script/dist/gate/index.js",
+            "/tmp/ado-aw-scripts/ado-script/gate.js",
         )
         .unwrap();
         assert!(result.contains("- bash:"), "should be a bash step");
@@ -1562,7 +1562,7 @@ mod tests {
             "should include base64 spec in env"
         );
         assert!(
-            result.contains("node '/tmp/ado-aw-scripts/ado-script/dist/gate/index.js'"),
+            result.contains("node '/tmp/ado-aw-scripts/ado-script/gate.js'"),
             "should reference external evaluator script"
         );
         assert!(result.contains("name: prGate"), "should set step name");
@@ -1585,7 +1585,7 @@ mod tests {
         let result = compile_gate_step_external(
             GateContext::PullRequest,
             &checks,
-            "/tmp/ado-aw-scripts/ado-script/dist/gate/index.js",
+            "/tmp/ado-aw-scripts/ado-script/gate.js",
         )
         .unwrap();
         assert!(
@@ -1612,7 +1612,7 @@ mod tests {
         let result = compile_gate_step_external(
             GateContext::PipelineCompletion,
             &checks,
-            "/tmp/ado-aw-scripts/ado-script/dist/gate/index.js",
+            "/tmp/ado-aw-scripts/ado-script/gate.js",
         )
         .unwrap();
         assert!(
@@ -1642,7 +1642,7 @@ mod tests {
         let result = compile_gate_step_external(
             GateContext::PullRequest,
             &checks,
-            "/tmp/ado-aw-scripts/ado-script/dist/gate/index.js",
+            "/tmp/ado-aw-scripts/ado-script/gate.js",
         )
         .unwrap();
         assert!(
@@ -1668,7 +1668,7 @@ mod tests {
         let result = compile_gate_step_external(
             GateContext::PullRequest,
             &checks,
-            "/tmp/ado-aw-scripts/ado-script/dist/gate/index.js",
+            "/tmp/ado-aw-scripts/ado-script/gate.js",
         )
         .unwrap();
         // Check export lines only (evaluator script always contains these strings)
@@ -1761,7 +1761,7 @@ mod tests {
         let step = compile_gate_step_external(
             GateContext::PullRequest,
             &checks,
-            "/tmp/ado-aw-scripts/ado-script/dist/gate/index.js",
+            "/tmp/ado-aw-scripts/ado-script/gate.js",
         )
         .unwrap();
         // Step structure

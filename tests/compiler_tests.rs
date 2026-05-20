@@ -4473,7 +4473,7 @@ fn test_pr_filter_tier1_has_evaluator_gate() {
         "Should include base64-encoded spec"
     );
     assert!(
-        compiled.contains("node '/tmp/ado-aw-scripts/ado-script/dist/gate/index.js'"),
+        compiled.contains("node '/tmp/ado-aw-scripts/ado-script/gate.js'"),
         "Should invoke node gate evaluator"
     );
     assert!(
@@ -4644,7 +4644,7 @@ fn test_pr_filter_tier2_has_extension_gate() {
         "Tier 2 should include base64-encoded spec"
     );
     assert!(
-        compiled.contains("node '/tmp/ado-aw-scripts/ado-script/dist/gate/index.js'"),
+        compiled.contains("node '/tmp/ado-aw-scripts/ado-script/gate.js'"),
         "Tier 2 should invoke node gate evaluator"
     );
     assert!(compiled.contains("name: prGate"), "Should have prGate step");

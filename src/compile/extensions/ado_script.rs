@@ -29,8 +29,8 @@ use crate::compile::filter_ir::{
 };
 use crate::compile::types::{PipelineFilters, PrFilters};
 
-const GATE_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/dist/gate/index.js";
-pub(crate) const IMPORT_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/dist/import/index.js";
+const GATE_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/gate.js";
+pub(crate) const IMPORT_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/import.js";
 const RELEASE_BASE_URL: &str = "https://github.com/githubnext/ado-aw/releases/download";
 
 /// Single always-on extension that owns all `ado-script` bundle wiring.
@@ -424,7 +424,7 @@ mod tests {
         assert!(!steps[0].contains("for gate evaluator"));
         assert!(steps[1].contains("Download ado-aw scripts"));
         assert!(steps[1].contains("sha256sum -c -"));
-        assert!(steps[2].contains("node '/tmp/ado-aw-scripts/ado-script/dist/gate/index.js'"));
+        assert!(steps[2].contains("node '/tmp/ado-aw-scripts/ado-script/gate.js'"));
     }
 
     #[test]
@@ -444,7 +444,7 @@ mod tests {
         assert_eq!(steps.len(), 3, "install + download + resolver");
         assert!(steps[0].contains("NodeTool@0"));
         assert!(steps[1].contains("Download ado-aw scripts"));
-        assert!(steps[2].contains("node '/tmp/ado-aw-scripts/ado-script/dist/import/index.js'"));
+        assert!(steps[2].contains("node '/tmp/ado-aw-scripts/ado-script/import.js'"));
         assert!(steps[2].contains("Resolve runtime imports (agent prompt)"));
         // The resolver receives `--base "$(Build.SourcesDirectory)"` so
         // the compiler-emitted trigger-repo-relative marker path

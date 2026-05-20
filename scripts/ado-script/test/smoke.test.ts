@@ -1,8 +1,8 @@
 /**
  * End-to-end smoke tests of bundled ado-script programs.
  *
- * The gate smoke test validates the existing dist/gate/index.js bundle.
- * The import smoke test builds dist/import/index.js and verifies it expands
+ * The gate smoke test validates the existing gate.js bundle.
+ * The import smoke test builds import.js and verifies it expands
  * a prompt fixture in place.
  */
 import { spawnSync } from "node:child_process";
@@ -14,8 +14,8 @@ import { describe, expect, it } from "vitest";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const workspaceDir = resolve(__dirname, "..");
-const gateBundlePath = resolve(__dirname, "../dist/gate/index.js");
-const importBundlePath = resolve(__dirname, "../dist/import/index.js");
+const gateBundlePath = resolve(__dirname, "../gate.js");
+const importBundlePath = resolve(__dirname, "../import.js");
 const gateFixturePath = resolve(
   __dirname,
   "fixtures/gate-spec-pr-title-match.json",

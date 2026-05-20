@@ -67,13 +67,13 @@ jobs:
         run: |
           npm ci
           npm run build
-        # `npm run build` runs codegen + ncc and outputs dist/gate/index.js.
+        # `npm run build` runs codegen + ncc and outputs gate.js + import.js.
 
       - name: Package ado-script bundle
         run: |
           set -euo pipefail
           cd scripts
-          zip -r ../ado-script.zip ado-script/dist
+          zip -r ../ado-script.zip ado-script/gate.js ado-script/import.js
 
       - name: Upload release assets
         env:
