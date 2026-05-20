@@ -561,6 +561,18 @@ parameters:
 
 Omit `parameters:` if no runtime configuration knobs are needed.
 
+### Step 16 — Inlined Imports (advanced, optional)
+
+By default (`inlined-imports: false`), any `{{#runtime-import …}}` markers in the agent body — including the implicit marker that reloads the body itself — are resolved at **pipeline runtime**. This means editing the `.md` agent body does not require recompiling the `.lock.yml` pipeline.
+
+Set `inlined-imports: true` only when you need a fully self-contained pipeline YAML (e.g., for auditing or air-gapped deployment):
+
+```yaml
+inlined-imports: true
+```
+
+**Trade-off**: with `inlined-imports: true`, every change to the agent instructions requires running `ado-aw compile` and committing the updated `.lock.yml`. Omit this field (or set it to `false`) for the typical edit-without-recompile workflow.
+
 ---
 
 ## Agent Instruction Body
