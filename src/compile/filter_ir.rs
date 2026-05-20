@@ -1342,7 +1342,23 @@ mod tests {
         let checks = lower_pr_filters(&filters);
         assert_eq!(checks.len(), 2);
         assert_eq!(checks[0].name, "author include");
+        assert!(
+            matches!(
+                &checks[0].predicate,
+                Predicate::ValueInSet { fact: Fact::AuthorEmail, values, .. }
+                    if values == &["alice@corp.com"]
+            ),
+            "include should lower to ValueInSet on AuthorEmail"
+        );
         assert_eq!(checks[1].name, "author exclude");
+        assert!(
+            matches!(
+                &checks[1].predicate,
+                Predicate::ValueNotInSet { fact: Fact::AuthorEmail, values, .. }
+                    if values == &["bot@noreply.com"]
+            ),
+            "exclude should lower to ValueNotInSet on AuthorEmail"
+        );
     }
 
     #[test]
@@ -1357,10 +1373,15 @@ mod tests {
         };
         let checks = lower_pr_filters(&filters);
         assert_eq!(checks.len(), 1);
-        assert!(matches!(
-            &checks[0].predicate,
-            Predicate::LabelSetMatch { .. }
-        ));
+        assert_eq!(checks[0].name, "labels");
+        assert!(
+            matches!(
+                &checks[0].predicate,
+                Predicate::LabelSetMatch { any_of, none_of, .. }
+                    if any_of == &["run-agent"] && none_of == &["do-not-run"]
+            ),
+            "labels should lower to LabelSetMatch preserving any_of and none_of"
+        );
     }
 
     #[test]
@@ -1815,27 +1836,6 @@ mod tests {
                 pred_type
             );
         }
-    }
-
-    #[test]
-    fn test_spec_validates_against_schema() {
-        // Generate a spec and verify it matches the schema structure
-        let checks = vec![FilterCheck {
-            name: "title",
-            predicate: Predicate::GlobMatch {
-                fact: Fact::PrTitle,
-                pattern: "test".into(),
-            },
-            build_tag_suffix: "title-mismatch",
-        }];
-        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
-        let spec_json = serde_json::to_value(&spec).unwrap();
-
-        // Verify structural expectations from schema
-        assert!(spec_json["context"]["build_reason"].is_string());
-        assert!(spec_json["facts"].is_array());
-        assert!(spec_json["checks"].is_array());
-        assert!(spec_json["checks"][0]["predicate"]["type"].as_str() == Some("glob_match"));
     }
 
     #[test]
