@@ -1466,7 +1466,7 @@ mod tests {
 
     #[test]
     fn test_yaml_path_match_finds_definition_by_yaml_filename() {
-        let defs = vec![
+        let defs = [
             make_def(1, "Unrelated Pipeline"),
             make_def_with_yaml(2, "My Agent", "/.azdo/pipelines/agent.yml"),
             make_def(3, "Another Pipeline"),
@@ -1484,7 +1484,7 @@ mod tests {
 
     #[test]
     fn test_yaml_path_match_no_match_when_process_is_none() {
-        let defs = vec![
+        let defs = [
             make_def(1, "Classic Pipeline"),
             make_def(2, "Another Classic"),
         ];
