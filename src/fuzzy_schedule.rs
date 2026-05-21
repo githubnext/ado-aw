@@ -163,7 +163,7 @@ fn parse_time_spec(s: &str) -> Result<TimeSpec> {
             (hour, 0)
         };
 
-        if hour < 1 || hour > 12 {
+        if !(1..=12).contains(&hour) {
             bail!("Hour must be 1-12 in 12-hour format, got {}", hour);
         }
         if minute > 59 {
@@ -228,7 +228,7 @@ fn parse_utc_offset(s: &str) -> Result<i32> {
     let total_offset = sign * offset_minutes;
 
     // Validate range: UTC-12:00 to UTC+14:00
-    if total_offset < -12 * 60 || total_offset > 14 * 60 {
+    if !(-12 * 60..=14 * 60).contains(&total_offset) {
         bail!("UTC offset out of range (UTC-12:00 to UTC+14:00): {}", s);
     }
 
@@ -426,29 +426,29 @@ fn parse_interval_schedule(tokens: &[&str]) -> Result<FuzzySchedule> {
         ("week", "w"),
         ("w", "w"),
     ] {
-        if let Some(num_str) = interval_str.strip_suffix(suffix) {
-            if let Ok(n) = num_str.parse::<u8>() {
-                return create_interval_schedule(n, unit);
-            }
+        if let Some(num_str) = interval_str.strip_suffix(suffix)
+            && let Ok(n) = num_str.parse::<u8>()
+        {
+            return create_interval_schedule(n, unit);
         }
     }
 
     // Try format: "<N> <unit>" (e.g., "2 hours")
-    if tokens.len() >= 2 {
-        if let Ok(n) = tokens[0].parse::<u8>() {
-            let unit = tokens[1];
-            let unit_char = match unit {
-                "hours" | "hour" | "h" => "h",
-                "minutes" | "minute" | "mins" | "min" | "m" => "m",
-                "days" | "day" | "d" => "d",
-                "weeks" | "week" | "w" => "w",
-                _ => bail!(
-                    "Unknown interval unit '{}'. Valid units: hours, minutes, days, weeks",
-                    unit
-                ),
-            };
-            return create_interval_schedule(n, unit_char);
-        }
+    if tokens.len() >= 2
+        && let Ok(n) = tokens[0].parse::<u8>()
+    {
+        let unit = tokens[1];
+        let unit_char = match unit {
+            "hours" | "hour" | "h" => "h",
+            "minutes" | "minute" | "mins" | "min" | "m" => "m",
+            "days" | "day" | "d" => "d",
+            "weeks" | "week" | "w" => "w",
+            _ => bail!(
+                "Unknown interval unit '{}'. Valid units: hours, minutes, days, weeks",
+                unit
+            ),
+        };
+        return create_interval_schedule(n, unit_char);
     }
 
     bail!(
@@ -509,7 +509,7 @@ fn parse_time_with_offset(tokens: &[&str]) -> Result<(TimeSpec, i32)> {
 
     // Check if last token is a UTC offset
     let (time_tokens, offset) =
-        if tokens.len() >= 2 && tokens.last().map_or(false, |t| t.starts_with("utc")) {
+        if tokens.len() >= 2 && tokens.last().is_some_and(|t| t.starts_with("utc")) {
             let offset = parse_utc_offset(tokens.last().unwrap())?;
             (&tokens[..tokens.len() - 1], offset)
         } else if tokens.len() == 1 && tokens[0].contains("utc") {
