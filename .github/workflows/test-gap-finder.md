@@ -4,6 +4,7 @@ on:
 description: Analyzes test coverage and contributes missing test cases through focused pull requests
 permissions:
   contents: read
+  issues: read
   pull-requests: read
 tools:
   github:
