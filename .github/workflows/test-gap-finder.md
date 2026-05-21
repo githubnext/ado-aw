@@ -118,7 +118,7 @@ cargo clippy --all-targets --all-features 2>&1
 ```
 
 Open at most one pull request via `create-pull-request` when tests were added and checks passed.
-If CI-triggering automation for PRs in this repository requires `GH_AW_CI_TRIGGER_TOKEN`, ensure that secret is configured before opening the PR.
+Note: this repository requires `GH_AW_CI_TRIGGER_TOKEN` to be configured for PR CI triggers when using `create-pull-request`.
 
 **Do NOT open a PR** if:
 - All significant paths are covered
@@ -150,4 +150,4 @@ If CI-triggering automation for PRs in this repository requires `GH_AW_CI_TRIGGE
 *This PR was created by the automated test gap finder. Previous run: [date]. Modules audited this cycle: [list].*
 ```
 
-If no meaningful, safe test additions are found, emit `noop` with a brief explanation.
+If no meaningful, safe test additions are found, call the `noop` safe-output tool with a brief explanation.
