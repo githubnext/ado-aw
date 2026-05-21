@@ -43,7 +43,7 @@ This is a test agent for integration testing.
     fs::create_dir_all(temp_dir.join(".github/agents")).expect("Failed to create .github/agents");
 
     // Run the compilation
-    let output_yaml = temp_dir.join("test-agent.yml");
+    let _output_yaml = temp_dir.join("test-agent.yml");
 
     // Note: We can't directly call compile_pipeline from here since it's not a library function
     // This test verifies the output structure when compile runs
@@ -3730,7 +3730,7 @@ fn assert_marker_step_present(
         "{fixture_name}: marker line missing schema=1: {line}"
     );
     assert!(
-        line.contains(&format!("\"source\":\"")) && line.contains(expected_source_suffix),
+        line.contains("\"source\":\"") && line.contains(expected_source_suffix),
         "{fixture_name}: marker line does not include source suffix {expected_source_suffix}: {line}"
     );
     // The runtime echo on the next line should mirror the same data

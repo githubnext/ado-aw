@@ -2,11 +2,11 @@ use std::io::BufRead;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-/// Integration tests for the SafeOutputs HTTP server (`mcp-http` subcommand).
-///
-/// These tests validate the HTTP transport layer that MCPG uses to reach
-/// SafeOutputs. They do NOT require Docker or the MCPG gateway — they test
-/// the ado-aw HTTP server directly.
+// Integration tests for the SafeOutputs HTTP server (`mcp-http` subcommand).
+//
+// These tests validate the HTTP transport layer that MCPG uses to reach
+// SafeOutputs. They do NOT require Docker or the MCPG gateway — they test
+// the ado-aw HTTP server directly.
 
 /// Guard that kills the child process on drop (even on panic).
 struct ServerGuard {
@@ -94,6 +94,7 @@ fn start_server() -> ServerGuard {
     }
     // Kill and panic if not ready
     child.kill().ok();
+    child.wait().ok();
     panic!("SafeOutputs HTTP server did not become ready within 5 s");
 }
 
