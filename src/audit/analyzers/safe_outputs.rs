@@ -4,9 +4,9 @@ use anyhow::Context;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
-use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use tokio::fs;
 
 use crate::audit::model::{
     CreatedItemReport, Finding, RejectedSafeOutputsRollup, SafeOutputExecution,
@@ -63,9 +63,9 @@ struct IndexedExecutionRecord {
 pub async fn analyze_safe_outputs(
     download_root: &std::path::Path,
 ) -> anyhow::Result<SafeOutputAnalysis> {
-    let proposals_path = find_proposals_file(download_root)?;
-    let detection_path = find_detection_file(download_root)?;
-    let executions_path = find_execution_file(download_root)?;
+    let proposals_path = find_proposals_file(download_root).await?;
+    let detection_path = find_detection_file(download_root).await?;
+    let executions_path = find_execution_file(download_root).await?;
 
     let proposals = load_proposals(proposals_path.as_deref()).await?;
     let detection = load_detection_verdict(detection_path.as_deref()).await?;
@@ -526,13 +526,17 @@ fn truncate_reason(reason: String, max_chars: usize) -> String {
     }
 }
 
-fn find_proposals_file(download_root: &Path) -> anyhow::Result<Option<PathBuf>> {
-    for directory in top_level_dirs_with_prefix(download_root, "agent_outputs_")? {
+async fn find_proposals_file(download_root: &Path) -> anyhow::Result<Option<PathBuf>> {
+    for directory in top_level_dirs_with_prefix(download_root, "agent_outputs_").await? {
         for candidate in [
             directory.join("staging").join(SAFE_OUTPUT_FILENAME),
             directory.join(SAFE_OUTPUT_FILENAME),
         ] {
-            if candidate.is_file() {
+            if fs::metadata(&candidate)
+                .await
+                .map(|m| m.is_file())
+                .unwrap_or(false)
+            {
                 return Ok(Some(candidate));
             }
         }
@@ -540,32 +544,40 @@ fn find_proposals_file(download_root: &Path) -> anyhow::Result<Option<PathBuf>> 
     Ok(None)
 }
 
-fn find_detection_file(download_root: &Path) -> anyhow::Result<Option<PathBuf>> {
-    for directory in top_level_dirs_with_prefix(download_root, "analyzed_outputs_")? {
+async fn find_detection_file(download_root: &Path) -> anyhow::Result<Option<PathBuf>> {
+    for directory in top_level_dirs_with_prefix(download_root, "analyzed_outputs_").await? {
         let candidate = directory.join("threat-analysis.json");
-        if candidate.is_file() {
+        if fs::metadata(&candidate)
+            .await
+            .map(|m| m.is_file())
+            .unwrap_or(false)
+        {
             return Ok(Some(candidate));
         }
     }
     Ok(None)
 }
 
-fn find_execution_file(download_root: &Path) -> anyhow::Result<Option<PathBuf>> {
+async fn find_execution_file(download_root: &Path) -> anyhow::Result<Option<PathBuf>> {
     let preferred = download_root
         .join("safe_outputs")
         .join(EXECUTED_NDJSON_FILENAME);
-    if preferred.is_file() {
+    if fs::metadata(&preferred)
+        .await
+        .map(|m| m.is_file())
+        .unwrap_or(false)
+    {
         return Ok(Some(preferred));
     }
 
     let mut matches = Vec::new();
-    collect_named_files(download_root, EXECUTED_NDJSON_FILENAME, &mut matches)?;
+    collect_named_files(download_root, EXECUTED_NDJSON_FILENAME, &mut matches).await?;
     matches.sort();
     Ok(matches.into_iter().next())
 }
 
-fn top_level_dirs_with_prefix(root: &Path, prefix: &str) -> anyhow::Result<Vec<PathBuf>> {
-    let entries = match fs::read_dir(root) {
+async fn top_level_dirs_with_prefix(root: &Path, prefix: &str) -> anyhow::Result<Vec<PathBuf>> {
+    let mut entries = match fs::read_dir(root).await {
         Ok(entries) => entries,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => {
@@ -574,11 +586,20 @@ fn top_level_dirs_with_prefix(root: &Path, prefix: &str) -> anyhow::Result<Vec<P
         }
     };
 
-    let mut matches = Vec::new();
-    for entry in entries {
-        let entry = entry.with_context(|| format!("Failed to iterate {}", root.display()))?;
+    let mut matches: Vec<(String, PathBuf)> = Vec::new();
+    loop {
+        let entry = match entries.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("Failed to iterate {}", root.display()));
+            }
+        };
+
         let file_type = entry
             .file_type()
+            .await
             .with_context(|| format!("Failed to inspect {}", entry.path().display()))?;
         if !file_type.is_dir() {
             continue;
@@ -588,43 +609,55 @@ fn top_level_dirs_with_prefix(root: &Path, prefix: &str) -> anyhow::Result<Vec<P
             continue;
         };
         if name.starts_with(prefix) {
-            matches.push(entry.path());
+            matches.push((name, entry.path()));
         }
     }
-    matches.sort();
-    Ok(matches)
+    // Sort by numeric suffix so `agent_outputs_10` outranks
+    // `agent_outputs_9` (lexicographic sort gets this wrong).
+    matches.sort_by(|(a, _), (b, _)| crate::audit::cmp_numeric_suffix(a, b));
+    Ok(matches.into_iter().map(|(_, path)| path).collect())
 }
 
-fn collect_named_files(
-    root: &Path,
-    file_name: &str,
-    matches: &mut Vec<PathBuf>,
-) -> anyhow::Result<()> {
-    let entries = match fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("Failed to read directory {}", root.display()));
-        }
-    };
+fn collect_named_files<'a>(
+    root: &'a Path,
+    file_name: &'a str,
+    matches: &'a mut Vec<PathBuf>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>> {
+    Box::pin(async move {
+        let mut entries = match fs::read_dir(root).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("Failed to read directory {}", root.display()));
+            }
+        };
 
-    for entry in entries {
-        let entry = entry.with_context(|| format!("Failed to iterate {}", root.display()))?;
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .with_context(|| format!("Failed to inspect {}", path.display()))?;
-        if file_type.is_dir() {
-            collect_named_files(&path, file_name, matches)?;
-        } else if file_type.is_file()
-            && path.file_name().and_then(|name| name.to_str()) == Some(file_name)
-        {
-            matches.push(path);
+        loop {
+            let entry = match entries.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("Failed to iterate {}", root.display()));
+                }
+            };
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .await
+                .with_context(|| format!("Failed to inspect {}", path.display()))?;
+            if file_type.is_dir() {
+                collect_named_files(&path, file_name, matches).await?;
+            } else if file_type.is_file()
+                && path.file_name().and_then(|name| name.to_str()) == Some(file_name)
+            {
+                matches.push(path);
+            }
         }
-    }
 
-    Ok(())
+        Ok(())
+    })
 }
 
 #[cfg(test)]

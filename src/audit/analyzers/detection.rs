@@ -115,7 +115,9 @@ async fn find_verdict_path(download_root: &Path) -> Option<PathBuf> {
 
         let path = entry.path();
         match &latest_dir {
-            Some((current_name, _)) if name <= *current_name => {}
+            Some((current_name, _))
+                if crate::audit::cmp_numeric_suffix(&name, current_name)
+                    != std::cmp::Ordering::Greater => {}
             _ => latest_dir = Some((name, path)),
         }
     }
@@ -293,7 +295,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn uses_lexicographically_last_analyzed_outputs_directory() {
+    async fn uses_highest_numbered_analyzed_outputs_directory() {
         let temp_dir = TempDir::new().unwrap();
         write_verdict(
             &temp_dir,
@@ -315,6 +317,33 @@ mod tests {
         assert_eq!(
             analysis.verdict_path,
             Some(expected_verdict_path("analyzed_outputs_42"))
+        );
+    }
+
+    /// Regression: lexicographic sort would pick `analyzed_outputs_9`
+    /// here. Numeric-suffix sort must pick `analyzed_outputs_10`.
+    #[tokio::test]
+    async fn picks_highest_numeric_suffix_not_lexicographic() {
+        let temp_dir = TempDir::new().unwrap();
+        write_verdict(
+            &temp_dir,
+            "analyzed_outputs_9",
+            r#"{"prompt_injection":false,"secret_leak":false,"malicious_patch":false,"reasons":[]}"#,
+        )
+        .await;
+        write_verdict(
+            &temp_dir,
+            "analyzed_outputs_10",
+            r#"{"prompt_injection":true,"secret_leak":false,"malicious_patch":false,"reasons":["newer verdict"]}"#,
+        )
+        .await;
+
+        let analysis = analyze_detection(temp_dir.path()).await.unwrap().unwrap();
+
+        assert!(analysis.threats.prompt_injection);
+        assert_eq!(
+            analysis.verdict_path,
+            Some(expected_verdict_path("analyzed_outputs_10"))
         );
     }
 }

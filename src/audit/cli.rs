@@ -611,17 +611,19 @@ async fn collect_files_under(run_dir: &Path, start_dir: &Path) -> Result<Vec<Fil
 
 async fn find_artifact_dir(run_dir: &Path, prefix: &str) -> Option<PathBuf> {
     let mut entries = tokio::fs::read_dir(run_dir).await.ok()?;
-    let mut hits = Vec::new();
+    let mut hits: Vec<(String, PathBuf)> = Vec::new();
     while let Ok(Some(entry)) = entries.next_entry().await {
         if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false)
             && let Some(name) = entry.file_name().to_str()
             && (name == prefix || name.starts_with(&format!("{}_", prefix)))
         {
-            hits.push(entry.path());
+            hits.push((name.to_string(), entry.path()));
         }
     }
-    hits.sort();
-    hits.pop()
+    // Numeric-suffix sort so `agent_outputs_10` outranks
+    // `agent_outputs_9` (lexicographic sort gets this wrong).
+    hits.sort_by(|(a, _), (b, _)| crate::audit::cmp_numeric_suffix(a, b));
+    hits.pop().map(|(_, path)| path)
 }
 
 fn is_authz_error(error: &anyhow::Error) -> bool {
@@ -670,7 +672,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn find_artifact_dir_picks_lexicographically_last_match() {
+    async fn find_artifact_dir_picks_highest_numbered_match() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         tokio::fs::create_dir_all(temp_dir.path().join("agent_outputs_001"))
             .await
@@ -689,6 +691,28 @@ mod tests {
         assert_eq!(
             found.file_name().and_then(|name| name.to_str()),
             Some("agent_outputs_999")
+        );
+    }
+
+    /// Regression test: lexicographic sort would pick `agent_outputs_9`
+    /// here (because `'9' > '1'`); numeric-suffix sort must pick
+    /// `agent_outputs_10` instead.
+    #[tokio::test]
+    async fn find_artifact_dir_orders_multi_digit_suffixes_numerically() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        for suffix in ["1", "2", "9", "10", "100"] {
+            tokio::fs::create_dir_all(temp_dir.path().join(format!("agent_outputs_{suffix}")))
+                .await
+                .expect("create dir");
+        }
+
+        let found = find_artifact_dir(temp_dir.path(), "agent_outputs")
+            .await
+            .expect("find artifact dir");
+
+        assert_eq!(
+            found.file_name().and_then(|name| name.to_str()),
+            Some("agent_outputs_100")
         );
     }
 

@@ -829,14 +829,40 @@ pub async fn resolve_ado_context(
     Ok(ctx)
 }
 
-#[doc(hidden)]
+/// Test-only override that lets the integration tests in `tests/audit_it.rs`
+/// redirect ADO REST calls at a mock server via the `ADO_AW_TEST_ORG_URL`
+/// environment variable.
+///
+/// **Compiled out of release builds.** All published artifacts ship with
+/// `cargo build --release`, which sets `debug_assertions = false` and
+/// replaces the body of this function with a no-op via the
+/// `#[cfg(not(debug_assertions))]` branch below. This prevents an
+/// attacker-controlled env var (a leftover from a debugging session, a
+/// hostile CI environment, etc.) from silently redirecting production
+/// ADO API calls. Debug builds — used by `cargo test`, integration
+/// tests, and `cargo run` during development — keep the override
+/// available, and emit a `warn!` on every invocation so the override is
+/// loud and obvious in logs.
+#[cfg(debug_assertions)]
 fn apply_test_org_url_override(ctx: &mut AdoContext) {
     if let Ok(org_url) = std::env::var("ADO_AW_TEST_ORG_URL") {
         let org_url = org_url.trim().trim_end_matches('/');
         if !org_url.is_empty() {
+            log::warn!(
+                "ADO_AW_TEST_ORG_URL test override active: redirecting ADO REST calls \
+                 from {} to {} (this branch is compiled out of release builds)",
+                ctx.org_url,
+                org_url
+            );
             ctx.org_url = org_url.to_string();
         }
     }
+}
+
+#[cfg(not(debug_assertions))]
+fn apply_test_org_url_override(_: &mut AdoContext) {
+    // Release builds intentionally ignore ADO_AW_TEST_ORG_URL so that a
+    // stray env var cannot redirect production ADO API calls.
 }
 
 /// Builds the list of definitions to update from explicit IDs or auto-detection.
