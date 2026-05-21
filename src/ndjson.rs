@@ -12,6 +12,9 @@ use crate::safeoutputs::ToolResult;
 /// The standard filename for safe outputs
 pub const SAFE_OUTPUT_FILENAME: &str = "safe_outputs.ndjson";
 
+/// The standard filename for executed safe-output audit records
+pub const EXECUTED_NDJSON_FILENAME: &str = "safe-outputs-executed.ndjson";
+
 /// Parse NDJSON content into a vector of JSON values
 pub fn parse_ndjson(content: &str) -> Result<Vec<Value>> {
     if content.trim().is_empty() {

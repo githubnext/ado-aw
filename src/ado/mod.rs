@@ -12,6 +12,7 @@
 use anyhow::{Context, Result};
 use log::{debug, info, warn};
 use serde::Deserialize;
+use std::io::Write;
 use std::path::Path;
 
 use crate::detect;
@@ -29,20 +30,30 @@ pub async fn try_azure_cli_token() -> Result<String> {
     let output = if cfg!(windows) {
         tokio::process::Command::new("cmd")
             .args([
-                "/C", "az", "account", "get-access-token",
-                "--resource", ADO_RESOURCE_ID,
-                "--query", "accessToken",
-                "-o", "tsv",
+                "/C",
+                "az",
+                "account",
+                "get-access-token",
+                "--resource",
+                ADO_RESOURCE_ID,
+                "--query",
+                "accessToken",
+                "-o",
+                "tsv",
             ])
             .output()
             .await
     } else {
         tokio::process::Command::new("az")
             .args([
-                "account", "get-access-token",
-                "--resource", ADO_RESOURCE_ID,
-                "--query", "accessToken",
-                "-o", "tsv",
+                "account",
+                "get-access-token",
+                "--resource",
+                ADO_RESOURCE_ID,
+                "--query",
+                "accessToken",
+                "-o",
+                "tsv",
             ])
             .output()
             .await
@@ -119,8 +130,7 @@ pub fn parse_ado_remote(remote_url: &str) -> Result<AdoContext> {
 
     // HTTPS format: https://dev.azure.com/{org}/{project}/_git/{repo}
     if url.contains("dev.azure.com") {
-        let url_parsed =
-            url::Url::parse(url).with_context(|| format!("Invalid URL: {}", url))?;
+        let url_parsed = url::Url::parse(url).with_context(|| format!("Invalid URL: {}", url))?;
         let segments: Vec<&str> = url_parsed
             .path_segments()
             .map(|s| s.collect())
@@ -139,8 +149,7 @@ pub fn parse_ado_remote(remote_url: &str) -> Result<AdoContext> {
 
     // Legacy format: https://{org}.visualstudio.com/{project}/_git/{repo}
     if url.contains(".visualstudio.com") {
-        let url_parsed =
-            url::Url::parse(url).with_context(|| format!("Invalid URL: {}", url))?;
+        let url_parsed = url::Url::parse(url).with_context(|| format!("Invalid URL: {}", url))?;
         let host = url_parsed.host_str().unwrap_or("");
         let org = host.strip_suffix(".visualstudio.com").unwrap_or(host);
         let segments: Vec<&str> = url_parsed
@@ -319,7 +328,8 @@ pub async fn list_definitions(
 
         debug!("Listing definitions: {}", base_url);
 
-        let mut request = auth.apply(client.get(&base_url))
+        let mut request = auth
+            .apply(client.get(&base_url))
             .query(&[("includeAllProperties", "true"), ("api-version", "7.1")]);
         if let Some(ref token) = continuation_token {
             request = request.query(&[("continuationToken", token)]);
@@ -347,16 +357,18 @@ pub async fn list_definitions(
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
-        let body = resp.text().await.context("Failed to read definitions response body")?;
-        let response: DefinitionListResponse = serde_json::from_str(&body)
-            .with_context(|| {
-                let snippet: String = body.chars().take(500).collect();
-                format!(
-                    "Failed to parse definitions response as JSON. \
+        let body = resp
+            .text()
+            .await
+            .context("Failed to read definitions response body")?;
+        let response: DefinitionListResponse = serde_json::from_str(&body).with_context(|| {
+            let snippet: String = body.chars().take(500).collect();
+            format!(
+                "Failed to parse definitions response as JSON. \
                      This usually means the PAT is invalid or expired. \
                      Response body (first 500 chars):\n{snippet}"
-                )
-            })?;
+            )
+        })?;
 
         all_definitions.extend(response.value);
 
@@ -387,7 +399,10 @@ pub enum FuzzyMatchResult {
 /// Checks if any definition name contains the agent name (with hyphens also
 /// tried as spaces). Returns `Single(index)` for an unambiguous match,
 /// `Ambiguous` when multiple definitions match, or `None` when nothing matches.
-pub fn fuzzy_match_by_name(agent_name: &str, definitions: &[DefinitionSummary]) -> FuzzyMatchResult {
+pub fn fuzzy_match_by_name(
+    agent_name: &str,
+    definitions: &[DefinitionSummary],
+) -> FuzzyMatchResult {
     if agent_name.is_empty() {
         return FuzzyMatchResult::None;
     }
@@ -442,7 +457,8 @@ pub fn match_definitions_in(
             .map(|f| normalize_ado_yaml_path(f));
         debug!(
             "ADO definition: '{}' (id={}) yamlFilename={:?} normalized={:?}",
-            def.name, def.id,
+            def.name,
+            def.id,
             def.process.as_ref().and_then(|p| p.yaml_filename.as_ref()),
             yaml_path
         );
@@ -565,7 +581,10 @@ pub async fn get_definition_name(
     let resp = match auth.apply(client.get(&url)).send().await {
         Ok(r) => r,
         Err(e) => {
-            debug!("Failed to fetch name for definition {}: {:?}", definition_id, e);
+            debug!(
+                "Failed to fetch name for definition {}: {:?}",
+                definition_id, e
+            );
             return None;
         }
     };
@@ -582,7 +601,10 @@ pub async fn get_definition_name(
     let body: serde_json::Value = match resp.json().await {
         Ok(b) => b,
         Err(e) => {
-            debug!("Failed to parse response for definition {}: {:?}", definition_id, e);
+            debug!(
+                "Failed to parse response for definition {}: {:?}",
+                definition_id, e
+            );
             return None;
         }
     };
@@ -604,7 +626,10 @@ pub async fn get_definition_name(
 /// while the literal mask would overwrite it. Normalize the masked form
 /// before mutating the definition and PUTting it back.
 pub(crate) fn normalize_masked_secret_variable_values(definition: &mut serde_json::Value) {
-    let Some(vars) = definition.get_mut("variables").and_then(|v| v.as_object_mut()) else {
+    let Some(vars) = definition
+        .get_mut("variables")
+        .and_then(|v| v.as_object_mut())
+    else {
         return;
     };
 
@@ -631,7 +656,12 @@ pub async fn update_pipeline_variable(
 ) -> Result<()> {
     let mut definition = get_definition_full(client, ctx, auth, definition_id)
         .await
-        .with_context(|| format!("Failed to fetch definition {} before updating", definition_id))?;
+        .with_context(|| {
+            format!(
+                "Failed to fetch definition {} before updating",
+                definition_id
+            )
+        })?;
     normalize_masked_secret_variable_values(&mut definition);
 
     // Ensure variables object exists
@@ -703,7 +733,10 @@ pub async fn resolve_auth(pat: Option<&str>) -> Result<AdoAuth> {
                     Ok(AdoAuth::Bearer(token))
                 }
                 Err(e) => {
-                    warn!("Azure CLI auth failed: {:#}. Falling back to interactive prompt.", e);
+                    warn!(
+                        "Azure CLI auth failed: {:#}. Falling back to interactive prompt.",
+                        e
+                    );
                     let pat = inquire::Password::new("Enter your Azure DevOps PAT:")
                         .without_confirmation()
                         .prompt()
@@ -753,21 +786,18 @@ pub async fn resolve_ado_context(
     org: Option<&str>,
     project: Option<&str>,
 ) -> Result<AdoContext> {
-    let remote_ctx = get_git_remote_url(repo_path)
-        .await
-        .ok()
-        .and_then(|url| {
-            info!("Git remote: {}", url);
-            match parse_ado_remote(&url) {
-                Ok(ctx) => Some(ctx),
-                Err(e) => {
-                    debug!("Git remote is not an ADO URL: {:#}", e);
-                    None
-                }
+    let remote_ctx = get_git_remote_url(repo_path).await.ok().and_then(|url| {
+        info!("Git remote: {}", url);
+        match parse_ado_remote(&url) {
+            Ok(ctx) => Some(ctx),
+            Err(e) => {
+                debug!("Git remote is not an ADO URL: {:#}", e);
+                None
             }
-        });
+        }
+    });
 
-    match (remote_ctx, org, project) {
+    let mut ctx = match (remote_ctx, org, project) {
         // Git remote parsed — apply overrides
         (Some(mut ctx), org, project) => {
             if let Some(org) = org {
@@ -776,22 +806,35 @@ pub async fn resolve_ado_context(
             if let Some(project) = project {
                 ctx.project = project.to_string();
             }
-            Ok(ctx)
+            ctx
         }
         // No usable remote — require explicit --org and --project
         (None, Some(org), Some(project)) => {
             info!("No ADO git remote; using --org and --project");
-            Ok(AdoContext {
+            AdoContext {
                 org_url: normalize_org_url(org),
                 project: project.to_string(),
                 repo_name: String::new(),
-            })
+            }
         }
         (None, _, _) => {
             anyhow::bail!(
                 "Could not determine ADO context: no ADO git remote found and --org/--project not both provided.\n\
                  When using --definition-ids outside an ADO repo, both --org and --project are required."
             );
+        }
+    };
+
+    apply_test_org_url_override(&mut ctx);
+    Ok(ctx)
+}
+
+#[doc(hidden)]
+fn apply_test_org_url_override(ctx: &mut AdoContext) {
+    if let Ok(org_url) = std::env::var("ADO_AW_TEST_ORG_URL") {
+        let org_url = org_url.trim().trim_end_matches('/');
+        if !org_url.is_empty() {
+            ctx.org_url = org_url.to_string();
         }
     }
 }
@@ -1016,7 +1059,10 @@ pub async fn patch_queue_status(
         id
     );
 
-    debug!("PUT definition {} with queueStatus={}: {}", id, status, put_url);
+    debug!(
+        "PUT definition {} with queueStatus={}: {}",
+        id, status, put_url
+    );
 
     let resp = auth
         .apply(client.put(&put_url))
@@ -1245,11 +1291,12 @@ pub async fn get_latest_build(
 
     debug!("GET latest build for definition {}: {}", definition_id, url);
 
-    let resp = auth
-        .apply(client.get(&url))
-        .send()
-        .await
-        .with_context(|| format!("Failed to fetch latest build for definition {}", definition_id))?;
+    let resp = auth.apply(client.get(&url)).send().await.with_context(|| {
+        format!(
+            "Failed to fetch latest build for definition {}",
+            definition_id
+        )
+    })?;
 
     let status = resp.status();
     if !status.is_success() {
@@ -1272,6 +1319,288 @@ pub async fn get_latest_build(
         .and_then(|v| v.as_array())
         .and_then(|a| a.first())
         .cloned())
+}
+
+/// A single build artifact returned by the ADO REST API.
+///
+/// Shape comes from `GET _apis/build/builds/{buildId}/artifacts`.
+/// We surface only the fields the audit consumes; unknown fields are
+/// dropped on deserialization.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildArtifact {
+    pub id: u64,
+    pub name: String,
+    pub source: Option<String>,
+    pub resource: BuildArtifactResource,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildArtifactResource {
+    /// "PipelineArtifact" for `- publish:` steps, "Container" for legacy.
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub data: Option<String>,
+    pub properties: Option<serde_json::Value>,
+    pub url: Option<String>,
+    pub download_url: Option<String>,
+}
+
+/// List all artifacts published by a build.
+///
+/// Calls `GET /_apis/build/builds/{buildId}/artifacts?api-version=7.1`.
+/// Returns the full `value` array — callers filter by `name` themselves.
+///
+/// Returns an empty vec when the build has not published any artifacts
+/// (HTTP 200 with `value: []`) — that is NOT an error.
+///
+/// Mirrors the style of `get_build` (status-code check, body capture,
+/// debug! logging).
+pub async fn list_build_artifacts(
+    client: &reqwest::Client,
+    ctx: &AdoContext,
+    auth: &AdoAuth,
+    build_id: u64,
+) -> Result<Vec<BuildArtifact>> {
+    #[derive(Deserialize)]
+    struct BuildArtifactListResponse {
+        value: Vec<BuildArtifact>,
+    }
+
+    let url = format!(
+        "{}/{}/_apis/build/builds/{}/artifacts?api-version=7.1",
+        ctx.org_url.trim_end_matches('/'),
+        percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
+        build_id
+    );
+
+    debug!("GET build artifacts for build {}: {}", build_id, url);
+
+    let resp = auth
+        .apply(client.get(&url))
+        .send()
+        .await
+        .with_context(|| format!("Failed to fetch build artifacts for build {}", build_id))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(anyhow::anyhow!(
+                "ADO API returned {} when listing build artifacts for build {}: {}. This call requires PAT scopes Build (Read) and Build Artifacts (Read). As a manual alternative, try `az pipelines runs artifact list --run-id {}`.",
+                status,
+                build_id,
+                body,
+                build_id
+            ));
+        }
+        anyhow::bail!(
+            "ADO API returned {} when listing build artifacts for build {}: {}",
+            status,
+            build_id,
+            body
+        );
+    }
+
+    let body = resp.text().await.with_context(|| {
+        format!(
+            "Failed to read build artifacts response body for build {}",
+            build_id
+        )
+    })?;
+    let response: BuildArtifactListResponse = serde_json::from_str(&body).with_context(|| {
+        let snippet: String = body.chars().take(500).collect();
+        format!(
+            "Failed to parse build artifacts response for build {} as JSON. Response body (first 500 chars):\n{snippet}",
+            build_id
+        )
+    })?;
+
+    Ok(response.value)
+}
+
+/// Download a single build artifact and unzip it into `dest_dir`.
+///
+/// ADO PipelineArtifacts are delivered as a zip; this helper follows the
+/// signed `downloadUrl`, streams the response, and extracts it under
+/// `dest_dir/{artifact.name}/...`.
+///
+/// On HTTP 401/403, returns a structured error whose message lists the
+/// required PAT scopes (`Build (Read)`, `Build Artifacts (Read)`) and
+/// suggests the `az pipelines runs artifact download --run-id <id>
+/// --artifact-name <name> --path <dir>` escape hatch.
+///
+/// If `artifact.resource.download_url` is `None`, returns an error
+/// explaining that the artifact resource type is not downloadable
+/// (legacy `Container` artifacts use a different endpoint we do not
+/// support yet).
+pub async fn download_build_artifact(
+    client: &reqwest::Client,
+    auth: &AdoAuth,
+    artifact: &BuildArtifact,
+    dest_dir: &std::path::Path,
+) -> Result<()> {
+    let download_url = artifact.resource.download_url.as_deref().with_context(|| {
+        format!(
+            "Build artifact '{}' has no download URL. Artifact resource type '{}' is not downloadable via this helper yet (legacy Container artifacts use a different endpoint).",
+            artifact.name,
+            artifact.resource.kind
+        )
+    })?;
+
+    std::fs::create_dir_all(dest_dir).with_context(|| {
+        format!(
+            "Failed to create artifact destination directory '{}'",
+            dest_dir.display()
+        )
+    })?;
+
+    let artifact_dir = dest_dir.join(&artifact.name);
+    if artifact_dir.exists() {
+        std::fs::remove_dir_all(&artifact_dir).with_context(|| {
+            format!(
+                "Failed to remove existing artifact directory '{}'",
+                artifact_dir.display()
+            )
+        })?;
+    }
+    std::fs::create_dir_all(&artifact_dir).with_context(|| {
+        format!(
+            "Failed to create artifact extraction directory '{}'",
+            artifact_dir.display()
+        )
+    })?;
+
+    debug!(
+        "Downloading build artifact '{}' from {}",
+        artifact.name, download_url
+    );
+
+    let mut resp = client
+        .get(download_url)
+        .send()
+        .await
+        .with_context(|| format!("Failed to download build artifact '{}'", artifact.name))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            let run_id_hint = artifact.source.as_deref().unwrap_or("<build-id>");
+            let _ = auth;
+            return Err(anyhow::anyhow!(
+                "ADO API returned {} when downloading build artifact '{}': {}. This call requires PAT scopes Build (Read) and Build Artifacts (Read). As a manual alternative, try `az pipelines runs artifact download --run-id {} --artifact-name {} --path {}`.",
+                status,
+                artifact.name,
+                body,
+                run_id_hint,
+                artifact.name,
+                dest_dir.display()
+            ));
+        }
+        anyhow::bail!(
+            "ADO API returned {} when downloading build artifact '{}': {}",
+            status,
+            artifact.name,
+            body
+        );
+    }
+
+    let mut temp_zip = tempfile::Builder::new()
+        .prefix(&format!(".tmp-{}-", artifact.id))
+        .suffix(".zip")
+        .tempfile_in(dest_dir)
+        .with_context(|| {
+            format!(
+                "Failed to create temp zip for build artifact '{}'",
+                artifact.name
+            )
+        })?;
+
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .with_context(|| format!("Failed to stream build artifact '{}'", artifact.name))?
+    {
+        temp_zip.write_all(&chunk).with_context(|| {
+            format!(
+                "Failed to write temp zip for build artifact '{}'",
+                artifact.name
+            )
+        })?;
+    }
+    temp_zip.flush().with_context(|| {
+        format!(
+            "Failed to flush temp zip for build artifact '{}'",
+            artifact.name
+        )
+    })?;
+
+    let archive_file = temp_zip.reopen().with_context(|| {
+        format!(
+            "Failed to reopen temp zip for build artifact '{}'",
+            artifact.name
+        )
+    })?;
+    let mut archive = zip::ZipArchive::new(archive_file).with_context(|| {
+        format!(
+            "Failed to read downloaded zip for build artifact '{}'",
+            artifact.name
+        )
+    })?;
+
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).with_context(|| {
+            format!(
+                "Failed to read zip entry {} from build artifact '{}'",
+                index, artifact.name
+            )
+        })?;
+        let entry_name = entry.name().to_string();
+        let relative_path = entry
+            .enclosed_name()
+            .map(|path| path.to_owned())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Refusing to extract unsafe path '{}' from build artifact '{}'",
+                    entry_name,
+                    artifact.name
+                )
+            })?;
+        let output_path = artifact_dir.join(&relative_path);
+
+        if entry.is_dir() {
+            std::fs::create_dir_all(&output_path).with_context(|| {
+                format!(
+                    "Failed to create extracted directory '{}'",
+                    output_path.display()
+                )
+            })?;
+            continue;
+        }
+
+        if let Some(parent) = output_path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create parent directory '{}'", parent.display())
+            })?;
+        }
+
+        let mut output = std::fs::File::create(&output_path).with_context(|| {
+            format!(
+                "Failed to create extracted file '{}'",
+                output_path.display()
+            )
+        })?;
+        std::io::copy(&mut entry, &mut output).with_context(|| {
+            format!(
+                "Failed to extract '{}' from build artifact '{}'",
+                entry_name, artifact.name
+            )
+        })?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1361,10 +1690,7 @@ mod tests {
 
     #[test]
     fn normalize_org_url_accepts_bare_name() {
-        assert_eq!(
-            normalize_org_url("myorg"),
-            "https://dev.azure.com/myorg"
-        );
+        assert_eq!(normalize_org_url("myorg"), "https://dev.azure.com/myorg");
     }
 
     #[test]
@@ -1618,9 +1944,76 @@ mod tests {
 
     #[test]
     fn path_segment_handles_non_ascii() {
-        let encoded =
-            percent_encoding::utf8_percent_encode("café-π", PATH_SEGMENT).to_string();
+        let encoded = percent_encoding::utf8_percent_encode("café-π", PATH_SEGMENT).to_string();
         // Non-ASCII bytes get encoded per UTF-8.
         assert_eq!(encoded, "caf%C3%A9-%CF%80");
+    }
+
+    #[test]
+    fn build_artifact_deserializes_pipeline_artifact_response() {
+        #[derive(Deserialize)]
+        struct BuildArtifactListResponse {
+            value: Vec<BuildArtifact>,
+        }
+
+        let raw = serde_json::json!({
+            "count": 1,
+            "value": [
+                {
+                    "id": 1,
+                    "name": "agent_outputs_42",
+                    "source": "42",
+                    "resource": {
+                        "type": "PipelineArtifact",
+                        "data": "#/123/agent_outputs_42",
+                        "url": "https://dev.azure.com/example/project/_apis/build/builds/42/artifacts?artifactName=agent_outputs_42",
+                        "downloadUrl": "https://example.invalid/download/agent_outputs_42.zip"
+                    }
+                }
+            ]
+        });
+
+        let response: BuildArtifactListResponse = serde_json::from_value(raw).unwrap();
+        let artifact = &response.value[0];
+        assert_eq!(artifact.id, 1);
+        assert_eq!(artifact.name, "agent_outputs_42");
+        assert_eq!(artifact.source.as_deref(), Some("42"));
+        assert_eq!(artifact.resource.kind, "PipelineArtifact");
+        assert_eq!(
+            artifact.resource.download_url.as_deref(),
+            Some("https://example.invalid/download/agent_outputs_42.zip")
+        );
+    }
+
+    #[tokio::test]
+    async fn download_build_artifact_errors_when_download_url_is_missing() {
+        let artifact = BuildArtifact {
+            id: 1,
+            name: "safe_outputs".to_string(),
+            source: Some("42".to_string()),
+            resource: BuildArtifactResource {
+                kind: "Container".to_string(),
+                data: None,
+                properties: None,
+                url: None,
+                download_url: None,
+            },
+        };
+        let client = reqwest::Client::new();
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let error = download_build_artifact(
+            &client,
+            &AdoAuth::Pat("test".to_string()),
+            &artifact,
+            temp_dir.path(),
+        )
+        .await
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("no download URL") || message.contains("not downloadable"),
+            "unexpected error message: {message}"
+        );
     }
 }

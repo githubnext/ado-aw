@@ -35,6 +35,8 @@ base64 = "0.22.1"
 glob-match = "0.2.1"
 similar = "3.1.0"
 sha2 = "0.11.0"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["blocking"] }
+wiremock = "0.6"

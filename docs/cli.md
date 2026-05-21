@@ -117,6 +117,16 @@ Both flags route through `ado-aw`'s `discover_ado_aw_pipelines` machinery, which
   - `--timeout <secs>` - Hard cap on the polling loop when `--wait` is set (default 1800).
   - `--dry-run` - Print the planned `templateParameters` body without calling the ADO API.
 
+- `audit <build-id-or-url>` - Audit a single Azure DevOps build: download the known stage artifacts, run the audit analyzers, and render a structured console report or `AuditData` JSON.
+  - `-o, --output <dir>` - Output directory for downloaded artifacts and reports. Defaults to `./logs`; the run is stored under `<dir>/build-<id>/`.
+  - `--json` - Emit machine-readable JSON (`AuditData`) instead of the console report. Suppresses the trailing `Audit complete` stderr line.
+  - `--org <url>` - Override: Azure DevOps organization (used when the input is a bare build ID). Full build URLs provide the host / org directly.
+  - `--project <name>` - Override: Azure DevOps project name (used when the input is a bare build ID). Full build URLs provide the project directly.
+  - `--pat <pat>` / `AZURE_DEVOPS_EXT_PAT` env var - PAT for ADO API authentication (Azure CLI fallback if omitted).
+  - `--artifacts <set[,set...]>` - Restrict download + analysis to the named sets: `agent`, `detection`, `safe-outputs` (`safe_outputs` is also accepted). Defaults to all three.
+  - `--no-cache` - Ignore `<output>/build-<id>/run-summary.json` and re-process the build.
+  - See [`audit.md`](audit.md) for accepted build-reference formats, output layout, cache semantics, and the `AuditData` report shape.
+
 ### Hidden Build-Time Tools
 
 These commands are not shown in `--help` but are available for contributors working on the ado-aw compiler itself:

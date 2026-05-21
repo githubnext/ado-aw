@@ -3,25 +3,27 @@
 //! After the agent (Stage 1) generates safe outputs as an NDJSON file,
 //! Stage 3 parses this file and executes the corresponding actions.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use chrono::{SecondsFormat, Utc};
 use log::{debug, error, info, warn};
-use serde::de::DeserializeOwned;
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncWriteExt;
 
-use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
-use crate::sanitize::neutralize_pipeline_commands;
+use crate::ndjson::{self, EXECUTED_NDJSON_FILENAME, SAFE_OUTPUT_FILENAME};
 use crate::safeoutputs::{
-    AddBuildTagResult, AddPrCommentResult, CreateBranchResult, CreateGitTagResult,
-    CreateIssueResult, CreatePrResult, CreateWikiPageResult, CreateWorkItemResult,
-    CommentOnWorkItemResult, ExecutionContext, ExecutionResult, Executor,
-    LinkWorkItemsResult, MissingDataResult, MissingToolResult, NoopResult,
-    QueueBuildResult, ReplyToPrCommentResult, ReportIncompleteResult,
-    ResolvePrThreadResult, SubmitPrReviewResult, ToolResult, UpdatePrResult,
-    UpdateWikiPageResult, UpdateWorkItemResult, UploadBuildAttachmentResult,
+    AddBuildTagResult, AddPrCommentResult, CommentOnWorkItemResult, CreateBranchResult,
+    CreateGitTagResult, CreateIssueResult, CreatePrResult, CreateWikiPageResult,
+    CreateWorkItemResult, ExecutionContext, ExecutionResult, Executor, LinkWorkItemsResult,
+    MissingDataResult, MissingToolResult, NoopResult, QueueBuildResult, ReplyToPrCommentResult,
+    ReportIncompleteResult, ResolvePrThreadResult, SubmitPrReviewResult, ToolResult,
+    UpdatePrResult, UpdateWikiPageResult, UpdateWorkItemResult, UploadBuildAttachmentResult,
     UploadPipelineArtifactResult, UploadWorkitemAttachmentResult,
 };
+use crate::sanitize::neutralize_pipeline_commands;
 
 // Re-export memory types for use by main.rs
 pub use crate::tools::cache_memory::{MemoryConfig, process_agent_memory};
@@ -106,12 +108,29 @@ pub async fn execute_safe_outputs(
     let mut results = Vec::new();
     for (i, entry) in entries.iter().enumerate() {
         let entry_json = serde_json::to_string(entry).unwrap_or_else(|_| "<invalid>".to_string());
-        debug!("[{}/{}] Executing entry: {}", i + 1, entries.len(), entry_json);
+        let proposal_context = entry.get("context").and_then(|value| value.as_str());
+        let proposal_tool_name = entry
+            .get("name")
+            .and_then(|name| name.as_str())
+            .unwrap_or("unknown");
+        debug!(
+            "[{}/{}] Executing entry: {}",
+            i + 1,
+            entries.len(),
+            entry_json
+        );
 
         // Generic budget enforcement: skip excess entries rather than aborting the whole batch.
         // Budget is consumed before execution so that failed attempts (target policy rejection,
         // network errors) still count — this prevents unbounded retries against a failing endpoint.
         if let Some(result) = enforce_budget(entry, &mut budgets, entries.len(), i) {
+            append_execution_record(
+                safe_output_dir,
+                proposal_tool_name,
+                &result,
+                proposal_context,
+            )
+            .await;
             results.push(result);
             continue;
         }
@@ -119,6 +138,8 @@ pub async fn execute_safe_outputs(
         match execute_safe_output(entry, ctx).await {
             Ok((tool_name, result)) => {
                 log_and_print_entry_result(i, entries.len(), &tool_name, &result);
+                append_execution_record(safe_output_dir, &tool_name, &result, proposal_context)
+                    .await;
                 results.push(result);
             }
             Err(e) => {
@@ -127,13 +148,23 @@ pub async fn execute_safe_outputs(
                 let safe_msg = neutralize_pipeline_commands(&raw_msg);
                 let result = ExecutionResult::failure(safe_msg);
                 println!("[{}/{}] ✗ - {}", i + 1, entries.len(), result.message);
+                append_execution_record(
+                    safe_output_dir,
+                    proposal_tool_name,
+                    &result,
+                    proposal_context,
+                )
+                .await;
                 results.push(result);
             }
         }
     }
 
     // Log final summary
-    let success_count = results.iter().filter(|r| r.success && !r.is_warning()).count();
+    let success_count = results
+        .iter()
+        .filter(|r| r.success && !r.is_warning())
+        .count();
     let warning_count = results.iter().filter(|r| r.is_warning()).count();
     let failure_count = results.iter().filter(|r| !r.success).count();
     info!(
@@ -149,20 +180,37 @@ fn log_execution_context(safe_output_dir: &Path, ctx: &ExecutionContext) {
     info!("Stage 3 execution starting");
     debug!("Safe output directory: {}", safe_output_dir.display());
     debug!("Source directory: {}", ctx.source_directory.display());
-    debug!("ADO org: {}", ctx.ado_org_url.as_deref().unwrap_or("<not set>"));
-    debug!("ADO project: {}", ctx.ado_project.as_deref().unwrap_or("<not set>"));
-    debug!("Repository ID: {}", ctx.repository_id.as_deref().unwrap_or("<not set>"));
-    debug!("Repository name: {}", ctx.repository_name.as_deref().unwrap_or("<not set>"));
+    debug!(
+        "ADO org: {}",
+        ctx.ado_org_url.as_deref().unwrap_or("<not set>")
+    );
+    debug!(
+        "ADO project: {}",
+        ctx.ado_project.as_deref().unwrap_or("<not set>")
+    );
+    debug!(
+        "Repository ID: {}",
+        ctx.repository_id.as_deref().unwrap_or("<not set>")
+    );
+    debug!(
+        "Repository name: {}",
+        ctx.repository_name.as_deref().unwrap_or("<not set>")
+    );
     debug!(
         "Build ID: {}",
         ctx.build_id
             .map(|id| id.to_string())
             .unwrap_or_else(|| "<not set>".to_string())
     );
-    debug!("Build reason: {}", ctx.build_reason.as_deref().unwrap_or("<not set>"));
+    debug!(
+        "Build reason: {}",
+        ctx.build_reason.as_deref().unwrap_or("<not set>")
+    );
     debug!(
         "Triggered by definition: {}",
-        ctx.triggered_by_definition_name.as_deref().unwrap_or("<not set>")
+        ctx.triggered_by_definition_name
+            .as_deref()
+            .unwrap_or("<not set>")
     );
     if !ctx.allowed_repositories.is_empty() {
         debug!(
@@ -209,15 +257,136 @@ fn enforce_budget(
 /// Log and print the outcome of a single safe-output execution.
 fn log_and_print_entry_result(i: usize, total: usize, tool_name: &str, result: &ExecutionResult) {
     if result.is_warning() {
-        warn!("[{}/{}] {} warning: {}", i + 1, total, tool_name, result.message);
+        warn!(
+            "[{}/{}] {} warning: {}",
+            i + 1,
+            total,
+            tool_name,
+            result.message
+        );
     } else if result.success {
-        info!("[{}/{}] {} succeeded: {}", i + 1, total, tool_name, result.message);
+        info!(
+            "[{}/{}] {} succeeded: {}",
+            i + 1,
+            total,
+            tool_name,
+            result.message
+        );
     } else {
-        warn!("[{}/{}] {} failed: {}", i + 1, total, tool_name, result.message);
+        warn!(
+            "[{}/{}] {} failed: {}",
+            i + 1,
+            total,
+            tool_name,
+            result.message
+        );
     }
-    let symbol = if result.is_warning() { "⚠" } else if result.success { "✓" } else { "✗" };
+    let symbol = if result.is_warning() {
+        "⚠"
+    } else if result.success {
+        "✓"
+    } else {
+        "✗"
+    };
     let safe_msg = neutralize_pipeline_commands(&result.message);
-    println!("[{}/{}] {} - {} - {}", i + 1, total, tool_name, symbol, safe_msg);
+    println!(
+        "[{}/{}] {} - {} - {}",
+        i + 1,
+        total,
+        tool_name,
+        symbol,
+        safe_msg
+    );
+}
+
+#[derive(Serialize)]
+struct ExecutionRecord {
+    name: String,
+    status: &'static str,
+    context: Option<String>,
+    result: Option<Value>,
+    error: Option<String>,
+    timestamp: String,
+}
+
+fn is_budget_exhausted(result: &ExecutionResult) -> bool {
+    !result.success
+        && result.message.starts_with("Skipped")
+        && result.message.contains("maximum ")
+        && result.message.contains("already reached")
+}
+
+fn execution_record_status(result: &ExecutionResult) -> &'static str {
+    if is_budget_exhausted(result) {
+        "budget_exhausted"
+    } else if result.is_warning() {
+        "skipped"
+    } else if result.success {
+        "succeeded"
+    } else {
+        "failed"
+    }
+}
+
+async fn append_execution_record_impl(
+    safe_output_dir: &Path,
+    tool_name: &str,
+    result: &ExecutionResult,
+    proposal_context: Option<&str>,
+) -> Result<()> {
+    let status = execution_record_status(result);
+    let record = ExecutionRecord {
+        name: tool_name.replace('-', "_"),
+        status,
+        context: proposal_context.map(str::to_owned),
+        result: if status == "succeeded" {
+            result.data.clone()
+        } else {
+            None
+        },
+        error: if status == "succeeded" {
+            None
+        } else {
+            Some(result.message.clone())
+        },
+        timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+    };
+    let line =
+        serde_json::to_string(&record).context("Failed to serialize execution record")? + "\n";
+    let path = safe_output_dir.join(EXECUTED_NDJSON_FILENAME);
+    let mut file = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&path)
+        .await
+        .with_context(|| format!("Failed to open executed NDJSON file: {}", path.display()))?;
+    file.write_all(line.as_bytes())
+        .await
+        .with_context(|| format!("Failed to append executed NDJSON file: {}", path.display()))?;
+    file.flush()
+        .await
+        .with_context(|| format!("Failed to flush executed NDJSON file: {}", path.display()))?;
+    Ok(())
+}
+
+/// Append one execution record to `<safe_output_dir>/safe-outputs-executed.ndjson`,
+/// creating the file on first call. Errors are logged at WARN level and swallowed —
+/// failing to append to the audit log must never break Stage 3 execution.
+pub async fn append_execution_record(
+    safe_output_dir: &Path,
+    tool_name: &str,
+    result: &ExecutionResult,
+    proposal_context: Option<&str>,
+) {
+    if let Err(err) =
+        append_execution_record_impl(safe_output_dir, tool_name, result, proposal_context).await
+    {
+        warn!(
+            "Failed to append execution record for {}: {}",
+            tool_name,
+            neutralize_pipeline_commands(&err.to_string())
+        );
+    }
 }
 
 /// Parse a JSON entry as `T` and run it through `execute_sanitized`.
@@ -265,10 +434,12 @@ pub async fn execute_safe_output(
     // Dispatch based on tool name. All registered tools go through `dispatch_tool`,
     // which handles deserialization and sanitized execution uniformly.
     // The dispatch is split across category helpers to keep each function's complexity low.
-    let result = find_tool_executor(tool_name, entry, ctx).await?.ok_or_else(|| {
-        error!("Unknown tool type: {}", tool_name);
-        anyhow::anyhow!("Unknown tool type: {}. No executor registered.", tool_name)
-    })?;
+    let result = find_tool_executor(tool_name, entry, ctx)
+        .await?
+        .ok_or_else(|| {
+            error!("Unknown tool type: {}", tool_name);
+            anyhow::anyhow!("Unknown tool type: {}. No executor registered.", tool_name)
+        })?;
 
     Ok((tool_name.to_string(), result))
 }
@@ -397,7 +568,11 @@ fn extract_entry_context(entry: &Value) -> String {
         let clean: String = title.chars().filter(|c| !c.is_control()).collect();
         let clean = neutralize_pipeline_commands(&clean);
         let truncated: &str = if clean.chars().count() > 40 {
-            &clean[..clean.char_indices().nth(40).map(|(i, _)| i).unwrap_or(clean.len())]
+            &clean[..clean
+                .char_indices()
+                .nth(40)
+                .map(|(i, _)| i)
+                .unwrap_or(clean.len())]
         } else {
             &clean
         };
@@ -598,7 +773,10 @@ mod tests {
         // noop always attempts to file a work item; without ADO credentials it
         // returns a warning (success=true) rather than failing hard.
         assert!(result.success);
-        assert!(result.is_warning(), "noop without credentials should be a warning");
+        assert!(
+            result.is_warning(),
+            "noop without credentials should be a warning"
+        );
         assert!(
             result.message.contains("not set"),
             "noop warning should mention missing config, got: {}",
@@ -618,7 +796,10 @@ mod tests {
         // missing-tool always attempts to file a work item; without ADO credentials
         // it returns a warning (success=true) rather than failing hard.
         assert!(result.success);
-        assert!(result.is_warning(), "missing-tool without credentials should be a warning");
+        assert!(
+            result.is_warning(),
+            "missing-tool without credentials should be a warning"
+        );
         assert!(
             result.message.contains("not set"),
             "missing-tool warning should mention missing config, got: {}",
@@ -652,6 +833,12 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert!(results[0].success);
         assert!(results[1].success);
+
+        let manifest = read_executed_manifest(&temp_dir).await;
+        assert_eq!(manifest.len(), 2);
+        assert_eq!(manifest[0]["status"], "skipped");
+        assert_eq!(manifest[0]["context"], "test1");
+        assert_eq!(manifest[1]["status"], "skipped");
     }
 
     #[tokio::test]
@@ -663,6 +850,82 @@ mod tests {
         let ctx = ExecutionContext::default();
         let results = execute_safe_outputs(temp_dir.path(), &ctx).await.unwrap();
         assert!(results.is_empty());
+    }
+
+    async fn read_executed_manifest(temp_dir: &tempfile::TempDir) -> Vec<Value> {
+        ndjson::read_ndjson_file(&temp_dir.path().join(EXECUTED_NDJSON_FILENAME))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_execute_safe_outputs_writes_success_manifest_records() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let safe_output_path = temp_dir.path().join(SAFE_OUTPUT_FILENAME);
+        let ndjson = r#"{"name":"noop","context":"first noop"}
+{"name":"noop","context":"second noop"}
+"#;
+        tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
+
+        let ctx = ExecutionContext {
+            dry_run: true,
+            ..Default::default()
+        };
+        let results = execute_safe_outputs(temp_dir.path(), &ctx).await.unwrap();
+        assert_eq!(results.len(), 2);
+
+        let executed_path = temp_dir.path().join(EXECUTED_NDJSON_FILENAME);
+        assert!(executed_path.exists(), "executed manifest should exist");
+
+        let manifest = read_executed_manifest(&temp_dir).await;
+        assert_eq!(manifest.len(), 2);
+        assert_eq!(manifest[0]["name"], "noop");
+        assert_eq!(manifest[0]["status"], "succeeded");
+        assert_eq!(manifest[0]["context"], "first noop");
+        assert!(manifest[0]["error"].is_null());
+        assert_eq!(manifest[1]["name"], "noop");
+        assert_eq!(manifest[1]["status"], "succeeded");
+        assert_eq!(manifest[1]["context"], "second noop");
+        assert!(manifest[1]["error"].is_null());
+    }
+
+    #[tokio::test]
+    async fn test_execute_safe_outputs_writes_mixed_success_failure_manifest_records() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let safe_output_path = temp_dir.path().join(SAFE_OUTPUT_FILENAME);
+        let ndjson = r#"{"name":"noop","context":"ok"}
+{"name":"unknown_tool","context":"bad"}
+"#;
+        tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
+
+        let ctx = ExecutionContext {
+            dry_run: true,
+            ..Default::default()
+        };
+        let results = execute_safe_outputs(temp_dir.path(), &ctx).await.unwrap();
+        assert_eq!(results.len(), 2);
+
+        let manifest = read_executed_manifest(&temp_dir).await;
+        assert_eq!(manifest.len(), 2);
+        assert_eq!(manifest[0]["name"], "noop");
+        assert_eq!(manifest[0]["status"], "succeeded");
+        assert_eq!(manifest[1]["name"], "unknown_tool");
+        assert_eq!(manifest[1]["status"], "failed");
+        assert_eq!(manifest[1]["context"], "bad");
+        assert!(manifest[1]["result"].is_null());
+        assert!(manifest[1]["error"].is_string());
+    }
+
+    #[tokio::test]
+    async fn test_execute_safe_outputs_empty_input_does_not_create_manifest() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let safe_output_path = temp_dir.path().join(SAFE_OUTPUT_FILENAME);
+        tokio::fs::write(&safe_output_path, "").await.unwrap();
+
+        let ctx = ExecutionContext::default();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx).await.unwrap();
+        assert!(results.is_empty());
+        assert!(!temp_dir.path().join(EXECUTED_NDJSON_FILENAME).exists());
     }
 
     #[tokio::test]
@@ -986,7 +1249,12 @@ mod tests {
             .iter()
             .filter(|r| r.message.contains("maximum update-work-item count"))
             .collect();
-        assert_eq!(skipped.len(), 2, "Expected 2 skipped entries, got: {:?}", skipped);
+        assert_eq!(
+            skipped.len(),
+            2,
+            "Expected 2 skipped entries, got: {:?}",
+            skipped
+        );
 
         // The noop still executes successfully
         let noop_result = &results[3];
@@ -1143,8 +1411,7 @@ mod tests {
 
         // Simulate an adversarial NDJSON entry where the agent injects a VSO pipeline command
         // into the 'name' field, trying to get it echoed to stdout by Stage 3.
-        let ndjson =
-            "{\"name\":\"##vso[task.setvariable variable=PAT;issecret=true]stolen\"}\n";
+        let ndjson = "{\"name\":\"##vso[task.setvariable variable=PAT;issecret=true]stolen\"}\n";
         tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
 
         let ctx = ExecutionContext::default();
@@ -1227,7 +1494,10 @@ mod tests {
         tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
 
         let mut tool_configs = HashMap::new();
-        tool_configs.insert("create-work-item".to_string(), serde_json::json!({"max": 2}));
+        tool_configs.insert(
+            "create-work-item".to_string(),
+            serde_json::json!({"max": 2}),
+        );
 
         let ctx = ExecutionContext {
             ado_org_url: Some("https://dev.azure.com/org".to_string()),
@@ -1246,7 +1516,10 @@ mod tests {
         };
 
         let results = execute_safe_outputs(temp_dir.path(), &ctx).await;
-        assert!(results.is_ok(), "Batch should not abort when max is exceeded");
+        assert!(
+            results.is_ok(),
+            "Batch should not abort when max is exceeded"
+        );
         let results = results.unwrap();
         assert_eq!(results.len(), 4, "Expected 4 results");
 
@@ -1255,10 +1528,26 @@ mod tests {
             .iter()
             .filter(|r| r.message.contains("maximum create-work-item count"))
             .collect();
-        assert_eq!(skipped.len(), 1, "Expected 1 skipped entry, got: {:?}", skipped);
+        assert_eq!(
+            skipped.len(),
+            1,
+            "Expected 1 skipped entry, got: {:?}",
+            skipped
+        );
 
         // noop still runs
         assert!(results[3].success, "noop should still succeed");
+
+        let manifest = read_executed_manifest(&temp_dir).await;
+        assert_eq!(manifest.len(), 4, "Expected 4 execution records");
+        assert_eq!(
+            manifest
+                .iter()
+                .filter(|entry| entry["status"] == "budget_exhausted")
+                .count(),
+            1,
+            "Expected 1 budget_exhausted record"
+        );
     }
 
     #[tokio::test]
@@ -1322,7 +1611,10 @@ mod tests {
         let ndjson = r#"{"name":"create-work-item","title":"Test work item title","description":"This is a test description that is long enough to pass validation checks"}"#;
         tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
 
-        let ctx = ExecutionContext { dry_run: true, ..Default::default() };
+        let ctx = ExecutionContext {
+            dry_run: true,
+            ..Default::default()
+        };
 
         let results = execute_safe_outputs(temp_dir.path(), &ctx).await.unwrap();
         assert_eq!(results.len(), 1);
@@ -1351,7 +1643,10 @@ mod tests {
         .join("\n");
         tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
 
-        let ctx = ExecutionContext { dry_run: true, ..Default::default() };
+        let ctx = ExecutionContext {
+            dry_run: true,
+            ..Default::default()
+        };
 
         let results = execute_safe_outputs(temp_dir.path(), &ctx).await.unwrap();
         assert_eq!(results.len(), 2);
@@ -1394,7 +1689,10 @@ mod tests {
         };
 
         let result = execute_safe_output(&entry, &ctx).await;
-        assert!(result.is_err(), "should fail without ADO config when not in dry-run mode");
+        assert!(
+            result.is_err(),
+            "should fail without ADO config when not in dry-run mode"
+        );
     }
 
     #[tokio::test]
@@ -1441,13 +1739,19 @@ mod tests {
             "reason": "Could not find the required data to complete the analysis"
         });
 
-        let ctx = ExecutionContext { dry_run: true, ..Default::default() };
+        let ctx = ExecutionContext {
+            dry_run: true,
+            ..Default::default()
+        };
 
         let result = execute_safe_output(&entry, &ctx).await;
         assert!(result.is_ok(), "dispatch should succeed");
         let (tool_name, exec_result) = result.unwrap();
         assert_eq!(tool_name, "report-incomplete");
-        assert!(!exec_result.success, "report-incomplete should still be a failure in dry-run mode");
+        assert!(
+            !exec_result.success,
+            "report-incomplete should still be a failure in dry-run mode"
+        );
         assert!(
             exec_result.message.contains("incomplete"),
             "message should mention incomplete, got: {}",

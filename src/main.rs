@@ -1,4 +1,5 @@
 mod agent_stats;
+mod audit;
 mod allowed_hosts;
 pub mod ado;
 mod compile;
@@ -421,6 +422,33 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Audit a single Azure DevOps build: download artifacts, analyze
+    /// logs, render a structured report.
+    Audit {
+        /// Build ID, or full ADO build URL.
+        build_id_or_url: String,
+        /// Output directory for downloaded artifacts and reports.
+        /// Default: ./logs (matches gh-aw operator muscle memory).
+        #[arg(short, long, default_value = "./logs")]
+        output: PathBuf,
+        /// Emit the report as JSON to stdout instead of console text.
+        #[arg(long)]
+        json: bool,
+        /// ADO context overrides (auto-detected from git remote if omitted).
+        #[arg(long)]
+        org: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long, env = "AZURE_DEVOPS_EXT_PAT")]
+        pat: Option<String>,
+        /// Artifact sets to download. Default: all three.
+        /// Valid values: agent, detection, safe-outputs.
+        #[arg(long, value_delimiter = ',')]
+        artifacts: Option<Vec<String>>,
+        /// Force re-processing even if a cached run-summary.json exists.
+        #[arg(long)]
+        no_cache: bool,
+    },
     /// Export the gate spec JSON Schema (build-time tool for the
     /// scripts/ado-script TypeScript workspace).
     #[command(hide = true)]
@@ -793,6 +821,7 @@ async fn main() -> Result<()> {
         Some(Commands::List { .. }) => "list",
         Some(Commands::Status { .. }) => "status",
         Some(Commands::Run { .. }) => "run",
+        Some(Commands::Audit { .. }) => "audit",
         Some(Commands::ExportGateSchema { .. }) => "export-gate-schema",
         None => "ado-aw",
     };
@@ -1126,6 +1155,28 @@ async fn main() -> Result<()> {
                 poll_interval_secs: poll_interval,
                 timeout_secs: timeout,
                 dry_run,
+            })
+            .await?;
+        }
+        Commands::Audit {
+            build_id_or_url,
+            output,
+            json,
+            org,
+            project,
+            pat,
+            artifacts,
+            no_cache,
+        } => {
+            audit::dispatch(audit::AuditOptions {
+                build_id_or_url: &build_id_or_url,
+                output: &output,
+                json,
+                org: org.as_deref(),
+                project: project.as_deref(),
+                pat: pat.as_deref(),
+                artifacts: artifacts.as_deref(),
+                no_cache,
             })
             .await?;
         }
