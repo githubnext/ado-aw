@@ -1190,9 +1190,11 @@ mod tests {
         repository_name: Option<&str>,
         allowed: std::collections::HashMap<String, String>,
     ) -> ExecutionContext {
-        let mut ctx = ExecutionContext::default();
-        ctx.repository_name = repository_name.map(|s| s.to_string());
-        ctx.allowed_repositories = allowed;
+        let ctx = ExecutionContext {
+            repository_name: repository_name.map(|s| s.to_string()),
+            allowed_repositories: allowed,
+            ..Default::default()
+        };
         ctx
     }
 
