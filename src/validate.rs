@@ -509,6 +509,17 @@ mod tests {
     }
 
     #[test]
+    fn test_is_valid_artifact_name() {
+        assert!(is_valid_artifact_name("my-artifact_v1.0"));
+        assert!(is_valid_artifact_name("drop"));
+        assert!(!is_valid_artifact_name(""));
+        assert!(!is_valid_artifact_name("my artifact"));
+        assert!(!is_valid_artifact_name("$(secretVar)"));
+        assert!(!is_valid_artifact_name("../../etc/passwd"));
+        assert!(!is_valid_artifact_name("{{inject}}"));
+    }
+
+    #[test]
     fn test_is_valid_arg() {
         assert!(is_valid_arg("--verbose"));
         assert!(is_valid_arg("--option=value"));
@@ -599,6 +610,25 @@ mod tests {
         assert!(reject_ado_expressions("$(SYSTEM_ACCESSTOKEN)", "param", "field").is_err());
         assert!(reject_ado_expressions("${{ variables.x }}", "param", "field").is_err());
         assert!(reject_ado_expressions("$[variables.x]", "param", "field").is_err());
+    }
+
+    #[test]
+    fn test_reject_ado_expressions_in_value_catches_injection_in_sequence() {
+        let seq = serde_yaml::Value::Sequence(vec![
+            serde_yaml::Value::String("safe".to_string()),
+            serde_yaml::Value::String("$(secretVar)".to_string()),
+        ]);
+        let result = reject_ado_expressions_in_value(&seq, "myParam", "default");
+        assert!(result.is_err(), "Sequence with ADO expression must be rejected");
+    }
+
+    #[test]
+    fn test_reject_ado_expressions_in_value_allows_safe_sequence() {
+        let seq = serde_yaml::Value::Sequence(vec![
+            serde_yaml::Value::String("us-east".to_string()),
+            serde_yaml::Value::String("eu-west".to_string()),
+        ]);
+        assert!(reject_ado_expressions_in_value(&seq, "region", "default").is_ok());
     }
 
     #[test]

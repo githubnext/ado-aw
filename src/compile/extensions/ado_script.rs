@@ -428,6 +428,40 @@ mod tests {
     }
 
     #[test]
+    fn gate_and_import_eval_paths_consistent_with_download_step() {
+        let extract_dir = "/tmp/ado-aw-scripts/";
+        assert!(
+            GATE_EVAL_PATH.starts_with(extract_dir),
+            "GATE_EVAL_PATH must be under the unzip -d destination"
+        );
+        assert!(
+            IMPORT_EVAL_PATH.starts_with(extract_dir),
+            "IMPORT_EVAL_PATH must be under the unzip -d destination"
+        );
+        let zip_prefix = "ado-script/";
+        assert!(
+            GATE_EVAL_PATH
+                .strip_prefix(extract_dir)
+                .expect("gate path should include extract dir")
+                .starts_with(zip_prefix),
+            "GATE_EVAL_PATH suffix must match zip internal path prefix used in release.yml"
+        );
+        assert!(
+            IMPORT_EVAL_PATH
+                .strip_prefix(extract_dir)
+                .expect("import path should include extract dir")
+                .starts_with(zip_prefix),
+            "IMPORT_EVAL_PATH suffix must match zip internal path prefix used in release.yml"
+        );
+        let steps = install_and_download_steps();
+        let download = &steps[1];
+        assert!(
+            download.contains("-d /tmp/ado-aw-scripts/"),
+            "download step must unzip to /tmp/ado-aw-scripts/"
+        );
+    }
+
+    #[test]
     fn prepare_steps_empty_when_inlined_imports_true() {
         let ext = ext_with(None, None, true);
         let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
