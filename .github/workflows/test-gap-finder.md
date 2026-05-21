@@ -110,7 +110,6 @@ Scope limits per run:
 - Add or update at most **3** high-value tests.
 - Keep the changes focused on one module/area.
 - Skip speculative or flaky tests.
-- Treat tests as high-value when they cover security-sensitive paths (for example `sanitize.rs`, `proxy.rs`, `mcp_firewall.rs`), error-handling branches, or previously untested public behavior.
 
 Before opening a PR, run:
 
@@ -122,7 +121,7 @@ cargo clippy --all-targets --all-features 2>&1
 Open at most one pull request via `create-pull-request` when tests were added and checks passed.
 Note: this repository requires `GH_AW_CI_TRIGGER_TOKEN` for PR CI triggers when using `create-pull-request`.
 PRs opened via the default `GITHUB_TOKEN` do not trigger follow-up workflows.
-Set `GH_AW_CI_TRIGGER_TOKEN` in **Repository Settings → Secrets and variables → Actions** with token permissions that allow PR creation and workflow triggering (for example `contents:write` and `workflows:write`).
+Set `GH_AW_CI_TRIGGER_TOKEN` in **Repository Settings → Secrets and variables → Actions** with token permissions that allow PR creation and workflow triggering (for example `contents: write` and `workflows: write`).
 
 **Do NOT open a PR** if:
 - All significant paths are covered
