@@ -1,10 +1,9 @@
 ---
 on:
   schedule: daily on weekdays
-description: Analyzes test coverage and suggests missing test cases for untested compiler paths
+description: Analyzes test coverage and contributes missing test cases through focused pull requests
 permissions:
   contents: read
-  issues: read
   pull-requests: read
 tools:
   github:
@@ -13,8 +12,10 @@ tools:
 network:
   allowed: [defaults, rust]
 safe-outputs:
-  create-issue:
+  create-pull-request:
     max: 1
+    allowed-files:
+      - "tests/**"
 ---
 
 # Test Gap Finder
@@ -99,55 +100,52 @@ cat > /tmp/gh-aw/cache-memory/test-gap-state.json << 'EOF'
 EOF
 ```
 
-## Step 5: Create Issue (If Warranted)
+## Step 5: Implement Missing Tests and Open a PR
 
-**Create an issue** if you find 3+ meaningful test gaps, or any gap in security-critical code (`sanitize.rs`, `proxy.rs`, `mcp_firewall.rs`).
+If you find meaningful gaps, implement them directly in `tests/**` instead of filing an issue.
 
-**Do NOT create an issue** if:
+Scope limits per run:
+- Add or update at most **3** high-value tests.
+- Keep the changes focused on one module/area.
+- Skip speculative or flaky tests.
+
+Before opening a PR, run:
+
+```bash
+cargo test 2>&1
+cargo clippy --all-targets --all-features 2>&1
+```
+
+Open at most one pull request via `create-pull-request` when tests were added and checks passed.
+
+**Do NOT open a PR** if:
 - All significant paths are covered
 - Only trivial gaps remain
-- The same gaps were already reported (check cache-memory and recent open issues)
+- You cannot get the test suite back to passing
 
-Before creating an issue, search for existing open issues to avoid duplicates:
-- Search for issues with "test gap" or "test coverage" in the title
+## PR Format
 
-## Issue Format
-
-**Title**: `🧪 Test gap analysis — [N] gaps found in [area]`
+**Title**: `test: add coverage for [module/area]`
 
 **Body**:
 ```markdown
-## Test Gap Analysis
+## Test Gap Fixes
 
 **Test suite snapshot**: [X] unit tests, [Y] integration tests, [Z] test fixtures
 
-### Priority Gaps
+### Added Coverage
 
-| Module | Function/Path | Why It Matters | Suggested Test |
-|--------|--------------|----------------|----------------|
-| `sanitize.rs` | `sanitize_yaml_value` with nested expressions | Security-critical input sanitization | Test with template expressions embedded in agent name |
+| Module | Function/Path | Why It Matters | Test Added |
+|--------|--------------|----------------|------------|
+| `sanitize.rs` | `sanitize_yaml_value` with nested expressions | Security-critical input sanitization | `test_sanitize_yaml_value_nested_expression` |
 
-### Suggested Test Cases
+### Validation
 
-#### 1. [Test name]
-```rust
-#[test]
-fn test_description() {
-    // Setup
-    // Action
-    // Assert
-}
-```
-
-#### 2. [Test name]
-...
-
-### Coverage Summary
-
-| Module | Public Fns | Tests | Coverage Estimate |
-|--------|-----------|-------|-------------------|
-| `compile/standalone.rs` | N | M | ~X% |
+- [x] `cargo test`
+- [x] `cargo clippy --all-targets --all-features`
 
 ---
-*This issue was created by the automated test gap finder. Previous run: [date]. Modules audited this cycle: [list].*
+*This PR was created by the automated test gap finder. Previous run: [date]. Modules audited this cycle: [list].*
 ```
+
+If no meaningful, safe test additions are found, emit `noop` with a brief explanation.
