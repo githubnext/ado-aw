@@ -378,16 +378,18 @@ mod tests {
 
     #[test]
     fn test_append_stats_to_body_opt_out() {
-        let mut ctx = crate::safeoutputs::ExecutionContext::default();
-        ctx.agent_stats = Some(AgentStats {
-            agent_name: "test".to_string(),
-            model: Some("model".to_string()),
-            input_tokens: 100,
-            output_tokens: 50,
-            duration_seconds: 10.0,
-            tool_calls: 1,
-            turns: 1,
-        });
+        let ctx = crate::safeoutputs::ExecutionContext {
+            agent_stats: Some(AgentStats {
+                agent_name: "test".to_string(),
+                model: Some("model".to_string()),
+                input_tokens: 100,
+                output_tokens: 50,
+                duration_seconds: 10.0,
+                tool_calls: 1,
+                turns: 1,
+            }),
+            ..Default::default()
+        };
         assert_eq!(append_stats_to_body("body", &ctx, false), "body");
     }
 
@@ -399,16 +401,18 @@ mod tests {
 
     #[test]
     fn test_append_stats_to_body_with_stats() {
-        let mut ctx = crate::safeoutputs::ExecutionContext::default();
-        ctx.agent_stats = Some(AgentStats {
-            agent_name: "test".to_string(),
-            model: Some("model".to_string()),
-            input_tokens: 100,
-            output_tokens: 50,
-            duration_seconds: 10.0,
-            tool_calls: 1,
-            turns: 1,
-        });
+        let ctx = crate::safeoutputs::ExecutionContext {
+            agent_stats: Some(AgentStats {
+                agent_name: "test".to_string(),
+                model: Some("model".to_string()),
+                input_tokens: 100,
+                output_tokens: 50,
+                duration_seconds: 10.0,
+                tool_calls: 1,
+                turns: 1,
+            }),
+            ..Default::default()
+        };
         let result = append_stats_to_body("body", &ctx, true);
         assert!(result.starts_with("body"));
         assert!(result.contains("test"));
