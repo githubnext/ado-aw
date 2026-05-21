@@ -840,31 +840,31 @@ mod tests {
     #[test]
     fn test_requires_write_consistency() {
         // Write-requiring tools
-        assert!(CreateWorkItemResult::REQUIRES_WRITE);
-        assert!(CommentOnWorkItemResult::REQUIRES_WRITE);
-        assert!(UpdateWorkItemResult::REQUIRES_WRITE);
-        assert!(CreatePrResult::REQUIRES_WRITE);
-        assert!(CreateWikiPageResult::REQUIRES_WRITE);
-        assert!(UpdateWikiPageResult::REQUIRES_WRITE);
-        assert!(AddPrCommentResult::REQUIRES_WRITE);
-        assert!(LinkWorkItemsResult::REQUIRES_WRITE);
-        assert!(QueueBuildResult::REQUIRES_WRITE);
-        assert!(CreateGitTagResult::REQUIRES_WRITE);
-        assert!(AddBuildTagResult::REQUIRES_WRITE);
-        assert!(CreateBranchResult::REQUIRES_WRITE);
-        assert!(UpdatePrResult::REQUIRES_WRITE);
-        assert!(UploadBuildAttachmentResult::REQUIRES_WRITE);
-        assert!(UploadPipelineArtifactResult::REQUIRES_WRITE);
-        assert!(UploadWorkitemAttachmentResult::REQUIRES_WRITE);
-        assert!(SubmitPrReviewResult::REQUIRES_WRITE);
-        assert!(ReplyToPrCommentResult::REQUIRES_WRITE);
-        assert!(ResolvePrThreadResult::REQUIRES_WRITE);
+        const { assert!(CreateWorkItemResult::REQUIRES_WRITE) };
+        const { assert!(CommentOnWorkItemResult::REQUIRES_WRITE) };
+        const { assert!(UpdateWorkItemResult::REQUIRES_WRITE) };
+        const { assert!(CreatePrResult::REQUIRES_WRITE) };
+        const { assert!(CreateWikiPageResult::REQUIRES_WRITE) };
+        const { assert!(UpdateWikiPageResult::REQUIRES_WRITE) };
+        const { assert!(AddPrCommentResult::REQUIRES_WRITE) };
+        const { assert!(LinkWorkItemsResult::REQUIRES_WRITE) };
+        const { assert!(QueueBuildResult::REQUIRES_WRITE) };
+        const { assert!(CreateGitTagResult::REQUIRES_WRITE) };
+        const { assert!(AddBuildTagResult::REQUIRES_WRITE) };
+        const { assert!(CreateBranchResult::REQUIRES_WRITE) };
+        const { assert!(UpdatePrResult::REQUIRES_WRITE) };
+        const { assert!(UploadBuildAttachmentResult::REQUIRES_WRITE) };
+        const { assert!(UploadPipelineArtifactResult::REQUIRES_WRITE) };
+        const { assert!(UploadWorkitemAttachmentResult::REQUIRES_WRITE) };
+        const { assert!(SubmitPrReviewResult::REQUIRES_WRITE) };
+        const { assert!(ReplyToPrCommentResult::REQUIRES_WRITE) };
+        const { assert!(ResolvePrThreadResult::REQUIRES_WRITE) };
 
         // Diagnostic tools (should NOT require write)
-        assert!(!NoopResult::REQUIRES_WRITE);
-        assert!(!MissingDataResult::REQUIRES_WRITE);
-        assert!(!MissingToolResult::REQUIRES_WRITE);
-        assert!(!ReportIncompleteResult::REQUIRES_WRITE);
+        const { assert!(!NoopResult::REQUIRES_WRITE) };
+        const { assert!(!MissingDataResult::REQUIRES_WRITE) };
+        const { assert!(!MissingToolResult::REQUIRES_WRITE) };
+        const { assert!(!ReportIncompleteResult::REQUIRES_WRITE) };
     }
 
     /// Verify ALL_KNOWN_SAFE_OUTPUTS has exactly the right count:
@@ -1190,12 +1190,11 @@ mod tests {
         repository_name: Option<&str>,
         allowed: std::collections::HashMap<String, String>,
     ) -> ExecutionContext {
-        let ctx = ExecutionContext {
+        ExecutionContext {
             repository_name: repository_name.map(|s| s.to_string()),
             allowed_repositories: allowed,
             ..Default::default()
-        };
-        ctx
+        }
     }
 
     #[test]
