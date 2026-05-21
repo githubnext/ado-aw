@@ -118,6 +118,7 @@ cargo clippy --all-targets --all-features 2>&1
 ```
 
 Open at most one pull request via `create-pull-request` when tests were added and checks passed.
+If CI-triggering automation for PRs in this repository requires `GH_AW_CI_TRIGGER_TOKEN`, ensure that secret is configured before opening the PR.
 
 **Do NOT open a PR** if:
 - All significant paths are covered
