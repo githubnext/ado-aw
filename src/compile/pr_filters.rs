@@ -122,6 +122,10 @@ mod tests {
         schedule: None,
         });
         let result = generate_pr_trigger(&triggers, true);
+        // PrTriggerConfig::default() has no branches/paths, so the native block is empty
+        // (meaning "trigger on all PRs" in ADO). The schedule suppression ("pr: none") must
+        // NOT be emitted because the explicit pr: key overrides it.
+        assert!(result.is_empty(), "default PrTriggerConfig should produce empty string (trigger on all PRs)");
         assert!(!result.contains("pr: none"), "triggers.pr should override schedule suppression");
     }
 
@@ -138,6 +142,9 @@ mod tests {
         schedule: None,
         });
         let result = generate_pr_trigger(&triggers, false);
+        // Same as above: default PrTriggerConfig → empty (trigger on all PRs).
+        // Pipeline-only suppression must NOT be emitted because pr: is explicit.
+        assert!(result.is_empty(), "default PrTriggerConfig should produce empty string (trigger on all PRs)");
         assert!(!result.contains("pr: none"), "triggers.pr should override pipeline trigger suppression");
     }
 
@@ -346,6 +353,7 @@ mod tests {
         };
         let checks = lower_pr_filters(&filters);
         let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
+        assert!(spec.facts.iter().any(|f| f.kind == "pr_title"), "should require pr_title fact for title filter");
         assert!(!spec.facts.iter().any(|f| f.kind == "pr_metadata"), "should not require pr_metadata for title-only");
     }
 
@@ -588,6 +596,8 @@ mod tests {
             false,
             &["eq(variables['Custom.ShouldRun'], 'true')"],
         );
+        // No setup steps, no PR filters → no dependsOn, but the expression produces a condition.
+        assert!(!result.contains("dependsOn"), "no dependsOn without setup/filters");
         assert!(result.contains("condition:"), "should have condition");
         assert!(result.contains("Custom.ShouldRun"), "should include expression");
         assert!(result.contains("succeeded()"), "should still require succeeded");
@@ -604,19 +614,6 @@ mod tests {
         assert!(result.contains("prGate.SHOULD_RUN"), "should check gate output");
         assert!(result.contains("Custom.Flag"), "should include expression");
         assert!(result.contains("Build.Reason"), "should check build reason");
-    }
-
-    #[test]
-    fn test_agentic_depends_on_expression_only_no_depends() {
-        let result = generate_agentic_depends_on(
-            &[],
-            false,
-            false,
-            &["eq(variables['Run'], 'true')"],
-        );
-        // No setup steps, no PR filters — no dependsOn, but still a condition
-        assert!(!result.contains("dependsOn"), "no dependsOn without setup/filters");
-        assert!(result.contains("condition:"), "should have condition from expression");
     }
 
     #[test]
@@ -695,7 +692,10 @@ on:
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let oc: OnConfig = serde_yaml::from_value(val["on"].clone()).unwrap();
         assert!(oc.schedule.is_some(), "should have schedule");
-        assert!(oc.pr.is_some(), "should have pr");
+        assert_eq!(oc.schedule.unwrap().expression(), "daily around 14:00", "schedule expression should round-trip");
+        let pr = oc.pr.expect("should have pr");
+        let filters = pr.filters.expect("pr should have filters");
+        assert_eq!(filters.title.unwrap().pattern, "*[review]*", "title pattern should round-trip");
         assert!(oc.pipeline.is_none(), "should not have pipeline");
     }
 
