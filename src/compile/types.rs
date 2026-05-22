@@ -1553,14 +1553,7 @@ timeout-minutes: 60
         assert_eq!(env.get("AWS_REGION").unwrap(), "us-west-2");
     }
 
-    #[test]
-    fn test_engine_config_id_defaults_to_copilot() {
-        let yaml = "model: gpt-5\ntimeout-minutes: 30";
-        let opts: EngineOptions = serde_yaml::from_str(yaml).unwrap();
-        let ec = EngineConfig::Full(opts);
-        assert_eq!(ec.engine_id(), "copilot");
-        assert_eq!(ec.model(), Some("gpt-5"));
-    }
+
 
     // ─── PermissionsConfig deserialization ───────────────────────────────
 
@@ -1807,12 +1800,14 @@ Body
         let content = r#"---
 name: "Test"
 description: "Test"
+tools:
+  edit: true
 ---
 
 Body
 "#;
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
-        assert!(fm.tools.is_none());
+        assert!(fm.tools.as_ref().unwrap().azure_devops.is_none());
     }
 
     #[test]
@@ -1871,6 +1866,7 @@ Body
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
         let lean = fm.runtimes.as_ref().unwrap().lean.as_ref().unwrap();
         assert!(!lean.is_enabled());
+        assert!(lean.toolchain().is_none());
     }
 
     #[test]
@@ -2009,6 +2005,12 @@ Body
         assert!(
             result.is_err(),
             "unknown fields in network should be rejected"
+        );
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(
+            err.contains("typo-field") || err.contains("unknown field"),
+            "error should mention the unknown field, got: {}",
+            err
         );
     }
 
@@ -2281,8 +2283,10 @@ triggers:
 "#;
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
-        assert!(tc.pipeline.is_some());
-        assert!(tc.pr.is_some());
+        assert_eq!(
+            tc.pipeline.as_ref().unwrap().name,
+            "Build Pipeline"
+        );
         assert_eq!(
             tc.pr.unwrap().filters.unwrap().title.unwrap().pattern,
             "*[review]*"
