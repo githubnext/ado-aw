@@ -228,24 +228,27 @@ That makes the agent run inside the `docs` repository.
 
 ## Add triggers
 
-Configure triggers under `on:`.
-
-### Push
-
-```yaml
-on:
-  push:
-    branches:
-      include: [main]
-```
+Configure triggers under `on:`. ado-aw supports three trigger types: `pr:` (pull request), `pipeline:` (pipeline completion), and `schedule:`.
 
 ### Pull request
 
 ```yaml
 on:
-  pull_request:
+  pr:
     branches:
       include: [main]
+```
+
+### Pipeline completion
+
+Triggers when another ADO pipeline finishes:
+
+```yaml
+on:
+  pipeline:
+    name: "Build Pipeline"
+    branches:
+      - main
 ```
 
 ### Schedule
@@ -259,10 +262,7 @@ You can combine them:
 
 ```yaml
 on:
-  push:
-    branches:
-      include: [main]
-  pull_request:
+  pr:
     branches:
       include: [main]
   schedule: weekly on monday around 09:00
@@ -280,7 +280,7 @@ workspace: repo
 repos:
   - infra=my-org/infra-scripts
 on:
-  pull_request:
+  pr:
     branches:
       include: [main]
   schedule: weekly on monday around 09:00
