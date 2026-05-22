@@ -119,8 +119,6 @@ name: Hello from ado-aw
 description: A minimal agentic pipeline example
 engine:
   id: copilot
-on:
-  workflow_dispatch:
 pool: AZS-1ES-L-MMS-ubuntu-22.04
 ---
 
@@ -130,6 +128,10 @@ Inspect the repository and summarize what this project does.
 ```
 
 This file combines YAML front matter for configuration with markdown instructions for the agent.
+
+:::note[Manual queuing]
+All Azure DevOps pipelines can be queued manually from the ADO UI — no special `on:` configuration is needed for that. The `on:` key is for automatic triggers such as schedules (`on.schedule:`), PR events (`on.pr:`), or upstream pipeline completion (`on.pipeline:`). Omitting `on:` means the pipeline only runs when you queue it manually (plus any CI triggers ADO applies by default).
+:::
 
 ### 2. Compile it
 
