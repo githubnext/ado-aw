@@ -101,7 +101,6 @@ pub(super) fn add_condition_to_steps(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::compile::common::{generate_agentic_depends_on, generate_pr_trigger, generate_setup_job};
     use crate::compile::extensions::CompileContext;
     use crate::compile::types::*;
