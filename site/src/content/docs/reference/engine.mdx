@@ -23,13 +23,13 @@ engine:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `id` | string | `copilot` | Engine identifier. Currently only `copilot` (GitHub Copilot CLI) is supported. |
-| `model` | string | `claude-opus-4.7` | AI model to use. Options include `claude-sonnet-4.5`, `gpt-5.2-codex`, `gemini-3-pro-preview`, etc. |
+| `model` | string | `claude-opus-4.7` | AI model to pass to the Copilot CLI `--model` flag. Any model ID supported by GitHub Copilot is accepted (e.g., `claude-sonnet-4.7`, `claude-opus-4.7`). The compiler does not validate the value — an unrecognised ID produces a runtime error from the CLI. |
 | `timeout-minutes` | integer | *(none)* | Maximum time in minutes the agent job is allowed to run. Sets `timeoutInMinutes` on the `Agent` job in the generated pipeline. |
 | `version` | string | *(none)* | Engine CLI version to install (e.g., `"1.0.43"`, `"latest"`). Overrides the pinned `COPILOT_CLI_VERSION`. Set to `"latest"` to use the newest available version. |
 | `agent` | string | *(none)* | Custom agent file identifier (Copilot only). Adds `--agent <name>` to the CLI invocation, selecting a custom agent from `.github/agents/`. |
 | `api-target` | string | *(none)* | Custom API endpoint hostname for GHES/GHEC (e.g., `"api.acme.ghe.com"`). Adds `--api-target <hostname>` to the CLI invocation and adds the hostname to the AWF network allowlist. |
-| `args` | list | `[]` | Custom CLI arguments appended after compiler-generated args. Subject to shell-safety validation and blocked from overriding compiler-controlled flags (`--prompt`, `--allow-tool`, `--disable-builtin-mcps`, etc.). |
-| `env` | map | *(none)* | Engine-specific environment variables merged into the sandbox step's `env:` block. Keys must be valid env var names; values must not contain ADO expressions (`$(`, `${{`) or pipeline command injection (`##vso[`). Compiler-controlled keys (`GITHUB_TOKEN`, `PATH`, `BASH_ENV`, etc.) are blocked. |
+| `args` | list | `[]` | Custom CLI arguments appended after compiler-generated args. Subject to shell-safety validation and blocked from overriding compiler-controlled flags (see [`args` reference](#args) below). |
+| `env` | map | *(none)* | Engine-specific environment variables merged into the sandbox step's `env:` block. Keys must be valid env var names; values must not contain ADO expressions (`$(`, `${{`) or pipeline command injection (`##vso[`). Compiler-controlled keys are blocked (see [`env` reference](#env) below). |
 | `command` | string | *(none)* | Custom engine executable path (skips default NuGet installation). The path must be accessible inside the AWF container (e.g., `/tmp/...` or workspace-mounted paths). |
 
 
@@ -42,3 +42,65 @@ The `timeout-minutes` field sets a wall-clock limit (in minutes) for the entire 
 - **SLA compliance** -- ensuring scheduled agents complete within a known window.
 
 When omitted, Azure DevOps uses its default job timeout (60 minutes). When set, the compiler emits `timeoutInMinutes: <value>` on the agentic job.
+
+### `args`
+
+The `args` list appends raw CLI arguments to the Copilot invocation. This is an escape hatch for passing flags that `ado-aw` does not yet model in front matter — use it sparingly.
+
+The compiler rejects any argument that starts with one of the following blocked prefixes, because those flags are owned and managed by the compiler:
+
+| Blocked prefix | Reason |
+|----------------|--------|
+| `--prompt` | Compiler controls how the prompt is supplied |
+| `--additional-mcp-config` | Compiler owns MCP configuration |
+| `--allow-tool` | Compiler controls tool allow-listing |
+| `--allow-all-tools` | Compiler controls tool allow-listing |
+| `--allow-all-paths` | Compiler controls path permissions |
+| `--disable-builtin-mcps` | Compiler manages built-in MCP setup |
+| `--no-ask-user` | Compiler controls interactive-mode setting |
+| `--ask-user` | Compiler controls interactive-mode setting |
+
+Each argument is also checked against a shell-safety character allowlist to prevent injection.
+
+Example — enabling a hypothetical experimental flag:
+
+```yaml
+engine:
+  id: copilot
+  args:
+    - --experimental-feature
+    - --log-level=debug
+```
+
+### `env`
+
+The `env` map injects additional environment variables into the sandbox step's `env:` block. This is useful for passing API tokens, configuration values, or feature flags that the agent script needs.
+
+The compiler blocks keys that it controls:
+
+| Blocked key | Reason |
+|-------------|--------|
+| `GITHUB_TOKEN` | Compiler-managed auth token |
+| `GITHUB_READ_ONLY` | Compiler-managed auth mode |
+| `COPILOT_OTEL_ENABLED` | Compiler-managed telemetry |
+| `COPILOT_OTEL_EXPORTER_TYPE` | Compiler-managed telemetry |
+| `COPILOT_OTEL_FILE_EXPORTER_PATH` | Compiler-managed telemetry |
+| `PATH` | System shell variable |
+| `HOME` | System shell variable |
+| `BASH_ENV` | System shell variable |
+| `ENV` | System shell variable |
+| `IFS` | System shell variable |
+| `LD_PRELOAD` | Dynamic linker — security-sensitive |
+| `LD_LIBRARY_PATH` | Dynamic linker — security-sensitive |
+
+Values must not contain ADO macro expressions (`$(...)`) or pipeline command injection markers (`##vso[`).
+
+Example — passing a custom API key:
+
+```yaml
+engine:
+  id: copilot
+  env:
+    MY_API_KEY: "$(MY_API_KEY)"    # inject from pipeline variable
+    STATIC_CONFIG: "production"    # literal value
+```
