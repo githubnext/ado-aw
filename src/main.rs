@@ -602,7 +602,7 @@ async fn run_execute(
 
 async fn build_execution_context(
     front_matter: compile::FrontMatter,
-    safe_output_dir: &PathBuf,
+    safe_output_dir: &Path,
     ado_org_url: Option<String>,
     ado_project: Option<String>,
     dry_run: bool,
@@ -631,7 +631,7 @@ async fn build_execution_context(
     if let Some(project) = ado_project {
         ctx.ado_project = Some(project);
     }
-    ctx.working_directory = safe_output_dir.clone();
+    ctx.working_directory = safe_output_dir.to_path_buf();
     ctx.tool_configs = front_matter.safe_outputs.clone();
     // Merge ado-aw-debug.create-issue config under the same tool_configs map
     // so Stage 3's `ctx.get_tool_config::<CreateIssueConfig>("create-issue")`
@@ -732,7 +732,7 @@ async fn discover_last_author(path: &Path) -> Option<String> {
 
 async fn process_cache_memory(
     tools: Option<&compile::types::ToolsConfig>,
-    safe_output_dir: &PathBuf,
+    safe_output_dir: &Path,
     output_dir: Option<PathBuf>,
 ) -> Result<()> {
     let Some(cm) = tools.and_then(|t| t.cache_memory.as_ref()) else {
@@ -744,7 +744,7 @@ async fn process_cache_memory(
     let memory_config = execute::MemoryConfig {
         allowed_extensions: cm.allowed_extensions().to_vec(),
     };
-    let memory_output = output_dir.unwrap_or_else(|| safe_output_dir.clone());
+    let memory_output = output_dir.unwrap_or_else(|| safe_output_dir.to_path_buf());
     let result =
         execute::process_agent_memory(safe_output_dir, &memory_output, &memory_config).await?;
     println!(
