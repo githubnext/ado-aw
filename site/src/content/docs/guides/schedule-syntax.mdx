@@ -18,42 +18,116 @@ on:
 
 This says: run every day at roughly 2 PM.
 
-## Use fuzzy human-readable expressions
-
-Here are common patterns you can use.
-
-### Daily
+## Daily schedules
 
 ```yaml
 on:
-  schedule: daily around 14:00
+  schedule: daily                        # Any time of day (fully scattered)
 ```
 
 ```yaml
 on:
-  schedule: daily between 09:00 and 17:00
-```
-
-### Weekly
-
-```yaml
-on:
-  schedule: weekly on monday
+  schedule: daily around 14:00           # Within ~60 minutes of 2 PM
 ```
 
 ```yaml
 on:
-  schedule: weekly on friday around 17:00
+  schedule: daily around midnight        # Keywords: midnight, noon
 ```
-
-### Hour-based intervals
 
 ```yaml
 on:
-  schedule: every 6 hours
+  schedule: daily between 09:00 and 17:00  # Any time in a business-hours window
 ```
 
-Other supported interval-style schedules include forms like `every 2h` and `every 30m`.
+Time values accept 24-hour (`14:00`), 12-hour (`3pm`, `11am`), or keywords (`midnight`, `noon`).
+
+## Weekly schedules
+
+```yaml
+on:
+  schedule: weekly                           # Any day, scattered time
+```
+
+```yaml
+on:
+  schedule: weekly on monday                 # Monday, scattered time
+```
+
+```yaml
+on:
+  schedule: weekly on friday around 17:00    # Friday, within ~60 min of 5 PM
+```
+
+```yaml
+on:
+  schedule: weekly on wednesday between 09:00 and 12:00
+```
+
+Valid weekdays: `sunday`, `monday`, `tuesday`, `wednesday`, `thursday`, `friday`, `saturday`.
+
+## Hourly schedules
+
+```yaml
+on:
+  schedule: hourly          # Every hour at a scattered minute
+```
+
+```yaml
+on:
+  schedule: every 2h        # Every 2 hours at scattered minute
+```
+
+```yaml
+on:
+  schedule: every 6 hours   # Short and long forms both accepted
+```
+
+Valid hour intervals: **1, 2, 3, 4, 6, 8, 12** (factors of 24 for even distribution).
+The minute within each hour is scattered per agent.
+
+## Minute intervals
+
+Minute intervals are scheduled at **fixed minutes** — they are not scattered like hour and day schedules.
+
+```yaml
+on:
+  schedule: every 5 minutes    # Minimum supported interval
+```
+
+```yaml
+on:
+  schedule: every 15 minutes
+```
+
+```yaml
+on:
+  schedule: every 30m          # Short form supported
+```
+
+The minimum interval is 5 minutes (an Azure DevOps / GitHub Actions constraint).
+
+## Multi-day and bi-weekly schedules
+
+```yaml
+on:
+  schedule: every 2 days       # Every N days at scattered time
+```
+
+```yaml
+on:
+  schedule: every 2 weeks      # Every N weeks (converted to N×7 days)
+```
+
+```yaml
+on:
+  schedule: bi-weekly          # Every 14 days at scattered time
+```
+
+```yaml
+on:
+  schedule: tri-weekly         # Every 21 days at scattered time
+```
 
 ## Add a timezone
 
@@ -69,13 +143,15 @@ on:
   schedule: daily between 09:00 utc-5 and 17:00 utc-5
 ```
 
+Supported offset formats: `utc+9`, `utc-5`, `utc+05:30`, `utc-08:00`.
+
 Use this when you want the schedule to reflect a team's local business hours without manually converting everything to UTC.
 
 ## Understand scattering
 
 `ado-aw` does not always compile a fuzzy schedule to the exact same wall-clock minute you typed.
 
-Instead, it applies **scattering**: a deterministic offset that spreads runs out to avoid a thundering herd effect.
+Instead, it applies **scattering**: a deterministic offset based on the agent name that spreads runs out to avoid thundering-herd effects.
 
 For example:
 
@@ -87,10 +163,10 @@ on:
 means:
 
 - stay near 14:00
-- pick a stable offset for this agent
+- pick a stable offset for this specific agent
 - avoid scheduling every agent at the exact same minute
 
-This helps when many teams use convenient schedule times like midnight, 9 AM, or the top of the hour.
+This helps when many teams use convenient schedule times like midnight, 9 AM, or the top of the hour. Scattering applies to all schedule types **except** minute intervals, which always run at fixed intervals.
 
 ## Know what happens at compile time
 
@@ -107,7 +183,7 @@ You write the friendly expression; the compiler emits the precise schedule.
 
 ## Schedule specific branches
 
-If you want more than the default branch behavior, use the object form:
+By default, scheduled runs fire on the `main` branch only. To specify different branches, use the object form:
 
 ```yaml
 on:
@@ -149,10 +225,21 @@ on:
 
 Use this when you need a repeated check throughout the day.
 
+### Frequent monitoring
+
+```yaml
+on:
+  schedule: every 15 minutes
+```
+
+Use this for lightweight checks that need to run often. Remember: minute intervals are fixed, not scattered.
+
 ## Tips for choosing a schedule
 
 - Use `daily around ...` for routine maintenance jobs.
 - Use `weekly on ...` for lower-frequency cleanup or reporting.
 - Use `every N hours` for repeated monitoring or polling.
+- Use `every N minutes` for high-frequency, latency-sensitive checks.
 - Add a timezone when the schedule should track local working hours.
 - Let scattering do its job instead of trying to force an exact shared minute across many agents.
+- Prefer hour-based schedules over minute intervals when sub-hourly frequency is not truly required.
