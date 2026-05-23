@@ -26,13 +26,13 @@ pub async fn check_for_update() {
             // Only print if the version parses to a valid semver triple so we
             // never forward raw API content (e.g. ANSI escape sequences) to
             // the terminal.  Use the reconstructed string, not `latest`.
-            if let Some((maj, min, pat)) = parse_version(latest) {
-                if (maj, min, pat) > parse_version(CURRENT_VERSION).unwrap_or((0, 0, 0)) {
-                    eprintln!(
-                        "A newer version of ado-aw is available: v{maj}.{min}.{pat} (you have v{CURRENT_VERSION}).\n\
-                         Update at: https://github.com/githubnext/ado-aw/releases/latest"
-                    );
-                }
+            if let Some((maj, min, pat)) = parse_version(latest)
+                && (maj, min, pat) > parse_version(CURRENT_VERSION).unwrap_or((0, 0, 0))
+            {
+                eprintln!(
+                    "A newer version of ado-aw is available: v{maj}.{min}.{pat} (you have v{CURRENT_VERSION}).\n\
+                     Update at: https://github.com/githubnext/ado-aw/releases/latest"
+                );
             }
         }
         Err(e) => {
