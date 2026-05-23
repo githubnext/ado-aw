@@ -17,7 +17,6 @@ use super::common::{
     generate_enabled_tools_args, generate_mcpg_config, generate_mcpg_docker_env,
     generate_mcpg_step_env,
 };
-use super::extensions::CompilerExtension;
 use super::types::FrontMatter;
 
 /// 1ES Pipeline Template compiler.
