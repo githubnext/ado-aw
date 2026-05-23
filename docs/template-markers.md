@@ -76,6 +76,11 @@ Examples of fuzzy schedule → cron conversion:
 - `weekly on monday` → Monday at scattered time (e.g., `"43 5 * * 1"`)
 - `every 2h` → every 2 hours at scattered minute (e.g., `"53 */2 * * *"`)
 - `bi-weekly` → every 14 days (e.g., `"43 5 */14 * *"`)
+- `tri-weekly` → every 21 days (e.g., `"43 5 */21 * *"`)
+- `every 3 days` → every 3 days (e.g., `"43 5 */3 * *"`)
+- `every 2 weeks` → every 14 days (e.g., `"43 5 */14 * *"`)
+
+See [`docs/schedule-syntax.md`](schedule-syntax.md) for the full schedule syntax reference.
 
 ## {{ checkout_self }}
 
@@ -101,6 +106,8 @@ Should be replaced with the human-readable name from the front matter
 (e.g., `Daily Code Review`). The value is substituted **as-is**, with
 no quoting or escaping — front-matter `name` values are free-form and
 have not been validated against YAML scalar rules.
+
+> **Alias:** `{{ agent }}` is registered as a backward-compatible alias for `{{ agent_name }}` and expands to the same unescaped name value. The same safety caveat applies — only safe in non-YAML positions.
 
 > ⚠️ This marker is only safe inside a position that is **not parsed as
 > YAML** (currently only `src/data/threat-analysis.md`, which is a
@@ -158,6 +165,8 @@ so the macro passes through untouched.
 
 Used in `src/data/base.yml` and `src/data/1es-base.yml` only. The
 job- and stage-level templates don't emit a top-level pipeline name.
+
+> **Alias:** `{{ pipeline_name }}` is registered as a backward-compatible alias for `{{ pipeline_agent_name }}` and expands to the same value.
 
 ## {{ engine_install_steps }}
 
@@ -310,6 +319,8 @@ workspace: exp23-a7-nw    # Resolves to $(Build.SourcesDirectory)/exp23-a7-nw
 ```
 
 This is used for the `workingDirectory` property of the copilot task.
+
+> **Alias:** `{{ workspace }}` is registered as a backward-compatible alias for `{{ working_directory }}` and expands to the same value. Prefer `{{ working_directory }}` in new templates. For paths that must always resolve to the trigger repo (not the agent workspace), use [`{{ trigger_repo_directory }}`](#-trigger_repo_directory-) instead.
 
 ## {{ source_path }}
 
@@ -498,7 +509,7 @@ The threat analysis prompt instructs the security analysis agent to check for:
 
 ## {{ agent_description }}
 
-Should be replaced with the description field from the front matter. This is used in display contexts and the threat analysis prompt template.
+Should be replaced with the description field from the front matter. This is used in the threat analysis prompt template (`src/data/threat-analysis.md`) via `{{ threat_analysis_prompt }}`. It is **not** used in any pipeline YAML template (`base.yml`, `1es-base.yml`, `job-base.yml`, `stage-base.yml`) directly.
 
 ## {{ acquire_ado_token }}
 
