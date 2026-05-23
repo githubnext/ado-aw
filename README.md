@@ -80,10 +80,11 @@ name: "Dependency Updater"
 description: "Checks for outdated dependencies and opens PRs"
 engine:
   id: copilot
-  model: claude-sonnet-4.5
+  model: claude-opus-4.7
 on:
   schedule: weekly on monday around 9:00
-pool: AZS-1ES-L-MMS-ubuntu-22.04
+pool:
+  vmImage: ubuntu-22.04
 tools:
   azure-devops: true
 permissions:
@@ -333,6 +334,13 @@ and network allowlist entries.
 
 ```yaml
 tools:
+  # Bash command allow-list. Omit or set to [] for the safe-command default;
+  # use [":*"] for unrestricted access. See docs/tools.md.
+  bash: ["git status", "git diff", "npm test"]
+
+  # File editing tool (read/write/patch files in the workspace). Default: true.
+  edit: true
+
   # Azure DevOps MCP — query work items, repos, PRs, etc.
   azure-devops: true
 
@@ -469,7 +477,11 @@ reachable. The allowlist is built from:
 1. **Core domains** — Azure DevOps, GitHub, Microsoft auth, Azure storage
 2. **MCP domains** — automatically added per enabled MCP
 3. **User domains** — from `network.allowed` in front matter
-4. **Minus blocked** — `network.blocked` entries are removed by exact match (wildcard patterns like `*.example.com` are not affected by blocking a specific subdomain)
+4. **Minus blocked** — `network.blocked` entries are removed from the
+   combined allowlist. Both ecosystem identifiers (e.g. `python`) and raw
+   domain strings are supported. Blocking an ecosystem identifier removes
+   all of its domains; blocking a raw domain uses exact-string matching
+   (blocking `"github.com"` does **not** also remove `"*.github.com"`).
 
 ```yaml
 network:
@@ -510,6 +522,14 @@ Options:
 
 > **Note:** The `configure` command is deprecated (hidden from `--help`) and is now just an alias for `secrets set GITHUB_TOKEN`. Use `secrets set GITHUB_TOKEN` directly.
 
+The `secrets` command has three subcommands:
+
+- `ado-aw secrets set <name> [value]` — set a pipeline variable (`isSecret=true`) on every matched definition. Value may be passed positionally, via `--value-stdin`, or prompted interactively.
+- `ado-aw secrets list` — list variable names and flags on every matched definition. Never prints values.
+- `ado-aw secrets delete <name>` — delete a pipeline variable from every matched definition.
+
+All three accept `--all-repos` / `--source <path>` for project-scope (Preview-driven) discovery instead of local-fixture matching. See [docs/cli.md](docs/cli.md) for the full flag reference.
+
 ---
 
 ## Prompts & Skill Files
@@ -534,6 +554,61 @@ The purpose of the workflow is to <describe what you want>
 ```
 
 The AI agent will fetch the prompt, follow its instructions, and create a complete workflow file for you.
+
+---
+
+## Documentation
+
+The [`docs/`](docs/) directory contains per-concept reference pages. Use this
+index to jump to the right page.
+
+**Authoring agent files**
+
+- [`docs/front-matter.md`](docs/front-matter.md) — full agent file format
+  (markdown body + YAML front matter grammar) with every supported field.
+- [`docs/engine.md`](docs/engine.md) — `engine:` configuration (model,
+  `timeout-minutes`, `version`, `agent`, `api-target`, `args`, `env`,
+  `command`).
+- [`docs/tools.md`](docs/tools.md) — `tools:` configuration (`bash` allow-list,
+  `edit`, `cache-memory`, `azure-devops` MCP).
+- [`docs/runtimes.md`](docs/runtimes.md) — `runtimes:` configuration (Lean 4,
+  Python, Node.js, .NET).
+- [`docs/runtime-imports.md`](docs/runtime-imports.md) — runtime prompt-import
+  markers, path resolution, and `inlined-imports:` behavior.
+- [`docs/schedule-syntax.md`](docs/schedule-syntax.md) — fuzzy schedule time
+  syntax with timezones and scattering.
+- [`docs/parameters.md`](docs/parameters.md) — ADO runtime parameters surfaced
+  in the pipeline UI.
+- [`docs/targets.md`](docs/targets.md) — target platforms: `standalone`, `1es`,
+  `job`, and `stage`.
+- [`docs/safe-outputs.md`](docs/safe-outputs.md) — full reference for every
+  safe-output tool plus their per-agent configuration.
+- [`docs/ado-aw-debug.md`](docs/ado-aw-debug.md) — debug-only `ado-aw-debug:`
+  front-matter section (`skip-integrity`, `create-issue`).
+
+**Compiler internals & operations**
+
+- [`docs/cli.md`](docs/cli.md) — `ado-aw` CLI command and flag reference.
+- [`docs/mcp.md`](docs/mcp.md) — MCP server configuration (stdio containers,
+  HTTP servers, env passthrough).
+- [`docs/mcpg.md`](docs/mcpg.md) — MCP Gateway architecture and pipeline
+  integration.
+- [`docs/network.md`](docs/network.md) — AWF network isolation, default
+  allowed domains, ecosystem identifiers, blocking, and ADO `permissions:`
+  service-connection model.
+- [`docs/template-markers.md`](docs/template-markers.md) — every `{{ marker }}`
+  in the base templates and how it is replaced.
+- [`docs/filter-ir.md`](docs/filter-ir.md) — filter expression IR for PR
+  trigger filters and gate-step generation.
+- [`docs/codemods.md`](docs/codemods.md) — front-matter codemod framework
+  (detection-based source rewrites on breaking-change updates).
+- [`docs/ado-script.md`](docs/ado-script.md) — `scripts/ado-script/` workspace
+  (bundled TypeScript runtime helpers: `gate.js`, `import.js`).
+- [`docs/extending.md`](docs/extending.md) — adding new CLI commands, compile
+  targets, front-matter fields, template markers, safe-output tools,
+  first-class tools, and runtimes.
+- [`docs/local-development.md`](docs/local-development.md) — local development
+  setup notes.
 
 ---
 

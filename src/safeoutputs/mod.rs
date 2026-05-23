@@ -840,31 +840,31 @@ mod tests {
     #[test]
     fn test_requires_write_consistency() {
         // Write-requiring tools
-        const { assert!(CreateWorkItemResult::REQUIRES_WRITE) };
-        const { assert!(CommentOnWorkItemResult::REQUIRES_WRITE) };
-        const { assert!(UpdateWorkItemResult::REQUIRES_WRITE) };
-        const { assert!(CreatePrResult::REQUIRES_WRITE) };
-        const { assert!(CreateWikiPageResult::REQUIRES_WRITE) };
-        const { assert!(UpdateWikiPageResult::REQUIRES_WRITE) };
-        const { assert!(AddPrCommentResult::REQUIRES_WRITE) };
-        const { assert!(LinkWorkItemsResult::REQUIRES_WRITE) };
-        const { assert!(QueueBuildResult::REQUIRES_WRITE) };
-        const { assert!(CreateGitTagResult::REQUIRES_WRITE) };
-        const { assert!(AddBuildTagResult::REQUIRES_WRITE) };
-        const { assert!(CreateBranchResult::REQUIRES_WRITE) };
-        const { assert!(UpdatePrResult::REQUIRES_WRITE) };
-        const { assert!(UploadBuildAttachmentResult::REQUIRES_WRITE) };
-        const { assert!(UploadPipelineArtifactResult::REQUIRES_WRITE) };
-        const { assert!(UploadWorkitemAttachmentResult::REQUIRES_WRITE) };
-        const { assert!(SubmitPrReviewResult::REQUIRES_WRITE) };
-        const { assert!(ReplyToPrCommentResult::REQUIRES_WRITE) };
-        const { assert!(ResolvePrThreadResult::REQUIRES_WRITE) };
+        const { assert!(CreateWorkItemResult::REQUIRES_WRITE); }
+        const { assert!(CommentOnWorkItemResult::REQUIRES_WRITE); }
+        const { assert!(UpdateWorkItemResult::REQUIRES_WRITE); }
+        const { assert!(CreatePrResult::REQUIRES_WRITE); }
+        const { assert!(CreateWikiPageResult::REQUIRES_WRITE); }
+        const { assert!(UpdateWikiPageResult::REQUIRES_WRITE); }
+        const { assert!(AddPrCommentResult::REQUIRES_WRITE); }
+        const { assert!(LinkWorkItemsResult::REQUIRES_WRITE); }
+        const { assert!(QueueBuildResult::REQUIRES_WRITE); }
+        const { assert!(CreateGitTagResult::REQUIRES_WRITE); }
+        const { assert!(AddBuildTagResult::REQUIRES_WRITE); }
+        const { assert!(CreateBranchResult::REQUIRES_WRITE); }
+        const { assert!(UpdatePrResult::REQUIRES_WRITE); }
+        const { assert!(UploadBuildAttachmentResult::REQUIRES_WRITE); }
+        const { assert!(UploadPipelineArtifactResult::REQUIRES_WRITE); }
+        const { assert!(UploadWorkitemAttachmentResult::REQUIRES_WRITE); }
+        const { assert!(SubmitPrReviewResult::REQUIRES_WRITE); }
+        const { assert!(ReplyToPrCommentResult::REQUIRES_WRITE); }
+        const { assert!(ResolvePrThreadResult::REQUIRES_WRITE); }
 
         // Diagnostic tools (should NOT require write)
-        const { assert!(!NoopResult::REQUIRES_WRITE) };
-        const { assert!(!MissingDataResult::REQUIRES_WRITE) };
-        const { assert!(!MissingToolResult::REQUIRES_WRITE) };
-        const { assert!(!ReportIncompleteResult::REQUIRES_WRITE) };
+        const { assert!(!NoopResult::REQUIRES_WRITE); }
+        const { assert!(!MissingDataResult::REQUIRES_WRITE); }
+        const { assert!(!MissingToolResult::REQUIRES_WRITE); }
+        const { assert!(!ReportIncompleteResult::REQUIRES_WRITE); }
     }
 
     /// Verify ALL_KNOWN_SAFE_OUTPUTS has exactly the right count:

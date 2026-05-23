@@ -186,19 +186,32 @@ target: 1es
 
 > **Note**: For `target: job` and `target: stage`, triggers configured via `on:` are ignored with a warning — the parent pipeline controls triggers. Job names are prefixed with the agent name for uniqueness (e.g., `DailyReview_Agent`). See `docs/targets.md` for usage examples.
 
-### Step 8 — MCP Servers
+### Step 8 — Tools (optional)
+
+Configure which tools are available to the agent. By default the agent has unrestricted bash access and the file-editing tool is enabled.
+
+```yaml
+tools:
+  bash: ["cat", "ls", "grep", "find", "git"]  # explicit allow-list; omit for unrestricted access
+  edit: true     # enable file-editing tool (default: true); set false to make the agent read-only
+  cache-memory: true  # persistent memory across runs (see table below for options)
+  azure-devops: true  # first-class ADO MCP (see MCP Servers step)
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `bash` | *(unrestricted)* | Explicit allow-list of bash commands the agent may call. Omit for unrestricted access (`--allow-all-tools`). Use `[":*"]` to explicitly allow all tools without omitting the field. |
+| `edit` | `true` | Enable the file-editing tool (`str_replace_editor`). Set `false` for read-only pipelines that must never modify files. |
+| `cache-memory` | `false` | Persistent memory across runs. See `docs/tools.md` for configuration options (`allowed-extensions`, etc.). When enabled, the compiler automatically injects a `clearMemory` parameter. |
+| `azure-devops` | `false` | First-class ADO MCP integration. See `docs/tools.md` for scoping options (`toolsets`, `allowed`, `org`). |
+
+> **Language runtimes** (Python, Node.js, .NET, Lean) auto-extend the bash allow-list with their ecosystem commands. See Step 14 (Runtimes).
+
+### Step 9 — MCP Servers
 
 MCP servers give the agent additional tools at runtime via the MCP Gateway (MCPG). Configure them under `mcp-servers:` with either a `container:` field (containerized stdio) or a `url:` field (HTTP).
 
-**Azure DevOps integration** — use `tools: azure-devops:` (first-class, not an MCP server):
-```yaml
-tools:
-  azure-devops: true                 # Auto-configures ADO MCP container + token mapping
-  # azure-devops:                    # Or with scoping options:
-  #   toolsets: [repos, wit, core]
-  #   allowed: [wit_get_work_item]
-  #   org: myorg
-```
+> **Azure DevOps integration** — configure via `tools: azure-devops:` (Step 8), not under `mcp-servers:`. The `tools.azure-devops` entry auto-wires the ADO MCP container, token mapping, and network allowlist.
 
 **Custom containerized MCP** (standalone target — requires `container:` field):
 ```yaml
@@ -236,7 +249,7 @@ mcp-servers:
 >
 > **Standalone target** (the default): MCPs without a `container:` or `url:` field are skipped at compile time with a compile-time warning — they have no effect and will not be available to the agent. Both containerized MCPs (with `container:`) and remote HTTP MCPs (with `url:`) are supported in standalone target.
 
-### Step 9 — Safe Outputs
+### Step 10 — Safe Outputs
 
 Safe outputs are the only write operations available to the agent. They are threat-analyzed before execution. Configure defaults in the front matter; the agent provides specifics at runtime.
 
@@ -358,7 +371,7 @@ Diagnostic tools (`noop`, `missing-data`, `missing-tool`, `report-incomplete`) a
 
 > **Validation**: The compiler enforces that if write-requiring safe outputs are configured, `permissions.write` must be set.
 
-### Step 10 — Permissions
+### Step 11 — Permissions
 
 ADO access tokens are minted from ARM service connections. `System.AccessToken` is never used.
 
@@ -375,7 +388,7 @@ permissions:
 | Both | Agent can read; safe-outputs can write |
 | Neither | No ADO tokens anywhere |
 
-### Step 11 — Triggers (optional)
+### Step 12 — Triggers (optional)
 
 #### PR Triggers (`on.pr`)
 
@@ -441,7 +454,7 @@ on:
 
 When `on.pipeline` is set: `trigger: none` and `pr: none` are generated automatically. If `filters:` are configured under `on.pipeline`, a gate step is added to the Setup job that evaluates the filters and self-cancels the build when they do not match.
 
-### Step 12 — Inline Steps (optional)
+### Step 13 — Inline Steps (optional)
 
 Steps that run inside the `Agent` job:
 
@@ -466,7 +479,7 @@ teardown:          # Separate job AFTER SafeOutputs
     displayName: "Teardown"
 ```
 
-### Step 13 — Runtimes (optional)
+### Step 14 — Runtimes (optional)
 
 Configure language runtimes that are installed before the agent runs. Runtimes auto-extend the bash command allow-list and add ecosystem-specific domains to the network allowlist.
 
@@ -513,7 +526,7 @@ runtimes:
 
 > Each enabled runtime auto-adds its ecosystem's bash commands (e.g., `dotnet`, `python`, `node`, `npm`, `lean`, `lake`) and network domains to the allowlist. See `docs/runtimes.md` for full configuration reference.
 
-### Step 14 — Network (standalone target only)
+### Step 15 — Network (standalone target only)
 
 Additional allowed domains beyond the built-in allowlist:
 ```yaml
@@ -528,7 +541,7 @@ network:
 
 `allowed` accepts raw domain patterns (wildcards supported) or ecosystem identifiers (`python`, `node`, `rust`, `dotnet`, `lean`) that expand to the full set of package registry domains for that ecosystem. The built-in allowlist includes: Azure DevOps, GitHub, Microsoft identity, Azure services, Application Insights, and MCP-specific endpoints for each enabled server.
 
-### Step 15 — Parameters (optional)
+### Step 16 — Parameters (optional)
 
 ADO runtime parameters are surfaced in the pipeline queue UI when a user manually runs the pipeline. Use them to expose configuration knobs (e.g., target region, log verbosity, feature flags) without hardcoding values.
 
@@ -560,7 +573,7 @@ parameters:
 
 Omit `parameters:` if no runtime configuration knobs are needed.
 
-### Step 16 — Inlined Imports (advanced, optional)
+### Step 17 — Inlined Imports (advanced, optional)
 
 By default (`inlined-imports: false`), any `{{#runtime-import ...}}` markers in the agent body — including the implicit marker that reloads the body itself — are resolved at **pipeline runtime**. This means editing the `.md` agent body does not require recompiling the `.lock.yml` pipeline.
 

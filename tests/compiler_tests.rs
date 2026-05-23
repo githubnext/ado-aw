@@ -1,64 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
 
-/// Integration test for the compile functionality
-///
-/// This test verifies that the compiler can successfully process a markdown file
-/// with YAML front matter and generate the expected pipeline YAML and agent file.
-#[test]
-fn test_compile_pipeline_basic() {
-    // Create a temporary directory for test artifacts
-    let temp_dir =
-        std::env::temp_dir().join(format!("agentic-pipeline-test-{}", std::process::id()));
-    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
-
-    // Create a test markdown file
-    let test_input = temp_dir.join("test-agent.md");
-    let test_content = r#"---
-name: "Test Agent"
-description: "A test agent for verification"
-on:
-  schedule: daily
-repositories:
-  - repository: test-repo
-    type: git
-    name: test-org/test-repo
-mcp-servers:
-  ado: true
-  es-chat: true
----
-
-## Test Agent
-
-This is a test agent for integration testing.
-
-### Instructions
-
-1. Test instruction one
-2. Test instruction two
-"#;
-    fs::write(&test_input, test_content).expect("Failed to write test input file");
-
-    // Create .github/agents directory in temp dir
-    fs::create_dir_all(temp_dir.join(".github/agents")).expect("Failed to create .github/agents");
-
-    // Run the compilation
-    let _output_yaml = temp_dir.join("test-agent.yml");
-
-    // Note: We can't directly call compile_pipeline from here since it's not a library function
-    // This test verifies the output structure when compile runs
-    // In a real scenario, you'd use std::process::Command to run the CLI
-
-    // For now, verify that test setup works
-    assert!(test_input.exists(), "Test input file should exist");
-    assert!(
-        temp_dir.join(".github/agents").exists(),
-        ".github/agents directory should exist"
-    );
-
-    // Cleanup
-    let _ = fs::remove_dir_all(&temp_dir);
-}
 
 /// Asserts that all required `{{ marker }}` placeholders are present in the template.
 fn assert_required_markers(content: &str) {
@@ -216,40 +158,6 @@ fn test_example_file_structure() {
     );
 }
 
-/// Test for edge cases in file naming
-#[test]
-fn test_filename_edge_cases() {
-    // This test ensures that various input names produce valid filenames
-    let test_cases = vec![
-        ("Simple Name", "simple-name"),
-        ("Name With Numbers 123", "name-with-numbers-123"),
-        ("name-with-dashes", "name-with-dashes"),
-        ("name_with_underscores", "name-with-underscores"),
-        ("Name!@#$%^&*()", "name"),
-        (
-            "   Leading and Trailing Spaces   ",
-            "leading-and-trailing-spaces",
-        ),
-        ("UPPERCASE", "uppercase"),
-    ];
-
-    // Note: This test demonstrates expected behavior
-    // The actual sanitize_filename function is tested in unit tests
-    for (input, expected) in test_cases {
-        // In integration tests, we would verify the actual output filenames
-        // For now, we document the expected behavior
-        assert!(
-            !expected.is_empty(),
-            "Sanitized filename should not be empty for input: {}",
-            input
-        );
-        assert!(
-            !expected.contains(' '),
-            "Sanitized filename should not contain spaces for input: {}",
-            input
-        );
-    }
-}
 
 /// Test that validates the presence of required dependencies
 #[test]
@@ -2737,6 +2645,16 @@ network:
         output.status.success(),
         "Compiler should succeed for valid wildcard '*.mycompany.com': {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+    assert!(
+        compiled.contains("*.mycompany.com"),
+        "Compiled output should include the wildcard domain '*.mycompany.com' in the allow list"
+    );
+    assert!(
+        compiled.contains("api.external-service.com"),
+        "Compiled output should include 'api.external-service.com' in the allow list"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
