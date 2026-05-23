@@ -334,8 +334,8 @@ and network allowlist entries.
 
 ```yaml
 tools:
-  # Bash command allow-list. Omit or set to [] for the safe-command default;
-  # use [":*"] for unrestricted access. See docs/tools.md.
+  # Bash command allow-list. Omit or use [":*"] for unrestricted access;
+  # set to [] to disable bash entirely. See docs/tools.md.
   bash: ["git status", "git diff", "npm test"]
 
   # File editing tool (read/write/patch files in the workspace). Default: true.
