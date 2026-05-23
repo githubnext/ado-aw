@@ -30,15 +30,60 @@ description: "Agent: does things"
 ---
 ```
 
+### "Deprecated front-matter shapes"
+
+`ado-aw check` may print:
+
+```
+contains deprecated front-matter shapes that need codemod fixes.
+hint: run `ado-aw compile <file>` to apply the codemods in place.
+```
+
+**Solution:** Run `ado-aw compile ./agent.md`. The compiler detects the old shape, rewrites the source file in place, and prints which codemods fired. Once compilation succeeds, commit the updated front matter. See the [codemods reference](/ado-aw/reference/codemods/) for details.
+
+### "Safe outputs require write access to ADO, but no write service connection is configured"
+
+You configured one or more safe-output tools (e.g. `create-pull-request`, `create-work-item`, `add-pr-comment`) but omitted `permissions.write` from your front matter.
+
+**Solution:** Add a write service connection:
+
+```yaml
+permissions:
+  write: ado-aw-write   # name of your ARM service connection
+```
+
+If you haven't created a service connection yet, see the [Service Connections guide](/ado-aw/setup/service-connections/).
+
+### "safe-outputs.comment-on-work-item requires a 'target' field"
+
+Certain safe-output tools require an explicit `target:` in the front matter configuration. `comment-on-work-item` and `update-work-item` are the most common examples — they need `target:` to scope which work items can be modified.
+
+**Solution:** Add a `target:` field under the tool's `safe-outputs:` entry:
+
+```yaml
+safe-outputs:
+  comment-on-work-item:
+    max: 3
+    target: "*"   # any work item, or a specific ID / area path prefix
+```
+
 ## Runtime Errors
 
 ### Network timeouts in AWF sandbox
 
 The agent can only access explicitly allowed domains. If your agent needs to reach an external service:
 
-1. Check if a runtime enables the domain (e.g., `runtimes: [python]` enables `pypi.org`)
-2. Add custom domains via `allowed-hosts:` in front matter
-3. For broader access, use ADO `permissions:` with a service connection
+1. Check if a runtime enables the domain — for example, `runtimes: python: true` adds `pypi.org` and other Python ecosystem hosts.
+2. Add custom domains explicitly under `network: allowed:` in the front matter:
+
+   ```yaml
+   network:
+     allowed:
+       - "api.contoso.internal"
+       - "*.packages.example.com"
+   ```
+
+3. For Azure DevOps API access (work items, PRs, repos), configure a service connection under `permissions:` — that's separate from network domain access.
 
 ### Safe output validation failures
 
