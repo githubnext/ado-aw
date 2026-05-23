@@ -98,11 +98,11 @@ impl log::Log for FileLogger {
             );
 
             // Write to file (always capture debug+)
-            if record.level() <= self.file_level {
-                if let Ok(mut file) = self.file.lock() {
-                    let _ = file.write_all(message.as_bytes());
-                    let _ = file.flush();
-                }
+            if record.level() <= self.file_level
+                && let Ok(mut file) = self.file.lock()
+            {
+                let _ = file.write_all(message.as_bytes());
+                let _ = file.flush();
             }
 
             // Write to stderr according to selected runtime verbosity

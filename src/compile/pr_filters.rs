@@ -30,38 +30,38 @@ pub(super) fn generate_native_pr_trigger(pr: &PrTriggerConfig) -> String {
 
     let mut yaml = String::from("pr:\n");
 
-    if let Some(branches) = &pr.branches {
-        if !branches.include.is_empty() || !branches.exclude.is_empty() {
-            yaml.push_str("  branches:\n");
-            if !branches.include.is_empty() {
-                yaml.push_str("    include:\n");
-                for b in &branches.include {
-                    yaml.push_str(&format!("      - '{}'\n", b.replace('\'', "''")));
-                }
+    if let Some(branches) = &pr.branches
+        && (!branches.include.is_empty() || !branches.exclude.is_empty())
+    {
+        yaml.push_str("  branches:\n");
+        if !branches.include.is_empty() {
+            yaml.push_str("    include:\n");
+            for b in &branches.include {
+                yaml.push_str(&format!("      - '{}'\n", b.replace('\'', "''")));
             }
-            if !branches.exclude.is_empty() {
-                yaml.push_str("    exclude:\n");
-                for b in &branches.exclude {
-                    yaml.push_str(&format!("      - '{}'\n", b.replace('\'', "''")));
-                }
+        }
+        if !branches.exclude.is_empty() {
+            yaml.push_str("    exclude:\n");
+            for b in &branches.exclude {
+                yaml.push_str(&format!("      - '{}'\n", b.replace('\'', "''")));
             }
         }
     }
 
-    if let Some(paths) = &pr.paths {
-        if !paths.include.is_empty() || !paths.exclude.is_empty() {
-            yaml.push_str("  paths:\n");
-            if !paths.include.is_empty() {
-                yaml.push_str("    include:\n");
-                for p in &paths.include {
-                    yaml.push_str(&format!("      - '{}'\n", p.replace('\'', "''")));
-                }
+    if let Some(paths) = &pr.paths
+        && (!paths.include.is_empty() || !paths.exclude.is_empty())
+    {
+        yaml.push_str("  paths:\n");
+        if !paths.include.is_empty() {
+            yaml.push_str("    include:\n");
+            for p in &paths.include {
+                yaml.push_str(&format!("      - '{}'\n", p.replace('\'', "''")));
             }
-            if !paths.exclude.is_empty() {
-                yaml.push_str("    exclude:\n");
-                for p in &paths.exclude {
-                    yaml.push_str(&format!("      - '{}'\n", p.replace('\'', "''")));
-                }
+        }
+        if !paths.exclude.is_empty() {
+            yaml.push_str("    exclude:\n");
+            for p in &paths.exclude {
+                yaml.push_str(&format!("      - '{}'\n", p.replace('\'', "''")));
             }
         }
     }

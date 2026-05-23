@@ -632,17 +632,17 @@ pub fn validate_pr_filters(filters: &super::types::PrFilters) -> Vec<Diagnostic>
     let mut diags = Vec::new();
 
     // min_changes > max_changes
-    if let (Some(min), Some(max)) = (filters.min_changes, filters.max_changes) {
-        if min > max {
-            diags.push(Diagnostic {
-                severity: Severity::Error,
-                filter: "min-changes / max-changes".into(),
-                message: format!(
-                    "min-changes ({}) is greater than max-changes ({}) — no PR can satisfy both",
-                    min, max
-                ),
-            });
-        }
+    if let (Some(min), Some(max)) = (filters.min_changes, filters.max_changes)
+        && min > max
+    {
+        diags.push(Diagnostic {
+            severity: Severity::Error,
+            filter: "min-changes / max-changes".into(),
+            message: format!(
+                "min-changes ({}) is greater than max-changes ({}) — no PR can satisfy both",
+                min, max
+            ),
+        });
     }
 
     // Time window validation
