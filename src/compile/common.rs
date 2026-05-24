@@ -6536,7 +6536,7 @@ safe-outputs:
     fn test_generate_awf_mounts_no_extensions() {
         let fm = minimal_front_matter();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
+        let _ctx = crate::compile::extensions::CompileContext::for_test(&fm);
         let result = generate_awf_mounts(&exts);
         assert_eq!(result, "\\", "no mounts should produce bare continuation");
     }
@@ -6547,7 +6547,7 @@ safe-outputs:
             parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  lean: true\n---\n")
                 .unwrap();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
+        let _ctx = crate::compile::extensions::CompileContext::for_test(&fm);
         let result = generate_awf_mounts(&exts);
         assert!(result.contains("--mount"), "should contain --mount flag");
         assert!(result.contains(".elan"), "should reference .elan directory");

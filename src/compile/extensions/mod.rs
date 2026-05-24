@@ -677,12 +677,7 @@ extension_enum! {
 /// (runtimes in `RuntimesConfig` field order, tools in `ToolsConfig`
 /// field order).
 pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
-    let mut extensions = Vec::new();
-
     // ── Always-on internal extensions ──
-    extensions.push(Extension::AdoAwMarker(AdoAwMarkerExtension));
-    extensions.push(Extension::GitHub(GitHubExtension));
-    extensions.push(Extension::SafeOutputs(SafeOutputsExtension));
     // Always-on ado-script extension. Owns both the gate evaluator
     // (Setup job) and the runtime-import resolver (Agent job). Internal
     // gating on `filters:` and `inlined-imports` means the extension
@@ -692,11 +687,16 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
     // resolver step run BEFORE any user-facing Runtime extension (e.g.
     // `NodeExtension`). The user's pinned Node version then "wins last"
     // on PATH for the rest of the Agent job.
-    extensions.push(Extension::AdoScript(AdoScriptExtension {
-        pr_filters: front_matter.pr_filters().cloned(),
-        pipeline_filters: front_matter.pipeline_filters().cloned(),
-        inlined_imports: front_matter.inlined_imports,
-    }));
+    let mut extensions = vec![
+        Extension::AdoAwMarker(AdoAwMarkerExtension),
+        Extension::GitHub(GitHubExtension),
+        Extension::SafeOutputs(SafeOutputsExtension),
+        Extension::AdoScript(AdoScriptExtension {
+            pr_filters: front_matter.pr_filters().cloned(),
+            pipeline_filters: front_matter.pipeline_filters().cloned(),
+            inlined_imports: front_matter.inlined_imports,
+        }),
+    ];
 
     // ── Runtimes (ExtensionPhase::Runtime) ──
     if let Some(lean) = front_matter.runtimes.as_ref().and_then(|r| r.lean.as_ref())
