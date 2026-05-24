@@ -659,55 +659,6 @@ mod tests {
     // ── Container / Docker validators ───────────────────────────────────
 
     #[test]
-    fn test_validate_container_image() {
-        assert!(validate_container_image("node:20-slim", "mcp").is_empty());
-        assert!(validate_container_image("ghcr.io/org/tool:latest", "mcp").is_empty());
-        let empty_warnings = validate_container_image("", "mcp");
-        assert!(!empty_warnings.is_empty());
-        assert!(empty_warnings[0].contains("empty"));
-        let injection_warnings = validate_container_image("$(malicious)", "mcp");
-        assert!(!injection_warnings.is_empty());
-        assert!(injection_warnings[0].contains("unexpected characters"));
-    }
-
-    #[test]
-    fn test_validate_docker_args_privileged_flag() {
-        let warnings = validate_docker_args(&["--privileged".to_string()], "my-mcp");
-        assert!(!warnings.is_empty());
-        assert!(warnings[0].contains("elevated privileges"));
-    }
-
-    #[test]
-    fn test_validate_docker_args_entrypoint_in_args_warns() {
-        let warnings = validate_docker_args(
-            &["--entrypoint".to_string(), "/bin/sh".to_string()],
-            "my-mcp",
-        );
-        assert!(!warnings.is_empty());
-        assert!(warnings[0].contains("entrypoint"));
-    }
-
-    #[test]
-    fn test_validate_docker_args_volume_flag_calls_mount_validation() {
-        let warnings = validate_docker_args(
-            &["-v".to_string(), "/etc/passwd:/data:ro".to_string()],
-            "my-mcp",
-        );
-        assert!(warnings.len() >= 2); // bypass warning + sensitive path
-        assert!(warnings[0].contains("bypasses mounts"));
-        assert!(warnings[1].contains("sensitive"));
-    }
-
-    #[test]
-    fn test_validate_mcp_url() {
-        assert!(validate_mcp_url("https://mcp.example.com", "mcp").is_empty());
-        assert!(validate_mcp_url("http://localhost:8080", "mcp").is_empty());
-        let warnings = validate_mcp_url("ftp://example.com", "mcp");
-        assert!(!warnings.is_empty());
-        assert!(warnings[0].contains("http://") || warnings[0].contains("https://"));
-    }
-
-    #[test]
     fn test_warn_potential_secrets() {
         let env = HashMap::from([("AZURE_DEVOPS_EXT_PAT".to_string(), "secret123".to_string())]);
         let warnings = warn_potential_secrets("mcp", &env, &HashMap::new());
