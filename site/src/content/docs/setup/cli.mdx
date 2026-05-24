@@ -252,6 +252,12 @@ Options:
 - `--ado-project <name>` -- Azure DevOps project name override
 - `--dry-run` -- validate inputs without making write calls
 
+## Deprecated commands
+
+### `configure` (deprecated alias)
+
+`ado-aw configure` is a hidden alias for `ado-aw secrets set GITHUB_TOKEN`. It emits a deprecation warning and will be removed in a future release. Use `ado-aw secrets set GITHUB_TOKEN` instead.
+
 ## Common examples
 
 ```bash

@@ -76,14 +76,14 @@ The agent will walk you through the front-matter configuration, write the agent 
 
 ### 3. Push and configure
 
-Once you're happy with the generated files, commit and push them to your Azure DevOps repository. Then create a pipeline in Azure DevOps pointing at the compiled `.lock.yml` file, and configure it:
+Once you're happy with the generated files, commit and push them to your Azure DevOps repository. Then create a pipeline in Azure DevOps pointing at the compiled `.lock.yml` file, and set the required `GITHUB_TOKEN` pipeline variable:
 
 ```bash
-ado-aw configure
+ado-aw secrets set GITHUB_TOKEN
 ```
 
-This sets the `GITHUB_TOKEN` pipeline variable on the ADO build definition. The command prompts for:
-- A **GitHub Personal Access Token (PAT)** -- used by the Copilot CLI at runtime (see [required permissions](#github-pat-permissions) below)
+This stores the `GITHUB_TOKEN` pipeline variable (as a secret) on every matched ADO build definition. The command prompts for:
+- The **GitHub Personal Access Token (PAT)** value -- used by the Copilot CLI at runtime (see [required permissions](#github-pat-permissions) below)
 - For Azure DevOps authentication, the command first tries the **Azure CLI** (`az` login session). If the Azure CLI is not available or not logged in, it falls back to prompting for an **Azure DevOps PAT**.
 
 #### Service connections for ADO access
@@ -151,13 +151,13 @@ This writes a compiled `.lock.yml` pipeline alongside the source file. You shoul
 3. In Azure DevOps, create a pipeline that points at the compiled YAML file.
 4. Save the pipeline.
 
-### 4. Configure the pipeline
+### 4. Set the GitHub token
 
 ```bash
-ado-aw configure
+ado-aw secrets set GITHUB_TOKEN
 ```
 
-This sets the `GITHUB_TOKEN` pipeline variable. See the [With Agents](#3-push-and-configure) section above for details on what the command prompts for and the current GitHub PAT limitation.
+This stores the `GITHUB_TOKEN` pipeline variable (as a secret) on every matched ADO build definition. See the [With Agents](#3-push-and-configure) section above for details on what the command prompts for and the current GitHub PAT limitation.
 
 If your workflow uses write-requiring safe outputs, you'll also need an ARM service connection — see [Service Connections](/ado-aw/setup/service-connections/).
 
@@ -182,7 +182,7 @@ No repository permissions are needed -- the token is only used for Copilot infer
 GitHub App tokens and OAuth tokens are **not supported** for this secret. Only fine-grained PATs work. The token owner's account must have an active Copilot license.
 :::
 
-The token is stored as the `GITHUB_TOKEN` pipeline variable on your Azure DevOps build definition (set by `ado-aw configure`). It is never exposed to the agent -- only the pipeline runtime uses it.
+The token is stored as the `GITHUB_TOKEN` pipeline variable on your Azure DevOps build definition (set by `ado-aw secrets set GITHUB_TOKEN`). It is never exposed to the agent -- only the pipeline runtime uses it.
 
 ---
 
