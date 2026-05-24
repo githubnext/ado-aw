@@ -32,6 +32,10 @@ safe-outputs:
 
 Safe output configurations are passed to Stage 3 execution and used when processing safe outputs.
 
+:::caution[Compile-time key validation]
+All keys under `safe-outputs:` must match an exact registered tool name (e.g. `create-pull-request`, not `create-pr`). The compiler rejects unknown or misspelled keys with an error listing similar known tools. Key names must use only ASCII letters, digits, and hyphens.
+:::
+
 ## Available Safe Output Tools
 
 ### comment-on-work-item

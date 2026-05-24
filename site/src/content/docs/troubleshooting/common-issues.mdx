@@ -54,6 +54,51 @@ permissions:
 
 If you haven't created a service connection yet, see the [Service Connections guide](/ado-aw/setup/service-connections/).
 
+### "safe-outputs contains unrecognised tool name(s)"
+
+A key under `safe-outputs:` does not match any known tool name. The compiler now rejects unknown keys rather than silently dropping them.
+
+```
+safe-outputs contains unrecognised tool name(s):
+  - create-pr (similar known tools: create-branch, create-git-tag, create-pull-request, create-wiki-page, create-work-item)
+
+Valid safe-output keys are listed in docs/safe-outputs.md. Each key must
+match exactly the kebab-case name registered by a tool in src/safeoutputs/
+(e.g. `create-pull-request`, not `create-pr`).
+```
+
+**Solution:** Replace the unrecognised key with the correct tool name shown in the "similar known tools" hint. All tool names use kebab-case and must match exactly:
+
+```yaml
+# ✗ Bad — old short-form that used to be silently dropped
+safe-outputs:
+  create-pr:
+    target-branch: main
+
+# ✓ Good — exact registered name
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+```
+
+See the [Safe Outputs reference](/ado-aw/reference/safe-outputs/) for the full list of available tool names.
+
+### "safe-outputs contains tool name(s) with invalid characters"
+
+A key under `safe-outputs:` contains characters other than ASCII letters, digits, and hyphens.
+
+**Solution:** Use only lowercase letters, digits, and hyphens in `safe-outputs:` keys:
+
+```yaml
+# ✗ Bad — spaces are not allowed
+safe-outputs:
+  create work item: {}
+
+# ✓ Good
+safe-outputs:
+  create-work-item: {}
+```
+
 ### "safe-outputs.comment-on-work-item requires a 'target' field"
 
 Certain safe-output tools require an explicit `target:` in the front matter configuration. `comment-on-work-item` and `update-work-item` are the most common examples — they need `target:` to scope which work items can be modified.
