@@ -41,7 +41,7 @@ impl Validate for CreateWikiPageParams {
             self.path
         );
         ensure!(
-            self.path.trim_matches('/') != "",
+            !self.path.trim_matches('/').is_empty(),
             "path must contain at least one non-slash segment"
         );
         ensure!(

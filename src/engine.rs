@@ -210,7 +210,7 @@ fn collect_allowed_tools(
     // WithOptions that have a container or url). McpConfig::Enabled(true) has no backing
     // server in MCPG, so granting the permission would cause confusing runtime errors.
     let mut sorted_mcps: Vec<_> = front_matter.mcp_servers.iter().collect();
-    sorted_mcps.sort_by(|(a, _), (b, _)| a.cmp(b));
+    sorted_mcps.sort_by_key(|(a, _)| *a);
     for (name, config) in sorted_mcps {
         // Skip servers already provided by extensions (case-insensitive to match
         // generate_mcpg_config's eq_ignore_ascii_case guard for reserved names)
