@@ -20,6 +20,9 @@ safe-outputs:
       - README.md
       - docs/**
       - prompts/**
+  create-issue:
+    max: 1
+    labels: [source-code, docs]
 ---
 
 # Documentation Freshness Check
@@ -127,7 +130,11 @@ This file is the primary guide AI agents use when creating new workflow files. D
 
 When you find drift between documentation and source code, the correct fix is always to **update the documentation to match the source code**, not to modify the source code.
 
-If fixing a discrepancy would require modifying a file outside the `allowed-files` list (`AGENTS.md`, `README.md`, `docs/**`, `prompts/**`), skip that change and note it as out-of-scope in the pull request body.
+If fixing a discrepancy would require modifying a file outside the `allowed-files` list (`AGENTS.md`, `README.md`, `docs/**`, `prompts/**`), skip that change and **file a GitHub issue** describing the source code inconsistency instead. Use the `create-issue` safe output with:
+- **Title**: `docs: source code inconsistency — [brief summary of the drift]`
+- **Body**: A clear description of what the documentation says versus what the source code actually does, with specific file and line references, so a developer can investigate and fix it.
+
+The `create-issue` safe output is pre-configured with the `source-code` and `docs` labels.
 
 ## Decision Criteria
 
