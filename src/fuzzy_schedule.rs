@@ -836,16 +836,24 @@ mod tests {
         ));
 
         let schedule = parse_fuzzy_schedule("daily around 14:00").unwrap();
-        assert!(matches!(
+        assert_eq!(
             schedule,
-            FuzzySchedule::Daily(TimeConstraint::Around(_))
-        ));
+            FuzzySchedule::Daily(TimeConstraint::Around(TimeSpec {
+                hour: 14,
+                minute: 0
+            })),
+            "daily around 14:00 should capture 14:00 in the Around variant"
+        );
 
         let schedule = parse_fuzzy_schedule("daily between 9:00 and 17:00").unwrap();
-        assert!(matches!(
+        assert_eq!(
             schedule,
-            FuzzySchedule::Daily(TimeConstraint::Between(_, _))
-        ));
+            FuzzySchedule::Daily(TimeConstraint::Between(
+                TimeSpec { hour: 9, minute: 0 },
+                TimeSpec { hour: 17, minute: 0 }
+            )),
+            "daily between should capture both boundary times"
+        );
     }
 
     #[test]
@@ -946,41 +954,32 @@ mod tests {
 
     #[test]
     fn test_between_equal_times_daily() {
-        // Test edge case: daily between 14:00 and 14:00 (same time)
-        // Should not panic and should generate valid cron
+        // When start == end the range expands to the full 24-hour day, so the
+        // scattered time must NOT be pinned to the specified hour (14).
+        // The cron expression must be deterministic for a given workflow key.
         let schedule = parse_fuzzy_schedule("daily between 14:00 and 14:00").unwrap();
         let cron = generate_cron(&schedule, "test/agent");
-
-        // Verify it's a valid cron format
-        let parts: Vec<&str> = cron.split_whitespace().collect();
-        assert_eq!(parts.len(), 5, "Cron should have 5 fields");
-
-        let minute: u32 = parts[0].parse().expect("Minute should be a number");
-        assert!(minute < 60, "Minute should be 0-59");
-
-        let hour: u32 = parts[1].parse().expect("Hour should be a number");
-        assert!(hour < 24, "Hour should be 0-23");
+        // FNV-1a("test/agent")=196813323; offset=196813323%1440=1323;
+        // scattered=(840+1323)%1440=723 → hour=12, min=3
+        assert_eq!(
+            cron, "3 12 * * *",
+            "Same start/end time should scatter across full 24-hour day deterministically"
+        );
     }
 
     #[test]
     fn test_between_equal_times_weekly() {
-        // Test edge case: weekly on monday between 09:00 and 09:00 (same time)
-        // Should not panic and should generate valid cron
+        // When start == end the range expands to the full 24-hour day, so the
+        // scattered time must NOT be pinned to the specified hour (09).
+        // The cron expression must be deterministic for a given workflow key.
         let schedule = parse_fuzzy_schedule("weekly on monday between 09:00 and 09:00").unwrap();
         let cron = generate_cron(&schedule, "test/agent");
-
-        // Verify it's a valid cron format
-        let parts: Vec<&str> = cron.split_whitespace().collect();
-        assert_eq!(parts.len(), 5, "Cron should have 5 fields");
-
-        let minute: u32 = parts[0].parse().expect("Minute should be a number");
-        assert!(minute < 60, "Minute should be 0-59");
-
-        let hour: u32 = parts[1].parse().expect("Hour should be a number");
-        assert!(hour < 24, "Hour should be 0-23");
-
-        // Verify day of week is Monday (1)
-        assert_eq!(parts[4], "1", "Day of week should be Monday (1)");
+        // FNV-1a("test/agent")=196813323; offset=196813323%1440=1323;
+        // scattered=(540+1323)%1440=423 → hour=7, min=3; day-of-week=1 (Monday)
+        assert_eq!(
+            cron, "3 7 * * 1",
+            "Same start/end time on Monday should scatter across full day deterministically"
+        );
     }
 
     #[test]
