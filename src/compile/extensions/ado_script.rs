@@ -323,14 +323,11 @@ pub fn resolve_imports_inline(body: &str, base_dir: &std::path::Path) -> Result<
         //   - UNC (`\\server\share`)
         let is_drive_letter_absolute = {
             let mut chars = path_str.chars();
-            match (chars.next(), chars.next(), chars.next()) {
+            matches!(
+                (chars.next(), chars.next(), chars.next()),
                 (Some(c), Some(':'), Some(sep))
-                    if c.is_ascii_alphabetic() && (sep == '/' || sep == '\\') =>
-                {
-                    true
-                }
-                _ => false,
-            }
+                    if c.is_ascii_alphabetic() && (sep == '/' || sep == '\\')
+            )
         };
         let is_absolute = std::path::Path::new(path_str).is_absolute()
             || path_str.starts_with('/')

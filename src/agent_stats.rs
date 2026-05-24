@@ -69,11 +69,10 @@ impl AgentStats {
         // Find the last invoke_agent span (contains aggregated totals)
         let last_agent_span = entries
             .iter()
-            .filter(|e| {
+            .rfind(|e| {
                 e.get("type").and_then(|t| t.as_str()) == Some("span")
                     && e.get("name").and_then(|n| n.as_str()) == Some("invoke_agent")
-            })
-            .next_back();
+            });
 
         if let Some(span) = last_agent_span {
             let attrs = span.get("attributes").cloned().unwrap_or(Value::Null);
