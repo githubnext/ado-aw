@@ -99,7 +99,7 @@ pub struct Codemod {
 /// having run first (e.g. A renames `foo` → `bar`, B operates on
 /// `bar`); idempotency means any codemod can re-run on any source
 /// without harm.
-pub static CODEMODS: &[&'static Codemod] = &[
+pub static CODEMODS: &[&Codemod] = &[
     &m0001_repos_unified::CODEMOD,
     &m0002_pool_object_form::CODEMOD,
 ];
