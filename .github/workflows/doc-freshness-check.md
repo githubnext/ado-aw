@@ -10,7 +10,7 @@ tools:
   github:
     toolsets: [default]
 network:
-  allowed: [defaults, rust]
+  allowed: [defaults, rust, dev.azure.com, learn.microsoft.com]
 safe-outputs:
   create-pull-request:
     max: 1

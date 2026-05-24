@@ -12,7 +12,7 @@ tools:
   bash: ["*"]
   cache-memory: true
 network:
-  allowed: [defaults, node, rust]
+  allowed: [defaults, node, rust, dev.azure.com, learn.microsoft.com]
 safe-outputs:
   create-pull-request:
     max: 1

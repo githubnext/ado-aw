@@ -11,7 +11,7 @@ tools:
     toolsets: [default]
   cache-memory: true
 network:
-  allowed: [defaults, rust]
+  allowed: [defaults, rust, dev.azure.com, learn.microsoft.com]
 safe-outputs:
   create-pull-request:
     max: 1

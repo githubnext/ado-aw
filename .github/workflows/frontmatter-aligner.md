@@ -13,7 +13,7 @@ tools:
   bash: ["*"]
   web-fetch:
 network:
-  allowed: [defaults, rust]
+  allowed: [defaults, rust, dev.azure.com, learn.microsoft.com]
 runtimes:
   rust:
     version: "stable"
