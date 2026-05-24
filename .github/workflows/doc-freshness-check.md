@@ -121,6 +121,14 @@ This file is the primary guide AI agents use when creating new workflow files. D
 - **Common Patterns** — are the YAML examples valid against the current front matter schema?
 - **Key Rules** — is the guidance accurate? (e.g., compile-time validation rules, permission requirements)
 
+## Scope Restriction
+
+**You must only modify documentation files.** Source code files (`.rs`, `.ts`, `.js`, `.toml`, etc.) are strictly out of scope and must **never** be included in your pull request.
+
+When you find drift between documentation and source code, the correct fix is always to **update the documentation to match the source code**, not to modify the source code.
+
+If fixing a discrepancy would require modifying a file outside the `allowed-files` list (`AGENTS.md`, `README.md`, `docs/**`, `prompts/**`), skip that change and note it as out-of-scope in the pull request body.
+
 ## Decision Criteria
 
 **Create a pull request** if you find any of the following:
