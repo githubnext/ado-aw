@@ -201,6 +201,24 @@ Reports that no action was needed. Use this to provide visibility when analysis 
 **Agent parameters:**
 - `context` - Optional context about why no action was taken
 
+**Configuration options (front matter):**
+
+By default, Stage 3 **automatically files or appends to an ADO work item** every time `noop` fires. If a non-closed work item with the same title already exists, a new comment is appended instead of creating a duplicate. If ADO credentials are unavailable, execution succeeds with a warning.
+
+```yaml
+safe-outputs:
+  noop:
+    work-item:
+      enabled: true                               # Set false to disable work-item filing entirely
+      title: "[ado-aw] Agent reported no operation"  # Work item title (used for dedup lookup too)
+      work-item-type: Task                        # ADO work item type (default: Task)
+      area-path: "MyProject\\MyTeam"              # Optional area path
+      iteration-path: "MyProject\\Sprint 1"       # Optional iteration path
+      tags:                                       # Optional tags applied to the work item
+        - agent-noop
+      include-stats: true                         # Append agent execution stats (default: true)
+```
+
 ### missing-data
 Reports that data or information needed to complete the task is not available.
 
@@ -215,6 +233,24 @@ Reports that a tool or capability needed to complete the task is not available.
 **Agent parameters:**
 - `tool_name` - Name of the tool that was expected but not found
 - `context` - Optional context about why the tool was needed
+
+**Configuration options (front matter):**
+
+Like `noop`, Stage 3 **automatically files or appends to an ADO work item** when `missing-tool` fires. If ADO credentials are unavailable, execution succeeds with a warning.
+
+```yaml
+safe-outputs:
+  missing-tool:
+    work-item:
+      enabled: true                                       # Set false to disable work-item filing entirely
+      title: "[ado-aw] Agent encountered missing tool"    # Work item title (used for dedup lookup too)
+      work-item-type: Task                                # ADO work item type (default: Task)
+      area-path: "MyProject\\MyTeam"                      # Optional area path
+      iteration-path: "MyProject\\Sprint 1"               # Optional iteration path
+      tags:                                               # Optional tags applied to the work item
+        - agent-missing-tool
+      include-stats: true                                 # Append agent execution stats (default: true)
+```
 
 ### report-incomplete
 Reports that a task could not be completed.
