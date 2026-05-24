@@ -54,7 +54,7 @@ fn apply_codemod(fm: &mut Mapping, ctx: &CodemodContext) -> Result<bool> {
             return Ok(false);
         }
         let target = fm
-            .get(&Value::String("target".to_string()))
+            .get(Value::String("target".to_string()))
             .and_then(|v| v.as_str());
         if target != Some("1es") {
             return Ok(false);
