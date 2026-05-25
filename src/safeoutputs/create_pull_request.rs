@@ -2086,15 +2086,16 @@ fn validate_patch_paths(patch_content: &str) -> anyhow::Result<()> {
         {
             let path = line.splitn(3, ' ').nth(2).unwrap_or("").trim_matches('"');
             validate_single_path(path)?;
-        } else if {
-            // Only consider this a real header line if it has no leading
-            // whitespace — diff context lines are space-prefixed, so a line
-            // body of "new file mode 120000" inside a hunk would look identical
-            // to a real mode header after trim(). Real git header lines never
-            // start with whitespace; we require the same here to avoid false
-            // positives on adversarial-but-benign diff content. Added (+)/
-            // removed (-) lines start with a non-whitespace prefix that
-            // survives trim() and so cannot match the exact mode-line strings.
+        }
+        // Only consider this a real header line if it has no leading
+        // whitespace — diff context lines are space-prefixed, so a line
+        // body of "new file mode 120000" inside a hunk would look identical
+        // to a real mode header after trim(). Real git header lines never
+        // start with whitespace; we require the same here to avoid false
+        // positives on adversarial-but-benign diff content. Added (+)/
+        // removed (-) lines start with a non-whitespace prefix that
+        // survives trim() and so cannot match the exact mode-line strings.
+        let is_symlink_mode_header = {
             let starts_with_ws = line
                 .chars()
                 .next()
@@ -2102,7 +2103,8 @@ fn validate_patch_paths(patch_content: &str) -> anyhow::Result<()> {
             let trimmed = line.trim();
             !starts_with_ws
                 && (trimmed == "new file mode 120000" || trimmed == "new mode 120000")
-        } {
+        };
+        if is_symlink_mode_header {
             // Reject patch lines that INTRODUCE a symlink (git mode 120000).
             // Either of these lines means the resulting tree contains a symlink:
             //   - "new file mode 120000" — a freshly added symlink
