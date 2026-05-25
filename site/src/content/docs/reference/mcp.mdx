@@ -56,8 +56,56 @@ mcp-servers:
 
 **Common (both types):**
 - `enabled:` - Whether this MCP server is active (default: `true`). Set to `false` to temporarily disable an entry without removing it from the front matter.
-- `allowed:` - Array of tool names the agent is permitted to call (required for security)
+- `allowed:` - Array of tool names the agent is permitted to call from this server (required for security). See [Two-Level Permission Model](#two-level-permission-model) for how this interacts with Copilot CLI's `--allow-tool`.
 - `env:` - Environment variables for the MCP server process. Use `""` (empty string) for passthrough from the pipeline environment.
+
+## Two-Level Permission Model
+
+MCP security operates at **two distinct layers**, both of which must grant permission for an agent to successfully call an MCP tool:
+
+### Layer 1: Copilot CLI Server Access (`--allow-tool <server-name>`)
+
+The Copilot CLI controls which MCP servers the agent can *access* via `--allow-tool` flags. The compiler automatically generates these flags for:
+
+- **Built-in extensions** — `github`, `safeoutputs`, and `azure-devops` (when configured via `tools.azure-devops`)
+- **User-defined MCP servers** — any server in `mcp-servers:` with a `container:` or `url:` backing
+
+For example, if you define an `azure-devops` server in `mcp-servers:`, the compiled pipeline includes:
+
+```bash
+copilot --allow-tool azure-devops ...
+```
+
+This grants the agent permission to *connect to the server*. Without this flag, the agent cannot communicate with the server at all, regardless of the `allowed:` list.
+
+**When is `--allow-tool` automatic?**
+- **Restricted bash mode** (explicit `bash: [...]` list) — the compiler emits individual `--allow-tool` flags for each server.
+- **Wildcard bash mode** (omitted `bash:` or `bash: [":*"]`) — the compiler emits `--allow-all-tools` instead, which grants access to all servers and tools without individual flags.
+
+### Layer 2: MCPG Tool-Level Filtering (`allowed: [...]`)
+
+The MCP Gateway (MCPG) enforces the `allowed:` list for each server. Even if the agent has `--allow-tool azure-devops` permission, it can only call tools explicitly listed in the server's `allowed:` array.
+
+```yaml
+mcp-servers:
+  azure-devops:
+    container: "node:20-slim"
+    entrypoint: "npx"
+    entrypoint-args: ["-y", "@azure-devops/mcp", "myorg"]
+    allowed:
+      - core_list_projects   # ✅ Agent can call this
+      - wit_get_work_item    # ✅ Agent can call this
+      # wit_update_work_item  ❌ Not in allowed list → MCPG blocks
+```
+
+If the agent attempts to call `wit_update_work_item`, MCPG rejects the request even though the agent has `--allow-tool azure-devops`.
+
+### Why Two Layers?
+
+- **CLI layer (`--allow-tool`)** — coarse-grained server access control; prevents agents from discovering or connecting to servers they shouldn't use.
+- **MCPG layer (`allowed:`)** — fine-grained tool access control; allows servers to expose many tools while agents only get a safe subset.
+
+This defense-in-depth model ensures agents can only call the exact tools you intended, with no accidental privilege escalation.
 
 ## Environment Variable Passthrough
 
@@ -94,8 +142,7 @@ network:
 
 ## Security Notes
 
-1. **Allow-listing**: Only tools explicitly listed in `allowed:` are accessible to agents
-2. **Containerization**: Stdio MCP servers run as isolated Docker containers (per MCPG spec §3.2.1)
-3. **Environment Isolation**: MCP containers are spawned by MCPG with only the configured environment variables
-4. **MCPG Gateway**: All MCP traffic flows through the MCP Gateway which enforces tool-level filtering
-5. **Network Isolation**: MCP containers run within the same AWF-isolated network. Users must explicitly allow external domains via `network.allowed`
+1. **Two-level allow-listing**: Both `--allow-tool <server>` (CLI layer) and `allowed:` (MCPG layer) must grant permission for a tool call to succeed. See [Two-Level Permission Model](#two-level-permission-model) for details.
+2. **Containerization**: Stdio MCP servers run as isolated Docker containers (per MCPG spec §3.2.1).
+3. **Environment Isolation**: MCP containers are spawned by MCPG with only the configured environment variables.
+4. **Network Isolation**: MCP containers run within the same AWF-isolated network. Users must explicitly allow external domains via `network.allowed`.
