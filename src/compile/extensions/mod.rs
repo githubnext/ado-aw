@@ -649,7 +649,7 @@ extension_enum! {
         AdoAwMarker(AdoAwMarkerExtension),
         GitHub(GitHubExtension),
         SafeOutputs(SafeOutputsExtension),
-        AdoScript(AdoScriptExtension),
+        AdoScript(Box<AdoScriptExtension>),
         Lean(LeanExtension),
         Python(PythonExtension),
         Node(NodeExtension),
@@ -691,11 +691,11 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
         Extension::AdoAwMarker(AdoAwMarkerExtension),
         Extension::GitHub(GitHubExtension),
         Extension::SafeOutputs(SafeOutputsExtension),
-        Extension::AdoScript(AdoScriptExtension {
+        Extension::AdoScript(Box::new(AdoScriptExtension {
             pr_filters: front_matter.pr_filters().cloned(),
             pipeline_filters: front_matter.pipeline_filters().cloned(),
             inlined_imports: front_matter.inlined_imports,
-        }),
+        })),
     ];
 
     // ── Runtimes (ExtensionPhase::Runtime) ──
