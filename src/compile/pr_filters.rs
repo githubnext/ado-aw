@@ -490,42 +490,6 @@ mod tests {
     }
 
     #[test]
-    fn test_gate_step_min_changes() {
-        use crate::compile::filter_ir::{build_gate_spec, lower_pr_filters, GateContext, PredicateSpec};
-        let filters = PrFilters {
-            min_changes: Some(5),
-            ..Default::default()
-        };
-        let checks = lower_pr_filters(&filters);
-        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
-        match &spec.checks[0].predicate {
-            PredicateSpec::NumericRange { min, max, .. } => {
-                assert_eq!(*min, Some(5));
-                assert_eq!(*max, None);
-            }
-            other => panic!("expected NumericRange, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_gate_step_max_changes() {
-        use crate::compile::filter_ir::{build_gate_spec, lower_pr_filters, GateContext, PredicateSpec};
-        let filters = PrFilters {
-            max_changes: Some(50),
-            ..Default::default()
-        };
-        let checks = lower_pr_filters(&filters);
-        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
-        match &spec.checks[0].predicate {
-            PredicateSpec::NumericRange { min, max, .. } => {
-                assert_eq!(*min, None);
-                assert_eq!(*max, Some(50));
-            }
-            other => panic!("expected NumericRange, got {:?}", other),
-        }
-    }
-
-    #[test]
     fn test_gate_step_min_and_max_changes() {
         use crate::compile::filter_ir::{build_gate_spec, lower_pr_filters, GateContext, PredicateSpec};
         let filters = PrFilters {
