@@ -592,12 +592,6 @@ mod tests {
         }
     }
 
-    /// Compute SHA-256 hex digest of a byte slice (test helper, delegates
-    /// to the crate-level helper).
-    fn test_sha256(data: &[u8]) -> String {
-        crate::hash::sha256_hex(data)
-    }
-
     /// Dummy SHA-256 hash for tests that use dry_run=true (hash check is
     /// skipped on the dry-run path).
     const DUMMY_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";

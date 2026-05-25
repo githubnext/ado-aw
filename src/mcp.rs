@@ -76,6 +76,9 @@ use crate::safeoutputs::{ALWAYS_ON_TOOLS, DEBUG_ONLY_TOOLS};
 pub struct SafeOutputs {
     bounding_directory: PathBuf,
     output_directory: PathBuf,
+    /// ToolRouter is used by the rmcp framework's #[tool_handler] macro for
+    /// dispatching MCP tool calls. Clippy doesn't see this usage.
+    #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
 

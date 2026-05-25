@@ -78,6 +78,7 @@ impl Default for PoolConfig {
 
 impl PoolConfig {
     /// Get the self-hosted pool name, if configured.
+    #[cfg(test)]
     pub fn name(&self) -> Option<&str> {
         match self {
             PoolConfig::Name(name) => Some(name),
@@ -86,6 +87,7 @@ impl PoolConfig {
     }
 
     /// Get the Microsoft-hosted VM image, if configured.
+    #[cfg(test)]
     pub fn vm_image(&self) -> Option<&str> {
         match self {
             PoolConfig::Name(_) => None,
