@@ -1011,7 +1011,7 @@ impl ReposItem {
 #[serde(untagged)]
 pub enum McpConfig {
     Enabled(bool),
-    WithOptions(McpOptions),
+    WithOptions(Box<McpOptions>),
 }
 
 impl SanitizeConfigTrait for McpConfig {

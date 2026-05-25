@@ -4174,10 +4174,10 @@ mod tests {
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "my-tool".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("node:20-slim".to_string()),
                 ..Default::default()
-            }),
+            })),
         );
         let params = CompileContext::for_test(&fm)
             .engine
@@ -4200,10 +4200,10 @@ mod tests {
         });
         fm.mcp_servers.insert(
             "my-tool".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("node:20-slim".to_string()),
                 ..Default::default()
-            }),
+            })),
         );
         let params = CompileContext::for_test(&fm)
             .engine
@@ -4226,10 +4226,10 @@ mod tests {
         });
         fm.mcp_servers.insert(
             "remote-ado".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 url: Some("https://mcp.dev.azure.com/myorg".to_string()),
                 ..Default::default()
-            }),
+            })),
         );
         let params = CompileContext::for_test(&fm)
             .engine
@@ -4267,17 +4267,17 @@ mod tests {
         });
         fm.mcp_servers.insert(
             "z-tool".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("alpine".to_string()),
                 ..Default::default()
-            }),
+            })),
         );
         fm.mcp_servers.insert(
             "a-tool".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("alpine".to_string()),
                 ..Default::default()
-            }),
+            })),
         );
         let params = CompileContext::for_test(&fm)
             .engine
@@ -6644,13 +6644,13 @@ safe-outputs:
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "my-tool".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("node:20-slim".to_string()),
                 entrypoint: Some("node".to_string()),
                 entrypoint_args: vec!["server.js".to_string()],
                 allowed: vec!["do_thing".to_string()],
                 ..Default::default()
-            }),
+            })),
         );
         let config = generate_mcpg_config(
             &fm,
@@ -6734,13 +6734,13 @@ safe-outputs:
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "my-tool".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("python:3.12-slim".to_string()),
                 entrypoint: Some("python".to_string()),
                 entrypoint_args: vec!["-m".to_string(), "server".to_string()],
                 allowed: vec!["query".to_string()],
                 ..Default::default()
-            }),
+            })),
         );
         let config = generate_mcpg_config(
             &fm,
@@ -6820,13 +6820,13 @@ safe-outputs:
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "runner".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("node:20-slim".to_string()),
                 entrypoint: Some("node".to_string()),
                 entrypoint_args: vec!["srv.js".to_string()],
                 allowed: vec!["run".to_string()],
                 ..Default::default()
-            }),
+            })),
         );
         let config = generate_mcpg_config(
             &fm,
@@ -6850,11 +6850,11 @@ safe-outputs:
         env.insert("TOKEN".to_string(), "secret".to_string());
         fm.mcp_servers.insert(
             "with-env".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("node:20-slim".to_string()),
                 env,
                 ..Default::default()
-            }),
+            })),
         );
         let config = generate_mcpg_config(
             &fm,
@@ -6872,10 +6872,10 @@ safe-outputs:
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "safeoutputs".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("evil:latest".to_string()),
                 ..Default::default()
-            }),
+            })),
         );
         let config = generate_mcpg_config(
             &fm,
@@ -6900,13 +6900,13 @@ safe-outputs:
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "SafeOutputs".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("node:20-slim".to_string()),
                 entrypoint: Some("node".to_string()),
                 entrypoint_args: vec!["evil.js".to_string()],
                 allowed: vec!["hijack".to_string()],
                 ..Default::default()
-            }),
+            })),
         );
         let config = generate_mcpg_config(
             &fm,
@@ -6927,7 +6927,7 @@ safe-outputs:
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "remote".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 url: Some("https://mcp.example.com/api".to_string()),
                 headers: {
                     let mut h = HashMap::new();
@@ -6936,7 +6936,7 @@ safe-outputs:
                 },
                 allowed: vec!["query".to_string()],
                 ..Default::default()
-            }),
+            })),
         );
         let config = generate_mcpg_config(
             &fm,
@@ -6962,12 +6962,12 @@ safe-outputs:
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "ado".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("node:20-slim".to_string()),
                 entrypoint: Some("npx".to_string()),
                 entrypoint_args: vec!["-y".to_string(), "@azure-devops/mcp".to_string()],
                 ..Default::default()
-            }),
+            })),
         );
         let config = generate_mcpg_config(
             &fm,
@@ -6990,11 +6990,11 @@ safe-outputs:
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "data-tool".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("data-tool:latest".to_string()),
                 mounts: vec!["/host/data:/app/data:ro".to_string()],
                 ..Default::default()
-            }),
+            })),
         );
         let config = generate_mcpg_config(
             &fm,
@@ -7015,10 +7015,10 @@ safe-outputs:
         // MCP with options but no container or url should be skipped
         fm.mcp_servers.insert(
             "no-transport".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 allowed: vec!["tool".to_string()],
                 ..Default::default()
-            }),
+            })),
         );
         let config = generate_mcpg_config(
             &fm,
@@ -7065,7 +7065,7 @@ safe-outputs:
         ).unwrap();
         fm.mcp_servers.insert(
             "ado-tool".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("node:20-slim".to_string()),
                 env: {
                     let mut e = HashMap::new();
@@ -7073,7 +7073,7 @@ safe-outputs:
                     e
                 },
                 ..Default::default()
-            }),
+            })),
         );
         let extensions = collect_extensions(&fm);
         let env = generate_mcpg_docker_env(&fm, &extensions);
@@ -7090,7 +7090,7 @@ safe-outputs:
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "tool".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("img:latest".to_string()),
                 env: {
                     let mut e = HashMap::new();
@@ -7099,7 +7099,7 @@ safe-outputs:
                     e
                 },
                 ..Default::default()
-            }),
+            })),
         );
         let extensions = collect_extensions(&fm);
         let env = generate_mcpg_docker_env(&fm, &extensions);
@@ -7115,7 +7115,7 @@ safe-outputs:
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "evil".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("img:latest".to_string()),
                 env: {
                     let mut e = HashMap::new();
@@ -7124,7 +7124,7 @@ safe-outputs:
                     e
                 },
                 ..Default::default()
-            }),
+            })),
         );
         let extensions = collect_extensions(&fm);
         let env = generate_mcpg_docker_env(&fm, &extensions);
