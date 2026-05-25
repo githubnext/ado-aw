@@ -11,7 +11,7 @@ The `ado-aw` compiler binary is distributed via [GitHub Releases](https://github
 
 ## Default Allowed Domains
 
-The following domains are always allowed. Most are defined in `CORE_ALLOWED_HOSTS` in `allowed_hosts.rs`; `host.docker.internal` is the exception -- it is added by the standalone compiler in `generate_allowed_domains` (`src/compile/common.rs`) because standalone pipelines always use MCPG, which needs host access from the AWF container:
+The following domains are always allowed. Most are defined in `CORE_ALLOWED_HOSTS` in `allowed_hosts.rs`; `host.docker.internal` is the exception — it is added by `generate_allowed_domains` (`src/compile/common.rs`) for any target that uses AWF (`standalone` and `1es` targets), but not for `job` or `stage` targets. AWF-sandboxed agents need `host.docker.internal` to reach MCPG and SafeOutputs MCP servers running on the host:
 
 | Host Pattern | Purpose |
 |-------------|---------|
@@ -47,7 +47,7 @@ The following domains are always allowed. Most are defined in `CORE_ALLOWED_HOST
 | `dc.services.visualstudio.com` | Visual Studio telemetry |
 | `rt.services.visualstudio.com` | Visual Studio runtime telemetry |
 | `config.edge.skype.com` | Configuration |
-| `host.docker.internal` | MCP Gateway (MCPG) on host -- added by the standalone compiler, not part of `CORE_ALLOWED_HOSTS` |
+| `host.docker.internal` | MCP Gateway (MCPG) and SafeOutputs on host — added for AWF targets (`standalone`, `1es`), not part of `CORE_ALLOWED_HOSTS` |
 
 ## Adding Additional Hosts
 
