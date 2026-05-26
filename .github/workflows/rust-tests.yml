@@ -5,6 +5,7 @@ on:
     paths:
       - "src/**"
       - "tests/**"
+      - "docs/template-markers.md"
       - "Cargo.toml"
       - "Cargo.lock"
 
