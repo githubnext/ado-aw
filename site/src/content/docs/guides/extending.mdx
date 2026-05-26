@@ -122,22 +122,56 @@ Use a runtime when the feature installs or configures a language or execution en
 
 The key abstraction for tools and runtimes is `CompilerExtension` in `src/compile/extensions/mod.rs`.
 
-Implement this trait when your feature needs to contribute things like:
+### Trait overview
 
-- required network hosts
-- required bash commands
-- prompt supplements
-- prepare or setup steps
-- MCP gateway server entries
-- allowed Copilot tools
-- compile-time validation
-- pipeline environment mappings
-- AWF mounts or PATH updates
+`CompilerExtension` defines everything a runtime or tool needs to tell the compiler:
 
-In practice, the workflow is:
+```rust
+pub trait CompilerExtension {
+    fn name(&self) -> &str;
+    fn phase(&self) -> ExtensionPhase;
+    fn required_hosts(&self) -> Vec<String>;
+    fn required_bash_commands(&self) -> Vec<String>;
+    fn prompt_supplement(&self) -> Option<String>;
+    fn prepare_steps(&self, ctx: &CompileContext) -> Vec<String>;
+    fn setup_steps(&self, ctx: &CompileContext) -> Result<Vec<String>>;
+    fn mcpg_servers(&self, ctx: &CompileContext) -> Result<Vec<(String, McpgServerConfig)>>;
+    fn allowed_copilot_tools(&self) -> Vec<String>;
+    fn validate(&self, ctx: &CompileContext) -> Result<Vec<String>>;
+    fn required_pipeline_vars(&self) -> Vec<PipelineEnvMapping>;
+    fn required_awf_mounts(&self) -> Vec<AwfMount>;
+    fn awf_path_prepends(&self) -> Vec<String>;
+    fn agent_env_vars(&self) -> Vec<(String, String)>;
+}
+```
+
+All methods except `name()` and `phase()` have default implementations that return empty collections.
+
+### Phase ordering
+
+Extensions execute in phase order to handle dependencies between features:
+
+- **System** (phase 0) — compiler-internal infrastructure. Reserved for ado-aw's own extensions like ado-script. Not for user-facing extension authors.
+- **Runtime** (phase 1) — language toolchains (Lean, Python, Node, .NET). Always run first so tools can depend on them.
+- **Tool** (phase 2) — first-party tools (azure-devops, cache-memory, etc.).
+
+The compiler sorts extensions by phase before collecting their contributions. This guarantees runtime install steps appear before tool steps in the generated pipeline.
+
+### `prepare_steps()` vs `setup_steps()`
+
+These methods inject pipeline steps at different times:
+
+- **`prepare_steps()`** — steps injected into the **Agent job** before the agent runs. Used for installing dependencies the agent needs (e.g., Lean toolchain, Node.js, Python packages).
+- **`setup_steps()`** — steps injected into the **Setup job** before the Agent job starts. Used for gate checks and pre-activation validation that must complete before launching the agent (e.g., filter IR gate evaluation).
+
+In most cases, use `prepare_steps()` for runtime/tool installations.
+
+### Extension workflow
+
+To implement a new extension:
 
 1. implement `CompilerExtension` for your runtime or tool
-2. return the pieces your feature needs
+2. return the pieces your feature needs from the trait methods
 3. let the compiler collect and merge those requirements
 
 This keeps new features composable instead of scattering special-case logic across the compiler.
@@ -152,6 +186,45 @@ When adding a new feature:
 4. register the feature in the compiler's collection and dispatch points
 5. add tests for parsing, validation, and generated YAML
 6. run `cargo test` and `cargo clippy`
+
+## Bash step linting
+
+Pipeline templates contain dozens of multi-line `bash:` steps. ADO bash steps fail only on the **last** command's exit code by default, so a chain like `mkdir … && curl … && cd … && cmd` can silently swallow earlier failures.
+
+Rather than spread `set -eo pipefail` boilerplate across every step, the project enforces hygiene via `tests/bash_lint_tests.rs`, which compiles a set of fixtures and runs `shellcheck` against every literal `bash:` body in the generated YAML.
+
+### Common findings
+
+The lint catches these silent-failure patterns:
+
+- **SC2164** — `cd $X` without `|| exit` (the canonical silent-failure)
+- **SC2155** — `local var=$(cmd)` masking the inner exit code
+- **SC2086 / SC2046** — unquoted variables / command substitutions
+- **SC2154** — variables referenced but never assigned
+- **SC2088** — tilde inside double quotes (does not expand)
+
+### Workflow for adding or modifying bash steps
+
+When you add or modify a bash step in a template or extension:
+
+1. Run `cargo test --test bash_lint_tests`
+   - Locally requires `shellcheck` on PATH
+   - Install with `brew install shellcheck` (macOS) or `apt-get install -y shellcheck` (Debian/Ubuntu)
+   - CI sets `ENFORCE_BASH_LINT=1` so a missing shellcheck becomes a hard failure
+
+2. Fix any finding by adjusting the bash. Common fixes:
+   - `cd "$X" || exit 1` instead of bare `cd $X`
+   - `exit "$CODE"` for explicit failure propagation
+   - `"$HOME/.foo"` instead of `"~/.foo"` (tilde does not expand in double quotes)
+   - Quote variable expansions to avoid word splitting
+
+3. If a finding is genuinely intentional, add a `# shellcheck disable=SCxxxx` comment immediately above the offending line in the bash body. Such directives are bash comments and have no runtime effect.
+
+### Why not `set -eo pipefail` everywhere?
+
+The project uses targeted `set -eo pipefail` only when a step has a real fail-fast requirement that shellcheck cannot express (e.g., AWF/MCPG downloads, the `tee`-piped agent run). Sprinkling `set -eo pipefail` everywhere adds noise, drifts as new steps are added, and does not address the actual silent-failure patterns that shellcheck surfaces.
+
+The exclude list (`SC1090`, `SC1091`) is documented in `tests/bash_lint_tests.rs` with justifications for each entry. Do not extend without one.
 
 ## Example decision guide
 
