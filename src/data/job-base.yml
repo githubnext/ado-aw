@@ -3,7 +3,7 @@
 jobs:
   {{ setup_job }}
   - job: {{ stage_prefix }}_Agent
-    displayName: "Agent"
+    displayName: {{ agent_display_name }}
     {{ agentic_depends_on }}
     {{ job_timeout }}
     pool:

@@ -106,7 +106,7 @@ Example: `name: Daily safe-output smoke: "noop" @nightly` → `Daily safe-output
 
 ## `{{ agent_display_name }}`
 
-Replaced with the raw `name:` front matter value as a YAML double-quoted scalar (e.g., `"Daily Code Review"`). Used in the `displayName:` property of the outermost stage block in `target: stage` pipelines, and in the 1ES template's `templateContext.buildJob.displayName` property.
+Replaced with the raw `name:` front matter value as a YAML double-quoted scalar (e.g., `"Daily Code Review"`). Used as the top-most user-facing `displayName:` in all four base templates: the Agent job displayName in `target: standalone` and `target: job` pipelines, and the Agent stage displayName in `target: stage` and 1ES pipelines.
 
 Always quoted to handle names that contain characters (such as `:`) that ADO would otherwise misparse as YAML mapping indicators.
 
@@ -514,7 +514,7 @@ Should be replaced with the domain the AWF-sandboxed agent uses to reach MCPG on
 
 The 1ES target uses the same template markers as standalone, plus the 1ES-specific `extends:` / `stages:` / `templateContext` wrapping. The 1ES template includes `templateContext.type: buildJob` for all jobs, and the pool is specified at the top-level `parameters.pool` rather than per-job.
 
-Both targets share the same execution model (Copilot CLI + AWF + MCPG) and the same set of template markers. The 1ES template additionally uses `{{ agent_display_name }}` for the `templateContext.buildJob.displayName` property (see above).
+Both targets share the same execution model (Copilot CLI + AWF + MCPG) and the same set of template markers, including `{{ agent_display_name }}` (used in all four base templates — see above).
 
 ## Job/Stage Template Markers
 

@@ -133,11 +133,17 @@ For an agent named `My "special": agent`, this expands to:
   displayName: "My \"special\": agent"
 ```
 
-Used in `src/data/1es-base.yml` (1ES stage display name) and
-`src/data/stage-base.yml` (stage-target stage display name). The marker
-deliberately does **not** include the `-$(BuildID)` suffix that
-[`{{ pipeline_agent_name }}`](#-pipeline_agent_name-) carries — stage labels are
-static and don't need per-run uniqueness.
+Used in all four base templates as the top-most user-facing
+`displayName:`:
+
+- `src/data/base.yml` — standalone Agent job display name.
+- `src/data/job-base.yml` — job-target Agent job display name.
+- `src/data/1es-base.yml` — 1ES Agent stage display name.
+- `src/data/stage-base.yml` — stage-target Agent stage display name.
+
+The marker deliberately does **not** include the `-$(BuildID)` suffix
+that [`{{ pipeline_agent_name }}`](#-pipeline_agent_name-) carries —
+stage and job labels are static and don't need per-run uniqueness.
 
 ## {{ pipeline_agent_name }}
 
