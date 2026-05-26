@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
 use ado_aw_derive::SanitizeConfig;
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, ToolResult, Validate};
+use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
 use crate::validate::reject_pipeline_injection;
@@ -329,29 +329,8 @@ impl SanitizeContent for CreatePrResult {
 }
 
 impl CreatePrResult {
-    /// Create a new CreatePrResult with all fields
-    pub fn new(
-        title: String,
-        description: String,
-        source_branch: String,
-        patch_file: String,
-        repository: String,
-        agent_labels: Vec<String>,
-        base_commit: Option<String>,
-        patch_sha256: String,
-    ) -> Self {
-        Self {
-            name: Self::NAME.to_string(),
-            title,
-            description,
-            source_branch,
-            patch_file,
-            repository,
-            agent_labels,
-            base_commit,
-            patch_sha256,
-        }
-    }
+    // Constructor removed - use struct literal syntax instead.
+    // Note: This struct doesn't have a `name` field - the name is handled by the ToolResult trait.
 }
 
 /// Behavior when the patch is empty or all files were excluded
@@ -1371,13 +1350,17 @@ impl Executor for CreatePrResult {
 
         // Set completion options (delete source branch, squash merge, auto-complete)
         // and add reviewers.
-        set_pr_completion_options(
-            &client, &config, org_url, project, &repo_id, pr_id,
-            pr_data["createdBy"]["id"].as_str(), token,
-        ).await;
-        add_reviewers_to_pr(
-            &client, &config, org_url, project, &repo_id, pr_id, organization, token,
-        ).await;
+        let pr_ctx = PrContext {
+            client: &client,
+            config: &config,
+            org_url,
+            project,
+            repo_id: &repo_id,
+            pr_id,
+            token,
+        };
+        set_pr_completion_options(&pr_ctx, pr_data["createdBy"]["id"].as_str()).await;
+        add_reviewers_to_pr(&pr_ctx, organization).await;
 
         info!(
             "PR #{} created successfully: {} -> {}{}",
@@ -1540,38 +1523,44 @@ async fn apply_patch_to_worktree(
     }
 }
 
+/// Context for PR post-creation operations (reviewers, completion options).
+/// Groups common parameters to avoid too_many_arguments.
+struct PrContext<'a> {
+    client: &'a reqwest::Client,
+    config: &'a CreatePrConfig,
+    org_url: &'a str,
+    project: &'a str,
+    repo_id: &'a str,
+    pr_id: i64,
+    token: &'a str,
+}
+
 /// Set PR completion options (delete-source-branch, squash-merge) and optionally
 /// enable auto-complete. Logs a warning on failure but does not propagate the error
 /// because these are best-effort settings that do not affect the PR's existence.
 async fn set_pr_completion_options(
-    client: &reqwest::Client,
-    config: &CreatePrConfig,
-    org_url: &str,
-    project: &str,
-    repo_id: &str,
-    pr_id: i64,
+    ctx: &PrContext<'_>,
     pr_created_by_id: Option<&str>,
-    token: &str,
 ) {
     debug!(
         "Setting PR completion options: delete_source_branch={}, squash_merge={}, auto_complete={}",
-        config.delete_source_branch, config.squash_merge, config.auto_complete
+        ctx.config.delete_source_branch, ctx.config.squash_merge, ctx.config.auto_complete
     );
     let pr_update_url = format!(
         "{}{}/_apis/git/repositories/{}/pullrequests/{}?api-version=7.1",
-        org_url, project, repo_id, pr_id
+        ctx.org_url, ctx.project, ctx.repo_id, ctx.pr_id
     );
 
     let mut update_body = serde_json::json!({
         "completionOptions": {
-            "deleteSourceBranch": config.delete_source_branch,
-            "squashMerge": config.squash_merge
+            "deleteSourceBranch": ctx.config.delete_source_branch,
+            "squashMerge": ctx.config.squash_merge
         }
     });
 
     // Only set autoCompleteSetBy if auto_complete is enabled and PR is not a draft
     // (ADO silently ignores auto-complete on draft PRs, so skip the API call)
-    if config.auto_complete && !config.draft {
+    if ctx.config.auto_complete && !ctx.config.draft {
         if let Some(creator_id) = pr_created_by_id {
             update_body["autoCompleteSetBy"] = serde_json::json!({ "id": creator_id });
         } else {
@@ -1579,9 +1568,9 @@ async fn set_pr_completion_options(
         }
     }
 
-    match client
+    match ctx.client
         .patch(&pr_update_url)
-        .basic_auth("", Some(token))
+        .basic_auth("", Some(ctx.token))
         .json(&update_body)
         .send()
         .await
@@ -1604,24 +1593,18 @@ async fn set_pr_completion_options(
 /// issues a `PUT` for each one. Logs a warning if a reviewer cannot be resolved or
 /// if the API call fails; does not abort the overall PR creation.
 async fn add_reviewers_to_pr(
-    client: &reqwest::Client,
-    config: &CreatePrConfig,
-    org_url: &str,
-    project: &str,
-    repo_id: &str,
-    pr_id: i64,
+    ctx: &PrContext<'_>,
     organization: &str,
-    token: &str,
 ) {
-    if config.reviewers.is_empty() {
+    if ctx.config.reviewers.is_empty() {
         return;
     }
-    debug!("Adding {} reviewers", config.reviewers.len());
-    for reviewer in &config.reviewers {
+    debug!("Adding {} reviewers", ctx.config.reviewers.len());
+    for reviewer in &ctx.config.reviewers {
         debug!("Adding reviewer: {}", reviewer);
 
         // Resolve reviewer identity (email/name -> ID)
-        let reviewer_id = match resolve_reviewer_identity(client, organization, token, reviewer).await {
+        let reviewer_id = match resolve_reviewer_identity(ctx.client, organization, ctx.token, reviewer).await {
             Some(id) => id,
             None => {
                 warn!("Could not resolve reviewer '{}' to an identity ID, skipping", reviewer);
@@ -1631,13 +1614,13 @@ async fn add_reviewers_to_pr(
 
         let reviewer_url = format!(
             "{}{}/_apis/git/repositories/{}/pullrequests/{}/reviewers/{}?api-version=7.1",
-            org_url, project, repo_id, pr_id, reviewer_id
+            ctx.org_url, ctx.project, ctx.repo_id, ctx.pr_id, reviewer_id
         );
         let reviewer_body = serde_json::json!({ "vote": 0, "isRequired": false });
 
-        match client
+        match ctx.client
             .put(&reviewer_url)
-            .basic_auth("", Some(token))
+            .basic_auth("", Some(ctx.token))
             .json(&reviewer_body)
             .send()
             .await
@@ -2311,6 +2294,7 @@ fn generate_pr_footer() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::safeoutputs::ToolResult;
 
     #[test]
     fn test_validate_params_valid() {
@@ -2358,16 +2342,17 @@ mod tests {
 
     #[test]
     fn test_sanitize_content_neutralizes_repository_pipeline_command() {
-        let mut result = CreatePrResult::new(
-            "Fix bug in parser".to_string(),
-            "This PR fixes a critical bug in the parser module.".to_string(),
-            "agent/fix-parser".to_string(),
-            "/tmp/test.patch".to_string(),
-            "##vso[task.setvariable variable=x]y".to_string(),
-            vec![],
-            None,
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
-        );
+        let mut result = CreatePrResult {
+            name: CreatePrResult::NAME.to_string(),
+            title: "Fix bug in parser".to_string(),
+            description: "This PR fixes a critical bug in the parser module.".to_string(),
+            source_branch: "agent/fix-parser".to_string(),
+            patch_file: "/tmp/test.patch".to_string(),
+            repository: "##vso[task.setvariable variable=x]y".to_string(),
+            agent_labels: vec![],
+            base_commit: None,
+            patch_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+        };
         result.sanitize_content_fields();
         assert!(
             result.repository.contains("`##vso[`"),
@@ -2930,16 +2915,17 @@ index 0000000..abcdefg
         // Record the hash of different content.
         let wrong_hash = crate::hash::sha256_hex(b"completely different patch");
 
-        let result = CreatePrResult::new(
-            "Test PR".to_string(),
-            "Description of the PR".to_string(),
-            "agent/test-pr-12345678".to_string(),
-            patch_file.to_string(),
-            "self".to_string(),
-            vec![],
-            None,
-            wrong_hash,
-        );
+        let result = CreatePrResult {
+            name: CreatePrResult::NAME.to_string(),
+            title: "Test PR".to_string(),
+            description: "Description of the PR".to_string(),
+            source_branch: "agent/test-pr-12345678".to_string(),
+            patch_file: patch_file.to_string(),
+            repository: "self".to_string(),
+            agent_labels: vec![],
+            base_commit: None,
+            patch_sha256: wrong_hash,
+        };
 
         let ctx = ExecutionContext {
             ado_org_url: Some("https://dev.azure.com/test".to_string()),

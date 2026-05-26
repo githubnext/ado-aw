@@ -763,16 +763,17 @@ Use 'self' for the pipeline's own repository, or a repository alias from the che
         };
 
         // Create the result with patch file reference and integrity hash
-        let result = CreatePrResult::new(
-            sanitized.title.clone(),
-            sanitized.description.clone(),
+        let result = CreatePrResult {
+            name: CreatePrResult::NAME.to_string(),
+            title: sanitized.title.clone(),
+            description: sanitized.description.clone(),
             source_branch,
-            patch_filename,
-            repository.to_string(),
-            sanitized.labels,
-            Some(merge_base),
+            patch_file: patch_filename,
+            repository: repository.to_string(),
+            agent_labels: sanitized.labels,
+            base_commit: Some(merge_base),
             patch_sha256,
-        );
+        };
 
         // Write to safe outputs
         let _ = self.write_safe_output_file(&result).await;
