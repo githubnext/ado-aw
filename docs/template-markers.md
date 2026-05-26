@@ -114,9 +114,9 @@ have not been validated against YAML scalar rules.
 > markdown body). YAML positions inside the generated pipelines use
 > [`{{ pipeline_agent_name }}`](#-pipeline_agent_name-) (top-level `name:` line)
 > or [`{{ agent_display_name }}`](#-agent_display_name-)
-> (`displayName:` positions). Both emit a fully-quoted-and-escaped
-> double-quoted YAML scalar, so colons, embedded `"`, and other
-> plain-scalar-unsafe characters in the agent name cannot break parsing.
+> (`displayName:` positions in 1ES and stage templates). Both emit a
+> fully-quoted-and-escaped double-quoted YAML scalar, so colons, embedded `"`,
+> and other plain-scalar-unsafe characters in the agent name cannot break parsing.
 
 ## {{ agent_display_name }}
 
