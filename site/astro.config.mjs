@@ -66,6 +66,7 @@ export default defineConfig({
             { label: 'Template Markers', slug: 'reference/template-markers' },
             { label: 'Runtime Imports', slug: 'reference/runtime-imports' },
             { label: 'Filter IR', slug: 'reference/filter-ir' },
+            { label: 'ado-script', slug: 'reference/ado-script' },
             { label: 'Codemods', slug: 'reference/codemods' },
           ],
         },
