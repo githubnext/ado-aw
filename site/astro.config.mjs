@@ -43,6 +43,7 @@ export default defineConfig({
           label: 'Guides',
           items: [
             { label: 'Creating Agents', slug: 'guides/creating-agents' },
+            { label: 'Example Agents', slug: 'guides/examples' },
             { label: 'Network Configuration', slug: 'guides/network-config' },
             { label: 'Schedule Syntax', slug: 'guides/schedule-syntax' },
             { label: 'Using MCP', slug: 'guides/using-mcp' },
