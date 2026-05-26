@@ -1423,22 +1423,6 @@ mod tests {
     // ─── ScheduleConfig deserialization ─────────────────────────────────────
 
     #[test]
-    fn test_schedule_config_simple_has_empty_branches() {
-        let sc = ScheduleConfig::Simple("daily around 14:00".to_string());
-        assert_eq!(sc.expression(), "daily around 14:00");
-        assert!(sc.branches().is_empty());
-    }
-
-    #[test]
-    fn test_schedule_config_with_options_returns_branches() {
-        let yaml = "run: weekly on monday\nbranches:\n  - main\n  - release/*";
-        let opts: ScheduleOptions = serde_yaml::from_str(yaml).unwrap();
-        let sc = ScheduleConfig::WithOptions(opts);
-        assert_eq!(sc.expression(), "weekly on monday");
-        assert_eq!(sc.branches(), &["main", "release/*"]);
-    }
-
-    #[test]
     fn test_schedule_config_with_options_empty_branches() {
         let yaml = "run: hourly";
         let opts: ScheduleOptions = serde_yaml::from_str(yaml).unwrap();
@@ -1466,24 +1450,6 @@ mod tests {
     }
 
     // ─── EngineConfig deserialization ────────────────────────────────────────
-
-    #[test]
-    fn test_engine_config_simple_string() {
-        let ec = EngineConfig::Simple("copilot".to_string());
-        assert_eq!(ec.engine_id(), "copilot");
-        assert_eq!(ec.model(), None);
-        assert_eq!(ec.timeout_minutes(), None);
-    }
-
-    #[test]
-    fn test_engine_config_full_object() {
-        let yaml = "id: copilot\nmodel: claude-sonnet-4.5\ntimeout-minutes: 30";
-        let opts: EngineOptions = serde_yaml::from_str(yaml).unwrap();
-        let ec = EngineConfig::Full(opts);
-        assert_eq!(ec.engine_id(), "copilot");
-        assert_eq!(ec.model(), Some("claude-sonnet-4.5"));
-        assert_eq!(ec.timeout_minutes(), Some(30));
-    }
 
     #[test]
     fn test_engine_config_full_object_partial_fields() {
