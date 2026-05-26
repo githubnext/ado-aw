@@ -35,6 +35,7 @@ export default defineConfig({
           label: 'Setup',
           items: [
             { label: 'Quick Start', slug: 'setup/quick-start' },
+            { label: 'Service Connections', slug: 'setup/service-connections' },
             { label: 'CLI Commands', slug: 'setup/cli' },
             { label: 'Local Development', slug: 'setup/local-development' },
           ],
