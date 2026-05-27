@@ -3,6 +3,8 @@ title: Creating agent definition files
 description: Learn how to write ado-aw agent files with front matter, tools, runtimes, repositories, safe outputs, and triggers.
 ---
 
+import { Steps } from '@astrojs/starlight/components';
+
 # Creating agent definition files
 
 This guide shows how to create an `ado-aw` agent file from scratch.
@@ -311,8 +313,10 @@ create a pull request with a concise summary.
 
 ## Next steps
 
+<Steps>
 1. Create the Markdown file.
 2. Add only the tools and runtimes your agent needs.
 3. Configure `repos:` and `workspace:` if the agent spans multiple repositories.
 4. Add `safe-outputs:` for any write actions.
 5. Add `on:` triggers so the pipeline runs when you want.
+</Steps>
