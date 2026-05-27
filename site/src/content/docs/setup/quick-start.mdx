@@ -5,7 +5,7 @@ sidebar:
   order: 1
 ---
 
-import { Tabs, TabItem } from '@astrojs/starlight/components';
+import { Tabs, TabItem, Steps } from '@astrojs/starlight/components';
 
 There are two ways to get started with `ado-aw` -- using a Copilot agent to co-create your first workflow interactively, or writing the agent file manually.
 
@@ -50,58 +50,62 @@ Replace `latest` in the URL with a tag name (e.g., `download/v0.19.0/ado-aw-linu
 
 The fastest way to create an agentic pipeline is to let Copilot do the heavy lifting.
 
-### 1. Initialize your project
+<Steps>
 
-In your Azure DevOps repository root, run:
+1. **Initialize your project**
 
-```bash
-ado-aw init
-```
+   In your Azure DevOps repository root, run:
 
-This creates `.github/agents/ado-aw.agent.md` -- a Copilot dispatcher agent that knows how to create, update, and debug agentic pipelines. It auto-downloads the `ado-aw` compiler and handles the full lifecycle.
+   ```bash
+   ado-aw init
+   ```
 
-### 2. Co-create a workflow with Copilot
+   This creates `.github/agents/ado-aw.agent.md` -- a Copilot dispatcher agent that knows how to create, update, and debug agentic pipelines. It auto-downloads the `ado-aw` compiler and handles the full lifecycle.
 
-Open your project in an editor with Copilot and invoke the agent:
+2. **Co-create a workflow with Copilot**
 
-```
-/agent ado-aw
-```
+   Open your project in an editor with Copilot and invoke the agent:
 
-Describe what you want your agentic pipeline to do. For example:
+   ```
+   /agent ado-aw
+   ```
 
-> *"Create a workflow that runs daily, reads open work items tagged 'stale', and adds a reminder comment."*
+   Describe what you want your agentic pipeline to do. For example:
 
-The agent will walk you through the front-matter configuration, write the agent prompt, and compile the pipeline -- all interactively.
+   > *"Create a workflow that runs daily, reads open work items tagged 'stale', and adds a reminder comment."*
 
-### 3. Push and configure
+   The agent will walk you through the front-matter configuration, write the agent prompt, and compile the pipeline -- all interactively.
 
-Once you're happy with the generated files, commit and push them to your Azure DevOps repository. Then create a pipeline in Azure DevOps pointing at the compiled `.lock.yml` file, and set the required `GITHUB_TOKEN` pipeline variable:
+3. **Push and configure**
 
-```bash
-ado-aw secrets set GITHUB_TOKEN
-```
+   Once you're happy with the generated files, commit and push them to your Azure DevOps repository. Then create a pipeline in Azure DevOps pointing at the compiled `.lock.yml` file, and set the required `GITHUB_TOKEN` pipeline variable:
 
-This stores the `GITHUB_TOKEN` pipeline variable (as a secret) on every matched ADO build definition. The command prompts for:
-- The **GitHub Personal Access Token (PAT)** value -- used by the Copilot CLI at runtime (see [required permissions](#github-pat-permissions) below)
-- For Azure DevOps authentication, the command first tries the **Azure CLI** (`az` login session). If the Azure CLI is not available or not logged in, it falls back to prompting for an **Azure DevOps PAT**.
+   ```bash
+   ado-aw secrets set GITHUB_TOKEN
+   ```
 
-#### Service connections for ADO access
+   This stores the `GITHUB_TOKEN` pipeline variable (as a secret) on every matched ADO build definition. The command prompts for:
+   - The **GitHub Personal Access Token (PAT)** value -- used by the Copilot CLI at runtime (see [required permissions](#github-pat-permissions) below)
+   - For Azure DevOps authentication, the command first tries the **Azure CLI** (`az` login session). If the Azure CLI is not available or not logged in, it falls back to prompting for an **Azure DevOps PAT**.
 
-If your agent uses safe outputs that write to Azure DevOps (creating PRs, work items, comments, etc.), you need an **ARM service connection** referenced in your agent file's `permissions.write` field. This connection is used to mint short-lived ADO tokens for the executor stage.
+   **Service connections for ADO access**: If your agent uses safe outputs that write to Azure DevOps (creating PRs, work items, comments, etc.), you need an **ARM service connection** referenced in your agent file's `permissions.write` field. This connection is used to mint short-lived ADO tokens for the executor stage.
 
-```yaml
-permissions:
-  write: my-write-connection  # ARM service connection name
-```
+   ```yaml
+   permissions:
+     write: my-write-connection  # ARM service connection name
+   ```
 
-See [Service Connections](/ado-aw/setup/service-connections/) for step-by-step creation instructions. You can use an existing connection if one is already configured in your project.
+   See [Service Connections](/ado-aw/setup/service-connections/) for step-by-step creation instructions. You can use an existing connection if one is already configured in your project.
 
-:::caution[Temporary limitation: GitHub PAT required]
-The Copilot CLI does not yet support GitHub App tokens. You must provide a fine-grained GitHub PAT. This requirement will be removed once GitHub App token support is added to the Copilot CLI.
-:::
+   :::caution[Temporary limitation: GitHub PAT required]
+   The Copilot CLI does not yet support GitHub App tokens. You must provide a fine-grained GitHub PAT. This requirement will be removed once GitHub App token support is added to the Copilot CLI.
+   :::
 
-Run the pipeline in Azure DevOps -- it executes the three-stage workflow: Agent -> Detection -> SafeOutputs.
+4. **Run the pipeline**
+
+   Back in Azure DevOps, queue your pipeline. It executes the three-stage workflow: Agent → Detection → SafeOutputs.
+
+</Steps>
 
 ---
 
@@ -109,61 +113,65 @@ Run the pipeline in Azure DevOps -- it executes the three-stage workflow: Agent 
 
 If you prefer full control, you can author agent files by hand.
 
-### 1. Create an agent file
+<Steps>
 
-Create a file named `agent.md`:
+1. **Create an agent file**
 
-```markdown
----
-name: Hello from ado-aw
-description: A minimal agentic pipeline example
-engine:
-  id: copilot
-pool: AZS-1ES-L-MMS-ubuntu-22.04
----
+   Create a file named `agent.md`:
 
-## Instructions
+   ```markdown
+   ---
+   name: Hello from ado-aw
+   description: A minimal agentic pipeline example
+   engine:
+     id: copilot
+   pool: AZS-1ES-L-MMS-ubuntu-22.04
+   ---
 
-Inspect the repository and summarize what this project does.
-```
+   ## Instructions
 
-This file combines YAML front matter for configuration with markdown instructions for the agent.
+   Inspect the repository and summarize what this project does.
+   ```
 
-:::note[Manual queuing]
-All Azure DevOps pipelines can be queued manually from the ADO UI — no special `on:` configuration is needed for that. The `on:` key is for automatic triggers such as schedules (`on.schedule:`), PR events (`on.pr:`), or upstream pipeline completion (`on.pipeline:`). Omitting `on:` means the pipeline only runs when you queue it manually (plus any CI triggers ADO applies by default).
-:::
+   This file combines YAML front matter for configuration with markdown instructions for the agent.
 
-### 2. Compile it
+   :::note[Manual queuing]
+   All Azure DevOps pipelines can be queued manually from the ADO UI — no special `on:` configuration is needed for that. The `on:` key is for automatic triggers such as schedules (`on.schedule:`), PR events (`on.pr:`), or upstream pipeline completion (`on.pipeline:`). Omitting `on:` means the pipeline only runs when you queue it manually (plus any CI triggers ADO applies by default).
+   :::
 
-```bash
-ado-aw compile agent.md
-```
+2. **Compile it**
 
-This writes a compiled `.lock.yml` pipeline alongside the source file. You should now have:
+   ```bash
+   ado-aw compile agent.md
+   ```
 
-- `agent.md` -- your source definition
-- `agent.lock.yml` -- the compiled Azure DevOps pipeline
+   This writes a compiled `.lock.yml` pipeline alongside the source file. You should now have:
 
-### 3. Push to Azure DevOps
+   - `agent.md` -- your source definition
+   - `agent.lock.yml` -- the compiled Azure DevOps pipeline
 
-1. Commit both `agent.md` and the compiled `.lock.yml` file.
-2. Push them to your Azure DevOps repository.
-3. In Azure DevOps, create a pipeline that points at the compiled YAML file.
-4. Save the pipeline.
+3. **Push to Azure DevOps**
 
-### 4. Set the GitHub token
+   - Commit both `agent.md` and the compiled `.lock.yml` file
+   - Push them to your Azure DevOps repository
+   - In Azure DevOps, create a pipeline that points at the compiled YAML file
+   - Save the pipeline
 
-```bash
-ado-aw secrets set GITHUB_TOKEN
-```
+4. **Set the GitHub token**
 
-This stores the `GITHUB_TOKEN` pipeline variable (as a secret) on every matched ADO build definition. See the [With Agents](#3-push-and-configure) section above for details on what the command prompts for and the current GitHub PAT limitation.
+   ```bash
+   ado-aw secrets set GITHUB_TOKEN
+   ```
 
-If your workflow uses write-requiring safe outputs, you'll also need an ARM service connection — see [Service Connections](/ado-aw/setup/service-connections/).
+   This stores the `GITHUB_TOKEN` pipeline variable (as a secret) on every matched ADO build definition. See the [With Agents](#with-agents-recommended) section above for details on what the command prompts for and the current GitHub PAT limitation.
 
-### 5. Run the pipeline
+   If your workflow uses write-requiring safe outputs, you'll also need an ARM service connection — see [Service Connections](/ado-aw/setup/service-connections/).
 
-Back in Azure DevOps, run the pipeline. It executes the compiled three-stage workflow: Agent -> Detection -> SafeOutputs.
+5. **Run the pipeline**
+
+   Back in Azure DevOps, queue your pipeline. It executes the compiled three-stage workflow: Agent → Detection → SafeOutputs.
+
+</Steps>
 
 ---
 
