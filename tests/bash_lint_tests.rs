@@ -52,10 +52,9 @@ use tempfile::TempDir;
 /// per-line `# shellcheck disable=SCxxxx` comments inside the bash body, not
 /// as a global override.
 ///
-/// * **SC1090, SC1091** — `source` paths that include ADO macros
-///   (e.g. `$(Pipeline.Workspace)`) are dynamic and cannot be resolved by
-///   shellcheck.
-const SHELLCHECK_EXCLUDE: &str = "SC1090,SC1091";
+/// Currently empty — no global exclusions are needed. The codebase does not
+/// use `source` commands that would require SC1090/SC1091 suppression.
+const SHELLCHECK_EXCLUDE: &str = "";
 
 /// Fixtures exercised by the lint. Chosen to collectively cover every bash-step
 /// generator in the codebase: standalone + 1ES templates, every runtime that
