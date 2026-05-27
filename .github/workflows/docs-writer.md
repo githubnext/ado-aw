@@ -1,6 +1,6 @@
 ---
 on:
-  schedule: every 4 hours
+  schedule: daily
 description: Proactively improves user-facing docs and site components, then opens focused PRs
 permissions:
   contents: read

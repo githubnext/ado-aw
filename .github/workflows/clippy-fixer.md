@@ -1,6 +1,6 @@
 ---
 on:
-  schedule: every 4h
+  schedule: daily
 description: Runs cargo clippy across the workspace, applies a focused set of fixes for any warnings it surfaces, and opens a PR with the changes.
 permissions:
   contents: read
