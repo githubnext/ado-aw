@@ -5,11 +5,13 @@ sidebar:
   order: 3
 ---
 
+import { Steps } from '@astrojs/starlight/components';
+
 If you want to work on `ado-aw` itself, a local Rust-based development setup is enough for most compiler and documentation tasks.
 
 ## Prerequisites
 
-- **Rust 1.94.0 or later** (the project uses the Rust 2024 edition)
+- **Rust 1.82.0 or later** (the project uses the Rust 2024 edition)
 - Git
 - An editor of your choice
 
@@ -18,22 +20,30 @@ Install or update Rust:
 ```bash
 rustup toolchain install stable
 rustup default stable
-rustc --version  # must be 1.94.0 or later
+rustc --version  # must be 1.82.0 or later
 ```
 
 ## Build from source
 
-From the repository root:
+<Steps>
+1. Navigate to the repository root:
 
-```bash
-cargo build
-```
+   ```bash
+   cd /path/to/ado-aw
+   ```
 
-For an optimized build:
+2. Build the project:
 
-```bash
-cargo build --release
-```
+   ```bash
+   cargo build
+   ```
+
+   For an optimized release build:
+
+   ```bash
+   cargo build --release
+   ```
+</Steps>
 
 ## Run the test suite
 
@@ -48,28 +58,49 @@ These commands help catch regressions and style issues before you commit changes
 
 ## Test compilation locally
 
-A simple way to validate changes is to compile an example or your own agent file.
+<Steps>
+1. Compile an example or your own agent file:
 
-```bash
-cargo run -- compile path/to/agent.md
-```
+   ```bash
+   cargo run -- compile path/to/agent.md
+   ```
 
-To verify the generated YAML matches the source definition:
+2. Verify the generated YAML matches the source definition:
 
-```bash
-cargo run -- check path/to/agent.lock.yml
-```
+   ```bash
+   cargo run -- check path/to/agent.lock.yml
+   ```
+</Steps>
 
 ## Iterate on documentation or compiler changes
 
-A common local loop looks like this:
+A common local development loop for compiler work:
 
-```bash
-cargo build
-cargo test
-cargo run -- compile path/to/agent.md
-cargo run -- check path/to/agent.lock.yml
-```
+<Steps>
+1. Build the project:
+
+   ```bash
+   cargo build
+   ```
+
+2. Run the test suite:
+
+   ```bash
+   cargo test
+   ```
+
+3. Compile a test agent to verify your changes:
+
+   ```bash
+   cargo run -- compile path/to/agent.md
+   ```
+
+4. Verify the compiled output matches expectations:
+
+   ```bash
+   cargo run -- check path/to/agent.lock.yml
+   ```
+</Steps>
 
 If you are working on the docs site itself, run the site from `site/` with your usual Astro workflow after installing dependencies.
 
