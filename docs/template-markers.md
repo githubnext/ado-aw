@@ -455,21 +455,6 @@ Generates an `env:` block for the "Start MCP Gateway (MCPG)" pipeline step, forw
 
 When no extensions require pipeline variables, this marker is replaced with an empty string and the MCPG step has no `env:` block.
 
-## {{ mcp_client_config }} *(obsolete)*
-
-**Removed in recent versions.** The Copilot CLI `mcp-config.json` is no longer generated at compile time. Instead, it is derived at **pipeline runtime** from MCPG's actual gateway output, matching gh-aw's `convert_gateway_config_copilot.cjs` pattern.
-
-The "Start MCP Gateway (MCPG)" pipeline step:
-1. Redirects MCPG's stdout to `gateway-output.json`
-2. Waits for the health check and for valid JSON output
-3. Transforms the output with a Python script that:
-   - Rewrites URLs from `127.0.0.1` → `host.docker.internal` (AWF container loopback vs host)
-   - Ensures `tools: ["*"]` on each server entry (Copilot CLI requirement)
-   - Preserves all other fields (headers, type, etc.)
-4. Writes the result to `/tmp/awf-tools/mcp-config.json` and `$HOME/.copilot/mcp-config.json`
-
-This ensures the Copilot CLI config reflects MCPG's actual runtime state rather than a compile-time prediction.
-
 ## {{ allowed_domains }}
 
 Should be replaced with the comma-separated domain list for AWF's `--allow-domains` flag. The list includes:
@@ -533,10 +518,6 @@ The threat analysis prompt instructs the security analysis agent to check for:
 - Prompt injection attempts
 - Secret leaks
 - Malicious patches (suspicious web calls, backdoors, encoded strings, suspicious dependencies)
-
-## {{ agent_description }}
-
-Should be replaced with the description field from the front matter. This is used in the threat analysis prompt template (`src/data/threat-analysis.md`) via `{{ threat_analysis_prompt }}`. It is **not** used in any pipeline YAML template (`base.yml`, `1es-base.yml`, `job-base.yml`, `stage-base.yml`) directly.
 
 ## {{ acquire_ado_token }}
 
@@ -606,10 +587,6 @@ Should be replaced with the MCPG listening port (defined as `MCPG_PORT` constant
 ## {{ mcpg_domain }}
 
 Should be replaced with the domain the AWF-sandboxed agent uses to reach MCPG on the host (defined as `MCPG_DOMAIN` constant in `src/compile/common.rs`, currently `host.docker.internal`). Used in the pipeline to set the `MCP_GATEWAY_DOMAIN` ADO variable. Docker's `host.docker.internal` resolves to the host loopback from inside containers.
-
-## {{ copilot_version }}
-
-**Removed.** This marker has been absorbed into `{{ engine_install_steps }}`. The `COPILOT_CLI_VERSION` constant now lives in `src/engine.rs` and is used internally by `Engine::install_steps()`. The version can be overridden per-agent via `engine: { id: copilot, version: "..." }` in front matter.
 
 ## 1ES-Specific Template Markers
 
