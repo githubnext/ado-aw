@@ -27,7 +27,6 @@ safe-outputs:
     target: "*"
     required-title-prefix: "[deps-release-notes] "
     max: 10
-    state-reason: "not_planned"
 ---
 
 # Dependency Version Updater
