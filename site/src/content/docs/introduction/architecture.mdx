@@ -5,6 +5,8 @@ sidebar:
   order: 3
 ---
 
+import { Steps } from '@astrojs/starlight/components';
+
 `ado-aw` combines a Rust-based compiler with runtime components that support secure agent execution in Azure DevOps.
 
 ## High-level architecture
@@ -62,10 +64,28 @@ tests/           Integration tests and fixtures
 
 ## How the pieces fit together
 
-1. You author an agent file in markdown.
-2. The compiler reads its front matter and body.
-3. Compile targets render the appropriate Azure DevOps YAML.
-4. Runtimes, tools, and MCP integrations are added based on configuration.
-5. Safe outputs connect Stage 1 proposals to Stage 3 execution.
+<Steps>
+
+1. **Author an agent file in markdown**
+
+   Write your pipeline intent in a `.md` file with YAML front matter and a natural-language body describing the agent's task.
+
+2. **Compiler reads front matter and body**
+
+   The `ado-aw compile` command parses configuration from the YAML front matter and validates all fields against the schema.
+
+3. **Compile targets render Azure DevOps YAML**
+
+   Based on your `target:` (standalone, 1ES, job, or stage), the compiler selects the appropriate base template and performs marker replacement.
+
+4. **Runtimes, tools, and MCP integrations are added**
+
+   Configured runtimes (Python, Node.js, .NET, Lean) inject their setup steps, tool allow-lists are applied, and MCP server entries are wired into the pipeline.
+
+5. **Safe outputs connect Stage 1 proposals to Stage 3 execution**
+
+   The generated pipeline enforces the three-stage model: agent proposals in Stage 1, threat detection in Stage 2, and safe-output execution in Stage 3.
+
+</Steps>
 
 This separation helps keep the authoring model approachable while preserving strong runtime controls.
