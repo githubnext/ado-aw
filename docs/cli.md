@@ -120,3 +120,14 @@ Both flags route through `ado-aw`'s `discover_ado_aw_pipelines` machinery, which
 - `export-gate-schema` *(hidden; build-time tool)* - Export the gate spec JSON Schema used by the `scripts/ado-script` TypeScript workspace for type codegen. Outputs JSON to stdout or to a file.
   - `--output, -o <path>` - Write the schema to a file instead of stdout. Parent directories are created automatically.
   - See [`docs/ado-script.md`](ado-script.md) for how this command fits into the ado-script build workflow (`cargo run -- export-gate-schema --output schema/gate-spec.schema.json`).
+
+## Template Markers Reference
+
+The compiler uses Mustache-style markers in template files to inject configuration:
+- `base.yml` (standalone), `1es-base.yml` (1ES), `job-base.yml` (job template), `stage-base.yml` (stage template)
+
+**Job/Stage Template Markers:**
+- `{{ stage_prefix }}` — Prefixes job names with sanitized agent name for uniqueness (e.g., `DailyReview_Agent`)
+- `{{ template_parameters }}` — Generates ADO template `parameters:` block (not pipeline parameters)
+
+See [`docs/template-markers.md`](template-markers.md) for the complete marker reference.
