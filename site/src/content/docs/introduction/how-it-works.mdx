@@ -5,32 +5,30 @@ sidebar:
   order: 2
 ---
 
+import { Steps } from '@astrojs/starlight/components';
+
 `ado-aw` takes a markdown agent file and turns it into an Azure DevOps pipeline that runs in three stages.
 
 ## The three-stage pipeline model
 
-### 1. Agent
+<Steps>
+1. **Agent** — The first stage runs the AI agent inside a network-isolated sandbox with a read-only Azure DevOps token. The agent can inspect code, use its approved tools, and propose actions through safe outputs.
 
-The first stage runs the AI agent inside a network-isolated sandbox with a read-only Azure DevOps token. The agent can inspect code, use its approved tools, and propose actions through safe outputs.
+   Importantly, the agent does **not** perform write actions directly.
 
-Importantly, the agent does **not** perform write actions directly.
+2. **Detection** — The second stage reviews the agent's proposed outputs. Its job is to detect problems such as:
 
-### 2. Detection
+   - prompt injection attempts
+   - secret leakage
+   - malformed or suspicious outputs
+   - policy violations
 
-The second stage reviews the agent's proposed outputs. Its job is to detect problems such as:
+   Only approved proposals continue to the next stage.
 
-- prompt injection attempts
-- secret leakage
-- malformed or suspicious outputs
-- policy violations
+3. **SafeOutputs** — The third stage applies approved actions with a separate write-capable token. This stage can create or update Azure DevOps resources such as pull requests, comments, work items, and related artifacts.
 
-Only approved proposals continue to the next stage.
-
-### 3. SafeOutputs
-
-The third stage applies approved actions with a separate write-capable token. This stage can create or update Azure DevOps resources such as pull requests, comments, work items, and related artifacts.
-
-Because the write credential is isolated from the agent, the system keeps a strong boundary between reasoning and mutation.
+   Because the write credential is isolated from the agent, the system keeps a strong boundary between reasoning and mutation.
+</Steps>
 
 ## Compile time vs. runtime
 
