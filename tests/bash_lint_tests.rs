@@ -109,6 +109,7 @@ const REQUIRED_STEP_DISPLAY_NAMES: &[&str] = &[
     "Verify MCP backends",                    // src/compile/common.rs (--debug-pipeline only)
     "Verify pipeline integrity",              // src/compile/common.rs generate_integrity_check
     "Resolve runtime imports (agent prompt)", // src/compile/extensions/ado_script.rs resolver_step()
+    "Output copilot version",                 // src/engine.rs (copilot_install_from_nuget + copilot_install_from_github_release)
 ];
 
 fn ado_aw_binary() -> PathBuf {
