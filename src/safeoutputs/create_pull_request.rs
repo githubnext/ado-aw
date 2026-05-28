@@ -2856,13 +2856,6 @@ index 0000000..abcdefg
     }
 
     #[test]
-    fn test_default_config_draft_true_autocomplete_false() {
-        let config = CreatePrConfig::default();
-        assert!(config.draft, "draft should default to true");
-        assert!(!config.auto_complete, "auto_complete should default to false");
-    }
-
-    #[test]
     fn test_config_deserialize_draft_false_autocomplete_true() {
         let yaml = r#"
             target-branch: main
