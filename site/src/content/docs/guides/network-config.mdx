@@ -3,6 +3,8 @@ title: Configuring network access
 description: Learn how ado-aw network isolation works, which domains are allowed by default, and how to allow or block additional hosts.
 ---
 
+import { Steps } from '@astrojs/starlight/components';
+
 # Configuring network access
 
 `ado-aw` runs agents inside **AWF** (Agentic Workflow Firewall), which applies network isolation to outbound traffic.
@@ -168,10 +170,18 @@ network:
 
 When configuring network access:
 
-1. start with defaults only
-2. enable runtimes for package ecosystems
-3. add custom hosts under `network.allowed`
-4. block anything you explicitly want excluded
-5. add `permissions.read` or `permissions.write` if the agent must call Azure DevOps APIs
+<Steps>
+
+1. Start with defaults only — test whether the agent works without any custom network configuration.
+
+2. Enable runtimes for package ecosystems — add `runtimes: { python: true }` or similar to automatically include ecosystem domains.
+
+3. Add custom hosts under `network.allowed` — add internal APIs or vendor services the agent needs to reach.
+
+4. Block anything you explicitly want excluded — use `network.blocked` to remove specific domains from the allowlist.
+
+5. Add `permissions.read` or `permissions.write` if the agent must call Azure DevOps APIs — configure service connections for ADO access.
+
+</Steps>
 
 This keeps agent access narrow, explicit, and easier to review.
