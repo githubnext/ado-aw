@@ -59,8 +59,8 @@ runtimes:                      # optional runtime configuration (language enviro
   # dotnet:                    # Alternative object format (pin version, configure internal feed via nuget.config)
   #   version: "8.0.x"          # use "global.json" to pin from the repo's global.json
   #   feed-url: "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/nuget/v3/index.json"
-# env:                          # RESERVED: workflow-level environment variables (not yet implemented)
-#   CUSTOM_VAR: "value"
+# env:                          # RESERVED: workflow-level environment variables (field exists but not yet used by compiler)
+#   CUSTOM_VAR: "value"        # For now, use engine.env or mcp-servers.<name>.env for process-specific vars
 # inlined-imports: false        # When true, resolve {{#runtime-import ...}} markers at compile time
 #                               # (default: false -- markers are resolved at pipeline runtime, so
 #                               # prompt-body edits do not require recompilation).
@@ -239,6 +239,161 @@ rewritten in place to the new shape -- each `repositories:` entry
 becomes a `repos:` entry, with `checkout: false` added for entries
 that weren't listed under `checkout:`. Mixing the legacy fields with
 an existing `repos:` block is rejected; pick one shape.
+
+## Custom Steps Injection
+
+The `steps`, `post-steps`, `setup`, and `teardown` fields let you inject custom ADO pipeline steps at specific points in the compiled workflow's execution flow.
+
+### Execution Order
+
+Custom steps are inserted at these points in the three-stage pipeline:
+
+```mermaid
+flowchart TB
+    subgraph SetupJob[Setup Job]
+        S1[setup steps]
+        S2[Gate step]
+        S3[Runtime setup]
+    end
+    subgraph AgentJob[Agent Job]
+        A1[steps]
+        A2[Run agent]
+        A3[post-steps]
+    end
+    subgraph ExecutorJob[Executor Job]
+        E1[Execute safe outputs]
+    end
+    subgraph TeardownJob[Teardown Job]
+        T1[teardown steps]
+    end
+    S1 --> S2 --> S3 --> A1 --> A2 --> A3 --> E1 --> T1
+```
+
+| Field | Job | Position | Use Cases |
+|-------|-----|----------|-----------|
+| `setup` | Setup (separate job) | **Before** gate step and runtime setup | Pre-flight checks, credentials setup, external service initialization |
+| `steps` | Agent (inline) | **Before** agent runs | Generate context files, fetch external data, prepare workspace |
+| `post-steps` | Agent (inline) | **After** agent completes | Process agent outputs, run validation, upload diagnostics |
+| `teardown` | Teardown (separate job) | **After** safe outputs execute | Cleanup, notification, metrics collection |
+
+### Field Types
+
+All four fields accept ADO step arrays (YAML sequences). Each step can be any standard ADO task or script:
+
+```yaml
+steps:
+  - bash: echo "Inline bash step"
+    displayName: "Prepare context"
+  - task: DownloadSecureFile@1
+    inputs:
+      secureFile: "config.json"
+    displayName: "Fetch config"
+```
+
+### `steps:` — Pre-Agent Context Preparation
+
+Runs **before** the agent in the same job. Use for generating context the agent needs:
+
+```yaml
+steps:
+  - bash: |
+      git log --oneline -10 > /tmp/recent-commits.txt
+      echo "Recent commits prepared for agent review"
+    displayName: "Generate commit history"
+```
+
+The agent can then read `/tmp/recent-commits.txt` when forming its response.
+
+### `post-steps:` — Post-Agent Processing
+
+Runs **after** the agent in the same job. Use for processing agent outputs or running validation:
+
+```yaml
+post-steps:
+  - bash: |
+      if [ -f agent-output.json ]; then
+        jq . agent-output.json || echo "Invalid JSON produced by agent"
+      fi
+    displayName: "Validate agent output"
+```
+
+### `setup:` — Pre-Flight Setup Job
+
+Runs as a **separate job** before the Setup job's gate step. Use for infrastructure provisioning or external service preparation:
+
+```yaml
+setup:
+  - bash: |
+      curl -X POST https://api.service.com/start-session \
+        -H "Authorization: Bearer $TOKEN"
+    displayName: "Initialize external service"
+    env:
+      TOKEN: $(ExternalServiceToken)
+```
+
+The Setup job (with `setup:` steps) always runs first, followed by Agent, then Executor, then Teardown.
+
+### `teardown:` — Post-Execution Cleanup Job
+
+Runs as a **separate job** after safe outputs execute. Use for cleanup, notifications, or metrics:
+
+```yaml
+teardown:
+  - bash: |
+      echo "Pipeline completed. Cleaning up resources."
+      rm -rf /tmp/agent-workspace
+    displayName: "Cleanup workspace"
+```
+
+Teardown steps run even if the agent or executor jobs fail (condition: `always()`).
+
+### Job Conditions
+
+- **`setup`** and inline **`steps`** run unconditionally (subject to gate filters)
+- **`post-steps`** run only if the agent job reaches that phase (condition: `always()` within the job)
+- **`teardown`** runs unconditionally after the executor job completes (condition: `always()`)
+
+### Example: Full Custom Steps Workflow
+
+```yaml
+---
+name: "data-pipeline"
+description: "Fetch, process, and report on external data"
+on:
+  schedule: daily around 06:00
+pool:
+  vmImage: ubuntu-22.04
+setup:
+  - bash: |
+      curl -o /tmp/dataset.csv https://data.example.com/daily.csv
+      echo "Dataset downloaded and ready"
+    displayName: "Fetch external dataset"
+steps:
+  - bash: |
+      wc -l /tmp/dataset.csv > /tmp/row-count.txt
+      echo "Row count prepared for agent"
+    displayName: "Generate dataset stats"
+post-steps:
+  - bash: |
+      echo "Agent completed. Archiving results."
+      tar -czf agent-results.tar.gz /tmp/agent-*.log
+    displayName: "Archive logs"
+  - task: PublishBuildArtifacts@1
+    inputs:
+      pathToPublish: "agent-results.tar.gz"
+      artifactName: "results"
+teardown:
+  - bash: |
+      curl -X POST https://webhooks.example.com/notify \
+        -d '{"status":"complete","pipeline":"$(Build.DefinitionName)"}'
+    displayName: "Send completion webhook"
+---
+
+## Data Pipeline Agent
+
+Review the dataset statistics in `/tmp/row-count.txt`, process the data in
+`/tmp/dataset.csv`, and summarize any anomalies or trends.
+```
 
 ## Inlined Imports
 
