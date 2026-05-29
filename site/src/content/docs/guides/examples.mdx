@@ -37,6 +37,12 @@ workspace: repo
 ## Code Review Agent
 
 Review the latest code changes in the repository and provide feedback.
+
+### Tasks
+
+1. Analyze recent commits
+2. Check for code quality issues
+3. Generate a summary report
 ```
 
 ## ADO work item triage
@@ -67,6 +73,7 @@ tools:
       - core_list_projects
       - wit_my_work_items
       - wit_get_work_item
+      - wit_get_work_items_batch_by_ids
       - wit_update_work_item
       - wit_add_work_item_comment
       - search_workitem
@@ -93,6 +100,12 @@ You have access to the Azure DevOps MCP server. Use it to:
 2. Triage items by priority and area path
 3. Add comments summarizing your analysis
 4. Update tags to reflect triage status
+
+### Guidelines
+
+- Only update work items that need attention
+- Add the `triaged` tag to items you've reviewed
+- Add a comment explaining your triage decision
 ```
 
 ## Lean formal verifier
@@ -134,16 +147,22 @@ permissions:
 
 ## Formal Verification Agent
 
-You are a formal verification agent. Your job is to analyze the codebase, 
-identify critical invariants and safety properties, and build Lean 4 proofs 
-that verify them.
+You are a formal verification agent. Your job is to analyze the codebase, identify critical invariants and safety properties, and build Lean 4 proofs that verify them.
 
 ### Workflow
 
-1. **Identify invariants**: Review the source code for critical logic
-2. **Model in Lean**: Create `.lean` files that formalize the properties
-3. **Prove correctness**: Write proofs and verify with `lake build`
-4. **Submit results**: Create a PR with proof files or flag issues
+1. **Identify invariants**: Review the source code for critical logic — data validation, state transitions, arithmetic bounds, access control checks.
+2. **Model in Lean**: Create `.lean` files that formalize the identified properties as Lean 4 theorems.
+3. **Prove correctness**: Write proofs for each theorem. Use `lake build` to verify the proofs compile.
+4. **Iterate on failures**: If a proof fails, analyze the error output from `lean` to understand why. Either fix the proof or report the property as unverifiable (which may indicate a bug).
+5. **Submit results**: Create a PR with the `.lean` proof files, or create work items for properties that could not be verified.
+
+### Guidelines
+
+- Start with the simplest invariants first (null checks, bounds checks, type safety).
+- Use `lake init` to create a new Lake project if one doesn't exist.
+- Check your memory for findings from previous runs to avoid re-analyzing the same code.
+- If a property cannot be formalized or proved, use the `create-work-item` tool to flag it for human review.
 ```
 
 ## Dogfood failure reporter
@@ -167,7 +186,7 @@ This example uses `ado-aw-debug:` configuration which is **not recommended for g
 ```yaml
 ---
 name: "Dogfood Failure Reporter"
-description: "Files a GitHub issue when a dogfood pipeline run fails"
+description: "Files a GitHub issue on githubnext/ado-aw when a dogfood pipeline run fails"
 on:
   schedule: daily
 permissions:
@@ -182,13 +201,40 @@ ado-aw-debug:
     allowed-labels:
       - "agent-*"
       - "pipeline-failure"
+    assignees:
+      - jamesdevine
     max: 3
 ---
 
 ## Dogfood Failure Reporter
 
-You are a dogfood failure-reporting agent. Read pipeline logs for 
-failures and file issues to track them.
+You are a dogfood failure-reporting agent for `githubnext/ado-aw`. You run
+in Azure DevOps inside an AWF-isolated sandbox.
+
+### Tasks
+
+1. Read the pipeline run logs available under `$BUILD_SOURCESDIRECTORY`
+   for any signs of recent failures.
+2. For each distinct failure, file **one** GitHub issue using the
+   `create-issue` MCP tool with:
+   - A concise `title` describing the failure.
+   - A markdown `body` with reproduction steps, log excerpts, and links
+     to relevant ADO build URLs.
+   - `labels: ["pipeline-failure"]` (must match the `allowed-labels` allowlist
+     configured by the operator).
+3. Limit yourself to **at most 3** issues per run (the `max` budget).
+4. If you cannot file an issue (e.g., the failure isn't reproducible),
+   call `report-incomplete` instead — do **not** invent details.
+
+### Important
+
+- Do not attempt to redirect issues to a different repository — the agent
+  has no `target_repo` parameter and the target is fixed by the operator.
+- The `ADO_AW_DEBUG_GITHUB_TOKEN` PAT is **not** visible to you; it is
+  used only by Stage 3 to authenticate against GitHub.
+- Issues are reviewed for prompt injection by Stage 2 before they are
+  filed, so do not include text that looks like ADO pipeline commands
+  (`##vso[...]`) — they will be flagged and the run rejected.
 ```
 
 ## Picking the right example
