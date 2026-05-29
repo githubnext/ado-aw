@@ -679,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_feed_url_missing_scheme() {
+    fn test_validate_feed_url_unsupported_scheme() {
         assert!(validate_feed_url("pkgs.dev.azure.com/org/feed", "test").is_err());
         assert!(validate_feed_url("ftp://example.com/feed", "test").is_err());
     }
