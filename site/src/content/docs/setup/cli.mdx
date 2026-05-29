@@ -107,12 +107,16 @@ Options:
 
 ### Project-scope discovery (`--all-repos` / `--source`)
 
-By default, `secrets` commands match ADO definitions by scanning local lock files. Two opt-in flags activate **Preview-driven discovery** instead — useful when local checkouts of every consumer pipeline aren't available:
+By default, `secrets` commands match ADO definitions by scanning **local lock files** (the same auto-discovery used by `compile` and `enable`). Two opt-in flags activate **Preview-driven discovery** instead — useful when local checkouts of every consumer pipeline aren't available:
 
-- **`--all-repos`** — search every ado-aw definition in the ADO project, including consumer pipelines that include ado-aw templates but live in other repos. No local checkout of those repos is required.
-- **`--source <path>`** — restrict results to definitions whose `# ado-aw-metadata` marker references the given template path. Useful for fan-out token rotation: `ado-aw secrets set GITHUB_TOKEN --source agents/security-scan.md` updates every pipeline that includes that template across the entire project.
+- **`--all-repos`** — search every ado-aw definition in the ADO project, including consumer pipelines that include ado-aw templates but live in other repos. No local checkout of those repos is required. This routes through `ado-aw`'s Preview API machinery, which calls ADO's Pipeline Preview endpoint per definition and scans the expanded YAML for the `ado-aw-marker` step that every compiled pipeline now carries.
+- **`--source <path>`** — restrict results to definitions whose `# ado-aw-metadata` marker references the given template path. Useful for fan-out token rotation: `ado-aw secrets set GITHUB_TOKEN --source agents/security-scan.md` updates every pipeline that includes that template across the entire project. **Without `--all-repos`, only definitions in the current repository are searched** — pair with `--all-repos` to search the full project.
 
-Both flags are mutually exclusive with `--definition-ids`. `enable`, `disable`, and `remove` are **not** affected — they retain their source-scoped safety semantics.
+Both flags are mutually exclusive with `--definition-ids`. `--definition-ids` remains the explicit-ID escape hatch when you know exactly which definitions to target.
+
+:::caution[Not available for other lifecycle commands]
+`enable`, `disable`, `remove`, `list`, `status`, and `run` are **not** affected by these flags — they retain their local-fixture-scoped safety semantics. Only `secrets` commands support project-scope discovery because token rotation is the primary use case for cross-repo operations.
+:::
 
 ```bash
 # Rotate GITHUB_TOKEN on every ado-aw pipeline in the project
