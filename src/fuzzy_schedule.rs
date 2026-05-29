@@ -876,13 +876,17 @@ mod tests {
         ));
 
         let schedule = parse_fuzzy_schedule("weekly on friday around 17:00").unwrap();
-        assert!(matches!(
+        assert_eq!(
             schedule,
             FuzzySchedule::Weekly {
                 day: Some(Weekday::Friday),
-                constraint: TimeConstraint::Around(_)
-            }
-        ));
+                constraint: TimeConstraint::Around(TimeSpec {
+                    hour: 17,
+                    minute: 0
+                })
+            },
+            "weekly on friday around 17:00 should capture the time spec in Around variant"
+        );
     }
 
     #[test]
@@ -895,22 +899,22 @@ mod tests {
 
     #[test]
     fn test_parse_intervals() {
-        assert!(matches!(
+        assert_eq!(
             parse_fuzzy_schedule("every 2h").unwrap(),
             FuzzySchedule::EveryHours(2)
-        ));
-        assert!(matches!(
+        );
+        assert_eq!(
             parse_fuzzy_schedule("every 6 hours").unwrap(),
             FuzzySchedule::EveryHours(6)
-        ));
-        assert!(matches!(
+        );
+        assert_eq!(
             parse_fuzzy_schedule("every 5 minutes").unwrap(),
             FuzzySchedule::EveryMinutes(5)
-        ));
-        assert!(matches!(
+        );
+        assert_eq!(
             parse_fuzzy_schedule("every 2 days").unwrap(),
             FuzzySchedule::EveryDays(2)
-        ));
+        );
     }
 
     #[test]
