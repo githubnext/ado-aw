@@ -3,6 +3,8 @@ title: "Target platforms"
 description: "Reference for ado-aw target platforms and the pipeline or template shapes they generate."
 ---
 
+import { Aside } from '@astrojs/starlight/components';
+
 ## Target Platforms
 
 The `target` field in the front matter determines the output format and execution environment for the compiled pipeline.
@@ -71,12 +73,6 @@ stages:
       - template: agents/review.lock.yml
 ```
 
-#### Notes
-
-- Triggers (`on:`) are ignored with a warning (the parent pipeline controls triggers)
-- If the agent declares additional repositories via `repos:`, add them to the
-  parent pipeline's `resources:` block (documented in the generated file header)
-
 ### `stage`
 
 Generates a **stage-level ADO YAML template** with `stages:` at root. This
@@ -102,9 +98,14 @@ stages:
 ADO natively supports `dependsOn` and `condition` at the template call site --
 no template parameters are needed for stage ordering.
 
-#### Notes
+---
 
-- Same 3-job chain, job-name prefixing, and pool handling as `target: job`
-- Triggers (`on:`) are ignored with a warning
-- If the agent declares additional repositories via `repos:`, add them to the
-  parent pipeline's `resources:` block
+## Template Target Considerations
+
+<Aside type="caution" title="Triggers and resources">
+When using `target: job` or `target: stage`, the `on:` trigger configuration is **ignored with a warning** during compilation. Triggers are the parent pipeline's responsibility.
+
+If your agent declares additional repositories via `repos:`, you must manually add them to the parent pipeline's `resources:` block. The generated template file header documents the required resources.
+</Aside>
+
+Both `job` and `stage` targets produce templates with the same 3-job execution chain (Agent → Detection → SafeOutputs), job-name prefixing for uniqueness, and pool configuration baked in from the `pool:` front-matter field. The difference is only in the YAML wrapper: `jobs:` at root vs. `stages:` at root.
