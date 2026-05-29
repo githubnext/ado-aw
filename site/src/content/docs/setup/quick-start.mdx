@@ -76,17 +76,29 @@ The fastest way to create an agentic pipeline is to let Copilot do the heavy lif
 
    The agent will walk you through the front-matter configuration, write the agent prompt, and compile the pipeline -- all interactively.
 
-3. **Push and configure**
+3. **Push and register the pipeline**
 
-   Once you're happy with the generated files, commit and push them to your Azure DevOps repository. Then create a pipeline in Azure DevOps pointing at the compiled `.lock.yml` file, and set the required `GITHUB_TOKEN` pipeline variable:
+   Once you're happy with the generated files, commit and push them to your Azure DevOps repository. Then register the pipeline with Azure DevOps:
+
+   ```bash
+   ado-aw enable
+   ```
+
+   This auto-discovers compiled pipelines in your repository and creates (or enables) corresponding ADO build definitions. With the `--also-set-token` flag, it can also set the `GITHUB_TOKEN` variable in one step:
+
+   ```bash
+   ado-aw enable --also-set-token
+   ```
+
+   Alternatively, set the token separately on existing definitions:
 
    ```bash
    ado-aw secrets set GITHUB_TOKEN
    ```
 
-   This stores the `GITHUB_TOKEN` pipeline variable (as a secret) on every matched ADO build definition. The command prompts for:
+   Both commands prompt for:
    - The **GitHub Personal Access Token (PAT)** value -- used by the Copilot CLI at runtime (see [required permissions](#github-pat-permissions) below)
-   - For Azure DevOps authentication, the command first tries the **Azure CLI** (`az` login session). If the Azure CLI is not available or not logged in, it falls back to prompting for an **Azure DevOps PAT**.
+   - For Azure DevOps authentication, the commands first try the **Azure CLI** (`az` login session). If the Azure CLI is not available or not logged in, they fall back to prompting for an **Azure DevOps PAT**.
 
    **Service connections for ADO access**: If your agent uses safe outputs that write to Azure DevOps (creating PRs, work items, comments, etc.), you need an **ARM service connection** referenced in your agent file's `permissions.write` field. This connection is used to mint short-lived ADO tokens for the executor stage.
 
@@ -103,7 +115,13 @@ The fastest way to create an agentic pipeline is to let Copilot do the heavy lif
 
 4. **Run the pipeline**
 
-   Back in Azure DevOps, queue your pipeline. It executes the three-stage workflow: Agent → Detection → SafeOutputs.
+   Queue your pipeline from the command line:
+
+   ```bash
+   ado-aw run
+   ```
+
+   Or queue it manually from the Azure DevOps UI. The pipeline executes the three-stage workflow: Agent → Detection → SafeOutputs.
 
 </Steps>
 
@@ -150,14 +168,25 @@ If you prefer full control, you can author agent files by hand.
    - `agent.md` -- your source definition
    - `agent.lock.yml` -- the compiled Azure DevOps pipeline
 
-3. **Push to Azure DevOps**
+3. **Push and register the pipeline**
 
    - Commit both `agent.md` and the compiled `.lock.yml` file
    - Push them to your Azure DevOps repository
-   - In Azure DevOps, create a pipeline that points at the compiled YAML file
-   - Save the pipeline
+   - Register the pipeline with Azure DevOps:
 
-4. **Set the GitHub token**
+   ```bash
+   ado-aw enable
+   ```
+
+   This auto-discovers the compiled pipeline and creates a corresponding ADO build definition. You can also register and set the GitHub token in one step:
+
+   ```bash
+   ado-aw enable --also-set-token
+   ```
+
+4. **Set the GitHub token (if not done in step 3)**
+
+   If you didn't use `--also-set-token` in the previous step, set the token now:
 
    ```bash
    ado-aw secrets set GITHUB_TOKEN
@@ -169,7 +198,13 @@ If you prefer full control, you can author agent files by hand.
 
 5. **Run the pipeline**
 
-   Back in Azure DevOps, queue your pipeline. It executes the compiled three-stage workflow: Agent → Detection → SafeOutputs.
+   Back in Azure DevOps, queue your pipeline:
+
+   ```bash
+   ado-aw run
+   ```
+
+   Or queue it manually from the Azure DevOps UI. The pipeline executes the compiled three-stage workflow: Agent → Detection → SafeOutputs.
 
 </Steps>
 
