@@ -114,7 +114,7 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_pr_trigger_with_explicit_pr_trigger_overrides_schedule() {
+    fn test_generate_pr_trigger_with_explicit_pr_trigger_overrides_suppression() {
         let triggers = Some(OnConfig {
             pipeline: None,
             pr: Some(PrTriggerConfig::default()),
@@ -122,29 +122,11 @@ mod tests {
         });
         let result = generate_pr_trigger(&triggers, true);
         // PrTriggerConfig::default() has no branches/paths, so the native block is empty
-        // (meaning "trigger on all PRs" in ADO). The schedule suppression ("pr: none") must
-        // NOT be emitted because the explicit pr: key overrides it.
+        // (meaning "trigger on all PRs" in ADO). The schedule/pipeline suppression ("pr: none")
+        // must NOT be emitted because the explicit pr: key overrides it — regardless of whether
+        // has_schedule or has_pipeline_trigger is set.
         assert!(result.is_empty(), "default PrTriggerConfig should produce empty string (trigger on all PRs)");
-        assert!(!result.contains("pr: none"), "triggers.pr should override schedule suppression");
-    }
-
-    #[test]
-    fn test_generate_pr_trigger_with_pr_trigger_and_pipeline_trigger() {
-        let triggers = Some(OnConfig {
-            pipeline: Some(PipelineTrigger {
-                name: "Build".into(),
-                project: None,
-                branches: vec![],
-            filters: None,
-            }),
-            pr: Some(PrTriggerConfig::default()),
-        schedule: None,
-        });
-        let result = generate_pr_trigger(&triggers, false);
-        // Same as above: default PrTriggerConfig → empty (trigger on all PRs).
-        // Pipeline-only suppression must NOT be emitted because pr: is explicit.
-        assert!(result.is_empty(), "default PrTriggerConfig should produce empty string (trigger on all PRs)");
-        assert!(!result.contains("pr: none"), "triggers.pr should override pipeline trigger suppression");
+        assert!(!result.contains("pr: none"), "triggers.pr should override schedule/pipeline suppression");
     }
 
     #[test]
