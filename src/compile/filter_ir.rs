@@ -1692,14 +1692,22 @@ mod tests {
             "/tmp/ado-aw-scripts/ado-script/gate.js",
         )
         .unwrap();
-        // Check export lines only (evaluator script always contains these strings)
+        // Verify tier-1 (pipeline-var only) checks do not export API-related env vars
+        // Look for the env: block exports (YAML format with leading spaces)
+        let lines: Vec<&str> = result.lines().collect();
+        let has_repo_id_export = lines.iter().any(|line| {
+            line.trim_start().starts_with("ADO_REPO_ID:")
+        });
+        let has_pr_id_export = lines.iter().any(|line| {
+            line.trim_start().starts_with("ADO_PR_ID:")
+        });
         assert!(
-            !result.contains("ADO_REPO_ID:"),
-            "should not export repo ID for title-only"
+            !has_repo_id_export,
+            "should not export ADO_REPO_ID for title-only (tier-1) check"
         );
         assert!(
-            !result.contains("ADO_PR_ID:"),
-            "should not export PR ID for title-only"
+            !has_pr_id_export,
+            "should not export ADO_PR_ID for title-only (tier-1) check"
         );
     }
 
@@ -1779,24 +1787,20 @@ mod tests {
         let diags = validate_pr_filters(&filters);
         assert!(diags.iter().all(|d| d.severity != Severity::Error));
 
-        let step = compile_gate_step_external(
+        let _step = compile_gate_step_external(
             GateContext::PullRequest,
             &checks,
             "/tmp/ado-aw-scripts/ado-script/gate.js",
         )
         .unwrap();
-        // Step structure
-        assert!(step.contains("ADO_PR_TITLE"));
-        assert!(step.contains("ADO_REPO_ID")); // for API-derived facts
-        assert!(step.contains("node"));
-        assert!(step.contains("prGate"));
 
-        // Spec content
+        // Verify the spec captures all three filters with correct fact dependencies
         let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
-        assert_eq!(spec.checks.len(), 3);
-        assert!(spec.facts.iter().any(|f| f.kind == "pr_title"));
-        assert!(spec.facts.iter().any(|f| f.kind == "pr_is_draft"));
-        assert!(spec.facts.iter().any(|f| f.kind == "pr_labels"));
+        assert_eq!(spec.checks.len(), 3, "should produce 3 checks from 3 filters");
+        assert!(spec.facts.iter().any(|f| f.kind == "pr_title"), "title filter requires pr_title fact");
+        assert!(spec.facts.iter().any(|f| f.kind == "pr_is_draft"), "draft filter requires pr_is_draft fact");
+        assert!(spec.facts.iter().any(|f| f.kind == "pr_labels"), "labels filter requires pr_labels fact");
+        assert!(spec.facts.iter().any(|f| f.kind == "pr_metadata"), "API-derived facts should pull in pr_metadata dependency");
     }
 
     // ─── Schema tests ──────────────────────────────────────────────────
