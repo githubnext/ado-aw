@@ -1,6 +1,6 @@
 # ado-aw
 
-An agentic pipeline compiler for Azure DevOps. Write pipeline definitions in
+An agentic workflow compiler for Azure DevOps. Write pipeline definitions in
 human-friendly markdown, compile them into secure, multi-stage Azure DevOps
 pipelines that run AI agents in network-isolated sandboxes.
 
@@ -53,7 +53,7 @@ cargo build --release
 ado-aw init
 ```
 
-This creates a Copilot agent at `.github/agents/ado-aw.agent.md` that helps you create, update, and debug agentic pipelines. The agent automatically downloads the ado-aw compiler and handles compilation.
+This creates a Copilot agent at `.github/agents/ado-aw.agent.md` that helps you create, update, and debug agentic workflows. The agent automatically downloads the ado-aw compiler and handles compilation.
 
 ### 3. Create an Agent with AI
 
@@ -69,7 +69,7 @@ and open PRs to update them.
 
 Or if you've run `ado-aw init`, simply ask your AI agent:
 ```
-Create an agentic pipeline that checks for outdated dependencies and opens PRs
+Create an agentic workflow that checks for outdated dependencies and opens PRs
 ```
 
 The AI will generate a markdown file like:
@@ -500,7 +500,7 @@ network:
 ado-aw [OPTIONS] <COMMAND>
 
 Commands:
-  init          Initialize a repository for AI-first agentic pipeline authoring
+  init          Initialize a repository for AI-first agentic workflow authoring
   compile       Compile markdown to pipeline definition
   check         Verify a compiled pipeline matches its source
   mcp           Run as an MCP server (safe outputs)
@@ -538,9 +538,9 @@ ado-aw provides specialized prompt files that guide AI agents through common tas
 
 | Task | Prompt URL | Description |
 |------|-----------|-------------|
-| Create a workflow | [create-ado-agentic-workflow.md](prompts/create-ado-agentic-workflow.md) | Step-by-step guide for creating a new agentic pipeline from scratch |
+| Create a workflow | [create-ado-agentic-workflow.md](prompts/create-ado-agentic-workflow.md) | Step-by-step guide for creating a new agentic workflow from scratch |
 | Update a workflow | [update-ado-agentic-workflow.md](prompts/update-ado-agentic-workflow.md) | Guide for modifying existing agent workflows |
-| Debug a pipeline | [debug-ado-agentic-workflow.md](prompts/debug-ado-agentic-workflow.md) | Troubleshoot failing agentic pipelines |
+| Debug a pipeline | [debug-ado-agentic-workflow.md](prompts/debug-ado-agentic-workflow.md) | Troubleshoot failing agentic workflows |
 
 ### Using Prompts with Your AI Agent
 

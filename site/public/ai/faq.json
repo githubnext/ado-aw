@@ -10,7 +10,7 @@
     },
     {
       "q": "How do I compile an agent file?",
-      "a": "Run `ado-aw compile ./path/to/agent.md` to compile a single file, or `ado-aw compile` to auto-discover and recompile all agentic pipelines in the current directory."
+      "a": "Run `ado-aw compile ./path/to/agent.md` to compile a single file, or `ado-aw compile` to auto-discover and recompile all agentic workflows in the current directory."
     },
     {
       "q": "What is the three-stage pipeline model?",

@@ -1236,7 +1236,7 @@ This agent tests the auto-discovery feature.
     );
 
     assert!(
-        stdout.contains("Found 1 agentic pipeline"),
+        stdout.contains("Found 1 agentic workflow"),
         "Should report finding 1 pipeline, got stdout: {}",
         stdout
     );

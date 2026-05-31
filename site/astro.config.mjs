@@ -13,7 +13,7 @@ export default defineConfig({
     mermaid({ autoTheme: true }),
     starlight({
       title: 'ado-aw',
-      description: 'Compile natural-language markdown into Azure DevOps agentic pipelines',
+      description: 'Compile natural-language markdown into Azure DevOps agentic workflows',
       plugins: [
         starlightLlmsTxt(),
         starlightLinksValidator(),

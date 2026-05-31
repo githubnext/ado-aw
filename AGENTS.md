@@ -1,4 +1,4 @@
-# Copilot Instructions for Azure DevOps Agentic Pipelines
+# Copilot Instructions for Azure DevOps Agentic Workflows
 
 This repository contains a compiler for Azure DevOps pipelines that transforms
 natural language markdown files with YAML front matter into Azure DevOps
@@ -87,7 +87,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── ado/              # Shared Azure DevOps REST helpers (auth, list/match/PATCH/POST)
 │   │   ├── mod.rs        # Shared ADO REST helpers used by all lifecycle commands (`enable`, `disable`, `list`, `status`, `run`, `remove`, `secrets`)
 │   │   └── discovery.rs  # Project-scope pipeline discovery (`--all-repos` / `--source` flags)
-│   ├── detect.rs         # Agentic pipeline detection — discovers compiled pipelines; used by all lifecycle commands
+│   ├── detect.rs         # Agentic workflow detection — discovers compiled pipelines; used by all lifecycle commands
 │   ├── update_check.rs   # Version update check — queries GitHub Releases and prints advisory when newer version is available
 │   ├── ndjson.rs         # NDJSON parsing utilities
 │   ├── sanitize.rs       # Input sanitization for safe outputs
@@ -155,9 +155,9 @@ Every compiled pipeline runs as three sequential jobs:
 ├── ado-aw-derive/        # Proc-macro crate: #[derive(SanitizeConfig)], #[derive(SanitizeContent)]
 ├── examples/             # Example agent definitions
 ├── prompts/              # AI agent prompt files for workflow authoring tasks
-│   ├── create-ado-agentic-workflow.md # Step-by-step guide for creating a new agentic pipeline
-│   ├── update-ado-agentic-workflow.md # Guide for modifying an existing agentic pipeline
-│   └── debug-ado-agentic-workflow.md  # Guide for troubleshooting a failing agentic pipeline
+│   ├── create-ado-agentic-workflow.md # Step-by-step guide for creating a new agentic workflow
+│   ├── update-ado-agentic-workflow.md # Guide for modifying an existing agentic workflow
+│   └── debug-ado-agentic-workflow.md  # Guide for troubleshooting a failing agentic workflow
 ├── scripts/              # Supporting scripts shipped as release artifacts
 │   └── ado-script/       # TypeScript workspace for bundled gate.js, import.js, and future bundles
 │       └── src/
@@ -189,11 +189,11 @@ index to jump to the right page.
 ### Prompt files for workflow authoring
 
 - [`prompts/create-ado-agentic-workflow.md`](prompts/create-ado-agentic-workflow.md) — step-by-step
-  guide for creating a new agentic pipeline from scratch (interactive and non-interactive modes).
+  guide for creating a new agentic workflow from scratch (interactive and non-interactive modes).
 - [`prompts/update-ado-agentic-workflow.md`](prompts/update-ado-agentic-workflow.md) — guide for
-  modifying an existing agentic pipeline (read-then-update workflow with validation).
+  modifying an existing agentic workflow (read-then-update workflow with validation).
 - [`prompts/debug-ado-agentic-workflow.md`](prompts/debug-ado-agentic-workflow.md) — guide for
-  troubleshooting a failing agentic pipeline and filing a diagnostic report.
+  troubleshooting a failing agentic workflow and filing a diagnostic report.
 
 ### Authoring agent files
 
@@ -344,10 +344,10 @@ the bash body — shellcheck honours the directive and it's inert at runtime.
 cargo run -- compile ./path/to/agent.md
 ```
 
-### Recompile all agentic pipelines in the current directory
+### Recompile all agentic workflows in the current directory
 
 ```bash
-# Auto-discovers and recompiles all detected agentic pipelines
+# Auto-discovers and recompiles all detected agentic workflows
 cargo run -- compile
 ```
 

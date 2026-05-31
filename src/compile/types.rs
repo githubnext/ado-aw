@@ -1,4 +1,4 @@
-//! Common types for the agentic pipeline compiler.
+//! Common types for the agentic workflow compiler.
 //!
 //! This module defines the front matter grammar that is shared across all compile targets.
 

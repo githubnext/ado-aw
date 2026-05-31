@@ -22,7 +22,7 @@ fn test_init_creates_agent_file() {
 
     let content = fs::read_to_string(&agent_path).expect("Should be able to read agent file");
     assert!(
-        content.contains("ADO Agentic Pipelines Agent"),
+        content.contains("ADO Agentic Workflows Agent"),
         "Agent file should contain the expected title"
     );
     // Verify version placeholder was substituted
@@ -62,7 +62,7 @@ fn test_init_overwrites_by_default() {
 
     let content = fs::read_to_string(&agent_path).expect("Should read agent file");
     assert!(
-        content.contains("ADO Agentic Pipelines Agent"),
+        content.contains("ADO Agentic Workflows Agent"),
         "Default init should restore the template content"
     );
     assert!(
@@ -97,7 +97,7 @@ fn test_init_force_overwrites() {
 
     let content = fs::read_to_string(&agent_path).expect("Should read agent file");
     assert!(
-        content.contains("ADO Agentic Pipelines Agent"),
+        content.contains("ADO Agentic Workflows Agent"),
         "Force should restore the template content"
     );
     assert!(

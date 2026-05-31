@@ -1,6 +1,6 @@
 {
   "name": "ado-aw",
-  "description": "Compiler that transforms natural-language markdown with YAML front matter into Azure DevOps agentic pipeline definitions. Enables AI agents to work safely in network-isolated sandboxes with controlled tool access and validated outputs.",
+  "description": "Compiler that transforms natural-language markdown with YAML front matter into Azure DevOps agentic workflow definitions. Enables AI agents to work safely in network-isolated sandboxes with controlled tool access and validated outputs.",
   "version": "latest",
   "docs": "https://githubnext.github.io/ado-aw/",
   "repository": "https://github.com/githubnext/ado-aw",

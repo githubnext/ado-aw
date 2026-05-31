@@ -166,10 +166,10 @@ pub async fn dispatch(opts: RunOptions<'_>) -> Result<()> {
         .build()
         .context("Failed to create HTTP client")?;
 
-    println!("Scanning for agentic pipelines...");
+    println!("Scanning for agentic workflows...");
     let detected = detect::detect_pipelines(&repo_path).await?;
     if detected.is_empty() {
-        println!("No agentic pipelines found.");
+        println!("No agentic workflows found.");
         return Ok(());
     }
 

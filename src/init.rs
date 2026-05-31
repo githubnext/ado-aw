@@ -32,7 +32,7 @@ pub async fn run(path: Option<&std::path::Path>) -> Result<()> {
     // Print success message
     println!("✓ Created {}", agent_path.display());
     println!();
-    println!("This agent helps you create, update, and debug Azure DevOps agentic pipelines.");
+    println!("This agent helps you create, update, and debug Azure DevOps agentic workflows.");
     println!("It will automatically download the ado-aw compiler and handle compilation.");
     println!();
     println!("To use it, ask your AI agent:");

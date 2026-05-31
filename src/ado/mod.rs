@@ -797,7 +797,7 @@ pub async fn resolve_ado_context(
 }
 
 /// Builds the list of definitions to update from explicit IDs or auto-detection.
-/// Returns `None` when auto-detection finds no agentic pipelines (caller should exit cleanly).
+/// Returns `None` when auto-detection finds no agentic workflows (caller should exit cleanly).
 pub async fn resolve_definitions(
     client: &reqwest::Client,
     ado_ctx: &AdoContext,
@@ -824,17 +824,17 @@ pub async fn resolve_definitions(
     }
 
     // Auto-detect: scan local repo and match to ADO definitions
-    println!("Scanning for agentic pipelines...");
+    println!("Scanning for agentic workflows...");
     let detected = detect::detect_pipelines(repo_path).await?;
 
     if detected.is_empty() {
         println!(
-            "No agentic pipelines found. Make sure your pipelines were compiled with the latest ado-aw."
+            "No agentic workflows found. Make sure your pipelines were compiled with the latest ado-aw."
         );
         return Ok(None);
     }
 
-    println!("Found {} agentic pipeline(s):", detected.len());
+    println!("Found {} agentic workflow(s):", detected.len());
     for p in &detected {
         println!(
             "  {} (source: {}, version: {})",

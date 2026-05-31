@@ -1,4 +1,4 @@
-# 1ES Pipeline Template for Agentic Pipelines
+# 1ES Pipeline Template for Agentic Workflows
 # This template extends the 1ES Unofficial Pipeline Template with Copilot CLI,
 # AWF network isolation, and MCP Gateway — matching the standalone pipeline model.
 
@@ -74,7 +74,7 @@ extends:
                     grep "ado-aw-linux-x64" checksums.txt | sha256sum -c -
                     mv ado-aw-linux-x64 ado-aw
                     chmod +x ado-aw
-                  displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
+                  displayName: "Download agentic workflow compiler (v{{ compiler_version }})"
 
                 {{ integrity_check }}
 
@@ -453,7 +453,7 @@ extends:
                     grep "ado-aw-linux-x64" checksums.txt | sha256sum -c -
                     mv ado-aw-linux-x64 ado-aw
                     chmod +x ado-aw
-                  displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
+                  displayName: "Download agentic workflow compiler (v{{ compiler_version }})"
 
                 - task: DockerInstaller@0
                   displayName: "Install Docker"
@@ -509,7 +509,7 @@ extends:
                 - bash: |
                     AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
                     chmod +x "$AGENTIC_PIPELINES_PATH"
-                  displayName: "Setup agentic pipeline compiler"
+                  displayName: "Setup agentic workflow compiler"
 
                 - bash: |
                     set -o pipefail
@@ -656,7 +656,7 @@ extends:
                     grep "ado-aw-linux-x64" checksums.txt | sha256sum -c -
                     mv ado-aw-linux-x64 ado-aw
                     chmod +x ado-aw
-                  displayName: "Download agentic pipeline compiler (v{{ compiler_version }})"
+                  displayName: "Download agentic workflow compiler (v{{ compiler_version }})"
 
                 - bash: |
                     ls -la "$(Pipeline.Workspace)/agentic-pipeline-compiler"

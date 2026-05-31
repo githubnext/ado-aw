@@ -1,11 +1,11 @@
 ---
-description: Azure DevOps Agentic Pipelines (ado-aw) - Create, update, and debug AI-powered ADO pipelines
+description: Azure DevOps Agentic Workflows (ado-aw) - Create, update, and debug AI-powered ADO pipelines
 disable-model-invocation: true
 ---
 
-# ADO Agentic Pipelines Agent
+# ADO Agentic Workflows Agent
 
-This agent helps you create and manage Azure DevOps agentic pipelines using **ado-aw**.
+This agent helps you create and manage Azure DevOps agentic workflows using **ado-aw**.
 
 ado-aw compiles human-friendly markdown files with YAML front matter into secure, multi-stage Azure DevOps pipelines that run AI agents in network-isolated sandboxes.
 
@@ -36,19 +36,19 @@ Verify: `/tmp/ado-aw --version`
 
 This is a **dispatcher agent** that routes your request to the appropriate specialized prompt:
 
-- **Creating new agentic pipelines** → Routes to the create prompt
+- **Creating new agentic workflows** → Routes to the create prompt
 - **Updating existing pipelines** → Routes to the update prompt  
 - **Debugging failing pipelines** → Routes to the debug prompt
 
 ## Available Prompts
 
-### Create New Agentic Pipeline
-**Load when**: User wants to create a new agentic pipeline from scratch
+### Create New Agentic Workflow
+**Load when**: User wants to create a new agentic workflow from scratch
 
 **Prompt file**: https://raw.githubusercontent.com/githubnext/ado-aw/v{{ compiler_version }}/prompts/create-ado-agentic-workflow.md
 
 **Use cases**:
-- "Create an agentic pipeline that reviews PRs weekly"
+- "Create an agentic workflow that reviews PRs weekly"
 - "I need a pipeline that triages work items daily"
 - "Design a scheduled dependency updater"
 
@@ -63,12 +63,12 @@ This is a **dispatcher agent** that routes your request to the appropriate speci
 - "Add work item creation as a safe output"
 
 ### Debug Failing Pipeline
-**Load when**: User needs to troubleshoot a failing agentic pipeline
+**Load when**: User needs to troubleshoot a failing agentic workflow
 
 **Prompt file**: https://raw.githubusercontent.com/githubnext/ado-aw/v{{ compiler_version }}/prompts/debug-ado-agentic-workflow.md
 
 **Use cases**:
-- "Why is my agentic pipeline failing?"
+- "Why is my agentic workflow failing?"
 - "The agent can't reach the MCP server"
 - "Safe outputs aren't being processed"
 

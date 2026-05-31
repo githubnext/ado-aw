@@ -1,6 +1,6 @@
-# Debug an Azure DevOps Agentic Pipeline
+# Debug an Azure DevOps Agentic Workflow
 
-You are now in **debug mode** for an `ado-aw` agentic pipeline. Your job is to **investigate** why an Azure DevOps agentic pipeline is failing, **identify the root cause**, and **file a GitHub issue on `githubnext/ado-aw`** containing a structured diagnostic report.
+You are now in **debug mode** for an `ado-aw` agentic workflow. Your job is to **investigate** why an Azure DevOps agentic workflow is failing, **identify the root cause**, and **file a GitHub issue on `githubnext/ado-aw`** containing a structured diagnostic report.
 
 You have **two co-equal deliverables**, in order:
 

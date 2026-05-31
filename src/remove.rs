@@ -94,7 +94,7 @@ pub async fn run(opts: RemoveOptions<'_>) -> Result<()> {
     );
     println!();
 
-    println!("Scanning for agentic pipelines...");
+    println!("Scanning for agentic workflows...");
     let detected = detect::detect_pipelines(&repo_path).await?;
     if detected.is_empty() {
         // Destructive command: returning Ok(()) here would let a
@@ -103,13 +103,13 @@ pub async fn run(opts: RemoveOptions<'_>) -> Result<()> {
         // happened. Mirror `disable`'s bail and tell the operator
         // exactly which path was scanned so they can correct it.
         anyhow::bail!(
-            "No local agentic pipeline fixtures were found under {}. \
+            "No local agentic workflow fixtures were found under {}. \
              Run `ado-aw compile` first (or point `ado-aw remove` at the repo root). \
              `remove` refuses to exit success in this state because it's destructive.",
             repo_path.display()
         );
     }
-    println!("Found {} agentic pipeline(s).", detected.len());
+    println!("Found {} agentic workflow(s).", detected.len());
     println!();
 
     let client = reqwest::Client::builder()

@@ -5,7 +5,7 @@
 
 # Local Development Guide
 
-This guide explains how to run an agentic pipeline locally for development and
+This guide explains how to run an agentic workflow locally for development and
 testing. The workflow mirrors what the compiled Azure DevOps pipeline does, but
 each step is run manually on your machine.
 

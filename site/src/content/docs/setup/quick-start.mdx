@@ -1,6 +1,6 @@
 ---
 title: Quick Start
-description: Get your first ado-aw agentic pipeline running in minutes
+description: Get your first ado-aw agentic workflow running in minutes
 sidebar:
   order: 1
 ---
@@ -48,7 +48,7 @@ Replace `latest` in the URL with a tag name (e.g., `download/v0.19.0/ado-aw-linu
 
 ## With Agents (recommended)
 
-The fastest way to create an agentic pipeline is to let Copilot do the heavy lifting.
+The fastest way to create an agentic workflow is to let Copilot do the heavy lifting.
 
 <Steps>
 
@@ -60,7 +60,7 @@ The fastest way to create an agentic pipeline is to let Copilot do the heavy lif
    ado-aw init
    ```
 
-   This creates `.github/agents/ado-aw.agent.md` -- a Copilot dispatcher agent that knows how to create, update, and debug agentic pipelines. It auto-downloads the `ado-aw` compiler and handles the full lifecycle.
+   This creates `.github/agents/ado-aw.agent.md` -- a Copilot dispatcher agent that knows how to create, update, and debug agentic workflows. It auto-downloads the `ado-aw` compiler and handles the full lifecycle.
 
 2. **Co-create a workflow with Copilot**
 
@@ -70,7 +70,7 @@ The fastest way to create an agentic pipeline is to let Copilot do the heavy lif
    /agent ado-aw
    ```
 
-   Describe what you want your agentic pipeline to do. For example:
+   Describe what you want your agentic workflow to do. For example:
 
    > *"Create a workflow that runs daily, reads open work items tagged 'stale', and adds a reminder comment."*
 
@@ -140,7 +140,7 @@ If you prefer full control, you can author agent files by hand.
    ```markdown
    ---
    name: Hello from ado-aw
-   description: A minimal agentic pipeline example
+   description: A minimal agentic workflow example
    engine:
      id: copilot
    pool: AZS-1ES-L-MMS-ubuntu-22.04

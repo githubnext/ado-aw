@@ -123,16 +123,16 @@ pub async fn run(opts: DisableOptions<'_>) -> Result<()> {
     println!("Target queueStatus: {}", target.as_str());
     println!();
 
-    println!("Scanning for agentic pipelines...");
+    println!("Scanning for agentic workflows...");
     let detected = detect::detect_pipelines(&repo_path).await?;
     if detected.is_empty() {
         anyhow::bail!(
-            "No local agentic pipeline fixtures were found under {}. \
+            "No local agentic workflow fixtures were found under {}. \
              Run `ado-aw compile` first (or point `ado-aw disable` at the repo root).",
             repo_path.display()
         );
     }
-    println!("Found {} agentic pipeline(s).", detected.len());
+    println!("Found {} agentic workflow(s).", detected.len());
     println!();
 
     let client = reqwest::Client::builder()

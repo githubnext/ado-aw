@@ -227,15 +227,15 @@ pub async fn run(opts: EnableOptions<'_>) -> Result<()> {
     );
     println!();
 
-    println!("Scanning for agentic pipelines...");
+    println!("Scanning for agentic workflows...");
     let detected = detect::detect_pipelines(&repo_path).await?;
     if detected.is_empty() {
         println!(
-            "No agentic pipelines found. Make sure your pipelines were compiled with the latest ado-aw."
+            "No agentic workflows found. Make sure your pipelines were compiled with the latest ado-aw."
         );
         return Ok(());
     }
-    println!("Found {} agentic pipeline(s).", detected.len());
+    println!("Found {} agentic workflow(s).", detected.len());
     println!();
 
     let client = reqwest::Client::builder()

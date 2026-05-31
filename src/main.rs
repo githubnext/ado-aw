@@ -137,7 +137,7 @@ enum Commands {
     /// Compile markdown to pipeline definition (or recompile all detected pipelines)
     Compile {
         /// Path to the input markdown file. If omitted, auto-discovers and
-        /// recompiles all existing agentic pipelines in the current directory.
+        /// recompiles all existing agentic workflows in the current directory.
         path: Option<String>,
         /// Optional output path for the generated YAML file. If the path
         /// refers to an existing directory, the compiled YAML is written
@@ -213,7 +213,7 @@ enum Commands {
         #[arg(long = "enabled-tools")]
         enabled_tools: Vec<String>,
     },
-    /// Initialize a repository for AI-first agentic pipeline authoring
+    /// Initialize a repository for AI-first agentic workflow authoring
     Init {
         /// Target directory (defaults to current directory)
         #[arg(long)]
@@ -432,7 +432,7 @@ enum Commands {
 }
 
 #[derive(Parser, Debug)]
-#[command(version, about = "Compiler for Azure DevOps agentic pipelines")]
+#[command(version, about = "Compiler for Azure DevOps agentic workflows")]
 struct Args {
     /// Enable verbose logging (info level)
     #[arg(short, long, global = true)]

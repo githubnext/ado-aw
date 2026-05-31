@@ -7,7 +7,7 @@ sidebar:
 
 import { Aside } from '@astrojs/starlight/components';
 
-The `ado-aw` CLI provides commands for authoring, compiling, and managing the full lifecycle of Azure DevOps agentic pipelines.
+The `ado-aw` CLI provides commands for authoring, compiling, and managing the full lifecycle of Azure DevOps agentic workflows.
 
 ## Global flags
 
@@ -21,7 +21,7 @@ These flags apply to all commands:
 
 ### `init`
 
-Initialize a repository for AI-first agentic pipeline authoring. Creates `.github/agents/ado-aw.agent.md`, a Copilot dispatcher agent that routes to the create, update, and debug prompts.
+Initialize a repository for AI-first agentic workflow authoring. Creates `.github/agents/ado-aw.agent.md`, a Copilot dispatcher agent that routes to the create, update, and debug prompts.
 
 ```bash
 ado-aw init [--path <path>] [--force]
@@ -34,7 +34,7 @@ Options:
 
 ### `compile [<path>]`
 
-Compile a markdown agent file into Azure DevOps pipeline YAML. If you omit the path, `ado-aw` auto-discovers and recompiles all agentic pipeline sources in the current directory.
+Compile a markdown agent file into Azure DevOps pipeline YAML. If you omit the path, `ado-aw` auto-discovers and recompiles all agentic workflow sources in the current directory.
 
 ```bash
 ado-aw compile [<path>] [--output <path>]

@@ -358,24 +358,24 @@ async fn sync_gitattributes_for_output(output_path: &Path) -> Result<()> {
     gitattributes::update_gitattributes(&repo_root, paths).await
 }
 
-/// Auto-discover and recompile all agentic pipelines in the current directory.
+/// Auto-discover and recompile all agentic workflows in the current directory.
 ///
 /// Scans for compiled YAML files containing the `# @ado-aw source=...` header,
 /// resolves each source markdown path, and recompiles. Pipelines whose source
 /// files are missing are reported but don't abort the batch.
 pub async fn compile_all_pipelines(skip_integrity: bool, debug_pipeline: bool) -> Result<()> {
     let root = Path::new(".");
-    info!("Auto-discovering agentic pipelines for recompilation");
+    info!("Auto-discovering agentic workflows for recompilation");
 
     let detected = crate::detect::detect_pipelines(root).await?;
 
     if detected.is_empty() {
-        println!("No agentic pipelines found in the current directory.");
+        println!("No agentic workflows found in the current directory.");
         println!("To compile a single file, run: ado-aw compile <path>");
         return Ok(());
     }
 
-    println!("Found {} agentic pipeline(s):", detected.len());
+    println!("Found {} agentic workflow(s):", detected.len());
     for p in &detected {
         println!(
             "  {} (source: {}, version: {})",
