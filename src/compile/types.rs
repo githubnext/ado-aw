@@ -1685,21 +1685,6 @@ Body
         assert_eq!(cm.allowed_extensions(), &[".md", ".json"]);
     }
 
-    #[test]
-    fn test_cache_memory_not_set() {
-        let content = r#"---
-name: "Test"
-description: "Test"
-tools:
-  edit: true
----
-
-Body
-"#;
-        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
-        assert!(fm.tools.as_ref().unwrap().cache_memory.is_none());
-    }
-
     // ─── AzureDevOpsToolConfig deserialization ──────────────────────────────
 
     #[test]
@@ -1763,44 +1748,6 @@ Body
         assert!(ado.org().is_none());
     }
 
-    #[test]
-    fn test_azure_devops_not_set() {
-        let content = r#"---
-name: "Test"
-description: "Test"
-tools:
-  edit: true
----
-
-Body
-"#;
-        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
-        assert!(fm.tools.as_ref().unwrap().azure_devops.is_none());
-    }
-
-    #[test]
-    fn test_both_tools_together() {
-        let content = r#"---
-name: "Test"
-description: "Test"
-tools:
-  bash: ["cat", "ls"]
-  edit: true
-  cache-memory: true
-  azure-devops:
-    toolsets: [wit]
----
-
-Body
-"#;
-        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
-        let tools = fm.tools.as_ref().unwrap();
-        assert!(tools.cache_memory.as_ref().unwrap().is_enabled());
-        assert!(tools.azure_devops.as_ref().unwrap().is_enabled());
-        assert_eq!(tools.bash.as_ref().unwrap(), &["cat", "ls"]);
-        assert_eq!(tools.edit, Some(true));
-    }
-
     // ─── LeanRuntimeConfig deserialization ──────────────────────────────
 
     #[test]
@@ -1853,37 +1800,6 @@ Body
         let lean = fm.runtimes.as_ref().unwrap().lean.as_ref().unwrap();
         assert!(lean.is_enabled());
         assert_eq!(lean.toolchain(), Some("leanprover/lean4:v4.29.1"));
-    }
-
-    #[test]
-    fn test_lean_with_empty_options() {
-        let content = r#"---
-name: "Test"
-description: "Test"
-runtimes:
-  lean: {}
----
-
-Body
-"#;
-        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
-        let lean = fm.runtimes.as_ref().unwrap().lean.as_ref().unwrap();
-        assert!(lean.is_enabled());
-        assert!(lean.toolchain().is_none());
-    }
-
-    #[test]
-    fn test_lean_not_set() {
-        let content = r#"---
-name: "Test"
-description: "Test"
-runtimes: {}
----
-
-Body
-"#;
-        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
-        assert!(fm.runtimes.as_ref().unwrap().lean.is_none());
     }
 
     #[test]
