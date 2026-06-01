@@ -4,6 +4,16 @@
 stages:
 - stage: {{ stage_prefix }}
   displayName: {{ agent_display_name }}
+  # External ordering — applied only when the caller passes the corresponding
+  # template parameter. ADO does not permit `dependsOn:` / `condition:` as
+  # bare keys at a `- template:` call site (only `template:` and
+  # `parameters:` are valid per the `stages.template` schema), so we surface
+  # them as template parameters and apply them here. Empty defaults preserve
+  # ADO's implicit "depends on previous stage" and `succeeded()` behaviour.
+  ${{ if ne(length(parameters.dependsOn), 0) }}:
+    dependsOn: ${{ parameters.dependsOn }}
+  ${{ if ne(parameters.condition, '') }}:
+    condition: ${{ parameters.condition }}
   jobs:
     {{ setup_job }}
     - job: {{ stage_prefix }}_Agent

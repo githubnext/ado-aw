@@ -445,11 +445,39 @@ pub fn validate_front_matter_identity(front_matter: &FrontMatter) -> Result<()> 
 }
 
 /// Build the final parameters list by combining user-defined parameters
-/// with auto-injected parameters (e.g., `clearMemory` when memory is enabled).
+/// with auto-injected parameters.
+///
+/// Auto-injected parameters:
+/// - `clearMemory` (boolean) — when `has_memory` is true and the user has
+///   not already defined a parameter with the same name.
+/// - `dependsOn` (object, default `[]`) and `condition` (string, default
+///   `''`) — when `is_template_target` is true. These are applied at the
+///   template call site via `parameters:` and let the parent pipeline
+///   inject external stage/job ordering that ADO's `template:` invocation
+///   syntax does not otherwise support. See `docs/targets.md` and the ADO
+///   `stages.template` / `jobs.template` schemas.
+///
+/// Errors when `is_template_target` is true and the user has declared
+/// front-matter parameters with the reserved names `dependsOn` or
+/// `condition` — those names are reserved for template-invocation use.
 pub fn build_parameters(
     user_params: &[PipelineParameter],
     has_memory: bool,
-) -> Vec<PipelineParameter> {
+    is_template_target: bool,
+) -> Result<Vec<PipelineParameter>> {
+    if is_template_target {
+        for reserved in ["dependsOn", "condition"] {
+            if let Some(collide) = user_params.iter().find(|p| p.name == reserved) {
+                anyhow::bail!(
+                    "Parameter name '{}' is reserved for template-invocation use (target: job/stage). \
+                     Rename the parameter '{}' to something else, or change the target.",
+                    reserved,
+                    collide.name
+                );
+            }
+        }
+    }
+
     let mut params = user_params.to_vec();
 
     // Auto-inject clearMemory parameter when memory is configured,
@@ -467,7 +495,36 @@ pub fn build_parameters(
         );
     }
 
-    params
+    // Auto-inject dependsOn / condition template parameters for template
+    // targets so callers can specify external stage/job ordering at the
+    // template invocation site (ADO does not permit dependsOn:/condition:
+    // as bare keys on a template: call — only `parameters:`).
+    if is_template_target {
+        // Prepend so they appear first in the rendered parameters block,
+        // ahead of user-defined params and clearMemory.
+        params.insert(
+            0,
+            PipelineParameter {
+                name: "condition".to_string(),
+                display_name: None,
+                param_type: Some("string".to_string()),
+                default: Some(serde_yaml::Value::String(String::new())),
+                values: None,
+            },
+        );
+        params.insert(
+            0,
+            PipelineParameter {
+                name: "dependsOn".to_string(),
+                display_name: None,
+                param_type: Some("object".to_string()),
+                default: Some(serde_yaml::Value::Sequence(Vec::new())),
+                values: None,
+            },
+        );
+    }
+
+    Ok(params)
 }
 
 /// Generate a schedule YAML block from a fuzzy schedule expression.
@@ -1238,7 +1295,11 @@ pub fn generate_template_parameters(front_matter: &FrontMatter) -> Result<String
         .as_ref()
         .and_then(|t| t.cache_memory.as_ref())
         .is_some_and(|cm| cm.is_enabled());
-    let params = build_parameters(&front_matter.parameters, has_memory);
+    let is_template_target = matches!(
+        front_matter.target,
+        crate::compile::types::CompileTarget::Job | crate::compile::types::CompileTarget::Stage
+    );
+    let params = build_parameters(&front_matter.parameters, has_memory, is_template_target)?;
     if params.is_empty() {
         return Ok(String::new());
     }
@@ -2295,25 +2356,40 @@ pub fn generate_finalize_steps(finalize_steps: &[serde_yaml::Value]) -> String {
 /// non-matching trigger types to proceed unconditionally, while matching
 /// builds require the gate to pass.
 /// When `expression` is provided, it's ANDed into the condition as an escape hatch.
+///
+/// When `is_jobs_template_target` is true (i.e. compiling for `target: job`),
+/// the output is wrapped in mutually-exclusive `${{ if }}` ADO template
+/// expressions so that external `dependsOn` and `condition` template
+/// parameters supplied at the template call site merge with the internal
+/// Setup/gate behaviour. ADO permits only one `dependsOn:` / `condition:`
+/// key per job, so we emit each as a dual-branch block keyed on whether the
+/// caller passed a non-default value.
+///
+/// For `target: stage`, the external params apply to the inner stage block
+/// (handled directly in `stage-base.yml`) rather than the Agent job, so this
+/// flag is **false** for stage targets.
+///
+/// Note: when `is_jobs_template_target` is true and `has_setup` is true,
+/// callers MUST pass `parameters.dependsOn` as a YAML list (the default `[]`
+/// works). A bare string is not supported in the merge branch because
+/// `${{ each }}` iterates objects and arrays, not scalars. For `target: job`
+/// agents without any Setup/gate, the simpler `dependsOn: ${{ parameters.dependsOn }}`
+/// form is emitted, which does accept either a string or a list.
 pub fn generate_agentic_depends_on(
     setup_steps: &[serde_yaml::Value],
     has_pr_filters: bool,
     has_pipeline_filters: bool,
     expressions: &[&str],
+    is_jobs_template_target: bool,
 ) -> String {
     let has_gate = has_pr_filters || has_pipeline_filters;
     let has_setup = !setup_steps.is_empty() || has_gate;
+    let has_internal_condition = has_gate || !expressions.is_empty();
 
-    if !has_setup && expressions.is_empty() {
-        return String::new();
-    }
-
-    let depends = if has_setup { "dependsOn: Setup\n" } else { "" };
-
-    if has_gate || !expressions.is_empty() {
-        let mut parts = Vec::new();
-        parts.push("succeeded()".to_string());
-
+    // Build the shared condition body once. Reused across the internal-only
+    // (standalone/1es/stage) path and the dual-branch jobs-template path.
+    let condition_body: Option<String> = if has_internal_condition {
+        let mut parts = vec!["succeeded()".to_string()];
         if has_pr_filters {
             parts.push(
                 r"or(
@@ -2323,7 +2399,6 @@ pub fn generate_agentic_depends_on(
                 .to_string(),
             );
         }
-
         if has_pipeline_filters {
             parts.push(
                 r"or(
@@ -2333,16 +2408,75 @@ pub fn generate_agentic_depends_on(
                 .to_string(),
             );
         }
-
         for expr in expressions {
             parts.push(expr.to_string());
         }
-
-        let condition_body = parts.join(",\n       ");
-        format!("{depends}condition: |\n and(\n   {condition_body}\n )")
+        Some(parts.join(",\n       "))
     } else {
-        "dependsOn: Setup".to_string()
+        None
+    };
+
+    if !is_jobs_template_target {
+        // Standalone / 1ES / stage path: inline single dependsOn:/condition:
+        // (preserved verbatim — no behavioural change for non-job-template
+        // targets).
+        if !has_setup && expressions.is_empty() {
+            return String::new();
+        }
+        let depends = if has_setup { "dependsOn: Setup\n" } else { "" };
+        return if let Some(body) = condition_body {
+            format!("{depends}condition: |\n and(\n   {body}\n )")
+        } else {
+            "dependsOn: Setup".to_string()
+        };
     }
+
+    // target: job: emit dual-branch ADO template expressions so external
+    // dependsOn/condition template parameters merge with the internal
+    // Setup/gate behaviour.
+    let mut out = String::new();
+
+    // ---------- dependsOn block ----------
+    if has_setup {
+        // Internal Setup dependency exists. Branch on whether caller passed
+        // an external dependsOn.
+        out.push_str("${{ if eq(length(parameters.dependsOn), 0) }}:\n");
+        out.push_str("  dependsOn: Setup\n");
+        out.push_str("${{ if ne(length(parameters.dependsOn), 0) }}:\n");
+        out.push_str("  dependsOn:\n");
+        out.push_str("  - Setup\n");
+        out.push_str("  - ${{ each d in parameters.dependsOn }}:\n");
+        out.push_str("    - ${{ d }}\n");
+    } else {
+        // No internal Setup dependency. Emit dependsOn only when caller
+        // passes a non-empty external value; otherwise omit the key
+        // entirely (ADO will use implicit "depends on previous job"
+        // behaviour or none if this is the first job).
+        out.push_str("${{ if ne(length(parameters.dependsOn), 0) }}:\n");
+        out.push_str("  dependsOn: ${{ parameters.dependsOn }}\n");
+    }
+
+    // ---------- condition block ----------
+    if let Some(body) = &condition_body {
+        // Internal condition exists. Dual-branch: caller-omitted emits the
+        // internal expression verbatim (no behavioural change today);
+        // caller-provided ANDs the external clause into the body.
+        out.push_str("${{ if eq(parameters.condition, '') }}:\n");
+        out.push_str(&format!("  condition: |\n   and(\n     {body}\n   )\n"));
+        let body_with_external = format!("{body},\n       ${{{{ parameters.condition }}}}");
+        out.push_str("${{ if ne(parameters.condition, '') }}:\n");
+        out.push_str(&format!(
+            "  condition: |\n   and(\n     {body_with_external}\n   )\n"
+        ));
+    } else {
+        // No internal condition; only emit when caller passes external.
+        out.push_str("${{ if ne(parameters.condition, '') }}:\n");
+        out.push_str("  condition: ${{ parameters.condition }}\n");
+    }
+
+    // Trim trailing newline — replace_with_indent's first-line handling
+    // expects content to not end with a blank line.
+    out.trim_end_matches('\n').to_string()
 }
 
 /// Returns `Some(v.to_vec())` when `v` is non-empty, otherwise `None`.
@@ -3124,7 +3258,11 @@ pub async fn compile_shared(
         .as_ref()
         .and_then(|t| t.cache_memory.as_ref())
         .is_some_and(|cm| cm.is_enabled());
-    let parameters = build_parameters(&front_matter.parameters, has_memory);
+    let is_template_target = matches!(
+        front_matter.target,
+        crate::compile::types::CompileTarget::Job | crate::compile::types::CompileTarget::Stage
+    );
+    let parameters = build_parameters(&front_matter.parameters, has_memory, is_template_target)?;
     let parameters_yaml = generate_parameters(&parameters)?;
     let prepare_steps = generate_prepare_steps(&front_matter.steps, extensions, ctx)?;
     let finalize_steps = generate_finalize_steps(&front_matter.post_steps);
@@ -3172,6 +3310,7 @@ pub async fn compile_shared(
         has_pr_filters,
         has_pipeline_filters,
         &expressions,
+        matches!(front_matter.target, crate::compile::types::CompileTarget::Job),
     );
     let job_timeout = generate_job_timeout(front_matter);
 
@@ -5662,14 +5801,14 @@ safe-outputs:
 
     #[test]
     fn test_build_parameters_auto_injects_clear_memory() {
-        let params = build_parameters(&[], true);
+        let params = build_parameters(&[], true, false).unwrap();
         assert_eq!(params.len(), 1);
         assert_eq!(params[0].name, "clearMemory");
     }
 
     #[test]
     fn test_build_parameters_no_inject_without_memory() {
-        let params = build_parameters(&[], false);
+        let params = build_parameters(&[], false, false).unwrap();
         assert!(params.is_empty());
     }
 
@@ -5682,13 +5821,108 @@ safe-outputs:
             default: Some(serde_yaml::Value::Bool(true)),
             values: None,
         }];
-        let params = build_parameters(&user, true);
+        let params = build_parameters(&user, true, false).unwrap();
         assert_eq!(params.len(), 1, "Should not duplicate clearMemory");
         assert_eq!(
             params[0].display_name.as_deref(),
             Some("Custom"),
             "Should keep user's definition"
         );
+    }
+
+    #[test]
+    fn test_build_parameters_template_target_injects_depends_on_and_condition() {
+        let params = build_parameters(&[], false, true).unwrap();
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].name, "dependsOn");
+        assert_eq!(params[0].param_type.as_deref(), Some("object"));
+        assert!(matches!(
+            params[0].default,
+            Some(serde_yaml::Value::Sequence(ref s)) if s.is_empty()
+        ));
+        assert_eq!(params[1].name, "condition");
+        assert_eq!(params[1].param_type.as_deref(), Some("string"));
+        assert!(matches!(
+            params[1].default,
+            Some(serde_yaml::Value::String(ref s)) if s.is_empty()
+        ));
+    }
+
+    #[test]
+    fn test_build_parameters_template_target_ordering() {
+        let user = vec![PipelineParameter {
+            name: "myParam".to_string(),
+            display_name: None,
+            param_type: Some("string".to_string()),
+            default: Some(serde_yaml::Value::String("hi".to_string())),
+            values: None,
+        }];
+        let params = build_parameters(&user, true, true).unwrap();
+        // Order: dependsOn, condition, clearMemory, then user params
+        assert_eq!(params.len(), 4);
+        assert_eq!(params[0].name, "dependsOn");
+        assert_eq!(params[1].name, "condition");
+        assert_eq!(params[2].name, "clearMemory");
+        assert_eq!(params[3].name, "myParam");
+    }
+
+    #[test]
+    fn test_build_parameters_template_target_rejects_reserved_depends_on() {
+        let user = vec![PipelineParameter {
+            name: "dependsOn".to_string(),
+            display_name: None,
+            param_type: Some("string".to_string()),
+            default: None,
+            values: None,
+        }];
+        let err = build_parameters(&user, false, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("dependsOn") && msg.contains("reserved"),
+            "Expected reserved-name error mentioning dependsOn, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_build_parameters_template_target_rejects_reserved_condition() {
+        let user = vec![PipelineParameter {
+            name: "condition".to_string(),
+            display_name: None,
+            param_type: Some("string".to_string()),
+            default: None,
+            values: None,
+        }];
+        let err = build_parameters(&user, false, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("condition") && msg.contains("reserved"),
+            "Expected reserved-name error mentioning condition, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_build_parameters_non_template_target_allows_depends_on_name() {
+        // For standalone/1es, dependsOn and condition are just regular UI param names.
+        let user = vec![
+            PipelineParameter {
+                name: "dependsOn".to_string(),
+                display_name: None,
+                param_type: Some("string".to_string()),
+                default: None,
+                values: None,
+            },
+            PipelineParameter {
+                name: "condition".to_string(),
+                display_name: None,
+                param_type: Some("string".to_string()),
+                default: None,
+                values: None,
+            },
+        ];
+        let params = build_parameters(&user, false, false).unwrap();
+        assert_eq!(params.len(), 2);
     }
 
     #[test]
@@ -7851,15 +8085,103 @@ safe-outputs:
 
     #[test]
     fn test_generate_agentic_depends_on_empty_steps() {
-        assert!(generate_agentic_depends_on(&[], false, false, &[]).is_empty());
+        assert!(generate_agentic_depends_on(&[], false, false, &[], false).is_empty());
     }
 
     #[test]
     fn test_generate_agentic_depends_on_with_steps() {
         let step: serde_yaml::Value = serde_yaml::from_str("bash: x").unwrap();
         assert_eq!(
-            generate_agentic_depends_on(&[step], false, false, &[]),
+            generate_agentic_depends_on(&[step], false, false, &[], false),
             "dependsOn: Setup"
+        );
+    }
+
+    #[test]
+    fn test_generate_agentic_depends_on_jobs_template_with_setup() {
+        // When compiling for target: job and the agent has a Setup job, both
+        // dependsOn and condition (no internal gates here) are emitted as
+        // dual-branch ${{ if }} template expressions so external template
+        // parameters merge correctly.
+        let step: serde_yaml::Value = serde_yaml::from_str("bash: x").unwrap();
+        let out = generate_agentic_depends_on(&[step], false, false, &[], true);
+        // dependsOn branches
+        assert!(
+            out.contains("${{ if eq(length(parameters.dependsOn), 0) }}:"),
+            "missing empty-deps branch: {out}"
+        );
+        assert!(
+            out.contains("${{ if ne(length(parameters.dependsOn), 0) }}:"),
+            "missing non-empty-deps branch: {out}"
+        );
+        // Each-iteration over external list, with Setup as the leading item
+        assert!(out.contains("- Setup"), "missing Setup leading item: {out}");
+        assert!(
+            out.contains("${{ each d in parameters.dependsOn }}:"),
+            "missing each: {out}"
+        );
+        // condition branches (no internal gates, so external-only path)
+        assert!(
+            out.contains("${{ if ne(parameters.condition, '') }}:"),
+            "missing non-empty-condition branch: {out}"
+        );
+        assert!(
+            out.contains("condition: ${{ parameters.condition }}"),
+            "missing condition inline emit: {out}"
+        );
+    }
+
+    #[test]
+    fn test_generate_agentic_depends_on_jobs_template_no_setup() {
+        // No internal Setup, no gates: only the non-empty-external branches
+        // are emitted (both dependsOn and condition default to omitted).
+        let out = generate_agentic_depends_on(&[], false, false, &[], true);
+        assert!(
+            !out.contains("${{ if eq(length(parameters.dependsOn), 0) }}:"),
+            "should not emit empty-deps branch when no internal Setup: {out}"
+        );
+        assert!(
+            out.contains("${{ if ne(length(parameters.dependsOn), 0) }}:"),
+            "missing non-empty-deps branch: {out}"
+        );
+        assert!(
+            out.contains("dependsOn: ${{ parameters.dependsOn }}"),
+            "missing simple dependsOn inline: {out}"
+        );
+        assert!(
+            !out.contains("${{ if eq(parameters.condition, '') }}:"),
+            "should not emit empty-condition branch when no internal condition: {out}"
+        );
+        assert!(
+            out.contains("${{ if ne(parameters.condition, '') }}:"),
+            "missing non-empty-condition branch: {out}"
+        );
+    }
+
+    #[test]
+    fn test_generate_agentic_depends_on_jobs_template_with_pr_gate() {
+        // With internal PR gate, the condition block emits BOTH branches:
+        // empty-external uses the existing internal expression verbatim;
+        // non-empty-external ANDs the external clause into the body.
+        let out = generate_agentic_depends_on(&[], true, false, &[], true);
+        assert!(
+            out.contains("${{ if eq(parameters.condition, '') }}:"),
+            "missing empty-condition branch: {out}"
+        );
+        assert!(
+            out.contains("${{ if ne(parameters.condition, '') }}:"),
+            "missing non-empty-condition branch: {out}"
+        );
+        // The non-empty branch ANDs the external clause in.
+        assert!(
+            out.contains("${{ parameters.condition }}"),
+            "missing external condition reference: {out}"
+        );
+        // The PR gate clause appears in both branches.
+        assert_eq!(
+            out.matches("prGate.SHOULD_RUN").count(),
+            2,
+            "PR gate clause must appear in both empty/non-empty branches: {out}"
         );
     }
 
