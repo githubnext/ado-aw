@@ -269,15 +269,15 @@ async fn compile_pipeline_inner(
     // a different compiler version. This makes version bumps visible in the
     // terminal and in CI logs without requiring the user to diff the output.
     let current_version = env!("CARGO_PKG_VERSION");
-    if let Some(ref old_version) = existing_version {
-        if old_version != current_version {
-            println!(
-                "note: upgraded {} (was v{}, now v{})",
-                yaml_output_path.display(),
-                old_version,
-                current_version,
-            );
-        }
+    if let Some(ref old_version) = existing_version
+        && old_version != current_version
+    {
+        println!(
+            "note: upgraded {} (was v{}, now v{})",
+            yaml_output_path.display(),
+            old_version,
+            current_version,
+        );
     }
 
     // Update .gitattributes at the repo root so every compiled pipeline is
