@@ -1503,8 +1503,8 @@ pub async fn download_build_artifact(
         artifact.name, download_url
     );
 
-    let mut resp = client
-        .get(download_url)
+    let mut resp = auth
+        .apply(client.get(download_url))
         .send()
         .await
         .with_context(|| format!("Failed to download build artifact '{}'", artifact.name))?;
@@ -1514,7 +1514,6 @@ pub async fn download_build_artifact(
         let body = resp.text().await.unwrap_or_default();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             let run_id_hint = artifact.source.as_deref().unwrap_or("<build-id>");
-            let _ = auth;
             return Err(anyhow::anyhow!(
                 "ADO API returned {} when downloading build artifact '{}': {}. This call requires PAT scopes Build (Read) and Build Artifacts (Read). As a manual alternative, try `az pipelines runs artifact download --run-id {} --artifact-name {} --path {}`.",
                 status,

