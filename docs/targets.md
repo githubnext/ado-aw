@@ -56,6 +56,9 @@ jobs:
   - job: Build
     steps: ...
   - template: agents/review.lock.yml
+    parameters:
+      dependsOn: [Build]              # list of upstream job names; omit for implicit dep on previous job
+      condition: succeeded('Build')   # optional; ANDed into the agent job's internal condition
 ```
 
 #### Usage inside a user-defined stage
@@ -72,9 +75,22 @@ stages:
 
 #### Notes
 
-- Triggers (`on:`) are ignored with a warning (the parent pipeline controls triggers)
+- ADO's [`jobs.template`](https://learn.microsoft.com/azure/devops/pipelines/yaml-schema/jobs-template)
+  schema only allows `template:` and `parameters:` at the call site. `dependsOn:`
+  and `condition:` as bare keys on the `- template:` line are rejected; the
+  compiled template surfaces them as parameters and applies them to the
+  agent job internally.
+- When the agent has a Setup job (e.g. PR or pipeline filters), the
+  `dependsOn` parameter MUST be a YAML list — the template uses
+  `${{ each }}` to merge `Setup` with the caller's deps, and `${{ each }}`
+  requires an iterable. For agents without a Setup job, either a string or a
+  list works.
+- The `condition` parameter is ANDed into the agent job's existing internal
+  condition (PR gate, pipeline gate, etc.). Empty default preserves ADO's
+  native `succeeded()` behaviour.
+- Triggers (`on:`) are ignored with a warning (the parent pipeline controls triggers).
 - If the agent declares additional repositories via `repos:`, add them to the
-  parent pipeline's `resources:` block (documented in the generated file header)
+  parent pipeline's `resources:` block (documented in the generated file header).
 
 ### `stage`
 
@@ -94,16 +110,24 @@ stages:
   - stage: Build
     jobs: ...
   - template: agents/review.lock.yml
-    dependsOn: Build
-    condition: succeeded()
+    parameters:
+      dependsOn: Build              # or [Build, Test]; omit for implicit dep on previous stage
+      condition: succeeded('Build') # optional; omit for ADO's default succeeded()
 ```
-
-ADO natively supports `dependsOn` and `condition` at the template call site —
-no template parameters are needed for stage ordering.
 
 #### Notes
 
-- Same 3-job chain, job-name prefixing, and pool handling as `target: job`
-- Triggers (`on:`) are ignored with a warning
+- ADO's [`stages.template`](https://learn.microsoft.com/azure/devops/pipelines/yaml-schema/stages-template)
+  schema only allows `template:` and `parameters:` at the call site —
+  `dependsOn:` and `condition:` as bare keys on the `- template:` line are
+  rejected by the YAML parser. The compiled template surfaces them as the
+  `dependsOn` and `condition` parameters and applies them to the inner
+  stage block via ADO conditional template expressions, so empty defaults
+  preserve ADO's implicit "depends on previous stage" and `succeeded()`
+  behaviour.
+- The `dependsOn` parameter is typed `object`, matching ADO's native
+  `dependsOn:` semantics (accepts a single string or a list).
+- Same 3-job chain, job-name prefixing, and pool handling as `target: job`.
+- Triggers (`on:`) are ignored with a warning.
 - If the agent declares additional repositories via `repos:`, add them to the
-  parent pipeline's `resources:` block
+  parent pipeline's `resources:` block.

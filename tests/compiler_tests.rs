@@ -4588,3 +4588,278 @@ fn regex_captures_markers(content: &str) -> Vec<String> {
     }
     results
 }
+
+// =====================================================================
+// External stage/job ordering for template targets
+// =====================================================================
+//
+// `target: stage` and `target: job` are ADO template targets. ADO's
+// `stages.template` / `jobs.template` schemas only permit `template:` and
+// `parameters:` at the call site — `dependsOn:` and `condition:` as bare
+// keys on the `- template:` line are rejected. The compiler surfaces them
+// as auto-injected template parameters and applies them inside the
+// template via ADO conditional template expressions.
+//
+// These tests pin the new contract: parameter declarations are emitted,
+// inner stage/job blocks contain the conditional `${{ if … }}` blocks,
+// internal Setup/gate behaviour is preserved when callers omit the new
+// params, and standalone/1ES targets are untouched.
+
+#[test]
+fn test_stage_target_auto_injects_depends_on_and_condition_params() {
+    let compiled = compile_fixture("stage-agent.md");
+    assert!(
+        compiled.contains("- name: dependsOn\n  type: object\n  default: []"),
+        "stage target should auto-inject dependsOn param. got:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("- name: condition\n  type: string\n  default: ''"),
+        "stage target should auto-inject condition param. got:\n{compiled}"
+    );
+}
+
+#[test]
+fn test_stage_target_emits_conditional_blocks_on_inner_stage() {
+    let compiled = compile_fixture("stage-agent.md");
+    assert!(
+        compiled.contains("${{ if ne(length(parameters.dependsOn), 0) }}:"),
+        "stage target should emit conditional dependsOn block. got:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("dependsOn: ${{ parameters.dependsOn }}"),
+        "stage target should pass parameters.dependsOn through to the inner stage. got:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("${{ if ne(parameters.condition, '') }}:"),
+        "stage target should emit conditional condition block. got:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("condition: ${{ parameters.condition }}"),
+        "stage target should pass parameters.condition through to the inner stage. got:\n{compiled}"
+    );
+}
+
+#[test]
+fn test_job_target_auto_injects_depends_on_and_condition_params() {
+    let compiled = compile_fixture("job-agent.md");
+    assert!(
+        compiled.contains("- name: dependsOn\n  type: object\n  default: []"),
+        "job target should auto-inject dependsOn param. got:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("- name: condition\n  type: string\n  default: ''"),
+        "job target should auto-inject condition param. got:\n{compiled}"
+    );
+}
+
+#[test]
+fn test_job_target_minimal_emits_non_empty_only_branches() {
+    // job-agent.md is a minimal fixture without Setup steps or PR/pipeline
+    // gates. The dependsOn and condition blocks should only emit the
+    // `ne(..., default)` branch — there is no internal Setup/gate to
+    // preserve in the alternate branch.
+    let compiled = compile_fixture("job-agent.md");
+    assert!(
+        !compiled.contains("${{ if eq(length(parameters.dependsOn), 0) }}:"),
+        "minimal job target should not emit empty-deps branch (no internal Setup). got:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("${{ if ne(length(parameters.dependsOn), 0) }}:"),
+        "minimal job target should emit non-empty deps branch. got:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("dependsOn: ${{ parameters.dependsOn }}"),
+        "minimal job target should pass dependsOn through directly. got:\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("${{ if eq(parameters.condition, '') }}:"),
+        "minimal job target should not emit empty-condition branch (no internal condition). got:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("condition: ${{ parameters.condition }}"),
+        "minimal job target should pass condition through directly. got:\n{compiled}"
+    );
+}
+
+#[test]
+fn test_standalone_target_does_not_auto_inject_template_params() {
+    // Standalone is a root pipeline, not a template; auto-injecting
+    // dependsOn/condition as runtime UI parameters would be wrong.
+    let compiled = compile_fixture("minimal-agent.md");
+    assert!(
+        !compiled.contains("- name: dependsOn"),
+        "standalone must not auto-inject dependsOn parameter. got:\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("- name: condition"),
+        "standalone must not auto-inject condition parameter. got:\n{compiled}"
+    );
+}
+
+#[test]
+fn test_1es_target_does_not_auto_inject_template_params() {
+    let compiled = compile_fixture("1es-test-agent.md");
+    assert!(
+        !compiled.contains("- name: dependsOn"),
+        "1es must not auto-inject dependsOn parameter. got:\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("- name: condition"),
+        "1es must not auto-inject condition parameter. got:\n{compiled}"
+    );
+}
+
+#[test]
+fn test_template_target_rejects_reserved_depends_on_parameter_name() {
+    // Compile-time validation must reject user front-matter that declares
+    // a parameter named dependsOn or condition under target: job/stage —
+    // those names are reserved for template-invocation use.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique_id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temp_dir = std::env::temp_dir().join(format!(
+        "ado-aw-collision-{}-{}",
+        std::process::id(),
+        unique_id,
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+    let src = temp_dir.join("collision.md");
+    fs::write(
+        &src,
+        "---\nname: Test Agent\ndescription: t\ntarget: job\nparameters:\n  - name: dependsOn\n    type: string\n    default: x\n---\n\n# body\n",
+    )
+    .expect("write fixture");
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let out_path = temp_dir.join("collision.lock.yml");
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            src.to_str().unwrap(),
+            "-o",
+            out_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compilation should fail when user declares reserved param 'dependsOn' for target: job"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("dependsOn") && stderr.contains("reserved"),
+        "stderr should mention dependsOn as reserved. got:\n{stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_template_target_rejects_reserved_condition_parameter_name() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique_id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temp_dir = std::env::temp_dir().join(format!(
+        "ado-aw-collision-cond-{}-{}",
+        std::process::id(),
+        unique_id,
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+    let src = temp_dir.join("collision.md");
+    fs::write(
+        &src,
+        "---\nname: Test Agent\ndescription: t\ntarget: stage\nparameters:\n  - name: condition\n    type: string\n    default: x\n---\n\n# body\n",
+    )
+    .expect("write fixture");
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let out_path = temp_dir.join("collision.lock.yml");
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            src.to_str().unwrap(),
+            "-o",
+            out_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compilation should fail when user declares reserved param 'condition' for target: stage"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("condition") && stderr.contains("reserved"),
+        "stderr should mention condition as reserved. got:\n{stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_job_target_with_setup_emits_dual_branch_dependson_with_each() {
+    // When the agent has a Setup job (e.g. via setup: steps or PR/pipeline
+    // gates), the dependsOn block must emit BOTH branches: empty-external
+    // preserves the existing `dependsOn: Setup`; non-empty-external uses
+    // `${{ each }}` to merge `Setup` with the caller's deps into a single
+    // list. This is the only place we use `${{ each }}` in the compiler;
+    // the parameter MUST be declared as type: object and callers MUST
+    // pass a list because ${{ each }} iterates only iterables.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique_id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temp_dir = std::env::temp_dir().join(format!(
+        "ado-aw-job-setup-{}-{}",
+        std::process::id(),
+        unique_id,
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+    let src = temp_dir.join("job-setup.md");
+    fs::write(
+        &src,
+        "---\nname: Job With Setup\ndescription: t\ntarget: job\nsetup:\n  - bash: echo s\n---\n\n# body\n",
+    )
+    .expect("write fixture");
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let out_path = temp_dir.join("job-setup.lock.yml");
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            src.to_str().unwrap(),
+            "-o",
+            out_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+    assert!(
+        output.status.success(),
+        "compile should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let compiled = fs::read_to_string(&out_path).expect("read output");
+
+    // Both branches present
+    assert!(
+        compiled.contains("${{ if eq(length(parameters.dependsOn), 0) }}:"),
+        "should emit empty-deps branch when has_setup. got:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("${{ if ne(length(parameters.dependsOn), 0) }}:"),
+        "should emit non-empty-deps branch when has_setup. got:\n{compiled}"
+    );
+    // Empty-deps branch preserves internal Setup dependency
+    assert!(
+        compiled.contains("dependsOn: Setup"),
+        "empty-deps branch should keep dependsOn: Setup. got:\n{compiled}"
+    );
+    // Non-empty branch uses ${{ each }} over a list, with Setup as the first item
+    assert!(
+        compiled.contains("${{ each d in parameters.dependsOn }}:"),
+        "non-empty-deps branch should use ${{{{ each }}}} to iterate. got:\n{compiled}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
