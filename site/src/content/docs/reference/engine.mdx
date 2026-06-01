@@ -74,9 +74,17 @@ engine:
 
 ### `env`
 
-The `env` map injects additional environment variables into the sandbox step's `env:` block. This is useful for passing API tokens, configuration values, or feature flags that the agent script needs.
+The `env` map injects additional environment variables into the sandbox step's `env:` block. This is useful for passing static configuration values or feature flags that the agent script needs.
 
-The compiler blocks keys that it controls:
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="caution">
+**Literal values only.** The compiler rejects any value that contains ADO macro expressions (`$(...)`, `${{...}}`, `$[...]`) or pipeline command injection markers (`##vso[`). Values are embedded verbatim into the generated YAML — ADO variable expansion does not apply here.
+
+To pass a pipeline variable's value to the agent, use a `setup:` step with an `env:` block on the ADO task, where ADO macro expansion is fully supported. See the [front-matter reference](/ado-aw/reference/front-matter/#custom-steps-injection) for custom step injection.
+</Aside>
+
+The compiler also blocks keys that it controls:
 
 | Blocked key | Reason |
 |-------------|--------|
@@ -93,14 +101,12 @@ The compiler blocks keys that it controls:
 | `LD_PRELOAD` | Dynamic linker — security-sensitive |
 | `LD_LIBRARY_PATH` | Dynamic linker — security-sensitive |
 
-Values must not contain ADO macro expressions (`$(...)`) or pipeline command injection markers (`##vso[`).
-
-Example — passing a custom API key:
+Example — passing static configuration values:
 
 ```yaml
 engine:
   id: copilot
   env:
-    MY_API_KEY: "$(MY_API_KEY)"    # inject from pipeline variable
-    STATIC_CONFIG: "production"    # literal value
+    STATIC_CONFIG: "production"
+    FEATURE_FLAGS: "enable-new-parser,strict-mode"
 ```
