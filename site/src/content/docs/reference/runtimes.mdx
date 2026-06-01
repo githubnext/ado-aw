@@ -57,7 +57,7 @@ runtimes:
 |-------|------|-------------|
 | `version` | string | Python version to install (e.g., `"3.12"`, `"3.11"`). Passed to `UsePythonVersion@0` `versionSpec`. Defaults to latest 3.x. |
 | `feed-url` | string | Internal PyPI feed URL. Injects `PIP_INDEX_URL` and `UV_DEFAULT_INDEX` env vars into the agent environment. |
-| `config` | string | Path to a pip/uv config file. Accepted with a warning -- the file will not be available inside the AWF agent environment until proxy-auth support lands. |
+| `config` | string | Path to a pip/uv config file. Accepted with a warning -- the file will not be available inside the AWF agent environment until proxy-auth support lands. Mutually exclusive with `feed-url` (compile error if both are set). |
 
 When enabled, the compiler:
 - Injects `UsePythonVersion@0` into `{{ prepare_steps }}` (runs before AWF)
@@ -92,7 +92,7 @@ runtimes:
 |-------|------|-------------|
 | `version` | string | Node.js version to install (e.g., `"22.x"`, `"20.x"`). Passed to `NodeTool@0` `versionSpec`. Defaults to `"22.x"`. |
 | `feed-url` | string | Internal npm registry URL. Injects `NPM_CONFIG_REGISTRY` env var into the agent environment. |
-| `config` | string | Path to an .npmrc config file. Accepted with a warning -- the file will not be available inside the AWF agent environment until proxy-auth support lands. |
+| `config` | string | Path to an .npmrc config file. Accepted with a warning -- the file will not be available inside the AWF agent environment until proxy-auth support lands. Mutually exclusive with `feed-url` (compile error if both are set). |
 
 When enabled, the compiler:
 - Injects `NodeTool@0` into `{{ prepare_steps }}` (runs before AWF)

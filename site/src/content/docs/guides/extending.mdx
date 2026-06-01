@@ -3,6 +3,8 @@ title: Extending ado-aw
 description: Learn how to add commands, compile targets, front-matter fields, template markers, tools, runtimes, and safe outputs to the compiler.
 ---
 
+import { Steps } from '@astrojs/starlight/components';
+
 # Extending ado-aw
 
 This guide shows the usual workflow for adding a new capability to the compiler.
@@ -21,10 +23,12 @@ Use it when you want to add a feature such as:
 
 Start in `src/main.rs`.
 
-1. Add a new variant to the `Commands` enum.
-2. Define the arguments with `clap` derive attributes.
-3. Handle the new command in the main dispatch logic.
-4. Add tests for parsing and behavior.
+<Steps>
+1. **Add a new variant** to the `Commands` enum.
+2. **Define the arguments** with `clap` derive attributes.
+3. **Handle the new command** in the main dispatch logic.
+4. **Add tests** for parsing and behavior.
+</Steps>
 
 Use this when you want a new top-level command such as `ado-aw my-command`.
 
@@ -32,12 +36,12 @@ Use this when you want a new top-level command such as `ado-aw my-command`.
 
 Compile targets live under `src/compile/`.
 
-A typical workflow is:
-
-1. create a new target module such as `src/compile/my_target.rs`
-2. implement the compiler behavior for that target
-3. register the target so the front matter can select it
-4. add tests that compile representative inputs and verify generated output
+<Steps>
+1. **Create a new target module** such as `src/compile/my_target.rs`.
+2. **Implement the compiler behavior** for that target.
+3. **Register the target** so the front matter can select it.
+4. **Add tests** that compile representative inputs and verify generated output.
+</Steps>
 
 Use this when the project needs a different kind of generated Azure DevOps template.
 
@@ -45,12 +49,12 @@ Use this when the project needs a different kind of generated Azure DevOps templ
 
 Front-matter types live in `src/compile/types.rs`.
 
-To add a field:
-
-1. add the new field to the relevant Rust type
-2. update parsing and validation
-3. thread the value into compilation where needed
-4. add tests for valid and invalid input
+<Steps>
+1. **Add the new field** to the relevant Rust type.
+2. **Update parsing and validation** logic.
+3. **Thread the value** into compilation where needed.
+4. **Add tests** for valid and invalid input.
+</Steps>
 
 If the change is breaking, also add a codemod under `src/compile/codemods/`.
 
@@ -65,12 +69,12 @@ Use a codemod for changes such as:
 
 Template markers are placeholders in the pipeline templates under `src/data/`.
 
-To add one:
-
-1. add the marker to the relevant template file
-2. update the target compiler that replaces markers
-3. ensure the replacement is correct for every target that needs it
-4. add tests that assert the generated YAML contains the expected expansion
+<Steps>
+1. **Add the marker** to the relevant template file.
+2. **Update the target compiler** that replaces markers.
+3. **Ensure the replacement** is correct for every target that needs it.
+4. **Add tests** that assert the generated YAML contains the expected expansion.
+</Steps>
 
 This is the right approach when a feature needs new generated YAML in the final pipeline.
 
@@ -78,14 +82,14 @@ This is the right approach when a feature needs new generated YAML in the final 
 
 Safe-output tools live in `src/safeoutputs/`.
 
-Typical workflow:
-
-1. add a new file in `src/safeoutputs/`
-2. define the tool's input and validation rules
-3. implement Stage 3 execution behavior
-4. register the tool in the safe-output module wiring
-5. expose it through the MCP server and execution path
-6. add compile-time and execution tests
+<Steps>
+1. **Add a new file** in `src/safeoutputs/`.
+2. **Define the tool's input** and validation rules.
+3. **Implement Stage 3 execution** behavior.
+4. **Register the tool** in the safe-output module wiring.
+5. **Expose it** through the MCP server and execution path.
+6. **Add compile-time and execution tests**.
+</Steps>
 
 Use a safe output when the agent should **propose** an action that is validated and executed later, instead of performing the action directly.
 
@@ -93,14 +97,14 @@ Use a safe output when the agent should **propose** an action that is validated 
 
 First-class tools live under `src/tools/<name>/`.
 
-A common pattern is:
-
-1. create `src/tools/<name>/mod.rs`
-2. create `src/tools/<name>/extension.rs`
-3. add `execute.rs` if the tool also needs Stage 3 runtime behavior
-4. extend the front-matter config types in `src/compile/types.rs`
-5. register the tool in extension collection
-6. add tests
+<Steps>
+1. **Create `src/tools/<name>/mod.rs`** with core logic.
+2. **Create `src/tools/<name>/extension.rs`** for compiler integration.
+3. **Add `execute.rs`** if the tool also needs Stage 3 runtime behavior.
+4. **Extend the front-matter config types** in `src/compile/types.rs`.
+5. **Register the tool** in extension collection.
+6. **Add tests** for all aspects.
+</Steps>
 
 Use a first-class tool when the feature is user-configured under `tools:` and needs compiler-managed setup.
 
@@ -108,13 +112,13 @@ Use a first-class tool when the feature is user-configured under `tools:` and ne
 
 Runtimes live under `src/runtimes/<name>/`.
 
-To add one:
-
-1. create `src/runtimes/<name>/mod.rs` for config types and helpers
-2. create `src/runtimes/<name>/extension.rs` for compiler integration
-3. extend `RuntimesConfig` in `src/compile/types.rs`
-4. register the runtime in extension collection
-5. add tests for pipeline generation, validation, and runtime-specific behavior
+<Steps>
+1. **Create `src/runtimes/<name>/mod.rs`** for config types and helpers.
+2. **Create `src/runtimes/<name>/extension.rs`** for compiler integration.
+3. **Extend `RuntimesConfig`** in `src/compile/types.rs`.
+4. **Register the runtime** in extension collection.
+5. **Add tests** for pipeline generation, validation, and runtime-specific behavior.
+</Steps>
 
 Use a runtime when the feature installs or configures a language or execution environment before the agent runs.
 
@@ -122,23 +126,59 @@ Use a runtime when the feature installs or configures a language or execution en
 
 The key abstraction for tools and runtimes is `CompilerExtension` in `src/compile/extensions/mod.rs`.
 
-Implement this trait when your feature needs to contribute things like:
+### Trait overview
 
-- required network hosts
-- required bash commands
-- prompt supplements
-- prepare or setup steps
-- MCP gateway server entries
-- allowed Copilot tools
-- compile-time validation
-- pipeline environment mappings
-- AWF mounts or PATH updates
+`CompilerExtension` defines everything a runtime or tool needs to tell the compiler:
 
-In practice, the workflow is:
+```rust
+pub trait CompilerExtension {
+    fn name(&self) -> &str;
+    fn phase(&self) -> ExtensionPhase;
+    fn required_hosts(&self) -> Vec<String>;
+    fn required_bash_commands(&self) -> Vec<String>;
+    fn prompt_supplement(&self) -> Option<String>;
+    fn prepare_steps(&self, ctx: &CompileContext) -> Vec<String>;
+    fn setup_steps(&self, ctx: &CompileContext) -> Result<Vec<String>>;
+    fn mcpg_servers(&self, ctx: &CompileContext) -> Result<Vec<(String, McpgServerConfig)>>;
+    fn allowed_copilot_tools(&self) -> Vec<String>;
+    fn validate(&self, ctx: &CompileContext) -> Result<Vec<String>>;
+    fn required_pipeline_vars(&self) -> Vec<PipelineEnvMapping>;
+    fn required_awf_mounts(&self) -> Vec<AwfMount>;
+    fn awf_path_prepends(&self) -> Vec<String>;
+    fn agent_env_vars(&self) -> Vec<(String, String)>;
+}
+```
 
-1. implement `CompilerExtension` for your runtime or tool
-2. return the pieces your feature needs
-3. let the compiler collect and merge those requirements
+All methods except `name()` and `phase()` have default implementations that return empty collections.
+
+### Phase ordering
+
+Extensions execute in phase order to handle dependencies between features:
+
+- **System** (phase 0) — compiler-internal infrastructure. Reserved for ado-aw's own extensions like ado-script. Not for user-facing extension authors.
+- **Runtime** (phase 1) — language toolchains (Lean, Python, Node, .NET). Always run first so tools can depend on them.
+- **Tool** (phase 2) — first-party tools (azure-devops, cache-memory, etc.).
+
+The compiler sorts extensions by phase before collecting their contributions. This guarantees runtime install steps appear before tool steps in the generated pipeline.
+
+### `prepare_steps()` vs `setup_steps()`
+
+These methods inject pipeline steps at different times:
+
+- **`prepare_steps()`** — steps injected into the **Agent job** before the agent runs. Used for installing dependencies the agent needs (e.g., Lean toolchain, Node.js, Python packages).
+- **`setup_steps()`** — steps injected into the **Setup job** before the Agent job starts. Used for gate checks and pre-activation validation that must complete before launching the agent (e.g., filter IR gate evaluation).
+
+In most cases, use `prepare_steps()` for runtime/tool installations.
+
+### Extension workflow
+
+To implement a new extension:
+
+<Steps>
+1. **Implement `CompilerExtension`** for your runtime or tool.
+2. **Return the pieces** your feature needs from the trait methods.
+3. **Let the compiler** collect and merge those requirements.
+</Steps>
 
 This keeps new features composable instead of scattering special-case logic across the compiler.
 
@@ -146,12 +186,57 @@ This keeps new features composable instead of scattering special-case logic acro
 
 When adding a new feature:
 
-1. decide whether it belongs under `safe-outputs`, `tools`, `runtimes`, or target compilation
-2. add or update front-matter types in `src/compile/types.rs`
-3. implement the behavior in the colocated module
-4. register the feature in the compiler's collection and dispatch points
-5. add tests for parsing, validation, and generated YAML
-6. run `cargo test` and `cargo clippy`
+<Steps>
+1. **Decide whether** it belongs under `safe-outputs`, `tools`, `runtimes`, or target compilation.
+2. **Add or update** front-matter types in `src/compile/types.rs`.
+3. **Implement the behavior** in the colocated module.
+4. **Register the feature** in the compiler's collection and dispatch points.
+5. **Add tests** for parsing, validation, and generated YAML.
+6. **Run `cargo test`** and `cargo clippy` to verify correctness.
+</Steps>
+
+## Bash step linting
+
+Pipeline templates contain dozens of multi-line `bash:` steps. ADO bash steps fail only on the **last** command's exit code by default, so a chain like `mkdir … && curl … && cd … && cmd` can silently swallow earlier failures.
+
+Rather than spread `set -eo pipefail` boilerplate across every step, the project enforces hygiene via `tests/bash_lint_tests.rs`, which compiles a set of fixtures and runs `shellcheck` against every literal `bash:` body in the generated YAML.
+
+### Common findings
+
+The lint catches these silent-failure patterns:
+
+- **SC2164** — `cd $X` without `|| exit` (the canonical silent-failure)
+- **SC2155** — `local var=$(cmd)` masking the inner exit code
+- **SC2086 / SC2046** — unquoted variables / command substitutions
+- **SC2154** — variables referenced but never assigned
+- **SC2088** — tilde inside double quotes (does not expand)
+
+### Workflow for adding or modifying bash steps
+
+When you add or modify a bash step in a template or extension:
+
+<Steps>
+1. **Run `cargo test --test bash_lint_tests`**
+   - Locally requires `shellcheck` on PATH
+   - Install with `brew install shellcheck` (macOS) or `apt-get install -y shellcheck` (Debian/Ubuntu)
+   - CI sets `ENFORCE_BASH_LINT=1` so a missing shellcheck becomes a hard failure
+
+2. **Fix any finding** by adjusting the bash. Common fixes:
+   - `cd "$X" || exit 1` instead of bare `cd $X`
+   - `exit "$CODE"` for explicit failure propagation
+   - `"$HOME/.foo"` instead of `"~/.foo"` (tilde does not expand in double quotes)
+   - Quote variable expansions to avoid word splitting
+
+3. **Add a disable directive** if a finding is genuinely intentional:
+   - Add a `# shellcheck disable=SCxxxx` comment immediately above the offending line in the bash body
+   - Such directives are bash comments and have no runtime effect
+</Steps>
+
+### Why not `set -eo pipefail` everywhere?
+
+The project uses targeted `set -eo pipefail` only when a step has a real fail-fast requirement that shellcheck cannot express (e.g., AWF/MCPG downloads, the `tee`-piped agent run). Sprinkling `set -eo pipefail` everywhere adds noise, drifts as new steps are added, and does not address the actual silent-failure patterns that shellcheck surfaces.
+
+The exclude list (`SC1090`, `SC1091`) is documented in `tests/bash_lint_tests.rs` with justifications for each entry. Do not extend without one.
 
 ## Example decision guide
 

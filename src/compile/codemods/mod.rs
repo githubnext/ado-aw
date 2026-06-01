@@ -99,7 +99,7 @@ pub struct Codemod {
 /// having run first (e.g. A renames `foo` → `bar`, B operates on
 /// `bar`); idempotency means any codemod can re-run on any source
 /// without harm.
-pub static CODEMODS: &[&'static Codemod] = &[
+pub static CODEMODS: &[&Codemod] = &[
     &m0001_repos_unified::CODEMOD,
     &m0002_pool_object_form::CODEMOD,
 ];
@@ -181,9 +181,6 @@ mod tests {
 
     #[test]
     fn registry_ids_are_unique() {
-        // Vacuously true while CODEMODS is empty; the assertion
-        // machinery still compiles so this test guards against
-        // duplicate ids the moment a real codemod ships.
         let mut seen = std::collections::BTreeSet::new();
         for c in CODEMODS {
             assert!(
@@ -196,10 +193,9 @@ mod tests {
 
     #[test]
     fn codemod_filenames_match_registry_count() {
-        // Vacuously true while CODEMODS is empty (the directory
-        // contains only `mod.rs` and `helpers.rs`, which are
-        // skipped). Once a numeric `<NNNN>_<id>.rs` file lands, this
-        // test asserts the registry was updated to match.
+        // Each numeric `<NNNN>_<id>.rs` file must have a corresponding
+        // entry in CODEMODS; forgetting to register a new codemod
+        // in the slice is caught here.
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("src/compile/codemods");
         let mut numeric_files: Vec<String> = Vec::new();
@@ -309,12 +305,17 @@ mod tests {
 
     #[test]
     fn non_matching_codemod_omitted_from_report() {
-        // Source has no `a` key, so the rename is a no-op and is
-        // not listed in the report.
+        // Source has no `a` key, so the rename is a no-op and must
+        // not appear in the applied list.
         let mut m: Mapping = serde_yaml::from_str("name: x\n").unwrap();
         let registry: &[&'static Codemod] = &[&TEST_CODEMOD_RENAME];
         let report = apply_codemods_with(&mut m, registry).unwrap();
         assert!(!report.changed());
+        assert!(
+            report.applied_ids().is_empty(),
+            "non-matching codemod must not appear in applied list, got: {:?}",
+            report.applied_ids()
+        );
     }
 
     #[test]

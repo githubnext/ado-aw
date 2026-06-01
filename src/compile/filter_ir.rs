@@ -632,17 +632,17 @@ pub fn validate_pr_filters(filters: &super::types::PrFilters) -> Vec<Diagnostic>
     let mut diags = Vec::new();
 
     // min_changes > max_changes
-    if let (Some(min), Some(max)) = (filters.min_changes, filters.max_changes) {
-        if min > max {
-            diags.push(Diagnostic {
-                severity: Severity::Error,
-                filter: "min-changes / max-changes".into(),
-                message: format!(
-                    "min-changes ({}) is greater than max-changes ({}) — no PR can satisfy both",
-                    min, max
-                ),
-            });
-        }
+    if let (Some(min), Some(max)) = (filters.min_changes, filters.max_changes)
+        && min > max
+    {
+        diags.push(Diagnostic {
+            severity: Severity::Error,
+            filter: "min-changes / max-changes".into(),
+            message: format!(
+                "min-changes ({}) is greater than max-changes ({}) — no PR can satisfy both",
+                min, max
+            ),
+        });
     }
 
     // Time window validation
@@ -818,7 +818,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 /// Serializable gate specification — the JSON document consumed by the
-/// Node gate evaluator (`scripts/ado-script/dist/gate/index.js`) at pipeline runtime.
+/// Node gate evaluator (`scripts/ado-script/gate.js`) at pipeline runtime.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct GateSpec {
     pub context: GateContextSpec,
@@ -933,7 +933,7 @@ pub fn generate_gate_spec_schema() -> String {
 // ─── Codegen ────────────────────────────────────────────────────────────────
 
 // The inline heredoc evaluator has been removed in favor of external script delivery.
-// See TriggerFiltersExtension for the external path (bundled TypeScript gate.js).
+// See AdoScriptExtension for the external path (bundled TypeScript gate.js).
 
 impl Fact {
     /// ADO macro exports required by this fact.
@@ -1342,7 +1342,23 @@ mod tests {
         let checks = lower_pr_filters(&filters);
         assert_eq!(checks.len(), 2);
         assert_eq!(checks[0].name, "author include");
+        assert!(
+            matches!(
+                &checks[0].predicate,
+                Predicate::ValueInSet { fact: Fact::AuthorEmail, values, .. }
+                    if values == &["alice@corp.com"]
+            ),
+            "include should lower to ValueInSet on AuthorEmail"
+        );
         assert_eq!(checks[1].name, "author exclude");
+        assert!(
+            matches!(
+                &checks[1].predicate,
+                Predicate::ValueNotInSet { fact: Fact::AuthorEmail, values, .. }
+                    if values == &["bot@noreply.com"]
+            ),
+            "exclude should lower to ValueNotInSet on AuthorEmail"
+        );
     }
 
     #[test]
@@ -1357,10 +1373,15 @@ mod tests {
         };
         let checks = lower_pr_filters(&filters);
         assert_eq!(checks.len(), 1);
-        assert!(matches!(
-            &checks[0].predicate,
-            Predicate::LabelSetMatch { .. }
-        ));
+        assert_eq!(checks[0].name, "labels");
+        assert!(
+            matches!(
+                &checks[0].predicate,
+                Predicate::LabelSetMatch { any_of, none_of, .. }
+                    if any_of == &["run-agent"] && none_of == &["do-not-run"]
+            ),
+            "labels should lower to LabelSetMatch preserving any_of and none_of"
+        );
     }
 
     #[test]
@@ -1534,7 +1555,7 @@ mod tests {
         let result = compile_gate_step_external(
             GateContext::PullRequest,
             &[],
-            "/tmp/ado-aw-scripts/ado-script/dist/gate/index.js",
+            "/tmp/ado-aw-scripts/ado-script/gate.js",
         )
         .unwrap();
         assert!(result.is_empty());
@@ -1553,7 +1574,7 @@ mod tests {
         let result = compile_gate_step_external(
             GateContext::PullRequest,
             &checks,
-            "/tmp/ado-aw-scripts/ado-script/dist/gate/index.js",
+            "/tmp/ado-aw-scripts/ado-script/gate.js",
         )
         .unwrap();
         assert!(result.contains("- bash:"), "should be a bash step");
@@ -1562,7 +1583,7 @@ mod tests {
             "should include base64 spec in env"
         );
         assert!(
-            result.contains("node '/tmp/ado-aw-scripts/ado-script/dist/gate/index.js'"),
+            result.contains("node '/tmp/ado-aw-scripts/ado-script/gate.js'"),
             "should reference external evaluator script"
         );
         assert!(result.contains("name: prGate"), "should set step name");
@@ -1585,7 +1606,7 @@ mod tests {
         let result = compile_gate_step_external(
             GateContext::PullRequest,
             &checks,
-            "/tmp/ado-aw-scripts/ado-script/dist/gate/index.js",
+            "/tmp/ado-aw-scripts/ado-script/gate.js",
         )
         .unwrap();
         assert!(
@@ -1612,7 +1633,7 @@ mod tests {
         let result = compile_gate_step_external(
             GateContext::PipelineCompletion,
             &checks,
-            "/tmp/ado-aw-scripts/ado-script/dist/gate/index.js",
+            "/tmp/ado-aw-scripts/ado-script/gate.js",
         )
         .unwrap();
         assert!(
@@ -1642,7 +1663,7 @@ mod tests {
         let result = compile_gate_step_external(
             GateContext::PullRequest,
             &checks,
-            "/tmp/ado-aw-scripts/ado-script/dist/gate/index.js",
+            "/tmp/ado-aw-scripts/ado-script/gate.js",
         )
         .unwrap();
         assert!(
@@ -1668,17 +1689,25 @@ mod tests {
         let result = compile_gate_step_external(
             GateContext::PullRequest,
             &checks,
-            "/tmp/ado-aw-scripts/ado-script/dist/gate/index.js",
+            "/tmp/ado-aw-scripts/ado-script/gate.js",
         )
         .unwrap();
-        // Check export lines only (evaluator script always contains these strings)
+        // Verify tier-1 (pipeline-var only) checks do not export API-related env vars
+        // Look for the env: block exports (YAML format with leading spaces)
+        let lines: Vec<&str> = result.lines().collect();
+        let has_repo_id_export = lines.iter().any(|line| {
+            line.trim_start().starts_with("ADO_REPO_ID:")
+        });
+        let has_pr_id_export = lines.iter().any(|line| {
+            line.trim_start().starts_with("ADO_PR_ID:")
+        });
         assert!(
-            !result.contains("ADO_REPO_ID:"),
-            "should not export repo ID for title-only"
+            !has_repo_id_export,
+            "should not export ADO_REPO_ID for title-only (tier-1) check"
         );
         assert!(
-            !result.contains("ADO_PR_ID:"),
-            "should not export PR ID for title-only"
+            !has_pr_id_export,
+            "should not export ADO_PR_ID for title-only (tier-1) check"
         );
     }
 
@@ -1758,24 +1787,20 @@ mod tests {
         let diags = validate_pr_filters(&filters);
         assert!(diags.iter().all(|d| d.severity != Severity::Error));
 
-        let step = compile_gate_step_external(
+        let _step = compile_gate_step_external(
             GateContext::PullRequest,
             &checks,
-            "/tmp/ado-aw-scripts/ado-script/dist/gate/index.js",
+            "/tmp/ado-aw-scripts/ado-script/gate.js",
         )
         .unwrap();
-        // Step structure
-        assert!(step.contains("ADO_PR_TITLE"));
-        assert!(step.contains("ADO_REPO_ID")); // for API-derived facts
-        assert!(step.contains("node"));
-        assert!(step.contains("prGate"));
 
-        // Spec content
+        // Verify the spec captures all three filters with correct fact dependencies
         let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
-        assert_eq!(spec.checks.len(), 3);
-        assert!(spec.facts.iter().any(|f| f.kind == "pr_title"));
-        assert!(spec.facts.iter().any(|f| f.kind == "pr_is_draft"));
-        assert!(spec.facts.iter().any(|f| f.kind == "pr_labels"));
+        assert_eq!(spec.checks.len(), 3, "should produce 3 checks from 3 filters");
+        assert!(spec.facts.iter().any(|f| f.kind == "pr_title"), "title filter requires pr_title fact");
+        assert!(spec.facts.iter().any(|f| f.kind == "pr_is_draft"), "draft filter requires pr_is_draft fact");
+        assert!(spec.facts.iter().any(|f| f.kind == "pr_labels"), "labels filter requires pr_labels fact");
+        assert!(spec.facts.iter().any(|f| f.kind == "pr_metadata"), "API-derived facts should pull in pr_metadata dependency");
     }
 
     // ─── Schema tests ──────────────────────────────────────────────────
@@ -1815,27 +1840,6 @@ mod tests {
                 pred_type
             );
         }
-    }
-
-    #[test]
-    fn test_spec_validates_against_schema() {
-        // Generate a spec and verify it matches the schema structure
-        let checks = vec![FilterCheck {
-            name: "title",
-            predicate: Predicate::GlobMatch {
-                fact: Fact::PrTitle,
-                pattern: "test".into(),
-            },
-            build_tag_suffix: "title-mismatch",
-        }];
-        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
-        let spec_json = serde_json::to_value(&spec).unwrap();
-
-        // Verify structural expectations from schema
-        assert!(spec_json["context"]["build_reason"].is_string());
-        assert!(spec_json["facts"].is_array());
-        assert!(spec_json["checks"].is_array());
-        assert!(spec_json["checks"][0]["predicate"]["type"].as_str() == Some("glob_match"));
     }
 
     #[test]

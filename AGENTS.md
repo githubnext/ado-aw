@@ -59,9 +59,10 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   ├── pr_filters.rs # PR trigger filter generation (native ADO + gate steps)
 │   │   ├── extensions/   # CompilerExtension trait and infrastructure extensions
 │   │   │   ├── mod.rs    # Trait, Extension enum, collect_extensions(), re-exports
+│   │   │   ├── ado_aw_marker.rs # Always-on metadata marker extension (emits # ado-aw-metadata JSON)
 │   │   │   ├── github.rs # Always-on GitHub MCP extension
 │   │   │   ├── safe_outputs.rs # Always-on SafeOutputs MCP extension
-│   │   │   ├── trigger_filters.rs # Trigger filter extension (gate evaluator delivery)
+│   │   │   ├── ado_script.rs # Always-on ado-script extension (gate evaluator + runtime-import resolver, per-job downloads)
 │   │   │   └── tests.rs  # Extension integration tests
 │   │   ├── codemods/     # Front-matter codemods (one file per transformation)
 │   │   │   ├── mod.rs    # Codemod struct, CODEMODS registry, runner
@@ -84,8 +85,10 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── status.rs         # `status` CLI command — denser per-pipeline status block (thin renderer over `list`'s data path)
 │   ├── run.rs            # `run` CLI command — queues builds for matched definitions, optional polling to completion (module entry is `dispatch`)
 │   ├── ado/              # Shared Azure DevOps REST helpers (auth, list/match/PATCH/POST)
-│   │   └── mod.rs        # Used by `configure` and the `enable` command (ADO REST helpers: auth, list/match/PATCH/POST)
-│   ├── detect.rs         # Agentic pipeline detection (helper for `configure`)
+│   │   ├── mod.rs        # Shared ADO REST helpers used by all lifecycle commands (`enable`, `disable`, `list`, `status`, `run`, `remove`, `secrets`)
+│   │   └── discovery.rs  # Project-scope pipeline discovery (`--all-repos` / `--source` flags)
+│   ├── detect.rs         # Agentic pipeline detection — discovers compiled pipelines; used by all lifecycle commands
+│   ├── update_check.rs   # Version update check — queries GitHub Releases and prints advisory when newer version is available
 │   ├── ndjson.rs         # NDJSON parsing utilities
 │   ├── sanitize.rs       # Input sanitization for safe outputs
 │   ├── validate.rs       # Structural input validators (char allowlists, format checks, injection detectors)
@@ -156,8 +159,11 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── update-ado-agentic-workflow.md # Guide for modifying an existing agentic pipeline
 │   └── debug-ado-agentic-workflow.md  # Guide for troubleshooting a failing agentic pipeline
 ├── scripts/              # Supporting scripts shipped as release artifacts
-│   ├── ado-script/       # TypeScript workspace for bundled gate.js (and future bundles)
-│   └── gate.js           # Bundled gate evaluator (built from scripts/ado-script/, see docs/ado-script.md)
+│   └── ado-script/       # TypeScript workspace for bundled gate.js, import.js, and future bundles
+│       └── src/
+│           ├── gate/     # Gate evaluator source (bundled to gate.js)
+│           ├── import/   # Runtime prompt resolver source (bundled to import.js)
+│           └── shared/   # Shared modules across bundles (auth, ado-client, env-facts, types.gen.ts)
 ├── tests/                # Integration tests and fixtures
 ├── docs/                 # Per-concept reference documentation (see index below)
 ├── Cargo.toml            # Rust dependencies
@@ -169,7 +175,7 @@ Every compiled pipeline runs as three sequential jobs:
 - **Language**: Rust (2024 edition) - Note: Rust 2024 edition exists and is the edition used by this project
 - **CLI Framework**: clap v4 with derive macros
 - **Error Handling**: anyhow for ergonomic error propagation
-- **Bundled scripts**: TypeScript + ncc (`scripts/ado-script/`) — compiled gate evaluator and future internal helpers; see [`docs/ado-script.md`](docs/ado-script.md).
+- **Bundled scripts**: TypeScript + ncc (`scripts/ado-script/`) — compiled gate evaluator, runtime import resolver, and future internal helpers; see [`docs/ado-script.md`](docs/ado-script.md).
 - **Async Runtime**: tokio with full features
 - **YAML Parsing**: serde_yaml
 - **MCP Server**: rmcp with server and transport-io features
@@ -193,6 +199,8 @@ index to jump to the right page.
 
 - [`docs/front-matter.md`](docs/front-matter.md) — full agent file format
   (markdown body + YAML front matter grammar) with every supported field.
+- [`docs/runtime-imports.md`](docs/runtime-imports.md) — runtime prompt import
+  markers, path resolution, and `inlined-imports:` behavior.
 - [`docs/schedule-syntax.md`](docs/schedule-syntax.md) — fuzzy schedule time
   syntax (`daily around 14:00`, `weekly on monday`, timezones, scattering).
 - [`docs/engine.md`](docs/engine.md) — `engine:` configuration (model,
@@ -218,7 +226,8 @@ index to jump to the right page.
 - [`docs/template-markers.md`](docs/template-markers.md) — every `{{ marker }}`
   in `src/data/base.yml`, `src/data/1es-base.yml`, `src/data/job-base.yml`, and `src/data/stage-base.yml` and how it is replaced.
 - [`docs/cli.md`](docs/cli.md) — `ado-aw` CLI commands (`init`, `compile`,
-  `check`, `mcp`, `mcp-http`, `execute`, `configure`).
+  `check`, `mcp`, `mcp-http`, `execute`, `secrets`, `enable`, `disable`,
+  `remove`, `list`, `status`, `run`; `configure` is a deprecated hidden alias).
 - [`docs/mcp.md`](docs/mcp.md) — MCP server configuration (stdio containers,
   HTTP servers, env passthrough).
 - [`docs/mcpg.md`](docs/mcpg.md) — MCP Gateway architecture and pipeline
@@ -238,7 +247,7 @@ index to jump to the right page.
   adding codemods.
 - [`docs/ado-script.md`](docs/ado-script.md) — `ado-script` workspace
   (`scripts/ado-script/`): the bundled TypeScript runtime helpers (today:
-  `gate.js`), schemars-driven type codegen, and the A2 design decision.
+  `gate.js` and `import.js`), schemars-driven type codegen, and the A2 design decision.
 - [`docs/local-development.md`](docs/local-development.md) — local development
   setup notes.
 

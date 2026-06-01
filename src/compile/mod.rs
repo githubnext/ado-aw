@@ -8,12 +8,12 @@
 
 mod common;
 pub(crate) use common::resolve_repos;
-pub mod extensions;
-pub(crate) mod filter_ir;
-mod gitattributes;
 #[cfg(test)]
 mod codemod_integration_test;
 pub(crate) mod codemods;
+pub mod extensions;
+pub(crate) mod filter_ir;
+mod gitattributes;
 mod job;
 mod onees;
 pub(crate) mod pr_filters;
@@ -26,16 +26,16 @@ use async_trait::async_trait;
 use log::{debug, info};
 use std::path::{Path, PathBuf};
 
-#[allow(unused_imports)]
-pub use common::parse_markdown;
-#[allow(unused_imports)]
-pub use common::{atomic_write, parse_markdown_detailed, reconstruct_source, ParsedSource};
-pub use common::HEADER_MARKER;
-pub use common::normalize_source_path;
 pub use common::ADO_MCP_ENTRYPOINT;
 pub use common::ADO_MCP_IMAGE;
 pub use common::ADO_MCP_PACKAGE;
 pub use common::ADO_MCP_SERVER_NAME;
+pub use common::HEADER_MARKER;
+pub use common::normalize_source_path;
+#[allow(unused_imports)]
+pub use common::parse_markdown;
+#[allow(unused_imports)]
+pub use common::{ParsedSource, atomic_write, parse_markdown_detailed, reconstruct_source};
 pub use types::{CompileTarget, FrontMatter};
 
 /// Trait for pipeline compilers.
@@ -152,7 +152,11 @@ async fn compile_pipeline_inner(
     info!("Parsed agent: '{}'", front_matter.name);
     debug!("Description: {}", front_matter.description);
     debug!("Target: {:?}", front_matter.target);
-    debug!("Engine: {} (model: {})", front_matter.engine.engine_id(), front_matter.engine.model().unwrap_or("default"));
+    debug!(
+        "Engine: {} (model: {})",
+        front_matter.engine.engine_id(),
+        front_matter.engine.model().unwrap_or("default")
+    );
     debug!("Schedule: {:?}", front_matter.schedule());
     debug!("MCP servers configured: {}", front_matter.mcp_servers.len());
 
@@ -179,9 +183,7 @@ async fn compile_pipeline_inner(
                     .with_extension("lock.yml")
                     .file_name()
                     .map(PathBuf::from)
-                    .with_context(|| {
-                        format!("Invalid input path: {}", input_path.display())
-                    })?;
+                    .with_context(|| format!("Invalid input path: {}", input_path.display()))?;
                 p.join(default_filename)
             } else {
                 p
@@ -206,7 +208,14 @@ async fn compile_pipeline_inner(
     // Compile (no source mutation yet — a failure here must leave the
     // source byte-identical).
     let pipeline_yaml = compiler
-        .compile(input_path, &yaml_output_path, &front_matter, &markdown_body, skip_integrity, debug_pipeline)
+        .compile(
+            input_path,
+            &yaml_output_path,
+            &front_matter,
+            &markdown_body,
+            skip_integrity,
+            debug_pipeline,
+        )
         .await?;
 
     // Clean up spacing artifacts from empty placeholder replacements
@@ -276,10 +285,10 @@ async fn compile_pipeline_inner(
     // debug-level log when the output is not inside a git repository, since
     // a non-git workspace is a valid use case (e.g. ad-hoc compilation).
     // Skipped during batch compilation (callers do one sync at the end).
-    if sync_gitattributes {
-        if let Err(e) = sync_gitattributes_for_output(&yaml_output_path).await {
-            debug!("Skipped .gitattributes update: {}", e);
-        }
+    if sync_gitattributes
+        && let Err(e) = sync_gitattributes_for_output(&yaml_output_path).await
+    {
+        debug!("Skipped .gitattributes update: {}", e);
     }
 
     Ok(rewrote)
@@ -449,7 +458,16 @@ pub async fn compile_all_pipelines(skip_integrity: bool, debug_pipeline: bool) -
         let source_str = source_path.to_string_lossy();
         let output_str = yaml_output_path.to_string_lossy();
 
-        match compile_pipeline_inner(&source_str, Some(&output_str), skip_integrity, debug_pipeline, false, codemods::CODEMODS).await {
+        match compile_pipeline_inner(
+            &source_str,
+            Some(&output_str),
+            skip_integrity,
+            debug_pipeline,
+            false,
+            codemods::CODEMODS,
+        )
+        .await
+        {
             Ok(rewrote) => {
                 success_count += 1;
                 if rewrote {
@@ -457,10 +475,7 @@ pub async fn compile_all_pipelines(skip_integrity: bool, debug_pipeline: bool) -
                 }
             }
             Err(e) => {
-                eprintln!(
-                    "  Error compiling '{}': {:#}",
-                    pipeline.source, e
-                );
+                eprintln!("  Error compiling '{}': {:#}", pipeline.source, e);
                 fail_count += 1;
             }
         }
@@ -470,7 +485,9 @@ pub async fn compile_all_pipelines(skip_integrity: bool, debug_pipeline: bool) -
     // that would happen if each pipeline triggered its own
     // `sync_gitattributes_for_output` call. We reuse the already-detected
     // pipeline list rather than re-scanning the tree.
-    if let Some(repo_root) = find_repo_root(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))) {
+    if let Some(repo_root) =
+        find_repo_root(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    {
         let paths: Vec<PathBuf> = detected.iter().map(|p| p.yaml_path.clone()).collect();
         if let Err(e) = gitattributes::update_gitattributes(&repo_root, paths).await {
             debug!("Skipped .gitattributes update: {}", e);
@@ -509,17 +526,12 @@ pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
     // Read existing pipeline and extract header to discover source path
     let existing = tokio::fs::read_to_string(pipeline_path)
         .await
-        .with_context(|| {
-            format!(
-                "Failed to read pipeline file: {}",
-                pipeline_path.display()
-            )
-        })?;
+        .with_context(|| format!("Failed to read pipeline file: {}", pipeline_path.display()))?;
 
     let header_meta = existing
         .lines()
         .take(5)
-        .find_map(|line| crate::detect::parse_header_line(line))
+        .find_map(crate::detect::parse_header_line)
         .with_context(|| {
             format!(
                 "No @ado-aw header found in {}. Is this file generated by ado-aw?",
@@ -666,13 +678,13 @@ fn format_diff(existing: &str, expected: &str, pipeline_path: &Path) -> String {
     ));
 
     // First pass: count total changes across the full diff.
-    let (total_added, total_removed) = diff.iter_all_changes().fold((0usize, 0usize), |(a, r), c| {
-        match c.tag() {
-            ChangeTag::Insert => (a + 1, r),
-            ChangeTag::Delete => (a, r + 1),
-            ChangeTag::Equal => (a, r),
-        }
-    });
+    let (total_added, total_removed) =
+        diff.iter_all_changes()
+            .fold((0usize, 0usize), |(a, r), c| match c.tag() {
+                ChangeTag::Insert => (a + 1, r),
+                ChangeTag::Delete => (a, r + 1),
+                ChangeTag::Equal => (a, r),
+            });
 
     let mut changed_lines_shown = 0usize;
     let mut truncated = false;

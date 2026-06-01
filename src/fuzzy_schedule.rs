@@ -163,7 +163,7 @@ fn parse_time_spec(s: &str) -> Result<TimeSpec> {
             (hour, 0)
         };
 
-        if hour < 1 || hour > 12 {
+        if !(1..=12).contains(&hour) {
             bail!("Hour must be 1-12 in 12-hour format, got {}", hour);
         }
         if minute > 59 {
@@ -228,7 +228,7 @@ fn parse_utc_offset(s: &str) -> Result<i32> {
     let total_offset = sign * offset_minutes;
 
     // Validate range: UTC-12:00 to UTC+14:00
-    if total_offset < -12 * 60 || total_offset > 14 * 60 {
+    if !(-12 * 60..=14 * 60).contains(&total_offset) {
         bail!("UTC offset out of range (UTC-12:00 to UTC+14:00): {}", s);
     }
 
@@ -426,29 +426,29 @@ fn parse_interval_schedule(tokens: &[&str]) -> Result<FuzzySchedule> {
         ("week", "w"),
         ("w", "w"),
     ] {
-        if let Some(num_str) = interval_str.strip_suffix(suffix) {
-            if let Ok(n) = num_str.parse::<u8>() {
-                return create_interval_schedule(n, unit);
-            }
+        if let Some(num_str) = interval_str.strip_suffix(suffix)
+            && let Ok(n) = num_str.parse::<u8>()
+        {
+            return create_interval_schedule(n, unit);
         }
     }
 
     // Try format: "<N> <unit>" (e.g., "2 hours")
-    if tokens.len() >= 2 {
-        if let Ok(n) = tokens[0].parse::<u8>() {
-            let unit = tokens[1];
-            let unit_char = match unit {
-                "hours" | "hour" | "h" => "h",
-                "minutes" | "minute" | "mins" | "min" | "m" => "m",
-                "days" | "day" | "d" => "d",
-                "weeks" | "week" | "w" => "w",
-                _ => bail!(
-                    "Unknown interval unit '{}'. Valid units: hours, minutes, days, weeks",
-                    unit
-                ),
-            };
-            return create_interval_schedule(n, unit_char);
-        }
+    if tokens.len() >= 2
+        && let Ok(n) = tokens[0].parse::<u8>()
+    {
+        let unit = tokens[1];
+        let unit_char = match unit {
+            "hours" | "hour" | "h" => "h",
+            "minutes" | "minute" | "mins" | "min" | "m" => "m",
+            "days" | "day" | "d" => "d",
+            "weeks" | "week" | "w" => "w",
+            _ => bail!(
+                "Unknown interval unit '{}'. Valid units: hours, minutes, days, weeks",
+                unit
+            ),
+        };
+        return create_interval_schedule(n, unit_char);
     }
 
     bail!(
@@ -509,7 +509,7 @@ fn parse_time_with_offset(tokens: &[&str]) -> Result<(TimeSpec, i32)> {
 
     // Check if last token is a UTC offset
     let (time_tokens, offset) =
-        if tokens.len() >= 2 && tokens.last().map_or(false, |t| t.starts_with("utc")) {
+        if tokens.len() >= 2 && tokens.last().is_some_and(|t| t.starts_with("utc")) {
             let offset = parse_utc_offset(tokens.last().unwrap())?;
             (&tokens[..tokens.len() - 1], offset)
         } else if tokens.len() == 1 && tokens[0].contains("utc") {
@@ -836,16 +836,24 @@ mod tests {
         ));
 
         let schedule = parse_fuzzy_schedule("daily around 14:00").unwrap();
-        assert!(matches!(
+        assert_eq!(
             schedule,
-            FuzzySchedule::Daily(TimeConstraint::Around(_))
-        ));
+            FuzzySchedule::Daily(TimeConstraint::Around(TimeSpec {
+                hour: 14,
+                minute: 0
+            })),
+            "daily around 14:00 should capture 14:00 in the Around variant"
+        );
 
         let schedule = parse_fuzzy_schedule("daily between 9:00 and 17:00").unwrap();
-        assert!(matches!(
+        assert_eq!(
             schedule,
-            FuzzySchedule::Daily(TimeConstraint::Between(_, _))
-        ));
+            FuzzySchedule::Daily(TimeConstraint::Between(
+                TimeSpec { hour: 9, minute: 0 },
+                TimeSpec { hour: 17, minute: 0 }
+            )),
+            "daily between should capture both boundary times"
+        );
     }
 
     #[test]
@@ -868,13 +876,17 @@ mod tests {
         ));
 
         let schedule = parse_fuzzy_schedule("weekly on friday around 17:00").unwrap();
-        assert!(matches!(
+        assert_eq!(
             schedule,
             FuzzySchedule::Weekly {
                 day: Some(Weekday::Friday),
-                constraint: TimeConstraint::Around(_)
-            }
-        ));
+                constraint: TimeConstraint::Around(TimeSpec {
+                    hour: 17,
+                    minute: 0
+                })
+            },
+            "weekly on friday around 17:00 should capture the time spec in Around variant"
+        );
     }
 
     #[test]
@@ -887,22 +899,22 @@ mod tests {
 
     #[test]
     fn test_parse_intervals() {
-        assert!(matches!(
+        assert_eq!(
             parse_fuzzy_schedule("every 2h").unwrap(),
             FuzzySchedule::EveryHours(2)
-        ));
-        assert!(matches!(
+        );
+        assert_eq!(
             parse_fuzzy_schedule("every 6 hours").unwrap(),
             FuzzySchedule::EveryHours(6)
-        ));
-        assert!(matches!(
+        );
+        assert_eq!(
             parse_fuzzy_schedule("every 5 minutes").unwrap(),
             FuzzySchedule::EveryMinutes(5)
-        ));
-        assert!(matches!(
+        );
+        assert_eq!(
             parse_fuzzy_schedule("every 2 days").unwrap(),
             FuzzySchedule::EveryDays(2)
-        ));
+        );
     }
 
     #[test]
@@ -924,9 +936,8 @@ mod tests {
         let cron2 = generate_cron(&schedule, "test/workflow");
         assert_eq!(cron1, cron2, "Same workflow should produce same cron");
 
-        let _cron3 = generate_cron(&schedule, "other/workflow");
-        // Different workflows should (usually) produce different crons
-        // Note: There's a small chance of collision, but it's unlikely
+        let cron3 = generate_cron(&schedule, "other/workflow");
+        assert_ne!(cron1, cron3, "Different workflow IDs should produce different crons");
     }
 
     #[test]
@@ -947,57 +958,32 @@ mod tests {
 
     #[test]
     fn test_between_equal_times_daily() {
-        // Test edge case: daily between 14:00 and 14:00 (same time)
-        // Should not panic and should generate valid cron
+        // When start == end the range expands to the full 24-hour day, so the
+        // scattered time must NOT be pinned to the specified hour (14).
+        // The cron expression must be deterministic for a given workflow key.
         let schedule = parse_fuzzy_schedule("daily between 14:00 and 14:00").unwrap();
         let cron = generate_cron(&schedule, "test/agent");
-
-        // Verify it's a valid cron format
-        let parts: Vec<&str> = cron.split_whitespace().collect();
-        assert_eq!(parts.len(), 5, "Cron should have 5 fields");
-
-        let minute: u32 = parts[0].parse().expect("Minute should be a number");
-        assert!(minute < 60, "Minute should be 0-59");
-
-        let hour: u32 = parts[1].parse().expect("Hour should be a number");
-        assert!(hour < 24, "Hour should be 0-23");
+        // FNV-1a("test/agent")=196813323; offset=196813323%1440=1323;
+        // scattered=(840+1323)%1440=723 → hour=12, min=3
+        assert_eq!(
+            cron, "3 12 * * *",
+            "Same start/end time should scatter across full 24-hour day deterministically"
+        );
     }
 
     #[test]
     fn test_between_equal_times_weekly() {
-        // Test edge case: weekly on monday between 09:00 and 09:00 (same time)
-        // Should not panic and should generate valid cron
+        // When start == end the range expands to the full 24-hour day, so the
+        // scattered time must NOT be pinned to the specified hour (09).
+        // The cron expression must be deterministic for a given workflow key.
         let schedule = parse_fuzzy_schedule("weekly on monday between 09:00 and 09:00").unwrap();
         let cron = generate_cron(&schedule, "test/agent");
-
-        // Verify it's a valid cron format
-        let parts: Vec<&str> = cron.split_whitespace().collect();
-        assert_eq!(parts.len(), 5, "Cron should have 5 fields");
-
-        let minute: u32 = parts[0].parse().expect("Minute should be a number");
-        assert!(minute < 60, "Minute should be 0-59");
-
-        let hour: u32 = parts[1].parse().expect("Hour should be a number");
-        assert!(hour < 24, "Hour should be 0-23");
-
-        // Verify day of week is Monday (1)
-        assert_eq!(parts[4], "1", "Day of week should be Monday (1)");
-    }
-
-    #[test]
-    fn test_between_equal_times_midnight() {
-        // Test edge case: between midnight and midnight
-        let schedule = parse_fuzzy_schedule("daily between midnight and midnight").unwrap();
-        let cron = generate_cron(&schedule, "test/agent");
-
-        let parts: Vec<&str> = cron.split_whitespace().collect();
-        assert_eq!(parts.len(), 5, "Cron should have 5 fields");
-
-        let minute: u32 = parts[0].parse().expect("Minute should be a number");
-        assert!(minute < 60, "Minute should be 0-59");
-
-        let hour: u32 = parts[1].parse().expect("Hour should be a number");
-        assert!(hour < 24, "Hour should be 0-23");
+        // FNV-1a("test/agent")=196813323; offset=196813323%1440=1323;
+        // scattered=(540+1323)%1440=423 → hour=7, min=3; day-of-week=1 (Monday)
+        assert_eq!(
+            cron, "3 7 * * 1",
+            "Same start/end time on Monday should scatter across full day deterministically"
+        );
     }
 
     #[test]
@@ -1039,23 +1025,19 @@ mod tests {
     // ─── invalid hour interval error path ────────────────────────────────────
 
     #[test]
-    fn test_parse_invalid_hour_interval_5h() {
-        let err = parse_fuzzy_schedule("every 5h").unwrap_err();
-        assert!(
-            err.to_string().contains("Valid intervals"),
-            "Error for 5h should mention valid intervals: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn test_parse_invalid_hour_interval_7h() {
-        let err = parse_fuzzy_schedule("every 7h").unwrap_err();
-        assert!(
-            err.to_string().contains("not recommended"),
-            "Error for 7h should say 'not recommended': {}",
-            err
-        );
+    fn test_parse_invalid_hour_interval() {
+        for input in &["every 5h", "every 7h"] {
+            let err = parse_fuzzy_schedule(input).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("not recommended"),
+                "Error for {input} should say 'not recommended': {msg}"
+            );
+            assert!(
+                msg.contains("Valid intervals"),
+                "Error for {input} should list valid intervals: {msg}"
+            );
+        }
     }
 
     #[test]
@@ -1069,12 +1051,29 @@ mod tests {
     }
 
     #[test]
-    fn test_backward_compatibility() {
-        // Test that simple "hourly" and "daily" still work
+    fn test_backward_compatibility_hourly() {
+        // "hourly" should produce a cron where only the minute varies (all other fields are `*`)
         let yaml = generate_schedule_yaml("hourly", "test", &[]).unwrap();
         assert!(yaml.contains("cron:"));
-
-        let yaml = generate_schedule_yaml("daily", "test", &[]).unwrap();
-        assert!(yaml.contains("cron:"));
+        // Extract the cron expression from the YAML: `  - cron: "N * * * *"`
+        let cron_line = yaml
+            .lines()
+            .find(|l| l.trim_start().starts_with("- cron:"))
+            .expect("YAML should contain a `- cron:` line");
+        let cron = cron_line
+            .trim()
+            .trim_start_matches("- cron:")
+            .trim()
+            .trim_matches('"');
+        let parts: Vec<&str> = cron.split_whitespace().collect();
+        assert_eq!(parts.len(), 5, "Hourly cron should have 5 fields");
+        // Hour, day-of-month, month, day-of-week must all be `*`
+        assert_eq!(parts[1], "*", "Hour field should be * for hourly");
+        assert_eq!(parts[2], "*", "Day-of-month field should be * for hourly");
+        assert_eq!(parts[3], "*", "Month field should be * for hourly");
+        assert_eq!(parts[4], "*", "Day-of-week field should be * for hourly");
+        // Minute must be a valid 0-59 integer
+        let minute: u32 = parts[0].parse().expect("Minute field should be a number");
+        assert!(minute < 60, "Minute should be 0-59");
     }
 }

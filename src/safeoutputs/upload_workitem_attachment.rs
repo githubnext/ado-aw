@@ -224,13 +224,13 @@ impl Executor for UploadWorkitemAttachmentResult {
         // viewer won't execute ##vso[ sequences from binary content. Note that a binary file
         // with a valid UTF-8 preamble but malformed tail will also skip the scan, but this is
         // acceptable because the injection risk from binary attachments is negligible.
-        if let Ok(text) = std::str::from_utf8(&file_bytes) {
-            if text.contains("##vso[") {
-                return Ok(ExecutionResult::failure(
-                    "Uploaded file contains '##vso[' command injection sequence — upload rejected"
-                        .to_string(),
-                ));
-            }
+        if let Ok(text) = std::str::from_utf8(&file_bytes)
+            && text.contains("##vso[")
+        {
+            return Ok(ExecutionResult::failure(
+                "Uploaded file contains '##vso[' command injection sequence — upload rejected"
+                    .to_string(),
+            ));
         }
 
         // Extract filename for upload

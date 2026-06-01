@@ -7,9 +7,11 @@ description: "Reference for the tools field, including bash access, file editing
 
 The `tools` field controls which tools are available to the agent. Both sub-fields are optional and have sensible defaults.
 
+For custom MCP servers beyond the built-in `azure-devops` integration, see the [MCP reference](/ado-aw/reference/mcp/).
+
 ### Default Bash Command Allow-list
 
-When `tools.bash` is omitted, the agent defaults to **unrestricted bash access** (`--allow-all-tools`). This matches gh-aw's sandbox behavior -- since ado-aw agents always run inside the AWF sandbox, all tools are allowed by default.
+When `tools.bash` is omitted, the agent defaults to **unrestricted bash access** (`--allow-all-tools`). This matches gh-aw's sandbox behavior -- since ado-aw agents always run inside the [AWF sandbox](/ado-aw/reference/network/), all tools are allowed by default.
 
 ### Configuring Bash Access
 
@@ -59,13 +61,13 @@ When enabled, the compiler auto-generates pipeline steps to:
 - Download previous memory from the last successful run's artifact
 - Restore files to `/tmp/awf-tools/staging/agent_memory/`
 - Append a memory prompt to the agent instructions
-- Auto-inject a `clearMemory` pipeline parameter (allows clearing memory from the ADO UI)
+- Auto-inject a `clearMemory` [runtime parameter](/ado-aw/reference/parameters/) (allows clearing memory from the ADO UI)
 
 During Stage 3 execution, memory files are validated (path safety, extension filtering, `##vso[` injection detection, 5 MB size limit) and published as a pipeline artifact.
 
 ### Azure DevOps MCP (`azure-devops:`)
 
-First-class Azure DevOps MCP integration. Auto-configures the ADO MCP container, token mapping, MCPG entry, and network allowlist.
+First-class Azure DevOps MCP integration. Auto-configures the ADO MCP container, token mapping, [MCPG](/ado-aw/reference/mcpg/) entry, and [network allowlist](/ado-aw/reference/network/).
 
 ```yaml
 # Simple enablement (auto-infers org from git remote)
@@ -81,8 +83,8 @@ tools:
 ```
 
 When enabled, the compiler:
-- Generates a containerized stdio MCP entry (`node:20-slim` + `npx @azure-devops/mcp`) in the MCPG config
-- Auto-maps `AZURE_DEVOPS_EXT_PAT` token passthrough when `permissions.read` is configured
-- Adds ADO-specific hosts to the network allowlist
+- Generates a containerized stdio MCP entry (`node:20-slim` + `npx @azure-devops/mcp`) in the [MCPG](/ado-aw/reference/mcpg/) config
+- Auto-maps `AZURE_DEVOPS_EXT_PAT` token passthrough when [`permissions.read`](/ado-aw/reference/network/#permissions-ado-access-tokens) is configured
+- Adds ADO-specific hosts to the [network allowlist](/ado-aw/reference/network/)
 - Auto-infers org from the git remote URL at compile time (overridable via `org:` field)
 - Fails compilation if org cannot be determined (no explicit override and no ADO git remote)

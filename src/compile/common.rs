@@ -4,12 +4,18 @@ use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use super::types::{CompileTarget, FrontMatter, OnConfig, PipelineParameter, PoolConfig, Repository, ReposItem};
-use super::extensions::{CompilerExtension, Extension, McpgServerConfig, McpgGatewayConfig, McpgConfig, CompileContext};
-use crate::compile::types::McpConfig;
-use crate::fuzzy_schedule;
+use super::extensions::{
+    CompileContext, CompilerExtension, Extension, McpgConfig, McpgGatewayConfig, McpgServerConfig,
+};
+use super::types::{
+    CompileTarget, FrontMatter, OnConfig, PipelineParameter, PoolConfig, ReposItem, Repository,
+};
 use crate::allowed_hosts::{CORE_ALLOWED_HOSTS, mcp_required_hosts};
-use crate::ecosystem_domains::{get_ecosystem_domains, is_ecosystem_identifier, is_known_ecosystem};
+use crate::compile::types::McpConfig;
+use crate::ecosystem_domains::{
+    get_ecosystem_domains, is_ecosystem_identifier, is_known_ecosystem,
+};
+use crate::fuzzy_schedule;
 use crate::validate;
 
 /// Atomically write `contents` to `path`.
@@ -73,16 +79,13 @@ fn atomic_write_blocking(path: &Path, contents: &str) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         if let Ok(meta) = std::fs::metadata(path) {
             let mode = meta.permissions().mode();
-            std::fs::set_permissions(
-                tmp.path(),
-                std::fs::Permissions::from_mode(mode),
-            )
-            .with_context(|| {
-                format!(
-                    "failed to copy permissions from {} to temp file",
-                    path.display()
-                )
-            })?;
+            std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(mode))
+                .with_context(|| {
+                    format!(
+                        "failed to copy permissions from {} to temp file",
+                        path.display()
+                    )
+                })?;
         }
     }
 
@@ -152,7 +155,10 @@ pub(crate) fn parse_markdown_detailed_with_registry(
     // the whitespace prefix around so that source rewrites preserve
     // anything the user (or their editor) put before the opening
     // fence.
-    let leading_ws = content.bytes().take_while(|b| b.is_ascii_whitespace()).count();
+    let leading_ws = content
+        .bytes()
+        .take_while(|b| b.is_ascii_whitespace())
+        .count();
     let leading_whitespace = content[..leading_ws].to_string();
     let after_lead = &content[leading_ws..];
     if !after_lead.starts_with("---") {
@@ -190,21 +196,19 @@ pub(crate) fn parse_markdown_detailed_with_registry(
     // typed FrontMatter. Errors here mean either the user wrote an
     // unsupported shape or a codemod produced invalid output. The
     // error context differs by case so the user can tell which.
-    let front_matter: FrontMatter = serde_yaml::from_value(
-        serde_yaml::Value::Mapping(mapping.clone()),
-    )
-    .with_context(|| {
-        if report.changed() {
-            let ids = report.applied_ids().join(", ");
-            format!(
-                "Failed to parse YAML front matter after applying codemods ({}); \
+    let front_matter: FrontMatter =
+        serde_yaml::from_value(serde_yaml::Value::Mapping(mapping.clone())).with_context(|| {
+            if report.changed() {
+                let ids = report.applied_ids().join(", ");
+                format!(
+                    "Failed to parse YAML front matter after applying codemods ({}); \
                  a codemod likely produced an invalid shape",
-                ids
-            )
-        } else {
-            "Failed to parse YAML front matter".to_string()
-        }
-    })?;
+                    ids
+                )
+            } else {
+                "Failed to parse YAML front matter".to_string()
+            }
+        })?;
 
     Ok(ParsedSource {
         front_matter,
@@ -382,7 +386,10 @@ pub fn generate_parameters(parameters: &[PipelineParameter]) -> Result<String> {
 /// delimiter (`{{`), or newlines — any of which could disclose secrets or manipulate
 /// pipeline logic via second-order injection.
 pub fn validate_front_matter_identity(front_matter: &FrontMatter) -> Result<()> {
-    for (field, value) in [("name", &front_matter.name), ("description", &front_matter.description)] {
+    for (field, value) in [
+        ("name", &front_matter.name),
+        ("description", &front_matter.description),
+    ] {
         validate::reject_pipeline_injection(value, field)?;
     }
 
@@ -394,7 +401,10 @@ pub fn validate_front_matter_identity(front_matter: &FrontMatter) -> Result<()> 
                 validate::reject_pipeline_injection(project, "on.pipeline.project")?;
             }
             for branch in &pipeline.branches {
-                validate::reject_pipeline_injection(branch, &format!("on.pipeline.branches entry {:?}", branch))?;
+                validate::reject_pipeline_injection(
+                    branch,
+                    &format!("on.pipeline.branches entry {:?}", branch),
+                )?;
             }
         }
 
@@ -402,18 +412,30 @@ pub fn validate_front_matter_identity(front_matter: &FrontMatter) -> Result<()> 
         if let Some(pr) = &trigger_config.pr {
             if let Some(branches) = &pr.branches {
                 for b in &branches.include {
-                    validate::reject_pipeline_injection(b, &format!("on.pr.branches.include entry {:?}", b))?;
+                    validate::reject_pipeline_injection(
+                        b,
+                        &format!("on.pr.branches.include entry {:?}", b),
+                    )?;
                 }
                 for b in &branches.exclude {
-                    validate::reject_pipeline_injection(b, &format!("on.pr.branches.exclude entry {:?}", b))?;
+                    validate::reject_pipeline_injection(
+                        b,
+                        &format!("on.pr.branches.exclude entry {:?}", b),
+                    )?;
                 }
             }
             if let Some(paths) = &pr.paths {
                 for p in &paths.include {
-                    validate::reject_pipeline_injection(p, &format!("on.pr.paths.include entry {:?}", p))?;
+                    validate::reject_pipeline_injection(
+                        p,
+                        &format!("on.pr.paths.include entry {:?}", p),
+                    )?;
                 }
                 for p in &paths.exclude {
-                    validate::reject_pipeline_injection(p, &format!("on.pr.paths.exclude entry {:?}", p))?;
+                    validate::reject_pipeline_injection(
+                        p,
+                        &format!("on.pr.paths.exclude entry {:?}", p),
+                    )?;
                 }
             }
         }
@@ -424,7 +446,10 @@ pub fn validate_front_matter_identity(front_matter: &FrontMatter) -> Result<()> 
 
 /// Build the final parameters list by combining user-defined parameters
 /// with auto-injected parameters (e.g., `clearMemory` when memory is enabled).
-pub fn build_parameters(user_params: &[PipelineParameter], has_memory: bool) -> Vec<PipelineParameter> {
+pub fn build_parameters(
+    user_params: &[PipelineParameter],
+    has_memory: bool,
+) -> Vec<PipelineParameter> {
     let mut params = user_params.to_vec();
 
     // Auto-inject clearMemory parameter when memory is configured,
@@ -517,10 +542,16 @@ pub fn generate_pipeline_resources(on_config: &Option<OnConfig>) -> Result<Strin
     let mut yaml = String::from("pipelines:\n");
 
     yaml.push_str(&format!("    - pipeline: {}\n", resource_id));
-    yaml.push_str(&format!("      source: '{}'\n", pipeline.name.replace('\'', "''")));
+    yaml.push_str(&format!(
+        "      source: '{}'\n",
+        pipeline.name.replace('\'', "''")
+    ));
 
     if let Some(project) = &pipeline.project {
-        yaml.push_str(&format!("      project: '{}'\n", project.replace('\'', "''")));
+        yaml.push_str(&format!(
+            "      project: '{}'\n",
+            project.replace('\'', "''")
+        ));
     }
 
     // If no branches specified, trigger on any branch
@@ -589,7 +620,13 @@ pub fn lower_repos(items: &[ReposItem]) -> Result<(Vec<Repository>, Vec<String>)
         let (name, alias, repo_type, repo_ref, do_checkout) = match item {
             ReposItem::Shorthand(s) => {
                 let (alias, name) = parse_shorthand(s)?;
-                (name, alias, "git".to_string(), "refs/heads/main".to_string(), true)
+                (
+                    name,
+                    alias,
+                    "git".to_string(),
+                    "refs/heads/main".to_string(),
+                    true,
+                )
             }
             ReposItem::Full(entry) => {
                 let alias = match &entry.alias {
@@ -663,11 +700,7 @@ fn parse_shorthand(s: &str) -> Result<(String, String)> {
 fn derive_alias(name: &str) -> Result<String> {
     // Trim trailing slashes to handle "org/repo/" gracefully
     let trimmed = name.trim_end_matches('/');
-    let alias = trimmed
-        .rsplit('/')
-        .next()
-        .unwrap_or(trimmed)
-        .to_string();
+    let alias = trimmed.rsplit('/').next().unwrap_or(trimmed).to_string();
     if alias.is_empty() {
         anyhow::bail!(
             "Cannot derive a repository alias from '{}'. \
@@ -736,7 +769,11 @@ pub fn validate_checkout_self_collision(
         };
         // `rsplit('/').next()` on any &str always yields `Some` — even for
         // names without a slash the whole string is returned.
-        let last_segment = repo.name.rsplit('/').next().expect("rsplit always yields one item");
+        let last_segment = repo
+            .name
+            .rsplit('/')
+            .next()
+            .expect("rsplit always yields one item");
         // ADO is case-insensitive on Windows agents and case-sensitive on
         // Linux. Use a case-insensitive comparison so the collision is
         // caught regardless of agent OS — the resulting pipeline would
@@ -1010,7 +1047,10 @@ const ADO_BUILD_ID_SUFFIX: &str = "-$(BuildID)";
 fn sanitize_pipeline_agent_name(name: &str) -> String {
     let mut sanitized = String::with_capacity(name.len());
     for ch in name.trim().chars() {
-        if matches!(ch, '"' | '/' | ':' | '<' | '>' | '\\' | '|' | '?' | '@' | '*') {
+        if matches!(
+            ch,
+            '"' | '/' | ':' | '<' | '>' | '\\' | '|' | '?' | '@' | '*'
+        ) {
             continue;
         }
         sanitized.push(ch);
@@ -1149,7 +1189,10 @@ pub fn generate_stage_prefix(name: &str) -> String {
     // Warn if any Unicode alphanumeric characters are present — they will be
     // treated as word-separator boundaries and stripped from the output, which
     // may surprise users whose agent name starts with a non-ASCII letter.
-    if name.chars().any(|c| c.is_alphanumeric() && !c.is_ascii_alphanumeric()) {
+    if name
+        .chars()
+        .any(|c| c.is_alphanumeric() && !c.is_ascii_alphanumeric())
+    {
         log::warn!(
             "Agent name '{}' contains non-ASCII alphanumeric characters; \
              these are dropped from the ADO job-name prefix because ADO identifiers \
@@ -1216,22 +1259,49 @@ pub const HEADER_MARKER: &str = "# @ado-aw";
 /// - A human-readable "do not edit" warning
 /// - A machine-readable `@ado-aw` marker with source path and compiler version
 ///
-/// The source path is the input path as provided to the compiler (e.g., `agents/my-agent.md`,
-/// `.azdo/pipelines/review.md`, or any other location the user chose). Path separators
-/// are normalized to forward slashes for cross-platform consistency.
-/// Normalise a source markdown path for embedding in generated YAML.
+/// The source path is stored as a relative path so that `--source` filters
+/// and auto-discovery recompile work regardless of how the user invoked the
+/// compiler (relative path, absolute path, etc.). Path separators are
+/// normalized to forward slashes for cross-platform consistency.
 ///
-/// Applies the same transformations the `# @ado-aw` comment header uses
-/// (forward-slash separators, newline/CR stripping, `"` escaping, leading
-/// `./` collapsed). Shared between [`generate_header_comment`] and the
-/// always-on `ado-aw-marker` compiler extension so both surfaces agree on
-/// the canonical form of a source path.
+/// Normalise a source markdown path into the canonical form embedded
+/// in the `# ado-aw-metadata:` JSON marker and the `# @ado-aw` YAML
+/// header comment.
+///
+/// Applies forward-slash separator normalisation, strips CR/LF, and
+/// collapses any leading `./`. Does **not** escape `"` — JSON encoding
+/// is the caller's job (`serde_json::json!` handles it for the marker;
+/// [`generate_header_comment`] escapes for its YAML comment surface).
+/// Previously this also escaped `"`, but that produced a literal `\"`
+/// inside the marker JSON (serde_json then escaped the leading
+/// backslash on top, storing a spurious extra backslash on every
+/// round-trip). The header comment now applies its own escape inline.
+///
+/// Shared between [`generate_header_comment`], the always-on
+/// `ado-aw-marker` compiler extension, and the `--source` filter in
+/// Preview-driven discovery so all surfaces agree on the canonical
+/// form of a source path.
+///
+/// Absolute inputs (e.g. `ado-aw compile /repo/agents/foo.md`) are
+/// converted to a path relative to the current working directory so that
+/// `--source agents/foo.md` filters can match them. When the absolute path
+/// is not under the CWD (unusual), falls back to the original input rather
+/// than silently producing a wrong value.
 pub fn normalize_source_path(input_path: &std::path::Path) -> String {
-    let mut source_path = input_path
+    let relative: std::borrow::Cow<std::path::Path> = if input_path.is_absolute() {
+        std::env::current_dir()
+            .ok()
+            .and_then(|cwd| input_path.strip_prefix(&cwd).ok().map(|p| p.to_path_buf()))
+            .map(std::borrow::Cow::Owned)
+            .unwrap_or(std::borrow::Cow::Borrowed(input_path))
+    } else {
+        std::borrow::Cow::Borrowed(input_path)
+    };
+
+    let mut source_path = relative
         .to_string_lossy()
         .replace('\\', "/")
-        .replace(['\n', '\r'], "")
-        .replace('"', "\\\"");
+        .replace(['\n', '\r'], "");
 
     // Strip redundant leading "./" prefixes to prevent accumulation when
     // compile_all_pipelines re-joins paths through Path::new(".").join(source).
@@ -1244,7 +1314,11 @@ pub fn normalize_source_path(input_path: &std::path::Path) -> String {
 
 pub fn generate_header_comment(input_path: &std::path::Path) -> String {
     let version = env!("CARGO_PKG_VERSION");
-    let source_path = normalize_source_path(input_path);
+    // The header comment embeds the source inside double quotes
+    // (`source="…"`); escape `"` so legacy `parse_header_line` consumers
+    // can still recover the original. The JSON marker does not need
+    // this — serde_json escapes JSON-meaningful chars on its own.
+    let source_path = normalize_source_path(input_path).replace('"', "\\\"");
 
     format!(
         "# This file is auto-generated by ado-aw. Do not edit manually.\n\
@@ -1400,10 +1474,7 @@ pub fn validate_ado_aw_debug_config(front_matter: &FrontMatter) -> Result<()> {
         )?;
     }
     for label in &ci.labels {
-        crate::validate::reject_pipeline_injection(
-            label,
-            "ado-aw-debug.create-issue.labels",
-        )?;
+        crate::validate::reject_pipeline_injection(label, "ado-aw-debug.create-issue.labels")?;
     }
     for label in &ci.allowed_labels {
         crate::validate::reject_pipeline_injection(
@@ -1611,7 +1682,10 @@ pub fn generate_acquire_ado_token(service_connection: Option<&str>, variable_nam
                 r#"  displayName: "Acquire ADO token ({variable_name})""#
             ));
             lines.push("  inputs:".to_string());
-            lines.push(format!("    azureSubscription: '{}'", sc.replace('\'', "''")));
+            lines.push(format!(
+                "    azureSubscription: '{}'",
+                sc.replace('\'', "''")
+            ));
             lines.push("    scriptType: 'bash'".to_string());
             lines.push("    scriptLocation: 'inlineScript'".to_string());
             lines.push("    addSpnToEnvironment: true".to_string());
@@ -1977,9 +2051,7 @@ pub fn validate_resolve_pr_thread_statuses(front_matter: &FrontMatter) -> Result
 /// `validate_ado_aw_debug_config` with a more specific error message;
 /// this validator skips them so the operator gets that better message.
 pub fn validate_safe_outputs_keys(front_matter: &FrontMatter) -> Result<()> {
-    use crate::safeoutputs::{
-        ALL_KNOWN_SAFE_OUTPUTS, DEBUG_ONLY_TOOLS, NON_MCP_SAFE_OUTPUT_KEYS,
-    };
+    use crate::safeoutputs::{ALL_KNOWN_SAFE_OUTPUTS, DEBUG_ONLY_TOOLS, NON_MCP_SAFE_OUTPUT_KEYS};
 
     let mut unknown: Vec<(String, Vec<&'static str>)> = Vec::new();
     let mut invalid_names: Vec<String> = Vec::new();
@@ -2092,7 +2164,10 @@ pub fn generate_setup_job(
         .unwrap_or(false);
     let has_gate = has_pr_gate || has_pipeline_gate;
 
-    // Collect setup_steps from ALL extensions
+    // Collect setup_steps from ALL extensions. Each extension that needs
+    // the ado-script bundle in the Setup job returns its own install +
+    // download steps inline (see `AdoScriptExtension::setup_steps`) — no
+    // separate shared-asset prepend is needed.
     let mut ext_setup_steps: Vec<String> = Vec::new();
     for ext in extensions {
         ext_setup_steps.extend(ext.setup_steps(ctx)?);
@@ -2119,10 +2194,7 @@ pub fn generate_setup_job(
                 (false, true) => "eq(variables['pipelineGate.SHOULD_RUN'], 'true')".to_string(),
                 (false, false) => unreachable!(),
             };
-            let conditioned = super::pr_filters::add_condition_to_steps(
-                setup_steps,
-                &condition,
-            );
+            let conditioned = super::pr_filters::add_condition_to_steps(setup_steps, &condition);
             steps_parts.push(format_steps_yaml_indented(&conditioned, 0));
         } else {
             steps_parts.push(format_steps_yaml_indented(setup_steps, 0));
@@ -2160,10 +2232,7 @@ pub fn generate_setup_job(
 }
 
 /// Generate the teardown job YAML
-pub fn generate_teardown_job(
-    teardown_steps: &[serde_yaml::Value],
-    pool: &str,
-) -> String {
+pub fn generate_teardown_job(teardown_steps: &[serde_yaml::Value], pool: &str) -> String {
     if teardown_steps.is_empty() {
         return String::new();
     }
@@ -2190,12 +2259,13 @@ pub fn generate_teardown_job(
 pub fn generate_prepare_steps(
     prepare_steps: &[serde_yaml::Value],
     extensions: &[super::extensions::Extension],
+    ctx: &CompileContext,
 ) -> Result<String> {
     let mut parts = Vec::new();
 
     // Extension prepare steps and prompt supplements (runtimes + first-party tools)
     for ext in extensions {
-        for step in ext.prepare_steps() {
+        for step in ext.prepare_steps(ctx) {
             parts.push(step);
         }
         if let Some(prompt) = ext.prompt_supplement() {
@@ -2238,11 +2308,7 @@ pub fn generate_agentic_depends_on(
         return String::new();
     }
 
-    let depends = if has_setup {
-        "dependsOn: Setup\n"
-    } else {
-        ""
-    };
+    let depends = if has_setup { "dependsOn: Setup\n" } else { "" };
 
     if has_gate || !expressions.is_empty() {
         let mut parts = Vec::new();
@@ -2302,16 +2368,27 @@ where
 
 /// Validate a container-based MCP entry and emit any warnings.
 fn validate_stdio_mcp(name: &str, container: &str, opts: &crate::compile::types::McpOptions) {
-    for w in validate::validate_container_image(container, name) { eprintln!("{}", w); }
-    for mount in &opts.mounts {
-        for w in validate::validate_mount_source(mount, name) { eprintln!("{}", w); }
+    for w in validate::validate_container_image(container, name) {
+        eprintln!("{}", w);
     }
-    for w in validate::validate_docker_args(&opts.args, name) { eprintln!("{}", w); }
-    for w in validate::warn_potential_secrets(name, &opts.env, &opts.headers) { eprintln!("{}", w); }
+    for mount in &opts.mounts {
+        for w in validate::validate_mount_source(mount, name) {
+            eprintln!("{}", w);
+        }
+    }
+    for w in validate::validate_docker_args(&opts.args, name) {
+        eprintln!("{}", w);
+    }
+    for w in validate::warn_potential_secrets(name, &opts.env, &opts.headers) {
+        eprintln!("{}", w);
+    }
 }
 
 /// Build a stdio `McpgServerConfig` from a container-based MCP options block.
-fn build_stdio_mcpg_server(container: &str, opts: &crate::compile::types::McpOptions) -> McpgServerConfig {
+fn build_stdio_mcpg_server(
+    container: &str,
+    opts: &crate::compile::types::McpOptions,
+) -> McpgServerConfig {
     McpgServerConfig {
         server_type: "stdio".to_string(),
         container: Some(container.to_string()),
@@ -2364,7 +2441,9 @@ fn try_add_user_mcp(
     // Leading dots are rejected to prevent path normalization issues (e.g., ".." → parent).
     if name.is_empty()
         || name.starts_with('.')
-        || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
     {
         anyhow::bail!(
             "MCP server name '{}' is invalid — must be non-empty, not start with '.', and contain only ASCII alphanumerics, hyphens, underscores, and dots",
@@ -2404,8 +2483,12 @@ fn try_add_user_mcp(
         servers.insert(name.to_string(), build_stdio_mcpg_server(container, opts));
     } else if let Some(url) = &opts.url {
         // HTTP-based MCP (remote server)
-        for w in validate::validate_mcp_url(url, name) { eprintln!("{}", w); }
-        for w in validate::warn_potential_secrets(name, &HashMap::new(), &opts.headers) { eprintln!("{}", w); }
+        for w in validate::validate_mcp_url(url, name) {
+            eprintln!("{}", w);
+        }
+        for w in validate::warn_potential_secrets(name, &HashMap::new(), &opts.headers) {
+            eprintln!("{}", w);
+        }
         if !opts.env.is_empty() {
             eprintln!(
                 "Warning: MCP '{}': env vars are not supported for HTTP MCPs — they will be ignored. \
@@ -2502,7 +2585,8 @@ pub fn generate_mcpg_docker_env(
             if !validate::is_valid_env_var_name(var_name) {
                 log::warn!(
                     "MCP '{}': skipping invalid env var name '{}' — must match [A-Za-z_][A-Za-z0-9_]*",
-                    mcp_name, var_name
+                    mcp_name,
+                    var_name
                 );
                 continue;
             }
@@ -2534,9 +2618,7 @@ pub fn generate_mcpg_docker_env(
 ///
 /// Returns YAML `env:` entries (e.g., `SC_READ_TOKEN: $(SC_READ_TOKEN)`),
 /// or an empty string if no mappings are needed.
-pub fn generate_mcpg_step_env(
-    extensions: &[super::extensions::Extension],
-) -> String {
+pub fn generate_mcpg_step_env(extensions: &[super::extensions::Extension]) -> String {
     let mut entries: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
@@ -2793,7 +2875,9 @@ pub fn collect_awf_path_prepends(extensions: &[super::extensions::Extension]) ->
 /// as YAML `KEY: "value"` lines for injection into the `{{ engine_env }}` block.
 ///
 /// Returns an empty string if no extensions declare env vars.
-pub fn collect_agent_env_vars(extensions: &[super::extensions::Extension]) -> anyhow::Result<String> {
+pub fn collect_agent_env_vars(
+    extensions: &[super::extensions::Extension],
+) -> anyhow::Result<String> {
     use crate::engine::BLOCKED_ENV_KEYS;
     use crate::validate;
     use std::collections::HashSet;
@@ -2814,7 +2898,10 @@ pub fn collect_agent_env_vars(extensions: &[super::extensions::Extension]) -> an
             }
 
             // Validate key is not blocked
-            if BLOCKED_ENV_KEYS.iter().any(|blocked| key.eq_ignore_ascii_case(blocked)) {
+            if BLOCKED_ENV_KEYS
+                .iter()
+                .any(|blocked| key.eq_ignore_ascii_case(blocked))
+            {
                 anyhow::bail!(
                     "Extension '{}' declares agent env var '{}' which conflicts with a \
                      compiler-controlled environment variable.",
@@ -2974,7 +3061,9 @@ pub async fn compile_shared(
         "/tmp/awf-tools/threat-analysis-prompt.md",
         None,
     )?;
-    let engine_install_steps = ctx.engine.install_steps(&front_matter.engine, &front_matter.target, ctx.ado_org())?;
+    let engine_install_steps =
+        ctx.engine
+            .install_steps(&front_matter.engine, &front_matter.target, ctx.ado_org())?;
 
     // 5. Compute workspace, working directory, triggers
     let effective_workspace = compute_effective_workspace(
@@ -3008,7 +3097,27 @@ pub async fn compile_shared(
     let has_pipeline_filters = pipeline_filters
         .map(|f| !super::filter_ir::lower_pipeline_filters(f).is_empty())
         .unwrap_or(false);
-    let setup_job = generate_setup_job(&front_matter.setup, &pool, pr_filters, pipeline_filters, extensions, ctx)?;
+    // Skip generating the shared setup_job when the caller has already
+    // bound `{{ setup_job }}` via `extra_replacements` (1ES does this so
+    // it can emit a 1ES-shaped Setup job). This avoids invoking every
+    // extension's `setup_steps()` twice when the result would be
+    // discarded anyway.
+    let setup_job_already_bound = config
+        .extra_replacements
+        .iter()
+        .any(|(k, _)| k == "{{ setup_job }}");
+    let setup_job = if setup_job_already_bound {
+        String::new()
+    } else {
+        generate_setup_job(
+            &front_matter.setup,
+            &pool,
+            pr_filters,
+            pipeline_filters,
+            extensions,
+            ctx,
+        )?
+    };
     let teardown_job = generate_teardown_job(&front_matter.teardown, &pool);
     let has_memory = front_matter
         .tools
@@ -3017,7 +3126,7 @@ pub async fn compile_shared(
         .is_some_and(|cm| cm.is_enabled());
     let parameters = build_parameters(&front_matter.parameters, has_memory);
     let parameters_yaml = generate_parameters(&parameters)?;
-    let prepare_steps = generate_prepare_steps(&front_matter.steps, extensions)?;
+    let prepare_steps = generate_prepare_steps(&front_matter.steps, extensions, ctx)?;
     let finalize_steps = generate_finalize_steps(&front_matter.post_steps);
     let pr_expression = pr_filters.and_then(|f| f.expression.as_deref());
     let pipeline_expression = pipeline_filters.and_then(|f| f.expression.as_deref());
@@ -3114,9 +3223,93 @@ pub async fn compile_shared(
     validate_ado_aw_debug_config(front_matter)?;
 
     // 11. Threat analysis prompt
+    //
+    // The threat-analysis prompt is tooling-shipped (compiled into the
+    // ado-aw binary via `include_str!`), so it's always inlined into the
+    // emitted YAML regardless of `inlined-imports`. The runtime-import
+    // mechanism is reserved for the agent body, where edit-without-
+    // recompile is the actual motivating UX win. This mirrors gh-aw's
+    // model, where `threat_detection.md` ships with the setup action and
+    // is read directly from disk by `setup_threat_detection.cjs` — no
+    // runtime-import marker is involved.
     let threat_analysis_prompt = include_str!("../data/threat-analysis.md");
-    let template = replace_with_indent(
-        &config.template,
+    // The agent body uses runtime imports when `inlined-imports: false`
+    // (the default): the heredoc writes a literal `{{#runtime-import …}}`
+    // marker, and `AdoScriptExtension::prepare_steps()` injects the
+    // resolver step into the existing `{{ prepare_steps }}` block in the
+    // Agent job (same VM as the heredoc, so /tmp is shared).
+    let agent_content_value: String = if front_matter.inlined_imports {
+        let base_dir = input_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        crate::compile::extensions::ado_script::resolve_imports_inline(markdown_body, base_dir)?
+    } else {
+        // Build the trigger-repo-relative marker path (i.e. relative to
+        // `$(Build.SourcesDirectory)`). For the default no-checkout
+        // case the relative form is `agents/foo.md`; for multi-repo
+        // checkout it is `$(Build.Repository.Name)/agents/foo.md`
+        // (the ADO variable substitutes to a directory name at runtime,
+        // so the final string is still a relative path with no leading
+        // `/`). The resolver step passes `--base "$(Build.SourcesDirectory)"`
+        // to `import.js`, which rejects absolute paths — see
+        // `AdoScriptExtension::resolver_step` and `import.js`. This
+        // mirrors the compile-time `resolve_imports_inline` policy
+        // (relative-only) and matches the same defence-in-depth
+        // posture on the runtime side.
+        let absolute_marker_path =
+            source_path.replace("{{ trigger_repo_directory }}", &trigger_repo_directory);
+        let agent_marker_path = absolute_marker_path
+            .strip_prefix("$(Build.SourcesDirectory)/")
+            .unwrap_or(&absolute_marker_path)
+            .to_string();
+        // The runtime resolver (`scripts/ado-script/src/import/index.ts`)
+        // matches marker bodies with `[^\s}]+`, which truncates at the
+        // first whitespace or `}` character. Reject both at compile
+        // time so a malformed marker can never reach the runtime:
+        //
+        //   * Whitespace (e.g. `my agents/pipeline.md`) → the regex
+        //     truncates at the space, fails the existence check, and
+        //     surfaces a misleading error (or, worse, leaves an
+        //     optional marker unexpanded).
+        //   * `}` in the path (e.g. `agents/fo}o.md`) → the regex
+        //     stops at `}`, then expects `\s*\}\}` to follow but
+        //     finds `}o.md}}` — the regex fails to match entirely
+        //     and the marker survives as literal text in the
+        //     agent's prompt.
+        //
+        // Both guards mirror the same checks in `resolve_imports_inline`
+        // (the `inlined-imports: true` path), so authoring the same
+        // path triggers the same compile-time error in either mode.
+        anyhow::ensure!(
+            !agent_marker_path.chars().any(char::is_whitespace),
+            "runtime-import: agent source path '{}' contains whitespace, which is not supported by the runtime resolver (rename the path to remove spaces, or set `inlined-imports: true`)",
+            agent_marker_path
+        );
+        anyhow::ensure!(
+            !agent_marker_path.contains('}'),
+            "runtime-import: agent source path '{}' contains '}}', which is not supported by the runtime resolver (rename the path to remove '}}' characters, or set `inlined-imports: true`)",
+            agent_marker_path
+        );
+        format!("{{{{#runtime-import {}}}}}", agent_marker_path)
+    };
+
+    let CompileConfig {
+        mut template,
+        extra_replacements,
+        skip_integrity: config_skip_integrity,
+        debug_pipeline,
+        skip_header,
+        ..
+    } = config;
+
+    // 11.5 Inline the threat-analysis prompt FIRST, before the shared
+    //      replacement fold. The threat prompt content itself contains
+    //      `{{ source_path }}` and other markers that the fold below
+    //      resolves — so the prompt must be inlined here, before that
+    //      fold runs, otherwise `{{ source_path }}` inside the prompt
+    //      survives into the emitted YAML.
+    template = replace_with_indent(
+        &template,
         "{{ threat_analysis_prompt }}",
         threat_analysis_prompt,
     );
@@ -3124,8 +3317,7 @@ pub async fn compile_shared(
     // 12. Debug pipeline replacements (MUST run before extra_replacements
     //     because the probe step content contains {{ mcpg_port }} which is
     //     resolved by extra_replacements).
-    let debug_replacements = generate_debug_pipeline_replacements(config.debug_pipeline);
-    let mut template = template;
+    let debug_replacements = generate_debug_pipeline_replacements(debug_pipeline);
     for (placeholder, replacement) in &debug_replacements {
         template = replace_with_indent(&template, placeholder, replacement);
     }
@@ -3133,13 +3325,13 @@ pub async fn compile_shared(
     // 13. Apply extra replacements (target-specific overrides like {{ mcpg_port }})
     // These run before shared replacements so targets can override shared
     // markers like {{ setup_job }} and {{ teardown_job }}.
-    for (placeholder, replacement) in &config.extra_replacements {
+    for (placeholder, replacement) in &extra_replacements {
         template = replace_with_indent(&template, placeholder, replacement);
     }
 
     // 14. Shared replacements
     let compiler_version = env!("CARGO_PKG_VERSION");
-    let skip_integrity = config.skip_integrity
+    let skip_integrity = config_skip_integrity
         || front_matter
             .ado_aw_debug
             .as_ref()
@@ -3184,7 +3376,7 @@ pub async fn compile_shared(
         ("{{ trigger_repo_directory }}", &trigger_repo_directory),
         ("{{ working_directory }}", &working_directory),
         ("{{ workspace }}", &working_directory),
-        ("{{ agent_content }}", markdown_body),
+        ("{{ agent_content }}", &agent_content_value),
         ("{{ acquire_ado_token }}", &acquire_read_token),
         ("{{ engine_env }}", &engine_env),
         ("{{ engine_log_dir }}", engine_log_dir),
@@ -3199,7 +3391,7 @@ pub async fn compile_shared(
         });
 
     // 15. Prepend header (unless the caller will prepend its own)
-    if config.skip_header {
+    if skip_header {
         Ok(pipeline_yaml)
     } else {
         let header = generate_header_comment(input_path);
@@ -3294,8 +3486,8 @@ pub async fn compile_template_target(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compile::types::{McpConfig, McpOptions, PoolConfigFull, Repository};
     use crate::compile::extensions::{CompileContext, collect_extensions};
+    use crate::compile::types::{McpConfig, McpOptions, PoolConfigFull, Repository};
     use std::collections::HashMap;
 
     /// Helper: create a minimal FrontMatter by parsing YAML
@@ -3335,7 +3527,12 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
         atomic_write(&path, "new").await.unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o640, "expected mode 0o640, got {:o}", mode & 0o777);
+        assert_eq!(
+            mode & 0o777,
+            0o640,
+            "expected mode 0o640, got {:o}",
+            mode & 0o777
+        );
     }
 
     #[cfg(unix)]
@@ -3440,7 +3637,10 @@ mod tests {
         // Find the closing fence in both and compare the suffix.
         let orig_suffix = &original[original.find("\n---\n").unwrap()..];
         let recon_suffix = &reconstructed[reconstructed.find("\n---\n").unwrap()..];
-        assert_eq!(orig_suffix, recon_suffix, "body region must be byte-identical");
+        assert_eq!(
+            orig_suffix, recon_suffix,
+            "body region must be byte-identical"
+        );
     }
 
     #[test]
@@ -3458,13 +3658,6 @@ mod tests {
             &reconstructed[..20.min(reconstructed.len())]
         );
         assert!(reconstructed.ends_with("---\nbody\n"));
-    }
-
-    #[test]
-    fn parse_markdown_detailed_allows_leading_whitespace() {
-        let original = "\n  \n---\nname: x\ndescription: y\n---\nbody\n";
-        let parsed = parse_markdown_detailed(original).unwrap();
-        assert_eq!(parsed.front_matter.name, "x");
     }
 
     #[test]
@@ -3577,12 +3770,8 @@ mod tests {
     #[test]
     fn test_workspace_explicit_alias_with_traversal_fails() {
         let checkouts = vec!["../sibling".to_string()];
-        let err = compute_effective_workspace(
-            &Some("../sibling".to_string()),
-            &checkouts,
-            "agent",
-        )
-        .unwrap_err();
+        let err = compute_effective_workspace(&Some("../sibling".to_string()), &checkouts, "agent")
+            .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("not a safe path"), "msg: {msg}");
     }
@@ -3590,12 +3779,8 @@ mod tests {
     #[test]
     fn test_workspace_explicit_alias_with_slash_fails() {
         let checkouts = vec!["foo/bar".to_string()];
-        let err = compute_effective_workspace(
-            &Some("foo/bar".to_string()),
-            &checkouts,
-            "agent",
-        )
-        .unwrap_err();
+        let err = compute_effective_workspace(&Some("foo/bar".to_string()), &checkouts, "agent")
+            .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("not a safe path"), "msg: {msg}");
     }
@@ -3603,12 +3788,8 @@ mod tests {
     #[test]
     fn test_workspace_explicit_alias_resolves_to_repo_subdir() {
         let checkouts = vec!["exp23-a7-nw".to_string(), "another-repo".to_string()];
-        let ws = compute_effective_workspace(
-            &Some("exp23-a7-nw".to_string()),
-            &checkouts,
-            "agent",
-        )
-        .unwrap();
+        let ws = compute_effective_workspace(&Some("exp23-a7-nw".to_string()), &checkouts, "agent")
+            .unwrap();
         assert_eq!(
             generate_working_directory(&ws),
             "$(Build.SourcesDirectory)/exp23-a7-nw"
@@ -3618,12 +3799,9 @@ mod tests {
     #[test]
     fn test_workspace_explicit_alias_not_in_checkout_fails() {
         let checkouts = vec!["other-repo".to_string()];
-        let err = compute_effective_workspace(
-            &Some("exp23-a7-nw".to_string()),
-            &checkouts,
-            "agent",
-        )
-        .unwrap_err();
+        let err =
+            compute_effective_workspace(&Some("exp23-a7-nw".to_string()), &checkouts, "agent")
+                .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("exp23-a7-nw"), "msg: {msg}");
         assert!(msg.contains("does not match"), "msg: {msg}");
@@ -3631,9 +3809,8 @@ mod tests {
 
     #[test]
     fn test_workspace_explicit_alias_no_checkouts_fails() {
-        let err =
-            compute_effective_workspace(&Some("exp23-a7-nw".to_string()), &[], "agent")
-                .unwrap_err();
+        let err = compute_effective_workspace(&Some("exp23-a7-nw".to_string()), &[], "agent")
+            .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("exp23-a7-nw"), "msg: {msg}");
         assert!(
@@ -3720,8 +3897,7 @@ mod tests {
             repo_ref: "refs/heads/main".to_string(),
         }];
         let checkout = vec!["my-repo".to_string()];
-        let err =
-            validate_checkout_self_collision(&repos, &checkout, Some("my-repo")).unwrap_err();
+        let err = validate_checkout_self_collision(&repos, &checkout, Some("my-repo")).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("'my-repo'"), "msg: {msg}");
         assert!(msg.contains("same"), "msg: {msg}");
@@ -3753,8 +3929,7 @@ mod tests {
             repo_ref: "refs/heads/main".to_string(),
         }];
         let checkout = vec!["my-repo".to_string()];
-        let err =
-            validate_checkout_self_collision(&repos, &checkout, Some("my-repo")).unwrap_err();
+        let err = validate_checkout_self_collision(&repos, &checkout, Some("my-repo")).unwrap_err();
         assert!(err.to_string().contains("same"));
     }
 
@@ -3795,9 +3970,18 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
-        assert!(params.contains("--allow-all-tools"), "wildcard bash should emit --allow-all-tools");
-        assert!(!params.contains("--allow-tool"), "no individual --allow-tool flags with --allow-all-tools");
+        let params = CompileContext::for_test(&fm)
+            .engine
+            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
+            .unwrap();
+        assert!(
+            params.contains("--allow-all-tools"),
+            "wildcard bash should emit --allow-all-tools"
+        );
+        assert!(
+            !params.contains("--allow-tool"),
+            "no individual --allow-tool flags with --allow-all-tools"
+        );
     }
 
     #[test]
@@ -3809,9 +3993,18 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
-        assert!(params.contains("--allow-all-tools"), "\"*\" should behave same as \":*\"");
-        assert!(!params.contains("--allow-tool"), "no individual --allow-tool flags with --allow-all-tools");
+        let params = CompileContext::for_test(&fm)
+            .engine
+            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
+            .unwrap();
+        assert!(
+            params.contains("--allow-all-tools"),
+            "\"*\" should behave same as \":*\""
+        );
+        assert!(
+            !params.contains("--allow-tool"),
+            "no individual --allow-tool flags with --allow-all-tools"
+        );
     }
 
     #[test]
@@ -3823,17 +4016,32 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm)
+            .engine
+            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
+            .unwrap();
         assert!(!params.contains("shell("));
     }
 
     #[test]
     fn test_engine_args_allow_all_paths_when_edit_enabled() {
         let fm = minimal_front_matter(); // edit defaults to true, bash defaults to wildcard
-        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
-        assert!(params.contains("--allow-all-paths"), "edit enabled (default) should emit --allow-all-paths");
-        assert!(params.contains("--allow-all-tools"), "default (no bash) should emit --allow-all-tools");
-        assert!(!params.contains("--allow-tool"), "no individual --allow-tool flags with --allow-all-tools");
+        let params = CompileContext::for_test(&fm)
+            .engine
+            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
+            .unwrap();
+        assert!(
+            params.contains("--allow-all-paths"),
+            "edit enabled (default) should emit --allow-all-paths"
+        );
+        assert!(
+            params.contains("--allow-all-tools"),
+            "default (no bash) should emit --allow-all-tools"
+        );
+        assert!(
+            !params.contains("--allow-tool"),
+            "no individual --allow-tool flags with --allow-all-tools"
+        );
     }
 
     #[test]
@@ -3845,9 +4053,18 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
-        assert!(!params.contains("--allow-all-paths"), "edit disabled should NOT emit --allow-all-paths");
-        assert!(!params.contains("--allow-tool write"), "edit disabled should NOT emit --allow-tool write");
+        let params = CompileContext::for_test(&fm)
+            .engine
+            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
+            .unwrap();
+        assert!(
+            !params.contains("--allow-all-paths"),
+            "edit disabled should NOT emit --allow-all-paths"
+        );
+        assert!(
+            !params.contains("--allow-tool write"),
+            "edit disabled should NOT emit --allow-tool write"
+        );
     }
 
     #[test]
@@ -3859,10 +4076,22 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
-        assert!(params.contains("--allow-all-tools"), "wildcard bash should emit --allow-all-tools");
-        assert!(params.contains("--allow-all-paths"), "edit enabled should still emit --allow-all-paths");
-        assert!(!params.contains("--allow-tool"), "no individual --allow-tool flags");
+        let params = CompileContext::for_test(&fm)
+            .engine
+            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
+            .unwrap();
+        assert!(
+            params.contains("--allow-all-tools"),
+            "wildcard bash should emit --allow-all-tools"
+        );
+        assert!(
+            params.contains("--allow-all-paths"),
+            "edit enabled should still emit --allow-all-paths"
+        );
+        assert!(
+            !params.contains("--allow-tool"),
+            "no individual --allow-tool flags"
+        );
     }
 
     #[test]
@@ -3880,12 +4109,27 @@ mod tests {
             node: None,
             dotnet: None,
         });
-        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
-        assert!(params.contains("shell(lean)"), "lean command should be allowed");
-        assert!(params.contains("shell(lake)"), "lake command should be allowed");
-        assert!(params.contains("shell(elan)"), "elan command should be allowed");
+        let params = CompileContext::for_test(&fm)
+            .engine
+            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
+            .unwrap();
+        assert!(
+            params.contains("shell(lean)"),
+            "lean command should be allowed"
+        );
+        assert!(
+            params.contains("shell(lake)"),
+            "lake command should be allowed"
+        );
+        assert!(
+            params.contains("shell(elan)"),
+            "elan command should be allowed"
+        );
         // Explicit bash commands should still be present
-        assert!(params.contains("shell(cat)"), "explicit commands should remain");
+        assert!(
+            params.contains("shell(cat)"),
+            "explicit commands should remain"
+        );
     }
 
     #[test]
@@ -3903,10 +4147,19 @@ mod tests {
             node: None,
             dotnet: None,
         });
-        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
-        assert!(params.contains("--allow-all-tools"), "wildcard should use --allow-all-tools");
+        let params = CompileContext::for_test(&fm)
+            .engine
+            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
+            .unwrap();
+        assert!(
+            params.contains("--allow-all-tools"),
+            "wildcard should use --allow-all-tools"
+        );
         // Should NOT add individual tool flags when --allow-all-tools is active
-        assert!(!params.contains("--allow-tool"), "no individual tool flags with --allow-all-tools");
+        assert!(
+            !params.contains("--allow-tool"),
+            "no individual tool flags with --allow-all-tools"
+        );
     }
 
     #[test]
@@ -3914,12 +4167,15 @@ mod tests {
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "my-tool".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("node:20-slim".to_string()),
                 ..Default::default()
-            }),
+            })),
         );
-        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm)
+            .engine
+            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
+            .unwrap();
         assert!(
             !params.contains("--allow-tool my-tool"),
             "default (all-tools) mode should not emit individual --allow-tool for MCPs"
@@ -3937,13 +4193,19 @@ mod tests {
         });
         fm.mcp_servers.insert(
             "my-tool".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("node:20-slim".to_string()),
                 ..Default::default()
-            }),
+            })),
         );
-        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
-        assert!(params.contains("--allow-tool my-tool"), "container MCP should get --allow-tool");
+        let params = CompileContext::for_test(&fm)
+            .engine
+            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
+            .unwrap();
+        assert!(
+            params.contains("--allow-tool my-tool"),
+            "container MCP should get --allow-tool"
+        );
     }
 
     #[test]
@@ -3957,24 +4219,34 @@ mod tests {
         });
         fm.mcp_servers.insert(
             "remote-ado".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 url: Some("https://mcp.dev.azure.com/myorg".to_string()),
                 ..Default::default()
-            }),
+            })),
         );
-        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
-        assert!(params.contains("--allow-tool remote-ado"), "URL MCP should get --allow-tool");
+        let params = CompileContext::for_test(&fm)
+            .engine
+            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
+            .unwrap();
+        assert!(
+            params.contains("--allow-tool remote-ado"),
+            "URL MCP should get --allow-tool"
+        );
     }
 
     #[test]
     fn test_engine_args_no_allow_tool_for_enabled_only_mcp() {
         let mut fm = minimal_front_matter();
-        fm.mcp_servers.insert(
-            "my-tool".to_string(),
-            McpConfig::Enabled(true),
+        fm.mcp_servers
+            .insert("my-tool".to_string(), McpConfig::Enabled(true));
+        let params = CompileContext::for_test(&fm)
+            .engine
+            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
+            .unwrap();
+        assert!(
+            !params.contains("--allow-tool my-tool"),
+            "Enabled(true) with no container/url should not get --allow-tool"
         );
-        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
-        assert!(!params.contains("--allow-tool my-tool"), "Enabled(true) with no container/url should not get --allow-tool");
     }
 
     #[test]
@@ -3988,22 +4260,32 @@ mod tests {
         });
         fm.mcp_servers.insert(
             "z-tool".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("alpine".to_string()),
                 ..Default::default()
-            }),
+            })),
         );
         fm.mcp_servers.insert(
             "a-tool".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("alpine".to_string()),
                 ..Default::default()
-            }),
+            })),
         );
-        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
-        let a_pos = params.find("--allow-tool a-tool").expect("a-tool should be present");
-        let z_pos = params.find("--allow-tool z-tool").expect("z-tool should be present");
-        assert!(a_pos < z_pos, "MCPs should be sorted alphabetically: a-tool before z-tool");
+        let params = CompileContext::for_test(&fm)
+            .engine
+            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
+            .unwrap();
+        let a_pos = params
+            .find("--allow-tool a-tool")
+            .expect("a-tool should be present");
+        let z_pos = params
+            .find("--allow-tool z-tool")
+            .expect("z-tool should be present");
+        assert!(
+            a_pos < z_pos,
+            "MCPs should be sorted alphabetically: a-tool before z-tool"
+        );
     }
 
     #[test]
@@ -4011,7 +4293,10 @@ mod tests {
         let mut fm = minimal_front_matter();
         fm.mcp_servers
             .insert("ado".to_string(), McpConfig::Enabled(true));
-        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm)
+            .engine
+            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
+            .unwrap();
         // Copilot CLI has no built-in MCPs — all MCPs are handled via the MCP firewall
         assert!(!params.contains("--mcp ado"));
     }
@@ -4022,14 +4307,23 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  timeout-minutes: 30\n---\n",
         )
         .unwrap();
-        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
-        assert!(!params.contains("--max-timeout"), "timeout-minutes should not be emitted as a CLI arg");
+        let params = CompileContext::for_test(&fm)
+            .engine
+            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
+            .unwrap();
+        assert!(
+            !params.contains("--max-timeout"),
+            "timeout-minutes should not be emitted as a CLI arg"
+        );
     }
 
     #[test]
     fn test_engine_args_no_max_timeout_when_simple_engine() {
         let fm = minimal_front_matter();
-        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
+        let params = CompileContext::for_test(&fm)
+            .engine
+            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
+            .unwrap();
         assert!(!params.contains("--max-timeout"));
     }
 
@@ -4039,8 +4333,14 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  timeout-minutes: 0\n---\n",
         )
         .unwrap();
-        let params = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm)).unwrap();
-        assert!(!params.contains("--max-timeout"), "timeout-minutes should not be emitted as a CLI arg");
+        let params = CompileContext::for_test(&fm)
+            .engine
+            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
+            .unwrap();
+        assert!(
+            !params.contains("--max-timeout"),
+            "timeout-minutes should not be emitted as a CLI arg"
+        );
     }
 
     #[test]
@@ -4191,10 +4491,7 @@ mod tests {
     fn test_yaml_double_quoted_passes_through_unicode() {
         // Non-ASCII characters pass through as-is — YAML 1.2 supports UTF-8
         // in double-quoted scalars natively.
-        assert_eq!(
-            yaml_double_quoted("résumé — 你好"),
-            r#""résumé — 你好""#
-        );
+        assert_eq!(yaml_double_quoted("résumé — 你好"), r#""résumé — 你好""#);
     }
 
     // ─── generate_pr_trigger ─────────────────────────────────────────────────
@@ -4222,10 +4519,10 @@ mod tests {
                 name: "Build".into(),
                 project: None,
                 branches: vec![],
-            filters: None,
+                filters: None,
             }),
-        pr: None,
-        schedule: None,
+            pr: None,
+            schedule: None,
         });
         let result = generate_pr_trigger(&triggers, false);
         assert!(result.contains("pr: none"));
@@ -4239,10 +4536,10 @@ mod tests {
                 name: "Build".into(),
                 project: None,
                 branches: vec![],
-            filters: None,
+                filters: None,
             }),
-        pr: None,
-        schedule: None,
+            pr: None,
+            schedule: None,
         });
         let result = generate_pr_trigger(&triggers, true);
         assert!(result.contains("pr: none"));
@@ -4274,10 +4571,10 @@ mod tests {
                 name: "Build".into(),
                 project: None,
                 branches: vec![],
-            filters: None,
+                filters: None,
             }),
-        pr: None,
-        schedule: None,
+            pr: None,
+            schedule: None,
         });
         let result = generate_ci_trigger(&triggers, false);
         assert_eq!(result, "trigger: none");
@@ -4290,10 +4587,10 @@ mod tests {
                 name: "Build".into(),
                 project: None,
                 branches: vec![],
-            filters: None,
+                filters: None,
             }),
-        pr: None,
-        schedule: None,
+            pr: None,
+            schedule: None,
         });
         let result = generate_ci_trigger(&triggers, true);
         assert_eq!(result, "trigger: none");
@@ -4309,7 +4606,11 @@ mod tests {
 
     #[test]
     fn test_generate_pipeline_resources_empty_trigger_config() {
-        let triggers = Some(crate::compile::types::OnConfig { schedule: None, pipeline: None, pr: None });
+        let triggers = Some(crate::compile::types::OnConfig {
+            schedule: None,
+            pipeline: None,
+            pr: None,
+        });
         let result = generate_pipeline_resources(&triggers).unwrap();
         assert!(result.is_empty());
     }
@@ -4321,10 +4622,10 @@ mod tests {
                 name: "Build Pipeline".into(),
                 project: Some("OtherProject".into()),
                 branches: vec!["main".into(), "release/*".into()],
-            filters: None,
+                filters: None,
             }),
-        pr: None,
-        schedule: None,
+            pr: None,
+            schedule: None,
         });
         let result = generate_pipeline_resources(&triggers).unwrap();
         assert!(result.contains("source: 'Build Pipeline'"));
@@ -4343,10 +4644,10 @@ mod tests {
                 name: "My Pipeline".into(),
                 project: None,
                 branches: vec![],
-            filters: None,
+                filters: None,
             }),
-        pr: None,
-        schedule: None,
+            pr: None,
+            schedule: None,
         });
         let result = generate_pipeline_resources(&triggers).unwrap();
         assert!(result.contains("source: 'My Pipeline'"));
@@ -4362,10 +4663,10 @@ mod tests {
                 name: "My Build Pipeline".into(),
                 project: None,
                 branches: vec![],
-            filters: None,
+                filters: None,
             }),
-        pr: None,
-        schedule: None,
+            pr: None,
+            schedule: None,
         });
         let result = generate_pipeline_resources(&triggers).unwrap();
         // The pipeline resource ID should be snake_case derived from the name
@@ -4413,6 +4714,34 @@ mod tests {
         assert!(
             header.contains(r#"source="agents/my-agent.md""#),
             "Single ./ prefix should be stripped: {}",
+            header
+        );
+    }
+
+    #[test]
+    fn test_generate_header_comment_absolute_path_under_cwd() {
+        // Build an absolute path by joining CWD with a relative agent path.
+        // generate_header_comment should strip the CWD prefix so the stored
+        // source remains relative (matching what --source filters expect).
+        let cwd = std::env::current_dir().expect("current dir");
+        let abs_path = cwd.join("agents/my-agent.md");
+        let header = generate_header_comment(&abs_path);
+        assert!(
+            header.contains(r#"source="agents/my-agent.md""#),
+            "Absolute path under CWD should be stored as relative: {}",
+            header
+        );
+    }
+
+    #[test]
+    fn test_generate_header_comment_absolute_path_subdir() {
+        // Absolute path that is nested several directories deep under CWD.
+        let cwd = std::env::current_dir().expect("current dir");
+        let abs_path = cwd.join(".azdo/pipelines/review.md");
+        let header = generate_header_comment(&abs_path);
+        assert!(
+            header.contains(r#"source=".azdo/pipelines/review.md""#),
+            "Nested absolute path should be stored as relative: {}",
             header
         );
     }
@@ -4551,12 +4880,8 @@ mod tests {
         // As soon as any additional repo is checked out, ADO places every
         // checked-out repo (including `self`) into a subdirectory named
         // after the repository.
-        let result =
-            generate_trigger_repo_directory(&["exp23-a7-nw".to_string()]);
-        assert_eq!(
-            result,
-            "$(Build.SourcesDirectory)/$(Build.Repository.Name)"
-        );
+        let result = generate_trigger_repo_directory(&["exp23-a7-nw".to_string()]);
+        assert_eq!(result, "$(Build.SourcesDirectory)/$(Build.Repository.Name)");
     }
 
     #[test]
@@ -4567,12 +4892,9 @@ mod tests {
         // (and Stage 3 --source) find the pipeline yaml / agent markdown.
         let checkout = vec!["exp23-a7-nw".to_string()];
         let trigger = generate_trigger_repo_directory(&checkout);
-        let workspace = compute_effective_workspace(
-            &Some("exp23-a7-nw".to_string()),
-            &checkout,
-            "ctf",
-        )
-        .unwrap();
+        let workspace =
+            compute_effective_workspace(&Some("exp23-a7-nw".to_string()), &checkout, "ctf")
+                .unwrap();
         let working_dir = generate_working_directory(&workspace);
 
         assert_eq!(
@@ -4658,11 +4980,23 @@ ado-aw-debug:
         let replacements = generate_debug_pipeline_replacements(false);
         assert_eq!(replacements.len(), 2);
         // mcpg_debug_flags returns `\` for bash line continuation
-        let flags = replacements.iter().find(|(m, _)| m == "{{ mcpg_debug_flags }}").unwrap();
-        assert_eq!(flags.1, "\\", "mcpg_debug_flags should be a bare backslash when disabled");
+        let flags = replacements
+            .iter()
+            .find(|(m, _)| m == "{{ mcpg_debug_flags }}")
+            .unwrap();
+        assert_eq!(
+            flags.1, "\\",
+            "mcpg_debug_flags should be a bare backslash when disabled"
+        );
         // verify_mcp_backends should be empty
-        let probe = replacements.iter().find(|(m, _)| m == "{{ verify_mcp_backends }}").unwrap();
-        assert!(probe.1.is_empty(), "verify_mcp_backends should be empty when disabled");
+        let probe = replacements
+            .iter()
+            .find(|(m, _)| m == "{{ verify_mcp_backends }}")
+            .unwrap();
+        assert!(
+            probe.1.is_empty(),
+            "verify_mcp_backends should be empty when disabled"
+        );
     }
 
     #[test]
@@ -4670,18 +5004,37 @@ ado-aw-debug:
         let replacements = generate_debug_pipeline_replacements(true);
         assert_eq!(replacements.len(), 2);
 
-        let flags = replacements.iter().find(|(m, _)| m == "{{ mcpg_debug_flags }}");
+        let flags = replacements
+            .iter()
+            .find(|(m, _)| m == "{{ mcpg_debug_flags }}");
         assert!(flags.is_some(), "Should have mcpg_debug_flags marker");
         let flags_value = &flags.unwrap().1;
-        assert!(flags_value.contains("DEBUG"), "Should contain DEBUG env var");
+        assert!(
+            flags_value.contains("DEBUG"),
+            "Should contain DEBUG env var"
+        );
 
-        let probe = replacements.iter().find(|(m, _)| m == "{{ verify_mcp_backends }}");
+        let probe = replacements
+            .iter()
+            .find(|(m, _)| m == "{{ verify_mcp_backends }}");
         assert!(probe.is_some(), "Should have verify_mcp_backends marker");
         let probe_value = &probe.unwrap().1;
-        assert!(probe_value.contains("Verify MCP backends"), "Should contain displayName");
-        assert!(probe_value.contains("tools/list"), "Should contain tools/list probe");
-        assert!(probe_value.contains("initialize"), "Should contain initialize handshake");
-        assert!(probe_value.contains("MCPG_API_KEY"), "Should contain API key env mapping");
+        assert!(
+            probe_value.contains("Verify MCP backends"),
+            "Should contain displayName"
+        );
+        assert!(
+            probe_value.contains("tools/list"),
+            "Should contain tools/list probe"
+        );
+        assert!(
+            probe_value.contains("initialize"),
+            "Should contain initialize handshake"
+        );
+        assert!(
+            probe_value.contains("MCPG_API_KEY"),
+            "Should contain API key env mapping"
+        );
     }
 
     // ─── validate_submit_pr_review_events ────────────────────────────────────
@@ -4717,8 +5070,9 @@ ado-aw-debug:
     #[test]
     fn test_submit_pr_review_events_fails_when_value_is_scalar() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  submit-pr-review: true\n---\n"
-        ).unwrap();
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  submit-pr-review: true\n---\n",
+        )
+        .unwrap();
         let result = validate_submit_pr_review_events(&fm);
         assert!(result.is_err());
     }
@@ -4833,8 +5187,9 @@ ado-aw-debug:
     #[test]
     fn test_resolve_pr_thread_fails_when_value_is_scalar() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pr-thread: true\n---\n"
-        ).unwrap();
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pr-thread: true\n---\n",
+        )
+        .unwrap();
         let result = validate_resolve_pr_thread_statuses(&fm);
         assert!(result.is_err());
     }
@@ -4851,9 +5206,7 @@ ado-aw-debug:
 
     #[test]
     fn test_generate_enabled_tools_args_empty_safe_outputs() {
-        let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\n---\n"
-        ).unwrap();
+        let (fm, _) = parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
         let args = generate_enabled_tools_args(&fm);
         assert!(args.is_empty(), "Empty safe-outputs should produce no args");
     }
@@ -4877,8 +5230,9 @@ ado-aw-debug:
     fn test_generate_enabled_tools_args_no_duplicates() {
         // If a diagnostic tool is also in safe-outputs, it shouldn't appear twice
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  noop:\n    max: 5\n---\n"
-        ).unwrap();
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  noop:\n    max: 5\n---\n",
+        )
+        .unwrap();
         let args = generate_enabled_tools_args(&fm);
         let noop_count = args.matches("--enabled-tools noop").count();
         assert_eq!(noop_count, 1, "noop should appear exactly once");
@@ -4904,8 +5258,14 @@ ado-aw-debug:
             "---\nname: test\ndescription: test\nsafe-outputs:\n  crate-pull-request:\n    target-branch: main\n---\n"
         ).unwrap();
         let args = generate_enabled_tools_args(&fm);
-        assert!(!args.contains("crate-pull-request"), "Unrecognized tool should be skipped");
-        assert!(args.is_empty(), "All-unrecognized safe-outputs should produce no args (all tools available)");
+        assert!(
+            !args.contains("crate-pull-request"),
+            "Unrecognized tool should be skipped"
+        );
+        assert!(
+            args.is_empty(),
+            "All-unrecognized safe-outputs should produce no args (all tools available)"
+        );
     }
 
     #[test]
@@ -4917,18 +5277,22 @@ ado-aw-debug:
             "---\nname: test\ndescription: test\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n"
         ).unwrap();
         let args = generate_enabled_tools_args(&fm);
-        assert!(args.contains("--enabled-tools create-pull-request"), "Real MCP tool should be present");
+        assert!(
+            args.contains("--enabled-tools create-pull-request"),
+            "Real MCP tool should be present"
+        );
     }
 
     #[test]
     fn test_generate_enabled_tools_args_empty_safe_outputs_no_filter() {
         // When safe-outputs is empty, no --enabled-tools args should be generated
         // so all tools remain available.
-        let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\n---\n"
-        ).unwrap();
+        let (fm, _) = parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
         let args = generate_enabled_tools_args(&fm);
-        assert!(args.is_empty(), "empty safe-outputs should produce no args (all tools available)");
+        assert!(
+            args.is_empty(),
+            "empty safe-outputs should produce no args (all tools available)"
+        );
     }
 
     // ─── ado-aw-debug wiring ────────────────────────────────────────────────
@@ -5288,7 +5652,10 @@ safe-outputs:
         let result = generate_parameters(&params);
         assert!(result.is_err(), "Should reject invalid parameter name");
         assert!(
-            result.unwrap_err().to_string().contains("Invalid parameter name"),
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid parameter name"),
             "Error should mention invalid parameter name"
         );
     }
@@ -5317,7 +5684,11 @@ safe-outputs:
         }];
         let params = build_parameters(&user, true);
         assert_eq!(params.len(), 1, "Should not duplicate clearMemory");
-        assert_eq!(params[0].display_name.as_deref(), Some("Custom"), "Should keep user's definition");
+        assert_eq!(
+            params[0].display_name.as_deref(),
+            Some("Custom"),
+            "Should keep user's definition"
+        );
     }
 
     #[test]
@@ -5330,7 +5701,10 @@ safe-outputs:
             values: None,
         }];
         let result = generate_parameters(&params);
-        assert!(result.is_err(), "Should reject ADO expression in displayName");
+        assert!(
+            result.is_err(),
+            "Should reject ADO expression in displayName"
+        );
     }
 
     #[test]
@@ -5343,7 +5717,10 @@ safe-outputs:
             values: None,
         }];
         let result = generate_parameters(&params);
-        assert!(result.is_err(), "Should reject ADO macro expression in default");
+        assert!(
+            result.is_err(),
+            "Should reject ADO macro expression in default"
+        );
     }
 
     #[test]
@@ -5386,7 +5763,10 @@ safe-outputs:
         let replacement = "- bash: echo hello\n  displayName: Hello";
         let result = replace_with_indent(template, "{{ my_marker }}", replacement);
         // The 4-space indent on the placeholder line is inherited by continuation lines
-        assert_eq!(result, "steps:\n    - bash: echo hello\n      displayName: Hello\n");
+        assert_eq!(
+            result,
+            "steps:\n    - bash: echo hello\n      displayName: Hello\n"
+        );
     }
 
     #[test]
@@ -5474,7 +5854,10 @@ safe-outputs:
     #[test]
     fn test_generate_acquire_ado_token_none_returns_empty() {
         let result = generate_acquire_ado_token(None, "SC_READ_TOKEN");
-        assert!(result.is_empty(), "None service connection should return empty string");
+        assert!(
+            result.is_empty(),
+            "None service connection should return empty string"
+        );
     }
 
     #[test]
@@ -5557,44 +5940,75 @@ safe-outputs:
     #[test]
     fn test_model_name_rejects_single_quote() {
         let mut fm = minimal_front_matter();
-        fm.engine = crate::compile::types::EngineConfig::Full(crate::compile::types::EngineOptions {
-            id: Some("copilot".to_string()),
-            model: Some("model' && echo pwned".to_string()),
-            version: None, agent: None, api_target: None,
-            args: vec![], env: None, command: None,
-            timeout_minutes: None,
-        });
-        let result = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm));
+        fm.engine =
+            crate::compile::types::EngineConfig::Full(crate::compile::types::EngineOptions {
+                id: Some("copilot".to_string()),
+                model: Some("model' && echo pwned".to_string()),
+                version: None,
+                agent: None,
+                api_target: None,
+                args: vec![],
+                env: None,
+                command: None,
+                timeout_minutes: None,
+            });
+        let result = CompileContext::for_test(&fm)
+            .engine
+            .args(&fm, &crate::compile::extensions::collect_extensions(&fm));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid characters"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid characters")
+        );
     }
 
     #[test]
     fn test_model_name_rejects_space() {
         let mut fm = minimal_front_matter();
-        fm.engine = crate::compile::types::EngineConfig::Full(crate::compile::types::EngineOptions {
-            id: Some("copilot".to_string()),
-            model: Some("model && curl evil.com".to_string()),
-            version: None, agent: None, api_target: None,
-            args: vec![], env: None, command: None,
-            timeout_minutes: None,
-        });
-        let result = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm));
+        fm.engine =
+            crate::compile::types::EngineConfig::Full(crate::compile::types::EngineOptions {
+                id: Some("copilot".to_string()),
+                model: Some("model && curl evil.com".to_string()),
+                version: None,
+                agent: None,
+                api_target: None,
+                args: vec![],
+                env: None,
+                command: None,
+                timeout_minutes: None,
+            });
+        let result = CompileContext::for_test(&fm)
+            .engine
+            .args(&fm, &crate::compile::extensions::collect_extensions(&fm));
         assert!(result.is_err());
     }
 
     #[test]
     fn test_model_name_allows_valid_names() {
-        for name in &["claude-opus-4.5", "gpt-5.2-codex", "gemini-3-pro-preview", "my_model:latest"] {
+        for name in &[
+            "claude-opus-4.5",
+            "gpt-5.2-codex",
+            "gemini-3-pro-preview",
+            "my_model:latest",
+        ] {
             let mut fm = minimal_front_matter();
-            fm.engine = crate::compile::types::EngineConfig::Full(crate::compile::types::EngineOptions {
-                id: Some("copilot".to_string()),
-                model: Some(name.to_string()),
-                version: None, agent: None, api_target: None,
-                args: vec![], env: None, command: None,
-                timeout_minutes: None,
-            });
-            let result = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm));
+            fm.engine =
+                crate::compile::types::EngineConfig::Full(crate::compile::types::EngineOptions {
+                    id: Some("copilot".to_string()),
+                    model: Some(name.to_string()),
+                    version: None,
+                    agent: None,
+                    api_target: None,
+                    args: vec![],
+                    env: None,
+                    command: None,
+                    timeout_minutes: None,
+                });
+            let result = CompileContext::for_test(&fm)
+                .engine
+                .args(&fm, &crate::compile::extensions::collect_extensions(&fm));
             assert!(result.is_ok(), "Model name '{}' should be valid", name);
         }
     }
@@ -5608,7 +6022,9 @@ safe-outputs:
             cache_memory: None,
             azure_devops: None,
         });
-        let result = CompileContext::for_test(&fm).engine.args(&fm, &crate::compile::extensions::collect_extensions(&fm));
+        let result = CompileContext::for_test(&fm)
+            .engine
+            .args(&fm, &crate::compile::extensions::collect_extensions(&fm));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("single quote"));
     }
@@ -5666,10 +6082,10 @@ safe-outputs:
                 name: "Build\ninjected: true".to_string(),
                 project: None,
                 branches: vec![],
-            filters: None,
+                filters: None,
             }),
-        pr: None,
-        schedule: None,
+            pr: None,
+            schedule: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -5684,14 +6100,19 @@ safe-outputs:
                 name: "Build Pipeline".to_string(),
                 project: Some("OtherProject\ninjected: true".to_string()),
                 branches: vec![],
-            filters: None,
+                filters: None,
             }),
-        pr: None,
-        schedule: None,
+            pr: None,
+            schedule: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("on.pipeline.project"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("on.pipeline.project")
+        );
     }
 
     #[test]
@@ -5702,14 +6123,19 @@ safe-outputs:
                 name: "Build Pipeline".to_string(),
                 project: None,
                 branches: vec!["main\ninjected: true".to_string()],
-            filters: None,
+                filters: None,
             }),
-        pr: None,
-        schedule: None,
+            pr: None,
+            schedule: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("on.pipeline.branches"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("on.pipeline.branches")
+        );
     }
 
     #[test]
@@ -5729,7 +6155,12 @@ safe-outputs:
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("on.pr.branches.include"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("on.pr.branches.include")
+        );
     }
 
     #[test]
@@ -5749,7 +6180,12 @@ safe-outputs:
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("on.pr.branches.exclude"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("on.pr.branches.exclude")
+        );
     }
 
     #[test]
@@ -5769,7 +6205,12 @@ safe-outputs:
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("on.pr.paths.include"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("on.pr.paths.include")
+        );
     }
 
     #[test]
@@ -5789,7 +6230,12 @@ safe-outputs:
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("on.pr.paths.exclude"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("on.pr.paths.exclude")
+        );
     }
 
     #[test]
@@ -5851,10 +6297,10 @@ safe-outputs:
                 name: "Build Pipeline".to_string(),
                 project: Some("OtherProject".to_string()),
                 branches: vec!["main".to_string(), "release/*".to_string()],
-            filters: None,
+                filters: None,
             }),
-        pr: None,
-        schedule: None,
+            pr: None,
+            schedule: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_ok());
@@ -5877,10 +6323,10 @@ safe-outputs:
                 name: "Build $(System.AccessToken)".to_string(),
                 project: None,
                 branches: vec![],
-            filters: None,
+                filters: None,
             }),
-        pr: None,
-        schedule: None,
+            pr: None,
+            schedule: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -5895,10 +6341,10 @@ safe-outputs:
                 name: "Build Pipeline".to_string(),
                 project: Some("$(System.AccessToken)".to_string()),
                 branches: vec![],
-            filters: None,
+                filters: None,
             }),
-        pr: None,
-        schedule: None,
+            pr: None,
+            schedule: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -5913,10 +6359,10 @@ safe-outputs:
                 name: "Build Pipeline".to_string(),
                 project: None,
                 branches: vec!["$[variables['token']]".to_string()],
-            filters: None,
+                filters: None,
             }),
-        pr: None,
-        schedule: None,
+            pr: None,
+            schedule: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -5930,10 +6376,10 @@ safe-outputs:
                 name: "Build's Pipeline".to_string(),
                 project: Some("My'Project".to_string()),
                 branches: vec!["main".to_string(), "it's-branch".to_string()],
-            filters: None,
+                filters: None,
             }),
-        pr: None,
-        schedule: None,
+            pr: None,
+            schedule: None,
         });
         let result = generate_pipeline_resources(&triggers).unwrap();
         assert!(result.contains("source: 'Build''s Pipeline'"));
@@ -5947,9 +6393,11 @@ safe-outputs:
     fn test_generate_prepare_steps_with_memory_includes_memory_preamble() {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\ntools:\n  cache-memory: true\n---\n",
-        ).unwrap();
+        )
+        .unwrap();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts).unwrap();
+        let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
+        let result = generate_prepare_steps(&[], &exts, &ctx).unwrap();
         assert!(
             !result.is_empty(),
             "memory steps must be emitted when cache-memory enabled"
@@ -5964,7 +6412,8 @@ safe-outputs:
     fn test_generate_prepare_steps_without_memory_and_no_steps_has_safeoutputs_prompt() {
         let fm = minimal_front_matter();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts).unwrap();
+        let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
+        let result = generate_prepare_steps(&[], &exts, &ctx).unwrap();
         // SafeOutputs always contributes a prompt supplement
         assert!(
             result.contains("Safe Outputs"),
@@ -5976,9 +6425,11 @@ safe-outputs:
     fn test_generate_prepare_steps_with_memory_includes_download_and_prompt() {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\ntools:\n  cache-memory: true\n---\n",
-        ).unwrap();
+        )
+        .unwrap();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts).unwrap();
+        let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
+        let result = generate_prepare_steps(&[], &exts, &ctx).unwrap();
         assert!(
             result.contains("DownloadPipelineArtifact"),
             "memory steps must include the artifact download task"
@@ -5993,9 +6444,10 @@ safe-outputs:
     fn test_generate_prepare_steps_without_memory_with_user_steps() {
         let fm = minimal_front_matter();
         let exts = crate::compile::extensions::collect_extensions(&fm);
+        let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
         let step: serde_yaml::Value =
             serde_yaml::from_str("bash: echo hello\ndisplayName: greet").unwrap();
-        let result = generate_prepare_steps(&[step], &exts).unwrap();
+        let result = generate_prepare_steps(&[step], &exts, &ctx).unwrap();
         assert!(!result.is_empty(), "user steps should be present");
         assert!(
             !result.contains("agent_memory"),
@@ -6007,11 +6459,13 @@ safe-outputs:
     fn test_generate_prepare_steps_with_memory_and_user_steps() {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\ntools:\n  cache-memory: true\n---\n",
-        ).unwrap();
+        )
+        .unwrap();
         let exts = crate::compile::extensions::collect_extensions(&fm);
+        let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
         let step: serde_yaml::Value =
             serde_yaml::from_str("bash: echo hello\ndisplayName: greet").unwrap();
-        let result = generate_prepare_steps(&[step], &exts).unwrap();
+        let result = generate_prepare_steps(&[step], &exts, &ctx).unwrap();
         assert!(
             result.contains("agent_memory"),
             "memory reference must be present"
@@ -6024,15 +6478,22 @@ safe-outputs:
 
     #[test]
     fn test_generate_prepare_steps_with_lean() {
-        let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nruntimes:\n  lean: true\n---\n",
-        ).unwrap();
+        let (fm, _) =
+            parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  lean: true\n---\n")
+                .unwrap();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts).unwrap();
+        let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
+        let result = generate_prepare_steps(&[], &exts, &ctx).unwrap();
         assert!(result.contains("elan-init.sh"), "should include elan installer");
         assert!(result.contains("Lean 4"), "should include Lean prompt");
-        assert!(result.contains("--default-toolchain stable"), "should default to stable");
-        assert!(result.contains("/tmp/awf-tools/"), "should symlink into awf-tools for AWF chroot");
+        assert!(
+            result.contains("--default-toolchain stable"),
+            "should default to stable"
+        );
+        assert!(
+            result.contains("/tmp/awf-tools/"),
+            "should symlink into awf-tools for AWF chroot"
+        );
     }
 
     #[test]
@@ -6041,7 +6502,8 @@ safe-outputs:
             "---\nname: test\ndescription: test\nruntimes:\n  lean:\n    toolchain: \"leanprover/lean4:v4.29.1\"\n---\n",
         ).unwrap();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts).unwrap();
+        let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
+        let result = generate_prepare_steps(&[], &exts, &ctx).unwrap();
         assert!(
             result.contains("--default-toolchain leanprover/lean4:v4.29.1"),
             "should use specified toolchain"
@@ -6054,7 +6516,8 @@ safe-outputs:
             "---\nname: test\ndescription: test\nruntimes:\n  lean: true\ntools:\n  cache-memory: true\n---\n",
         ).unwrap();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let result = generate_prepare_steps(&[], &exts).unwrap();
+        let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
+        let result = generate_prepare_steps(&[], &exts, &ctx).unwrap();
         assert!(result.contains("agent_memory"), "memory steps present");
         assert!(result.contains("elan-init.sh"), "lean install present");
         assert!(result.contains("Lean 4"), "lean prompt present");
@@ -6066,24 +6529,32 @@ safe-outputs:
     fn test_generate_awf_mounts_no_extensions() {
         let fm = minimal_front_matter();
         let exts = crate::compile::extensions::collect_extensions(&fm);
+        let _ctx = crate::compile::extensions::CompileContext::for_test(&fm);
         let result = generate_awf_mounts(&exts);
         assert_eq!(result, "\\", "no mounts should produce bare continuation");
     }
 
     #[test]
     fn test_generate_awf_mounts_with_lean() {
-        let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nruntimes:\n  lean: true\n---\n",
-        ).unwrap();
+        let (fm, _) =
+            parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  lean: true\n---\n")
+                .unwrap();
         let exts = crate::compile::extensions::collect_extensions(&fm);
+        let _ctx = crate::compile::extensions::CompileContext::for_test(&fm);
         let result = generate_awf_mounts(&exts);
         assert!(result.contains("--mount"), "should contain --mount flag");
         assert!(result.contains(".elan"), "should reference .elan directory");
         assert!(result.contains(":ro"), "should be read-only");
         // Each mount line ends with ` \` continuation
-        assert!(result.ends_with(" \\"), "last mount should end with continuation");
+        assert!(
+            result.ends_with(" \\"),
+            "last mount should end with continuation"
+        );
         // No embedded indent — replace_with_indent handles indentation
-        assert!(!result.contains("            "), "should not contain hard-coded indent");
+        assert!(
+            !result.contains("            "),
+            "should not contain hard-coded indent"
+        );
     }
 
     // ─── generate_awf_path_step ──────────────────────────────────────────────
@@ -6091,22 +6562,37 @@ safe-outputs:
     #[test]
     fn test_generate_awf_path_step_no_paths() {
         let result = generate_awf_path_step(&[]);
-        assert!(result.is_empty(), "no path prepends should produce empty string");
+        assert!(
+            result.is_empty(),
+            "no path prepends should produce empty string"
+        );
     }
 
     #[test]
     fn test_generate_awf_path_step_with_lean() {
-        let paths = collect_awf_path_prepends(
-            &crate::compile::extensions::collect_extensions(
-                &parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  lean: true\n---\n").unwrap().0,
-            ),
-        );
+        let paths = collect_awf_path_prepends(&crate::compile::extensions::collect_extensions(
+            &parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  lean: true\n---\n")
+                .unwrap()
+                .0,
+        ));
         let result = generate_awf_path_step(&paths);
-        assert!(result.contains("ado-path-entries"), "should reference path entries file");
+        assert!(
+            result.contains("ado-path-entries"),
+            "should reference path entries file"
+        );
         assert!(result.contains(".elan/bin"), "should include elan bin path");
-        assert!(result.contains("GITHUB_PATH"), "should set GITHUB_PATH variable");
-        assert!(result.contains("displayName"), "should be a complete pipeline step");
-        assert!(result.contains("AWF_PATH_EOF"), "should use heredoc markers");
+        assert!(
+            result.contains("GITHUB_PATH"),
+            "should set GITHUB_PATH variable"
+        );
+        assert!(
+            result.contains("displayName"),
+            "should be a complete pipeline step"
+        );
+        assert!(
+            result.contains("AWF_PATH_EOF"),
+            "should use heredoc markers"
+        );
     }
 
     #[test]
@@ -6130,7 +6616,10 @@ safe-outputs:
     #[test]
     fn test_generate_awf_path_env_no_paths() {
         let result = generate_awf_path_env(false);
-        assert!(result.is_empty(), "no path prepends should produce empty string");
+        assert!(
+            result.is_empty(),
+            "no path prepends should produce empty string"
+        );
     }
 
     #[test]
@@ -6148,23 +6637,25 @@ safe-outputs:
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "my-tool".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("node:20-slim".to_string()),
                 entrypoint: Some("node".to_string()),
                 entrypoint_args: vec!["server.js".to_string()],
                 allowed: vec!["do_thing".to_string()],
                 ..Default::default()
-            }),
+            })),
         );
-        let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test(&fm),
+            &collect_extensions(&fm),
+        )
+        .unwrap();
         let server = config.mcp_servers.get("my-tool").unwrap();
         assert_eq!(server.server_type, "stdio");
         assert_eq!(server.container.as_ref().unwrap(), "node:20-slim");
         assert_eq!(server.entrypoint.as_ref().unwrap(), "node");
-        assert_eq!(
-            server.entrypoint_args.as_ref().unwrap(),
-            &vec!["server.js"]
-        );
+        assert_eq!(server.entrypoint_args.as_ref().unwrap(), &vec!["server.js"]);
         assert_eq!(
             server.tools.as_ref().unwrap(),
             &vec!["do_thing".to_string()]
@@ -6177,7 +6668,12 @@ safe-outputs:
         // An MCP with no container or url should be skipped
         fm.mcp_servers
             .insert("phantom".to_string(), McpConfig::Enabled(true));
-        let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test(&fm),
+            &collect_extensions(&fm),
+        )
+        .unwrap();
         assert!(!config.mcp_servers.contains_key("phantom"));
         // safeoutputs is always present
         assert!(config.mcp_servers.contains_key("safeoutputs"));
@@ -6188,14 +6684,24 @@ safe-outputs:
         let mut fm = minimal_front_matter();
         fm.mcp_servers
             .insert("my-tool".to_string(), McpConfig::Enabled(false));
-        let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test(&fm),
+            &collect_extensions(&fm),
+        )
+        .unwrap();
         assert!(!config.mcp_servers.contains_key("my-tool"));
     }
 
     #[test]
     fn test_generate_mcpg_config_empty_mcp_servers() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test(&fm),
+            &collect_extensions(&fm),
+        )
+        .unwrap();
         // Only safeoutputs should be present
         assert_eq!(config.mcp_servers.len(), 1);
         assert!(config.mcp_servers.contains_key("safeoutputs"));
@@ -6204,7 +6710,12 @@ safe-outputs:
     #[test]
     fn test_generate_mcpg_config_gateway_defaults() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test(&fm),
+            &collect_extensions(&fm),
+        )
+        .unwrap();
         assert_eq!(config.gateway.port, 80);
         assert_eq!(config.gateway.domain, "host.docker.internal");
         assert_eq!(config.gateway.api_key, "${MCP_GATEWAY_API_KEY}");
@@ -6216,15 +6727,20 @@ safe-outputs:
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "my-tool".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("python:3.12-slim".to_string()),
                 entrypoint: Some("python".to_string()),
                 entrypoint_args: vec!["-m".to_string(), "server".to_string()],
                 allowed: vec!["query".to_string()],
                 ..Default::default()
-            }),
+            })),
         );
-        let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test(&fm),
+            &collect_extensions(&fm),
+        )
+        .unwrap();
         let json = serde_json::to_string_pretty(&config).expect("Config should serialize to JSON");
         let parsed: serde_json::Value =
             serde_json::from_str(&json).expect("Serialized JSON should parse back");
@@ -6249,7 +6765,12 @@ safe-outputs:
     #[test]
     fn test_generate_mcpg_config_safeoutputs_variable_placeholders() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test(&fm),
+            &collect_extensions(&fm),
+        )
+        .unwrap();
         let so = config.mcp_servers.get("safeoutputs").unwrap();
 
         // URL should reference the runtime-substituted port
@@ -6271,7 +6792,12 @@ safe-outputs:
     #[test]
     fn test_generate_mcpg_config_safeoutputs_is_http_type() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test(&fm),
+            &collect_extensions(&fm),
+        )
+        .unwrap();
         let so = config.mcp_servers.get("safeoutputs").unwrap();
         assert_eq!(so.server_type, "http");
         assert!(
@@ -6287,15 +6813,20 @@ safe-outputs:
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "runner".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("node:20-slim".to_string()),
                 entrypoint: Some("node".to_string()),
                 entrypoint_args: vec!["srv.js".to_string()],
                 allowed: vec!["run".to_string()],
                 ..Default::default()
-            }),
+            })),
         );
-        let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test(&fm),
+            &collect_extensions(&fm),
+        )
+        .unwrap();
         let srv = config.mcp_servers.get("runner").unwrap();
         assert_eq!(srv.server_type, "stdio");
         assert!(
@@ -6312,13 +6843,18 @@ safe-outputs:
         env.insert("TOKEN".to_string(), "secret".to_string());
         fm.mcp_servers.insert(
             "with-env".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("node:20-slim".to_string()),
                 env,
                 ..Default::default()
-            }),
+            })),
         );
-        let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test(&fm),
+            &collect_extensions(&fm),
+        )
+        .unwrap();
         let srv = config.mcp_servers.get("with-env").unwrap();
         let e = srv.env.as_ref().unwrap();
         assert_eq!(e.get("TOKEN").unwrap(), "secret");
@@ -6329,12 +6865,17 @@ safe-outputs:
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "safeoutputs".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("evil:latest".to_string()),
                 ..Default::default()
-            }),
+            })),
         );
-        let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test(&fm),
+            &collect_extensions(&fm),
+        )
+        .unwrap();
         // The reserved entry should still be the HTTP backend, not the user's container
         let so = config.mcp_servers.get("safeoutputs").unwrap();
         assert_eq!(
@@ -6352,15 +6893,20 @@ safe-outputs:
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "SafeOutputs".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("node:20-slim".to_string()),
                 entrypoint: Some("node".to_string()),
                 entrypoint_args: vec!["evil.js".to_string()],
                 allowed: vec!["hijack".to_string()],
                 ..Default::default()
-            }),
+            })),
         );
-        let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test(&fm),
+            &collect_extensions(&fm),
+        )
+        .unwrap();
         // The user-defined "SafeOutputs" must not overwrite the built-in entry
         let so = config.mcp_servers.get("safeoutputs").unwrap();
         assert_eq!(so.server_type, "http");
@@ -6374,7 +6920,7 @@ safe-outputs:
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "remote".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 url: Some("https://mcp.example.com/api".to_string()),
                 headers: {
                     let mut h = HashMap::new();
@@ -6383,20 +6929,25 @@ safe-outputs:
                 },
                 allowed: vec!["query".to_string()],
                 ..Default::default()
-            }),
+            })),
         );
-        let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test(&fm),
+            &collect_extensions(&fm),
+        )
+        .unwrap();
         let srv = config.mcp_servers.get("remote").unwrap();
         assert_eq!(srv.server_type, "http");
-        assert_eq!(
-            srv.url.as_ref().unwrap(),
-            "https://mcp.example.com/api"
-        );
+        assert_eq!(srv.url.as_ref().unwrap(), "https://mcp.example.com/api");
         assert_eq!(
             srv.headers.as_ref().unwrap().get("X-Custom").unwrap(),
             "value"
         );
-        assert!(srv.container.is_none(), "HTTP server should have no container");
+        assert!(
+            srv.container.is_none(),
+            "HTTP server should have no container"
+        );
     }
 
     #[test]
@@ -6404,14 +6955,19 @@ safe-outputs:
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "ado".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("node:20-slim".to_string()),
                 entrypoint: Some("npx".to_string()),
                 entrypoint_args: vec!["-y".to_string(), "@azure-devops/mcp".to_string()],
                 ..Default::default()
-            }),
+            })),
         );
-        let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test(&fm),
+            &collect_extensions(&fm),
+        )
+        .unwrap();
         let srv = config.mcp_servers.get("ado").unwrap();
         assert_eq!(srv.server_type, "stdio");
         assert_eq!(srv.container.as_ref().unwrap(), "node:20-slim");
@@ -6427,13 +6983,18 @@ safe-outputs:
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "data-tool".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("data-tool:latest".to_string()),
                 mounts: vec!["/host/data:/app/data:ro".to_string()],
                 ..Default::default()
-            }),
+            })),
         );
-        let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test(&fm),
+            &collect_extensions(&fm),
+        )
+        .unwrap();
         let srv = config.mcp_servers.get("data-tool").unwrap();
         assert_eq!(
             srv.mounts.as_ref().unwrap(),
@@ -6447,12 +7008,17 @@ safe-outputs:
         // MCP with options but no container or url should be skipped
         fm.mcp_servers.insert(
             "no-transport".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 allowed: vec!["tool".to_string()],
                 ..Default::default()
-            }),
+            })),
         );
-        let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test(&fm),
+            &collect_extensions(&fm),
+        )
+        .unwrap();
         assert!(!config.mcp_servers.contains_key("no-transport"));
     }
 
@@ -6492,7 +7058,7 @@ safe-outputs:
         ).unwrap();
         fm.mcp_servers.insert(
             "ado-tool".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("node:20-slim".to_string()),
                 env: {
                     let mut e = HashMap::new();
@@ -6500,12 +7066,16 @@ safe-outputs:
                     e
                 },
                 ..Default::default()
-            }),
+            })),
         );
         let extensions = collect_extensions(&fm);
         let env = generate_mcpg_docker_env(&fm, &extensions);
         let count = env.matches("ADO_MCP_AUTH_TOKEN").count();
-        assert_eq!(count, 1, "ADO_MCP_AUTH_TOKEN should appear exactly once, got {}", count);
+        assert_eq!(
+            count, 1,
+            "ADO_MCP_AUTH_TOKEN should appear exactly once, got {}",
+            count
+        );
     }
 
     #[test]
@@ -6513,7 +7083,7 @@ safe-outputs:
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "tool".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("img:latest".to_string()),
                 env: {
                     let mut e = HashMap::new();
@@ -6522,11 +7092,14 @@ safe-outputs:
                     e
                 },
                 ..Default::default()
-            }),
+            })),
         );
         let extensions = collect_extensions(&fm);
         let env = generate_mcpg_docker_env(&fm, &extensions);
-        assert!(env.contains("-e PASS_THROUGH"), "Should include passthrough var");
+        assert!(
+            env.contains("-e PASS_THROUGH"),
+            "Should include passthrough var"
+        );
         assert!(!env.contains("-e STATIC"), "Should NOT include static var");
     }
 
@@ -6535,7 +7108,7 @@ safe-outputs:
         let mut fm = minimal_front_matter();
         fm.mcp_servers.insert(
             "evil".to_string(),
-            McpConfig::WithOptions(McpOptions {
+            McpConfig::WithOptions(Box::new(McpOptions {
                 container: Some("img:latest".to_string()),
                 env: {
                     let mut e = HashMap::new();
@@ -6544,7 +7117,7 @@ safe-outputs:
                     e
                 },
                 ..Default::default()
-            }),
+            })),
         );
         let extensions = collect_extensions(&fm);
         let env = generate_mcpg_docker_env(&fm, &extensions);
@@ -6552,10 +7125,7 @@ safe-outputs:
             !env.contains("--privileged"),
             "Should reject invalid env var name with Docker flag injection"
         );
-        assert!(
-            env.contains("-e GOOD_VAR"),
-            "Should include valid env var"
-        );
+        assert!(env.contains("-e GOOD_VAR"), "Should include valid env var");
     }
 
     // ─── generate_mcpg_step_env ──────────────────────────────────────────────
@@ -6564,7 +7134,8 @@ safe-outputs:
     fn test_generate_mcpg_step_env_with_ado_extension() {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\n---\n",
-        ).unwrap();
+        )
+        .unwrap();
         let extensions = collect_extensions(&fm);
         let env = generate_mcpg_step_env(&extensions);
         assert!(
@@ -6582,7 +7153,10 @@ safe-outputs:
         let fm = minimal_front_matter();
         let extensions = collect_extensions(&fm);
         let env = generate_mcpg_step_env(&extensions);
-        assert!(env.is_empty(), "Should be empty when no extensions need pipeline vars");
+        assert!(
+            env.is_empty(),
+            "Should be empty when no extensions need pipeline vars"
+        );
     }
 
     #[test]
@@ -6603,7 +7177,11 @@ safe-outputs:
     fn test_generate_mcpg_config_rejects_invalid_server_name() {
         let yaml = "---\nname: test-agent\ndescription: test\nmcp-servers:\n  bad/name:\n    container: python:3\n    entrypoint: python\n---\n";
         let (fm, _) = parse_markdown(yaml).unwrap();
-        let result = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm));
+        let result = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test(&fm),
+            &collect_extensions(&fm),
+        );
         assert!(result.is_err(), "Should reject server name with /");
     }
 
@@ -6612,14 +7190,28 @@ safe-outputs:
         // ".." would resolve to /mcp via path normalization, bypassing routing
         let yaml = "---\nname: test-agent\ndescription: test\nmcp-servers:\n  ..:\n    container: python:3\n    entrypoint: python\n---\n";
         let (fm, _) = parse_markdown(yaml).unwrap();
-        let result = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm));
-        assert!(result.is_err(), "Should reject server name starting with dot");
+        let result = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test(&fm),
+            &collect_extensions(&fm),
+        );
+        assert!(
+            result.is_err(),
+            "Should reject server name starting with dot"
+        );
 
         // ".hidden" would produce /mcp/.hidden
         let yaml2 = "---\nname: test-agent\ndescription: test\nmcp-servers:\n  .hidden:\n    container: python:3\n    entrypoint: python\n---\n";
         let (fm2, _) = parse_markdown(yaml2).unwrap();
-        let result2 = generate_mcpg_config(&fm2, &CompileContext::for_test(&fm2), &collect_extensions(&fm2));
-        assert!(result2.is_err(), "Should reject server name starting with dot");
+        let result2 = generate_mcpg_config(
+            &fm2,
+            &CompileContext::for_test(&fm2),
+            &collect_extensions(&fm2),
+        );
+        assert!(
+            result2.is_err(),
+            "Should reject server name starting with dot"
+        );
     }
 
     // ─── tools.azure-devops MCPG integration ────────────────────────────────
@@ -6631,7 +7223,12 @@ safe-outputs:
         )
         .unwrap();
         // Pass inferred org since no explicit org is set
-        let config = generate_mcpg_config(&fm, &CompileContext::for_test_with_org(&fm, "inferred-org"), &collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test_with_org(&fm, "inferred-org"),
+            &collect_extensions(&fm),
+        )
+        .unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         assert_eq!(ado.server_type, "stdio");
         assert_eq!(ado.container.as_deref(), Some(ADO_MCP_IMAGE));
@@ -6651,7 +7248,12 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    toolsets: [repos, wit, core]\n---\n",
         )
         .unwrap();
-        let config = generate_mcpg_config(&fm, &CompileContext::for_test_with_org(&fm, "myorg"), &collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test_with_org(&fm, "myorg"),
+            &collect_extensions(&fm),
+        )
+        .unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         let args = ado.entrypoint_args.as_ref().unwrap();
         assert!(args.contains(&"-d".to_string()));
@@ -6667,7 +7269,12 @@ safe-outputs:
         )
         .unwrap();
         // Explicit org should be used even when inferred_org is None
-        let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test(&fm),
+            &collect_extensions(&fm),
+        )
+        .unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         let args = ado.entrypoint_args.as_ref().unwrap();
         assert!(args.contains(&"myorg".to_string()));
@@ -6679,7 +7286,12 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: explicit-org\n---\n",
         )
         .unwrap();
-        let config = generate_mcpg_config(&fm, &CompileContext::for_test_with_org(&fm, "inferred-org"), &collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test_with_org(&fm, "inferred-org"),
+            &collect_extensions(&fm),
+        )
+        .unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         let args = ado.entrypoint_args.as_ref().unwrap();
         assert!(args.contains(&"explicit-org".to_string()));
@@ -6693,10 +7305,17 @@ safe-outputs:
         )
         .unwrap();
         // No explicit org and no inferred org — should fail
-        let result = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm));
+        let result = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test(&fm),
+            &collect_extensions(&fm),
+        );
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().to_string().contains("no ADO organization"),
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("no ADO organization"),
             "Error should mention missing org"
         );
     }
@@ -6707,10 +7326,17 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: \"my org/bad\"\n---\n",
         )
         .unwrap();
-        let result = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm));
+        let result = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test(&fm),
+            &collect_extensions(&fm),
+        );
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().to_string().contains("Invalid ADO org name"),
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid ADO org name"),
             "Error should mention invalid org"
         );
     }
@@ -6721,10 +7347,17 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: myorg\n    toolsets: [\"repos\", \"bad toolset\"]\n---\n",
         )
         .unwrap();
-        let result = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm));
+        let result = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test(&fm),
+            &collect_extensions(&fm),
+        );
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().to_string().contains("Invalid ADO toolset name"),
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid ADO toolset name"),
             "Error should mention invalid toolset"
         );
     }
@@ -6735,7 +7368,12 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: myorg\n    allowed:\n      - wit_get_work_item\n      - core_list_projects\n---\n",
         )
         .unwrap();
-        let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test(&fm),
+            &collect_extensions(&fm),
+        )
+        .unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         let tools = ado.tools.as_ref().unwrap();
         assert_eq!(tools, &["wit_get_work_item", "core_list_projects"]);
@@ -6747,14 +7385,24 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  azure-devops: false\n---\n",
         )
         .unwrap();
-        let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test(&fm),
+            &collect_extensions(&fm),
+        )
+        .unwrap();
         assert!(!config.mcp_servers.contains_key("azure-devops"));
     }
 
     #[test]
     fn test_ado_tool_not_set_not_generated() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test(&fm),
+            &collect_extensions(&fm),
+        )
+        .unwrap();
         assert!(!config.mcp_servers.contains_key("azure-devops"));
     }
 
@@ -6766,7 +7414,12 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: auto-org\nmcp-servers:\n  azure-devops:\n    container: \"node:20-slim\"\n    entrypoint: \"npx\"\n    entrypoint-args: [\"-y\", \"@azure-devops/mcp\", \"manual-org\"]\n---\n",
         )
         .unwrap();
-        let config = generate_mcpg_config(&fm, &CompileContext::for_test(&fm), &collect_extensions(&fm)).unwrap();
+        let config = generate_mcpg_config(
+            &fm,
+            &CompileContext::for_test(&fm),
+            &collect_extensions(&fm),
+        )
+        .unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         // Should use the auto-configured org, not the manual one
         let args = ado.entrypoint_args.as_ref().unwrap();
@@ -6794,20 +7447,24 @@ safe-outputs:
     fn test_validate_docker_args_privileged_flag() {
         let warnings = validate::validate_docker_args(&["--privileged".to_string()], "my-mcp");
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("--privileged"), "should warn about --privileged");
+        assert!(
+            warnings[0].contains("--privileged"),
+            "should warn about --privileged"
+        );
     }
 
     #[test]
     fn test_validate_docker_args_entrypoint_in_args_warns() {
         let warnings = validate::validate_docker_args(
-            &[
-                "--entrypoint".to_string(),
-                "/bin/sh".to_string(),
-            ],
+            &["--entrypoint".to_string(), "/bin/sh".to_string()],
             "my-mcp",
         );
-        assert!(warnings.iter().any(|w| w.contains("--entrypoint") && w.contains("entrypoint:")),
-            "should warn about --entrypoint with hint to use entrypoint: field");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("--entrypoint") && w.contains("entrypoint:")),
+            "should warn about --entrypoint with hint to use entrypoint: field"
+        );
     }
 
     #[test]
@@ -6820,10 +7477,16 @@ safe-outputs:
             ],
             "my-mcp",
         );
-        assert!(warnings.iter().any(|w| w.contains("bypasses mounts validation")),
-            "should warn about volume mount in args");
-        assert!(warnings.iter().any(|w| w.contains("Docker socket")),
-            "should propagate mount source warning for docker.sock");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("bypasses mounts validation")),
+            "should warn about volume mount in args"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("Docker socket")),
+            "should propagate mount source warning for docker.sock"
+        );
     }
 
     #[test]
@@ -6833,8 +7496,12 @@ safe-outputs:
             &["--volume=/var/run/docker.sock:/var/run/docker.sock".to_string()],
             "my-mcp",
         );
-        assert!(warnings.iter().any(|w| w.contains("bypasses mounts validation")),
-            "should warn about --volume= form");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("bypasses mounts validation")),
+            "should warn about --volume= form"
+        );
     }
 
     #[test]
@@ -6847,7 +7514,10 @@ safe-outputs:
     #[test]
     fn test_validate_docker_args_empty_no_warnings() {
         let warnings = validate::validate_docker_args(&[], "my-mcp");
-        assert!(warnings.is_empty(), "empty args should not produce warnings");
+        assert!(
+            warnings.is_empty(),
+            "empty args should not produce warnings"
+        );
     }
 
     #[test]
@@ -6855,7 +7525,10 @@ safe-outputs:
         // -v as the last arg with no mount spec is malformed
         let warnings = validate::validate_docker_args(&["-v".to_string()], "my-mcp");
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("malformed"), "trailing -v with no mount spec should warn");
+        assert!(
+            warnings[0].contains("malformed"),
+            "trailing -v with no mount spec should warn"
+        );
     }
 
     #[test]
@@ -6863,7 +7536,10 @@ safe-outputs:
         // --volume as the last arg with no mount spec is malformed
         let warnings = validate::validate_docker_args(&["--volume".to_string()], "my-mcp");
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("malformed"), "trailing --volume with no mount spec should warn");
+        assert!(
+            warnings[0].contains("malformed"),
+            "trailing --volume with no mount spec should warn"
+        );
     }
 
     // ─── validate_mcp_url ────────────────────────────────────────────────────
@@ -6884,37 +7560,55 @@ safe-outputs:
     fn test_validate_mcp_url_bad_scheme_warns() {
         let warnings = validate::validate_mcp_url("ftp://files.example.com", "my-mcp");
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("does not use http://"), "non-HTTP scheme should warn");
+        assert!(
+            warnings[0].contains("does not use http://"),
+            "non-HTTP scheme should warn"
+        );
     }
 
     #[test]
     fn test_validate_mcp_url_no_scheme_warns() {
         let warnings = validate::validate_mcp_url("mcp.dev.azure.com/myorg", "my-mcp");
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("does not use http://"), "URL without scheme should warn");
+        assert!(
+            warnings[0].contains("does not use http://"),
+            "URL without scheme should warn"
+        );
     }
 
     // ─── validate_mount_source ───────────────────────────────────────────────
 
     #[test]
     fn test_validate_mount_source_docker_sock() {
-        let warnings = validate::validate_mount_source("/var/run/docker.sock:/var/run/docker.sock:rw", "my-mcp");
+        let warnings = validate::validate_mount_source(
+            "/var/run/docker.sock:/var/run/docker.sock:rw",
+            "my-mcp",
+        );
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("Docker socket"), "should warn about Docker socket exposure");
+        assert!(
+            warnings[0].contains("Docker socket"),
+            "should warn about Docker socket exposure"
+        );
     }
 
     #[test]
     fn test_validate_mount_source_sensitive_path_etc() {
         let warnings = validate::validate_mount_source("/etc/passwd:/data/passwd:ro", "my-mcp");
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("sensitive host path"), "should warn about /etc mount");
+        assert!(
+            warnings[0].contains("sensitive host path"),
+            "should warn about /etc mount"
+        );
     }
 
     #[test]
     fn test_validate_mount_source_sensitive_path_proc() {
         let warnings = validate::validate_mount_source("/proc:/host/proc:ro", "my-mcp");
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("sensitive host path"), "should warn about /proc mount");
+        assert!(
+            warnings[0].contains("sensitive host path"),
+            "should warn about /proc mount"
+        );
     }
 
     #[test]
@@ -6922,14 +7616,20 @@ safe-outputs:
         // /ETC/shadow should match sensitive /etc prefix (lowercased comparison)
         let warnings = validate::validate_mount_source("/ETC/shadow:/data/shadow:ro", "my-mcp");
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("sensitive host path"), "case-insensitive match should trigger warning");
+        assert!(
+            warnings[0].contains("sensitive host path"),
+            "case-insensitive match should trigger warning"
+        );
     }
 
     #[test]
     fn test_validate_mount_source_no_false_positive_on_etc_configs() {
         // /etc-configs should NOT match the /etc prefix (path boundary check requires trailing /)
         let warnings = validate::validate_mount_source("/etc-configs:/app/config:ro", "my-mcp");
-        assert!(warnings.is_empty(), "/etc-configs must not match /etc prefix due to path boundary check");
+        assert!(
+            warnings.is_empty(),
+            "/etc-configs must not match /etc prefix due to path boundary check"
+        );
     }
 
     #[test]
@@ -6945,21 +7645,29 @@ safe-outputs:
     fn test_validate_container_image_empty_string() {
         let warnings = validate::validate_container_image("", "my-mcp");
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("empty"), "should warn about empty image name");
+        assert!(
+            warnings[0].contains("empty"),
+            "should warn about empty image name"
+        );
     }
 
     #[test]
     fn test_validate_container_image_shell_metacharacters() {
         let warnings = validate::validate_container_image("node:20-slim; rm -rf /", "my-mcp");
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("unexpected characters"), "should warn about shell metacharacters");
+        assert!(
+            warnings[0].contains("unexpected characters"),
+            "should warn about shell metacharacters"
+        );
     }
 
     #[test]
     fn test_validate_container_image_valid_name_no_warnings() {
         // Standard image references should produce no warnings
         assert!(validate::validate_container_image("node:20-slim", "my-mcp").is_empty());
-        assert!(validate::validate_container_image("ghcr.io/org/image:latest", "my-mcp").is_empty());
+        assert!(
+            validate::validate_container_image("ghcr.io/org/image:latest", "my-mcp").is_empty()
+        );
         assert!(validate::validate_container_image("python:3.12-slim", "my-mcp").is_empty());
     }
 
@@ -6971,7 +7679,10 @@ safe-outputs:
         let headers = HashMap::new();
         let warnings = validate::warn_potential_secrets("my-mcp", &env, &headers);
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("API_TOKEN"), "should warn about secret-looking env var");
+        assert!(
+            warnings[0].contains("API_TOKEN"),
+            "should warn about secret-looking env var"
+        );
     }
 
     #[test]
@@ -6980,28 +7691,35 @@ safe-outputs:
         let env = HashMap::from([("API_TOKEN".to_string(), "".to_string())]);
         let headers = HashMap::new();
         let warnings = validate::warn_potential_secrets("my-mcp", &env, &headers);
-        assert!(warnings.is_empty(), "empty passthrough value must not trigger a warning");
+        assert!(
+            warnings.is_empty(),
+            "empty passthrough value must not trigger a warning"
+        );
     }
 
     #[test]
     fn test_warn_potential_secrets_authorization_header_triggers() {
         let env = HashMap::new();
-        let headers =
-            HashMap::from([("Authorization".to_string(), "Bearer abc".to_string())]);
+        let headers = HashMap::from([("Authorization".to_string(), "Bearer abc".to_string())]);
         let warnings = validate::warn_potential_secrets("my-mcp", &env, &headers);
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("Authorization"), "should warn about Authorization header");
+        assert!(
+            warnings[0].contains("Authorization"),
+            "should warn about Authorization header"
+        );
     }
 
     #[test]
     fn test_warn_potential_secrets_bearer_value_triggers() {
         // A header whose value starts with "Bearer " should also warn
         let env = HashMap::new();
-        let headers =
-            HashMap::from([("X-Custom-Auth".to_string(), "Bearer token123".to_string())]);
+        let headers = HashMap::from([("X-Custom-Auth".to_string(), "Bearer token123".to_string())]);
         let warnings = validate::warn_potential_secrets("my-mcp", &env, &headers);
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("X-Custom-Auth"), "should warn about header with Bearer value");
+        assert!(
+            warnings[0].contains("X-Custom-Auth"),
+            "should warn about header with Bearer value"
+        );
     }
 
     #[test]
@@ -7010,7 +7728,10 @@ safe-outputs:
         let env = HashMap::from([("MY_CONFIG".to_string(), "value".to_string())]);
         let headers = HashMap::new();
         let warnings = validate::warn_potential_secrets("my-mcp", &env, &headers);
-        assert!(warnings.is_empty(), "non-secret env var should not produce warnings");
+        assert!(
+            warnings.is_empty(),
+            "non-secret env var should not produce warnings"
+        );
     }
 
     // ─── standalone setup/teardown/finalize/checkout/repositories generators ───
@@ -7098,7 +7819,8 @@ safe-outputs:
     fn test_resolve_pool_block_non_onees_from_vm_image() {
         let pool_yaml = "name: x\ndescription: x\npool:\n  vmImage: windows-latest";
         let fm: FrontMatter = serde_yaml::from_str(pool_yaml).expect("front matter");
-        let block = resolve_pool_block(CompileTarget::Standalone, fm.pool.as_ref()).expect("pool block");
+        let block =
+            resolve_pool_block(CompileTarget::Standalone, fm.pool.as_ref()).expect("pool block");
         assert_eq!(block, "vmImage: windows-latest");
     }
 
@@ -7123,8 +7845,7 @@ safe-outputs:
             vm_image: None,
             os: None,
         });
-        let block =
-            resolve_pool_block(CompileTarget::Standalone, Some(&pool)).expect("pool block");
+        let block = resolve_pool_block(CompileTarget::Standalone, Some(&pool)).expect("pool block");
         assert_eq!(block, "vmImage: ubuntu-22.04");
     }
 
@@ -7136,7 +7857,10 @@ safe-outputs:
     #[test]
     fn test_generate_agentic_depends_on_with_steps() {
         let step: serde_yaml::Value = serde_yaml::from_str("bash: x").unwrap();
-        assert_eq!(generate_agentic_depends_on(&[step], false, false, &[]), "dependsOn: Setup");
+        assert_eq!(
+            generate_agentic_depends_on(&[step], false, false, &[]),
+            "dependsOn: Setup"
+        );
     }
 
     #[test]
@@ -7211,8 +7935,8 @@ safe-outputs:
     // Tests for compact `repos:` lowering
     // ──────────────────────────────────────────────────────────────────────
 
-    use super::{lower_repos, resolve_repos, parse_shorthand, derive_alias};
-    use crate::compile::types::{ReposItem, RepoEntry};
+    use super::{derive_alias, lower_repos, parse_shorthand, resolve_repos};
+    use crate::compile::types::{RepoEntry, ReposItem};
 
     #[test]
     fn test_repos_shorthand_simple() {
@@ -7228,7 +7952,9 @@ safe-outputs:
 
     #[test]
     fn test_repos_shorthand_with_alias() {
-        let items = vec![ReposItem::Shorthand("schemas=my-org/internal-schemas".to_string())];
+        let items = vec![ReposItem::Shorthand(
+            "schemas=my-org/internal-schemas".to_string(),
+        )];
         let (repos, checkout) = lower_repos(&items).unwrap();
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].repository, "schemas");
@@ -7288,7 +8014,11 @@ safe-outputs:
             ReposItem::Shorthand("other-org/tools".to_string()),
         ];
         let err = lower_repos(&items).unwrap_err();
-        assert!(err.to_string().contains("Duplicate repository alias 'tools'"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("Duplicate repository alias 'tools'"),
+            "{err}"
+        );
     }
 
     #[test]

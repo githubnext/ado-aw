@@ -12,7 +12,7 @@ tools:
   bash: ["*"]
   cache-memory: true
 network:
-  allowed: [defaults, rust]
+  allowed: [defaults, rust, dev.azure.com, learn.microsoft.com]
 timeout-minutes: 60
 safe-outputs:
   create-pull-request:

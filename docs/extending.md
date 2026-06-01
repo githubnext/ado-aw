@@ -40,7 +40,7 @@ pub trait CompilerExtension {
     fn required_hosts(&self) -> Vec<String>;                   // AWF network allowlist
     fn required_bash_commands(&self) -> Vec<String>;           // Agent bash allow-list
     fn prompt_supplement(&self) -> Option<String>;              // Agent prompt markdown
-    fn prepare_steps(&self) -> Vec<String>;                    // Agent job steps (install, etc.)
+    fn prepare_steps(&self, ctx: &CompileContext) -> Vec<String>; // Agent job steps (install, etc.)
     fn setup_steps(&self, ctx: &CompileContext) -> Result<Vec<String>>; // Setup job steps (gates, pre-checks)
     fn mcpg_servers(&self, ctx: &CompileContext) -> Result<Vec<(String, McpgServerConfig)>>; // MCPG entries
     fn allowed_copilot_tools(&self) -> Vec<String>;            // --allow-tool values

@@ -3,8 +3,9 @@
 `ado-script` is the umbrella name for the TypeScript workspace at
 [`scripts/ado-script/`](../scripts/ado-script/). It produces small,
 ncc-bundled Node programs that the **compiler injects into every emitted
-pipeline** as runtime helpers. The first (and currently only) bundle is
-`gate.js`, the trigger-filter gate evaluator.
+pipeline** as runtime helpers. Today it produces `gate.js`, the
+trigger-filter gate evaluator, and `import.js`, the runtime prompt
+resolver described in [`runtime-imports.md`](runtime-imports.md).
 
 > **Internal-only.** `ado-script` is not a user-facing front-matter
 > feature. Authors never write an `ado-script:` block in their agent
@@ -32,6 +33,35 @@ is a typed JSON document; predicates are dispatched via a `switch` on a
 discriminated union. There is no `eval`, no `Function`, no `vm` — a
 compromised compiler cannot use the spec to run arbitrary code on the
 pipeline runner.
+
+## What `import.js` does
+
+`import.js` is a single-shot Node program. It reads the prompt file path
+from `argv[2]` and resolves `{{#runtime-import path}}` markers in place.
+The compiler runs it as a post-prepare-prompt step when
+[`inlined-imports: false`](front-matter.md#inlined-imports). See
+[`runtime-imports.md`](runtime-imports.md) for the author-facing marker
+syntax.
+
+### Env-var contract
+
+`import.js` takes no environment variables. Relative-path markers
+resolve against `dirname(argv[2])`; in pipeline use this is irrelevant
+because the compiler always embeds an absolute marker path and
+`import.js` is single-pass (nested markers inside the inlined body are
+not re-expanded).
+
+The bundle lives at `import.js` and ships in the same
+`ado-script.zip` release asset as `gate.js`, so pipelines download it
+through the same Setup-job asset flow. `import.js` uses only the Node
+standard library, so the ncc bundle is small (~1.5 KB) and carries no
+SDK dependency.
+
+The Stage-2 threat-analysis prompt is **not** runtime-imported.
+`src/data/threat-analysis.md` is `include_str!`'d into the `ado-aw`
+binary and inlined into the emitted YAML at compile time, matching
+gh-aw's pattern (their `threat_detection.md` ships with the setup
+action and is read directly from disk — no marker, no resolver).
 
 ## End-to-end data flow
 
@@ -107,7 +137,7 @@ job.
 ## Runtime env-var contract
 
 The compiler injects these environment variables on the
-`bash: node gate/index.js` step. `gate.js` reads them via
+`bash: node gate.js` step. `gate.js` reads them via
 `process.env`:
 
 | Env var | Source | Purpose |
@@ -147,18 +177,23 @@ scripts/ado-script/
 │   │   ├── env-facts.ts         # Pipeline-variable readers + ENV_BY_FACT + BRANCH_FACTS + ref-prefix stripping
 │   │   ├── policy.ts            # PolicyTracker state machine
 │   │   └── vso-logger.ts        # ##vso[…] emitters with property/message escaping; complete() is idempotent
-│   └── gate/                    # gate.js entry point + per-concern modules
-│       ├── index.ts             # main(): decode → preflight → bypass → facts → eval → emit
-│       ├── bypass.ts            # build-reason auto-pass
-│       ├── facts.ts             # fact acquisition (env + REST)
-│       ├── predicates.ts        # 11 predicate evaluators + validatePredicateTree + glob ReDoS hardening
-│       └── selfcancel.ts        # best-effort build cancellation
+│   ├── gate/                    # gate.js entry point + per-concern modules
+│   │   ├── index.ts             # main(): decode → preflight → bypass → facts → eval → emit
+│   │   ├── bypass.ts            # build-reason auto-pass
+│   │   ├── facts.ts             # fact acquisition (env + REST)
+│   │   ├── predicates.ts        # 11 predicate evaluators + validatePredicateTree + glob ReDoS hardening
+│   │   └── selfcancel.ts        # best-effort build cancellation
+│   └── import/                  # import.js entry point + runtime prompt resolver
+│       ├── index.ts             # main(): expand runtime-import markers in place
+│       └── __tests__/           # marker, path-resolution, and single-pass coverage
 ├── test/                        # End-to-end smoke tests
-└── dist/gate/index.js           # ncc bundle output (gitignored)
+├── gate.js                      # ncc bundle output (gitignored)
+└── import.js                    # ncc bundle output (gitignored)
 ```
 
 The release workflow (`.github/workflows/release.yml`) runs
-`npm ci && npm run build`, then zips `scripts/ado-script/dist/` into
+`npm ci && npm run build`, then zips `scripts/ado-script/gate.js` and
+`scripts/ado-script/import.js` into
 the `ado-script.zip` release asset. Pipelines download that asset at
 runtime by URL pinned to the compiler's `CARGO_PKG_VERSION`, verify
 its SHA-256 against the `checksums.txt` asset, then extract.
@@ -195,11 +230,18 @@ The Rust subcommand that emits the schema is intentionally hidden:
 cargo run -- export-gate-schema --output schema/gate-spec.schema.json
 ```
 
-## How the gate bundle is wired into emitted pipelines
+## How the bundles are wired into emitted pipelines
 
-`TriggerFiltersExtension`
-(`src/compile/extensions/trigger_filters.rs`) injects three Setup-job
-steps when any `filters:` block is active:
+`AdoScriptExtension`
+(`src/compile/extensions/ado_script.rs`) is the always-on single
+extension that owns all `ado-script` wiring. It has two independent
+features, each emitted **into the job that actually consumes the
+bundle**:
+
+### Setup job (gate evaluator)
+
+When `filters:` lowers to non-empty checks, `setup_steps()` returns
+three step strings into the Setup job:
 
 1. **`NodeTool@0`** — installs Node 20.x LTS, capped at
    `timeoutInMinutes: 5`.
@@ -208,10 +250,43 @@ steps when any `filters:` block is active:
    `CARGO_PKG_VERSION`, verifies the zip's SHA-256, then
    `unzip -o /tmp/ado-aw-scripts/ado-script.zip -d /tmp/ado-aw-scripts/`.
    Also capped at `timeoutInMinutes: 5`.
-3. **`bash: node '/tmp/ado-aw-scripts/ado-script/dist/gate/index.js'`** —
-   runs the gate with `GATE_SPEC` and the env-var contract above.
+3. **`bash: node '/tmp/ado-aw-scripts/ado-script/gate.js'`** —
+   runs the gate with `GATE_SPEC` and the env-var contract documented
+   above.
 
-The IR-to-bash codegen that produces these steps is
+### Agent job (runtime-import resolver)
+
+When `inlined-imports: false` (the default), `prepare_steps()` returns
+the same install + download pair plus the resolver invocation, into
+the Agent job's existing `{{ prepare_steps }}` block:
+
+1. **`NodeTool@0`** — same shape as above.
+2. **`curl` download + verify + extract** — same artefact, same
+   verification.
+3. **`bash: node '/tmp/ado-aw-scripts/ado-script/import.js'`** —
+   expands `{{#runtime-import …}}` markers in
+   `/tmp/awf-tools/agent-prompt.md` in place. See
+   [`runtime-imports.md`](runtime-imports.md) for marker syntax.
+
+### Per-job download (NOT a duplication bug)
+
+ADO jobs use **isolated VMs** — `/tmp` is not shared between jobs.
+The `ado-script.zip` bundle therefore has to be downloaded once per
+job that consumes it. When both features are active (a pipeline with
+both `filters:` and `inlined-imports: false`), install + download
+steps appear in **both** Setup and Agent. That's correct architecture
+given ADO's topology, not waste.
+
+### What gets emitted, by case
+
+| `filters:` | `inlined-imports` | Setup-job steps | Agent-job extra steps |
+|---|---|---|---|
+| inactive   | `true`  | (none)                              | (none)                              |
+| inactive   | `false` | (no Setup job)                      | install + download + resolver       |
+| active     | `true`  | install + download + gate           | (none)                              |
+| active     | `false` | install + download + gate           | install + download + resolver       |
+
+The IR-to-bash codegen that produces the gate step is
 `compile_gate_step_external` in `src/compile/filter_ir.rs`.
 
 ## Modifying `ado-script`
@@ -249,16 +324,16 @@ The IR-to-bash codegen that produces these steps is
    `scripts/ado-script/src/poll/`. Reuse anything in `src/shared/`.
 2. Add a build script to `package.json`:
    ```json
-   "build:poll": "ncc build src/poll/index.ts -o dist/poll -m -t"
+   "build:poll": "ncc build src/poll/index.ts -o .ado-build/poll -m -t && node -e \"const fs=require('node:fs'); fs.copyFileSync('.ado-build/poll/index.js','poll.js'); fs.rmSync('.ado-build/poll',{recursive:true,force:true});\""
    ```
    and extend `build` to also run it.
 3. Add vitest tests under `src/poll/__tests__/`.
 4. Wire from a new `CompilerExtension` (or extend an existing one)
    that downloads `ado-script.zip` (already a release asset) and
-   invokes `node /tmp/ado-aw-scripts/ado-script/dist/poll/index.js`
+   invokes `node /tmp/ado-aw-scripts/ado-script/poll.js`
    as a runtime step.
-5. No release-workflow change is needed — `zip -r ado-script/dist`
-   picks up the new bundle automatically.
+5. Update release packaging to include `scripts/ado-script/poll.js`
+   in `ado-script.zip` alongside other bundles.
 
 ### Local development loop
 
@@ -269,7 +344,7 @@ npm ci                 # one-time
 npm run codegen        # regenerate types.gen.ts (compiles ado-aw first)
 npm test               # vitest unit tests
 npm run typecheck      # strict tsc --noEmit
-npm run build          # ncc-bundle to dist/gate/index.js
+npm run build          # ncc-bundle to gate.js
 npm run test:smoke     # build + smoke test the bundle end-to-end
 ```
 

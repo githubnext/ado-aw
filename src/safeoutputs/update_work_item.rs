@@ -465,24 +465,24 @@ impl Executor for UpdateWorkItemResult {
             return Ok(result);
         }
 
-        // Validate agent-provided tags against allowed-tags (if configured)
-        if let Some(tags) = &self.tags {
-            if !config.allowed_tags.is_empty() {
-                let disallowed: Vec<_> = tags
-                    .iter()
-                    .filter(|tag| {
-                        !config
-                            .allowed_tags
-                            .iter()
-                            .any(|pattern| super::tag_matches_pattern(tag, pattern))
-                    })
-                    .collect();
-                if !disallowed.is_empty() {
-                    return Ok(ExecutionResult::failure(format!(
-                        "Agent-provided tags not in allowed-tags: {}",
-                        disallowed.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(", ")
-                    )));
-                }
+                // Validate agent-provided tags against allowed-tags (if configured)
+        if let Some(tags) = &self.tags
+            && !config.allowed_tags.is_empty()
+        {
+            let disallowed: Vec<_> = tags
+                .iter()
+                .filter(|tag| {
+                    !config
+                        .allowed_tags
+                        .iter()
+                        .any(|pattern| super::tag_matches_pattern(tag, pattern))
+                })
+                .collect();
+            if !disallowed.is_empty() {
+                return Ok(ExecutionResult::failure(format!(
+                    "Agent-provided tags not in allowed-tags: {}",
+                    disallowed.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(", ")
+                )));
             }
         }
 

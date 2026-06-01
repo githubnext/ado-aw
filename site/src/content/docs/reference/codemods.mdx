@@ -12,6 +12,15 @@ rewrite deprecated front-matter shapes to the current shape during
 This page is the reference for both users (what codemods mean for me)
 and contributors (how to add one).
 
+## Registered codemods
+
+| ID | Summary | Introduced in |
+|----|---------|---------------|
+| `repos_unified` | `repositories:` + `checkout:` → unified `repos:` | 0.28.0 |
+| `pool_object_form` | `pool: <string>` → explicit `pool:` object form (`name` / `vmImage`) | 0.30.0 |
+
+If `ado-aw compile` rewrites your source, it prints a warning to stderr naming each codemod that fired and reminding you that front-matter comments are dropped by the round-trip.
+
 ## How it works
 
 ### No version field on user files
@@ -107,11 +116,10 @@ Codemods live in `src/compile/codemods/`:
 
 ```text
 src/compile/codemods/
-├── mod.rs       # Framework + CODEMODS registry
-├── helpers.rs   # take_key, insert_no_overwrite, rename_key, ConflictPolicy
-├── 0001_engine_id_split.rs
-├── 0002_permissions_field.rs
-└── 0003_safeoutput_renames.rs
+├── mod.rs                  # Framework + CODEMODS registry
+├── helpers.rs              # take_key, insert_no_overwrite, rename_key, ConflictPolicy
+├── 0001_repos_unified.rs   # repositories: + checkout: -> unified repos:
+└── 0002_pool_object_form.rs # pool: <string> -> pool object form (name/vmImage)
 ```
 
 The filename prefix is a zero-padded sequence number (`<NNNN>`). It

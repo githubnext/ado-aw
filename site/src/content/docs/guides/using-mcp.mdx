@@ -3,6 +3,8 @@ title: Configuring MCP servers
 description: Learn how ado-aw uses MCP, which built-in servers are available, and how to add custom stdio or HTTP MCP backends.
 ---
 
+import { Steps } from '@astrojs/starlight/components';
+
 # Configuring MCP servers
 
 In `ado-aw`, **MCP** means **Model Context Protocol** servers that expose tools to the agent.
@@ -171,8 +173,16 @@ Use this pattern when you already operate an internal MCP service.
 
 ## Recommended workflow
 
-1. start with built-in capabilities such as SafeOutputs
-2. add `tools.azure-devops` if the agent needs Azure DevOps tooling
-3. add custom `mcp-servers:` only for extra capabilities
-4. keep `allowed:` lists tight
-5. use `env:` passthrough for secrets and tokens instead of hardcoding values
+<Steps>
+
+1. Start with built-in capabilities such as SafeOutputs — test whether the agent works with only GitHub MCP and SafeOutputs tools.
+
+2. Add `tools.azure-devops` if the agent needs Azure DevOps tooling — configure toolsets and allowed tools for ADO operations.
+
+3. Add custom `mcp-servers:` only for extra capabilities — use stdio containers or HTTP backends for specialized tools.
+
+4. Keep `allowed:` lists tight — only expose the specific tools the agent genuinely needs.
+
+5. Use `env:` passthrough for secrets and tokens instead of hardcoding values — keep credentials out of the agent file with blank-string env mappings.
+
+</Steps>

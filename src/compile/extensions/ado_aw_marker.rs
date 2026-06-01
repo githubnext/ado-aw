@@ -1,9 +1,15 @@
 //! Always-on ado-aw marker extension.
 //!
-//! Injects a single informational step into the Setup job of every
-//! compiled pipeline. The step's bash body carries a machine-readable
-//! JSON metadata blob keyed by a `# ado-aw-metadata:` prefix, plus a
-//! runtime `echo` for build-log visibility.
+//! Injects a single informational step into the prepare phase of the
+//! Agent job of every compiled pipeline. The step's bash body carries a
+//! machine-readable JSON metadata blob keyed by a `# ado-aw-metadata:`
+//! prefix, plus a runtime `echo` for build-log visibility.
+//!
+//! Why `prepare_steps` (Agent job) and not `setup_steps` (Setup job):
+//! a Setup-job injection would force every compiled pipeline to spin
+//! up a dedicated pool agent just to emit a metadata comment, even for
+//! pipelines that have no other reason to need a Setup job. The Agent
+//! job is always present, so `prepare_steps` is free.
 //!
 //! Why a step (and not a top-of-file comment): ADO's Pipeline Preview
 //! API strips top-of-document leading comments during YAML expansion
@@ -17,12 +23,12 @@
 //! older parsers, mirroring gh-aw's `# gh-aw-metadata: {...}` shape.
 
 use super::{CompileContext, CompilerExtension, ExtensionPhase};
-use anyhow::Result;
 
 // ─── ado-aw marker (always-on, internal) ─────────────────────────────
 
 /// Always-on internal extension that embeds machine-readable
-/// `# ado-aw-metadata: {…}` JSON inside an injected Setup-job step.
+/// `# ado-aw-metadata: {…}` JSON inside an injected Agent-job prepare
+/// step.
 ///
 /// The metadata is the canonical surface consumed by Preview-driven
 /// project-scope discovery in [`crate::ado`]. Discovery enumerates ADO
@@ -43,22 +49,50 @@ impl CompilerExtension for AdoAwMarkerExtension {
         ExtensionPhase::Tool
     }
 
-    fn setup_steps(&self, ctx: &CompileContext) -> Result<Vec<String>> {
+    fn prepare_steps(&self, ctx: &CompileContext) -> Vec<String> {
+        // Inject the marker step into the Agent job's prepare phase
+        // (NOT a separate Setup job). Setup-job injection would force
+        // every compiled pipeline to spin up an extra agent pool job
+        // just to emit a metadata comment — wasteful for pipelines
+        // that have no other reason to need a Setup job. prepare_steps
+        // lands inside the always-present Agent job's
+        // `{{ prepare_steps }}` block, so it costs zero extra
+        // jobs/agents/pool time.
+        //
         // In unit-test contexts that build a CompileContext without an
         // input_path (e.g. CompileContext::for_test), skip the marker.
         // Production paths always populate input_path via
         // CompileContext::new.
         let Some(input_path) = ctx.input_path else {
-            return Ok(vec![]);
+            return vec![];
         };
 
         let source = super::super::common::normalize_source_path(input_path);
         let version = env!("CARGO_PKG_VERSION");
         let target = ctx.front_matter.target.as_str();
 
+        // ADO origin of the source markdown — disambiguates the
+        // `source` field when two repos in the same project happen to
+        // have files of the same name (e.g. both define `agents/foo.md`).
+        // Lower-cased so case-insensitive ADO identifiers compare cleanly.
+        // Empty strings when no ADO context could be inferred — production
+        // runs always have one thanks to the non-GitHub-remote guard, but
+        // unit-test contexts via `CompileContext::for_test` will not.
+        let org = ctx
+            .ado_org()
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
+        let repo = ctx
+            .ado_context
+            .as_ref()
+            .map(|c| c.repo_name.to_ascii_lowercase())
+            .unwrap_or_default();
+
         let metadata_json = serde_json::json!({
             "schema": 1,
             "source": source,
+            "org": org,
+            "repo": repo,
             "version": version,
             "target": target,
         })
@@ -69,33 +103,45 @@ impl CompilerExtension for AdoAwMarkerExtension {
         // the build log at runtime, which is a free human-discoverability
         // bonus and costs nothing because the step runs in milliseconds.
         //
-        // The echo's source value goes through two sanitisations:
+        // The echo's user-controlled values go through two sanitisations:
         //
-        //  1. `sanitize_for_vso_logging` neutralises `##vso[` and `##[`
-        //     prefixes. The ADO build agent scans stdout for those
-        //     sequences and treats them as logging commands (e.g.
-        //     `task.setvariable`). An attacker who controls a markdown
-        //     filename could otherwise inject a logging command into
-        //     the build log via the echoed source path. Same convention
-        //     used by `agent_stats::sanitize_for_markdown`.
+        //  1. `crate::sanitize::neutralize_pipeline_commands` neutralises
+        //     `##vso[` and `##[` prefixes by wrapping them in backticks.
+        //     The ADO build agent scans stdout for those sequences and
+        //     treats them as logging commands (e.g. `task.setvariable`).
+        //     An attacker who controls a markdown filename could
+        //     otherwise inject a logging command into the build log via
+        //     the echoed source path. Reusing the canonical helper keeps
+        //     this in sync with the rest of the sanitisation surfaces.
         //
         //  2. `bash_single_quote_escape` applies the `'\''` idiom so a
         //     filename containing `'` (e.g. `agents/foo's.md`) doesn't
         //     produce syntactically broken bash. `version` and `target`
         //     are controlled inputs and can't contain either.
-        let echo_source = bash_single_quote_escape(&sanitize_for_vso_logging(&source));
+        //
+        // `org` and `repo` are derived from ADO remote parsing, which
+        // already restricts them to a safe character set, but we apply
+        // the same defence-in-depth pattern for consistency.
+        let echo_source =
+            bash_single_quote_escape(&crate::sanitize::neutralize_pipeline_commands(&source));
+        let echo_org =
+            bash_single_quote_escape(&crate::sanitize::neutralize_pipeline_commands(&org));
+        let echo_repo =
+            bash_single_quote_escape(&crate::sanitize::neutralize_pipeline_commands(&repo));
         let step = format!(
             "- bash: |\n    \
                 # ado-aw-metadata: {metadata}\n    \
-                echo 'ado-aw metadata: source={echo_source} version={version} target={target}'\n  \
+                echo 'ado-aw metadata: source={echo_source} org={echo_org} repo={echo_repo} version={version} target={target}'\n  \
             displayName: \"ado-aw\"\n",
             metadata = metadata_json,
             echo_source = echo_source,
+            echo_org = echo_org,
+            echo_repo = echo_repo,
             version = version,
             target = target,
         );
 
-        Ok(vec![step])
+        vec![step]
     }
 }
 
@@ -104,15 +150,6 @@ impl CompilerExtension for AdoAwMarkerExtension {
 /// reopen-quote — the canonical idiom).
 fn bash_single_quote_escape(s: &str) -> String {
     s.replace('\'', "'\\''")
-}
-
-/// Neutralise ADO build-agent logging-command prefixes (`##vso[`, `##[`).
-/// Mirrors `crate::agent_stats::sanitize_for_markdown` so a malicious
-/// filename can't smuggle a `task.setvariable` (or similar) through the
-/// runtime `echo` line in the marker step.
-fn sanitize_for_vso_logging(s: &str) -> String {
-    s.replace("##vso[", "[vso-filtered][")
-        .replace("##[", "[filtered][")
 }
 
 #[cfg(test)]
@@ -130,8 +167,11 @@ mod tests {
     fn returns_no_step_when_input_path_absent() {
         let fm = parse_fm("name: t\ndescription: x\n");
         let ctx = CompileContext::for_test(&fm);
-        let steps = AdoAwMarkerExtension.setup_steps(&ctx).unwrap();
-        assert!(steps.is_empty(), "expected no marker when input_path is None");
+        let steps = AdoAwMarkerExtension.prepare_steps(&ctx);
+        assert!(
+            steps.is_empty(),
+            "expected no marker when input_path is None"
+        );
     }
 
     #[test]
@@ -148,14 +188,78 @@ mod tests {
             compile_dir: None,
             input_path: Some(input_path),
         };
-        let steps = AdoAwMarkerExtension.setup_steps(&ctx).unwrap();
+        let steps = AdoAwMarkerExtension.prepare_steps(&ctx);
         assert_eq!(steps.len(), 1);
         let step = &steps[0];
-        assert!(step.contains("displayName: \"ado-aw\""), "step missing displayName:\n{step}");
-        assert!(step.contains("# ado-aw-metadata:"), "step missing JSON marker line:\n{step}");
-        assert!(step.contains("\"source\":\"agents/foo.md\""), "step missing source field:\n{step}");
-        assert!(step.contains("\"target\":\"standalone\""), "step missing target field:\n{step}");
-        assert!(step.contains("\"schema\":1"), "step missing schema field:\n{step}");
+        assert!(
+            step.contains("displayName: \"ado-aw\""),
+            "step missing displayName:\n{step}"
+        );
+        assert!(
+            step.contains("# ado-aw-metadata:"),
+            "step missing JSON marker line:\n{step}"
+        );
+        assert!(
+            step.contains("\"source\":\"agents/foo.md\""),
+            "step missing source field:\n{step}"
+        );
+        assert!(
+            step.contains("\"target\":\"standalone\""),
+            "step missing target field:\n{step}"
+        );
+        assert!(
+            step.contains("\"schema\":1"),
+            "step missing schema field:\n{step}"
+        );
+        // No ado_context => org/repo emit as empty strings.
+        assert!(
+            step.contains("\"org\":\"\""),
+            "step missing org field:\n{step}"
+        );
+        assert!(
+            step.contains("\"repo\":\"\""),
+            "step missing repo field:\n{step}"
+        );
+    }
+
+    #[test]
+    fn org_and_repo_embed_from_ado_context_lowercased() {
+        // When the compiler runs inside an ADO checkout (the production
+        // path — the non-GitHub-remote guard enforces this), the JSON
+        // marker carries `org` and `repo` so discovery can disambiguate
+        // a same-named `source` across two repos in the same project.
+        let fm = parse_fm("name: t\ndescription: x\n");
+        let input_path = Path::new("agents/foo.md");
+        let ctx = CompileContext {
+            agent_name: &fm.name,
+            front_matter: &fm,
+            ado_context: Some(crate::ado::AdoContext {
+                org_url: "https://dev.azure.com/MyOrg".to_string(),
+                project: "MyProject".to_string(),
+                repo_name: "Templates-A".to_string(),
+            }),
+            engine: crate::engine::Engine::Copilot,
+            compile_dir: None,
+            input_path: Some(input_path),
+        };
+        let steps = AdoAwMarkerExtension.prepare_steps(&ctx);
+        assert_eq!(steps.len(), 1);
+        let step = &steps[0];
+        // ADO identifiers are case-insensitive; lowercase to make
+        // comparisons in discovery deterministic.
+        assert!(
+            step.contains("\"org\":\"myorg\""),
+            "expected lowercased org field:\n{step}"
+        );
+        assert!(
+            step.contains("\"repo\":\"templates-a\""),
+            "expected lowercased repo field:\n{step}"
+        );
+        // The echo line surfaces them too for build-log readability.
+        assert!(
+            step.contains("org=myorg repo=templates-a"),
+            "expected echo to include org/repo:\n{step}"
+        );
     }
 
     #[test]
@@ -177,7 +281,7 @@ mod tests {
                 compile_dir: None,
                 input_path: Some(input_path),
             };
-            let steps = AdoAwMarkerExtension.setup_steps(&ctx).unwrap();
+            let steps = AdoAwMarkerExtension.prepare_steps(&ctx);
             assert_eq!(steps.len(), 1, "target={raw_target}");
             assert!(
                 steps[0].contains(&format!("\"target\":\"{expected}\"")),
@@ -211,7 +315,7 @@ mod tests {
             compile_dir: None,
             input_path: Some(input_path),
         };
-        let steps = AdoAwMarkerExtension.setup_steps(&ctx).unwrap();
+        let steps = AdoAwMarkerExtension.prepare_steps(&ctx);
         assert_eq!(steps.len(), 1);
         let step = &steps[0];
         assert!(
@@ -227,26 +331,17 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_for_vso_logging_neutralises_known_prefixes() {
-        assert_eq!(
-            sanitize_for_vso_logging("##vso[task.setvariable variable=X]value"),
-            "[vso-filtered][task.setvariable variable=X]value"
-        );
-        assert_eq!(
-            sanitize_for_vso_logging("##[warning]ignore me"),
-            "[filtered][warning]ignore me"
-        );
-        assert_eq!(sanitize_for_vso_logging("agents/foo.md"), "agents/foo.md");
-        assert_eq!(sanitize_for_vso_logging(""), "");
-    }
-
-    #[test]
     fn echo_line_neutralises_vso_injection_attempt() {
         // An attacker who controls a markdown filename must not be able
         // to inject ADO logging commands into the build log via the
         // echoed source path. The ADO agent scans stdout for `##vso[`
         // and `##[` prefixes and treats matching sequences as task
         // commands (setvariable, setoutput, etc.).
+        //
+        // Marker uses the canonical `crate::sanitize::neutralize_pipeline_commands`
+        // which backtick-wraps the prefix (`` `##vso[` ``) — the literal
+        // `##vso[` no longer starts a token in the agent's scanner. See
+        // `src/sanitize.rs` for the canonical helper's own tests.
         let fm = parse_fm("name: t\ndescription: x\n");
         let input_path = Path::new("agents/##vso[task.setvariable variable=FOO]value.md");
         let ctx = CompileContext {
@@ -257,7 +352,7 @@ mod tests {
             compile_dir: None,
             input_path: Some(input_path),
         };
-        let steps = AdoAwMarkerExtension.setup_steps(&ctx).unwrap();
+        let steps = AdoAwMarkerExtension.prepare_steps(&ctx);
         assert_eq!(steps.len(), 1);
         let step = &steps[0];
 
@@ -272,13 +367,51 @@ mod tests {
             .lines()
             .find(|l| l.trim_start().starts_with("echo 'ado-aw metadata:"))
             .expect("must have echo line");
+        // `neutralize_pipeline_commands` wraps the matched prefix in
+        // backticks, breaking the `##vso[` token at the start of the
+        // sequence. The agent's scanner is anchored to the literal
+        // prefix; the backtick-wrapped form passes through unprocessed.
         assert!(
-            !echo_line.contains("##vso["),
-            "raw ##vso[ leaked into echo line: {echo_line}"
+            !echo_line.contains(" ##vso["),
+            "raw ##vso[ leaked into echo line (must be backtick-wrapped): {echo_line}"
         );
         assert!(
-            echo_line.contains("[vso-filtered]["),
-            "expected `##vso[` neutralised to `[vso-filtered][` in echo line: {echo_line}"
+            echo_line.contains("`##vso[`"),
+            "expected `##vso[` neutralised via canonical backtick-wrap in echo line: {echo_line}"
+        );
+    }
+
+    #[test]
+    fn json_marker_quote_in_source_round_trips_correctly() {
+        // Regression: `normalize_source_path` previously escaped `"` to
+        // `\"` before embedding the path. `serde_json::json!` then
+        // double-encoded the backslash, so the marker JSON looked like
+        // `"source":"agents/foo\\\"bar.md"` — and the path returned by
+        // `parse_marker_step` carried a spurious `\` that did not exist
+        // in the original filename. The fix is to feed the canonical
+        // (unescaped) path into the JSON value and let serde_json do
+        // the JSON-level escaping.
+        let fm = parse_fm("name: t\ndescription: x\n");
+        let input_path = Path::new(r#"agents/foo"bar.md"#);
+        let ctx = CompileContext {
+            agent_name: &fm.name,
+            front_matter: &fm,
+            ado_context: None,
+            engine: crate::engine::Engine::Copilot,
+            compile_dir: None,
+            input_path: Some(input_path),
+        };
+        let steps = AdoAwMarkerExtension.prepare_steps(&ctx);
+        assert_eq!(steps.len(), 1);
+
+        // Parse the marker step back via the canonical discovery parser
+        // and confirm the source field reconstructs to the original
+        // path (forward-slash-normalised, no spurious backslashes).
+        let parsed = crate::detect::parse_marker_step(&steps[0]);
+        assert_eq!(parsed.len(), 1, "expected exactly one marker in step");
+        assert_eq!(
+            parsed[0].source, r#"agents/foo"bar.md"#,
+            "marker source should round-trip without spurious backslash"
         );
     }
 }

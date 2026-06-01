@@ -80,7 +80,9 @@ Options:
 - `--org <url>` -- Azure DevOps organization URL or bare org name
 - `--project <name>` -- Azure DevOps project name
 - `--pat <pat>` -- PAT for ADO API authentication
-- `--definition-ids <ids>` -- explicit comma-separated definition IDs (skips auto-detection)
+- `--definition-ids <ids>` -- explicit comma-separated definition IDs (skips auto-detection); mutually exclusive with `--all-repos` / `--source`
+- `--all-repos` -- **project-scope mode**: search every ado-aw definition in the ADO project, not just those with a local lock file; mutually exclusive with `--definition-ids`
+- `--source <path>` -- filter to definitions whose `# ado-aw-metadata` marker references this template path (e.g. `agents/security-scan.md`); activates the discovery code path; pairs with `--all-repos` to scope across the whole project
 - `--dry-run` -- print the planned set without calling the ADO API
 
 ### `secrets list [path]`
@@ -91,6 +93,7 @@ Options:
 
 - `--json` -- emit machine-readable JSON
 - `--org`, `--project`, `--pat`, `--definition-ids` -- same as `secrets set`
+- `--all-repos`, `--source` -- same as `secrets set`
 
 ### `secrets delete <name> [path]`
 
@@ -99,7 +102,32 @@ Delete a named variable from every matched definition. No-op when the variable i
 Options:
 
 - `--org`, `--project`, `--pat`, `--definition-ids` -- same as `secrets set`
+- `--all-repos`, `--source` -- same as `secrets set`
 - `--dry-run` -- print the planned deletion without calling the ADO API
+
+### Project-scope discovery (`--all-repos` / `--source`)
+
+By default, `secrets` commands match ADO definitions by scanning **local lock files** (the same auto-discovery used by `compile` and `enable`). Two opt-in flags activate **Preview-driven discovery** instead — useful when local checkouts of every consumer pipeline aren't available:
+
+- **`--all-repos`** — search every ado-aw definition in the ADO project, including consumer pipelines that include ado-aw templates but live in other repos. No local checkout of those repos is required. This routes through `ado-aw`'s Preview API machinery, which calls ADO's Pipeline Preview endpoint per definition and scans the expanded YAML for the `ado-aw-marker` step that every compiled pipeline now carries.
+- **`--source <path>`** — restrict results to definitions whose `# ado-aw-metadata` marker references the given template path. Useful for fan-out token rotation: `ado-aw secrets set GITHUB_TOKEN --source agents/security-scan.md` updates every pipeline that includes that template across the entire project. **Without `--all-repos`, only definitions in the current repository are searched** — pair with `--all-repos` to search the full project.
+
+Both flags are mutually exclusive with `--definition-ids`. `--definition-ids` remains the explicit-ID escape hatch when you know exactly which definitions to target.
+
+:::caution[Not available for other lifecycle commands]
+`enable`, `disable`, `remove`, `list`, `status`, and `run` are **not** affected by these flags — they retain their local-fixture-scoped safety semantics. Only `secrets` commands support project-scope discovery because token rotation is the primary use case for cross-repo operations.
+:::
+
+```bash
+# Rotate GITHUB_TOKEN on every ado-aw pipeline in the project
+ado-aw secrets set GITHUB_TOKEN --all-repos
+
+# Update only pipelines that include a specific template
+ado-aw secrets set GITHUB_TOKEN --all-repos --source agents/security-scan.md
+
+# Preview which definitions would be updated
+ado-aw secrets set GITHUB_TOKEN --all-repos --dry-run
+```
 
 ### `enable [path]`
 
@@ -126,13 +154,13 @@ Options:
 
 ### `disable [path]`
 
-Set `queueStatus` to `disabled` (or `paused`) on every matched ADO definition.
+Set `queueStatus` to `disabled` (or `paused`) on every matched ADO definition. Disabled definitions reject all queue requests; paused definitions queue scheduled runs but hold them without executing.
 
 Options:
 
-- `--paused` -- use `queueStatus: paused` instead of `disabled`; paused definitions still queue scheduled runs but hold the queue, while disabled definitions reject all queue requests
+- `--paused` -- set `queueStatus` to `paused` instead of `disabled`
 - `--org`, `--project`, `--pat` -- same as `enable`
-- `--dry-run` -- print the planned transitions without calling the ADO API
+- `--dry-run` -- preview the planned transitions without calling the ADO API
 
 ### `remove [path]`
 
@@ -140,9 +168,9 @@ Options:
 
 Options:
 
-- `--yes` -- required for bulk deletes and for any delete in a non-tty context
+- `--yes` -- required for bulk deletes (more than one match) and for any delete in a non-tty context
 - `--org`, `--project`, `--pat` -- same as `enable`
-- `--dry-run` -- print the planned deletions without calling the ADO API
+- `--dry-run` -- preview the planned deletions without calling the ADO API
 
 ### `list [path]`
 
@@ -174,12 +202,12 @@ ado-aw run [path] [--wait] [--parameters key=value]
 Options:
 
 - `--branch <ref>` -- source branch to queue (defaults to the definition's `defaultBranch`)
-- `--parameters <k=v>` -- ADO `templateParameters` as `key=value` pairs; repeatable and/or comma-separated. Values must not contain commas — use one `--parameters` flag per pair when values contain commas.
-- `--wait` -- poll each queued build to completion before exiting
-- `--poll-interval <secs>` -- polling interval when `--wait` is set (default: `10`)
-- `--timeout <secs>` -- maximum wait time when `--wait` is set (default: `1800`)
+- `--parameters <k=v>` -- ADO `templateParameters` as `key=value` pairs; repeatable and/or comma-separated. Values must not contain commas — use one `--parameters` flag per pair when values contain commas
+- `--wait` -- poll each queued build to completion before exiting; aggregate result determines the exit code
+- `--poll-interval <secs>` -- seconds between polls when `--wait` is set (default: `10`)
+- `--timeout <secs>` -- maximum seconds to wait when `--wait` is set (default: `1800`)
 - `--org`, `--project`, `--pat` -- same as `enable`
-- `--dry-run` -- print the planned queue body without calling the ADO API
+- `--dry-run` -- preview the planned queue body without calling the ADO API
 
 ## Internal / pipeline runtime commands
 
@@ -187,7 +215,7 @@ These commands are used by the compiled pipeline itself and are not typically ca
 
 ### `mcp <output_directory> <bounding_directory>`
 
-Run SafeOutputs as a stdio MCP server (used by Stage 1).
+Run SafeOutputs as a stdio MCP server (used by Stage 1). The `<bounding_directory>` guards against directory traversal attacks by ensuring the agent cannot influence folders outside this path.
 
 ```bash
 ado-aw mcp <output_directory> <bounding_directory> [--enabled-tools <name>]
@@ -195,11 +223,11 @@ ado-aw mcp <output_directory> <bounding_directory> [--enabled-tools <name>]
 
 Options:
 
-- `--enabled-tools <name>` -- limit the server to specific tools; repeat to allow more than one
+- `--enabled-tools <name>` -- only expose these safe output tools; repeat to allow more than one. If omitted, all tools are exposed
 
 ### `mcp-http <output_directory> <bounding_directory>`
 
-Run SafeOutputs as an HTTP MCP server (for MCPG integration).
+Run SafeOutputs as an HTTP MCP server (for MCPG integration). The `<bounding_directory>` guards against directory traversal attacks.
 
 ```bash
 ado-aw mcp-http <output_directory> <bounding_directory> [options]
@@ -208,8 +236,8 @@ ado-aw mcp-http <output_directory> <bounding_directory> [options]
 Options:
 
 - `--port <port>` -- port to listen on (default: `8100`)
-- `--api-key <key>` -- API key for authentication (auto-generated if not provided)
-- `--enabled-tools <name>` -- limit the server to specific tools; repeat to allow more than one
+- `--api-key <key>` -- API key for authentication (if not provided, one is generated)
+- `--enabled-tools <name>` -- only expose these safe output tools; repeat to allow more than one. If omitted, all tools are exposed
 
 ### `execute`
 
@@ -228,6 +256,12 @@ Options:
 - `--ado-project <name>` -- Azure DevOps project name override
 - `--dry-run` -- validate inputs without making write calls
 
+## Deprecated commands
+
+### `configure` (deprecated alias)
+
+`ado-aw configure` is a hidden alias for `ado-aw secrets set GITHUB_TOKEN`. It emits a deprecation warning and will be removed in a future release. Use `ado-aw secrets set GITHUB_TOKEN` instead.
+
 ## Common examples
 
 ```bash
@@ -240,8 +274,11 @@ ado-aw compile
 # Verify a generated pipeline
 ado-aw check agent.lock.yml
 
-# Set GITHUB_TOKEN on all matched pipelines
+# Set GITHUB_TOKEN on all matched pipelines (local lock files)
 ado-aw secrets set GITHUB_TOKEN
+
+# Set GITHUB_TOKEN on every ado-aw pipeline in the project (no local checkout needed)
+ado-aw secrets set GITHUB_TOKEN --all-repos
 
 # Register pipelines with ADO and set their token in one step
 ado-aw enable --also-set-token

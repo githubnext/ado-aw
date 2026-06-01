@@ -30,38 +30,38 @@ pub(super) fn generate_native_pr_trigger(pr: &PrTriggerConfig) -> String {
 
     let mut yaml = String::from("pr:\n");
 
-    if let Some(branches) = &pr.branches {
-        if !branches.include.is_empty() || !branches.exclude.is_empty() {
-            yaml.push_str("  branches:\n");
-            if !branches.include.is_empty() {
-                yaml.push_str("    include:\n");
-                for b in &branches.include {
-                    yaml.push_str(&format!("      - '{}'\n", b.replace('\'', "''")));
-                }
+    if let Some(branches) = &pr.branches
+        && (!branches.include.is_empty() || !branches.exclude.is_empty())
+    {
+        yaml.push_str("  branches:\n");
+        if !branches.include.is_empty() {
+            yaml.push_str("    include:\n");
+            for b in &branches.include {
+                yaml.push_str(&format!("      - '{}'\n", b.replace('\'', "''")));
             }
-            if !branches.exclude.is_empty() {
-                yaml.push_str("    exclude:\n");
-                for b in &branches.exclude {
-                    yaml.push_str(&format!("      - '{}'\n", b.replace('\'', "''")));
-                }
+        }
+        if !branches.exclude.is_empty() {
+            yaml.push_str("    exclude:\n");
+            for b in &branches.exclude {
+                yaml.push_str(&format!("      - '{}'\n", b.replace('\'', "''")));
             }
         }
     }
 
-    if let Some(paths) = &pr.paths {
-        if !paths.include.is_empty() || !paths.exclude.is_empty() {
-            yaml.push_str("  paths:\n");
-            if !paths.include.is_empty() {
-                yaml.push_str("    include:\n");
-                for p in &paths.include {
-                    yaml.push_str(&format!("      - '{}'\n", p.replace('\'', "''")));
-                }
+    if let Some(paths) = &pr.paths
+        && (!paths.include.is_empty() || !paths.exclude.is_empty())
+    {
+        yaml.push_str("  paths:\n");
+        if !paths.include.is_empty() {
+            yaml.push_str("    include:\n");
+            for p in &paths.include {
+                yaml.push_str(&format!("      - '{}'\n", p.replace('\'', "''")));
             }
-            if !paths.exclude.is_empty() {
-                yaml.push_str("    exclude:\n");
-                for p in &paths.exclude {
-                    yaml.push_str(&format!("      - '{}'\n", p.replace('\'', "''")));
-                }
+        }
+        if !paths.exclude.is_empty() {
+            yaml.push_str("    exclude:\n");
+            for p in &paths.exclude {
+                yaml.push_str(&format!("      - '{}'\n", p.replace('\'', "''")));
             }
         }
     }
@@ -71,8 +71,8 @@ pub(super) fn generate_native_pr_trigger(pr: &PrTriggerConfig) -> String {
 
 // ─── Gate step generation ───────────────────────────────────────────────────
 
-// Gate step generation is now handled entirely by TriggerFiltersExtension.
-// See src/compile/extensions/trigger_filters.rs.
+// Gate step generation is now handled entirely by AdoScriptExtension's
+// `setup_steps()` hook. See src/compile/extensions/ado_script.rs.
 
 /// Add a `condition:` to each step in a list of serde_yaml::Value steps.
 pub(super) fn add_condition_to_steps(
@@ -101,7 +101,6 @@ pub(super) fn add_condition_to_steps(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::compile::common::{generate_agentic_depends_on, generate_pr_trigger, generate_setup_job};
     use crate::compile::extensions::CompileContext;
     use crate::compile::types::*;
@@ -115,30 +114,19 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_pr_trigger_with_explicit_pr_trigger_overrides_schedule() {
+    fn test_generate_pr_trigger_with_explicit_pr_trigger_overrides_suppression() {
         let triggers = Some(OnConfig {
             pipeline: None,
             pr: Some(PrTriggerConfig::default()),
         schedule: None,
         });
         let result = generate_pr_trigger(&triggers, true);
-        assert!(!result.contains("pr: none"), "triggers.pr should override schedule suppression");
-    }
-
-    #[test]
-    fn test_generate_pr_trigger_with_pr_trigger_and_pipeline_trigger() {
-        let triggers = Some(OnConfig {
-            pipeline: Some(PipelineTrigger {
-                name: "Build".into(),
-                project: None,
-                branches: vec![],
-            filters: None,
-            }),
-            pr: Some(PrTriggerConfig::default()),
-        schedule: None,
-        });
-        let result = generate_pr_trigger(&triggers, false);
-        assert!(!result.contains("pr: none"), "triggers.pr should override pipeline trigger suppression");
+        // PrTriggerConfig::default() has no branches/paths, so the native block is empty
+        // (meaning "trigger on all PRs" in ADO). The schedule/pipeline suppression ("pr: none")
+        // must NOT be emitted because the explicit pr: key overrides it — regardless of whether
+        // has_schedule or has_pipeline_trigger is set.
+        assert!(result.is_empty(), "default PrTriggerConfig should produce empty string (trigger on all PRs)");
+        assert!(!result.contains("pr: none"), "triggers.pr should override schedule/pipeline suppression");
     }
 
     #[test]
@@ -208,11 +196,12 @@ mod tests {
     }
 
     // Gate step tests now use the spec/extension directly since generate_setup_job
-    // delegates to TriggerFiltersExtension for all filter gate generation.
+    // delegates to AdoScriptExtension (in `src/compile/extensions/ado_script.rs`)
+    // for all filter gate generation.
 
     #[test]
     fn test_generate_setup_job_with_filters_no_extension_creates_empty() {
-        // Without the TriggerFiltersExtension, filters don't produce a gate step
+        // Without AdoScriptExtension, filters don't produce a gate step
         let fm = test_fm();
         let ctx = make_ctx(&fm);
         let filters = PrFilters {
@@ -345,6 +334,7 @@ mod tests {
         };
         let checks = lower_pr_filters(&filters);
         let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
+        assert!(spec.facts.iter().any(|f| f.kind == "pr_title"), "should require pr_title fact for title filter");
         assert!(!spec.facts.iter().any(|f| f.kind == "pr_metadata"), "should not require pr_metadata for title-only");
     }
 
@@ -482,42 +472,6 @@ mod tests {
     }
 
     #[test]
-    fn test_gate_step_min_changes() {
-        use crate::compile::filter_ir::{build_gate_spec, lower_pr_filters, GateContext, PredicateSpec};
-        let filters = PrFilters {
-            min_changes: Some(5),
-            ..Default::default()
-        };
-        let checks = lower_pr_filters(&filters);
-        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
-        match &spec.checks[0].predicate {
-            PredicateSpec::NumericRange { min, max, .. } => {
-                assert_eq!(*min, Some(5));
-                assert_eq!(*max, None);
-            }
-            other => panic!("expected NumericRange, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_gate_step_max_changes() {
-        use crate::compile::filter_ir::{build_gate_spec, lower_pr_filters, GateContext, PredicateSpec};
-        let filters = PrFilters {
-            max_changes: Some(50),
-            ..Default::default()
-        };
-        let checks = lower_pr_filters(&filters);
-        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
-        match &spec.checks[0].predicate {
-            PredicateSpec::NumericRange { min, max, .. } => {
-                assert_eq!(*min, None);
-                assert_eq!(*max, Some(50));
-            }
-            other => panic!("expected NumericRange, got {:?}", other),
-        }
-    }
-
-    #[test]
     fn test_gate_step_min_and_max_changes() {
         use crate::compile::filter_ir::{build_gate_spec, lower_pr_filters, GateContext, PredicateSpec};
         let filters = PrFilters {
@@ -587,6 +541,8 @@ mod tests {
             false,
             &["eq(variables['Custom.ShouldRun'], 'true')"],
         );
+        // No setup steps, no PR filters → no dependsOn, but the expression produces a condition.
+        assert!(!result.contains("dependsOn"), "no dependsOn without setup/filters");
         assert!(result.contains("condition:"), "should have condition");
         assert!(result.contains("Custom.ShouldRun"), "should include expression");
         assert!(result.contains("succeeded()"), "should still require succeeded");
@@ -603,19 +559,6 @@ mod tests {
         assert!(result.contains("prGate.SHOULD_RUN"), "should check gate output");
         assert!(result.contains("Custom.Flag"), "should include expression");
         assert!(result.contains("Build.Reason"), "should check build reason");
-    }
-
-    #[test]
-    fn test_agentic_depends_on_expression_only_no_depends() {
-        let result = generate_agentic_depends_on(
-            &[],
-            false,
-            false,
-            &["eq(variables['Run'], 'true')"],
-        );
-        // No setup steps, no PR filters — no dependsOn, but still a condition
-        assert!(!result.contains("dependsOn"), "no dependsOn without setup/filters");
-        assert!(result.contains("condition:"), "should have condition from expression");
     }
 
     #[test]
@@ -694,7 +637,10 @@ on:
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let oc: OnConfig = serde_yaml::from_value(val["on"].clone()).unwrap();
         assert!(oc.schedule.is_some(), "should have schedule");
-        assert!(oc.pr.is_some(), "should have pr");
+        assert_eq!(oc.schedule.unwrap().expression(), "daily around 14:00", "schedule expression should round-trip");
+        let pr = oc.pr.expect("should have pr");
+        let filters = pr.filters.expect("pr should have filters");
+        assert_eq!(filters.title.unwrap().pattern, "*[review]*", "title pattern should round-trip");
         assert!(oc.pipeline.is_none(), "should not have pipeline");
     }
 

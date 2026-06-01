@@ -35,7 +35,7 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - `--ado-project <name>` - Azure DevOps project name override
   - `--dry-run` - Validate inputs but skip ADO API calls (useful for local testing and QA review)
 
-- `configure` *(deprecated; hidden in --help)* - Alias forwarding to `secrets set GITHUB_TOKEN`. Existing scripts keep working but get a stderr warning. The alias will be removed in the next minor release.
+- `configure` *(deprecated; hidden in --help)* - Alias forwarding to `secrets set GITHUB_TOKEN`. Existing scripts keep working but get a stderr warning.
 
 - `secrets set <name> [<value>] [PATH]` - Set a pipeline variable (with `isSecret=true`) on every matched ADO definition. Value resolution: positional `<value>` → `--value-stdin` (one line) → interactive tty prompt with echo off.
   - `--allow-override` - Force `allowOverride=true` on the set variable. When omitted, `allowOverride` is **preserved** on existing variables (so secret rotation does not silently downgrade an existing `allowOverride=true`) and defaults to `false` for new variables.
@@ -116,3 +116,22 @@ Both flags route through `ado-aw`'s `discover_ado_aw_pipelines` machinery, which
   - `--poll-interval <secs>` - Polling period when `--wait` is set (default 10).
   - `--timeout <secs>` - Hard cap on the polling loop when `--wait` is set (default 1800).
   - `--dry-run` - Print the planned `templateParameters` body without calling the ADO API.
+
+### Hidden Build-Time Tools
+
+These commands are not shown in `--help` but are available for contributors working on the ado-aw compiler itself:
+
+- `export-gate-schema` - Export the gate spec JSON Schema used by the `scripts/ado-script` TypeScript workspace for type codegen. Outputs JSON to stdout or to a file.
+  - `--output, -o <path>` - Write the schema to a file instead of stdout. Parent directories are created automatically.
+  - See [`docs/ado-script.md`](ado-script.md) for how this command fits into the ado-script build workflow (`cargo run -- export-gate-schema --output schema/gate-spec.schema.json`).
+
+## Template Markers Reference
+
+The compiler uses Mustache-style markers in template files to inject configuration:
+- `base.yml` (standalone), `1es-base.yml` (1ES), `job-base.yml` (job template), `stage-base.yml` (stage template)
+
+**Job/Stage Template Markers:**
+- `{{ stage_prefix }}` — Prefixes job names with sanitized agent name for uniqueness (e.g., `DailyReview_Agent`)
+- `{{ template_parameters }}` — Generates ADO template `parameters:` block (not pipeline parameters)
+
+See [`docs/template-markers.md`](template-markers.md) for the complete marker reference.

@@ -1,0 +1,264 @@
+---
+title: Example agents
+description: Ready-to-use example agent definitions demonstrating key ado-aw capabilities
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+This page showcases complete, runnable agent examples from the [`examples/` directory](https://github.com/githubnext/ado-aw/tree/main/examples) in the repository. Each example demonstrates different ado-aw capabilities and can serve as a starting template for your own agents.
+
+## Sample agent
+
+**[`examples/sample-agent.md`](https://github.com/githubnext/ado-aw/blob/main/examples/sample-agent.md)**
+
+A minimal example demonstrating the basic structure of an agent file.
+
+**Key features:**
+- Simple daily schedule trigger
+- Repository checkout configuration
+- Basic workspace setup
+- Straightforward agent prompt
+
+**Use this when:** You want to understand the minimal structure of an agent file or need a clean starting template.
+
+```yaml
+---
+name: "Daily Code Review"
+description: "Reviews code changes and creates summary reports"
+on:
+  schedule: daily
+repositories:
+  - repository: azure-devops-agentic-pipelines
+    type: git
+    name: azure-devops-agentic-pipelines
+workspace: repo
+---
+
+## Code Review Agent
+
+Review the latest code changes in the repository and provide feedback.
+
+### Tasks
+
+1. Analyze recent commits
+2. Check for code quality issues
+3. Generate a summary report
+```
+
+## ADO work item triage
+
+**[`examples/azure-devops-mcp.md`](https://github.com/githubnext/ado-aw/blob/main/examples/azure-devops-mcp.md)**
+
+Demonstrates using the Azure DevOps MCP server to interact with work items programmatically.
+
+**Key features:**
+- Azure DevOps MCP tool integration with specific toolset configuration
+- Per-tool allow-list for fine-grained permission control
+- Safe outputs for work item updates and comments
+- Read and write service connections
+- Schedule with time-of-day specification
+
+**Use this when:** You need to build agents that query, triage, or update Azure DevOps work items.
+
+```yaml
+---
+name: "ADO Work Item Triage"
+description: "Triages work items using the Azure DevOps MCP"
+on:
+  schedule: daily around 9:00
+tools:
+  azure-devops:
+    toolsets: [core, work, work-items]
+    allowed:
+      - core_list_projects
+      - wit_my_work_items
+      - wit_get_work_item
+      - wit_get_work_items_batch_by_ids
+      - wit_update_work_item
+      - wit_add_work_item_comment
+      - search_workitem
+permissions:
+  read: my-read-arm-connection
+  write: my-write-arm-connection
+safe-outputs:
+  update-work-item:
+    status: true
+    body: true
+    tags: true
+    max: 10
+    target: "*"
+  comment-on-work-item:
+    max: 10
+    target: "*"
+---
+
+## ADO Work Item Triage Agent
+
+You have access to the Azure DevOps MCP server. Use it to:
+
+1. Query open work items assigned to the team
+2. Triage items by priority and area path
+3. Add comments summarizing your analysis
+4. Update tags to reflect triage status
+
+### Guidelines
+
+- Only update work items that need attention
+- Add the `triaged` tag to items you've reviewed
+- Add a comment explaining your triage decision
+```
+
+## Lean formal verifier
+
+**[`examples/lean-verifier.md`](https://github.com/githubnext/ado-aw/blob/main/examples/lean-verifier.md)**
+
+Shows how to use the Lean 4 runtime for formal verification workflows.
+
+**Key features:**
+- Lean 4 runtime configuration
+- Cache memory for persistent state across runs
+- Pull request creation with safe outputs
+- Work item creation for flagging unverifiable properties
+- Weekly schedule with specific day and time
+
+**Use this when:** You want to integrate formal verification, theorem proving, or mathematical proof workflows into your pipeline.
+
+```yaml
+---
+name: "Lean Formal Verifier"
+description: "Analyzes code and builds formal Lean 4 proofs of critical invariants"
+on:
+  schedule: weekly on friday around 17:00
+tools:
+  cache-memory: true
+runtimes:
+  lean: true
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+  create-work-item:
+    work-item-type: Task
+    tags:
+      - formal-verification
+      - lean4
+permissions:
+  write: my-write-arm-connection
+---
+
+## Formal Verification Agent
+
+You are a formal verification agent. Your job is to analyze the codebase, identify critical invariants and safety properties, and build Lean 4 proofs that verify them.
+
+### Workflow
+
+1. **Identify invariants**: Review the source code for critical logic — data validation, state transitions, arithmetic bounds, access control checks.
+2. **Model in Lean**: Create `.lean` files that formalize the identified properties as Lean 4 theorems.
+3. **Prove correctness**: Write proofs for each theorem. Use `lake build` to verify the proofs compile.
+4. **Iterate on failures**: If a proof fails, analyze the error output from `lean` to understand why. Either fix the proof or report the property as unverifiable (which may indicate a bug).
+5. **Submit results**: Create a PR with the `.lean` proof files, or create work items for properties that could not be verified.
+
+### Guidelines
+
+- Start with the simplest invariants first (null checks, bounds checks, type safety).
+- Use `lake init` to create a new Lake project if one doesn't exist.
+- Check your memory for findings from previous runs to avoid re-analyzing the same code.
+- If a property cannot be formalized or proved, use the `create-work-item` tool to flag it for human review.
+```
+
+## Dogfood failure reporter
+
+**[`examples/dogfood-failure-reporter.md`](https://github.com/githubnext/ado-aw/blob/main/examples/dogfood-failure-reporter.md)**
+
+A specialized example demonstrating debug-only capabilities for internal testing.
+
+**Key features:**
+- Debug-only `create-issue` safe output (not available in regular agents)
+- Target repository configuration
+- Label and assignee policies
+- Per-run budget control (`max: 3`)
+
+:::caution[Debug-only features]
+This example uses `ado-aw-debug:` configuration which is **not recommended for general use**. The `create-issue` tool is gated to debug mode and only enabled when explicitly configured. See the [ado-aw-debug reference](/ado-aw/reference/ado-aw-debug/) for details.
+:::
+
+**Use this when:** You're building internal testing infrastructure or need to understand how debug-only safe outputs work (reference only — not for production use).
+
+```yaml
+---
+name: "Dogfood Failure Reporter"
+description: "Files a GitHub issue on githubnext/ado-aw when a dogfood pipeline run fails"
+on:
+  schedule: daily
+permissions:
+  read: my-read-arm-connection
+ado-aw-debug:
+  create-issue:
+    target-repo: githubnext/ado-aw
+    title-prefix: "[pipeline-failure] "
+    labels:
+      - pipeline-failure
+      - automated
+    allowed-labels:
+      - "agent-*"
+      - "pipeline-failure"
+    assignees:
+      - jamesdevine
+    max: 3
+---
+
+## Dogfood Failure Reporter
+
+You are a dogfood failure-reporting agent for `githubnext/ado-aw`. You run
+in Azure DevOps inside an AWF-isolated sandbox.
+
+### Tasks
+
+1. Read the pipeline run logs available under `$BUILD_SOURCESDIRECTORY`
+   for any signs of recent failures.
+2. For each distinct failure, file **one** GitHub issue using the
+   `create-issue` MCP tool with:
+   - A concise `title` describing the failure.
+   - A markdown `body` with reproduction steps, log excerpts, and links
+     to relevant ADO build URLs.
+   - `labels: ["pipeline-failure"]` (must match the `allowed-labels` allowlist
+     configured by the operator).
+3. Limit yourself to **at most 3** issues per run (the `max` budget).
+4. If you cannot file an issue (e.g., the failure isn't reproducible),
+   call `report-incomplete` instead — do **not** invent details.
+
+### Important
+
+- Do not attempt to redirect issues to a different repository — the agent
+  has no `target_repo` parameter and the target is fixed by the operator.
+- The `ADO_AW_DEBUG_GITHUB_TOKEN` PAT is **not** visible to you; it is
+  used only by Stage 3 to authenticate against GitHub.
+- Issues are reviewed for prompt injection by Stage 2 before they are
+  filed, so do not include text that looks like ADO pipeline commands
+  (`##vso[...]`) — they will be flagged and the run rejected.
+```
+
+## Picking the right example
+
+<CardGrid>
+  <Card title="Just starting?" icon="star">
+    Begin with **sample-agent.md** to understand the basic structure. It's the simplest complete example.
+  </Card>
+  <Card title="Need ADO integration?" icon="setting">
+    Use **azure-devops-mcp.md** as a template. It shows how to configure the Azure DevOps MCP server and use work item safe outputs.
+  </Card>
+  <Card title="Need specialized runtimes?" icon="rocket">
+    Check **lean-verifier.md** for runtime configuration. The pattern applies to Python, Node.js, and .NET runtimes too.
+  </Card>
+  <Card title="Building internal tools?" icon="warning">
+    Reference **dogfood-failure-reporter.md** carefully — it uses debug-only features not available in standard agents.
+  </Card>
+</CardGrid>
+
+## Next steps
+
+After reviewing these examples:
+
+- Read [Creating Agents](/ado-aw/guides/creating-agents/) for a complete walkthrough of the agent file format
+- See [Front Matter](/ado-aw/reference/front-matter/) for all available configuration fields
+- Explore [Safe Outputs](/ado-aw/reference/safe-outputs/) for the full catalog of actions agents can propose
+- Check [Tools](/ado-aw/reference/tools/) and [Runtimes](/ado-aw/reference/runtimes/) for environment configuration options

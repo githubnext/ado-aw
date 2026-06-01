@@ -12,7 +12,7 @@ tools:
   github:
     toolsets: [default]
 network:
-  allowed: [defaults]
+  allowed: [defaults, dev.azure.com, learn.microsoft.com]
 safe-outputs:
   add-comment:
     max: 2

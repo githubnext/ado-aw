@@ -149,12 +149,12 @@ pub(crate) fn neutralize_pipeline_commands(input: &str) -> String {
     while let Some(pos) = rest.find("##") {
         result.push_str(&rest[..pos]);
         let after = &rest[pos + 2..];
-        if after.starts_with("vso[") {
+        if let Some(stripped) = after.strip_prefix("vso[") {
             result.push_str("`##vso[`");
-            rest = &after[4..];
-        } else if after.starts_with('[') {
+            rest = stripped;
+        } else if let Some(stripped) = after.strip_prefix('[') {
             result.push_str("`##[`");
-            rest = &after[1..];
+            rest = stripped;
         } else {
             // Harmless "##" (e.g. markdown heading)
             result.push_str("##");
@@ -587,11 +587,12 @@ mod tests {
 
     #[test]
     fn test_sanitize_preserves_markdown_headings() {
+        // Markdown headings and bare issue references must not be neutralized.
+        // A bare "#123" (without a preceding bot keyword like "fixes") must NOT
+        // be wrapped in backticks — this assertion would pass even if "#123"
+        // were wrapped, so we assert the exact output instead.
         let input = "# Heading\n## Sub-heading\nIssue #123";
-        let result = sanitize(input);
-        assert!(result.contains("# Heading"));
-        assert!(result.contains("## Sub-heading"));
-        assert!(result.contains("#123"));
+        assert_eq!(sanitize(input), input);
     }
 
     // ── sanitize_config tests ─────────────────────────────────────────────
@@ -622,8 +623,10 @@ mod tests {
 
     #[test]
     fn test_sanitize_config_removes_control_chars() {
-        let input = "hello\x00world\x07!";
-        assert_eq!(sanitize_config(input), "helloworld!");
+        // ANSI escape sequences must be stripped through the config pipeline.
+        // "\x1b[0m" is the ANSI reset code; it should be removed, joining "val" and "ue".
+        let input = "val\x1b[0mue";
+        assert_eq!(sanitize_config(input), "value");
     }
 
     #[test]

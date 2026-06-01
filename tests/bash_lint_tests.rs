@@ -52,10 +52,9 @@ use tempfile::TempDir;
 /// per-line `# shellcheck disable=SCxxxx` comments inside the bash body, not
 /// as a global override.
 ///
-/// * **SC1090, SC1091** — `source` paths that include ADO macros
-///   (e.g. `$(Pipeline.Workspace)`) are dynamic and cannot be resolved by
-///   shellcheck.
-const SHELLCHECK_EXCLUDE: &str = "SC1090,SC1091";
+/// Currently empty — no global exclusions are needed. The codebase does not
+/// use `source` commands that would require SC1090/SC1091 suppression.
+const SHELLCHECK_EXCLUDE: &str = "";
 
 /// Fixtures exercised by the lint. Chosen to collectively cover every bash-step
 /// generator in the codebase: standalone + 1ES templates, every runtime that
@@ -105,10 +104,12 @@ const REQUIRED_STEP_DISPLAY_NAMES: &[&str] = &[
     "Initialize empty agent memory (clearMemory=true)",
     "Append Python prompt",                   // src/runtimes/python/extension.rs
     "Generate GITHUB_PATH file",              // src/compile/common.rs (AWF path step)
-    "Evaluate pipeline filters",              // src/compile/extensions/trigger_filters.rs + src/compile/filter_ir.rs
+    "Evaluate pipeline filters",              // src/compile/extensions/ado_script.rs + src/compile/filter_ir.rs
     "Evaluate PR filters",                    // src/compile/filter_ir.rs (GateContext::PullRequest)
     "Verify MCP backends",                    // src/compile/common.rs (--debug-pipeline only)
     "Verify pipeline integrity",              // src/compile/common.rs generate_integrity_check
+    "Resolve runtime imports (agent prompt)", // src/compile/extensions/ado_script.rs resolver_step()
+    "Output copilot version",                 // src/engine.rs (copilot_install_from_nuget + copilot_install_from_github_release)
 ];
 
 fn ado_aw_binary() -> PathBuf {

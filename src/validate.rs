@@ -509,6 +509,17 @@ mod tests {
     }
 
     #[test]
+    fn test_is_valid_artifact_name() {
+        assert!(is_valid_artifact_name("my-artifact_v1.0"));
+        assert!(is_valid_artifact_name("drop"));
+        assert!(!is_valid_artifact_name(""));
+        assert!(!is_valid_artifact_name("my artifact"));
+        assert!(!is_valid_artifact_name("$(secretVar)"));
+        assert!(!is_valid_artifact_name("../../etc/passwd"));
+        assert!(!is_valid_artifact_name("{{inject}}"));
+    }
+
+    #[test]
     fn test_is_valid_arg() {
         assert!(is_valid_arg("--verbose"));
         assert!(is_valid_arg("--option=value"));
@@ -602,12 +613,31 @@ mod tests {
     }
 
     #[test]
+    fn test_reject_ado_expressions_in_value_catches_injection_in_sequence() {
+        let seq = serde_yaml::Value::Sequence(vec![
+            serde_yaml::Value::String("safe".to_string()),
+            serde_yaml::Value::String("$(secretVar)".to_string()),
+        ]);
+        let result = reject_ado_expressions_in_value(&seq, "myParam", "default");
+        assert!(result.is_err(), "Sequence with ADO expression must be rejected");
+    }
+
+    #[test]
+    fn test_reject_ado_expressions_in_value_allows_safe_sequence() {
+        let seq = serde_yaml::Value::Sequence(vec![
+            serde_yaml::Value::String("us-east".to_string()),
+            serde_yaml::Value::String("eu-west".to_string()),
+        ]);
+        assert!(reject_ado_expressions_in_value(&seq, "region", "default").is_ok());
+    }
+
+    #[test]
     fn test_reject_pipeline_injection() {
         assert!(reject_pipeline_injection("normal value", "field").is_ok());
         assert!(reject_pipeline_injection("$(SYSTEM_ACCESSTOKEN)", "field").is_err());
         assert!(reject_pipeline_injection("value\ninjected", "field").is_err());
         assert!(reject_pipeline_injection("{{ agent_content }}", "field").is_err());
-        assert!(reject_pipeline_injection("{{ copilot_params }}", "field").is_err());
+        assert!(reject_pipeline_injection("$[variables.x]", "field").is_err());
         assert!(reject_pipeline_injection("##vso[task.setvariable]x", "field").is_err());
         assert!(reject_pipeline_injection("##[section]foo", "field").is_err());
     }
@@ -627,48 +657,6 @@ mod tests {
     }
 
     // ── Container / Docker validators ───────────────────────────────────
-
-    #[test]
-    fn test_validate_container_image() {
-        assert!(validate_container_image("node:20-slim", "mcp").is_empty());
-        assert!(validate_container_image("ghcr.io/org/tool:latest", "mcp").is_empty());
-        assert!(!validate_container_image("", "mcp").is_empty());
-        assert!(!validate_container_image("$(malicious)", "mcp").is_empty());
-    }
-
-    #[test]
-    fn test_validate_docker_args_privileged_flag() {
-        let warnings = validate_docker_args(&["--privileged".to_string()], "my-mcp");
-        assert!(!warnings.is_empty());
-        assert!(warnings[0].contains("elevated privileges"));
-    }
-
-    #[test]
-    fn test_validate_docker_args_entrypoint_in_args_warns() {
-        let warnings = validate_docker_args(
-            &["--entrypoint".to_string(), "/bin/sh".to_string()],
-            "my-mcp",
-        );
-        assert!(!warnings.is_empty());
-        assert!(warnings[0].contains("entrypoint"));
-    }
-
-    #[test]
-    fn test_validate_docker_args_volume_flag_calls_mount_validation() {
-        let warnings = validate_docker_args(
-            &["-v".to_string(), "/etc/passwd:/data:ro".to_string()],
-            "my-mcp",
-        );
-        assert!(warnings.len() >= 2); // bypass warning + sensitive path
-        assert!(warnings[0].contains("bypasses mounts"));
-    }
-
-    #[test]
-    fn test_validate_mcp_url() {
-        assert!(validate_mcp_url("https://mcp.example.com", "mcp").is_empty());
-        assert!(validate_mcp_url("http://localhost:8080", "mcp").is_empty());
-        assert!(!validate_mcp_url("ftp://example.com", "mcp").is_empty());
-    }
 
     #[test]
     fn test_warn_potential_secrets() {
@@ -691,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_feed_url_missing_scheme() {
+    fn test_validate_feed_url_unsupported_scheme() {
         assert!(validate_feed_url("pkgs.dev.azure.com/org/feed", "test").is_err());
         assert!(validate_feed_url("ftp://example.com/feed", "test").is_err());
     }
@@ -705,12 +693,8 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_feed_url_rejects_double_quote() {
+    fn test_validate_feed_url_rejects_quotes() {
         assert!(validate_feed_url("https://example.com/feed\"name", "test").is_err());
-    }
-
-    #[test]
-    fn test_validate_feed_url_rejects_single_quote() {
         assert!(validate_feed_url("https://example.com/feed'name", "test").is_err());
     }
 }

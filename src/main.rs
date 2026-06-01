@@ -24,6 +24,7 @@ pub mod sanitize;
 mod secrets;
 mod status;
 mod tools;
+mod update_check;
 pub mod validate;
 
 use anyhow::{Context, Result};
@@ -72,7 +73,9 @@ enum SecretsCmd {
         /// ado-aw template (e.g. `agents/security-scan.md`). Activates
         /// the discovery code path. **Without `--all-repos`, only
         /// definitions in the current repository are searched** — pair
-        /// with `--all-repos` to search the full project.
+        /// with `--all-repos` to search the full project. Path matching
+        /// is case-sensitive and forward-slash-normalised; on Windows,
+        /// pass the path in the same case it was compiled with.
         #[arg(long, conflicts_with = "definition_ids")]
         source: Option<String>,
     },
@@ -95,7 +98,9 @@ enum SecretsCmd {
         all_repos: bool,
         /// Filter discovered definitions to consumers of one specific
         /// ado-aw template. **Without `--all-repos`, only definitions
-        /// in the current repository are searched.**
+        /// in the current repository are searched.** Path matching is
+        /// case-sensitive and forward-slash-normalised; on Windows,
+        /// pass the path in the same case it was compiled with.
         #[arg(long, conflicts_with = "definition_ids")]
         source: Option<String>,
     },
@@ -119,7 +124,9 @@ enum SecretsCmd {
         all_repos: bool,
         /// Filter discovered definitions to consumers of one specific
         /// ado-aw template. **Without `--all-repos`, only definitions
-        /// in the current repository are searched.**
+        /// in the current repository are searched.** Path matching is
+        /// case-sensitive and forward-slash-normalised; on Windows,
+        /// pass the path in the same case it was compiled with.
         #[arg(long, conflicts_with = "definition_ids")]
         source: Option<String>,
     },
@@ -595,7 +602,7 @@ async fn run_execute(
 
 async fn build_execution_context(
     front_matter: compile::FrontMatter,
-    safe_output_dir: &PathBuf,
+    safe_output_dir: &Path,
     ado_org_url: Option<String>,
     ado_project: Option<String>,
     dry_run: bool,
@@ -624,7 +631,7 @@ async fn build_execution_context(
     if let Some(project) = ado_project {
         ctx.ado_project = Some(project);
     }
-    ctx.working_directory = safe_output_dir.clone();
+    ctx.working_directory = safe_output_dir.to_path_buf();
     ctx.tool_configs = front_matter.safe_outputs.clone();
     // Merge ado-aw-debug.create-issue config under the same tool_configs map
     // so Stage 3's `ctx.get_tool_config::<CreateIssueConfig>("create-issue")`
@@ -725,7 +732,7 @@ async fn discover_last_author(path: &Path) -> Option<String> {
 
 async fn process_cache_memory(
     tools: Option<&compile::types::ToolsConfig>,
-    safe_output_dir: &PathBuf,
+    safe_output_dir: &Path,
     output_dir: Option<PathBuf>,
 ) -> Result<()> {
     let Some(cm) = tools.and_then(|t| t.cache_memory.as_ref()) else {
@@ -737,7 +744,7 @@ async fn process_cache_memory(
     let memory_config = execute::MemoryConfig {
         allowed_extensions: cm.allowed_extensions().to_vec(),
     };
-    let memory_output = output_dir.unwrap_or_else(|| safe_output_dir.clone());
+    let memory_output = output_dir.unwrap_or_else(|| safe_output_dir.to_path_buf());
     let result =
         execute::process_agent_memory(safe_output_dir, &memory_output, &memory_config).await?;
     println!(
@@ -801,6 +808,20 @@ async fn main() -> Result<()> {
     let Some(command) = args.command else {
         println!("No subcommand was used. Try `compile <path>`");
         return Ok(());
+    };
+
+    // Check for a newer release on GitHub and nudge the user to update.
+    // Skipped for pipeline-internal commands (execute, mcp, mcp-http) that
+    // run inside network-isolated sandboxes and are not invoked by humans.
+    // Also skipped in CI environments to avoid unnecessary outbound calls.
+    let is_pipeline_internal = matches!(
+        command,
+        Commands::Execute { .. } | Commands::Mcp { .. } | Commands::McpHttp { .. }
+    );
+    let update_handle = if !is_pipeline_internal && std::env::var_os("CI").is_none() {
+        Some(tokio::spawn(update_check::check_for_update()))
+    } else {
+        None
     };
 
     match command {
@@ -1124,6 +1145,13 @@ async fn main() -> Result<()> {
             }
         }
     }
+
+    // Wait for the background update check to finish so the advisory (if any)
+    // is printed before the process exits.
+    if let Some(handle) = update_handle {
+        let _ = handle.await;
+    }
+
     Ok(())
 }
 

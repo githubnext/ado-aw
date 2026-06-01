@@ -1322,8 +1322,7 @@ mod tests {
         let ndjson = r#"{"name":"create-work-item","title":"Test work item title","description":"This is a test description that is long enough to pass validation checks"}"#;
         tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
 
-        let mut ctx = ExecutionContext::default();
-        ctx.dry_run = true;
+        let ctx = ExecutionContext { dry_run: true, ..Default::default() };
 
         let results = execute_safe_outputs(temp_dir.path(), &ctx).await.unwrap();
         assert_eq!(results.len(), 1);
@@ -1352,8 +1351,7 @@ mod tests {
         .join("\n");
         tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
 
-        let mut ctx = ExecutionContext::default();
-        ctx.dry_run = true;
+        let ctx = ExecutionContext { dry_run: true, ..Default::default() };
 
         let results = execute_safe_outputs(temp_dir.path(), &ctx).await.unwrap();
         assert_eq!(results.len(), 2);
@@ -1443,8 +1441,7 @@ mod tests {
             "reason": "Could not find the required data to complete the analysis"
         });
 
-        let mut ctx = ExecutionContext::default();
-        ctx.dry_run = true;
+        let ctx = ExecutionContext { dry_run: true, ..Default::default() };
 
         let result = execute_safe_output(&entry, &ctx).await;
         assert!(result.is_ok(), "dispatch should succeed");

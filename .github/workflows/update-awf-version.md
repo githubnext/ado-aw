@@ -10,7 +10,7 @@ tools:
   github:
     toolsets: [default]
 network:
-  allowed: [defaults]
+  allowed: [defaults, dev.azure.com, learn.microsoft.com]
 safe-outputs:
   create-pull-request:
     title-prefix: "chore(deps): "

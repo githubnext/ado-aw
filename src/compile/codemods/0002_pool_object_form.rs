@@ -54,7 +54,7 @@ fn apply_codemod(fm: &mut Mapping, ctx: &CodemodContext) -> Result<bool> {
             return Ok(false);
         }
         let target = fm
-            .get(&Value::String("target".to_string()))
+            .get(Value::String("target".to_string()))
             .and_then(|v| v.as_str());
         if target != Some("1es") {
             return Ok(false);
@@ -91,17 +91,6 @@ mod tests {
     }
 
     #[test]
-    fn rewrites_scalar_pool_to_name_object() {
-        let mut fm: Mapping = serde_yaml::from_str("name: x\ndescription: y\npool: MyPool").unwrap();
-        let changed = apply_codemod(&mut fm, &ctx("0.30.0")).expect("apply");
-        assert!(changed);
-        assert_eq!(
-            fm.get(Value::String("pool".into())).cloned(),
-            Some(serde_yaml::from_str::<Value>("name: MyPool").unwrap())
-        );
-    }
-
-    #[test]
     fn noops_when_pool_is_already_mapping() {
         let mut fm: Mapping =
             serde_yaml::from_str("name: x\ndescription: y\npool:\n  vmImage: ubuntu-22.04")
@@ -128,21 +117,17 @@ mod tests {
 
     #[test]
     fn noops_when_pool_absent_standalone_and_version_gte() {
-        // Standalone pipelines without pool should get the new
-        // vmImage: ubuntu-22.04 default, not the legacy 1ES pool.
-        let mut fm: Mapping = serde_yaml::from_str("name: x\ndescription: y").unwrap();
-        let changed = apply_codemod(&mut fm, &ctx("0.30.0")).expect("apply");
-        assert!(!changed);
-        assert!(!fm.contains_key(Value::String("pool".into())));
-    }
-
-    #[test]
-    fn noops_when_pool_absent_explicit_standalone_and_version_gte() {
-        let mut fm: Mapping =
-            serde_yaml::from_str("name: x\ndescription: y\ntarget: standalone").unwrap();
-        let changed = apply_codemod(&mut fm, &ctx("0.30.0")).expect("apply");
-        assert!(!changed);
-        assert!(!fm.contains_key(Value::String("pool".into())));
+        // Neither implicit nor explicit `standalone` target should
+        // ever receive the legacy 1ES pool injection.
+        for yaml in &[
+            "name: x\ndescription: y",
+            "name: x\ndescription: y\ntarget: standalone",
+        ] {
+            let mut fm: Mapping = serde_yaml::from_str(yaml).unwrap();
+            let changed = apply_codemod(&mut fm, &ctx("0.30.0")).expect("apply");
+            assert!(!changed, "yaml: {}", yaml);
+            assert!(!fm.contains_key(Value::String("pool".into())), "yaml: {}", yaml);
+        }
     }
 
     #[test]

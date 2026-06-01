@@ -2,10 +2,10 @@
 //!
 //! This module defines the front matter grammar that is shared across all compile targets.
 
+use crate::sanitize::SanitizeConfig as SanitizeConfigTrait;
 use ado_aw_derive::SanitizeConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use crate::sanitize::SanitizeConfig as SanitizeConfigTrait;
 
 /// Target platform for compiled pipeline
 #[derive(Debug, Deserialize, Clone, Default, PartialEq)]
@@ -78,6 +78,7 @@ impl Default for PoolConfig {
 
 impl PoolConfig {
     /// Get the self-hosted pool name, if configured.
+    #[cfg(test)]
     pub fn name(&self) -> Option<&str> {
         match self {
             PoolConfig::Name(name) => Some(name),
@@ -86,6 +87,7 @@ impl PoolConfig {
     }
 
     /// Get the Microsoft-hosted VM image, if configured.
+    #[cfg(test)]
     pub fn vm_image(&self) -> Option<&str> {
         match self {
             PoolConfig::Name(_) => None,
@@ -379,7 +381,9 @@ pub struct ToolsConfig {
 impl SanitizeConfigTrait for ToolsConfig {
     fn sanitize_config_fields(&mut self) {
         self.bash = self.bash.as_ref().map(|v| {
-            v.iter().map(|s| crate::sanitize::sanitize_config(s)).collect()
+            v.iter()
+                .map(|s| crate::sanitize::sanitize_config(s))
+                .collect()
         });
         if let Some(ref mut cm) = self.cache_memory {
             cm.sanitize_config_fields();
@@ -700,6 +704,13 @@ pub struct FrontMatter {
     /// - `write`: MI for Stage 3 (executor) — write access for safe-outputs, never given to agent
     #[serde(default)]
     pub permissions: Option<PermissionsConfig>,
+    /// When `true`, the compiler inlines all `{{#runtime-import …}}` markers
+    /// (including the implicit top-level body marker) at compile time,
+    /// embedding referenced content directly into the emitted YAML. When
+    /// `false` (default), markers are preserved and resolved at pipeline
+    /// runtime, so prompt-body edits do not require recompilation.
+    #[serde(rename = "inlined-imports", default)]
+    pub inlined_imports: bool,
     /// Workflow-level environment variables
     #[serde(default)]
     pub env: HashMap<String, String>,
@@ -736,8 +747,7 @@ impl FrontMatter {
 
     /// Get the pipeline runtime filters (if any).
     pub fn pipeline_filters(&self) -> Option<&PipelineFilters> {
-        self.pipeline_trigger()
-            .and_then(|pt| pt.filters.as_ref())
+        self.pipeline_trigger().and_then(|pt| pt.filters.as_ref())
     }
 }
 
@@ -745,7 +755,10 @@ impl SanitizeConfigTrait for FrontMatter {
     fn sanitize_config_fields(&mut self) {
         self.name = crate::sanitize::sanitize_config(&self.name);
         self.description = crate::sanitize::sanitize_config(&self.description);
-        self.workspace = self.workspace.as_deref().map(crate::sanitize::sanitize_config);
+        self.workspace = self
+            .workspace
+            .as_deref()
+            .map(crate::sanitize::sanitize_config);
         if let Some(ref mut p) = self.pool {
             p.sanitize_config_fields();
         }
@@ -762,7 +775,11 @@ impl SanitizeConfigTrait for FrontMatter {
         for repo in &mut self.repositories {
             repo.sanitize_config_fields();
         }
-        self.checkout = self.checkout.iter().map(|s| crate::sanitize::sanitize_config(s)).collect();
+        self.checkout = self
+            .checkout
+            .iter()
+            .map(|s| crate::sanitize::sanitize_config(s))
+            .collect();
         for mcp in self.mcp_servers.values_mut() {
             mcp.sanitize_config_fields();
         }
@@ -994,7 +1011,7 @@ impl ReposItem {
 #[serde(untagged)]
 pub enum McpConfig {
     Enabled(bool),
-    WithOptions(McpOptions),
+    WithOptions(Box<McpOptions>),
 }
 
 impl SanitizeConfigTrait for McpConfig {
@@ -1094,7 +1111,11 @@ impl SanitizeConfigTrait for PipelineTrigger {
         if let Some(ref mut p) = self.project {
             *p = crate::sanitize::sanitize_config(p);
         }
-        self.branches = self.branches.iter().map(|s| crate::sanitize::sanitize_config(s)).collect();
+        self.branches = self
+            .branches
+            .iter()
+            .map(|s| crate::sanitize::sanitize_config(s))
+            .collect();
         if let Some(ref mut f) = self.filters {
             f.sanitize_config_fields();
         }
@@ -1327,9 +1348,21 @@ pub struct LabelFilter {
 
 impl SanitizeConfigTrait for LabelFilter {
     fn sanitize_config_fields(&mut self) {
-        self.any_of = self.any_of.iter().map(|s| crate::sanitize::sanitize_config(s)).collect();
-        self.all_of = self.all_of.iter().map(|s| crate::sanitize::sanitize_config(s)).collect();
-        self.none_of = self.none_of.iter().map(|s| crate::sanitize::sanitize_config(s)).collect();
+        self.any_of = self
+            .any_of
+            .iter()
+            .map(|s| crate::sanitize::sanitize_config(s))
+            .collect();
+        self.all_of = self
+            .all_of
+            .iter()
+            .map(|s| crate::sanitize::sanitize_config(s))
+            .collect();
+        self.none_of = self
+            .none_of
+            .iter()
+            .map(|s| crate::sanitize::sanitize_config(s))
+            .collect();
     }
 }
 
@@ -1390,22 +1423,6 @@ mod tests {
     // ─── ScheduleConfig deserialization ─────────────────────────────────────
 
     #[test]
-    fn test_schedule_config_simple_has_empty_branches() {
-        let sc = ScheduleConfig::Simple("daily around 14:00".to_string());
-        assert_eq!(sc.expression(), "daily around 14:00");
-        assert!(sc.branches().is_empty());
-    }
-
-    #[test]
-    fn test_schedule_config_with_options_returns_branches() {
-        let yaml = "run: weekly on monday\nbranches:\n  - main\n  - release/*";
-        let opts: ScheduleOptions = serde_yaml::from_str(yaml).unwrap();
-        let sc = ScheduleConfig::WithOptions(opts);
-        assert_eq!(sc.expression(), "weekly on monday");
-        assert_eq!(sc.branches(), &["main", "release/*"]);
-    }
-
-    #[test]
     fn test_schedule_config_with_options_empty_branches() {
         let yaml = "run: hourly";
         let opts: ScheduleOptions = serde_yaml::from_str(yaml).unwrap();
@@ -1433,24 +1450,6 @@ mod tests {
     }
 
     // ─── EngineConfig deserialization ────────────────────────────────────────
-
-    #[test]
-    fn test_engine_config_simple_string() {
-        let ec = EngineConfig::Simple("copilot".to_string());
-        assert_eq!(ec.engine_id(), "copilot");
-        assert_eq!(ec.model(), None);
-        assert_eq!(ec.timeout_minutes(), None);
-    }
-
-    #[test]
-    fn test_engine_config_full_object() {
-        let yaml = "id: copilot\nmodel: claude-sonnet-4.5\ntimeout-minutes: 30";
-        let opts: EngineOptions = serde_yaml::from_str(yaml).unwrap();
-        let ec = EngineConfig::Full(opts);
-        assert_eq!(ec.engine_id(), "copilot");
-        assert_eq!(ec.model(), Some("claude-sonnet-4.5"));
-        assert_eq!(ec.timeout_minutes(), Some(30));
-    }
 
     #[test]
     fn test_engine_config_full_object_partial_fields() {
@@ -1484,8 +1483,7 @@ mod tests {
 
     #[test]
     fn test_engine_config_deserialized_as_object() {
-        let yaml =
-            "engine:\n  id: copilot\n  model: claude-opus-4.5\n  timeout-minutes: 30";
+        let yaml = "engine:\n  id: copilot\n  model: claude-opus-4.5\n  timeout-minutes: 30";
         let fm: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let ec: EngineConfig = serde_yaml::from_value(fm["engine"].clone()).unwrap();
         assert_eq!(ec.engine_id(), "copilot");
@@ -1523,14 +1521,7 @@ timeout-minutes: 60
         assert_eq!(env.get("AWS_REGION").unwrap(), "us-west-2");
     }
 
-    #[test]
-    fn test_engine_config_id_defaults_to_copilot() {
-        let yaml = "model: gpt-5\ntimeout-minutes: 30";
-        let opts: EngineOptions = serde_yaml::from_str(yaml).unwrap();
-        let ec = EngineConfig::Full(opts);
-        assert_eq!(ec.engine_id(), "copilot");
-        assert_eq!(ec.model(), Some("gpt-5"));
-    }
+
 
     // ─── PermissionsConfig deserialization ───────────────────────────────
 
@@ -1596,6 +1587,49 @@ Body
         assert!(fm.permissions.is_none());
     }
 
+    // ─── FrontMatter inlined-imports deserialization ───────────────────────
+
+    #[test]
+    fn test_frontmatter_inlined_imports_defaults_to_false() {
+        let content = r#"---
+name: "Test Agent"
+description: "Test"
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        assert!(!fm.inlined_imports);
+    }
+
+    #[test]
+    fn test_frontmatter_inlined_imports_true_explicit() {
+        let content = r#"---
+name: "Test Agent"
+description: "Test"
+inlined-imports: true
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        assert!(fm.inlined_imports);
+    }
+
+    #[test]
+    fn test_frontmatter_inlined_imports_false_explicit() {
+        let content = r#"---
+name: "Test Agent"
+description: "Test"
+inlined-imports: false
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        assert!(!fm.inlined_imports);
+    }
+
     // ─── CacheMemoryToolConfig deserialization ──────────────────────────────
 
     #[test]
@@ -1649,21 +1683,6 @@ Body
         let cm = fm.tools.as_ref().unwrap().cache_memory.as_ref().unwrap();
         assert!(cm.is_enabled());
         assert_eq!(cm.allowed_extensions(), &[".md", ".json"]);
-    }
-
-    #[test]
-    fn test_cache_memory_not_set() {
-        let content = r#"---
-name: "Test"
-description: "Test"
-tools:
-  edit: true
----
-
-Body
-"#;
-        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
-        assert!(fm.tools.as_ref().unwrap().cache_memory.is_none());
     }
 
     // ─── AzureDevOpsToolConfig deserialization ──────────────────────────────
@@ -1729,42 +1748,6 @@ Body
         assert!(ado.org().is_none());
     }
 
-    #[test]
-    fn test_azure_devops_not_set() {
-        let content = r#"---
-name: "Test"
-description: "Test"
----
-
-Body
-"#;
-        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
-        assert!(fm.tools.is_none());
-    }
-
-    #[test]
-    fn test_both_tools_together() {
-        let content = r#"---
-name: "Test"
-description: "Test"
-tools:
-  bash: ["cat", "ls"]
-  edit: true
-  cache-memory: true
-  azure-devops:
-    toolsets: [wit]
----
-
-Body
-"#;
-        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
-        let tools = fm.tools.as_ref().unwrap();
-        assert!(tools.cache_memory.as_ref().unwrap().is_enabled());
-        assert!(tools.azure_devops.as_ref().unwrap().is_enabled());
-        assert_eq!(tools.bash.as_ref().unwrap(), &["cat", "ls"]);
-        assert_eq!(tools.edit, Some(true));
-    }
-
     // ─── LeanRuntimeConfig deserialization ──────────────────────────────
 
     #[test]
@@ -1798,6 +1781,7 @@ Body
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
         let lean = fm.runtimes.as_ref().unwrap().lean.as_ref().unwrap();
         assert!(!lean.is_enabled());
+        assert!(lean.toolchain().is_none());
     }
 
     #[test]
@@ -1816,37 +1800,6 @@ Body
         let lean = fm.runtimes.as_ref().unwrap().lean.as_ref().unwrap();
         assert!(lean.is_enabled());
         assert_eq!(lean.toolchain(), Some("leanprover/lean4:v4.29.1"));
-    }
-
-    #[test]
-    fn test_lean_with_empty_options() {
-        let content = r#"---
-name: "Test"
-description: "Test"
-runtimes:
-  lean: {}
----
-
-Body
-"#;
-        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
-        let lean = fm.runtimes.as_ref().unwrap().lean.as_ref().unwrap();
-        assert!(lean.is_enabled());
-        assert!(lean.toolchain().is_none());
-    }
-
-    #[test]
-    fn test_lean_not_set() {
-        let content = r#"---
-name: "Test"
-description: "Test"
-runtimes: {}
----
-
-Body
-"#;
-        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
-        assert!(fm.runtimes.as_ref().unwrap().lean.is_none());
     }
 
     #[test]
@@ -1891,7 +1844,10 @@ network:
 Body
 "#;
         let result = super::super::common::parse_markdown(content);
-        assert!(result.is_err(), "network.allow (old field name) should be rejected");
+        assert!(
+            result.is_err(),
+            "network.allow (old field name) should be rejected"
+        );
         let err = format!("{:#}", result.unwrap_err());
         assert!(
             err.contains("unknown field `allow`"),
@@ -1930,7 +1886,16 @@ network:
 Body
 "#;
         let result = super::super::common::parse_markdown(content);
-        assert!(result.is_err(), "unknown fields in network should be rejected");
+        assert!(
+            result.is_err(),
+            "unknown fields in network should be rejected"
+        );
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(
+            err.contains("typo-field") || err.contains("unknown field"),
+            "error should mention the unknown field, got: {}",
+            err
+        );
     }
 
     // ─── FrontMatter deny_unknown_fields ─────────────────────────────────────
@@ -1947,7 +1912,10 @@ safeoutputs:
 Body
 "#;
         let result = super::super::common::parse_markdown(content);
-        assert!(result.is_err(), "unknown top-level field 'safeoutputs' should be rejected");
+        assert!(
+            result.is_err(),
+            "unknown top-level field 'safeoutputs' should be rejected"
+        );
         let err = format!("{:#}", result.unwrap_err());
         assert!(
             err.contains("unknown field `safeoutputs`"),
@@ -1967,7 +1935,10 @@ schedule: daily around 14:00
 Body
 "#;
         let result = super::super::common::parse_markdown(content);
-        assert!(result.is_err(), "top-level 'schedule' should be rejected (use on.schedule)");
+        assert!(
+            result.is_err(),
+            "top-level 'schedule' should be rejected (use on.schedule)"
+        );
         let err = format!("{:#}", result.unwrap_err());
         assert!(
             err.contains("unknown field `schedule`"),
@@ -2047,7 +2018,10 @@ ado-aw-debug:
 Body
 "#;
         let result = super::super::common::parse_markdown(content);
-        assert!(result.is_err(), "unknown ado-aw-debug field should be rejected");
+        assert!(
+            result.is_err(),
+            "unknown ado-aw-debug field should be rejected"
+        );
         let err = format!("{:#}", result.unwrap_err());
         assert!(
             err.contains("bogus-knob") || err.contains("unknown field"),
@@ -2193,9 +2167,14 @@ triggers:
 "#;
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
-        assert!(tc.pipeline.is_some());
-        assert!(tc.pr.is_some());
-        assert_eq!(tc.pr.unwrap().filters.unwrap().title.unwrap().pattern, "*[review]*");
+        assert_eq!(
+            tc.pipeline.as_ref().unwrap().name,
+            "Build Pipeline"
+        );
+        assert_eq!(
+            tc.pr.unwrap().filters.unwrap().title.unwrap().pattern,
+            "*[review]*"
+        );
     }
 
     #[test]

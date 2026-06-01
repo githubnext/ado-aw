@@ -12,7 +12,7 @@ tools:
   bash: ["*"]
   cache-memory: true
 network:
-  allowed: [defaults, node, rust]
+  allowed: [defaults, node, rust, dev.azure.com, learn.microsoft.com]
 safe-outputs:
   create-pull-request:
     max: 1
@@ -50,6 +50,7 @@ cat /tmp/gh-aw/cache-memory/docs-writer-state.json 2>/dev/null || echo '{"histor
 Track:
 - last area touched
 - last PR title
+- last PR number
 - whether the last PR is still open
 
 Recommended state shape:
@@ -62,13 +63,19 @@ Recommended state shape:
       "area": "markdown",
       "summary": "clarified trigger docs in site/src/content/docs/reference/engine.mdx",
       "pr_title": "docs(site): clarify MCP setup examples",
+      "pr_number": 123,
       "pr_open": false
     }
   ]
 }
 ```
 
-If the last docs-writer PR is still open, stop and emit `noop` with a short waiting message.
+Before acting on `pr_open`, refresh it against GitHub:
+- If the latest history entry has `pr_open: true`, look up the PR in GitHub.
+- Prefer the stored `pr_number`; only fall back to searching by `pr_title` if no number was saved yet.
+- If the PR is now `MERGED` or `CLOSED`, update that history entry to `pr_open: false`, keep `pr_number` if known, and write the refreshed state back to `/tmp/gh-aw/cache-memory/docs-writer-state.json` before continuing.
+
+Only if the PR is still actually open should you stop and emit `noop` with a short waiting message.
 
 ## Step 2 — Discover High-Value Opportunities
 
@@ -135,6 +142,8 @@ Write/update `/tmp/gh-aw/cache-memory/docs-writer-state.json` with:
 - summary of the change
 - area touched (`markdown`, `component`, or `mixed`)
 - PR title (if opened)
+- PR number (if opened)
+- `pr_open` reflecting the PR's current GitHub state at the time you save
 
 Keep only the latest 30 entries.
 

@@ -79,6 +79,17 @@ pub struct AdoContext {
     pub repo_name: String,
 }
 
+impl AdoContext {
+    /// Extract just the org slug from `org_url` (e.g.
+    /// `https://dev.azure.com/MyOrg/` → `Some("MyOrg")`). Mirrors the
+    /// inline parse in `CompileContext::ado_org`; lives here so
+    /// non-compile callers (Preview-driven discovery) can reuse it.
+    pub fn org_name(&self) -> Option<&str> {
+        let org = self.org_url.trim_end_matches('/').rsplit('/').next()?;
+        if org.is_empty() { None } else { Some(org) }
+    }
+}
+
 /// Parse the ADO org, project, and repo from a git remote URL.
 ///
 /// Supports:
@@ -1455,7 +1466,7 @@ mod tests {
 
     #[test]
     fn test_yaml_path_match_finds_definition_by_yaml_filename() {
-        let defs = vec![
+        let defs = [
             make_def(1, "Unrelated Pipeline"),
             make_def_with_yaml(2, "My Agent", "/.azdo/pipelines/agent.yml"),
             make_def(3, "Another Pipeline"),
@@ -1473,7 +1484,7 @@ mod tests {
 
     #[test]
     fn test_yaml_path_match_no_match_when_process_is_none() {
-        let defs = vec![
+        let defs = [
             make_def(1, "Classic Pipeline"),
             make_def(2, "Another Classic"),
         ];

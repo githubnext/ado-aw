@@ -39,7 +39,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
-use super::{AdoAuth, AdoContext, DefinitionSummary, MatchMethod, MatchedDefinition, list_definitions};
+use super::{
+    AdoAuth, AdoContext, DefinitionSummary, MatchMethod, MatchedDefinition, list_definitions,
+};
 use crate::detect::{MarkerMetadata, parse_marker_step};
 
 /// Default permits used to throttle concurrent Preview HTTP calls.
@@ -136,7 +138,10 @@ pub enum PreviewError {
 impl std::fmt::Display for PreviewError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PreviewError::RequiredParams => write!(f, "preview returned 400 (required parameters without defaults)"),
+            PreviewError::RequiredParams => write!(
+                f,
+                "preview returned 400 (required parameters without defaults)"
+            ),
             PreviewError::Forbidden => write!(f, "preview returned 403 (forbidden)"),
             PreviewError::NotFound => write!(f, "preview returned 404 (not found)"),
             PreviewError::Other(msg) => write!(f, "preview failed: {msg}"),
@@ -350,16 +355,20 @@ fn normalize_repo_url(url: &str) -> String {
 
 /// Build a `(normalized yamlFilename → local lock path)` lookup table
 /// from `--source agents/foo.lock.yml` or similar inputs.
+///
+/// The key is produced by [`super::normalize_ado_yaml_path`], the same
+/// helper applied to ADO's returned `process.yamlFilename` during
+/// classification. Routing both sides through one function future-proofs
+/// the lookup: if `normalize_ado_yaml_path` ever gains case-folding or
+/// URL-decoding, the keys stay in sync without a second edit.
 fn build_lock_path_map(local_lock_paths: Option<&[PathBuf]>) -> HashMap<String, PathBuf> {
     let mut map = HashMap::new();
     let Some(paths) = local_lock_paths else {
         return map;
     };
     for path in paths {
-        let normalized = path.to_string_lossy().replace('\\', "/");
-        // Match the same trim that `normalize_ado_yaml_path` applies.
-        let trimmed = normalized.trim_start_matches('/').to_string();
-        map.insert(trimmed, path.clone());
+        let key = super::normalize_ado_yaml_path(&path.to_string_lossy());
+        map.insert(key, path.clone());
     }
     map
 }
@@ -473,16 +482,16 @@ fn is_direct_match(def: &DefinitionSummary, markers: &[MarkerMetadata]) -> bool 
         return false;
     }
     if markers.len() > 1 {
-        // Multiple markers means a consumer pulling in more than one
-        // template; can't be a direct ado-aw pipeline.
+        // A compiled ado-aw pipeline's expanded YAML carries exactly
+        // one marker — its own Agent-job prepare step. More than one
+        // means the YAML was produced by expanding a consumer that
+        // `template:`-includes multiple ado-aw lock files (each
+        // contributing its own marker step). None of those templates
+        // are the consumer's own root YAML, so it can't be Direct.
         return false;
     }
     let marker = &markers[0];
-    let Some(yaml_filename) = def
-        .process
-        .as_ref()
-        .and_then(|p| p.yaml_filename.as_ref())
-    else {
+    let Some(yaml_filename) = def.process.as_ref().and_then(|p| p.yaml_filename.as_ref()) else {
         return false;
     };
     let yaml_normalized = super::normalize_ado_yaml_path(yaml_filename);
@@ -490,6 +499,25 @@ fn is_direct_match(def: &DefinitionSummary, markers: &[MarkerMetadata]) -> bool 
     // Map e.g. `agents/foo.md` → `agents/foo.lock.yml` and compare to
     // the definition's root YAML. Convention: `<stem>.md` compiles to
     // `<stem>.lock.yml`.
+    //
+    // Equality is required — an earlier version also accepted
+    // `yaml_normalized.ends_with("/{stem}")` for a defensive
+    // tail-match, but that produced false-positives when an unrelated
+    // pipeline happened to live under a same-named lock file in a
+    // different directory (e.g. marker `agents/foo.md` + yamlFilename
+    // `other/agents/foo.lock.yml` would mislabel a Consumer as Direct).
+    // Both `marker.source` and the post-`normalize_ado_yaml_path`
+    // form of `yaml_filename` are repo-root-relative without a leading
+    // slash, so strict equality is the correct check.
+    //
+    // Non-`.md` sources are treated conservatively as `Consumer`: this
+    // branch is unreachable today (the compiler always emits `.md`
+    // source paths) but stays defensive against future extensions that
+    // allow `.yaml` / `.json` / etc. agent sources. Returning `false`
+    // here means the definition will be classified as `Consumer`
+    // rather than `Direct`, which is the safe default — a write
+    // command still acts on it, just labelled differently in the
+    // summary.
     let Some(stem) = marker
         .source
         .strip_suffix(".md")
@@ -497,7 +525,28 @@ fn is_direct_match(def: &DefinitionSummary, markers: &[MarkerMetadata]) -> bool 
     else {
         return false;
     };
-    yaml_normalized == stem || yaml_normalized.ends_with(&format!("/{stem}"))
+    yaml_normalized == stem
+}
+
+/// Decide whether a marker's `(org, repo)` identifies the same
+/// repository as the discovery context. Empty marker fields (legacy
+/// markers produced before the org/repo embed landed, or markers from
+/// non-ADO compile environments) are treated as wildcards so existing
+/// deployments are not silently excluded. Once those lock files are
+/// recompiled, the match becomes strict.
+fn marker_origin_matches(
+    marker: &MarkerMetadata,
+    current_org_lc: &str,
+    current_repo_lc: &str,
+) -> bool {
+    if marker.org.is_empty() && marker.repo.is_empty() {
+        return true;
+    }
+    // Marker fields are already lower-cased at emit time. Be defensive
+    // anyway — round-tripping through serde_json doesn't change case
+    // but a hand-edited fixture or future producer might.
+    marker.org.eq_ignore_ascii_case(current_org_lc)
+        && marker.repo.eq_ignore_ascii_case(current_repo_lc)
 }
 
 async fn parse_local_lock(path: &Path) -> Option<MarkerMetadata> {
@@ -516,6 +565,8 @@ async fn parse_local_lock(path: &Path) -> Option<MarkerMetadata> {
             return Some(MarkerMetadata {
                 schema: 0,
                 source: h.source,
+                org: String::new(),
+                repo: String::new(),
                 version: h.version,
                 target: String::new(),
             });
@@ -552,12 +603,14 @@ pub fn discovered_to_matched(d: &DiscoveredPipeline) -> Option<MatchedDefinition
     // Join every marker's source path so consumers that include
     // multiple templates show up honestly in the CLI summary instead
     // of silently truncating to whichever marker happened to be
-    // first. Also apply `sanitize_for_vso_logging` here: the
-    // `yaml_path` ends up in `print_matched_summary` (which writes to
-    // stdout), and if `ado-aw secrets set --all-repos` is ever invoked
-    // from inside an ADO pipeline step, an attacker-controlled marker
-    // source path containing `##vso[` would otherwise be processed by
-    // the agent's logging-command scanner.
+    // first. Also apply the canonical pipeline-command neutraliser:
+    // the `yaml_path` ends up in `print_matched_summary` (which writes
+    // to stdout), and if `ado-aw secrets set --all-repos` is ever
+    // invoked from inside an ADO pipeline step, an attacker-controlled
+    // marker source path containing `##vso[` would otherwise be
+    // processed by the agent's logging-command scanner. Reusing the
+    // shared helper keeps this in sync with every other sanitisation
+    // surface (front matter, safe outputs, agent stats).
     let yaml_path = if d.markers.is_empty() {
         String::new()
     } else {
@@ -567,7 +620,7 @@ pub fn discovered_to_matched(d: &DiscoveredPipeline) -> Option<MatchedDefinition
             .map(|m| m.source.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        sanitize_for_vso_logging(&joined)
+        crate::sanitize::neutralize_pipeline_commands(&joined)
     };
 
     Some(MatchedDefinition {
@@ -579,17 +632,6 @@ pub fn discovered_to_matched(d: &DiscoveredPipeline) -> Option<MatchedDefinition
     })
 }
 
-/// Neutralise ADO build-agent logging-command prefixes (`##vso[`,
-/// `##[`). Mirrors `crate::compile::extensions::ado_aw_marker` and
-/// `crate::agent_stats::sanitize_for_markdown` so that data flowing
-/// from a Preview-discovered marker through the CLI's own stdout
-/// cannot smuggle a `task.setvariable` (or similar) when the CLI is
-/// invoked from inside an ADO pipeline step.
-fn sanitize_for_vso_logging(s: &str) -> String {
-    s.replace("##vso[", "[vso-filtered][")
-        .replace("##[", "[filtered][")
-}
-
 /// CLI-facing wrapper: run Preview-driven discovery with the given
 /// scope, optionally filter to consumers of a single template source,
 /// and return the result as `Vec<MatchedDefinition>`.
@@ -597,6 +639,23 @@ fn sanitize_for_vso_logging(s: &str) -> String {
 /// `source_filter` filters discovery results so only definitions whose
 /// markers reference that source path are kept. Match is by exact
 /// equality on the normalized source string in the marker JSON.
+/// Normalisation is applied to the user-supplied value too
+/// ([`crate::compile::normalize_source_path`] — forward-slash separators,
+/// CR/LF stripping, leading `./` collapsed) so the common variants
+/// (`./agents/foo.md`, `agents\foo.md` on Windows) match. Matching is
+/// **case-sensitive** even on Windows; pass the path in the same case
+/// it was compiled with.
+///
+/// Source-only matching is ambiguous when two repos in the same ADO
+/// project happen to define a file of the same name (e.g. both have
+/// `agents/foo.md`). To disambiguate, the marker carries the ADO
+/// `org` and `repo` of the compiling repository (lower-cased). When
+/// `source_filter` is active, the marker's `(org, repo)` must also
+/// equal `ctx`'s — i.e. the operator gets only consumers whose
+/// template originated in the **current repo**. Markers with empty
+/// `org` / `repo` (legacy or non-ADO compilers) match leniently so
+/// pre-existing deployments are not silently excluded; once everything
+/// is recompiled with this version, the match becomes strict.
 ///
 /// Skip-summary warnings are emitted differently depending on whether
 /// `source_filter` is active:
@@ -624,83 +683,120 @@ pub async fn resolve_definitions_via_discovery(
 ) -> Result<Vec<MatchedDefinition>> {
     let discovered = discover_ado_aw_pipelines(client, ctx, auth, scope, local_lock_paths).await?;
 
-    let mut skipped_required_params = 0usize;
-    let mut skipped_forbidden = 0usize;
-    let mut skipped_failed = 0usize;
-    let mut uninspectable = 0usize;
-
     // Normalize the user-supplied `--source` value through the same
     // canonical form the compiler uses for the marker JSON's `source`
     // field. Without this, `--source ./agents/foo.md` or
     // `--source agents\foo.md` (Windows) silently matches nothing
     // because the marker stores `agents/foo.md`.
-    let normalized_filter: Option<String> = source_filter
-        .map(|s| crate::compile::normalize_source_path(Path::new(s)));
+    let normalized_filter: Option<String> =
+        source_filter.map(|s| crate::compile::normalize_source_path(Path::new(s)));
 
-    let kept: Vec<_> = discovered
-        .into_iter()
-        .filter(|d| {
-            let matches_filter = match normalized_filter.as_deref() {
-                Some(src) => d.markers.iter().any(|m| m.source == src),
-                None => true,
-            };
+    // Origin scoping: when filtering by `--source`, also require the
+    // marker's (org, repo) to identify the current repository. This
+    // disambiguates the source field when two repos in the same
+    // project define files of the same name. Lower-cased to align with
+    // the marker's lower-casing at emit time (ADO identifiers are
+    // case-insensitive). Markers with empty fields (legacy / non-ADO
+    // compiles) match leniently so already-deployed pipelines remain
+    // discoverable until they are recompiled.
+    let current_org = ctx
+        .org_name()
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    let current_repo = ctx.repo_name.to_ascii_lowercase();
 
-            // Count toward skip totals only when the failure is
-            // relevant to the requested operation:
-            //  - unfiltered: every failure is relevant (we're operating
-            //    on every ado-aw pipeline in scope);
-            //  - filtered: we can't attribute uninspectable definitions
-            //    to a specific source, so use a single combined counter.
-            if normalized_filter.is_none() {
-                match &d.status {
-                    DiscoveryStatus::UnknownRequiredParams => skipped_required_params += 1,
-                    DiscoveryStatus::UnknownForbidden => skipped_forbidden += 1,
-                    DiscoveryStatus::PreviewFailed(_) => skipped_failed += 1,
-                    _ => {}
-                }
-            } else if matches!(
-                d.status,
-                DiscoveryStatus::UnknownRequiredParams
-                    | DiscoveryStatus::UnknownForbidden
-                    | DiscoveryStatus::PreviewFailed(_)
-            ) {
-                uninspectable += 1;
-            }
+    // Pass 1: classify each discovered definition into "keep / skip
+    // silently / skip with reason". The previous shape stuffed all of
+    // this into a side-effecting `.filter()` closure that mutated
+    // counters while deciding inclusion — explicit two-pass form keeps
+    // the counts honestly derived from the same iteration and makes it
+    // obvious what ends up in the returned vec.
+    //
+    // The per-status counters (`uninspectable_required_params` /
+    // `_forbidden` / `_failed`) tally Preview failures by reason. They
+    // intentionally do NOT distinguish "ado-aw consumer" from
+    // "unrelated pipeline" — Preview failed for these, so we have no
+    // markers to tell which is which. A non-ado-aw project may have
+    // hundreds of definitions that legitimately require
+    // templateParameters; we can't claim any of them were ado-aw
+    // consumers without inspecting them, so the warning text below is
+    // written to be honest about that uncertainty.
+    let mut uninspectable_required_params = 0usize;
+    let mut uninspectable_forbidden = 0usize;
+    let mut uninspectable_failed = 0usize;
+    let mut selected: Vec<DiscoveredPipeline> = Vec::with_capacity(discovered.len());
 
-            matches_filter
-        })
-        .collect();
+    for d in discovered {
+        let matches_filter = match normalized_filter.as_deref() {
+            Some(src) => d
+                .markers
+                .iter()
+                .any(|m| m.source == src && marker_origin_matches(m, &current_org, &current_repo)),
+            None => true,
+        };
 
-    if skipped_required_params > 0 {
-        warn!(
-            "Discovery skipped {skipped_required_params} definition(s) whose Pipeline Preview \
-             requires templateParameters with no defaults. Use --definition-ids to act on them \
-             directly.",
+        // Tally uninspectable statuses *before* the actionability
+        // guard below so the count is accurate regardless of whether
+        // the definition makes it into `selected`.
+        match d.status {
+            DiscoveryStatus::UnknownRequiredParams => uninspectable_required_params += 1,
+            DiscoveryStatus::UnknownForbidden => uninspectable_forbidden += 1,
+            DiscoveryStatus::PreviewFailed(_) => uninspectable_failed += 1,
+            _ => {}
+        }
+
+        // Drop non-actionable statuses up-front instead of letting
+        // them ride along in `selected` only to be filtered out by
+        // `discovered_to_matched` at the end. In an `--all-repos` run
+        // against a large project where most definitions are
+        // `NotAdoAw` or `PreviewFailed`, this keeps the intermediate
+        // vec tight and makes the filter pass's intent obvious.
+        let actionable = matches!(
+            d.status,
+            DiscoveryStatus::Direct | DiscoveryStatus::Consumer
+        );
+
+        if matches_filter && actionable {
+            selected.push(d);
+        }
+    }
+
+    let uninspectable =
+        uninspectable_required_params + uninspectable_forbidden + uninspectable_failed;
+
+    // Pass 2: emit a single warning that's honest about uncertainty,
+    // and surface the per-status breakdown at debug level for
+    // operators who want to know whether the misses were
+    // permission-related or template-parameter-related.
+    //
+    // Previously we emitted three separate warn-level messages keyed
+    // on the per-status counts (e.g. "Discovery skipped N definitions
+    // whose Pipeline Preview requires templateParameters") — but in
+    // `--all-repos` mode that's misleading: a project with hundreds of
+    // non-ado-aw pipelines that legitimately require parameters would
+    // make the operator think they'd missed N ado-aw consumers, when
+    // none of them were ado-aw in the first place. We can't tell
+    // which is which without successful Preview output.
+    if uninspectable > 0 {
+        match normalized_filter.as_deref() {
+            Some(src) => warn!(
+                "Discovery could not inspect {uninspectable} definition(s) (Preview failure, \
+                 forbidden, or required-parameters); any consumers of `{src}` among them have \
+                 been silently skipped. Re-run with --debug for per-definition reasons.",
+            ),
+            None => warn!(
+                "Discovery could not inspect {uninspectable} definition(s) (Preview failure, \
+                 forbidden, or required-parameters); any ado-aw pipelines among them have been \
+                 silently skipped. Re-run with --debug for per-definition reasons.",
+            ),
+        }
+        debug!(
+            "Uninspectable breakdown: {uninspectable_required_params} required-parameters, \
+             {uninspectable_forbidden} forbidden, {uninspectable_failed} other Preview errors.",
         );
     }
-    if skipped_forbidden > 0 {
-        warn!(
-            "Discovery skipped {skipped_forbidden} definition(s) the calling identity lacks \
-             read access to. Check your PAT or AAD permissions.",
-        );
-    }
-    if skipped_failed > 0 {
-        warn!(
-            "Discovery skipped {skipped_failed} definition(s) whose Pipeline Preview returned \
-             an unexpected error. Re-run with --debug to see details.",
-        );
-    }
-    if uninspectable > 0
-        && let Some(src) = normalized_filter.as_deref()
-    {
-        warn!(
-            "Discovery could not inspect {uninspectable} definition(s) (Preview failure, \
-             forbidden, or required-parameters); any consumers of `{src}` among them have \
-             been silently skipped. Re-run with --debug for per-definition reasons.",
-        );
-    }
 
-    Ok(kept.iter().filter_map(discovered_to_matched).collect())
+    Ok(selected.iter().filter_map(discovered_to_matched).collect())
 }
 
 // AdoContext helper: derive the resolved git remote URL for
@@ -793,7 +889,12 @@ mod tests {
 
     #[test]
     fn scope_current_repo_with_no_remote_returns_empty() {
-        let defs = vec![def_with(1, "a", None, Some("https://dev.azure.com/o/p/_git/x"))];
+        let defs = vec![def_with(
+            1,
+            "a",
+            None,
+            Some("https://dev.azure.com/o/p/_git/x"),
+        )];
         let kept = apply_scope_filter(defs, &DiscoveryScope::CurrentRepo, &None);
         assert!(kept.is_empty());
     }
@@ -820,23 +921,44 @@ mod tests {
             source: "agents/foo.md".to_string(),
             version: "0.30.0".to_string(),
             target: "standalone".to_string(),
+            ..Default::default()
         }];
         assert!(is_direct_match(&def, &markers));
     }
 
     #[test]
-    fn direct_when_yaml_filename_has_extra_path_prefix() {
-        // ADO sometimes stores yamlFilename with a project-relative
-        // leading slash + extra path components. The marker source is
-        // just the markdown path the user passed at compile time.
+    fn direct_when_yaml_filename_has_leading_slash() {
+        // ADO sometimes returns yamlFilename with a leading slash. The
+        // `normalize_ado_yaml_path` helper strips it, so equality with
+        // the derived `<stem>.lock.yml` still holds.
         let def = def_with(1, "a", Some("/agents/foo.lock.yml"), None);
         let markers = vec![MarkerMetadata {
             schema: 1,
             source: "agents/foo.md".to_string(),
             version: "0.30.0".to_string(),
             target: "standalone".to_string(),
+            ..Default::default()
         }];
         assert!(is_direct_match(&def, &markers));
+    }
+
+    #[test]
+    fn consumer_when_same_stem_in_different_directory() {
+        // Regression: previously `yaml_normalized.ends_with("/{stem}")`
+        // would mislabel a Consumer pipeline as Direct whenever a
+        // same-named lock file lived under any unrelated prefix
+        // (e.g. marker `agents/foo.md` + yamlFilename
+        // `other/agents/foo.lock.yml`). The fix requires strict
+        // equality after normalisation.
+        let def = def_with(1, "a", Some("other/agents/foo.lock.yml"), None);
+        let markers = vec![MarkerMetadata {
+            schema: 1,
+            source: "agents/foo.md".to_string(),
+            version: "0.30.0".to_string(),
+            target: "standalone".to_string(),
+            ..Default::default()
+        }];
+        assert!(!is_direct_match(&def, &markers));
     }
 
     #[test]
@@ -847,6 +969,7 @@ mod tests {
             source: "agents/foo.md".to_string(),
             version: "0.30.0".to_string(),
             target: "stage".to_string(),
+            ..Default::default()
         }];
         assert!(!is_direct_match(&def, &markers));
     }
@@ -860,12 +983,14 @@ mod tests {
                 source: "agents/foo.md".to_string(),
                 version: "0.30.0".to_string(),
                 target: "stage".to_string(),
+                ..Default::default()
             },
             MarkerMetadata {
                 schema: 1,
                 source: "agents/bar.md".to_string(),
                 version: "0.30.0".to_string(),
                 target: "job".to_string(),
+                ..Default::default()
             },
         ];
         // Multiple markers = at least one template is being included
@@ -930,6 +1055,62 @@ mod tests {
         );
     }
 
+    // ── marker_origin_matches ────────────────────────────────────────
+
+    #[test]
+    fn origin_matches_strict_when_marker_has_org_and_repo() {
+        let marker = MarkerMetadata {
+            org: "myorg".to_string(),
+            repo: "templates-a".to_string(),
+            source: "agents/foo.md".to_string(),
+            ..Default::default()
+        };
+        assert!(marker_origin_matches(&marker, "myorg", "templates-a"));
+        assert!(!marker_origin_matches(&marker, "myorg", "templates-b"));
+        assert!(!marker_origin_matches(&marker, "otherorg", "templates-a"));
+    }
+
+    #[test]
+    fn origin_matches_case_insensitively() {
+        // ADO identifiers are case-insensitive. Marker fields are
+        // lower-cased at emit time, but a fixture or hand-edited
+        // marker might carry uppercase — accept either.
+        let marker = MarkerMetadata {
+            org: "MyOrg".to_string(),
+            repo: "Templates-A".to_string(),
+            source: "agents/foo.md".to_string(),
+            ..Default::default()
+        };
+        assert!(marker_origin_matches(&marker, "myorg", "templates-a"));
+    }
+
+    #[test]
+    fn origin_matches_leniently_when_marker_org_repo_empty() {
+        // Legacy markers (pre-org/repo embed) and markers compiled
+        // outside an ADO checkout carry empty org/repo. Match anything
+        // so existing deployments keep working until recompiled.
+        let marker = MarkerMetadata {
+            source: "agents/foo.md".to_string(),
+            ..Default::default()
+        };
+        assert!(marker_origin_matches(&marker, "myorg", "templates-a"));
+        assert!(marker_origin_matches(&marker, "", ""));
+    }
+
+    #[test]
+    fn origin_matches_strictly_when_only_one_field_empty() {
+        // If only one half of (org, repo) is set, we treat the marker
+        // as non-legacy and require both to match. Pre-empts a
+        // malformed fixture passing through the lenient path.
+        let half_marker = MarkerMetadata {
+            org: "myorg".to_string(),
+            repo: String::new(),
+            source: "agents/foo.md".to_string(),
+            ..Default::default()
+        };
+        assert!(!marker_origin_matches(&half_marker, "myorg", "templates-a"));
+    }
+
     // ── discovered_to_matched ────────────────────────────────────────
 
     fn discovered(status: DiscoveryStatus) -> DiscoveredPipeline {
@@ -985,18 +1166,19 @@ mod tests {
                 source: "agents/a.md".to_string(),
                 version: "1.0".to_string(),
                 target: "job".to_string(),
+                ..Default::default()
             },
             MarkerMetadata {
                 schema: 1,
                 source: "agents/b.md".to_string(),
                 version: "1.0".to_string(),
                 target: "stage".to_string(),
+                ..Default::default()
             },
         ];
         let matched = discovered_to_matched(&d).expect("Consumer kept");
         assert!(
-            matched.yaml_path.contains("agents/a.md")
-                && matched.yaml_path.contains("agents/b.md"),
+            matched.yaml_path.contains("agents/a.md") && matched.yaml_path.contains("agents/b.md"),
             "expected both marker sources in yaml_path, got: {}",
             matched.yaml_path
         );
@@ -1009,22 +1191,29 @@ mod tests {
         // attacker-controlled marker source path containing `##vso[`
         // would otherwise be processed by the agent's logging-command
         // scanner.
+        //
+        // The canonical `neutralize_pipeline_commands` wraps the
+        // prefix in backticks (`` `##vso[` ``) — the literal `##vso[`
+        // token no longer matches the agent's scanner. The canonical
+        // helper's own behaviour is exhaustively tested in
+        // `src/sanitize.rs`; this test is just the integration point.
         let mut d = discovered(DiscoveryStatus::Consumer);
         d.markers = vec![MarkerMetadata {
             schema: 1,
             source: "agents/##vso[task.setvariable variable=X]value.md".to_string(),
             version: "1.0".to_string(),
             target: "job".to_string(),
+            ..Default::default()
         }];
         let matched = discovered_to_matched(&d).expect("Consumer kept");
         assert!(
-            !matched.yaml_path.contains("##vso["),
+            !matched.yaml_path.contains("agents/##vso["),
             "raw ##vso[ leaked into yaml_path: {}",
             matched.yaml_path,
         );
         assert!(
-            matched.yaml_path.contains("[vso-filtered]["),
-            "expected `##vso[` neutralised to `[vso-filtered][`: {}",
+            matched.yaml_path.contains("`##vso[`"),
+            "expected `##vso[` neutralised via canonical backtick-wrap: {}",
             matched.yaml_path,
         );
     }
@@ -1047,20 +1236,5 @@ mod tests {
             normalize_repo_url("https://dev.azure.com/Org/P/_git/Repo/"),
             normalize_repo_url("https://dev.azure.com/org/p/_git/repo")
         );
-    }
-
-    // ── sanitize_for_vso_logging ─────────────────────────────────────
-
-    #[test]
-    fn discovery_sanitize_for_vso_logging_neutralises_prefixes() {
-        assert_eq!(
-            sanitize_for_vso_logging("##vso[task.setvariable variable=X]value"),
-            "[vso-filtered][task.setvariable variable=X]value"
-        );
-        assert_eq!(
-            sanitize_for_vso_logging("##[warning]ignore me"),
-            "[filtered][warning]ignore me"
-        );
-        assert_eq!(sanitize_for_vso_logging("agents/foo.md"), "agents/foo.md");
     }
 }

@@ -96,9 +96,19 @@ This distinction allows resources (like templates) to be available as pipeline r
 - checkout: reponame
 ```
 
-## `{{ agent_name }}`
+## `{{ pipeline_agent_name }}`
 
-Should be replaced with the human-readable name from the front matter (e.g., "Daily Code Review"). This is used for display purposes like stage names.
+Replaced with a sanitized version of the `name:` front matter field, used as the ADO pipeline `name:` value (the build number prefix visible in the ADO UI and `$(Build.BuildNumber)`).
+
+Sanitization strips characters that ADO rejects in build numbers (`"`, `/`, `:`, `<`, `>`, `\`, `|`, `?`, `@`, `*`), trims surrounding whitespace and any trailing dot, and truncates to ADO's build-number length limit. If the result is empty after sanitization, it falls back to `"pipeline"`.
+
+Example: `name: Daily safe-output smoke: "noop" @nightly` → `Daily safe-output smoke noop nightly`.
+
+## `{{ agent_display_name }}`
+
+Replaced with the raw `name:` front matter value as a YAML double-quoted scalar (e.g., `"Daily Code Review"`). Used in the `displayName:` property of the outermost stage block in `target: stage` pipelines, and in the 1ES template's `templateContext.buildJob.displayName` property.
+
+Always quoted to handle names that contain characters (such as `:`) that ADO would otherwise misparse as YAML mapping indicators.
 
 ## `{{ engine_install_steps }}`
 
@@ -504,7 +514,7 @@ Should be replaced with the domain the AWF-sandboxed agent uses to reach MCPG on
 
 The 1ES target uses the same template markers as standalone, plus the 1ES-specific `extends:` / `stages:` / `templateContext` wrapping. The 1ES template includes `templateContext.type: buildJob` for all jobs, and the pool is specified at the top-level `parameters.pool` rather than per-job.
 
-Both targets share the same execution model (Copilot CLI + AWF + MCPG) and the same set of template markers.
+Both targets share the same execution model (Copilot CLI + AWF + MCPG) and the same set of template markers. The 1ES template additionally uses `{{ agent_display_name }}` for the `templateContext.buildJob.displayName` property (see above).
 
 ## Job/Stage Template Markers
 
