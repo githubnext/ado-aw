@@ -1,6 +1,6 @@
 ---
 on:
-  schedule: every 2 days
+  schedule: daily on weekdays
 description: Identifies and refactors functions with high cyclomatic complexity using Clippy analysis
 permissions:
   contents: read
