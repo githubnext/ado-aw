@@ -1,6 +1,6 @@
 ---
 on:
-  schedule: daily
+  schedule: daily around 11:00
 description: Checks for new releases of gh-aw-firewall, copilot-cli, and gh-aw-mcpg, and syncs ecosystem_domains.json from gh-aw. Opens PRs for any updates found, and files action-item issues summarizing the upstream release notes for each dependency bump.
 permissions:
   contents: read

@@ -1,6 +1,6 @@
 ---
 on:
-  schedule: every 4 hours
+  schedule: every 8h
 description: Checks that documentation stays consistent with code structure and CLI commands
 permissions:
   contents: read
