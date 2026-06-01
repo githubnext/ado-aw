@@ -1,6 +1,6 @@
 ---
 on:
-  schedule: daily on weekdays
+  schedule: weekly on monday around 06:00
 description: Analyzes test coverage and contributes missing test cases through focused pull requests
 permissions:
   contents: read

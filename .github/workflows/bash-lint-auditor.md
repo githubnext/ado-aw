@@ -1,6 +1,6 @@
 ---
 on:
-  schedule: daily around 09:00
+  schedule: every 2 days
 description: Audits bash bodies in compiled pipeline YAML, applies shellcheck-driven fixes, and opens a PR with the changes.
 permissions:
   contents: read
