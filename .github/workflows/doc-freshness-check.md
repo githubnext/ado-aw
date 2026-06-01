@@ -20,6 +20,8 @@ safe-outputs:
       - README.md
       - docs/**
       - prompts/**
+      - src/safeoutputs/create_work_item.rs
+      - src/safeoutputs/update_work_item.rs
 ---
 
 # Documentation Freshness Check
