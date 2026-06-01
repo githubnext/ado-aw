@@ -110,6 +110,8 @@ const REQUIRED_STEP_DISPLAY_NAMES: &[&str] = &[
     "Verify pipeline integrity",              // src/compile/common.rs generate_integrity_check
     "Resolve runtime imports (agent prompt)", // src/compile/extensions/ado_script.rs resolver_step()
     "Output copilot version",                 // src/engine.rs (copilot_install_from_nuget + copilot_install_from_github_release)
+    "Add copilot to PATH",                    // src/engine.rs copilot_install_from_nuget (1ES path)
+    "Resolve ADO organization",               // src/engine.rs copilot_install_from_nuget (1ES, no org)
 ];
 
 fn ado_aw_binary() -> PathBuf {
