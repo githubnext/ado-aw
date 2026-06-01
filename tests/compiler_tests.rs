@@ -4505,3 +4505,86 @@ fn test_example_dogfood_failure_reporter_structure() {
         "Example should target githubnext/ado-aw"
     );
 }
+
+/// Test that every `{{ marker }}` used in `src/data/*.yml` has a corresponding
+/// `## {{ marker }}` heading in `docs/template-markers.md`.
+///
+/// This is the CI/docs marker-drift guard: if a marker is added to a template
+/// without updating the docs, this test fails.
+#[test]
+fn test_template_marker_docs_coverage() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let data_dir = manifest_dir.join("src").join("data");
+    let docs_file = manifest_dir.join("docs").join("template-markers.md");
+
+    // --- collect markers from src/data/*.yml ---
+    let yml_entries = fs::read_dir(&data_dir)
+        .unwrap_or_else(|e| panic!("Cannot read {}: {e}", data_dir.display()));
+
+    let mut yml_markers: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for entry in yml_entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("yml") {
+            continue;
+        }
+        let content = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("Cannot read {}: {e}", path.display()));
+        for cap in regex_captures_markers(&content) {
+            yml_markers.insert(cap);
+        }
+    }
+
+    // --- collect documented marker headings from docs/template-markers.md ---
+    let docs = fs::read_to_string(&docs_file)
+        .unwrap_or_else(|e| panic!("Cannot read {}: {e}", docs_file.display()));
+
+    let mut documented: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for line in docs.lines() {
+        // Match lines like: ## {{ marker_name }}
+        if let Some(rest) = line.strip_prefix("## {{ ")
+            && let Some(name) = rest.split("}}").next()
+        {
+            documented.insert(name.trim().to_string());
+        }
+    }
+
+    // Every marker that appears in the yml files must have a docs heading.
+    let mut missing: Vec<String> = Vec::new();
+    for marker in &yml_markers {
+        if !documented.contains(marker.as_str()) {
+            missing.push(format!("{{{{ {marker} }}}}"));
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "The following template markers appear in src/data/*.yml but have no \
+         '## {{{{ marker }}}}' heading in docs/template-markers.md — add docs or \
+         update the marker name:\n  {}",
+        missing.join("\n  ")
+    );
+}
+
+/// Extract all `{{ name }}` marker names from `content` (excluding `${{ }}` ADO expressions).
+fn regex_captures_markers(content: &str) -> Vec<String> {
+    let mut results = Vec::new();
+    let mut s: &str = content;
+    while let Some(start) = s.find("{{ ") {
+        // Skip ADO ${{ }} expressions
+        if start > 0 && s.as_bytes().get(start - 1) == Some(&b'$') {
+            s = &s[start + 3..];
+            continue;
+        }
+        let after = &s[start + 3..];
+        if let Some(end) = after.find("}}") {
+            let name = after[..end].trim().to_string();
+            if !name.is_empty() {
+                results.push(name);
+            }
+            s = &after[end + 2..];
+        } else {
+            break;
+        }
+    }
+    results
+}
