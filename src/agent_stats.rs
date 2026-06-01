@@ -290,7 +290,6 @@ mod tests {
         assert_eq!(stats.model.as_deref(), Some("claude-sonnet-4.5"));
         assert_eq!(stats.input_tokens, 32949);
         assert_eq!(stats.output_tokens, 236);
-        assert_eq!(stats.input_tokens + stats.output_tokens, 33185);
         assert_eq!(stats.turns, 2);
         // execute_tool spans: bash only (report_intent is filtered as internal)
         assert_eq!(stats.tool_calls, 1);

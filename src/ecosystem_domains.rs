@@ -132,7 +132,6 @@ mod tests {
         let domains = get_ecosystem_domains("python");
         assert!(domains.contains(&"pypi.org".to_string()));
         assert!(domains.contains(&"pip.pypa.io".to_string()));
-        assert!(!domains.is_empty());
     }
 
     #[test]
