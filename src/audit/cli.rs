@@ -311,15 +311,20 @@ async fn resolve_audit_context(
     project: Option<&str>,
     parsed: &ParsedBuildRef,
 ) -> Result<AdoContext> {
-    // Best-effort resolution of the trusted ADO context from --org / --project
-    // and the local git remote. These are the only sources we trust to decide
-    // whether the host derived from a user-supplied URL is safe to authenticate
-    // against.
-    let trusted_ctx = resolve_ado_context(cwd, org, project).await.ok();
-
+    // First, validate the URL host (if any) against a trust anchor derived
+    // independently of full context resolution. We deliberately do NOT depend
+    // on `resolve_ado_context` here because that helper requires both --org
+    // AND --project when running outside a git repo — but when the user
+    // supplies a full build URL, the project is already in the URL and asking
+    // them to also pass --project would be a UX regression.
     if let Some(url_host) = parsed.host.as_deref() {
-        validate_audit_url_host(url_host, trusted_ctx.as_ref())?;
+        let trusted_host = resolve_trusted_host(cwd, org).await;
+        validate_audit_url_host(url_host, trusted_host.as_deref())?;
     }
+
+    // Best-effort full context (git remote + --org + --project). Used only as
+    // a source of defaults that the URL overrides supersede.
+    let trusted_ctx = resolve_ado_context(cwd, org, project).await.ok();
 
     if parsed.org.is_some() && parsed.project.is_some() && parsed.host.is_some() {
         let mut ctx = trusted_ctx.unwrap_or_else(|| AdoContext {
@@ -338,6 +343,27 @@ async fn resolve_audit_context(
     })
 }
 
+/// Resolve the host we are willing to authenticate to, *without* requiring
+/// a full ADO context (which would also need --project to be present).
+///
+/// Trust anchor priority:
+/// 1. `--org` (any form `resolve_ado_context` accepts), if it normalizes to
+///    a parseable URL.
+/// 2. The git remote of `cwd`, if it parses as an ADO remote.
+/// 3. None — the caller must then refuse any non-cloud URL host.
+async fn resolve_trusted_host(cwd: &Path, org_flag: Option<&str>) -> Option<String> {
+    if let Some(org) = org_flag {
+        let normalized = crate::ado::normalize_org_url(org);
+        if let Some(host) = host_from_org_url(&normalized) {
+            return Some(host);
+        }
+    }
+
+    let remote = crate::ado::get_git_remote_url(cwd).await.ok()?;
+    let remote_ctx = crate::ado::parse_ado_remote(&remote).ok()?;
+    host_from_org_url(&remote_ctx.org_url)
+}
+
 /// Refuse to authenticate against an arbitrary host derived from a
 /// user-supplied build URL.
 ///
@@ -351,15 +377,14 @@ async fn resolve_audit_context(
 /// - Microsoft-managed cloud hosts (`dev.azure.com`, `*.visualstudio.com`)
 ///   are always allowed.
 /// - Any other host (typically on-prem ADO Server) is allowed only when it
-///   matches the host of `trusted_ctx.org_url`, which itself was resolved
-///   from either `--org` or the local git remote — both explicit, locally
-///   controlled trust anchors.
-fn validate_audit_url_host(url_host: &str, trusted_ctx: Option<&AdoContext>) -> Result<()> {
+///   matches `trusted_host`, which the caller derives from either `--org`
+///   or the local git remote — both explicit, locally controlled trust
+///   anchors.
+fn validate_audit_url_host(url_host: &str, trusted_host: Option<&str>) -> Result<()> {
     if is_microsoft_cloud_host(url_host) {
         return Ok(());
     }
 
-    let trusted_host = trusted_ctx.and_then(|ctx| host_from_org_url(&ctx.org_url));
     match trusted_host {
         Some(expected) if expected.eq_ignore_ascii_case(url_host) => Ok(()),
         Some(expected) => anyhow::bail!(
@@ -824,14 +849,6 @@ mod tests {
 
     // ── validate_audit_url_host: PAT exfiltration guard ───────────────────
 
-    fn trusted(org_url: &str) -> AdoContext {
-        AdoContext {
-            org_url: org_url.to_string(),
-            project: String::new(),
-            repo_name: String::new(),
-        }
-    }
-
     #[test]
     fn validate_host_accepts_dev_azure_com_without_trusted_context() {
         validate_audit_url_host("dev.azure.com", None).expect("cloud host is always trusted");
@@ -850,9 +867,6 @@ mod tests {
 
     #[test]
     fn validate_host_rejects_lookalike_attacker_visualstudio_com_path() {
-        // Must be host-suffix match, not substring match — a host like
-        // "visualstudio.com.attacker.example" or
-        // "attacker-visualstudio.com" must not be accepted.
         let attacker = "visualstudio.com.attacker.example";
         let err = validate_audit_url_host(attacker, None)
             .expect_err("attacker-controlled host with visualstudio.com prefix must be rejected");
@@ -879,8 +893,7 @@ mod tests {
 
     #[test]
     fn validate_host_rejects_host_mismatch_against_trusted_context() {
-        let ctx = trusted("https://onprem-real.example.com/MyCollection");
-        let err = validate_audit_url_host("attacker.example.com", Some(&ctx))
+        let err = validate_audit_url_host("attacker.example.com", Some("onprem-real.example.com"))
             .expect_err("URL host that doesn't match --org / git remote must be rejected");
         let msg = err.to_string();
         assert!(
@@ -895,15 +908,13 @@ mod tests {
 
     #[test]
     fn validate_host_accepts_matching_onprem_host() {
-        let ctx = trusted("https://onprem.example.com/MyCollection");
-        validate_audit_url_host("onprem.example.com", Some(&ctx))
+        validate_audit_url_host("onprem.example.com", Some("onprem.example.com"))
             .expect("on-prem host matching --org / git remote must be accepted");
     }
 
     #[test]
     fn validate_host_accepts_matching_onprem_host_case_insensitively() {
-        let ctx = trusted("https://OnPrem.Example.Com/MyCollection");
-        validate_audit_url_host("onprem.example.com", Some(&ctx))
+        validate_audit_url_host("onprem.example.com", Some("OnPrem.Example.Com"))
             .expect("on-prem host match must be case-insensitive");
     }
 
@@ -911,8 +922,7 @@ mod tests {
     fn validate_host_rejects_unrelated_host_even_with_cloud_trusted_context() {
         // A user with a dev.azure.com trusted context is still protected
         // against URLs pointing at an unrelated on-prem host.
-        let ctx = trusted("https://dev.azure.com/my-org");
-        let err = validate_audit_url_host("attacker.example.com", Some(&ctx))
+        let err = validate_audit_url_host("attacker.example.com", Some("dev.azure.com"))
             .expect_err("must reject attacker host even when trusted context is cloud");
         assert!(
             err.to_string().contains("attacker.example.com"),
@@ -947,5 +957,48 @@ mod tests {
         );
         assert_eq!(host_from_org_url(""), None);
         assert_eq!(host_from_org_url("not a url"), None);
+    }
+
+    // ── resolve_trusted_host: trust anchor without requiring --project ────
+
+    #[tokio::test]
+    async fn resolve_trusted_host_uses_org_flag_full_url() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let host = resolve_trusted_host(
+            temp_dir.path(),
+            Some("https://onprem.example.com/MyCollection"),
+        )
+        .await;
+        assert_eq!(host.as_deref(), Some("onprem.example.com"));
+    }
+
+    #[tokio::test]
+    async fn resolve_trusted_host_uses_org_flag_bare_name() {
+        // Bare org name is normalized to https://dev.azure.com/<org>.
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let host = resolve_trusted_host(temp_dir.path(), Some("my-org")).await;
+        assert_eq!(host.as_deref(), Some("dev.azure.com"));
+    }
+
+    #[tokio::test]
+    async fn resolve_trusted_host_returns_none_in_arbitrary_folder_without_org_flag() {
+        // No git remote, no --org → no trust anchor. The caller must then
+        // refuse any non-cloud URL host.
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let host = resolve_trusted_host(temp_dir.path(), None).await;
+        assert_eq!(host, None);
+    }
+
+    #[tokio::test]
+    async fn resolve_trusted_host_with_only_org_flag_enables_onprem_url() {
+        // Regression: running from an arbitrary folder with --org pointing at
+        // an on-prem host (and NO --project, because project is in the URL)
+        // must yield a trust anchor and let validation pass.
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let host = resolve_trusted_host(temp_dir.path(), Some("https://onprem.example.com/Coll"))
+            .await
+            .expect("--org alone should establish a trusted host");
+        validate_audit_url_host("onprem.example.com", Some(&host))
+            .expect("URL host matching --org must pass validation");
     }
 }
