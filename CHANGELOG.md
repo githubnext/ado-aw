@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.31.1](https://github.com/githubnext/ado-aw/compare/v0.31.0...v0.31.1) (2026-06-01)
+
+
+### Bug Fixes
+
+* **compile:** allow external dependsOn/condition on job and stage template targets ([#823](https://github.com/githubnext/ado-aw/issues/823)) ([608b0b5](https://github.com/githubnext/ado-aw/commit/608b0b56331ce2be1f8461fc13c80b3958426ea5))
+* **workflows:** allow doc-freshness-check to patch safeoutput source files ([#816](https://github.com/githubnext/ado-aw/issues/816)) ([d16f808](https://github.com/githubnext/ado-aw/commit/d16f808c1d68c7c05b39af973af9b5129144eb13))
+
 ## [0.31.0](https://github.com/githubnext/ado-aw/compare/v0.30.2...v0.31.0) (2026-06-01)
 
 
