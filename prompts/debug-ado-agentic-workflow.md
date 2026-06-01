@@ -52,9 +52,32 @@ You need minimal context from the user:
 - Error messages or log snippets from the failing step
 - The agent source `.md` file (or path) and the compiled `.lock.yml` (or path)
 
+**Fastest first move when a build ID or URL is available:** run `ado-aw audit <build-id-or-url> --json`. It downloads the build's artifacts, runs every analyzer (firewall, MCP gateway, OTel, safe outputs, detection verdict, timeline, missing tools/data/noops), and emits a structured JSON report you can read directly — much faster than paging through raw logs. The audit caches its results under `./logs/build-<id>/run-summary.json` so re-running is free.
+
 ### Step 2: Investigate
 
 If Azure DevOps MCP pipeline tools are available, follow this sequence:
+
+#### 2a-prime. Run `ado-aw audit` (when you have local CLI access)
+
+If you can run `ado-aw` locally and have the build ID:
+
+```bash
+ado-aw audit <build-id-or-url> --json > audit.json
+```
+
+The output JSON contains the full `AuditData` (see [What `ado-aw audit` extracts](#what-ado-aw-audit-extracts) below). Map each section to the stage that produced it:
+
+- `overview` / `metrics` / `engine_config` / `performance_metrics` → Agent-stage runtime characteristics
+- `firewall_analysis` / `policy_analysis` → Agent-stage AWF network behavior
+- `mcp_server_health` / `mcp_tool_usage` / `mcp_failures` → Agent-stage MCP gateway behavior
+- `safe_output_summary` / `safe_output_execution` / `rejected_safe_outputs` / `created_items` → cross-stage proposal → detection → execution trace
+- `detection_analysis` → Detection-stage threat-analysis verdict
+- `missing_tools` / `missing_data` / `noops` → agent-self-reported signals
+- `jobs` → ADO build timeline (use this to see which stage failed)
+- `key_findings` / `recommendations` → heuristic summaries (severity high/critical findings are usually the root-cause signal)
+
+If the CLI is not available, fall through to the MCP-based steps below.
 
 #### 2a. Find the Pipeline Definition
 
@@ -109,6 +132,16 @@ This is often the fastest path to root cause for regressions:
    - The ado-aw compiler version pin
    - Pipeline variables or service connection configuration
    - Pool or agent image configuration
+
+When the future `ado-aw audit <base> <comparison>` diff mode is not yet available, the lightweight stand-in is:
+
+```bash
+ado-aw audit <base-id> --json > base.json
+ado-aw audit <comparison-id> --json > comp.json
+diff <(jq -S . base.json) <(jq -S . comp.json) | less
+```
+
+This won't surface domain/MCP-tool diffs as cleanly as a structured diff, but it does highlight changes in `key_findings`, `metrics`, `mcp_failures`, `firewall_analysis.denied_count`, and the per-item `safe_output_execution`.
 
 #### 2g. Check Local Files (if accessible)
 
@@ -441,6 +474,38 @@ If downloads fail:
 - Check SHA256 checksum verification isn't failing (indicates corruption or version mismatch)
 
 ---
+
+## What `ado-aw audit` extracts
+
+| Section | What it contains / Source |
+|---|---|
+| `overview` | High-level build and pipeline metadata from Azure DevOps APIs, timeline data, and `staging/aw_info.json`. |
+| `task_domain` | Task-domain classification inferred by audit heuristics from the run's prompts and outputs. |
+| `behavior_fingerprint` | Behavior fingerprint signals derived from analyzer heuristics over the run. |
+| `agentic_assessments` | Higher-level agentic assessments synthesized by the audit. |
+| `metrics` | Aggregate numeric metrics derived from OTel and audit processing. |
+| `key_findings` | Important findings synthesized from analyzer output. |
+| `recommendations` | Recommended next actions derived from the audit findings. |
+| `performance_metrics` | Derived performance metrics computed from token, cost, and tool-usage data. |
+| `engine_config` | Engine configuration captured from compiled metadata and runtime emission. |
+| `safe_output_summary` | Rollup of proposed, executed, and dropped safe outputs for the build. |
+| `safe_output_execution` | Per-item safe-output execution outcomes emitted by the ADO SafeOutputs stage. |
+| `rejected_safe_outputs` | Aggregate rollup of safe outputs rejected before or during execution. |
+| `detection_analysis` | Threat-detection verdict information from `analyzed_outputs_<BuildId>`. |
+| `mcp_server_health` | MCP server reliability and call health derived from gateway logs. |
+| `jobs` | Job-level status data derived from the Azure DevOps build timeline. |
+| `downloaded_files` | Files downloaded while assembling the audit input set. |
+| `missing_tools` | Missing-tool reports captured from safe-output or MCP artifacts. |
+| `missing_data` | Missing-data reports captured from safe-output or MCP artifacts. |
+| `noops` | No-op reports emitted by runtime tools during the build. |
+| `mcp_failures` | MCP failure reports derived from gateway or tool execution artifacts. |
+| `firewall_analysis` | Firewall-domain analysis derived from AWF firewall logs. |
+| `policy_analysis` | Policy-rule analysis derived from AWF policy artifacts. |
+| `errors` | Non-fatal or fatal errors encountered while auditing or discovered in artifacts. |
+| `warnings` | Warning rows surfaced during audit processing. |
+| `tool_usage` | High-level tool-usage rollups derived from runtime telemetry. |
+| `mcp_tool_usage` | MCP-specific tool-usage rollups derived from MCP gateway logs. |
+| `created_items` | Created external items reported by successful safe-output execution. |
 
 ## Diagnostic Report Template
 

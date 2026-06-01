@@ -496,6 +496,8 @@ network:
 
 ## CLI Reference
 
+- `audit <build-id-or-url>` - Audit a single Azure DevOps build: download artifacts, analyze logs, render Markdown or JSON report. See [`docs/audit.md`](docs/audit.md).
+
 ```
 ado-aw [OPTIONS] <COMMAND>
 
@@ -513,6 +515,7 @@ Commands:
   list          List matched ADO definitions with their latest-run state
   status        Per-pipeline status block for matched ADO definitions
   run           Queue builds for matched ADO definitions (optionally poll to completion)
+  audit         Audit a single Azure DevOps build: download artifacts, analyze logs, render a report
 
 Options:
   -v, --verbose              Enable info-level logging

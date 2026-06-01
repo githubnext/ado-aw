@@ -96,18 +96,19 @@ const REQUIRED_STEP_DISPLAY_NAMES: &[&str] = &[
     "Evaluate threat analysis",
     "Execute safe outputs (Stage 3)",
     // Rust generators
-    "Install Lean 4 (elan)",                  // src/runtimes/lean/mod.rs
-    "Append Lean 4 prompt",                   // src/runtimes/lean/extension.rs
-    "Ensure .npmrc exists",                   // src/runtimes/node/mod.rs
-    "Ensure nuget.config exists",             // src/runtimes/dotnet/mod.rs
-    "Restore previous agent memory",          // src/tools/cache_memory/extension.rs
+    "Install Lean 4 (elan)",         // src/runtimes/lean/mod.rs
+    "Append Lean 4 prompt",          // src/runtimes/lean/extension.rs
+    "Ensure .npmrc exists",          // src/runtimes/node/mod.rs
+    "Ensure nuget.config exists",    // src/runtimes/dotnet/mod.rs
+    "Restore previous agent memory", // src/tools/cache_memory/extension.rs
     "Initialize empty agent memory (clearMemory=true)",
-    "Append Python prompt",                   // src/runtimes/python/extension.rs
-    "Generate GITHUB_PATH file",              // src/compile/common.rs (AWF path step)
-    "Evaluate pipeline filters",              // src/compile/extensions/ado_script.rs + src/compile/filter_ir.rs
-    "Evaluate PR filters",                    // src/compile/filter_ir.rs (GateContext::PullRequest)
-    "Verify MCP backends",                    // src/compile/common.rs (--debug-pipeline only)
-    "Verify pipeline integrity",              // src/compile/common.rs generate_integrity_check
+    "Append Python prompt",      // src/runtimes/python/extension.rs
+    "Generate GITHUB_PATH file", // src/compile/common.rs (AWF path step)
+    "Emit aw_info.json",         // src/compile/extensions/ado_aw_marker.rs
+    "Evaluate pipeline filters", // src/compile/extensions/ado_script.rs + src/compile/filter_ir.rs
+    "Evaluate PR filters",       // src/compile/filter_ir.rs (GateContext::PullRequest)
+    "Verify MCP backends",       // src/compile/common.rs (--debug-pipeline only)
+    "Verify pipeline integrity", // src/compile/common.rs generate_integrity_check
     "Resolve runtime imports (agent prompt)", // src/compile/extensions/ado_script.rs resolver_step()
     "Output copilot version",                 // src/engine.rs (copilot_install_from_nuget + copilot_install_from_github_release)
     "Add copilot to PATH",                    // src/engine.rs copilot_install_from_nuget (1ES path)
@@ -152,11 +153,14 @@ fn fresh_workspace() -> TempDir {
 /// compiler stdout. The `extra_flags` slice is appended after the file path,
 /// allowing callers to enable modes like `--debug-pipeline` that cannot be
 /// expressed in front matter.
-fn compile_fixture_with_flags(workspace: &Path, fixture: &str, extra_flags: &[&str]) -> (PathBuf, String) {
+fn compile_fixture_with_flags(
+    workspace: &Path,
+    fixture: &str,
+    extra_flags: &[&str],
+) -> (PathBuf, String) {
     let src = fixtures_dir().join(fixture);
     let dest = workspace.join(fixture);
-    std::fs::copy(&src, &dest)
-        .unwrap_or_else(|e| panic!("copy fixture {fixture}: {e}"));
+    std::fs::copy(&src, &dest).unwrap_or_else(|e| panic!("copy fixture {fixture}: {e}"));
 
     let mut args = vec!["compile", dest.to_str().unwrap()];
     args.extend_from_slice(extra_flags);
@@ -186,9 +190,7 @@ fn compile_fixture_with_flags(workspace: &Path, fixture: &str, extra_flags: &[&s
     } else if stdout.contains("Generated stage template:") {
         "stage"
     } else {
-        panic!(
-            "could not determine compile target for {fixture} from stdout:\n{stdout}"
-        )
+        panic!("could not determine compile target for {fixture} from stdout:\n{stdout}")
     };
 
     let lock = dest.with_extension("lock.yml");
@@ -201,7 +203,6 @@ fn compile_fixture_with_flags(workspace: &Path, fixture: &str, extra_flags: &[&s
 fn compile_fixture(workspace: &Path, fixture: &str) -> (PathBuf, String) {
     compile_fixture_with_flags(workspace, fixture, &[])
 }
-
 
 struct BashBody {
     display_name: String,
@@ -335,8 +336,7 @@ fn compiled_bash_bodies_pass_shellcheck() {
     let workspace = fresh_workspace();
     let mut report: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut all_display_names: Vec<String> = Vec::new();
-    let mut targets_seen: std::collections::BTreeSet<String> =
-        std::collections::BTreeSet::new();
+    let mut targets_seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
     for fixture in FIXTURES {
         let (lock, target) = compile_fixture(workspace.path(), fixture);

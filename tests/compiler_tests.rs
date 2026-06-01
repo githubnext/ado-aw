@@ -3359,6 +3359,50 @@ fn assert_marker_step_present(
     );
 }
 
+fn assert_aw_info_step_present(
+    compiled: &str,
+    expected_source_suffix: &str,
+    expected_target: &str,
+    expected_agent_name: &str,
+    fixture_name: &str,
+) {
+    assert!(
+        compiled.contains("displayName: \"Emit aw_info.json\""),
+        "{fixture_name}: compiled YAML missing Emit aw_info.json step"
+    );
+    assert!(
+        compiled.contains("condition: always()"),
+        "{fixture_name}: compiled YAML missing always() condition on aw_info step"
+    );
+    assert!(
+        compiled.contains("cat >\"$(Agent.TempDirectory)/staging/aw_info.json\" <<'AW_INFO_EOF'"),
+        "{fixture_name}: compiled YAML missing quoted heredoc aw_info write step"
+    );
+    // Softer suffix check on the source path: fixtures compile under
+    // a temp-dir prefix, so we can only assert the path ends with the
+    // expected suffix, not an exact match. Mirrors `assert_marker_step_present`.
+    assert!(
+        compiled.contains("\"source\":\"") && compiled.contains(expected_source_suffix),
+        "{fixture_name}: compiled YAML aw_info source does not include suffix {expected_source_suffix}"
+    );
+    for expected_fragment in [
+        "\"schema\":\"ado-aw/aw_info/1\"".to_string(),
+        format!("\"target\":\"{expected_target}\""),
+        "\"engine\":\"copilot\"".to_string(),
+        "\"model\":\"claude-opus-4.7\"".to_string(),
+        format!("\"agent_name\":\"{expected_agent_name}\""),
+        "\"build_id\":\"$(Build.BuildId)\"".to_string(),
+        "\"source_version\":\"$(Build.SourceVersion)\"".to_string(),
+        "\"source_branch\":\"$(Build.SourceBranch)\"".to_string(),
+        "\"build_definition_id\":\"$(System.DefinitionId)\"".to_string(),
+    ] {
+        assert!(
+            compiled.contains(&expected_fragment),
+            "{fixture_name}: compiled YAML missing aw_info fragment {expected_fragment}"
+        );
+    }
+}
+
 fn compile_fixture_with_inlined_imports(fixture_name: &str) -> String {
     compile_fixture_tree_with_flags(fixture_name, &[], &[], |contents| {
         // If the fixture already declares `inlined-imports:` (either
@@ -3455,25 +3499,58 @@ fn assert_runtime_imports_author_marker_output(fixture_name: &str) {
 #[test]
 fn test_marker_step_present_in_standalone_target() {
     let compiled = compile_fixture("minimal-agent.md");
-    assert_marker_step_present(&compiled, "minimal-agent.md", "standalone", "minimal-agent.md");
+    assert_marker_step_present(
+        &compiled,
+        "minimal-agent.md",
+        "standalone",
+        "minimal-agent.md",
+    );
+    assert_aw_info_step_present(
+        &compiled,
+        "minimal-agent.md",
+        "standalone",
+        "Minimal Test Agent",
+        "minimal-agent.md",
+    );
 }
 
 #[test]
 fn test_marker_step_present_in_1es_target() {
     let compiled = compile_fixture("1es-test-agent.md");
     assert_marker_step_present(&compiled, "1es-test-agent.md", "1es", "1es-test-agent.md");
+    assert_aw_info_step_present(
+        &compiled,
+        "1es-test-agent.md",
+        "1es",
+        "1ES Test Agent",
+        "1es-test-agent.md",
+    );
 }
 
 #[test]
 fn test_marker_step_present_in_job_target() {
     let compiled = compile_fixture("job-agent.md");
     assert_marker_step_present(&compiled, "job-agent.md", "job", "job-agent.md");
+    assert_aw_info_step_present(
+        &compiled,
+        "job-agent.md",
+        "job",
+        "Job Test Agent",
+        "job-agent.md",
+    );
 }
 
 #[test]
 fn test_marker_step_present_in_stage_target() {
     let compiled = compile_fixture("stage-agent.md");
     assert_marker_step_present(&compiled, "stage-agent.md", "stage", "stage-agent.md");
+    assert_aw_info_step_present(
+        &compiled,
+        "stage-agent.md",
+        "stage",
+        "Stage Test Agent",
+        "stage-agent.md",
+    );
 }
 
 /// Regression: the always-on `ado-aw-marker` extension used to inject
