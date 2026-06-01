@@ -57,8 +57,8 @@ runtimes:                      # optional runtime configuration (language enviro
   # dotnet:                    # Alternative object format (pin version, configure internal feed via nuget.config)
   #   version: "8.0.x"          # use "global.json" to pin from the repo's global.json
   #   feed-url: "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/nuget/v3/index.json"
-env:                          # workflow-level environment variables
-  CUSTOM_VAR: "value"
+# env:                         # workflow-level environment variables (reserved, not yet implemented)
+#   CUSTOM_VAR: "value"
 # inlined-imports: false        # When true, resolve {{#runtime-import ...}} markers at compile time
 #                               # (default: false — markers are resolved at pipeline runtime, so
 #                               # prompt-body edits do not require recompilation).
