@@ -86,7 +86,12 @@ pub async fn analyze_safe_outputs(
     let proposed_count = proposals.len() as u64;
     let executed_count = items
         .iter()
-        .filter(|item| item.status == SafeOutputStatus::Executed)
+        .filter(|item| {
+            matches!(
+                item.status,
+                SafeOutputStatus::Executed | SafeOutputStatus::Warning
+            )
+        })
         .count() as u64;
     let rejected_by_execution_count = items
         .iter()
@@ -372,6 +377,7 @@ fn build_gate_rejected_item(
 fn map_execution_status(status: &str) -> SafeOutputStatus {
     match status.trim().to_ascii_lowercase().as_str() {
         "succeeded" => SafeOutputStatus::Executed,
+        "warning" => SafeOutputStatus::Warning,
         "failed" => SafeOutputStatus::RejectedByExecution,
         "skipped" => SafeOutputStatus::Skipped,
         "budget_exhausted" => SafeOutputStatus::BudgetExhausted,
@@ -381,7 +387,7 @@ fn map_execution_status(status: &str) -> SafeOutputStatus {
 
 fn rejection_reason_for_status(status: SafeOutputStatus, error: Option<String>) -> Option<String> {
     match status {
-        SafeOutputStatus::Executed => None,
+        SafeOutputStatus::Executed | SafeOutputStatus::Warning => None,
         SafeOutputStatus::RejectedByExecution
         | SafeOutputStatus::Skipped
         | SafeOutputStatus::BudgetExhausted => error,
@@ -424,7 +430,9 @@ fn build_rollup(
                 ),
                 SafeOutputStatus::BudgetExhausted => String::from("budget_exhausted"),
                 SafeOutputStatus::Skipped => String::from("skipped"),
-                SafeOutputStatus::Executed | SafeOutputStatus::NotProcessedDueToAggregateGate => {
+                SafeOutputStatus::Executed
+                | SafeOutputStatus::Warning
+                | SafeOutputStatus::NotProcessedDueToAggregateGate => {
                     continue;
                 }
             };
@@ -845,6 +853,63 @@ mod tests {
         let rollup = analysis.rollup.expect("rollup");
         assert_eq!(rollup.by_reason.get("permission denied"), Some(&1));
         assert_eq!(rollup.by_reason.get("skipped"), Some(&1));
+    }
+
+    #[tokio::test]
+    async fn warning_status_counts_as_executed_not_rejected() {
+        // A `noop` proposal that succeeds with a warning (e.g. missing ADO
+        // credentials) is written to the executed manifest with
+        // status: "warning". It should be counted toward executed_count and
+        // must not show up in the rejection rollup.
+        let temp_dir = TempDir::new().expect("create temp dir");
+        write_ndjson(
+            &temp_dir
+                .path()
+                .join("agent_outputs_77")
+                .join("staging")
+                .join(SAFE_OUTPUT_FILENAME),
+            &[json!({"name": "noop", "context": "noop-warn"})],
+        );
+        write_ndjson(
+            &temp_dir
+                .path()
+                .join("safe_outputs")
+                .join(EXECUTED_NDJSON_FILENAME),
+            &[json!({
+                "name": "noop",
+                "status": "warning",
+                "context": "noop-warn",
+                "result": {"status": "ok"}
+            })],
+        );
+
+        let analysis = analyze_safe_outputs(temp_dir.path())
+            .await
+            .expect("analyze warning execution outcome");
+
+        let summary = analysis.summary.expect("summary");
+        assert_eq!(summary.proposed_count, 1);
+        assert_eq!(
+            summary.executed_count, 1,
+            "warning status should count toward executed_count"
+        );
+        assert_eq!(
+            summary.rejected_by_execution_count, 0,
+            "warning status must not be counted as a rejection"
+        );
+
+        let execution = analysis.execution.expect("execution");
+        assert_eq!(execution.items.len(), 1);
+        assert_eq!(execution.items[0].status, SafeOutputStatus::Warning);
+        assert!(
+            execution.items[0].rejection_reason.is_none(),
+            "warning items should have no rejection_reason"
+        );
+
+        assert!(
+            analysis.rollup.is_none(),
+            "no rejection rollup should be emitted for a warning-only run"
+        );
     }
 
     #[tokio::test]

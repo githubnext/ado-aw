@@ -704,6 +704,11 @@ pub enum SafeOutputStatus {
     /// Proposal was executed successfully.
     #[default]
     Executed,
+    /// Proposal executed successfully but emitted a warning — e.g. `noop` /
+    /// `missing-tool` ran but had nothing to persist (often missing ADO
+    /// credentials). Counts toward `executed_count`, *not* the rejection
+    /// rollup.
+    Warning,
     /// Proposal was rejected while executing.
     RejectedByExecution,
     /// Proposal was not processed because aggregate threat detection gated the batch.

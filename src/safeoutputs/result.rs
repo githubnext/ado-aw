@@ -268,6 +268,13 @@ pub struct ExecutionResult {
     /// Invariant: warning == true implies success == true.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     warning: bool,
+    /// Whether this result represents a budget-exhausted skip.
+    /// Invariant: budget_exhausted == true implies success == false.
+    /// Set this via [`ExecutionResult::budget_exhausted`] rather than direct
+    /// field access so the audit pipeline can key off the structural flag
+    /// instead of the human-readable `message`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    budget_exhausted: bool,
     /// Human-readable message describing the outcome
     pub message: String,
     /// Optional additional data (e.g., work item ID)
@@ -280,11 +287,22 @@ impl ExecutionResult {
     pub fn is_warning(&self) -> bool {
         self.warning
     }
+
+    /// Whether this result represents a budget-exhausted skip.
+    ///
+    /// The audit pipeline uses this structural flag (rather than parsing the
+    /// `message` string) to mark NDJSON manifest records with
+    /// `status: "budget_exhausted"`.
+    pub fn is_budget_exhausted(&self) -> bool {
+        self.budget_exhausted
+    }
+
     /// Create a successful execution result
     pub fn success(message: impl Into<String>) -> Self {
         Self {
             success: true,
             warning: false,
+            budget_exhausted: false,
             message: message.into(),
             data: None,
         }
@@ -295,6 +313,7 @@ impl ExecutionResult {
         Self {
             success: true,
             warning: false,
+            budget_exhausted: false,
             message: message.into(),
             data: Some(data),
         }
@@ -307,6 +326,7 @@ impl ExecutionResult {
         Self {
             success: true,
             warning: true,
+            budget_exhausted: false,
             message: message.into(),
             data: None,
         }
@@ -317,6 +337,7 @@ impl ExecutionResult {
         Self {
             success: false,
             warning: false,
+            budget_exhausted: false,
             message: message.into(),
             data: None,
         }
@@ -327,8 +348,26 @@ impl ExecutionResult {
         Self {
             success: false,
             warning: false,
+            budget_exhausted: false,
             message: message.into(),
             data: Some(data),
+        }
+    }
+
+    /// Create a failed result tagged as a budget-exhausted skip.
+    ///
+    /// The audit pipeline keys off this structural flag (not the message
+    /// string) when emitting `status: "budget_exhausted"` in the executed
+    /// NDJSON manifest. Use this instead of [`ExecutionResult::failure`]
+    /// whenever a tool entry is skipped because its per-run max has been
+    /// reached.
+    pub fn budget_exhausted(message: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            warning: false,
+            budget_exhausted: true,
+            message: message.into(),
+            data: None,
         }
     }
 }
@@ -693,6 +732,64 @@ mod tests {
     fn test_execution_result_failure_is_not_warning() {
         let r = ExecutionResult::failure("something broke");
         assert!(!r.is_warning(), "failure result should not be a warning");
+    }
+
+    // ── ExecutionResult::budget_exhausted / is_budget_exhausted tests ─────
+
+    #[test]
+    fn test_execution_result_budget_exhausted_sets_flag_and_failure() {
+        let r = ExecutionResult::budget_exhausted(
+            "Skipped (work item #42): maximum create-work-item count (3) already reached.",
+        );
+        assert!(
+            !r.success,
+            "budget_exhausted result should have success=false"
+        );
+        assert!(!r.is_warning(), "budget_exhausted should not be a warning");
+        assert!(
+            r.is_budget_exhausted(),
+            "budget_exhausted result should report budget_exhausted=true"
+        );
+        assert!(r.data.is_none());
+    }
+
+    #[test]
+    fn test_execution_result_failure_is_not_budget_exhausted() {
+        let r = ExecutionResult::failure("permission denied");
+        assert!(
+            !r.is_budget_exhausted(),
+            "ordinary failure should not be flagged as budget-exhausted"
+        );
+    }
+
+    #[test]
+    fn test_execution_result_success_is_not_budget_exhausted() {
+        let r = ExecutionResult::success("done");
+        assert!(
+            !r.is_budget_exhausted(),
+            "success result should not be flagged as budget-exhausted"
+        );
+    }
+
+    #[test]
+    fn test_execution_result_budget_exhausted_serializes_flag() {
+        let r = ExecutionResult::budget_exhausted("Skipped: maximum noop count (1) already reached");
+        let json = serde_json::to_value(&r).expect("serialize");
+        assert_eq!(
+            json.get("budget_exhausted").and_then(|v| v.as_bool()),
+            Some(true),
+            "budget_exhausted=true should be serialized; got: {json}"
+        );
+    }
+
+    #[test]
+    fn test_execution_result_failure_omits_budget_exhausted() {
+        let r = ExecutionResult::failure("permission denied");
+        let json = serde_json::to_value(&r).expect("serialize");
+        assert!(
+            json.get("budget_exhausted").is_none(),
+            "budget_exhausted=false should be omitted from JSON; got: {json}"
+        );
     }
 
     // ── ExecutionContext::get_tool_config sanitization tests ──────────────

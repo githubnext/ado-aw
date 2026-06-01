@@ -309,18 +309,16 @@ struct ExecutionRecord {
     timestamp: String,
 }
 
-fn is_budget_exhausted(result: &ExecutionResult) -> bool {
-    !result.success
-        && result.message.starts_with("Skipped")
-        && result.message.contains("maximum ")
-        && result.message.contains("already reached")
-}
-
 fn execution_record_status(result: &ExecutionResult) -> &'static str {
-    if is_budget_exhausted(result) {
+    if result.is_budget_exhausted() {
         "budget_exhausted"
     } else if result.is_warning() {
-        "skipped"
+        // Tools such as `noop` and `missing-tool` succeed with a warning when
+        // they have nothing to persist (e.g. missing ADO credentials). They
+        // ran successfully — they just produced no externally-visible artifact
+        // — so report this as a distinct `warning` status rather than
+        // conflating it with the `skipped` rejection bucket.
+        "warning"
     } else if result.success {
         "succeeded"
     } else {
@@ -612,7 +610,7 @@ fn check_budget(
         wi_id,
         max
     );
-    let result = ExecutionResult::failure(format!(
+    let result = ExecutionResult::budget_exhausted(format!(
         "Skipped{}: maximum {} count ({}) already reached. \
          Increase 'max' in safe-outputs.{} to allow more.",
         wi_id, tool_name, max, tool_name
@@ -836,9 +834,9 @@ mod tests {
 
         let manifest = read_executed_manifest(&temp_dir).await;
         assert_eq!(manifest.len(), 2);
-        assert_eq!(manifest[0]["status"], "skipped");
+        assert_eq!(manifest[0]["status"], "warning");
         assert_eq!(manifest[0]["context"], "test1");
-        assert_eq!(manifest[1]["status"], "skipped");
+        assert_eq!(manifest[1]["status"], "warning");
     }
 
     #[tokio::test]
