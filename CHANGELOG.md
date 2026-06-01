@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.31.0](https://github.com/githubnext/ado-aw/compare/v0.30.2...v0.31.0) (2026-06-01)
+
+
+### Features
+
+* **cli:** check for newer GitHub release on every user-facing command ([#637](https://github.com/githubnext/ado-aw/issues/637)) ([7d197f1](https://github.com/githubnext/ado-aw/commit/7d197f1553ad037af39cb78cab679a437ceb9fd1))
+* **compile:** runtime prompt loading via {{#runtime-import}} markers ([#625](https://github.com/githubnext/ado-aw/issues/625)) ([6ad1816](https://github.com/githubnext/ado-aw/commit/6ad18164e47c76e54502e0347aa5f59ce93c8bf2))
+* **compile:** warn about out-of-date compiled definitions on recompile ([#638](https://github.com/githubnext/ado-aw/issues/638)) ([1b2b266](https://github.com/githubnext/ado-aw/commit/1b2b2664a3b988540362a290f3d84ecdab440939))
+* **secrets:** add --all-repos and --source via Pipeline Preview discovery ([#624](https://github.com/githubnext/ado-aw/issues/624)) ([6d4c824](https://github.com/githubnext/ado-aw/commit/6d4c8247242de8ed50cfa7903ec76d38744f5859))
+* **workflows:** add docs-writer agentic workflow ([#631](https://github.com/githubnext/ado-aw/issues/631)) ([50bd4e0](https://github.com/githubnext/ado-aw/commit/50bd4e0ffd72097b74141762f44dcf45eae003d3))
+* **workflows:** add test-reducer agentic workflow ([#626](https://github.com/githubnext/ado-aw/issues/626)) ([4733c76](https://github.com/githubnext/ado-aw/commit/4733c7604c705bcece84e3e9f6f4770aaa591e5c))
+* **workflows:** make test-gap-finder open PRs for coverage gaps ([#680](https://github.com/githubnext/ado-aw/issues/680)) ([4087579](https://github.com/githubnext/ado-aw/commit/4087579fa62002e773b957dd6c9fb3f906d90d61))
+
+
+### Bug Fixes
+
+* **compile:** normalize absolute input paths in generate_header_comment ([#645](https://github.com/githubnext/ado-aw/issues/645)) ([7a0d268](https://github.com/githubnext/ado-aw/commit/7a0d2687e9280c8816c5db0dcb2ee024b052418c))
+* **site:** create runtime-imports page and fix broken relative link in filter-ir.mdx ([#654](https://github.com/githubnext/ado-aw/issues/654)) ([ad1b44b](https://github.com/githubnext/ado-aw/commit/ad1b44be257a3630ad09b4d29b8f8b3d6ade048e))
+* **site:** restore correct --sl-color-black in light mode for search box contrast ([#646](https://github.com/githubnext/ado-aw/issues/646)) ([f63a1a6](https://github.com/githubnext/ado-aw/commit/f63a1a663eccfe731c8210ed5f9d9d38c17233f8))
+
 ## [0.30.2](https://github.com/githubnext/ado-aw/compare/v0.30.1...v0.30.2) (2026-05-18)
 
 
