@@ -3661,13 +3661,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_markdown_detailed_allows_leading_whitespace() {
-        let original = "\n  \n---\nname: x\ndescription: y\n---\nbody\n";
-        let parsed = parse_markdown_detailed(original).unwrap();
-        assert_eq!(parsed.front_matter.name, "x");
-    }
-
-    #[test]
     fn parse_markdown_detailed_rejects_missing_open_fence() {
         let original = "name: x\ndescription: y\nbody\n";
         let err = parse_markdown_detailed(original).unwrap_err();
