@@ -209,6 +209,24 @@ Options:
 - `--org`, `--project`, `--pat` -- same as `enable`
 - `--dry-run` -- preview the planned queue body without calling the ADO API
 
+### `audit <build-id-or-url>`
+
+Audit one completed Azure DevOps agentic pipeline build. Downloads the three audit artifact families (agent outputs, detection outputs, safe outputs), runs the built-in analyzers, and renders a structured console report.
+
+```bash
+ado-aw audit <build-id-or-url> [--json] [--output <dir>] [--artifacts <set,...>] [--no-cache]
+```
+
+Options:
+
+- `--json` -- emit the full `AuditData` as JSON to stdout instead of the console report
+- `-o, --output <dir>` -- local directory for downloaded artifacts and the cached report (default: `./logs`)
+- `--artifacts <set,...>` -- restrict download to `agent`, `detection`, and/or `safe-outputs`
+- `--no-cache` -- re-process even when a cached `run-summary.json` already exists
+- `--org`, `--project`, `--pat` -- same as `enable`
+
+See the [Audit reference](/ado-aw/reference/audit/) for accepted URL formats, report shape, cache behavior, and permission failure handling.
+
 ## Internal / pipeline runtime commands
 
 These commands are used by the compiled pipeline itself and are not typically called by users directly.
