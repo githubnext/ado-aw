@@ -6,24 +6,36 @@
 //! build artifacts published through this tool appear in the **Artifacts tab**
 //! of the build summary page in Azure DevOps.
 //!
-//! The upload is a two-step REST flow that always reuses the agent's own
-//! pre-existing build container (Azure DevOps creates one container per build
-//! at job initialization and exposes its ID via `BUILD_CONTAINERID`):
+//! The artifact is **always** published to the current pipeline run. ADO's
+//! File Container API rejects cross-build publishing — the container is
+//! ACL-keyed on the build's job-plan identity, and the associate POST is
+//! scoped to the current pipeline's project — so the agent cannot target
+//! another build.
+//!
+//! The upload is a two-step REST flow against the agent's own pre-existing
+//! build container (Azure DevOps creates one container per build at job
+//! initialization and exposes its ID via `BUILD_CONTAINERID`):
 //!
 //! 1. **Upload bytes** — `PUT /_apis/resources/Containers/{BUILD_CONTAINERID}?itemPath={folder}/{file}&scope={projectId}`
 //!    sends the file body into the agent's own build container.
-//! 2. **Associate artifact** — `POST /{project}/_apis/build/builds/{effective_build_id}/artifacts`
+//! 2. **Associate artifact** — `POST /{project}/_apis/build/builds/{BUILD_BUILDID}/artifacts`
 //!    registers a record with `resource.type = "Container"` and
-//!    `resource.data = "#/{BUILD_CONTAINERID}/{folder}"`. `effective_build_id`
-//!    is the current build by default, or an agent-supplied `build_id` for
-//!    cross-build publishing (the artifact record points at the agent's
-//!    container; ADO does not require the container to belong to the target
-//!    build — that is how `DownloadBuildArtifacts@1 buildType=specific` works
-//!    in the wild).
+//!    `resource.data = "#/{BUILD_CONTAINERID}/{folder}"` on the current
+//!    build.
+//!
+//! Both requests authenticate as the build's **own job-plan identity**
+//! (`$(System.AccessToken)`, exposed via `ADO_SYSTEM_ACCESS_TOKEN`). The
+//! File Container ACL is keyed on this identity at container-create time
+//! and rejects ARM-minted SPN bearers with `HTTP 404
+//! ContainerWriteAccessDeniedException`, regardless of project-level RBAC.
+//! For this reason `upload-pipeline-artifact` is registered in
+//! [`crate::safeoutputs::SYSTEM_TOKEN_SAFE_OUTPUTS`] (not
+//! `WRITE_REQUIRING_SAFE_OUTPUTS`) and never uses the
+//! `permissions.write:` service connection.
 //!
 //! By default the container `folder` is `{artifact_name}__{6 hex hash}` so
 //! that two calls with the same `artifact_name` (e.g. publishing
-//! `TriageSummary` to many failing builds in one run) never silently overwrite
+//! `TriageSummary` twice with different content) never silently overwrite
 //! each other's bytes. The hash lives only in internal addressing — the
 //! user-visible `artifact_name` your downstream consumers query is unaffected.
 //! Set `safe-outputs.upload-pipeline-artifact.require-unique-names: true` to
@@ -38,8 +50,7 @@
 //! * **Stage 3 (executor, outside the sandbox):** reads the staged file from
 //!   `ctx.working_directory.join(staged_file)`, applies operator-supplied
 //!   limits (`max-file-size`, `allowed-extensions`, `allowed-artifact-names`,
-//!   `allowed-build-ids`, `name-prefix`), resolves the target build ID, and
-//!   executes the two-step upload flow.
+//!   `name-prefix`), and executes the two-step upload flow.
 
 use ado_aw_derive::SanitizeConfig;
 use log::{debug, info, warn};
@@ -57,21 +68,6 @@ use anyhow::{Context, ensure};
 /// Parameters for publishing a workspace file as an ADO pipeline artifact.
 #[derive(Deserialize, JsonSchema)]
 pub struct UploadPipelineArtifactParams {
-    /// The build ID to publish the artifact to.  **Omit to target the current
-    /// pipeline run** — the executor resolves the build ID from the
-    /// `BUILD_BUILDID` environment variable automatically.  When provided,
-    /// must be a positive integer.
-    ///
-    /// **Cross-build behavior:** when set to a build other than the current
-    /// run, the artifact bytes still live in the agent's own build container;
-    /// only the artifact *record* (`name`, `data` pointer) is associated with
-    /// the target build. This means cross-published artifacts share the
-    /// agent build's retention policy — if the agent's build is purged, the
-    /// cross-referenced artifact on the target build stops being downloadable.
-    /// Cross-project publishing is not supported (the associate POST uses
-    /// the current pipeline's project).
-    pub build_id: Option<i64>,
-
     /// The artifact name shown in the Artifacts tab.  ADO requires a non-empty
     /// name made of alphanumerics, `-`, `_`, or `.`. Must be 1-100 characters
     /// and must not start with `.`.
@@ -85,10 +81,6 @@ pub struct UploadPipelineArtifactParams {
 
 impl Validate for UploadPipelineArtifactParams {
     fn validate(&self) -> anyhow::Result<()> {
-        if let Some(id) = self.build_id {
-            ensure!(id > 0, "build_id must be positive when specified");
-        }
-
         ensure!(
             self.artifact_name.len() <= 100,
             "artifact_name must be at most 100 characters"
@@ -129,7 +121,6 @@ impl Validate for UploadPipelineArtifactParams {
 /// Internal params struct for the `tool_result!` macro's `TryFrom` plumbing.
 #[derive(Deserialize, JsonSchema)]
 struct UploadPipelineArtifactResultFields {
-    build_id: Option<i64>,
     artifact_name: String,
     file_path: String,
     staged_file: String,
@@ -146,9 +137,6 @@ tool_result! {
     default_max = 3,
     /// Result of publishing a workspace file as an ADO pipeline artifact.
     pub struct UploadPipelineArtifactResult {
-        /// Build ID the artifact should be published to.  `None` means "current
-        /// build" — resolved at execution time from `BUILD_BUILDID`.
-        build_id: Option<i64>,
         /// Artifact name as proposed by the agent (pre-prefix).
         artifact_name: String,
         /// Original file path proposed by the agent.
@@ -171,7 +159,6 @@ impl SanitizeContent for UploadPipelineArtifactResult {
 impl UploadPipelineArtifactResult {
     /// Construct a result after the agent's file has been staged.
     pub fn new(
-        build_id: Option<i64>,
         artifact_name: String,
         file_path: String,
         staged_file: String,
@@ -180,7 +167,6 @@ impl UploadPipelineArtifactResult {
     ) -> Self {
         Self {
             name: <Self as crate::safeoutputs::ToolResult>::NAME.to_string(),
-            build_id,
             artifact_name,
             file_path,
             staged_file,
@@ -212,27 +198,21 @@ pub struct UploadPipelineArtifactConfig {
     #[serde(default, rename = "allowed-artifact-names")]
     pub allowed_artifact_names: Vec<String>,
 
-    /// Restrict which build IDs the agent may publish to. Empty means any
-    /// build ID accessible to the executor's token is allowed. This check
-    /// is skipped when `build_id` is omitted (targeting the current build).
-    #[serde(default, rename = "allowed-build-ids")]
-    pub allowed_build_ids: Vec<i64>,
-
     /// Prefix prepended to the agent-supplied artifact name before publishing.
     #[serde(default, rename = "name-prefix")]
     pub name_prefix: Option<String>,
 
     /// When `false` (default), the executor inserts a short hash suffix into
-    /// the internal container folder so multiple calls in one agent run with
-    /// the same `artifact_name` (e.g. publishing `TriageSummary` to many
-    /// failing builds at once) do not silently overwrite each other's bytes
-    /// in the agent's shared file container. The suffix lives only in
-    /// internal addressing — the user-visible `artifact_name` your downstream
-    /// consumers query is unaffected.
+    /// the internal container folder so two calls with the same
+    /// `artifact_name` and different content (e.g. publishing
+    /// `TriageSummary` after a code change) do not silently overwrite each
+    /// other's bytes in the build's file container. The suffix lives only
+    /// in internal addressing — the user-visible `artifact_name` your
+    /// downstream consumers query is unaffected.
     ///
     /// Set to `true` to use a clean folder name (`{artifact_name}` exactly)
-    /// and reject any in-run reuse of `(effective_build_id, artifact_name)`
-    /// with a clear error before any HTTP call.
+    /// and reject any in-run reuse of `artifact_name` with a clear error
+    /// before any HTTP call.
     #[serde(default, rename = "require-unique-names")]
     pub require_unique_names: bool,
 }
@@ -263,7 +243,6 @@ impl Default for UploadPipelineArtifactConfig {
             max_file_size: PIPELINE_ARTIFACT_DEFAULT_MAX_FILE_SIZE,
             allowed_extensions: Vec::new(),
             allowed_artifact_names: Vec::new(),
-            allowed_build_ids: Vec::new(),
             name_prefix: None,
             require_unique_names: false,
         }
@@ -273,50 +252,27 @@ impl Default for UploadPipelineArtifactConfig {
 #[async_trait::async_trait]
 impl Executor for UploadPipelineArtifactResult {
     fn dry_run_summary(&self) -> String {
-        match self.build_id {
-            Some(id) => format!(
-                "publish '{}' as pipeline artifact '{}' on build #{}",
-                self.file_path, self.artifact_name, id
-            ),
-            None => format!(
-                "publish '{}' as pipeline artifact '{}' on current build",
-                self.file_path, self.artifact_name
-            ),
-        }
+        format!(
+            "publish '{}' as pipeline artifact '{}' on the current build",
+            self.file_path, self.artifact_name
+        )
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
-        let effective_build_id: i64 = match self.build_id {
-            Some(id) => id,
-            None => {
-                let current = ctx.build_id.context(
-                    "build_id was not specified and BUILD_BUILDID is not set — \
-                     cannot determine which build to publish the artifact to",
-                )?;
-                i64::try_from(current).context("BUILD_BUILDID value overflows i64")?
-            }
+        let effective_build_id: i64 = {
+            let current = ctx.build_id.context(
+                "BUILD_BUILDID is not set — \
+                 cannot determine which build to publish the artifact to",
+            )?;
+            i64::try_from(current).context("BUILD_BUILDID value overflows i64")?
         };
 
         info!(
-            "Publishing '{}' as pipeline artifact '{}' on build #{}{}",
-            self.file_path,
-            self.artifact_name,
-            effective_build_id,
-            if self.build_id.is_none() { " (current build)" } else { "" }
+            "Publishing '{}' as pipeline artifact '{}' on build #{} (current build)",
+            self.file_path, self.artifact_name, effective_build_id,
         );
 
         let config: UploadPipelineArtifactConfig = ctx.get_tool_config("upload-pipeline-artifact");
-
-        // ── Build-ID allow-list ──────────────────────────────────────────
-        if self.build_id.is_some()
-            && !config.allowed_build_ids.is_empty()
-            && !config.allowed_build_ids.contains(&effective_build_id)
-        {
-            return Ok(ExecutionResult::failure(format!(
-                "Build ID {} is not in the allowed-build-ids list",
-                effective_build_id
-            )));
-        }
 
         // ── Name-prefix ─────────────────────────────────────────────────
         if let Some(prefix) = &config.name_prefix
@@ -411,12 +367,11 @@ impl Executor for UploadPipelineArtifactResult {
 
         if ctx.dry_run {
             return Ok(ExecutionResult::success(format!(
-                "[dry-run] would publish '{}' ({} bytes) as pipeline artifact '{}' on build #{}{}",
+                "[dry-run] would publish '{}' ({} bytes) as pipeline artifact '{}' on build #{} (current build)",
                 self.file_path,
                 file_size,
                 final_name,
                 effective_build_id,
-                if self.build_id.is_none() { " (current build)" } else { "" }
             )));
         }
 
@@ -444,15 +399,31 @@ impl Executor for UploadPipelineArtifactResult {
             .ado_project_id
             .as_ref()
             .context("SYSTEM_TEAMPROJECTID not set — required for pipeline artifact upload")?;
+        // `upload-pipeline-artifact` MUST authenticate as the build's own
+        // job-plan identity ($(System.AccessToken), exposed via
+        // ADO_SYSTEM_ACCESS_TOKEN). The File Container ACL is keyed on this
+        // identity at container-create time and rejects ARM-minted SPN
+        // bearers (such as the SC_WRITE_TOKEN routed through
+        // SYSTEM_ACCESSTOKEN for other write-requiring safe outputs) with
+        // `HTTP 404 ContainerWriteAccessDeniedException`.
+        //
+        // Prefer `system_access_token` (always present in correctly-compiled
+        // pipelines that include upload-pipeline-artifact); fall back to
+        // `access_token` only so test fixtures and older compiled lock
+        // files keep working.
         let token = ctx
-            .access_token
-            .as_ref()
-            .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
+            .system_access_token
+            .as_deref()
+            .or(ctx.access_token.as_deref())
+            .context(
+                "No access token available (ADO_SYSTEM_ACCESS_TOKEN, \
+                 SYSTEM_ACCESSTOKEN, or AZURE_DEVOPS_EXT_PAT)",
+            )?;
 
-        // Resolve the agent's own build container ID (Azure DevOps pre-creates
+        // Resolve the build's own file container ID. Azure DevOps pre-creates
         // one container per build at job initialization and exposes it via
-        // BUILD_CONTAINERID). All artifacts in the build share this container,
-        // including those whose record we associate with a different build.
+        // BUILD_CONTAINERID; all artifacts in this build live in this
+        // container, differentiated by item path.
         let container_id = ctx.build_container_id.context(
             "BUILD_CONTAINERID not set or invalid — required to publish a \
              pipeline artifact; this tool must run inside an Azure DevOps \
@@ -460,10 +431,10 @@ impl Executor for UploadPipelineArtifactResult {
         )?;
 
         // ── Per-run dedupe (when require-unique-names is set) ────────────
-        // Reject reuse of (effective_build_id, final_name) before any HTTP
-        // call so two cross-build calls sharing a name don't silently
-        // overwrite each other's bytes in the shared container.
-        let dedupe_key = format!("{}/{}", effective_build_id, final_name);
+        // Reject reuse of `final_name` before any HTTP call so two calls
+        // sharing a name don't silently overwrite each other's bytes in
+        // the shared container.
+        let dedupe_key = final_name.clone();
         if config.require_unique_names {
             let seen = ctx
                 .uploaded_pipeline_artifact_keys
@@ -472,9 +443,8 @@ impl Executor for UploadPipelineArtifactResult {
             if seen.contains(&dedupe_key) {
                 return Ok(ExecutionResult::failure(format!(
                     "upload-pipeline-artifact: artifact_name '{}' was already used \
-                     on build #{} in this run; require-unique-names is configured \
-                     to reject reuse",
-                    final_name, effective_build_id
+                     in this run; require-unique-names is configured to reject reuse",
+                    final_name
                 )));
             }
             // Note: the key is inserted only after the HTTP calls succeed below,
@@ -483,12 +453,12 @@ impl Executor for UploadPipelineArtifactResult {
 
         // Internal container folder. The user-visible artifact name is
         // `final_name`; the folder name carries an optional discriminator so
-        // multiple calls in one run sharing the same name but uploading
-        // different content don't overwrite each other's bytes in the shared
-        // container. The discriminator is derived from the file content hash
-        // (already computed above) so distinct content always maps to a
-        // distinct folder — identical content maps to the same folder, which
-        // is safe (idempotent PUT). The discriminator is invisible in standard
+        // two calls sharing the same name but uploading different content
+        // don't overwrite each other's bytes in the shared container. The
+        // discriminator is derived from the file content hash (already
+        // computed above) so distinct content always maps to a distinct
+        // folder — identical content maps to the same folder, which is safe
+        // (idempotent PUT). The discriminator is invisible in standard
         // download paths (web UI zip wrapper, DownloadBuildArtifacts@1,
         // DownloadPipelineArtifact@2 — all strip the prefix) and is only seen
         // by callers that hit `GET /_apis/resources/Containers/{id}?itemPath=…`
@@ -639,9 +609,9 @@ impl Executor for UploadPipelineArtifactResult {
                 .unwrap_or_else(|_| "Unknown error".to_string());
             // Best-effort hint when the most common failure modes show up.
             let hint = match status.as_u16() {
-                401 | 403 => " — token may lack 'Build (Read & Execute)' scope on the target build's project",
-                404 => " — target build does not exist or is in a different project (cross-project publishing is not supported)",
-                409 => " — an artifact with this name already exists on the target build",
+                401 | 403 => " — token may lack 'Build (Read & Execute)' scope on this project",
+                404 => " — current build was not found in this project (the token may be unable to access build records)",
+                409 => " — an artifact with this name already exists on the current build",
                 _ => "",
             };
             Ok(ExecutionResult::failure(format!(
@@ -676,12 +646,10 @@ mod tests {
     }
 
     fn make_params(
-        build_id: Option<i64>,
         artifact_name: &str,
         file_path: &str,
     ) -> UploadPipelineArtifactParams {
         UploadPipelineArtifactParams {
-            build_id,
             artifact_name: artifact_name.to_string(),
             file_path: file_path.to_string(),
         }
@@ -691,43 +659,26 @@ mod tests {
 
     #[test]
     fn test_params_validate_accepts_valid() {
-        assert!(make_params(Some(1), "agent-report", "out/report.pdf")
+        assert!(make_params("agent-report", "out/report.pdf")
             .validate()
             .is_ok());
-        assert!(make_params(None, "agent-report", "out/report.pdf")
-            .validate()
-            .is_ok());
-    }
-
-    #[test]
-    fn test_validation_rejects_zero_build_id() {
-        assert!(make_params(Some(0), "report", "out/report.pdf")
-            .validate()
-            .is_err());
-    }
-
-    #[test]
-    fn test_validation_rejects_negative_build_id() {
-        assert!(make_params(Some(-1), "report", "out/report.pdf")
-            .validate()
-            .is_err());
     }
 
     #[test]
     fn test_validation_rejects_empty_artifact_name() {
-        assert!(make_params(None, "", "out/report.pdf").validate().is_err());
+        assert!(make_params("", "out/report.pdf").validate().is_err());
     }
 
     #[test]
     fn test_validation_rejects_artifact_name_with_spaces() {
-        assert!(make_params(None, "my report", "out/report.pdf")
+        assert!(make_params("my report", "out/report.pdf")
             .validate()
             .is_err());
     }
 
     #[test]
     fn test_validation_rejects_leading_dot_artifact_name() {
-        assert!(make_params(None, ".hidden", "out/report.pdf")
+        assert!(make_params(".hidden", "out/report.pdf")
             .validate()
             .is_err());
     }
@@ -735,47 +686,47 @@ mod tests {
     #[test]
     fn test_validation_rejects_long_artifact_name() {
         let long_name = "a".repeat(101);
-        assert!(make_params(None, &long_name, "out/report.pdf")
+        assert!(make_params(&long_name, "out/report.pdf")
             .validate()
             .is_err());
     }
 
     #[test]
     fn test_validation_rejects_empty_file_path() {
-        assert!(make_params(None, "report", "").validate().is_err());
+        assert!(make_params("report", "").validate().is_err());
     }
 
     #[test]
     fn test_validation_rejects_traversal_in_file_path() {
-        assert!(make_params(None, "report", "../etc/passwd")
+        assert!(make_params("report", "../etc/passwd")
             .validate()
             .is_err());
     }
 
     #[test]
     fn test_validation_rejects_null_bytes_in_file_path() {
-        assert!(make_params(None, "report", "out/report\0.pdf")
+        assert!(make_params("report", "out/report\0.pdf")
             .validate()
             .is_err());
     }
 
     #[test]
     fn test_validation_rejects_newline_in_file_path() {
-        assert!(make_params(None, "report", "out\n/report.pdf")
+        assert!(make_params("report", "out\n/report.pdf")
             .validate()
             .is_err());
     }
 
     #[test]
     fn test_validation_rejects_carriage_return_in_file_path() {
-        assert!(make_params(None, "report", "out\r/report.pdf")
+        assert!(make_params("report", "out\r/report.pdf")
             .validate()
             .is_err());
     }
 
     #[test]
     fn test_validation_rejects_colon_in_file_path() {
-        assert!(make_params(None, "report", "C:\\out\\report.pdf")
+        assert!(make_params("report", "C:\\out\\report.pdf")
             .validate()
             .is_err());
     }
@@ -784,7 +735,6 @@ mod tests {
     fn test_validation_rejects_pipeline_command_sequences_in_file_path() {
         assert!(
             make_params(
-                None,
                 "report",
                 "##vso[task.setvariable variable=EXPLOIT]value.txt"
             )
@@ -792,7 +742,7 @@ mod tests {
             .is_err()
         );
         assert!(
-            make_params(None, "report", "##[error]value.txt")
+            make_params("report", "##[error]value.txt")
                 .validate()
                 .is_err()
         );
@@ -801,7 +751,6 @@ mod tests {
     #[test]
     fn test_dry_run_summary() {
         let result = UploadPipelineArtifactResult::new(
-            None,
             "agent-report".to_string(),
             "out/report.pdf".to_string(),
             "staged-abc123.pdf".to_string(),
@@ -810,16 +759,6 @@ mod tests {
         );
         assert!(result.dry_run_summary().contains("agent-report"));
         assert!(result.dry_run_summary().contains("current build"));
-
-        let result_with_id = UploadPipelineArtifactResult::new(
-            Some(42),
-            "agent-report".to_string(),
-            "out/report.pdf".to_string(),
-            "staged-abc123.pdf".to_string(),
-            1024,
-            DUMMY_HASH.to_string(),
-        );
-        assert!(result_with_id.dry_run_summary().contains("build #42"));
     }
 
     #[test]
@@ -828,7 +767,6 @@ mod tests {
         assert_eq!(config.max_file_size, PIPELINE_ARTIFACT_DEFAULT_MAX_FILE_SIZE);
         assert!(config.allowed_extensions.is_empty());
         assert!(config.allowed_artifact_names.is_empty());
-        assert!(config.allowed_build_ids.is_empty());
         assert!(config.name_prefix.is_none());
     }
 
@@ -850,6 +788,19 @@ name-prefix: "ci-"
         assert_eq!(config.name_prefix.as_deref(), Some("ci-"));
     }
 
+    /// Unknown YAML keys (e.g. legacy `allowed-build-ids` or the removed
+    /// `build_id` field) should be silently ignored by serde — keeping
+    /// older lock files parseable without breaking compilation.
+    #[test]
+    fn test_config_ignores_removed_keys() {
+        let yaml = r#"
+max-file-size: 1024
+allowed-build-ids: [1, 2, 3]
+"#;
+        let config: UploadPipelineArtifactConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.max_file_size, 1024);
+    }
+
     #[tokio::test]
     async fn test_dry_run_succeeds() {
         let dir = tempfile::tempdir().unwrap();
@@ -859,7 +810,6 @@ name-prefix: "ci-"
         let hash = crate::hash::sha256_hex(content);
 
         let result = UploadPipelineArtifactResult::new(
-            None,
             "agent-report".to_string(),
             "out/report.pdf".to_string(),
             "staged-file.pdf".to_string(),
@@ -887,7 +837,6 @@ name-prefix: "ci-"
         std::fs::write(&staged, b"test content").unwrap();
 
         let result = UploadPipelineArtifactResult::new(
-            None,
             "report".to_string(),
             "out/report.pdf".to_string(),
             "staged-file.pdf".to_string(),
@@ -915,7 +864,6 @@ name-prefix: "ci-"
         std::fs::write(&staged, content).unwrap();
 
         let result = UploadPipelineArtifactResult::new(
-            None,
             "report".to_string(),
             "out/report.pdf".to_string(),
             "staged-file.pdf".to_string(),
@@ -941,36 +889,6 @@ name-prefix: "ci-"
     }
 
     #[tokio::test]
-    async fn test_rejects_disallowed_build_id() {
-        let dir = tempfile::tempdir().unwrap();
-        let staged = dir.path().join("staged-file.pdf");
-        std::fs::write(&staged, b"test").unwrap();
-
-        let result = UploadPipelineArtifactResult::new(
-            Some(999),
-            "report".to_string(),
-            "out/report.pdf".to_string(),
-            "staged-file.pdf".to_string(),
-            4,
-            DUMMY_HASH.to_string(),
-        );
-
-        let mut ctx = ExecutionContext {
-            working_directory: dir.path().to_path_buf(),
-            dry_run: false,
-            ..Default::default()
-        };
-        ctx.tool_configs.insert(
-            "upload-pipeline-artifact".to_string(),
-            serde_json::json!({"allowed-build-ids": [123, 456]}),
-        );
-
-        let exec_result = result.execute_impl(&ctx).await.unwrap();
-        assert!(!exec_result.success);
-        assert!(exec_result.message.contains("not in the allowed-build-ids"));
-    }
-
-    #[tokio::test]
     async fn test_rejects_disallowed_extension() {
         let dir = tempfile::tempdir().unwrap();
         let staged = dir.path().join("staged-file.exe");
@@ -978,7 +896,6 @@ name-prefix: "ci-"
         std::fs::write(&staged, content).unwrap();
 
         let result = UploadPipelineArtifactResult::new(
-            None,
             "report".to_string(),
             "out/report.exe".to_string(),
             "staged-file.exe".to_string(),
@@ -1013,7 +930,6 @@ name-prefix: "ci-"
         let hash = crate::hash::sha256_hex(content);
 
         let result = UploadPipelineArtifactResult::new(
-            None,
             "agent-report".to_string(),
             "out/report.pdf".to_string(),
             "staged-file.pdf".to_string(),
@@ -1039,6 +955,136 @@ name-prefix: "ci-"
         assert!(
             err.to_string().contains("BUILD_CONTAINERID"),
             "expected BUILD_CONTAINERID error, got: {}",
+            err
+        );
+    }
+
+    /// `system_access_token` (sourced from `ADO_SYSTEM_ACCESS_TOKEN` —
+    /// `$(System.AccessToken)`) takes precedence over `access_token`
+    /// (which may carry an ARM-minted SPN bearer for the other write-
+    /// requiring safe outputs). The File Container ACL rejects SPN
+    /// bearers, so this preference must hold even when both are set.
+    #[tokio::test]
+    async fn test_prefers_system_access_token_over_access_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = dir.path().join("staged-file.pdf");
+        let content = b"test content";
+        std::fs::write(&staged, content).unwrap();
+        let hash = crate::hash::sha256_hex(content);
+
+        let result = UploadPipelineArtifactResult::new(
+            "agent-report".to_string(),
+            "out/report.pdf".to_string(),
+            "staged-file.pdf".to_string(),
+            content.len() as u64,
+            hash,
+        );
+
+        // No build_container_id forces an early error so we can verify
+        // the token selection logic ran without firing an HTTP request.
+        let ctx = ExecutionContext {
+            working_directory: dir.path().to_path_buf(),
+            build_id: Some(123),
+            dry_run: false,
+            ado_org_url: Some("https://dev.azure.com/test".to_string()),
+            ado_project: Some("TestProject".to_string()),
+            ado_project_id: Some("proj-guid".to_string()),
+            system_access_token: Some("native-token".to_string()),
+            access_token: Some("spn-bearer".to_string()),
+            ..Default::default()
+        };
+
+        // Reaches the BUILD_CONTAINERID check, meaning a token was
+        // successfully selected. Asserting on the error path is enough
+        // — the runtime branch would otherwise need a live HTTP server.
+        let err = result.execute_impl(&ctx).await.unwrap_err();
+        assert!(
+            err.to_string().contains("BUILD_CONTAINERID"),
+            "expected BUILD_CONTAINERID error after token selection, got: {}",
+            err
+        );
+    }
+
+    /// When `system_access_token` is `None`, the executor must fall back to
+    /// `access_token` so older lock files / test fixtures keep working
+    /// while still producing a clear missing-token error if neither is set.
+    #[tokio::test]
+    async fn test_falls_back_to_access_token_when_system_token_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = dir.path().join("staged-file.pdf");
+        let content = b"test content";
+        std::fs::write(&staged, content).unwrap();
+        let hash = crate::hash::sha256_hex(content);
+
+        let result = UploadPipelineArtifactResult::new(
+            "agent-report".to_string(),
+            "out/report.pdf".to_string(),
+            "staged-file.pdf".to_string(),
+            content.len() as u64,
+            hash,
+        );
+
+        let ctx = ExecutionContext {
+            working_directory: dir.path().to_path_buf(),
+            build_id: Some(123),
+            dry_run: false,
+            ado_org_url: Some("https://dev.azure.com/test".to_string()),
+            ado_project: Some("TestProject".to_string()),
+            ado_project_id: Some("proj-guid".to_string()),
+            // system_access_token is None — fall back to access_token.
+            access_token: Some("fallback-token".to_string()),
+            ..Default::default()
+        };
+
+        let err = result.execute_impl(&ctx).await.unwrap_err();
+        assert!(
+            err.to_string().contains("BUILD_CONTAINERID"),
+            "expected BUILD_CONTAINERID error after fallback, got: {}",
+            err
+        );
+    }
+
+    /// When neither `system_access_token` nor `access_token` is set, the
+    /// executor must produce a clear missing-token error rather than
+    /// silently sending unauthenticated requests.
+    #[tokio::test]
+    async fn test_fails_when_no_token_available() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = dir.path().join("staged-file.pdf");
+        let content = b"test content";
+        std::fs::write(&staged, content).unwrap();
+        let hash = crate::hash::sha256_hex(content);
+
+        let result = UploadPipelineArtifactResult::new(
+            "agent-report".to_string(),
+            "out/report.pdf".to_string(),
+            "staged-file.pdf".to_string(),
+            content.len() as u64,
+            hash,
+        );
+
+        let ctx = ExecutionContext {
+            working_directory: dir.path().to_path_buf(),
+            build_id: Some(123),
+            dry_run: false,
+            ado_org_url: Some("https://dev.azure.com/test".to_string()),
+            ado_project: Some("TestProject".to_string()),
+            ado_project_id: Some("proj-guid".to_string()),
+            // No system_access_token, no access_token.
+            system_access_token: None,
+            access_token: None,
+            ..Default::default()
+        };
+
+        let err = result.execute_impl(&ctx).await.unwrap_err();
+        assert!(
+            err.to_string().contains("No access token available"),
+            "expected missing-token error, got: {}",
+            err
+        );
+        assert!(
+            err.to_string().contains("ADO_SYSTEM_ACCESS_TOKEN"),
+            "error should mention ADO_SYSTEM_ACCESS_TOKEN, got: {}",
             err
         );
     }
@@ -1075,8 +1121,8 @@ name-prefix: "ci-"
 
     /// When `require-unique-names` is set, the executor uses the clean folder
     /// name (no discriminator suffix) — and the per-run dedupe set on the
-    /// ExecutionContext rejects a second call with the same
-    /// (effective_build_id, final_name) before any HTTP call is made.
+    /// ExecutionContext rejects a second call with the same `final_name`
+    /// before any HTTP call is made.
     #[tokio::test]
     async fn test_require_unique_names_rejects_in_run_reuse() {
         let dir = tempfile::tempdir().unwrap();
@@ -1106,11 +1152,10 @@ name-prefix: "ci-"
         // a live HTTP server to run the upload.
         {
             let mut seen = ctx.uploaded_pipeline_artifact_keys.lock().unwrap();
-            seen.insert("100/TriageSummary".to_string());
+            seen.insert("TriageSummary".to_string());
         }
 
         let second = UploadPipelineArtifactResult::new(
-            Some(100),
             "TriageSummary".to_string(),
             "out/triage.md".to_string(),
             "staged-b.md".to_string(),

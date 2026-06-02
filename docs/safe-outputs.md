@@ -538,30 +538,43 @@ artifacts instead.
 ### upload-pipeline-artifact
 
 Publishes a workspace file as an Azure DevOps **pipeline artifact** that appears
-in the **Artifacts tab** of the build summary page. Uses the ADO build artifacts
-REST API in two steps:
+in the **Artifacts tab** of the build summary page of the **current pipeline
+run**. Uses the ADO build artifacts REST API in two steps:
 
-1. **Upload bytes** to the agent's own per-build file container (Azure DevOps
+1. **Upload bytes** to the build's own per-build file container (Azure DevOps
    creates one container per build and exposes its ID via `BUILD_CONTAINERID`).
-2. **Associate** the artifact record (`name = artifact_name`) with the target
-   build via `POST /{project}/_apis/build/builds/{effective_build_id}/artifacts`.
-
-**Omit `build_id` to target the current pipeline run** — the executor resolves
-the build ID from the `BUILD_BUILDID` environment variable automatically. When
-`build_id` is provided, the artifact record is published to that specific build
-("cross-build publishing"). The artifact bytes still live in the agent's own
-build container; only the record's pointer is associated with the target build.
-This means cross-published artifacts share the agent build's retention — if the
-agent's build is purged, the cross-referenced artifact stops being downloadable.
-Cross-project publishing is not supported (the associate POST uses the current
-pipeline's project).
+2. **Associate** the artifact record (`name = artifact_name`) with the current
+   build via `POST /{project}/_apis/build/builds/{BUILD_BUILDID}/artifacts`.
 
 The tool stages the file during Stage 1 (MCP) by copying it into the
 safe-outputs directory; Stage 3 reads the staged copy and executes the two-step
 REST flow.
 
+#### Authentication: always `$(System.AccessToken)`
+
+`upload-pipeline-artifact` is the only safe output that must authenticate as
+the build's **own job-plan identity** (the Project Build Service account) —
+exposed in the executor's env block as `ADO_SYSTEM_ACCESS_TOKEN` and sourced
+from the built-in `$(System.AccessToken)` pipeline macro. It does **not**
+honour `permissions.write:`, and configuring an ARM service connection for
+the rest of the pipeline does not affect this tool.
+
+The reason is structural: the ADO File Container API rejects any other
+identity with `HTTP 404 ContainerWriteAccessDeniedException`, regardless of
+project-level RBAC. The container's ACL is keyed on the build's identity at
+container-create time, and ARM-minted SPN bearers are never in that ACL.
+
+Consequence: **`upload-pipeline-artifact` does not require `permissions.write:`
+to be set**. Listing it in `safe-outputs:` is sufficient.
+
+#### Current-build only
+
+Cross-build publishing is **not supported**. The associate POST is scoped to
+the current pipeline's project, and the File Container ACL described above
+prevents writing to any other build's container. The agent has no way to
+target a different build.
+
 **Agent parameters:**
-- `build_id` *(optional)* - Target build ID. Omit to publish to the current pipeline run. Must be positive when specified.
 - `artifact_name` - Artifact name shown in the Artifacts tab (1–100 chars, alphanumeric / `-` / `_` / `.`, no leading `.`)
 - `file_path` - Relative path to the file in the workspace (no directory traversal)
 
@@ -572,7 +585,6 @@ safe-outputs:
     max-file-size: 52428800              # Maximum file size in bytes (default: 50 MB)
     allowed-extensions: []               # Optional — restrict file types (e.g., [".png", ".pdf", ".log"])
     allowed-artifact-names: []           # Optional — restrict names (suffix `*` = prefix match)
-    allowed-build-ids: []                # Optional — restrict target builds (skipped when targeting current build)
     name-prefix: ""                      # Optional — prepended to the agent-supplied artifact name
     require-unique-names: false          # Optional — see "Reusing artifact names" below
     max: 3                               # Maximum per run (default: 3)
@@ -580,31 +592,31 @@ safe-outputs:
 
 **Reusing artifact names within one agent run:**
 By default, the same `artifact_name` may be reused across multiple
-`upload-pipeline-artifact` calls in one run (e.g. publishing a `TriageSummary`
-to many failing builds at once). The executor inserts a short hash suffix
-(`{artifact_name}__{6 hex}`) into the **internal container folder name** so
-the calls don't silently overwrite each other's bytes in the agent's shared
-build container. The hash lives only in internal addressing — it does not
-appear in the `record.name` your downstream consumers query for, in the web UI
-"Download as zip" filename, or in the contents of files extracted by the
-`DownloadBuildArtifacts@1` / `DownloadPipelineArtifact@2` tasks (all of which
-strip the container folder prefix).
+`upload-pipeline-artifact` calls in one run. The executor inserts a short hash
+suffix (`{artifact_name}__{6 hex}`) into the **internal container folder
+name** — derived from the file content hash — so two calls with the same
+name but different content don't silently overwrite each other's bytes in
+the build's file container. Identical content maps to the same folder (a
+safe, idempotent PUT). The hash lives only in internal addressing — it does
+not appear in the `record.name` your downstream consumers query for, in the
+web UI "Download as zip" filename, or in the contents of files extracted by
+the `DownloadBuildArtifacts@1` / `DownloadPipelineArtifact@2` tasks (all of
+which strip the container folder prefix).
 
 Set `require-unique-names: true` to use a clean container folder
-(`{artifact_name}` only, no suffix) and reject in-run reuse of
-`(effective_build_id, artifact_name)` with a clear early error before any HTTP
-call. Use this when you guarantee one artifact per name per run and want the
-shortest possible internal addressing.
+(`{artifact_name}` only, no suffix) and reject any in-run reuse of
+`artifact_name` with a clear early error before any HTTP call. Use this when
+you guarantee one artifact per name per run and want the shortest possible
+internal addressing.
 
-Two records with the same `name` on the **same** target build still collide at
-the record level (ADO returns 409 from the associate call) regardless of this
-setting; use distinct `artifact_name` values when targeting one build with
-multiple uploads.
+Two records with the same `name` on the current build still collide at the
+record level (ADO returns 409 from the associate call) regardless of this
+setting; use distinct `artifact_name` values for multiple uploads in one run.
 
 **Notes:**
 - Single-file only; directory uploads are not supported.
-- When `build_id` is omitted and `allowed-build-ids` is configured, the allow-list check is skipped — the current build is implicitly trusted.
-- Requires `BUILD_CONTAINERID`, `BUILD_BUILDID`, and `SYSTEM_TEAMPROJECTID` (all set automatically inside an Azure DevOps pipeline job) and `vso.build_execute` scope on the executor's token (the existing write service connection provides this).
+- Requires `BUILD_CONTAINERID`, `BUILD_BUILDID`, `SYSTEM_TEAMPROJECTID`, and `$(System.AccessToken)` (all set automatically inside an Azure DevOps pipeline job).
+- Does **not** use `permissions.write:` — always uses the build's native token.
 
 ### cache-memory (moved to `tools:`)
 Memory is now configured as a first-class tool under `tools: cache-memory:` instead of `safe-outputs: memory:`. See the [Cache Memory section](./tools.md#cache-memory-cache-memory) in `docs/tools.md` for details.

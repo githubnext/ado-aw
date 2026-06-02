@@ -1206,17 +1206,16 @@ may apply per the workflow's safe-outputs config."
         description = "Publish a workspace file as an Azure DevOps pipeline artifact that appears \
 in the Artifacts tab of the build summary page — visible to all users viewing the build. Use \
 this tool when you want users to be able to find and download the file from the ADO UI. \
-Omit `build_id` to target the current pipeline run. When `build_id` is provided, the artifact \
-is published to that specific build. File size, extension, artifact-name and build-id \
-restrictions may apply per the workflow's safe-outputs config."
+The artifact is always published to the current pipeline run. File size, extension and \
+artifact-name restrictions may apply per the workflow's safe-outputs config."
     )]
     async fn upload_pipeline_artifact(
         &self,
         params: Parameters<UploadPipelineArtifactParams>,
     ) -> Result<CallToolResult, McpError> {
         info!(
-            "Tool called: upload-pipeline-artifact - artifact '{}' file '{}' build {:?}",
-            params.0.artifact_name, params.0.file_path, params.0.build_id
+            "Tool called: upload-pipeline-artifact - artifact '{}' file '{}'",
+            params.0.artifact_name, params.0.file_path
         );
 
         crate::safeoutputs::Validate::validate(&params.0).map_err(anyhow_to_mcp_error)?;
@@ -1310,7 +1309,6 @@ restrictions may apply per the workflow's safe-outputs config."
         })?;
 
         let result = UploadPipelineArtifactResult::new(
-            params.0.build_id,
             params.0.artifact_name.clone(),
             params.0.file_path.clone(),
             staged_filename.clone(),
@@ -1320,13 +1318,9 @@ restrictions may apply per the workflow's safe-outputs config."
         self.write_safe_output_file(&result).await
             .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
 
-        let build_desc = match params.0.build_id {
-            Some(id) => format!("build #{}", id),
-            None => "the current build".to_string(),
-        };
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Pipeline artifact '{}' queued from file '{}' ({} bytes) for {}. The artifact will appear in the Artifacts tab after safe output processing.",
-            result.artifact_name, result.file_path, file_size, build_desc
+            "Pipeline artifact '{}' queued from file '{}' ({} bytes) for the current build. The artifact will appear in the Artifacts tab after safe output processing.",
+            result.artifact_name, result.file_path, file_size
         ))]))
     }
 

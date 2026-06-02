@@ -543,12 +543,13 @@ If `permissions.write` is not configured, this marker is replaced with an empty 
 
 ## {{ executor_ado_env }}
 
-Generates the complete `env:` block (including the `env:` key) for the Stage 3 executor step. The block contains zero, one, or two lines depending on which features are configured:
+Generates the complete `env:` block (including the `env:` key) for the Stage 3 executor step. The block contains zero, one, two, or three lines depending on which features are configured:
 
-* `SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)` — emitted when `permissions.write` is configured. Provides the write-capable ADO token to the executor.
+* `SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)` — emitted when `permissions.write` is configured. Provides the write-capable ARM-minted ADO token to the executor; consumed by the write-requiring safe outputs in `WRITE_REQUIRING_SAFE_OUTPUTS`.
+* `ADO_SYSTEM_ACCESS_TOKEN: $(System.AccessToken)` — emitted when any safe output in `SYSTEM_TOKEN_SAFE_OUTPUTS` (currently `upload-pipeline-artifact`) is configured. Provides the build's native job-plan token (the Project Build Service account) to the executor. Required by REST endpoints — most notably the File Container API — whose ACLs are keyed on the build's own identity at job-initialization time and reject ARM-minted SPN bearers regardless of project-level RBAC.
 * `ADO_AW_DEBUG_GITHUB_TOKEN: $(ADO_AW_DEBUG_GITHUB_TOKEN)` — emitted when `ado-aw-debug.create-issue` is configured. Provides the GitHub PAT used by the debug-only `create-issue` safe output. See [`docs/ado-aw-debug.md`](ado-aw-debug.md).
 
-If neither feature is configured, this marker is replaced with an empty string so that no `env:` block is emitted at all. Note: `System.AccessToken` is never used directly — all ADO tokens come from explicitly configured service connections, and the GitHub PAT is sourced from a dedicated pipeline variable separate from the read-only `GITHUB_TOKEN` the agent sees in Stage 1.
+If none of these features is configured, this marker is replaced with an empty string so that no `env:` block is emitted at all. The GitHub PAT is sourced from a dedicated pipeline variable separate from the read-only `GITHUB_TOKEN` the agent sees in Stage 1.
 
 ## {{ compiler_version }}
 

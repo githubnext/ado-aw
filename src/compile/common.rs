@@ -1482,6 +1482,23 @@ pub(crate) fn debug_create_issue_enabled(front_matter: &FrontMatter) -> bool {
         .is_some()
 }
 
+/// Returns `true` when the agent's front matter configures any safe output
+/// in [`crate::safeoutputs::SYSTEM_TOKEN_SAFE_OUTPUTS`] (e.g.
+/// `upload-pipeline-artifact`).
+///
+/// When true, the Stage 3 executor env block must expose
+/// `ADO_SYSTEM_ACCESS_TOKEN: $(System.AccessToken)` so those handlers can
+/// authenticate as the build's own job-plan identity — required by REST
+/// endpoints (like the File Container API) whose ACLs are keyed on the
+/// build's identity at job-initialization time and reject ARM-minted SPN
+/// bearers regardless of project-level RBAC.
+pub(crate) fn needs_system_access_token(front_matter: &FrontMatter) -> bool {
+    use crate::safeoutputs::SYSTEM_TOKEN_SAFE_OUTPUTS;
+    SYSTEM_TOKEN_SAFE_OUTPUTS
+        .iter()
+        .any(|name| front_matter.safe_outputs.contains_key(*name))
+}
+
 /// Validate the `ado-aw-debug:` section.
 ///
 /// When `create-issue:` is present:
@@ -1765,24 +1782,37 @@ pub fn generate_acquire_ado_token(service_connection: Option<&str>, variable_nam
 
 /// Generate the env block entries for the executor step (Stage 3 Execution).
 ///
-/// Composed of two independent lines, each conditional on its caller flag:
+/// Composed of three independent lines, each conditional on its caller flag:
 /// * `SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)` when `write_service_connection`
 ///   is `Some` — write-capable ADO token minted via ARM service connection.
+///   Consumed by all write-requiring safe outputs in
+///   [`crate::safeoutputs::WRITE_REQUIRING_SAFE_OUTPUTS`].
+/// * `ADO_SYSTEM_ACCESS_TOKEN: $(System.AccessToken)` when
+///   `needs_system_access_token` is `true` — the build's native job-plan
+///   identity (Project Build Service account). Consumed by safe outputs in
+///   [`crate::safeoutputs::SYSTEM_TOKEN_SAFE_OUTPUTS`] (e.g.
+///   `upload-pipeline-artifact`) whose target REST endpoints key their ACL
+///   on the build's own identity and reject SPN bearers regardless of
+///   project-level RBAC.
 /// * `ADO_AW_DEBUG_GITHUB_TOKEN: $(ADO_AW_DEBUG_GITHUB_TOKEN)` when
 ///   `debug_create_issue_enabled` is `true` — GitHub PAT used by the
 ///   `ado-aw-debug.create-issue` safe output. Sourced from a dedicated
 ///   pipeline variable so it stays separate from the read-only `GITHUB_TOKEN`
 ///   the agent (Stage 1) sees.
 ///
-/// Returns an empty string when both flags are off (no `env:` block emitted
-/// — keeps the executor step minimal in pipelines that need neither token).
+/// Returns an empty string when all flags are off (no `env:` block emitted
+/// — keeps the executor step minimal in pipelines that need no extra tokens).
 pub fn generate_executor_ado_env(
     write_service_connection: Option<&str>,
     debug_create_issue_enabled: bool,
+    needs_system_access_token: bool,
 ) -> String {
     let mut lines: Vec<String> = Vec::new();
     if write_service_connection.is_some() {
         lines.push("SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)".to_string());
+    }
+    if needs_system_access_token {
+        lines.push("ADO_SYSTEM_ACCESS_TOKEN: $(System.AccessToken)".to_string());
     }
     if debug_create_issue_enabled {
         lines.push("ADO_AW_DEBUG_GITHUB_TOKEN: $(ADO_AW_DEBUG_GITHUB_TOKEN)".to_string());
@@ -1900,8 +1930,12 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
 }
 
 /// Validate that write-requiring safe-outputs have a write service connection configured.
+///
+/// Tools in [`SYSTEM_TOKEN_SAFE_OUTPUTS`] (e.g. `upload-pipeline-artifact`)
+/// are excluded from this check — they always use the build's native
+/// `$(System.AccessToken)` rather than an ARM-minted SPN bearer.
 pub fn validate_write_permissions(front_matter: &FrontMatter) -> Result<()> {
-    use crate::safeoutputs::WRITE_REQUIRING_SAFE_OUTPUTS;
+    use crate::safeoutputs::{SYSTEM_TOKEN_SAFE_OUTPUTS, WRITE_REQUIRING_SAFE_OUTPUTS};
 
     let has_write_sc = front_matter
         .permissions
@@ -1914,6 +1948,7 @@ pub fn validate_write_permissions(front_matter: &FrontMatter) -> Result<()> {
 
     let missing: Vec<&str> = WRITE_REQUIRING_SAFE_OUTPUTS
         .iter()
+        .filter(|name| !SYSTEM_TOKEN_SAFE_OUTPUTS.contains(*name))
         .filter(|name| front_matter.safe_outputs.contains_key(**name))
         .copied()
         .collect();
@@ -3349,6 +3384,7 @@ pub async fn compile_shared(
             .as_ref()
             .and_then(|p| p.write.as_deref()),
         debug_create_issue_enabled(front_matter),
+        needs_system_access_token(front_matter),
     );
 
     // 10. Validations
@@ -6120,7 +6156,7 @@ safe-outputs:
 
     #[test]
     fn test_generate_executor_ado_env_with_connection() {
-        let result = generate_executor_ado_env(Some("my-sc"), false);
+        let result = generate_executor_ado_env(Some("my-sc"), false, false);
         assert!(
             result.contains("env:"),
             "Executor env block should include the 'env:' key"
@@ -6138,19 +6174,23 @@ safe-outputs:
             !result.contains("ADO_AW_DEBUG_GITHUB_TOKEN"),
             "Without debug flag, GitHub token must not be exposed to executor"
         );
+        assert!(
+            !result.contains("ADO_SYSTEM_ACCESS_TOKEN"),
+            "Without system-token flag, ADO_SYSTEM_ACCESS_TOKEN must not be exposed"
+        );
     }
 
     #[test]
     fn test_generate_executor_ado_env_none_empty() {
         assert!(
-            generate_executor_ado_env(None, false).is_empty(),
-            "Both flags off should produce empty string (no env block)"
+            generate_executor_ado_env(None, false, false).is_empty(),
+            "All flags off should produce empty string (no env block)"
         );
     }
 
     #[test]
     fn test_generate_executor_ado_env_with_create_issue_only() {
-        let result = generate_executor_ado_env(None, true);
+        let result = generate_executor_ado_env(None, true, false);
         assert!(result.starts_with("env:\n"), "Should emit env: block");
         assert!(
             result.contains("ADO_AW_DEBUG_GITHUB_TOKEN: $(ADO_AW_DEBUG_GITHUB_TOKEN)"),
@@ -6160,13 +6200,49 @@ safe-outputs:
             !result.contains("SYSTEM_ACCESSTOKEN"),
             "No write SC means no ADO access token"
         );
+        assert!(
+            !result.contains("ADO_SYSTEM_ACCESS_TOKEN"),
+            "Without system-token flag, ADO_SYSTEM_ACCESS_TOKEN must not be exposed"
+        );
     }
 
     #[test]
     fn test_generate_executor_ado_env_with_both_tokens() {
-        let result = generate_executor_ado_env(Some("write-sc"), true);
+        let result = generate_executor_ado_env(Some("write-sc"), true, false);
         assert!(result.contains("SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)"));
         assert!(result.contains("ADO_AW_DEBUG_GITHUB_TOKEN: $(ADO_AW_DEBUG_GITHUB_TOKEN)"));
+    }
+
+    #[test]
+    fn test_generate_executor_ado_env_with_system_token_only() {
+        // upload-pipeline-artifact configured, no write SC, no debug.
+        let result = generate_executor_ado_env(None, false, true);
+        assert!(result.starts_with("env:\n"), "Should emit env: block");
+        assert!(
+            result.contains("ADO_SYSTEM_ACCESS_TOKEN: $(System.AccessToken)"),
+            "System-token flag must expose ADO_SYSTEM_ACCESS_TOKEN backed by $(System.AccessToken)"
+        );
+        assert!(
+            !result.contains("SC_WRITE_TOKEN"),
+            "Without write SC, no SPN bearer should be exposed"
+        );
+        assert!(
+            !result.contains("ADO_AW_DEBUG_GITHUB_TOKEN"),
+            "Without debug flag, GitHub token must not be exposed"
+        );
+    }
+
+    #[test]
+    fn test_generate_executor_ado_env_system_token_alongside_write_sc() {
+        // Both an ARM write SC and upload-pipeline-artifact configured: the
+        // SC_WRITE_TOKEN powers the other write-requiring handlers while
+        // upload-pipeline-artifact reads $(System.AccessToken) via the
+        // separate ADO_SYSTEM_ACCESS_TOKEN env var. Critical: the two must
+        // coexist; ADO_SYSTEM_ACCESS_TOKEN must NOT be silenced just because
+        // SC_WRITE_TOKEN is also present.
+        let result = generate_executor_ado_env(Some("write-sc"), false, true);
+        assert!(result.contains("SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)"));
+        assert!(result.contains("ADO_SYSTEM_ACCESS_TOKEN: $(System.AccessToken)"));
     }
 
     // ─── Security validation tests ────────────────────────────────────────────

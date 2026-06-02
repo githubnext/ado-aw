@@ -128,12 +128,13 @@ permissions:
 ### Security Model
 
 - **`permissions.read`**: Mints a read-only ADO-scoped token given to the agent inside the AWF sandbox (Stage 1). The agent can query ADO APIs but cannot write.
-- **`permissions.write`**: Mints a write-capable ADO-scoped token used **only** by the executor in Stage 3 (`SafeOutputs` job). This token is never exposed to the agent.
-- **Both omitted**: No ADO tokens are passed anywhere. The agent has no ADO API access.
+- **`permissions.write`**: Mints a write-capable ADO-scoped token used **only** by the executor in Stage 3 (`SafeOutputs` job). This token is never exposed to the agent. Consumed by most write-requiring safe outputs (`create-pull-request`, `create-work-item`, etc.).
+- **`upload-pipeline-artifact` exception**: This safe output authenticates as the build's **own job-plan identity** (`$(System.AccessToken)`, via the `ADO_SYSTEM_ACCESS_TOKEN` env var) rather than the ARM SPN bearer from `permissions.write`. The ADO File Container API's ACL is keyed on the build's identity at container-create time and rejects SPN bearers (with `HTTP 404 ContainerWriteAccessDeniedException`) regardless of project-level RBAC. As a result, `upload-pipeline-artifact` does **not** require `permissions.write` to be set.
+- **Both omitted**: No ARM-minted ADO tokens are passed anywhere. The agent has no ADO API access; safe outputs that need write access (other than `upload-pipeline-artifact`) cannot be configured.
 
 ### Compile-Time Validation
 
-If write-requiring safe-outputs (`create-pull-request`, `create-work-item`) are configured but `permissions.write` is missing, compilation fails with a clear error message.
+If write-requiring safe-outputs (`create-pull-request`, `create-work-item`, etc.) are configured but `permissions.write` is missing, compilation fails with a clear error message. `upload-pipeline-artifact` is exempt from this check — see the section above.
 
 ### Examples
 

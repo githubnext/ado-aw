@@ -2926,6 +2926,7 @@ index 0000000..abcdefg
             ado_project: Some("TestProject".to_string()),
             ado_project_id: None,
             access_token: Some("fake-token".to_string()),
+            system_access_token: None,
             github_token: None,
             source_directory: dir.path().to_path_buf(),
             working_directory: dir.path().to_path_buf(),

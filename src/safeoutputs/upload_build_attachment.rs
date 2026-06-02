@@ -822,6 +822,7 @@ attachment-type: "agent-artifact"
             ado_project: None,
             ado_project_id: None,
             access_token: None,
+            system_access_token: None,
             github_token: None,
             source_directory: working_directory.clone(),
             working_directory,

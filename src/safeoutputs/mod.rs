@@ -26,11 +26,15 @@ pub const ALWAYS_ON_TOOLS: &[&str] = tool_names![
     ReportIncompleteResult,
 ];
 
-/// Safe-output tools that require write access to ADO.
+/// Safe-output tools that require write access to ADO via an ARM service
+/// connection (mapped to `SYSTEM_ACCESSTOKEN` at execution time).
+///
 /// Compile-time derived from tool types via `ToolResult::NAME`.
 ///
 /// Adding a new write-requiring tool: create the struct with `tool_result!{ write = true, ... }`,
-/// then add its type to this list.
+/// then add its type to this list — *unless* the tool's target REST endpoint
+/// keys its ACL on the build's own job-plan identity (Project Build Service
+/// account), in which case add it to [`SYSTEM_TOKEN_SAFE_OUTPUTS`] instead.
 pub const WRITE_REQUIRING_SAFE_OUTPUTS: &[&str] = tool_names![
     CreateWorkItemResult,
     CommentOnWorkItemResult,
@@ -46,12 +50,29 @@ pub const WRITE_REQUIRING_SAFE_OUTPUTS: &[&str] = tool_names![
     CreateBranchResult,
     UpdatePrResult,
     UploadBuildAttachmentResult,
-    UploadPipelineArtifactResult,
     UploadWorkitemAttachmentResult,
     SubmitPrReviewResult,
     ReplyToPrCommentResult,
     ResolvePrThreadResult,
 ];
+
+/// Safe-output tools that write to ADO but MUST use the build's native
+/// `$(System.AccessToken)` (the Project Build Service identity) rather than an
+/// ARM-minted SPN bearer.
+///
+/// These tools target REST endpoints whose ACLs are keyed on the build's
+/// job-plan identity at job-initialization time — most notably the File
+/// Container API used by `upload-pipeline-artifact`, which returns
+/// `HTTP 404 ContainerWriteAccessDeniedException` for any SPN bearer
+/// regardless of project-level RBAC.
+///
+/// Tools in this list:
+///   * DO have `REQUIRES_WRITE = true` (they write to ADO),
+///   * do NOT contribute to the `permissions.write` requirement check, and
+///   * always read `$(System.AccessToken)` (via the `ADO_SYSTEM_ACCESS_TOKEN`
+///     env var) even when an ARM write service connection is configured for
+///     the rest of the safe-outputs job.
+pub const SYSTEM_TOKEN_SAFE_OUTPUTS: &[&str] = tool_names![UploadPipelineArtifactResult];
 
 /// Non-MCP safe-output keys handled by the compiler/executor, not the MCP server.
 /// These must not appear in `--enabled-tools` or they cause real MCP tools to be
@@ -814,6 +835,17 @@ mod tests {
     }
 
     #[test]
+    fn test_system_token_subset_of_all_known() {
+        for name in SYSTEM_TOKEN_SAFE_OUTPUTS {
+            assert!(
+                ALL_KNOWN_SAFE_OUTPUTS.contains(name),
+                "SYSTEM_TOKEN_SAFE_OUTPUTS entry '{}' is missing from ALL_KNOWN_SAFE_OUTPUTS",
+                name
+            );
+        }
+    }
+
+    #[test]
     fn test_always_on_subset_of_all_known() {
         for name in ALWAYS_ON_TOOLS {
             assert!(
@@ -868,12 +900,17 @@ mod tests {
     }
 
     /// Verify ALL_KNOWN_SAFE_OUTPUTS has exactly the right count:
-    /// write tools + diagnostics + non-MCP keys.
+    /// write tools + system-token tools + diagnostics + non-MCP keys.
     #[test]
     fn test_all_known_completeness() {
-        // The three sub-lists must be disjoint — a tool in multiple lists would
+        // The four sub-lists must be disjoint — a tool in multiple lists would
         // be duplicated in ALL_KNOWN and the count would mismatch.
         for name in WRITE_REQUIRING_SAFE_OUTPUTS {
+            assert!(
+                !SYSTEM_TOKEN_SAFE_OUTPUTS.contains(name),
+                "Tool '{}' appears in both WRITE_REQUIRING and SYSTEM_TOKEN — lists must be disjoint",
+                name
+            );
             assert!(
                 !ALWAYS_ON_TOOLS.contains(name),
                 "Tool '{}' appears in both WRITE_REQUIRING and ALWAYS_ON — lists must be disjoint",
@@ -882,6 +919,18 @@ mod tests {
             assert!(
                 !NON_MCP_SAFE_OUTPUT_KEYS.contains(name),
                 "Tool '{}' appears in both WRITE_REQUIRING and NON_MCP — lists must be disjoint",
+                name
+            );
+        }
+        for name in SYSTEM_TOKEN_SAFE_OUTPUTS {
+            assert!(
+                !ALWAYS_ON_TOOLS.contains(name),
+                "Tool '{}' appears in both SYSTEM_TOKEN and ALWAYS_ON — lists must be disjoint",
+                name
+            );
+            assert!(
+                !NON_MCP_SAFE_OUTPUT_KEYS.contains(name),
+                "Tool '{}' appears in both SYSTEM_TOKEN and NON_MCP — lists must be disjoint",
                 name
             );
         }
@@ -894,12 +943,13 @@ mod tests {
         }
 
         let expected = WRITE_REQUIRING_SAFE_OUTPUTS.len()
+            + SYSTEM_TOKEN_SAFE_OUTPUTS.len()
             + ALWAYS_ON_TOOLS.len()
             + NON_MCP_SAFE_OUTPUT_KEYS.len();
         assert_eq!(
             ALL_KNOWN_SAFE_OUTPUTS.len(),
             expected,
-            "ALL_KNOWN_SAFE_OUTPUTS should be the union of write + diagnostic + non-MCP lists"
+            "ALL_KNOWN_SAFE_OUTPUTS should be the union of write + system-token + diagnostic + non-MCP lists"
         );
     }
 

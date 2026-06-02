@@ -47,6 +47,23 @@ pub struct ExecutionContext {
     pub ado_project_id: Option<String>,
     /// Personal access token or system access token
     pub access_token: Option<String>,
+    /// Build-native ADO access token sourced from
+    /// `$(System.AccessToken)` via the `ADO_SYSTEM_ACCESS_TOKEN` env var.
+    ///
+    /// Holds the build's own job-plan identity (Project Build Service
+    /// account) — distinct from `access_token`, which may be an ARM-minted
+    /// SPN bearer when a write service connection is configured.
+    ///
+    /// Required by safe outputs in
+    /// [`crate::safeoutputs::SYSTEM_TOKEN_SAFE_OUTPUTS`] (e.g.
+    /// `upload-pipeline-artifact`) whose target REST endpoints key their
+    /// ACL on the build's identity at job-initialization time and reject
+    /// any other bearer (including SPNs) regardless of project-level RBAC.
+    ///
+    /// Set to `None` when the compiler did not emit
+    /// `ADO_SYSTEM_ACCESS_TOKEN` (i.e. no SYSTEM_TOKEN_SAFE_OUTPUTS handler
+    /// is configured for this pipeline).
+    pub system_access_token: Option<String>,
     /// GitHub PAT used by debug-only safe outputs (e.g. `ado-aw-debug.create-issue`).
     /// Sourced from the `ADO_AW_DEBUG_GITHUB_TOKEN` pipeline variable. Intentionally
     /// **separate** from `access_token` (ADO) and from the read-only `GITHUB_TOKEN`
@@ -212,6 +229,7 @@ impl ExecutionContext {
             ado_project: env("SYSTEM_TEAMPROJECT"),
             ado_project_id: env("SYSTEM_TEAMPROJECTID"),
             access_token: env("SYSTEM_ACCESSTOKEN").or_else(|| env("AZURE_DEVOPS_EXT_PAT")),
+            system_access_token: env("ADO_SYSTEM_ACCESS_TOKEN"),
             github_token: env("ADO_AW_DEBUG_GITHUB_TOKEN"),
             working_directory: std::env::current_dir().unwrap_or_default(),
             source_directory,
