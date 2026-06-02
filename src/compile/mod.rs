@@ -175,22 +175,7 @@ async fn compile_pipeline_inner(
     // caller passes an existing directory, place the compiled file inside
     // it using the default filename derived from the input markdown's stem
     // (e.g. `foo.md` -> `<dir>/foo.lock.yml`).
-    let yaml_output_path = match output_path {
-        Some(p) => {
-            let p = PathBuf::from(p);
-            if p.is_dir() {
-                let default_filename = input_path
-                    .with_extension("lock.yml")
-                    .file_name()
-                    .map(PathBuf::from)
-                    .with_context(|| format!("Invalid input path: {}", input_path.display()))?;
-                p.join(default_filename)
-            } else {
-                p
-            }
-        }
-        None => input_path.with_extension("lock.yml"),
-    };
+    let yaml_output_path = resolve_output_path(input_path, output_path)?;
 
     // Select compiler based on target
     let compiler: Box<dyn Compiler> = match front_matter.target {
@@ -252,18 +237,7 @@ async fn compile_pipeline_inner(
             )
         })?;
 
-    {
-        let kind = match front_matter.target {
-            CompileTarget::Job | CompileTarget::Stage => "template",
-            _ => "pipeline",
-        };
-        println!(
-            "Generated {} {}: {}",
-            compiler.target_name(),
-            kind,
-            yaml_output_path.display()
-        );
-    }
+    print_compile_success(compiler.as_ref(), front_matter.target, &yaml_output_path);
 
     // Emit an upgrade note when an existing compiled file was produced by
     // a different compiler version. This makes version bumps visible in the
@@ -292,6 +266,44 @@ async fn compile_pipeline_inner(
     }
 
     Ok(rewrote)
+}
+
+/// Resolve the output YAML path from an optional caller-supplied path.
+///
+/// - If no path is given, uses `<input>.lock.yml` next to the source file.
+/// - If a directory is given, places `<stem>.lock.yml` inside it.
+/// - Otherwise uses the path as-is.
+fn resolve_output_path(input_path: &Path, output_path: Option<&str>) -> Result<PathBuf> {
+    match output_path {
+        Some(p) => {
+            let p = PathBuf::from(p);
+            if p.is_dir() {
+                let default_filename = input_path
+                    .with_extension("lock.yml")
+                    .file_name()
+                    .map(PathBuf::from)
+                    .with_context(|| format!("Invalid input path: {}", input_path.display()))?;
+                Ok(p.join(default_filename))
+            } else {
+                Ok(p)
+            }
+        }
+        None => Ok(input_path.with_extension("lock.yml")),
+    }
+}
+
+/// Print the "Generated …" success line after a successful compile.
+fn print_compile_success(compiler: &dyn Compiler, target: CompileTarget, output_path: &Path) {
+    let kind = match target {
+        CompileTarget::Job | CompileTarget::Stage => "template",
+        _ => "pipeline",
+    };
+    println!(
+        "Generated {} {}: {}",
+        compiler.target_name(),
+        kind,
+        output_path.display()
+    );
 }
 
 /// Reconstruct the codemod-rewritten source, run the lost-update
