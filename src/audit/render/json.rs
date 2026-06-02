@@ -18,6 +18,7 @@ pub fn render_json<W: std::io::Write>(
 }
 
 /// Convenience: render to a `String`.
+#[cfg(test)]
 pub fn render_json_to_string(audit: &crate::audit::model::AuditData) -> anyhow::Result<String> {
     let mut json =
         serde_json::to_string_pretty(audit).context("failed to serialize audit report as JSON")?;
