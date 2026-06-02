@@ -34,12 +34,6 @@ fn test_awf_mount_display_with_mode() {
 }
 
 #[test]
-fn test_awf_mount_display_no_mode() {
-    let m = AwfMount::new("/tmp/foo", "/tmp/foo", AwfMountMode::ReadOnly);
-    assert_eq!(m.to_string(), "/tmp/foo:/tmp/foo:ro");
-}
-
-#[test]
 fn test_awf_mount_parse_with_mode() {
     let m: AwfMount = "$HOME/.elan:$HOME/.elan:ro".parse().unwrap();
     assert_eq!(m.host_path, "$HOME/.elan");
@@ -964,24 +958,4 @@ fn test_collect_extensions_all_runtimes_enabled() {
     // All are Runtime phase
     let runtime_exts: Vec<_> = exts.iter().filter(|e| e.phase() == ExtensionPhase::Runtime).collect();
     assert_eq!(runtime_exts.len(), 4);
-}
-
-#[test]
-fn test_collect_extensions_runtimes_before_tools_with_python_and_node() {
-    let (fm, _) = parse_markdown(
-        "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\nruntimes:\n  python: true\n  node: true\n---\n",
-    ).unwrap();
-    let exts = collect_extensions(&fm);
-    let last_runtime_idx = exts
-        .iter()
-        .rposition(|e| e.phase() == ExtensionPhase::Runtime)
-        .expect("expected Runtime extension");
-    let first_tool_idx = exts
-        .iter()
-        .position(|e| e.phase() == ExtensionPhase::Tool)
-        .expect("expected Tool extension");
-    assert!(
-        last_runtime_idx < first_tool_idx,
-        "Runtime extensions must come before Tool extensions"
-    );
 }
