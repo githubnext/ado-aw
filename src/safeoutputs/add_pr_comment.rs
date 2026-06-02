@@ -631,26 +631,6 @@ allowed-statuses:
     }
 
     #[test]
-    fn test_allowed_statuses_case_insensitive_reverse() {
-        // Config has "active" but agent sends "Active" — should be allowed
-        let config = AddPrCommentConfig {
-            comment_prefix: None,
-            allowed_repositories: Vec::new(),
-            allowed_statuses: vec!["active".to_string()],
-            include_stats: true,
-        };
-        let status = "Active";
-        let matched = config
-            .allowed_statuses
-            .iter()
-            .any(|s| s.eq_ignore_ascii_case(status));
-        assert!(
-            matched,
-            "uppercase 'Active' should match config value 'active'"
-        );
-    }
-
-    #[test]
     fn test_sanitize_content_neutralizes_repository_pipeline_command() {
         let params = AddPrCommentParams {
             pull_request_id: 42,

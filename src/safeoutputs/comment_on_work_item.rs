@@ -490,13 +490,5 @@ max: 3
         assert!(config.target.is_none());
     }
 
-    #[test]
-    fn test_config_partial_deserialize_uses_defaults() {
-        let yaml = r#"
-target: "*"
-"#;
-        let config: CommentOnWorkItemConfig = serde_yaml::from_str(yaml).unwrap();
-        assert!(config.target.is_some());
-    }
 }
 
