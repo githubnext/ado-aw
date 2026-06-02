@@ -914,7 +914,7 @@ fn format_bytes(value: u64) -> String {
 }
 
 fn format_total_duration_ms(value: u64) -> String {
-    if value % 1000 == 0 {
+    if value.is_multiple_of(1000) {
         format_duration_seconds(value / 1000)
     } else {
         format!("{} ms", format_number(value))

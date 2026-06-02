@@ -81,10 +81,7 @@ async fn read_safe_outputs_ndjson(download_root: &Path) -> Vec<Value> {
         };
 
         loop {
-            let Some(entry) = (match entries.next_entry().await {
-                Ok(entry) => entry,
-                Err(_) => None,
-            }) else {
+            let Some(entry) = entries.next_entry().await.unwrap_or_default() else {
                 break;
             };
 

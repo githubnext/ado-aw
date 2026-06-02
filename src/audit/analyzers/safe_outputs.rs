@@ -400,9 +400,7 @@ fn build_rollup(
     execution: Option<&SafeOutputExecution>,
     detection: Option<&DetectionVerdict>,
 ) -> Option<RejectedSafeOutputsRollup> {
-    let Some(summary) = summary else {
-        return None;
-    };
+    let summary = summary?;
 
     let total_rejected = summary.rejected_by_execution_count + summary.not_processed_count;
     if total_rejected == 0 {

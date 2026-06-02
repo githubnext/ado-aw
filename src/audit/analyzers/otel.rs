@@ -25,6 +25,7 @@ pub struct OtelAnalysis {
 ///   - OTel may be absent (non-Copilot engine, or older builds).
 ///   - aw_info may be absent (older builds; will become standard once the
 ///     `audit-pipeline-awinfo` change merges).
+///
 /// The function never errors on absence; it logs a `debug!` and leaves
 /// the corresponding field empty / None.
 pub async fn analyze_otel(agent_outputs_dir: &std::path::Path) -> anyhow::Result<OtelAnalysis> {
