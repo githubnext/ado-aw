@@ -70,6 +70,7 @@ export default defineConfig({
             { label: 'Filter IR', slug: 'reference/filter-ir' },
             { label: 'ado-script', slug: 'reference/ado-script' },
             { label: 'Codemods', slug: 'reference/codemods' },
+            { label: 'Audit', slug: 'reference/audit' },
           ],
         },
         {

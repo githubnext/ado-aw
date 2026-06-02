@@ -1,0 +1,144 @@
+---
+title: "ado-aw audit"
+description: "Audit a completed Azure DevOps agentic pipeline build: download artifacts, run analyzers, and render a structured report."
+---
+
+import { Steps } from '@astrojs/starlight/components';
+
+`ado-aw audit` inspects one completed Azure DevOps build at a time. It downloads the three audit artifact families (agent outputs, detection outputs, safe outputs), runs the built-in analyzers (firewall, MCP gateway, OTel, safe outputs, detection verdict, build timeline, and missing-tool / missing-data / noop extraction), and renders a structured console report or the raw `AuditData` JSON.
+
+## Usage
+
+```
+ado-aw audit <build-id-or-url> [options]
+```
+
+## Accepted input formats
+
+| Input | Example |
+|---|---|
+| Numeric build ID | `12345` |
+| dev.azure.com URL | `https://dev.azure.com/my-org/My%20Project/_build/results?buildId=12345` |
+| dev.azure.com URL with job/step anchors | `...?buildId=12345&j=<guid>&t=<guid>` (accepted; the build-level audit still runs) |
+| Legacy visualstudio.com URL | `https://my-org.visualstudio.com/proj/_build/results?buildId=12345` |
+| On-prem Azure DevOps Server URL | `https://onprem.example.com/DefaultCollection/MyProject/_build/results?buildId=12345` |
+
+URL-encoded project segments are decoded automatically. Both `t=` and `s=` are accepted as step-anchor parameters.
+
+## Flags
+
+| Flag | Default | Behavior |
+|---|---|---|
+| `-o, --output <dir>` | `./logs` | Directory under which `<dir>/build-<id>/` is written. |
+| `--json` | off | Emit the full `AuditData` as JSON to stdout. Suppresses the trailing `Audit complete` stderr line. |
+| `--org <url>` | auto | ADO organization override for bare build IDs. Full build URLs supply this directly. |
+| `--project <name>` | auto | ADO project override for bare build IDs. Full build URLs supply this directly. |
+| `--pat <token>` | env | Personal Access Token. Also reads `AZURE_DEVOPS_EXT_PAT`. Falls back to the Azure CLI auth chain when omitted. |
+| `--artifacts <set,...>` | all | Restrict download + analysis to a subset. Valid values: `agent`, `detection`, `safe-outputs` (`safe_outputs` is also accepted). |
+| `--no-cache` | off | Force re-processing even if `<dir>/build-<id>/run-summary.json` already exists. |
+
+## Behavior
+
+- **Input resolution.** Bare IDs use `--org` / `--project` or git-remote auto-detection. Full build URLs contribute host, org, and project — those URL-derived values win over CLI flags.
+- **Artifact scope.** Only `agent_outputs*`, `analyzed_outputs*`, and `safe_outputs*` are fetched. All other published build artifacts are ignored.
+- **Artifact refresh.** If a local artifact directory already exists, it is renamed aside before re-download and restored if the download fails — no data is lost on a network error.
+- **Analyzer failures are soft.** The command records a warning, keeps any successfully-derived sections, and still renders the report.
+- **Multiple directories.** When multiple local directories share one recognized prefix, the lexicographically last match wins.
+
+## Output layout
+
+```
+<output>/build-<id>/
+├── run-summary.json                  # Cached AuditData, CLI-version-keyed
+├── agent_outputs[_<BuildId>]/        # Agent stage artifacts
+│   ├── staging/
+│   │   ├── safe_outputs.ndjson       # Agent's safe-output proposals
+│   │   ├── aw_info.json              # Runtime engine / agent / source metadata
+│   │   └── otel.jsonl                # Copilot OTel (when emitted)
+│   └── logs/
+│       ├── firewall/                 # AWF Squid proxy logs
+│       ├── mcpg/                     # MCP Gateway logs
+│       ├── safeoutputs.log           # SafeOutputs HTTP server log
+│       └── agent-output.txt          # Filtered agent stdout
+├── analyzed_outputs[_<BuildId>]/     # Detection stage artifacts
+│   ├── threat-analysis.json          # Aggregate verdict + reasons
+│   └── threat-analysis-output.txt
+└── safe_outputs[_<BuildId>]/         # SafeOutputs stage artifacts
+    └── safe-outputs-executed.ndjson  # Per-item execution log
+```
+
+`aw_info.json`, `otel.jsonl`, and `safe_outputs.ndjson` are searched in `staging/` first, then at the artifact top level, so older artifact layouts still audit cleanly.
+
+## Report shape (`AuditData`)
+
+Optional sections are omitted from `--json` output when empty.
+
+| Key | Source |
+|---|---|
+| `overview` | ADO build metadata + `aw_info.json` (engine, model, agent name, source, target). |
+| `task_domain` | Audit heuristics over the run's prompts and outputs. |
+| `behavior_fingerprint` | Higher-level heuristics over the run's behavior patterns. |
+| `agentic_assessments` | Higher-level assessments emitted by the analyzers. |
+| `metrics` | OTel JSONL (`otel.jsonl`) plus audit-time warning/error counts. |
+| `key_findings` | Heuristic rules + analyzer findings (e.g. aggregate-gate rejection). |
+| `recommendations` | Follow-up actions derived from findings. |
+| `performance_metrics` | Derived from `metrics`, runtime duration, tool usage, and firewall counts. |
+| `engine_config` | Runtime engine configuration from `aw_info.json`. |
+| `safe_output_summary` | Counts of proposed / executed / rejected / not-processed items. |
+| `safe_output_execution` | Per-item trace joining proposal + detection + execution. |
+| `rejected_safe_outputs` | Rollup of rejections by reason/threat flag. |
+| `detection_analysis` | Contents of `threat-analysis.json`. |
+| `mcp_server_health` | MCPG logs aggregated per server. |
+| `mcp_tool_usage` | MCPG logs aggregated per `(server, tool)`. |
+| `mcp_failures` | MCPG `tool_error` / `server_error` events. |
+| `jobs` | ADO `/timeline` records filtered to `type: Job`. |
+| `firewall_analysis` | AWF Squid proxy logs aggregated by domain. |
+| `policy_analysis` | AWF policy artifacts aggregated into allow/deny summaries. |
+| `missing_tools` / `missing_data` / `noops` | NDJSON entries from the corresponding SafeOutputs MCP tools. |
+| `downloaded_files` | One entry per file under `<output>/build-<id>/`. |
+| `errors` / `warnings` | Run-level error/warning aggregates. |
+| `tool_usage` | High-level tool-usage rollups derived from telemetry. |
+| `created_items` | Successfully executed items with extracted id/url/title. |
+
+## Rejected safe-output trace
+
+When `threat-analysis.json` reports any threat flag, the audit treats the entire SafeOutputs batch as rejected by the aggregate gate and records each proposal with:
+
+- `status: not_processed_due_to_aggregate_gate`
+- `applies_to_whole_batch: true`
+- `rejection_reason`: the aggregate `reasons[]` from `threat-analysis.json`, joined with `; `
+
+One severity-`high` finding is also emitted summarizing the gate decision: which threat flags fired, how many proposals were dropped, and the full aggregate reasons.
+
+:::note[Per-item verdicts]
+`threat-analysis.json` currently emits an aggregate verdict only. Per-item detection verdicts are a planned follow-up.
+:::
+
+## Cache behavior
+
+`<output>/build-<id>/run-summary.json` is written after each successful run.
+
+| Scenario | Behavior |
+|---|---|
+| Cached `ado_aw_version` matches current CLI | Report rendered from cache; download/analysis skipped. |
+| Cache missing, unparseable, or from a different version | Cache ignored; build reprocessed from scratch. |
+| `--no-cache` passed | Always reprocesses. |
+
+The cache-hit info line is printed only in console mode (not with `--json`).
+
+## Permission failures
+
+- The initial build-metadata fetch is live ADO only. A 401/403 at this step is fatal.
+- If artifact listing or download returns 401/403 and at least one recognized artifact family exists locally, the audit continues from local cache and records a warning.
+- If artifact listing or download returns 401/403 and no local cache exists, the command emits a structured error pointing at the manual escape hatch:
+
+```bash
+az pipelines runs artifact download --run-id <id> --path <dir>
+```
+
+## Related
+
+- [CLI Commands](/ado-aw/setup/cli/) — full CLI reference
+- [Safe Outputs](/ado-aw/reference/safe-outputs/) — what agent proposals look like
+- [Network](/ado-aw/reference/network/) — AWF firewall configuration
+- [ado-aw-debug](/ado-aw/reference/ado-aw-debug/) — debug-only front-matter knobs
