@@ -121,7 +121,7 @@ supports these predicate types:
 | `NumericRange { fact, min, max }` | `[ "$VAR" -ge N ] && [ "$VAR" -le M ]` | Changed file count in range |
 | `TimeWindow { start, end }` | Arithmetic on `CURRENT_MINUTES` | Only during business hours |
 | `LabelSetMatch { any_of, all_of, none_of }` | `grep -qiF` per label | PR labels match criteria |
-| `FileGlobMatch { include, exclude }` | python3 `fnmatch` | Changed files match globs |
+| `FileGlobMatch { include, exclude }` | gate.js `globMatch` | Changed files match globs |
 | `And(Vec<Predicate>)` | All must pass | *(reserved for compound filters)* |
 | `Or(Vec<Predicate>)` | At least one must pass | *(reserved)* |
 | `Not(Box<Predicate>)` | Inner must fail | *(reserved)* |
@@ -306,7 +306,8 @@ acquisition logic.
 
 The evaluator is a TypeScript program ncc-bundled to a single
 self-contained `scripts/ado-script/gate.js` (~1.1 MB) that ships as part of the
-`ado-script.zip` release asset. It handles:
+`ado-script.zip` release asset. See the [ado-script reference](/ado-aw/reference/ado-script/) for the
+full design and build pipeline. It handles:
 
 1. **Bypass logic** -- reads `ADO_BUILD_REASON` and exits early for non-matching
    trigger types
