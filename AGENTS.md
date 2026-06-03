@@ -87,6 +87,27 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── ado/              # Shared Azure DevOps REST helpers (auth, list/match/PATCH/POST)
 │   │   ├── mod.rs        # Shared ADO REST helpers used by all lifecycle commands (`enable`, `disable`, `list`, `status`, `run`, `remove`, `secrets`)
 │   │   └── discovery.rs  # Project-scope pipeline discovery (`--all-repos` / `--source` flags)
+│   ├── audit/            # `ado-aw audit` command — downloads pipeline artifacts and runs analyzers
+│   │   ├── mod.rs        # Shared audit data types; AuditData report model
+│   │   ├── cli.rs        # CLI entry point for the `audit` subcommand
+│   │   ├── model.rs      # AuditData and supporting report structs
+│   │   ├── findings.rs   # Finding severity levels and structured finding types
+│   │   ├── cache.rs      # Artifact download cache (keyed on build-id)
+│   │   ├── url.rs        # Build-reference parsing (bare ID, full ADO URL)
+│   │   ├── analyzers/    # Per-signal analyzers that populate AuditData sections
+│   │   │   ├── mod.rs
+│   │   │   ├── detection.rs    # Detection-stage artifact analysis
+│   │   │   ├── firewall.rs     # AWF network log analysis
+│   │   │   ├── jobs.rs         # Build timeline / job-level analysis
+│   │   │   ├── mcp.rs          # MCP tool-call analysis
+│   │   │   ├── missing.rs      # Missing-tool / missing-data / noop safe-output analysis
+│   │   │   ├── otel.rs         # OTel agent stats (token usage, duration, turns)
+│   │   │   ├── policy.rs       # Policy-level findings (safe-output integrity, prompt injection signals)
+│   │   │   └── safe_outputs.rs # Safe-output NDJSON analysis
+│   │   └── render/       # Report renderers
+│   │       ├── mod.rs
+│   │       ├── console.rs # Human-readable console report
+│   │       └── json.rs    # Machine-readable AuditData JSON
 │   ├── detect.rs         # Agentic pipeline detection — discovers compiled pipelines; used by all lifecycle commands
 │   ├── update_check.rs   # Version update check — queries GitHub Releases and prints advisory when newer version is available
 │   ├── ndjson.rs         # NDJSON parsing utilities
