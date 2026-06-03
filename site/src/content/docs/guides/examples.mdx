@@ -15,7 +15,7 @@ A minimal example demonstrating the basic structure of an agent file.
 
 **Key features:**
 - Simple daily schedule trigger
-- Repository checkout configuration
+- Repository checkout using the `repos:` shorthand
 - Basic workspace setup
 - Straightforward agent prompt
 
@@ -27,10 +27,8 @@ name: "Daily Code Review"
 description: "Reviews code changes and creates summary reports"
 on:
   schedule: daily
-repositories:
-  - repository: azure-devops-agentic-pipelines
-    type: git
-    name: azure-devops-agentic-pipelines
+repos:
+  - my-org/my-repo
 workspace: repo
 ---
 
@@ -44,6 +42,10 @@ Review the latest code changes in the repository and provide feedback.
 2. Check for code quality issues
 3. Generate a summary report
 ```
+
+:::tip[repos: shorthand]
+`repos:` is the current recommended syntax for repository checkout. The legacy `repositories:` format is automatically rewritten to `repos:` on the next `ado-aw compile`. See [Repositories (repos:)](/ado-aw/reference/front-matter/#repositories-repos) for the full syntax.
+:::
 
 ## ADO work item triage
 
