@@ -840,6 +840,7 @@ mod tests {
     #[test]
     fn test_requires_write_consistency() {
         // Write-requiring tools
+        const { assert!(CreateIssueResult::REQUIRES_WRITE); }
         const { assert!(CreateWorkItemResult::REQUIRES_WRITE); }
         const { assert!(CommentOnWorkItemResult::REQUIRES_WRITE); }
         const { assert!(UpdateWorkItemResult::REQUIRES_WRITE); }

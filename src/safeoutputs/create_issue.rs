@@ -456,11 +456,6 @@ mod tests {
     }
 
     #[test]
-    fn test_result_requires_write() {
-        const _: () = assert!(CreateIssueResult::REQUIRES_WRITE);
-    }
-
-    #[test]
     fn test_validate_rejects_short_title() {
         let params = CreateIssueParams {
             title: "Hi".to_string(),
