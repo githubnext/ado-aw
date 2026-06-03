@@ -882,52 +882,7 @@ wiki-name: "MyProject.wiki"
         // already-exists guard is reachable; the no-network path verifies the
         // guard logic via the unit test below.
         let _ = result.execute_impl(&ctx).await;
-        // (we cannot assert success/failure here without a real server;
-        //  the guard itself is exercised by test_page_already_exists_guard_returns_failure)
-    }
-
-    /// Unit test for the page-already-exists guard logic.
-    ///
-    /// NOTE: This test verifies the conditional logic prototype in isolation —
-    /// it does *not* call `execute_impl` directly. If the guard were accidentally
-    /// removed from `execute_impl`, this test would still pass. The integration
-    /// tests in `tests/compiler_tests.rs` and the network-level test
-    /// `test_execute_page_already_exists_is_rejected` (which calls `execute_impl`
-    /// against a fake host) together catch regressions in the live code path.
-    #[test]
-    fn test_page_already_exists_guard_returns_failure() {
-        // Simulate the logic: if page_exists → failure.
-        let page_exists = true;
-        let effective_path = "/Agent/Page";
-        let result = if page_exists {
-            Some(ExecutionResult::failure(format!(
-                "Wiki page '{effective_path}' already exists. \
-                 Use the update-wiki-page safe output to update existing pages."
-            )))
-        } else {
-            None
-        };
-        assert!(result.is_some());
-        assert!(!result.unwrap().success);
-    }
-
-    /// Confirm that a non-existent page (page_exists = false) proceeds past the guard.
-    ///
-    /// NOTE: Same caveat as `test_page_already_exists_guard_returns_failure` above —
-    /// this tests the logic prototype, not the live `execute_impl` code path.
-    #[test]
-    fn test_new_page_passes_guard() {
-        let page_exists = false;
-        let effective_path = "/Agent/NewPage";
-        let result: Option<ExecutionResult> = if page_exists {
-            Some(ExecutionResult::failure(format!(
-                "Wiki page '{effective_path}' already exists. \
-                 Use the update-wiki-page safe output to update existing pages."
-            )))
-        } else {
-            None
-        };
-        assert!(result.is_none());
+        // (we cannot assert success/failure here without a real server)
     }
 
     // ── URL encoding ──────────────────────────────────────────────────────────
