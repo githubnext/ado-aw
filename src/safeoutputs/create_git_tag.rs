@@ -422,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validation_rejects_empty_tag() {
+    fn test_validation_rejects_too_short_tag() {
         let params = CreateGitTagParams {
             tag_name: "ab".to_string(),
             commit: None,
