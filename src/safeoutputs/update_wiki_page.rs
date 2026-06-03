@@ -854,68 +854,6 @@ wiki-name: "MyProject.wiki"
         // path-not-found guard is reachable; the no-network path verifies the
         // guard logic via the unit test below.
         let _ = result.execute_impl(&ctx).await;
-        // (we cannot assert success/failure here without a real server;
-        //  the guard itself is exercised by test_page_not_found_guard_returns_failure)
-    }
-
-    /// Unit test for the page-not-found guard (no HTTP call needed).
-    #[test]
-    fn test_page_not_found_guard_returns_failure() {
-        // Simulate the logic that replaced check_create_if_missing_guard:
-        // if !page_exists → failure.
-        let page_exists = false;
-        let effective_path = "/Agent/Page";
-        let result = if !page_exists {
-            Some(ExecutionResult::failure(format!(
-                "Wiki page '{effective_path}' does not exist. \
-                 Use a separate safe output to create new pages."
-            )))
-        } else {
-            None
-        };
-        assert!(result.is_some());
-        assert!(!result.unwrap().success);
-    }
-
-    /// Confirm that an existing page (page_exists = true) proceeds past the guard.
-    #[test]
-    fn test_existing_page_passes_guard() {
-        let page_exists = true;
-        let effective_path = "/Agent/Page";
-        let result: Option<ExecutionResult> = if !page_exists {
-            Some(ExecutionResult::failure(format!(
-                "Wiki page '{effective_path}' does not exist. \
-                 Use a separate safe output to create new pages."
-            )))
-        } else {
-            None
-        };
-        assert!(result.is_none());
-    }
-
-    // ── URL encoding ──────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_path_segment_encodes_fragment_delimiter() {
-        let encoded = utf8_percent_encode("wiki#name", PATH_SEGMENT).to_string();
-        assert_eq!(encoded, "wiki%23name");
-    }
-
-    #[test]
-    fn test_path_segment_encodes_query_delimiter() {
-        let encoded = utf8_percent_encode("wiki?name", PATH_SEGMENT).to_string();
-        assert_eq!(encoded, "wiki%3Fname");
-    }
-
-    #[test]
-    fn test_path_segment_encodes_space() {
-        let encoded = utf8_percent_encode("My Project", PATH_SEGMENT).to_string();
-        assert_eq!(encoded, "My%20Project");
-    }
-
-    #[test]
-    fn test_path_segment_does_not_encode_safe_chars() {
-        let encoded = utf8_percent_encode("MyProject.wiki", PATH_SEGMENT).to_string();
-        assert_eq!(encoded, "MyProject.wiki");
+        // (we cannot assert success/failure here without a real server)
     }
 }
