@@ -259,7 +259,7 @@ mod tests {
         let params: ReplyToPrCommentParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.pull_request_id, 42);
         assert_eq!(params.thread_id, 7);
-        assert!(params.content.contains("reply"));
+        assert_eq!(params.content, "This is a reply to the review comment.");
         assert_eq!(params.repository, Some("self".to_string()));
     }
 
@@ -275,7 +275,7 @@ mod tests {
         assert_eq!(result.name, "reply-to-pr-comment");
         assert_eq!(result.pull_request_id, 42);
         assert_eq!(result.thread_id, 7);
-        assert!(result.content.contains("test reply"));
+        assert_eq!(result.content, "This is a test reply with enough characters.");
     }
 
     #[test]
