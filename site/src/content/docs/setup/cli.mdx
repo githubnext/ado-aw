@@ -274,6 +274,30 @@ Options:
 - `--ado-project <name>` -- Azure DevOps project name override
 - `--dry-run` -- validate inputs without making write calls
 
+## Internal / build-time tools
+
+These commands are hidden from `--help` and are intended for contributors working on the ado-aw compiler itself — not for end users or compiled pipelines.
+
+### `export-gate-schema`
+
+Export the gate spec JSON Schema used by the `scripts/ado-script` TypeScript workspace for type code generation. Outputs JSON to stdout or to a file.
+
+```bash
+ado-aw export-gate-schema [--output <path>]
+```
+
+Options:
+
+- `--output`, `-o <path>` -- write the schema to a file instead of stdout; parent directories are created automatically
+
+Typical use (from the repo root):
+
+```bash
+cargo run -- export-gate-schema --output scripts/ado-script/schema/gate-spec.schema.json
+```
+
+See the [ado-script reference](/ado-aw/reference/ado-script/) for how this command fits into the TypeScript type-codegen workflow.
+
 ## Deprecated commands
 
 ### `configure` (deprecated alias)
