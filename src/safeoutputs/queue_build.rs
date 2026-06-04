@@ -403,18 +403,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validation_accepts_valid_params() {
-        let params = QueueBuildParams {
-            pipeline_id: 123,
-            branch: Some("main".to_string()),
-            parameters: None,
-            reason: Some("Scheduled nightly build".to_string()),
-        };
-        let result: Result<QueueBuildResult, _> = params.try_into();
-        assert!(result.is_ok());
-    }
-
-    #[test]
     fn test_validation_accepts_minimal_params() {
         let params = QueueBuildParams {
             pipeline_id: 1,

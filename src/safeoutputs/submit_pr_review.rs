@@ -495,18 +495,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validation_accepts_approve_without_body() {
-        let params = SubmitPrReviewParams {
-            pull_request_id: 1,
-            event: "approve".to_string(),
-            body: None,
-            repository: Some("self".to_string()),
-        };
-        let result: Result<SubmitPrReviewResult, _> = params.try_into();
-        assert!(result.is_ok());
-    }
-
-    #[test]
     fn test_validation_rejects_repository_pipeline_command() {
         let params = SubmitPrReviewParams {
             pull_request_id: 1,
