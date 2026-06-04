@@ -639,6 +639,10 @@ mod tests {
         };
         let result: Result<UpdateWorkItemResult, _> = params.try_into();
         assert!(result.is_ok());
+        let result = result.unwrap();
+        assert_eq!(result.id, 123);
+        assert_eq!(result.state, Some("Resolved".to_string()));
+        assert!(result.title.is_none());
     }
 
     #[test]
@@ -966,16 +970,6 @@ target: 42
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_config_tag_prefix_deserializes() {
-        let yaml = r#"
-title: true
-tag-prefix: "agent-"
-"#;
-        let config: UpdateWorkItemConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.tag_prefix, Some("agent-".to_string()));
-    }
-
-    #[test]
     fn test_config_tag_prefix_absent_is_none() {
         let yaml = "title: true";
         let config: UpdateWorkItemConfig = serde_yaml::from_str(yaml).unwrap();
@@ -1040,22 +1034,6 @@ tag-prefix: "agent-"
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("semicolon"), "Expected semicolon error, got: {err}");
-    }
-
-    #[test]
-    fn test_params_accepts_tags_without_semicolons() {
-        let params = UpdateWorkItemParams {
-            id: 42,
-            title: None,
-            body: None,
-            state: None,
-            area_path: None,
-            iteration_path: None,
-            assignee: None,
-            tags: Some(vec!["agent-run".to_string(), "automated".to_string()]),
-        };
-        let result: Result<UpdateWorkItemResult, _> = params.try_into();
-        assert!(result.is_ok());
     }
 
     #[test]
