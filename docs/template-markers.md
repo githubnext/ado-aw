@@ -107,7 +107,7 @@ Should be replaced with the human-readable name from the front matter
 no quoting or escaping — front-matter `name` values are free-form and
 have not been validated against YAML scalar rules.
 
-> **Alias:** `{{ agent }}` is registered as a backward-compatible alias for `{{ agent_name }}` and expands to the same unescaped name value. The same safety caveat applies — only safe in non-YAML positions.
+> **Related marker:** `{{ agent }}` is a distinct marker that expands to the *sanitized filename* form of the agent name — lowercase, with every non-alphanumeric character replaced by a hyphen and consecutive hyphens collapsed. For an agent named `Daily Code Review`, `{{ agent }}` expands to `daily-code-review`. Use `{{ agent_name }}` when the raw unescaped name is needed; use `{{ agent }}` when a filename-safe or URL-safe identifier is needed.
 
 > ⚠️ This marker is only safe inside a position that is **not parsed as
 > YAML** (currently only `src/data/threat-analysis.md`, which is a
