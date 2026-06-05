@@ -1065,12 +1065,6 @@ name-prefix: "ci-"
         assert_ne!(a, b, "different content must produce different folders");
         // Determinism: same inputs yield same folder.
         assert_eq!(a, folder_for("TriageSummary", b"content-alpha"));
-        // Identical content → same folder regardless of call order (idempotent).
-        assert_eq!(
-            folder_for("TriageSummary", b"same-content"),
-            folder_for("TriageSummary", b"same-content"),
-            "same content must always map to the same folder"
-        );
     }
 
     /// When `require-unique-names` is set, the executor uses the clean folder

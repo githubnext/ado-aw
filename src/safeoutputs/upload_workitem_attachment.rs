@@ -556,6 +556,7 @@ mod tests {
         assert!(json.contains(r#""name":"upload-workitem-attachment""#));
         assert!(json.contains(r#""work_item_id":42"#));
         assert!(json.contains(r#""file_path":"output/report.pdf""#));
+        assert!(json.contains(r#""comment":"Test attachment""#));
     }
 
     #[test]
