@@ -163,3 +163,145 @@ impl CompilerExtension for ExecContextExtension {
         out
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Divergence-trap tests for the `any_contributor_active`
+    //! pre-computation. The pattern in [`ExecContextExtension::new`]
+    //! duplicates each contributor's `should_activate` logic so the
+    //! pre-computed flag can gate [`required_bash_commands`] (which
+    //! receives no `CompileContext`). The risk is that a future
+    //! contributor author wires up `should_activate` + the
+    //! `contributors()` list but forgets to OR-in the aggregate
+    //! check, silently suppressing the contributor's bash-allow-list
+    //! contributions.
+    //!
+    //! These tests exercise the `new()` → `required_bash_commands()`
+    //! path independently (no fixture-compile, no `prepare_steps`,
+    //! no `CompileContext`) so a future divergence trips here at
+    //! unit-test time rather than at E2E time.
+
+    use super::*;
+    use crate::compile::types::{
+        ExecutionContextConfig, FrontMatter, PrContextConfig,
+    };
+
+    /// Parse a minimal markdown agent into a `FrontMatter`.
+    fn parse_fm(src: &str) -> FrontMatter {
+        let (fm, _) = crate::compile::common::parse_markdown(src).unwrap();
+        fm
+    }
+
+    /// Minimal agent with `on.pr` configured (default `branches`).
+    fn pr_triggered_front_matter() -> FrontMatter {
+        parse_fm(
+            "---\nname: test\ndescription: test\non:\n  pr:\n    branches:\n      include: [main]\n---\n",
+        )
+    }
+
+    /// Minimal agent with no triggers configured.
+    fn no_trigger_front_matter() -> FrontMatter {
+        parse_fm("---\nname: test\ndescription: test\n---\n")
+    }
+
+    /// When `on.pr` is configured (default `pr.enabled`),
+    /// `required_bash_commands` MUST yield the PR contributor's
+    /// git commands. If a future contributor diverges this from
+    /// `should_activate`, this assertion trips.
+    #[test]
+    fn required_bash_commands_matches_pr_contributor_active_default() {
+        let ext =
+            ExecContextExtension::new(ExecutionContextConfig::default(), &pr_triggered_front_matter());
+        let cmds = ext.required_bash_commands();
+        assert!(
+            !cmds.is_empty(),
+            "PR contributor is active (on.pr configured, default pr.enabled) \
+             but required_bash_commands is empty — `any_contributor_active` \
+             has diverged from `PrContextContributor::should_activate`."
+        );
+        assert!(
+            cmds.iter().any(|c| c == "git diff"),
+            "PR contributor's git commands missing from required_bash_commands: {cmds:?}"
+        );
+    }
+
+    /// Same scenario, with `pr.enabled: true` explicit. Must still
+    /// yield commands (matches `should_activate`).
+    #[test]
+    fn required_bash_commands_matches_pr_contributor_active_explicit_enabled() {
+        let cfg = ExecutionContextConfig {
+            enabled: None,
+            pr: Some(PrContextConfig {
+                enabled: Some(true),
+            }),
+        };
+        let ext = ExecContextExtension::new(cfg, &pr_triggered_front_matter());
+        assert!(
+            !ext.required_bash_commands().is_empty(),
+            "explicit pr.enabled: true + on.pr configured must yield bash commands"
+        );
+    }
+
+    /// With `on.pr` configured but `pr.enabled: false`, the
+    /// contributor is inactive — commands MUST be suppressed.
+    /// Mirrors `should_activate`'s `Some(false)` arm.
+    #[test]
+    fn required_bash_commands_suppressed_when_pr_disabled() {
+        let cfg = ExecutionContextConfig {
+            enabled: None,
+            pr: Some(PrContextConfig {
+                enabled: Some(false),
+            }),
+        };
+        let ext = ExecContextExtension::new(cfg, &pr_triggered_front_matter());
+        assert!(
+            ext.required_bash_commands().is_empty(),
+            "pr.enabled: false must suppress required_bash_commands"
+        );
+    }
+
+    /// No `on.pr` trigger configured → contributor inactive →
+    /// no commands. Mirrors `should_activate`'s `on.pr` gate.
+    #[test]
+    fn required_bash_commands_suppressed_without_on_pr() {
+        let ext =
+            ExecContextExtension::new(ExecutionContextConfig::default(), &no_trigger_front_matter());
+        assert!(
+            ext.required_bash_commands().is_empty(),
+            "without on.pr configured, required_bash_commands must be empty"
+        );
+    }
+
+    /// Explicit `pr.enabled: true` without `on.pr` must still
+    /// yield no commands (v6.2 footgun fix — bash allow-list is a
+    /// compile-time artifact for a step that can never run).
+    #[test]
+    fn required_bash_commands_suppressed_when_enabled_without_on_pr() {
+        let cfg = ExecutionContextConfig {
+            enabled: None,
+            pr: Some(PrContextConfig {
+                enabled: Some(true),
+            }),
+        };
+        let ext = ExecContextExtension::new(cfg, &no_trigger_front_matter());
+        assert!(
+            ext.required_bash_commands().is_empty(),
+            "pr.enabled: true without on.pr must NOT widen the agent bash allow-list"
+        );
+    }
+
+    /// Master switch off must suppress commands regardless of
+    /// contributor state.
+    #[test]
+    fn required_bash_commands_suppressed_when_master_switch_off() {
+        let cfg = ExecutionContextConfig {
+            enabled: Some(false),
+            pr: None,
+        };
+        let ext = ExecContextExtension::new(cfg, &pr_triggered_front_matter());
+        assert!(
+            ext.required_bash_commands().is_empty(),
+            "execution-context.enabled: false must suppress required_bash_commands"
+        );
+    }
+}

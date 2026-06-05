@@ -115,7 +115,15 @@ impl ContextContributor for PrContextContributor {
     AW_PR_DIR="$AW_CONTEXT_DIR/pr"
     AGENT_PROMPT="/tmp/awf-tools/agent-prompt.md"
 
-    mkdir -p "$AW_PR_DIR"
+    # Hard-fail on infra-level errors (read-only workspace, missing
+    # parent dir, etc.) BEFORE the soft `fail()` machinery is even
+    # defined. Without this, `set -uo pipefail` (no `-e`) would
+    # silently swallow a failed `mkdir`, then `fail()` would itself
+    # fail to write `error.txt`, and the step would exit 0 with
+    # nothing staged AND no failure signal in the agent prompt.
+    # That's strictly worse than a hard build break, which loudly
+    # tells the operator that the pipeline configuration is broken.
+    mkdir -p "$AW_PR_DIR" || { echo "[aw-context] fatal: could not create $AW_PR_DIR (check BUILD_SOURCESDIRECTORY permissions)"; exit 1; }
     rm -f "$AW_PR_DIR/error.txt" "$AW_PR_DIR/base.sha" "$AW_PR_DIR/head.sha" 2>/dev/null || true
 
     PR_ID="${SYSTEM_PULLREQUEST_PULLREQUESTID:-}"
