@@ -47,6 +47,25 @@ The following domains are always allowed. Most are defined in `CORE_ALLOWED_HOST
 | `rt.services.visualstudio.com` | Visual Studio runtime telemetry |
 | `config.edge.skype.com` | Configuration |
 | `host.docker.internal` | MCP Gateway (MCPG) on host — added by the standalone compiler, not part of `CORE_ALLOWED_HOSTS` |
+| `aka.ms` | Microsoft link shortener (used by `az` subcommand metadata) — contributed by the always-on Azure CLI extension |
+
+## Always-on Azure CLI (`az`)
+
+Every compiled pipeline mounts the host's `az` binary (from `/opt/az` and
+`/usr/bin/az`) into the AWF container and adds the Azure auth and
+management hosts listed above (`login.microsoftonline.com`,
+`login.windows.net`, `management.azure.com`, `graph.microsoft.com`,
+`aka.ms`) to the allowlist. This mirrors gh-aw's "assume `gh` is on the
+runner" model: agents can call `az` from their bash tool without
+opting in.
+
+The host is assumed to have `azure-cli` pre-installed. Microsoft-hosted
+`ubuntu-latest` agents satisfy this; 1ES self-hosted pool operators must
+bake `azure-cli` into their images. If `/opt/az` is missing on the host,
+the AWF mount will fail at runtime with a clear error.
+
+See [`docs/tools.md`](tools.md#built-in-clis) for the agent-facing
+contract (auth scope, available subcommands).
 
 ## Adding Additional Hosts
 
@@ -108,46 +127,83 @@ network:
 
 ## Permissions (ADO Access Tokens)
 
-ADO does not support fine-grained permissions — there are two access levels: blanket read and blanket write. Tokens are minted from ARM service connections; `System.AccessToken` is never used for agent or executor operations.
+ADO does not support fine-grained permissions — there are two access levels:
+blanket read and blanket write. The executor (Stage 3) always has a
+write-capable token; what changes is its *source* and *attribution*:
 
-**Exception:** The trigger filter gate step (Setup job) uses `System.AccessToken`
-for two purposes: (1) self-cancelling the build when filters don't match
-(`PATCH` to `_apis/build/builds/{id}`), and (2) fetching PR metadata for
-Tier 2 filters (labels, draft status, changed files). This runs in the
-Setup job before the agent starts, outside the AWF sandbox. The pipeline
-must have "Allow scripts to access the OAuth token" enabled for this to
-work. This is a deliberate scoped exception — the token is not passed to
-the agent or executor.
+| Source                              | When                                          | Identity                                        |
+| ----------------------------------- | --------------------------------------------- | ----------------------------------------------- |
+| `$(System.AccessToken)` *(default)* | No `permissions.write` configured             | `Project Collection Build Service (org)`        |
+| `$(SC_WRITE_TOKEN)` *(opt-in)*      | `permissions.write: <arm-service-connection>` | The federated identity behind the ARM SC        |
+
+The agent (Stage 1) never receives the executor's token. Stage separation —
+not token type — is the trust boundary.
+
+**`System.AccessToken` exceptions.** Two other steps also map
+`System.AccessToken`:
+
+1. **Setup-job trigger filter gate** — self-cancels the build when filters
+   don't match (`PATCH _apis/build/builds/{id}`) and fetches PR metadata for
+   Tier 2 filters (labels, draft status, changed files). Runs before the
+   agent, outside the AWF sandbox.
+2. **Stage 3 executor** — when no ARM write SC is configured (the default),
+   the executor's `SYSTEM_ACCESSTOKEN` env var is sourced from
+   `$(System.AccessToken)`.
+
+Both require the pipeline setting "Allow scripts to access the OAuth token"
+to be enabled (the ADO default).
+
+`System.AccessToken` is scoped by the pipeline's
+**"Limit job authorization scope to current project"** toggle. With this on
+(strongly recommended), writes are limited to the pipeline's host project.
+Operators can scope further per-pipeline by editing the build definition's
+*Run-time settings*.
 
 ```yaml
 permissions:
   read: my-read-arm-connection    # Stage 1 agent — read-only ADO access
-  write: my-write-arm-connection  # Stage 3 executor — write access for safe-outputs
+  # write: my-write-arm-connection  # Optional — see below
 ```
+
+### When to set `permissions.write`
+
+The default (`$(System.AccessToken)`) is sufficient for the vast majority of
+agents. Set `permissions.write` only when you need:
+
+1. **Cross-org or cross-project writes** — `System.AccessToken` is scoped to
+   the host project. Targeting work items or repos in a different ADO
+   project / organization requires an ARM SC with broader scope.
+2. **Named-identity attribution** — `System.AccessToken` writes are
+   attributed to the `Project Collection Build Service` identity. An ARM SC
+   attributes writes to its underlying federated identity (e.g.
+   `safe-output-bot@contoso.com`), useful when audit logs or work-item
+   notifications need a specific actor.
 
 ### Security Model
 
-- **`permissions.read`**: Mints a read-only ADO-scoped token given to the agent inside the AWF sandbox (Stage 1). The agent can query ADO APIs but cannot write.
-- **`permissions.write`**: Mints a write-capable ADO-scoped token used **only** by the executor in Stage 3 (`SafeOutputs` job). This token is never exposed to the agent.
-- **Both omitted**: No ADO tokens are passed anywhere. The agent has no ADO API access.
-
-### Compile-Time Validation
-
-If write-requiring safe-outputs (`create-pull-request`, `create-work-item`) are configured but `permissions.write` is missing, compilation fails with a clear error message.
+- **`permissions.read`**: Mints a read-only ADO-scoped token given to the
+  agent inside the AWF sandbox (Stage 1). The agent can query ADO APIs but
+  cannot write.
+- **`permissions.write` (optional)**: Mints a write-capable ADO-scoped token
+  used **only** by the executor in Stage 3 (`SafeOutputs` job). Overrides
+  the default `$(System.AccessToken)` for write operations. Never exposed
+  to the agent.
+- **Both omitted**: The agent has no ADO API access. The executor still has
+  a write-capable token via `$(System.AccessToken)`, scoped by the
+  pipeline's job-authorization settings.
 
 ### Examples
 
 ```yaml
-# Agent can read ADO, safe-outputs can write
+# Default: agent can read ADO, executor writes via $(System.AccessToken).
+permissions:
+  read: my-read-sc
+
+# Cross-org / named-identity attribution — executor writes via ARM SC.
 permissions:
   read: my-read-sc
   write: my-write-sc
 
-# Agent can read ADO, no write safe-outputs needed
-permissions:
-  read: my-read-sc
-
-# Agent has no ADO access, but safe-outputs can create PRs/work items
-permissions:
-  write: my-write-sc
+# Agent has no ADO read access; executor still writes via $(System.AccessToken).
+# (Empty front matter — no `permissions:` key at all.)
 ```

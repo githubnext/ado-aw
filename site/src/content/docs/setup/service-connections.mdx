@@ -179,4 +179,4 @@ If this pipeline succeeds, your connection is correctly configured for `ado-aw`.
 | `AzureCLI@2` fails with "service connection not found" | The pipeline isn't authorized to use the connection — check pipeline permissions in the connection's Security tab |
 | Token mints but safe outputs return 401/403 | The service principal doesn't have sufficient ADO permissions — verify its group membership in ADO Organization Settings → Users |
 | "AADSTS700024: Client assertion is not within its valid time range" | Federated credential issuer/subject mismatch — regenerate in the App Registration |
-| Compilation error: "require write access to ADO, but no write service connection is configured" | Your agent uses write-requiring safe outputs but is missing `permissions.write` in front matter |
+| Cross-project safe-output writes fail with 403 even though default executor token usually works | The pipeline setting "Limit job authorization scope to current project" is restricting `$(System.AccessToken)`. Either disable it (broader scope) or set `permissions.write` to an ARM SC with explicit cross-project rights |

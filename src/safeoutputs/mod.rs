@@ -26,11 +26,19 @@ pub const ALWAYS_ON_TOOLS: &[&str] = tool_names![
     ReportIncompleteResult,
 ];
 
-/// Safe-output tools that require write access to ADO.
+/// Safe-output tools that perform write operations against ADO.
 /// Compile-time derived from tool types via `ToolResult::NAME`.
+///
+/// **Informational only.** The Stage 3 executor always receives a
+/// `SYSTEM_ACCESSTOKEN` (sourced from the pipeline's built-in
+/// `$(System.AccessToken)` by default, or from a `permissions.write` ARM
+/// service connection when one is configured). This list is kept so other
+/// compiler/runtime code (e.g. audit) can identify write-bearing tools, but
+/// the compiler no longer fails when one is configured without an ARM SC.
 ///
 /// Adding a new write-requiring tool: create the struct with `tool_result!{ write = true, ... }`,
 /// then add its type to this list.
+#[allow(dead_code)]
 pub const WRITE_REQUIRING_SAFE_OUTPUTS: &[&str] = tool_names![
     CreateWorkItemResult,
     CommentOnWorkItemResult,

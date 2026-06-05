@@ -144,7 +144,10 @@ network:                       # optional network policy (standalone target only
     - "evil.example.com"
 permissions:                   # optional ADO access token configuration
   read: my-read-arm-connection   # ARM service connection for read-only ADO access (Stage 1 agent)
-  write: my-write-arm-connection # ARM service connection for write ADO access (Stage 3 executor only)
+  write: my-write-arm-connection # OPTIONAL ARM SC for Stage 3 executor writes.
+                                 # Default: executor uses $(System.AccessToken).
+                                 # Set this only for cross-org writes or
+                                 # named-identity attribution.
 parameters:                    # optional ADO runtime parameters (surfaced in UI when queuing a run)
   - name: clearMemory
     displayName: "Clear agent memory"
