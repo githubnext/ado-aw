@@ -31,6 +31,10 @@ use crate::compile::types::{PipelineFilters, PrFilters};
 
 const GATE_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/gate.js";
 pub(crate) const IMPORT_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/import.js";
+/// Path to the exec-context-pr bundle inside the unpacked `ado-script.zip`.
+/// Consumed by `src/compile/extensions/exec_context/pr.rs` to invoke
+/// the bundle from the PR contributor's prepare step.
+pub const EXEC_CONTEXT_PR_PATH: &str = "/tmp/ado-aw-scripts/ado-script/exec-context-pr.js";
 const RELEASE_BASE_URL: &str = "https://github.com/githubnext/ado-aw/releases/download";
 
 /// Single always-on extension that owns all `ado-script` bundle wiring.
@@ -38,6 +42,16 @@ pub struct AdoScriptExtension {
     pub pr_filters: Option<PrFilters>,
     pub pipeline_filters: Option<PipelineFilters>,
     pub inlined_imports: bool,
+    /// Whether the PR-context contributor will activate. When true,
+    /// the Agent-job install/download must fire even if
+    /// `runtime_imports_active()` is false (i.e. the user has
+    /// `inlined-imports: true` but a PR trigger configured), so that
+    /// `exec-context-pr.js` is present for the `pr.rs` invocation.
+    ///
+    /// Populated at construction by `collect_extensions` using the
+    /// shared `exec_context_pr_active` predicate so this stays in
+    /// lock-step with `ExecContextExtension`'s own activation gate.
+    pub exec_context_pr_active: bool,
 }
 
 impl AdoScriptExtension {
@@ -175,11 +189,26 @@ impl CompilerExtension for AdoScriptExtension {
     }
 
     fn prepare_steps(&self, _ctx: &CompileContext) -> Vec<String> {
-        if !self.runtime_imports_active() {
+        // The Agent-job install/download must fire when ANY downstream
+        // consumer is active. Today there are two:
+        //  - `import.js` (runtime-import resolver) — runs when
+        //    `inlined-imports: false`.
+        //  - `exec-context-pr.js` (PR-context precompute) — runs when
+        //    the PR contributor activates (`on.pr` configured AND
+        //    `execution-context.pr.enabled != false`).
+        //
+        // The exec-context-pr invocation itself is emitted by
+        // `ExecContextExtension::prepare_steps` (Tool phase, runs
+        // after this System-phase install/download), not here, so the
+        // two extensions stay loosely coupled.
+        let import_active = self.runtime_imports_active();
+        if !import_active && !self.exec_context_pr_active {
             return vec![];
         }
         let mut steps = install_and_download_steps();
-        steps.push(resolver_step());
+        if import_active {
+            steps.push(resolver_step());
+        }
         steps
     }
 
@@ -380,6 +409,7 @@ mod tests {
             pr_filters: pr,
             pipeline_filters: pipeline,
             inlined_imports: inlined,
+            exec_context_pr_active: false,
         }
     }
 

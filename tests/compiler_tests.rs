@@ -4956,8 +4956,14 @@ fn test_execution_context_pr_compiled_output_is_valid_yaml() {
     assert_valid_yaml(&compiled, "execution-context-agent.md");
 }
 
-/// Spot-checks the key components of the precompute step + the
-/// directly-injected prompt fragment that the agent depends on.
+/// Spot-checks the key components of the precompute step. v7 ports
+/// the precompute logic to an `ado-script` bundle
+/// (`exec-context-pr.js`), so the bash step is now a slim node
+/// invocation. Body-level behavioural coverage (regex validation,
+/// merge-base resolution, GIT_CONFIG_* bearer injection, prompt
+/// fragment shape) lives in vitest unit + smoke tests under
+/// `scripts/ado-script/src/exec-context-pr/__tests__/` and
+/// `scripts/ado-script/test/smoke.test.ts`.
 #[test]
 fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
     let compiled = compile_fixture("execution-context-agent.md");
@@ -4974,89 +4980,75 @@ fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
         compiled.contains("SYSTEM_ACCESSTOKEN: $(System.AccessToken)"),
         "Prepare step must map the system access token into its own env"
     );
+
+    // v7: the prepare step is a node invocation of the bundle. The
+    // path is the literal `EXEC_CONTEXT_PR_PATH` constant exported by
+    // `ado_script.rs`. The bundle is installed in the Agent job by
+    // `AdoScriptExtension::prepare_steps`, which runs in
+    // `ExtensionPhase::System` and thus appears before this step
+    // (which runs in `ExtensionPhase::Tool`).
     assert!(
-        compiled.contains("GIT_CONFIG_KEY_0=\"http.extraheader\""),
-        "Prepare step must use GIT_CONFIG_* env vars (not `git -c`) to inject the bearer, \
-         so the token does not appear in process argv"
-    );
-    assert!(
-        compiled.contains("GIT_CONFIG_VALUE_0=\"Authorization: bearer ${SYSTEM_ACCESSTOKEN}\""),
-        "Prepare step must source the bearer from the in-process SYSTEM_ACCESSTOKEN env"
+        compiled.contains("node '/tmp/ado-aw-scripts/ado-script/exec-context-pr.js'"),
+        "v7: prepare step must invoke the exec-context-pr.js bundle"
     );
 
-    // v6.2: artefact set is {base.sha, head.sha} on success + error.txt on failure.
+    // v7: all the bash-side specifics (GIT_CONFIG_*, regex validation,
+    // $AW_PR_DIR, status.txt, etc.) have moved into the TS bundle.
+    // They MUST NOT appear in the generated YAML.
     assert!(
-        compiled.contains("$AW_PR_DIR/base.sha"),
-        "Prepare step must write base.sha (the merge-base SHA the agent diffs against)"
+        !compiled.contains("GIT_CONFIG_KEY_0"),
+        "v7: GIT_CONFIG_* bearer injection moved into the bundle's git child env; \
+         it must not appear in the emitted prepare step's bash"
     );
     assert!(
-        compiled.contains("$AW_PR_DIR/head.sha"),
-        "Prepare step must write head.sha (the PR head SHA)"
+        !compiled.contains("AW_PR_DIR"),
+        "v7: artefact path construction lives in the bundle; \
+         the prepare step must not reference $AW_PR_DIR"
     );
     assert!(
-        compiled.contains("$AW_PR_DIR/error.txt"),
-        "Prepare step must write error.txt on failure"
-    );
-    assert!(
-        !compiled.contains("aw-context/pr/status.txt") &&
-            !compiled.contains("$AW_PR_DIR/status.txt"),
-        "v6.2: status.txt is gone -- the prompt text encodes the outcome instead"
-    );
-    assert!(
-        !compiled.contains("$AW_PR_DIR/diff.patch"),
-        "v6.2: diff.patch is gone -- the agent runs `git diff $BASE..$HEAD` itself"
-    );
-    assert!(
-        !compiled.contains("$AW_PR_DIR/metadata.txt"),
-        "v6.2: metadata.txt is gone -- short identifiers are inlined in the prompt"
+        !compiled.contains("git_fetch()"),
+        "v7: the git_fetch wrapper moved into the bundle"
     );
 
-    // v6.2: PR identifier regex validation must be present.
+    // v7: env passthrough — Node reads the ADO predefined vars from
+    // `process.env` (see `index.ts::main` and `validate.ts`).
     assert!(
-        compiled.contains("PR identifier validation failed"),
-        "Prepare step must validate PR_ID / PROJECT / REPO with an allowlist regex \
-         before interpolating them into the agent prompt"
+        compiled.contains("SYSTEM_PULLREQUEST_PULLREQUESTID: $(System.PullRequest.PullRequestId)"),
+        "Prepare step must pass the PR id through to the bundle"
     );
     assert!(
-        compiled.contains(r#"[[ ! "$PR_ID" =~ ^[0-9]+$ ]]"#),
-        "Prepare step must require numeric PR id"
-    );
-
-    // v6.2: prompt is appended directly to /tmp/awf-tools/agent-prompt.md
-    // via printf calls inside the prepare step (not via the
-    // `prompt_supplement` trait).
-    assert!(
-        compiled.contains("AGENT_PROMPT=\"/tmp/awf-tools/agent-prompt.md\""),
-        "Prepare step must target the AWF agent-prompt file directly"
+        compiled.contains("SYSTEM_PULLREQUEST_TARGETBRANCH: $(System.PullRequest.TargetBranch)"),
+        "Prepare step must pass the PR target branch through to the bundle"
     );
     assert!(
-        compiled.contains(">> \"$AGENT_PROMPT\""),
-        "Prepare step must append its prompt fragment to the agent prompt file"
+        compiled.contains("SYSTEM_TEAMPROJECT: $(System.TeamProject)"),
+        "Prepare step must pass the ADO project name through to the bundle"
     );
     assert!(
-        compiled.contains("## PR context"),
-        "Agent prompt should gain a `## PR context` section at runtime"
+        compiled.contains("BUILD_REPOSITORY_NAME: $(Build.Repository.Name)"),
+        "Prepare step must pass the repository name through to the bundle"
     );
     assert!(
-        compiled.contains(r#"repo_get_pull_request_by_id(project='%s', repositoryId='%s', pullRequestId=%s)"#),
-        "Prompt should illustrate ADO MCP usage with interpolated identifiers"
+        compiled.contains("BUILD_SOURCESDIRECTORY: $(Build.SourcesDirectory)"),
+        "Prepare step must pass the workspace root through to the bundle"
     );
 
-    // v6.2: prompt_supplement is no longer emitted for the
-    // execution-context extension -- the wrapper that would emit
-    // "Append Execution Context prompt" should not appear.
+    // v7: the bundle install/download must be present in the Agent
+    // job. AdoScriptExtension owns this — it fires whenever EITHER
+    // import.js OR exec-context-pr.js is needed.
+    assert!(
+        compiled.contains("ado-script.zip"),
+        "v7: AdoScriptExtension must install + download the bundle in the Agent job \
+         when the PR contributor is active"
+    );
+
+    // v6.2 carry-over: the prompt_supplement trait is NOT implemented
+    // by ExecContextExtension. The wrapper step must not be emitted.
     assert!(
         !compiled.contains("Append Execution Context prompt"),
-        "v6.2: ExecContextExtension::prompt_supplement is removed; \
+        "ExecContextExtension::prompt_supplement is removed; \
          the wrapper step must not be emitted"
     );
-
-    // v6.2: the agent bash allow-list must include the read-only
-    // git commands so the agent can actually diff inside the sandbox.
-    // The fixture's tools.bash is unset (= wildcard), so the engine
-    // bypasses the per-command allow-list entirely. We assert the
-    // explicit-allow-list case via the dedicated bash-allowlist test
-    // below.
 }
 
 /// **Trust-boundary regression test.** `SYSTEM_ACCESSTOKEN` must appear
@@ -5384,52 +5376,20 @@ Body.
     );
 }
 
-/// v6.2 correctness fix: in BOTH the synthetic-merge-commit path and
-/// the progressive-deepening path, `BASE_SHA` is the true common
-/// ancestor (`git merge-base`), so `git diff $BASE..$HEAD` produces
-/// the same change set regardless of which path runs. Regression
-/// guard against the old behaviour where the synthetic path used
-/// `HEAD^1` (the target tip) directly, giving a narrower diff.
-#[test]
-fn test_execution_context_pr_synthetic_merge_uses_merge_base() {
-    let compiled = compile_fixture("execution-context-agent.md");
+// v6.2 correctness fix: in BOTH the synthetic-merge-commit path and
+// the progressive-deepening path, `BASE_SHA` is the true common
+// ancestor (`git merge-base`), so `git diff $BASE..$HEAD` produces
+// the same change set regardless of which path runs. v7: this
+// invariant is now enforced by the `exec-context-pr.js` bundle (see
+// `merge-base.ts::resolveMergeBase`); the vitest test
+// `falls back to HEAD^1 when synthetic-merge merge-base cannot resolve`
+// guards the regression there. This Rust-side test is removed —
+// asserting bash literals against a node-invocation step makes no
+// sense.
 
-    // The synthetic-merge branch of the prepare step MUST compute
-    // merge-base from the two parents, not use HEAD^1 directly as
-    // BASE_SHA. We look for the literal `git merge-base "$MERGE_P1"
-    // "$MERGE_P2"` invocation.
-    assert!(
-        compiled.contains(r#"git merge-base "$MERGE_P1" "$MERGE_P2""#),
-        "synthetic-merge-commit branch must compute merge-base from the two \
-         parents so BASE_SHA has the same semantics as the deepening path. \
-         Compiled YAML does not contain the expected merge-base invocation."
-    );
-
-    // Defensive: the OLD (incorrect) shape — assigning HEAD^1
-    // directly to BASE_SHA — must NOT appear.
-    assert!(
-        !compiled.contains(r#"BASE_SHA="$(git rev-parse 'HEAD^1'"#),
-        "regression: synthetic-merge branch must not assign HEAD^1 directly \
-         to BASE_SHA; that gives a narrower 'vs target tip' diff instead of \
-         the consistent 'since branch-point' diff."
-    );
-}
-
-/// v6.2 defence-in-depth: `PR_TARGET_BRANCH` (which gets interpolated
-/// into a git refspec) is validated with the same posture as the
-/// other identifiers — strict allowlist regex — even though it
-/// comes from ADO infra rather than user-controlled input.
-#[test]
-fn test_execution_context_pr_target_branch_validated() {
-    let compiled = compile_fixture("execution-context-agent.md");
-
-    // The validation line for PR_TARGET_BRANCH must be present.
-    // Character class matches the regex in pr.rs:
-    //     ^[A-Za-z0-9._/-]+$
-    assert!(
-        compiled.contains(r#"[[ ! "$PR_TARGET_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]]"#),
-        "PR_TARGET_BRANCH must be validated with a strict allowlist regex \
-         before interpolation into a git refspec. Compiled YAML lacks the \
-         expected validation."
-    );
-}
+// v6.2 defence-in-depth: `PR_TARGET_BRANCH` (which gets interpolated
+// into a git refspec) is validated with a strict allowlist regex.
+// v7: this validation now lives in the `exec-context-pr.js` bundle
+// (see `validate.ts::TARGET_BRANCH_RE`); the vitest tests under
+// `validate.test.ts` guard the regression there. This Rust-side
+// test is removed for the same reason.

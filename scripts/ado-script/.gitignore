@@ -2,5 +2,6 @@ node_modules
 .ado-build
 gate.js
 import.js
+exec-context-pr.js
 schema
 *.tsbuildinfo

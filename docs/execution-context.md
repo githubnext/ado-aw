@@ -177,7 +177,12 @@ PR contributor opts out of the corresponding git capability.
 
 ## What the precompute step does
 
-The PR contributor's generated bash step:
+The PR contributor's prepare step is a 4-line bash wrapper that
+invokes `node /tmp/ado-aw-scripts/ado-script/exec-context-pr.js`
+with `SYSTEM_ACCESSTOKEN` plus the five `SYSTEM_*` / `BUILD_*`
+identifier env vars passed through. The actual work lives in the
+[`exec-context-pr.js` bundle](ado-script.md#what-exec-context-prjs-does)
+under `scripts/ado-script/src/exec-context-pr/`. The bundle:
 
 1. **Reads `System.PullRequest.*` and `System.TeamProject` /
    `Build.Repository.Name` from the environment.** No manual ref
@@ -185,30 +190,57 @@ The PR contributor's generated bash step:
 2. **Validates identifiers** with strict allowlist regexes
    (`PR_ID` ⊆ digits, `PROJECT`/`REPO` ⊆ alphanumeric + `._-`,
    `PROJECT` additionally allows space, `PR_TARGET_BRANCH` ⊆
-   alphanumeric + `._/-`). Failure writes `error.txt` and appends
-   the failure prompt fragment.
-3. **Detects merge-commit shape.** If `HEAD` has two parents (the
-   synthetic merge commit ADO checks out for PR builds), uses
-   `HEAD^2` as the PR head and computes `git merge-base HEAD^1 HEAD^2`
-   as the base — same semantics as the deepening path, no
-   target-branch fetch needed. Otherwise:
+   alphanumeric + `._/-`). See `validate.ts`. Failure writes
+   `error.txt` and appends the failure prompt fragment.
+3. **Detects merge-commit shape.** If `HEAD` has ≥ 3 tokens in
+   `git rev-list --parents HEAD` (the synthetic merge commit ADO
+   checks out for PR builds), uses `HEAD^2` as the PR head and
+   computes `git merge-base HEAD^1 HEAD^2` as the base — same
+   semantics as the deepening path, no target-branch fetch needed.
+   Otherwise:
 4. **Fetches the PR target branch with progressive deepening** —
    `--depth=200`, then `500`, then `2000`, then finally `--unshallow`.
    After each successful fetch, attempts `git merge-base
    origin/<target> HEAD` and continues to the next depth if it
-   cannot resolve yet.
+   cannot resolve yet. See `merge-base.ts`.
 5. **Writes `base.sha` and `head.sha`** on success and appends the
-   success prompt fragment to `/tmp/awf-tools/agent-prompt.md`.
+   success prompt fragment to `/tmp/awf-tools/agent-prompt.md` (path
+   overridable via `AW_AGENT_PROMPT_FILE` for tests). See
+   `prompt.ts`.
 6. **On failure**, writes `error.txt` and appends the failure prompt
    fragment.
 
-The step exits 0 in both success and failure paths so the build
+The bundle exits 0 in both success and failure paths so the build
 proceeds — the agent surfaces failures via the prompt fragment, not
-via a build break.
+via a build break. The only exit-1 path is a hard infrastructure
+failure (e.g. the workspace root is not writable, so the `mkdir -p
+aw-context/pr` cannot be created); the wrapper bash's `set -euo
+pipefail` propagates that to the pipeline.
 
 The whole step is gated by `condition: eq(variables['Build.Reason'],
 'PullRequest')` so it is a no-op on manual or scheduled queues of a
 PR-triggered pipeline.
+
+### Why a TypeScript bundle?
+
+The previous incarnation embedded ~190 lines of bash heredoc into
+the emitted YAML, with only end-to-end shellcheck for coverage. The
+TS port gains:
+
+- **Unit-test coverage** — 32 vitest tests across `validate.ts`,
+  `git.ts`, `merge-base.ts`, `prompt.ts` plus 3 end-to-end smoke
+  tests that exercise a synthetic-merge git repo.
+- **Tighter trust boundary** — the bearer lives only in the Node
+  process's env and is injected into the spawned `git` child via
+  `GIT_CONFIG_*` env vars (`git.ts::bearerEnv`), not into the
+  wrapping bash shell.
+- **Smaller emitted YAML** — `pr.rs` shrinks from ~320 lines to
+  ~145 lines; the emitted step body is 4 lines instead of ~190.
+
+The bundle is installed and downloaded into the Agent job by
+`AdoScriptExtension`, which fires whenever either `import.js` or
+`exec-context-pr.js` is needed. See
+[`ado-script.md`](ado-script.md#agent-job-runtime-import-resolver--pr-context-precompute).
 
 ## Trust boundary
 
@@ -220,7 +252,7 @@ preserves the Stage 1 read-only invariant with these design choices:
 |-----------------------------------------------------------|----------|
 | Override `checkout: self` with `persistCredentials: true` | **Rejected.** It would write the build identity's bearer into `.git/config` inside the workspace, which is then mounted into the AWF sandbox where the agent could read and exfiltrate it. |
 | Override `checkout: self` with `fetchDepth: 0`            | **Rejected.** Unnecessary — the precompute fetches exactly the refs it needs. |
-| In-step `SYSTEM_ACCESSTOKEN` + `GIT_CONFIG_*` bearer env  | **Adopted.** `SYSTEM_ACCESSTOKEN` is mapped from `$(System.AccessToken)` only into the precompute step's process env. `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_0` / `GIT_CONFIG_VALUE_0` inject `http.extraheader: Authorization: bearer …` into `git fetch` *via env vars* (not via `git -c` on argv) so the token never appears in process listings. The token lives only in the bash step's process memory and is never written to disk. |
+| In-step `SYSTEM_ACCESSTOKEN` + `GIT_CONFIG_*` bearer env  | **Adopted.** `SYSTEM_ACCESSTOKEN` is mapped from `$(System.AccessToken)` only into the `node exec-context-pr.js` step's process env. The bundle's `git.ts::bearerEnv` then injects `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_0` / `GIT_CONFIG_VALUE_0` into the *spawned `git` child process's* env only — not into the Node process's own env, and never via `git -c` on argv. The token never appears in process listings and is never written to disk. After the Node process exits, the bearer is gone from the runtime environment the agent inherits. |
 
 After the precompute step exits, the bearer is gone from the runtime
 environment the agent inherits, `.git/config` contains no

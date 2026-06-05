@@ -36,10 +36,48 @@ mod contributor;
 mod pr;
 
 use crate::compile::extensions::{CompileContext, CompilerExtension, ExtensionPhase};
-use crate::compile::types::ExecutionContextConfig;
+use crate::compile::types::{ExecutionContextConfig, FrontMatter};
 
 use contributor::{ContextContributor, Contributor};
 use pr::PrContextContributor;
+
+/// Returns `true` iff the PR-context contributor will activate for the
+/// given front matter. Shared between `ExecContextExtension::new` (for
+/// its own `any_contributor_active` precomputation) and
+/// `collect_extensions` (which passes it to `AdoScriptExtension` so
+/// the Agent-job install/download fires whenever the bundle is needed).
+///
+/// MAINTENANCE: this MUST match `PrContextContributor::should_activate`
+/// (in `pr.rs`). The duplication is intentional — `should_activate`
+/// takes a `CompileContext` that includes both front matter and target,
+/// while this helper only needs the front matter (because `target` is
+/// not relevant to PR activation today).
+pub fn pr_contributor_will_activate(front_matter: &FrontMatter) -> bool {
+    let cfg = front_matter
+        .execution_context
+        .clone()
+        .unwrap_or_default();
+    pr_contributor_will_activate_with_cfg(&cfg, front_matter)
+}
+
+/// Variant that takes the resolved `ExecutionContextConfig` explicitly.
+/// Used by [`ExecContextExtension::new`] so its internal
+/// `any_contributor_active` precomputation tracks the config it was
+/// handed, not just the config embedded in `front_matter` (which can
+/// diverge in unit tests).
+fn pr_contributor_will_activate_with_cfg(
+    cfg: &ExecutionContextConfig,
+    front_matter: &FrontMatter,
+) -> bool {
+    if front_matter.pr_trigger().is_none() {
+        return false;
+    }
+    if !cfg.is_enabled() {
+        return false;
+    }
+    let pr_enabled = cfg.pr.as_ref().and_then(|p| p.enabled);
+    !matches!(pr_enabled, Some(false))
+}
 
 /// Always-on execution-context extension.
 ///
@@ -69,36 +107,17 @@ impl ExecContextExtension {
         config: ExecutionContextConfig,
         front_matter: &crate::compile::types::FrontMatter,
     ) -> Self {
-        // Pre-compute whether *any* contributor will activate, mirroring
-        // each contributor's `should_activate` logic. The duplication is
-        // intentional: keeping `should_activate` as the runtime
-        // source-of-truth for `prepare_steps` (which DOES have a
-        // `CompileContext`) and this aggregate for
-        // `required_bash_commands` (which does not).
-        //
-        // MAINTENANCE: keep this aggregate in lock-step with each
-        // contributor's `should_activate`. When adding a new
-        // contributor, OR-in its activation predicate here so its
-        // `required_bash_commands` are not silently suppressed.
-        //
-        // For the PR contributor specifically: `on.pr` is REQUIRED.
-        // An explicit `pr.enabled: true` on a non-PR-triggered agent
-        // does NOT activate (the prepare step would be dead code
-        // because of the runtime `Build.Reason == 'PullRequest'` gate,
-        // and silently widening the agent's bash allow-list with the
-        // 7 git commands for a step that can never run is a footgun).
-        let pr_trigger_configured = front_matter.pr_trigger().is_some();
-        let pr_active = if !pr_trigger_configured {
-            false
-        } else {
-            match config.pr.as_ref().and_then(|p| p.enabled) {
-                Some(false) => false,
-                Some(true) | None => true,
-            }
-        };
+        // Use the shared activation predicate so this stays in
+        // lock-step with `collect_extensions` (which passes the same
+        // signal to `AdoScriptExtension`). Use the cfg-aware variant
+        // so unit tests that construct a custom `config` (separate
+        // from `front_matter.execution_context`) still see the right
+        // activation answer.
+        let any_contributor_active =
+            pr_contributor_will_activate_with_cfg(&config, front_matter);
         Self {
             config,
-            any_contributor_active: pr_active,
+            any_contributor_active,
         }
     }
 
