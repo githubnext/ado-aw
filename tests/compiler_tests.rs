@@ -4544,27 +4544,70 @@ fn test_agent_job_steps_do_not_map_system_access_token() {
     }
 }
 
-/// Always-on Azure CLI extension: every compiled pipeline must mount the
-/// host's `az` binary into AWF and add Azure auth hosts to the allow-list.
-/// Also guards against accidental re-introduction of an install step.
+/// Always-on Azure CLI extension: every compiled pipeline must include a
+/// host-detection prepare step that conditionally sets the `AW_AZ_MOUNTS`
+/// pipeline variable, and the AWF invocation must reference that
+/// variable so the mounts are added at pipeline time only when az is
+/// present on the runner. Also asserts that Azure auth hosts are in the
+/// allow-list and guards against accidental re-introduction of an
+/// install step.
 #[test]
 fn test_default_pipeline_mounts_az_and_allows_azure_hosts() {
     let compiled = compile_fixture("minimal-agent.md");
     assert_valid_yaml(&compiled, "minimal-agent.md");
 
-    // (1) AWF mount args for both az paths must be present.
+    // (1) The detection prepare step must be present. It is the only
+    // mechanism by which az gets mounted into AWF, so its presence is
+    // load-bearing for the "always-on az" promise. The displayName is
+    // also part of the compiled YAML and is what operators see in the
+    // ADO log; if it changes the documentation in docs/network.md and
+    // docs/tools.md should be updated too.
     assert!(
-        compiled.contains(r#"--mount "/opt/az:/opt/az:ro""#),
-        "compiled YAML must mount /opt/az:/opt/az:ro into the AWF container. \
+        compiled.contains(r#"displayName: "Detect Azure CLI on host (for AWF mount)""#),
+        "compiled YAML must contain the Azure CLI detection prepare step. \
          Compiled:\n{compiled}"
     );
     assert!(
-        compiled.contains(r#"--mount "/usr/bin/az:/usr/bin/az:ro""#),
-        "compiled YAML must mount /usr/bin/az:/usr/bin/az:ro into the AWF container. \
+        compiled.contains("[ -f /usr/bin/az ]"),
+        "detection step must test for /usr/bin/az. Compiled:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("##vso[task.setvariable variable=AW_AZ_MOUNTS]"),
+        "detection step must set the AW_AZ_MOUNTS pipeline variable. \
          Compiled:\n{compiled}"
     );
 
-    // (2) Azure auth/management hosts must be in --allow-domains.
+    // (2) The AWF invocation must reference $(AW_AZ_MOUNTS) so the
+    // pipeline-variable value (the two --mount args, or empty) is
+    // word-split into the docker run command at runtime. Unquoted on
+    // purpose — see the safety note in `generate_awf_mounts`.
+    assert!(
+        compiled.contains("$(AW_AZ_MOUNTS) \\"),
+        "AWF invocation must include a `$(AW_AZ_MOUNTS) \\` line so the \
+         pipeline variable expands into --mount args at runtime. \
+         Compiled:\n{compiled}"
+    );
+
+    // (3) Critical guard: we must NOT emit static --mount args for az
+    // paths, because that would crash `docker run` on runners without
+    // azure-cli installed (bind source path does not exist). All az
+    // mounting must go through the runtime-detected pipeline variable.
+    assert!(
+        !compiled.contains(r#"--mount "/opt/az:/opt/az:ro""#),
+        "compiled YAML must NOT contain a static --mount for /opt/az — \
+         that would crash `docker run` on runners without azure-cli. \
+         Mounts must be contributed via the AW_AZ_MOUNTS pipeline \
+         variable. Compiled:\n{compiled}"
+    );
+    assert!(
+        !compiled.contains(r#"--mount "/usr/bin/az:/usr/bin/az:ro""#),
+        "compiled YAML must NOT contain a static --mount for /usr/bin/az — \
+         that would crash `docker run` on runners without azure-cli. \
+         Mounts must be contributed via the AW_AZ_MOUNTS pipeline \
+         variable. Compiled:\n{compiled}"
+    );
+
+    // (4) Azure auth/management hosts must be in --allow-domains.
     for host in [
         "login.microsoftonline.com",
         "management.azure.com",
@@ -4576,7 +4619,7 @@ fn test_default_pipeline_mounts_az_and_allows_azure_hosts() {
         );
     }
 
-    // (3) Regression guard: we deliberately do NOT install az; the host
+    // (5) Regression guard: we deliberately do NOT install az; the host
     // is assumed to have azure-cli pre-installed (gh-aw parity). If a
     // future contributor adds an install step we want the test suite to
     // catch it so the decision is explicit.

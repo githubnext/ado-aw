@@ -284,6 +284,16 @@ jobs:
           echo "SafeOutputs prompt appended"
         displayName: "Append SafeOutputs prompt"
 
+      - bash: |
+          set -eo pipefail
+          if [ -f /usr/bin/az ] && [ -d /opt/az ]; then
+            echo "##vso[task.setvariable variable=AW_AZ_MOUNTS]--mount /opt/az:/opt/az:ro --mount /usr/bin/az:/usr/bin/az:ro"
+            echo "Azure CLI detected on host; mounting /opt/az and /usr/bin/az into AWF sandbox."
+          else
+            echo "##vso[task.logissue type=warning]Azure CLI not detected on this runner (missing /usr/bin/az or /opt/az). The az command will not be available inside the agent sandbox. Install azure-cli on the runner image to enable it."
+          fi
+        displayName: "Detect Azure CLI on host (for AWF mount)"
+
       # Start SafeOutputs HTTP server on host (MCPG proxies to it)
       - bash: |
           SAFE_OUTPUTS_PORT=8100
@@ -452,8 +462,7 @@ jobs:
             --skip-pull \
             --env-all \
             --enable-host-access \
-            --mount "/opt/az:/opt/az:ro" \
-            --mount "/usr/bin/az:/usr/bin/az:ro" \
+            $(AW_AZ_MOUNTS) \
             --container-workdir "$(Build.SourcesDirectory)" \
             --log-level info \
             --proxy-logs-dir "$(Agent.TempDirectory)/staging/logs/firewall" \

@@ -94,18 +94,37 @@ host is presumed to have each binary pre-installed.
 
 ### Azure CLI (`az`)
 
-Every compiled pipeline mounts the host's `az` binary into the AWF
-container (`/opt/az` + `/usr/bin/az`, read-only) and adds the Azure
-auth and management hosts (`login.microsoftonline.com`,
-`login.windows.net`, `management.azure.com`, `graph.microsoft.com`,
-`aka.ms`) to the AWF allowlist. The compiler does not install `az` —
-the host is assumed to already have `azure-cli` installed.
+Every compiled pipeline adds the Azure auth and management hosts
+(`login.microsoftonline.com`, `login.windows.net`,
+`management.azure.com`, `graph.microsoft.com`, `aka.ms`) to the AWF
+allowlist and emits a *Detect Azure CLI on host* prepare step in the
+Agent job. The compiler does not install `az`.
+
+**Runtime detection + graceful degradation.** The detection step does
+two things at pipeline time:
+
+1. If `/usr/bin/az` (the launcher shim) and `/opt/az` (the Python
+   venv that `az` runs in) both exist on the runner, it sets the
+   pipeline variable
+   `AW_AZ_MOUNTS=--mount /opt/az:/opt/az:ro --mount /usr/bin/az:/usr/bin/az:ro`.
+2. If either is missing, it emits a yellow ADO warning
+   (`##vso[task.logissue type=warning]`) and leaves the variable
+   unset.
+
+The AWF invocation includes a `$(AW_AZ_MOUNTS) \` line in its
+`--mount` chain. ADO expands the variable at step start: present →
+the two mounts appear; absent → the line collapses to nothing. No
+static `--mount` is emitted for `/opt/az` or `/usr/bin/az`, so the
+pipeline never crashes `docker run` with "bind source path does not
+exist" on runners without `az`. See
+[`docs/network.md`](network.md#always-on-azure-cli-az) for the full
+design.
 
 | Host posture                          | What you get                                              |
 | ------------------------------------- | --------------------------------------------------------- |
-| Microsoft-hosted `ubuntu-latest`      | Works out of the box (`az` is pre-installed)              |
-| 1ES self-hosted pool image            | Works if the pool operator baked `azure-cli` into the image |
-| Host missing `/opt/az`                | AWF mount fails at runtime with a clear error             |
+| Microsoft-hosted `ubuntu-latest`      | Detected → mounted → `az` available in the sandbox        |
+| 1ES self-hosted pool with `azure-cli` | Same as above                                             |
+| 1ES self-hosted pool *without* `az`   | Pipeline runs; warning in ADO log; `az` is `command not found` inside the sandbox |
 
 **Auth scope (important).** The compiler does not authenticate `az` for
 general use. Two paths are supported:

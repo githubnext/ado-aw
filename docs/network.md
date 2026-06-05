@@ -51,18 +51,54 @@ The following domains are always allowed. Most are defined in `CORE_ALLOWED_HOST
 
 ## Always-on Azure CLI (`az`)
 
-Every compiled pipeline mounts the host's `az` binary (from `/opt/az` and
-`/usr/bin/az`) into the AWF container and adds the Azure auth and
-management hosts listed above (`login.microsoftonline.com`,
-`login.windows.net`, `management.azure.com`, `graph.microsoft.com`,
-`aka.ms`) to the allowlist. This mirrors gh-aw's "assume `gh` is on the
-runner" model: agents can call `az` from their bash tool without
-opting in.
+Every compiled pipeline adds the Azure auth and management hosts listed
+above (`login.microsoftonline.com`, `login.windows.net`,
+`management.azure.com`, `graph.microsoft.com`, `aka.ms`) to the AWF
+allowlist and emits a small *Detect Azure CLI on host* prepare step
+that runs early in the Agent job. This mirrors gh-aw's "assume `gh` is
+on the runner" model: agents can call `az` from their bash tool
+without opting in — *when the runner has it*.
 
-The host is assumed to have `azure-cli` pre-installed. Microsoft-hosted
-`ubuntu-latest` agents satisfy this; 1ES self-hosted pool operators must
-bake `azure-cli` into their images. If `/opt/az` is missing on the host,
-the AWF mount will fail at runtime with a clear error.
+### Runtime detection and graceful degradation
+
+Because `azure-cli` is not universally pre-installed on every ADO
+runner image (notably some 1ES self-hosted pools), the compiler does
+**not** declare static AWF bind-mounts for `/opt/az` and `/usr/bin/az`.
+Static mounts would cause `docker run` to fail with "bind source path
+does not exist" on runners without `az`, breaking the pipeline before
+the agent ever started.
+
+Instead, the prepare step does the detection itself at pipeline time:
+
+* If both `/usr/bin/az` (the launcher shim) and `/opt/az` (the Python
+  venv that `az` actually runs in) exist on the host, the step sets
+  the ADO pipeline variable
+  `AW_AZ_MOUNTS=--mount /opt/az:/opt/az:ro --mount /usr/bin/az:/usr/bin/az:ro`
+  via `##vso[task.setvariable]`.
+* If either is missing, the step emits a
+  `##vso[task.logissue type=warning]` explaining `az` won't be
+  available inside the agent sandbox and leaves `AW_AZ_MOUNTS` unset
+  (which expands to the empty string).
+
+The AWF invocation in the compiled YAML then includes a literal
+`$(AW_AZ_MOUNTS) \` line on its own in the `--mount` chain.
+At step start, ADO interpolates that pipeline variable into the bash
+script: when az is present the two `--mount` args appear; when it's
+absent the line collapses to empty whitespace + the `\` continuation,
+which is a no-op.
+
+### Operator implications
+
+- **Microsoft-hosted `ubuntu-latest`**: `az` is detected, mounted, and
+  available inside the agent sandbox. Nothing to do.
+- **1ES self-hosted runners *with* azure-cli baked in**: same as above.
+- **1ES self-hosted runners *without* azure-cli**: the pipeline runs
+  successfully, but agents that invoke `az` get the standard
+  `command not found` inside the sandbox. The warning emitted by the
+  prepare step is visible in the ADO log as a yellow-flagged issue on
+  the build summary; treat it as a signal to either ignore (if no
+  agent on that runner needs `az`) or to install `azure-cli` on the
+  runner image.
 
 See [`docs/tools.md`](tools.md#built-in-clis) for the agent-facing
 contract (auth scope, available subcommands).

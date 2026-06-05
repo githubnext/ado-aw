@@ -2909,15 +2909,33 @@ pub fn generate_awf_mounts(extensions: &[super::extensions::Extension]) -> Strin
         .flat_map(|ext| ext.required_awf_mounts())
         .collect();
 
-    if mounts.is_empty() {
+    // When the always-on AzureCli extension is enabled, append a
+    // pipeline-variable reference that expands at pipeline time to
+    // either `--mount /opt/az:/opt/az:ro --mount /usr/bin/az:/usr/bin/az:ro`
+    // (when the runner has azure-cli installed) or to nothing (when it
+    // doesn't). The detection + setvariable happens in
+    // `AzureCliExtension::prepare_steps`. This avoids static bind-mounts
+    // that would crash `docker run` on 1ES self-hosted runners without
+    // azure-cli pre-installed.
+    let inject_az_var = extensions
+        .iter()
+        .any(|ext| matches!(ext, super::extensions::Extension::AzureCli(_)));
+
+    if mounts.is_empty() && !inject_az_var {
         return "\\".to_string();
     }
 
-    mounts
+    let mut lines: Vec<String> = mounts
         .iter()
         .map(|m| format!("--mount \"{}\" \\", m))
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    if inject_az_var {
+        // Unquoted on purpose: bash word-splits the pipeline-var value
+        // into separate `--mount <spec>` tokens. The value contains only
+        // path chars + `:` + spaces, no shell metachars.
+        lines.push("$(AW_AZ_MOUNTS) \\".to_string());
+    }
+    lines.join("\n")
 }
 
 /// Generates a dedicated pipeline step that writes a `GITHUB_PATH` file
@@ -6779,20 +6797,24 @@ safe-outputs:
     #[test]
     fn test_generate_awf_mounts_no_extensions() {
         // Even with a minimal front matter, the always-on Azure CLI
-        // extension contributes its two AWF mounts (/opt/az + /usr/bin/az).
-        // The "no mounts" name is historical; this test now verifies the
-        // always-on baseline.
+        // extension contributes a `$(AW_AZ_MOUNTS) \` injection line
+        // (no static mounts — those are runtime-detected by the
+        // AzureCli prepare step which sets the pipeline variable).
+        // The "no mounts" name is historical; this test now verifies
+        // the always-on baseline.
         let fm = minimal_front_matter();
         let exts = crate::compile::extensions::collect_extensions(&fm);
         let _ctx = crate::compile::extensions::CompileContext::for_test(&fm);
         let result = generate_awf_mounts(&exts);
         assert!(
-            result.contains(r#"--mount "/opt/az:/opt/az:ro""#),
-            "always-on Azure CLI mount /opt/az should be present: {result}"
+            result.contains("$(AW_AZ_MOUNTS) \\"),
+            "always-on Azure CLI injection line $(AW_AZ_MOUNTS) \\ should be present \
+             (so the AzureCli prepare step's pipeline variable expands into runtime mounts): {result}"
         );
         assert!(
-            result.contains(r#"--mount "/usr/bin/az:/usr/bin/az:ro""#),
-            "always-on Azure CLI mount /usr/bin/az should be present: {result}"
+            !result.contains(r#"--mount "/opt/az:/opt/az:ro""#),
+            "must NOT emit a static /opt/az --mount — that would crash docker run on \
+             runners without azure-cli. The mount is contributed via $(AW_AZ_MOUNTS) instead: {result}"
         );
         assert!(
             result.ends_with(" \\"),

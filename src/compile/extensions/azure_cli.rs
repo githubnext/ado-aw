@@ -1,26 +1,47 @@
-use super::{AwfMount, AwfMountMode, CompilerExtension, ExtensionPhase};
+use super::{AwfMount, CompilerExtension, CompileContext, ExtensionPhase};
 
 // ─── Azure CLI (always-on, install-free, gh-aw parity) ────────────────
 
 /// Azure CLI extension.
 ///
 /// Always-on internal extension that exposes the host's pre-installed
-/// `az` binary to the agent inside the AWF Docker container, and adds
-/// the necessary Azure auth/management hosts to the AWF allowlist so
-/// `az` calls aren't blocked by the L7 proxy.
+/// `az` binary to the agent inside the AWF Docker container (when
+/// present), and adds the necessary Azure auth/management hosts to the
+/// AWF allowlist so `az` calls aren't blocked by the L7 proxy.
 ///
 /// **Install posture.** Mirrors gh-aw's "assume the CLI is on the
-/// runner" model: this extension does NOT install `az`. It assumes the
-/// host has azure-cli pre-installed, which is true for Microsoft-hosted
-/// `ubuntu-latest` agents (`/opt/az/` + `/usr/bin/az`). 1ES self-hosted
-/// pool operators are responsible for baking `az` into their images; if
-/// `az` is missing, the AWF mount of `/opt/az` will fail at runtime
-/// with a clear error.
+/// runner" model: this extension does NOT install `az`. Microsoft-hosted
+/// `ubuntu-latest` agents ship with azure-cli pre-installed at
+/// `/opt/az/` + `/usr/bin/az`. 1ES self-hosted pool operators are
+/// responsible for baking `az` into their images if they want it
+/// available to agents.
 ///
-/// **AWF mounts.** AWF auto-mounts `/tmp` and `/opt/hostedtoolcache`
-/// only, so without explicit mounts the host's `az` is invisible inside
-/// the container. We bind-mount both the `/opt/az` Python venv that
-/// `az` is implemented in and the `/usr/bin/az` launcher shim.
+/// **Graceful runtime detection.** Instead of declaring static AWF
+/// mounts (which would crash `docker run` with "bind source path does
+/// not exist" on runners without azure-cli), this extension contributes
+/// a [`prepare_steps`] bash step that runs in the Agent job *before*
+/// the AWF invocation:
+///
+/// * If both `/usr/bin/az` and `/opt/az` exist on the host, the step
+///   sets the ADO pipeline variable `AW_AZ_MOUNTS` to
+///   `--mount /opt/az:/opt/az:ro --mount /usr/bin/az:/usr/bin/az:ro`
+///   via `##vso[task.setvariable]`.
+/// * Otherwise, the step emits a `##vso[task.logissue type=warning]`
+///   explaining `az` won't be available inside the agent sandbox and
+///   leaves `AW_AZ_MOUNTS` unset (expands to the empty string).
+///
+/// The AWF invocation in `base.yml`/`1es-base.yml`/etc. then includes a
+/// `$(AW_AZ_MOUNTS) \` line (injected by
+/// [`crate::compile::common::generate_awf_mounts`] when `AzureCli` is
+/// present in the extension list). At pipeline time this expands to
+/// either the two `--mount` args or nothing — bash word-splits on the
+/// expansion either way.
+///
+/// **Allowlist + bash command.** The 5 Azure auth/management hosts and
+/// the `az` bash command name are added unconditionally — they are
+/// inert when the runtime detection skips the mount (allowing hosts you
+/// can't reach and a command that doesn't resolve is harmless and
+/// keeps the compiled YAML deterministic across runner types).
 ///
 /// **Auth.** `az devops` subcommands read `AZURE_DEVOPS_EXT_PAT` (set
 /// inside AWF when `permissions.read` is configured). General `az`
@@ -57,23 +78,61 @@ impl CompilerExtension for AzureCliExtension {
     }
 
     fn required_awf_mounts(&self) -> Vec<AwfMount> {
-        // /opt/az holds the Python venv that the `az` CLI runs in
-        // (azure-cli is implemented as a Python package). /usr/bin/az is
-        // the launcher shim that activates the venv and dispatches.
-        // Both must be mounted for `az` to work inside AWF.
-        vec![
-            AwfMount::new("/opt/az", "/opt/az", AwfMountMode::ReadOnly),
-            AwfMount::new("/usr/bin/az", "/usr/bin/az", AwfMountMode::ReadOnly),
-        ]
-        // No awf_path_prepends() needed: /usr/bin is already on PATH
-        // inside the AWF container's base image.
-        // No prepare_steps() needed: host is assumed to have az pre-installed.
+        // Intentionally empty — declaring static mounts here would cause
+        // `docker run` to fail with "bind source path does not exist" on
+        // runners that don't have azure-cli pre-installed (e.g. some 1ES
+        // self-hosted pools). The mounts are decided at pipeline time
+        // by `prepare_steps` below, which sets the `AW_AZ_MOUNTS`
+        // pipeline variable; `generate_awf_mounts` then injects a
+        // `$(AW_AZ_MOUNTS) \` line into the AWF invocation that expands
+        // to the mounts when az is present and to nothing when it isn't.
+        vec![]
+    }
+
+    fn prepare_steps(&self, _ctx: &CompileContext) -> Vec<String> {
+        // Runtime detection step. Runs in the Agent job's prepare phase
+        // (NOT a separate Setup job) so it shares the same pipeline-
+        // variable scope as the subsequent AWF bash step. ADO pipeline
+        // variables set via `##vso[task.setvariable]` are visible as
+        // `$(NAME)` in later steps of the same job.
+        //
+        // Detection checks both /usr/bin/az (the launcher shim) AND
+        // /opt/az (the Python venv that az actually runs in). Mounting
+        // only one of the two would leave az partially available and
+        // produce confusing errors inside the sandbox.
+        //
+        // The setvariable value uses spaces between args so bash
+        // word-splits the unquoted `$(AW_AZ_MOUNTS)` expansion in the
+        // AWF invocation into clean `--mount <spec>` tokens. The value
+        // contains only path chars, `:`, and spaces — no shell
+        // metachars — so unquoted expansion is safe.
+        //
+        // Warning text is intentionally short and operator-facing.
+        // Agents that don't invoke `az` are unaffected; agents that do
+        // will get a normal "command not found" inside the sandbox.
+        let step = r###"- bash: |
+    set -eo pipefail
+    if [ -f /usr/bin/az ] && [ -d /opt/az ]; then
+      echo "##vso[task.setvariable variable=AW_AZ_MOUNTS]--mount /opt/az:/opt/az:ro --mount /usr/bin/az:/usr/bin/az:ro"
+      echo "Azure CLI detected on host; mounting /opt/az and /usr/bin/az into AWF sandbox."
+    else
+      echo "##vso[task.logissue type=warning]Azure CLI not detected on this runner (missing /usr/bin/az or /opt/az). The az command will not be available inside the agent sandbox. Install azure-cli on the runner image to enable it."
+    fi
+  displayName: "Detect Azure CLI on host (for AWF mount)"
+"###;
+        vec![step.to_string()]
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compile::extensions::CompileContext;
+    use crate::compile::types::FrontMatter;
+
+    fn fm() -> FrontMatter {
+        serde_yaml::from_str("name: t\ndescription: x\n").expect("front matter parses")
+    }
 
     #[test]
     fn test_azure_cli_required_hosts_includes_login_microsoft() {
@@ -94,29 +153,105 @@ mod tests {
     }
 
     #[test]
-    fn test_azure_cli_required_awf_mounts_includes_both_az_paths() {
+    fn test_azure_cli_required_awf_mounts_is_empty_static() {
+        // The static mount list must stay empty so `docker run` does not
+        // fail with "bind source path does not exist" on runners without
+        // azure-cli. Mounts are contributed via the pipeline variable
+        // `AW_AZ_MOUNTS` set by `prepare_steps` below and injected into
+        // the AWF chain by `generate_awf_mounts`.
         let ext = AzureCliExtension;
-        let mounts = ext.required_awf_mounts();
-        assert_eq!(
-            mounts.len(),
-            2,
-            "expected exactly two AWF mounts (/opt/az + /usr/bin/az), got: {mounts:?}"
+        assert!(
+            ext.required_awf_mounts().is_empty(),
+            "AzureCli must not contribute STATIC AWF mounts — the runner may not have az installed"
         );
-        let has_opt_az = mounts
-            .iter()
-            .any(|m| m.host_path == "/opt/az" && m.container_path == "/opt/az");
-        let has_usr_bin_az = mounts
-            .iter()
-            .any(|m| m.host_path == "/usr/bin/az" && m.container_path == "/usr/bin/az");
-        assert!(has_opt_az, "must mount /opt/az: {mounts:?}");
-        assert!(has_usr_bin_az, "must mount /usr/bin/az: {mounts:?}");
-        for m in &mounts {
-            assert_eq!(
-                m.mode,
-                AwfMountMode::ReadOnly,
-                "az mounts must be read-only (the agent has no business writing to az's install): {m:?}"
-            );
-        }
+    }
+
+    #[test]
+    fn test_azure_cli_prepare_steps_detects_az_before_setting_var() {
+        let ext = AzureCliExtension;
+        let fm = fm();
+        let ctx = CompileContext::for_test(&fm);
+        let steps = ext.prepare_steps(&ctx);
+        assert_eq!(
+            steps.len(),
+            1,
+            "expected exactly one prepare step (the az detection step), got: {steps:?}"
+        );
+        let step = &steps[0];
+        // Detection must check both the launcher shim and the venv
+        // directory — mounting only one would leave az partially
+        // available and produce confusing errors inside the sandbox.
+        assert!(
+            step.contains("[ -f /usr/bin/az ]"),
+            "prepare step must test for /usr/bin/az launcher: {step}"
+        );
+        assert!(
+            step.contains("[ -d /opt/az ]"),
+            "prepare step must test for /opt/az venv directory: {step}"
+        );
+    }
+
+    #[test]
+    fn test_azure_cli_prepare_steps_sets_aw_az_mounts_pipeline_var() {
+        let ext = AzureCliExtension;
+        let fm = fm();
+        let ctx = CompileContext::for_test(&fm);
+        let step = ext.prepare_steps(&ctx).into_iter().next().unwrap();
+        // Must use ##vso[task.setvariable] to make the value visible as
+        // $(AW_AZ_MOUNTS) in the subsequent AWF bash step.
+        assert!(
+            step.contains("##vso[task.setvariable variable=AW_AZ_MOUNTS]"),
+            "must set AW_AZ_MOUNTS pipeline variable: {step}"
+        );
+        // The value must contain both --mount args so the AWF
+        // invocation gets both /opt/az and /usr/bin/az.
+        assert!(
+            step.contains("--mount /opt/az:/opt/az:ro"),
+            "must include /opt/az mount in the setvariable value: {step}"
+        );
+        assert!(
+            step.contains("--mount /usr/bin/az:/usr/bin/az:ro"),
+            "must include /usr/bin/az mount in the setvariable value: {step}"
+        );
+    }
+
+    #[test]
+    fn test_azure_cli_prepare_steps_warns_when_az_missing() {
+        let ext = AzureCliExtension;
+        let fm = fm();
+        let ctx = CompileContext::for_test(&fm);
+        let step = ext.prepare_steps(&ctx).into_iter().next().unwrap();
+        // Must surface a visible ADO warning so operators can see why
+        // `az` isn't available inside their sandbox instead of silently
+        // failing later with "command not found".
+        assert!(
+            step.contains("##vso[task.logissue type=warning]"),
+            "must emit an ADO warning when az is not detected: {step}"
+        );
+        assert!(
+            step.contains("Azure CLI not detected"),
+            "warning text must explain the cause: {step}"
+        );
+        // The `else` branch of the `if` must be the warning branch — so
+        // the warning is the missing-az path, not the detected-az path.
+        assert!(
+            step.contains("else") && step.contains("fi"),
+            "must use a proper if/else/fi structure: {step}"
+        );
+    }
+
+    #[test]
+    fn test_azure_cli_prepare_steps_uses_pipefail() {
+        // Bash steps in this repo's lint policy require `set -eo
+        // pipefail` to avoid silent failure of any intermediate command.
+        let ext = AzureCliExtension;
+        let fm = fm();
+        let ctx = CompileContext::for_test(&fm);
+        let step = ext.prepare_steps(&ctx).into_iter().next().unwrap();
+        assert!(
+            step.contains("set -eo pipefail"),
+            "detection bash step must use set -eo pipefail: {step}"
+        );
     }
 
     #[test]
@@ -140,14 +275,10 @@ mod tests {
     }
 
     #[test]
-    fn test_azure_cli_no_prepare_steps_or_path_prepends() {
+    fn test_azure_cli_no_path_prepends() {
         // Sanity check that the install-free posture isn't accidentally
-        // regressed by a future edit that adds an apt install step or a
-        // PATH munge.
+        // regressed by a future edit that adds a PATH munge.
         let ext = AzureCliExtension;
-        // Use the CompileContext::for_test helper if available; otherwise
-        // construct a minimal one. These methods are inherited from the
-        // trait's default implementations and should return empty.
         assert!(
             ext.awf_path_prepends().is_empty(),
             "must not prepend any PATH entry — /usr/bin is already on PATH inside AWF"
