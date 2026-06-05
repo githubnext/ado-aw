@@ -20,7 +20,7 @@ tools:
     toolsets: [default]
   bash: ["*"]
 network:
-  allowed: [defaults, dev.azure.com, learn.microsoft.com]
+  allowed: [defaults, github, dev.azure.com, learn.microsoft.com]
 safe-outputs:
   create-pull-request:
     title-prefix: "chore(workflows): "
