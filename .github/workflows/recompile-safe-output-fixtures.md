@@ -1,9 +1,7 @@
 ---
 on:
-  workflow_run:
-    workflows: ["Release"]
-    types: [completed]
-    branches: [main]
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       version:
@@ -39,28 +37,7 @@ You are a deterministic release-driven recompiler for the **ado-aw** project. Ev
 
 Your goal each run is to land **at most one** focused PR that recompiles `tests/safe-outputs/*.lock.yml` against the **latest released** `ado-aw` binary. If nothing in the directory actually changes after recompilation, emit `noop` and exit.
 
-## Step 0 — Bail out early on irrelevant `workflow_run` triggers
-
-This workflow may be triggered by `workflow_run` after the `Release` workflow completes. The Release workflow runs on every push to `main`; only successful runs that actually published a release have new artifacts.
-
-If invoked via `workflow_run`:
-
-```bash
-TRIGGER="${GITHUB_EVENT_NAME:-unknown}"
-echo "trigger=$TRIGGER"
-if [ "$TRIGGER" = "workflow_run" ]; then
-  CONCLUSION="$(jq -r '.workflow_run.conclusion // empty' "$GITHUB_EVENT_PATH" 2>/dev/null || echo "")"
-  HEAD_BRANCH="$(jq -r '.workflow_run.head_branch // empty' "$GITHUB_EVENT_PATH" 2>/dev/null || echo "")"
-  echo "release_conclusion=$CONCLUSION head_branch=$HEAD_BRANCH"
-  if [ "$CONCLUSION" != "success" ] || [ "$HEAD_BRANCH" != "main" ]; then
-    echo "Release run did not succeed on main; nothing to recompile."
-    # Emit noop and stop. Do not proceed to any further steps.
-    exit 0
-  fi
-fi
-```
-
-If you exit here, emit `noop` with a one-line reason naming `$CONCLUSION` and `$HEAD_BRANCH` so the run is observable, and do not perform any other steps.
+> **Note on triggers.** This workflow is invoked by the `release` event when a new ado-aw release is published, or manually via `workflow_dispatch`. Release-please publishes the GitHub Release first; the `build` job inside the `Release` workflow then uploads the platform binaries and `checksums.txt`. By the time the `release` event fires both should be present, but Step 2 below adds a bounded retry so a slightly delayed asset upload does not cause a hard failure.
 
 ## Step 1 — Resolve the target ado-aw version
 
@@ -88,7 +65,7 @@ If the resolved tag is malformed (does not match `v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za
 
 ## Step 2 — Download and verify the released `ado-aw-linux-x64` binary
 
-Release-please publishes the GitHub Release first; the `build` job inside the `Release` workflow then uploads the platform binaries and `checksums.txt`. By the time `workflow_run` fires, both should be present, but add a bounded retry so a slightly delayed asset upload does not cause a hard failure.
+Release-please publishes the GitHub Release first; the `build` job inside the `Release` workflow then uploads the platform binaries and `checksums.txt`. By the time the `release` event fires both should be present, but add a bounded retry so a slightly delayed asset upload does not cause a hard failure.
 
 ```bash
 set -euo pipefail
@@ -265,7 +242,6 @@ The `safe-outputs.close-pull-request` configuration on this workflow targets any
 
 ## When NOT to open a PR
 
-- `workflow_run` fired for a Release-workflow run that did not succeed on `main` (Step 0).
 - The resolved tag is missing or malformed (Step 1) — emit `missing-data`.
 - Release assets never appear within the bounded retry window (Step 2) — emit `report-incomplete`.
 - `ado-aw --version` does not contain `BARE` (Step 2) — emit `missing-data`.
