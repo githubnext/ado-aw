@@ -240,9 +240,11 @@ index to jump to the right page.
 - [`docs/targets.md`](docs/targets.md) — target platforms: `standalone`,
   `1es`, `job`, and `stage`.
 - [`docs/execution-context.md`](docs/execution-context.md) — built-in
-  `aw-context/` precompute (issue #860): PR target-branch fetch,
-  unified diff, file snapshots, base/head SHAs, configured via the
-  `execution-context:` front-matter block.
+  `aw-context/` precompute (issue #860): PR target-branch fetch +
+  merge-base resolution, `base.sha`/`head.sha` artefacts, prompt
+  fragment with pre-filled ADO MCP identifiers, auto-extension of the
+  agent's bash allow-list with read-only git commands; configured via
+  the `execution-context:` front-matter block.
 - [`docs/safe-outputs.md`](docs/safe-outputs.md) — full reference for every
   safe-output tool agents can use to propose actions (PRs, work items, wiki
   pages, comments, etc.) plus their per-agent configuration.

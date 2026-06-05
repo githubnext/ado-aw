@@ -26,8 +26,12 @@ use crate::compile::extensions::CompileContext;
 /// Each contributor decides — based on `CompileContext` (front matter,
 /// triggers, target) — whether it activates. Activated contributors
 /// each emit exactly one prepare bash step (wrapped in an ADO
-/// `condition:` so non-matching trigger types skip with zero cost),
-/// plus a prompt-supplement fragment and env var declarations.
+/// `condition:` so non-matching trigger types skip with zero cost)
+/// and declare the bash commands the agent needs to inspect the
+/// staged context. Prompt-fragment injection is the contributor's
+/// own responsibility — emit `cat >> "/tmp/awf-tools/agent-prompt.md"`
+/// inside `prepare_step` for whatever (success / failure) fragment the
+/// runtime decides on.
 pub(super) trait ContextContributor {
     /// Display name for diagnostics (e.g. `"pr"`).
     #[allow(dead_code)]
@@ -39,11 +43,12 @@ pub(super) trait ContextContributor {
     /// Generate the prepare-step YAML (a single `- bash:` block or
     /// equivalent). Must include its own ADO `condition:` so the step
     /// no-ops on non-matching trigger types. Empty string = no step.
+    ///
+    /// Contributors that want to surface a prompt fragment to the
+    /// agent append it directly to `/tmp/awf-tools/agent-prompt.md`
+    /// from this step's bash (the file is created by base.yml's
+    /// "Prepare agent prompt" step before any prepare_steps run).
     fn prepare_step(&self, ctx: &CompileContext) -> String;
-
-    /// Markdown fragment to append to the agent prompt (under the
-    /// "Execution context" supplement section). Empty = no fragment.
-    fn prompt_fragment(&self) -> String;
 
     /// Agent env vars this contributor exposes. Currently unused
     /// (the ado-aw env-var channel rejects ADO `$(...)` expressions,
@@ -53,10 +58,11 @@ pub(super) trait ContextContributor {
     #[allow(dead_code)]
     fn agent_env_vars(&self) -> Vec<(String, String)>;
 
-    /// Bash commands the agent must have on its allow-list to read
-    /// the staged context (e.g. `cat`, `ls`). The agent itself does
-    /// NOT need `git`, `mkdir`, etc. — those run in the precompute
-    /// step which is outside the agent sandbox.
+    /// Bash commands the agent must have on its allow-list to inspect
+    /// the staged context (e.g. `git diff`, `git show`). Aggregated by
+    /// `ExecContextExtension::required_bash_commands` and forwarded
+    /// through `src/engine.rs::args` to the agent's `shell(...)`
+    /// allow-list.
     fn required_bash_commands(&self) -> Vec<String>;
 }
 
@@ -83,11 +89,6 @@ impl ContextContributor for Contributor {
     fn prepare_step(&self, ctx: &CompileContext) -> String {
         match self {
             Contributor::Pr(c) => c.prepare_step(ctx),
-        }
-    }
-    fn prompt_fragment(&self) -> String {
-        match self {
-            Contributor::Pr(c) => c.prompt_fragment(),
         }
     }
     fn agent_env_vars(&self) -> Vec<(String, String)> {

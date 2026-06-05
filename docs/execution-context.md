@@ -2,11 +2,13 @@
 
 _Part of the [ado-aw documentation](../AGENTS.md)._
 
-The **execution-context plugin** stages per-run context (changed files,
-diffs, base/head SHAs, file snapshots, metadata) on disk in a stable
-layout under `aw-context/` *before* the agent starts. The agent then
-reads these files instead of running its own `git fetch` / `git diff`
-plumbing.
+The **execution-context plugin** stages a small, focused set of per-run
+context signals on disk and appends a tailored fragment to the agent
+prompt *before* the agent starts. The agent then runs `git diff`,
+`git show`, `git log` itself against the precomputed SHAs (the
+workspace's `.git/objects/` are already populated by the precompute
+fetch) and calls Azure DevOps MCP tools with pre-filled identifiers
+already embedded in its prompt.
 
 This is an always-on compiler extension. There is no `tools:` entry to
 enable it; per-trigger contributors gate themselves based on the
@@ -18,27 +20,32 @@ agent's `on:` configuration.
 ## Why this exists
 
 PR-reviewer agents almost always need the same precondition: a fully
-fetched target branch, resolved base / head SHAs, a unified diff, and
-optionally pre / post snapshots of touched files. ADO's default
+fetched target branch and resolved base / head SHAs. ADO's default
 `checkout: self` is shallow (`fetchDepth: 1`), doesn't fetch the PR
 target branch, and (deliberately) does not persist credentials into
 `.git/config` for OAuth bearer reuse. Every PR-reviewer agent has
 historically rebuilt the same ~120 lines of bash to work around this.
 
-The execution-context plugin owns that step centrally:
+The execution-context plugin owns that step centrally — but does
+*only* the part the agent cannot do for itself:
 
-- One canonical implementation that evolves with the framework.
-- Driven by ADO's predefined `System.PullRequest.*` variables — no
-  manual ref discovery.
-- Inside the trust boundary: the bearer token used to fetch is
-  scoped to the precompute step's process env and never reaches the
-  agent container or `.git/config`.
+- Fetches the PR target branch with progressive deepening until
+  `git merge-base` resolves (requires the bearer; cannot happen
+  inside the agent's sandbox).
+- Writes the resolved `base.sha` and `head.sha` so the agent can
+  reuse them across many `git diff` invocations.
+- Appends a prompt fragment listing the right `git` commands and
+  ADO MCP tool calls (with literal PR id / project / repo
+  interpolated) for the agent to use.
+
+The agent does its own diff/show/log/stat work — it has the objects
+locally and `git` is added to its bash allow-list automatically.
 
 ## v1 contributors
 
-| Contributor | Trigger        | Output layout            |
-|-------------|----------------|--------------------------|
-| `pr`        | `on.pr`        | `aw-context/pr/*`        |
+| Contributor | Trigger | Output layout            |
+|-------------|---------|--------------------------|
+| `pr`        | `on.pr` | `aw-context/pr/*`        |
 
 Future trigger contributors (pipeline-completion, schedule, manual)
 plug in via the same internal `ContextContributor` trait without
@@ -48,16 +55,9 @@ breaking the agent-facing layout.
 
 ```yaml
 execution-context:
-  enabled: true                  # master switch; defaults to true
-  pr:                            # PR contributor configuration
-    enabled: true                # defaults to true when `on.pr` is configured
-    scope:                       # pathspecs scoping diff + snapshots
-      - "src/**"
-      - "docs/**"
-      - ":(top,glob)*.yml"
-    unified: 3                   # `-U` lines of context for diff.patch
-    max-diff-bytes: 524288       # truncate diff.patch beyond this many bytes
-    snapshots: true              # write head-files/ and base-files/
+  enabled: true       # master switch; defaults to true
+  pr:
+    enabled: true     # defaults to true when `on.pr` is configured
 ```
 
 All keys are optional. When the `execution-context:` block is omitted
@@ -68,21 +68,12 @@ entirely, defaults are *"on for the triggers configured in `on:`"*.
 - **`enabled`** (`bool`, default `true`) — master switch. When `false`,
   no contributor runs and no `aw-context/` is staged.
 - **`pr.enabled`** (`bool`, default `true` when `on.pr` is set) —
-  whether to activate the PR contributor. Set `false` to opt out on
-  huge monorepos where the targeted fetch + diff cost is unacceptable
-  (the agent then has to roll its own equivalent).
-- **`pr.scope`** (`list[string]`, default `[]` = all paths) — pathspecs
-  passed to `git diff -- <scope>` for both `changed-files-in-scope.txt`
-  and `diff.patch`. Sanitised at compile time.
-- **`pr.unified`** (`u32`, default `3`) — `-U` lines of context for
-  `diff.patch`.
-- **`pr.max-diff-bytes`** (`u64`, default `524288` / 512 KiB) — cap on
-  `diff.patch` size. When exceeded, the file ends with a literal
-  marker line `--- TRUNCATED at <N> bytes; full diff suppressed ---`
-  so the agent knows it is reading a partial diff.
-- **`pr.snapshots`** (`bool`, default `true`) — whether to write per-file
-  pre / post snapshots under `head-files/` and `base-files/`. Disable on
-  large changes if you only need the diff.
+  whether to activate the PR contributor. Set `false` to opt out
+  (e.g. when an agent already does its own precompute or doesn't need
+  PR context).
+
+`pr.enabled: false` also suppresses the auto-extension of the agent's
+bash allow-list with git commands described below.
 
 ## Agent-visible layout
 
@@ -90,72 +81,118 @@ For PR-triggered builds, the precompute step stages files under
 `$(Build.SourcesDirectory)/aw-context/` (i.e. relative to the agent's
 working directory):
 
+### Success case (2 files)
+
 ```
 aw-context/
-  status.txt                       # OK | (errors propagate to per-contributor files)
-  trigger.txt                      # pr (today; future: pipeline / schedule / manual)
-  metadata.txt                     # build_id, build_reason, repository, source_branch
   pr/
-    status.txt                     # OK | NO_PR_CONTEXT | DIFF_RESOLUTION_FAILED
-    metadata.txt                   # pr_id, source_branch, target_branch, base_sha, head_sha
-    changed-files.txt              # full `git diff --name-status`
-    changed-files-in-scope.txt     # name-status restricted to `scope`
-    diff.patch                     # unified diff, scoped, capped, may end with TRUNCATED marker
-    head-files/<path>              # post-PR snapshots of A/M/T/R*/C* files in scope
-    base-files/<path>              # pre-PR snapshots of D files in scope
-    error.txt                      # only present when pr/status.txt != OK
+    base.sha          # target merge-base SHA (40-char hex, no trailing newline)
+    head.sha          # PR head SHA (40-char hex, no trailing newline)
 ```
 
-**Agents MUST read `aw-context/pr/status.txt` first** and act on its
-value:
+### Failure case (1 file)
 
-- `OK` — `aw-context/pr/*` is fully populated. Prefer reading those
-  files over running `git fetch` / `git diff` yourself.
-- `NO_PR_CONTEXT` — the build is not a PR (e.g. manual queue of a
-  PR-triggered pipeline). Skip PR-specific logic.
-- `DIFF_RESOLUTION_FAILED` — the precompute step ran but could not
-  resolve the base / head SHAs. See `aw-context/pr/error.txt` for the
-  reason. Surface this in your output rather than silently producing
-  an empty review.
-- `CONTEXT_GENERATION_FAILED` — base / head SHAs resolved, but at
-  least one of the `git diff` commands that populates the staged
-  files failed. The `metadata.txt` file is still trustworthy, but
-  `changed-files.txt`, `changed-files-in-scope.txt`, or `diff.patch`
-  may be empty or partial. See `aw-context/pr/error.txt`.
+```
+aw-context/
+  pr/
+    error.txt         # one-line failure reason
+```
 
-If `aw-context/pr/status.txt` does not exist at all (e.g. when the
-extension is disabled), treat it as `NO_PR_CONTEXT`.
+(`base.sha` / `head.sha` are not written on failure.)
+
+Short identifiers — PR id, ADO project name, ADO repository name —
+are **not** staged as files. They are interpolated directly into the
+agent prompt fragment ("This is PR #4242 in project 'OneBranch' /
+repository 'my-repo'…"), so the agent sees them as natural English
+and as literal arguments in example ADO MCP tool calls. Files are
+reserved for the opaque 40-char SHAs the agent reuses across many
+commands.
+
+## Agent prompt fragment
+
+The precompute step appends one of two fragments directly to
+`/tmp/awf-tools/agent-prompt.md` (the file built by the
+"Prepare agent prompt" step in `base.yml`). This mirrors how gh-aw
+injects its own built-in prompt sections.
+
+### Success fragment
+
+The fragment shows how to set `$BASE` / `$HEAD` from the staged files,
+lists six common `git` invocations (`diff --stat`, `diff
+--name-status`, `diff`, `diff -- <path>`, `show $HEAD:<path>`, `log`),
+and shows three example ADO MCP tool calls
+(`repo_get_pull_request_by_id`, `repo_list_pull_request_threads`,
+`repo_create_pull_request_thread`) with `project`, `repositoryId`,
+and `pullRequestId` pre-filled to the actual values.
+
+### Failure fragment
+
+When the precompute fails (identifier validation or merge-base
+resolution exhausts the depth budget), the failure fragment is
+appended instead. It states the reason from `aw-context/pr/error.txt`
+and tells the agent:
+
+- Local `git diff` is unavailable for this run.
+- ADO MCP tool calls remain possible (the PR id / project / repo are
+  still embedded in the fragment).
+- Do NOT produce an empty review or pretend the PR has no changes —
+  surface the failure (e.g. via `report_incomplete`) or fall back to
+  the API.
+
+If neither fragment is appended (Build.Reason ≠ PullRequest), the
+agent prompt is silent on PR context.
+
+## Bash allow-list auto-extension
+
+When the PR contributor activates, these read-only `git` commands
+are added to the agent's bash allow-list:
+
+```
+git, git diff, git log, git show, git status, git rev-parse, git symbolic-ref
+```
+
+The extension uses the same `required_bash_commands()` plumbing as
+the runtime extensions (Python, Node, .NET, Lean). When the agent has:
+
+| `tools.bash` setting             | Behaviour |
+|----------------------------------|-----------|
+| `bash:` (omitted or wildcard)    | Allow-all mode — extension is a no-op (commands are already permitted). |
+| `bash: ["..."]` (explicit list)  | The 7 git commands are appended to the user's list. |
+| `pr.enabled: false`              | The 7 git commands are NOT added (matches the contributor's overall inactive state). |
+
+This keeps the agent's bash surface intentional: opting out of the
+PR contributor opts out of the corresponding git capability.
 
 ## What the precompute step does
 
 The PR contributor's generated bash step:
 
-1. **Reads `System.PullRequest.*` from the environment.** No manual ref
-   discovery — ADO already populates `SourceBranch`, `TargetBranch`,
-   and `PullRequestId`. If they are missing, writes `NO_PR_CONTEXT`
-   and exits 0.
-2. **Detects merge-commit shape first.** If `HEAD` has two parents
-   (the synthetic merge commit ADO checks out for PR builds), uses
+1. **Reads `System.PullRequest.*` and `System.TeamProject` /
+   `Build.Repository.Name` from the environment.** No manual ref
+   discovery — ADO already populates these.
+2. **Validates identifiers** with strict allowlist regexes
+   (`PR_ID` ⊆ digits, `PROJECT`/`REPO` ⊆ alphanumeric + `._-`,
+   `PROJECT` additionally allows space). Failure writes
+   `error.txt` and appends the failure prompt fragment.
+3. **Detects merge-commit shape.** If `HEAD` has two parents (the
+   synthetic merge commit ADO checks out for PR builds), uses
    `HEAD^1` / `HEAD^2` as base / head and skips the target-branch
    fetch entirely. Otherwise:
-3. **Fetches the PR target branch with progressive deepening** —
+4. **Fetches the PR target branch with progressive deepening** —
    `--depth=200`, then `500`, then `2000`, then finally `--unshallow`.
-   **After each successful fetch, attempts `git merge-base
-   origin/<target> HEAD`** and continues to the next depth if it
-   cannot resolve yet. Bounded bandwidth on the common case; covers
-   the long-tail PR-against-old-base case. On exhaustion writes
-   `DIFF_RESOLUTION_FAILED`.
-4. **Writes `metadata.txt`, `changed-files.txt`,
-   `changed-files-in-scope.txt`, `diff.patch`.** The diff is scoped to
-   `pr.scope` (or all paths if empty) and truncated at `pr.max-diff-bytes`
-   with a literal marker. If any of these `git diff` invocations fails,
-   the status becomes `CONTEXT_GENERATION_FAILED` rather than `OK`.
-5. **Snapshots** (when `pr.snapshots: true`) — for each in-scope file:
-   `head-files/<path>` for `A`/`M`/`T`/`R*`/`C*` entries,
-   `base-files/<path>` for `D` entries.
-6. **Writes the final status** to `pr/status.txt` and `status.txt`.
+   After each successful fetch, attempts `git merge-base
+   origin/<target> HEAD` and continues to the next depth if it
+   cannot resolve yet.
+5. **Writes `base.sha` and `head.sha`** on success and appends the
+   success prompt fragment to `/tmp/awf-tools/agent-prompt.md`.
+6. **On failure**, writes `error.txt` and appends the failure prompt
+   fragment.
 
-The step is gated by `condition: eq(variables['Build.Reason'],
+The step exits 0 in both success and failure paths so the build
+proceeds — the agent surfaces failures via the prompt fragment, not
+via a build break.
+
+The whole step is gated by `condition: eq(variables['Build.Reason'],
 'PullRequest')` so it is a no-op on manual or scheduled queues of a
 PR-triggered pipeline.
 
@@ -165,63 +202,61 @@ The PR contributor must fetch the PR target branch (which the default
 checkout does not), but doing so requires an OAuth bearer. ado-aw
 preserves the Stage 1 read-only invariant with these design choices:
 
-| Mechanism                                   | Decision |
-|---------------------------------------------|----------|
+| Mechanism                                                 | Decision |
+|-----------------------------------------------------------|----------|
 | Override `checkout: self` with `persistCredentials: true` | **Rejected.** It would write the build identity's bearer into `.git/config` inside the workspace, which is then mounted into the AWF sandbox where the agent could read and exfiltrate it. |
-| Override `checkout: self` with `fetchDepth: 0` | **Rejected.** Unnecessary — the precompute fetches exactly the two refs it needs. |
-| In-step `SYSTEM_ACCESSTOKEN` + bash bearer wrapper | **Adopted.** `SYSTEM_ACCESSTOKEN` is mapped from `$(System.AccessToken)` only into the precompute step's process env. A `git_fetch` wrapper injects `git -c http.extraheader="Authorization: bearer ${SYSTEM_ACCESSTOKEN}" fetch …`. The token lives only in the bash step's process memory and is never written to disk. |
+| Override `checkout: self` with `fetchDepth: 0`            | **Rejected.** Unnecessary — the precompute fetches exactly the refs it needs. |
+| In-step `SYSTEM_ACCESSTOKEN` + `GIT_CONFIG_*` bearer env  | **Adopted.** `SYSTEM_ACCESSTOKEN` is mapped from `$(System.AccessToken)` only into the precompute step's process env. `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_0` / `GIT_CONFIG_VALUE_0` inject `http.extraheader: Authorization: bearer …` into `git fetch` *via env vars* (not via `git -c` on argv) so the token never appears in process listings. The token lives only in the bash step's process memory and is never written to disk. |
 
 After the precompute step exits, the bearer is gone from the runtime
 environment the agent inherits, `.git/config` contains no
 `http.extraheader` line, and the agent container is started by AWF
 with its own (read-only) MI from the ARM service connection.
 
-The compile-time test `test_execution_context_pr_does_not_leak_system_accesstoken`
-asserts that generated YAML never contains `persistCredentials: true`,
-never writes to `.git/config`, and that `SYSTEM_ACCESSTOKEN` appears
-only in the execution-context prepare step.
+The compile-time test
+`test_execution_context_pr_does_not_leak_system_accesstoken` walks
+the generated YAML and asserts that `SYSTEM_ACCESSTOKEN` appears
+only in the execution-context prepare step's `env:` block, never
+the agent step's.
 
 ## Migrating from a hand-rolled precompute
 
 If you have an existing PR-reviewer agent with a `steps:` block that
-manually fetches the target branch, resolves merge-base, and emits a
-diff: delete that block, ensure `on.pr` is configured, and read from
-`aw-context/pr/*` in your agent prompt. The prompt supplement is
-appended automatically — you do not need to mention the layout in your
-own markdown body.
+manually fetches the target branch and resolves merge-base: delete
+that block, ensure `on.pr` is configured, and let the agent read
+`aw-context/pr/{base,head}.sha` directly. The prompt fragment is
+appended automatically — you do not need to mention the layout in
+your own markdown body.
 
 ## Notes and edge cases
 
-- **`AW_PR_*` env vars are not surfaced.** ado-aw's agent-env-var
-  channel rejects ADO `$(...)` expressions for injection-defence
-  reasons, and bouncing values through pipeline output variables
-  introduces a second source of truth. Agents read everything from
-  `aw-context/pr/metadata.txt`.
-- **No `git` / `cat` / `ls` is added to the agent's bash allow-list.**
-  The agent reads `aw-context/*` using its normal file-reading
-  mechanism (the `edit` tool, native copilot reads, etc.), not via
-  shell. This avoids silently widening the bash capability surface
-  when the user has restricted bash.
+- **Identifiers in the prompt, SHAs on disk.** Short values (PR id,
+  project, repo) are interpolated into the prompt heredoc; long
+  opaque 40-char SHAs stay as files where shell ergonomics actually
+  win (`BASE=$(cat aw-context/pr/base.sha)` is the natural pattern).
 - **Non-`self` checkouts in `repos:`.** v1 only diffs the `self`
   checkout. The PR contributor does not currently produce contexts
   for additional repository checkouts.
-- **Workspace alias.** When `workspace:` points to a non-`self` alias,
-  `aw-context/` is still relative to `$(Build.SourcesDirectory)` —
-  i.e. the pipeline's working directory, not the workspace alias's
+- **Workspace alias.** When `workspace:` points to a non-`self`
+  alias, `aw-context/` is still relative to `$(Build.SourcesDirectory)`
+  — i.e. the pipeline's working directory, not the workspace alias's
   directory.
-- **Ordering.** The precompute step runs after the standard
-  `- checkout: self` and before any user `steps:`, so user `steps:`
-  can also read `aw-context/` if needed.
+- **Ordering.** The precompute step runs after `{{ checkout_self }}`
+  in the Agent job's prepare phase, after the "Prepare agent prompt"
+  step (so it can append) and before the agent runs (so the agent
+  sees the appended prompt).
 
 ## Compiler internals
 
 - Always-on `ExecContextExtension` in
-  `src/compile/extensions/exec_context/mod.rs` (`ExtensionPhase::Tool`).
-- Internal `ContextContributor` trait in `contributor.rs`. v1 ships one
-  contributor: `PrContextContributor` in `pr.rs`.
-- Front-matter types: `ExecutionContextConfig` and `PrContextConfig` in
-  `src/compile/types.rs`.
+  `src/compile/extensions/exec_context/mod.rs`
+  (`ExtensionPhase::Tool`).
+- Internal `ContextContributor` trait in `contributor.rs`. v1 ships
+  one contributor: `PrContextContributor` in `pr.rs`.
+- Front-matter types: `ExecutionContextConfig` and `PrContextConfig`
+  in `src/compile/types.rs` (`PrContextConfig` is just
+  `{ enabled: Option<bool> }`).
 - Compile tests live in `tests/compiler_tests.rs` (search for
   `test_execution_context_pr_*`).
-- The generated bash is shellchecked by `tests/bash_lint_tests.rs` via
-  the `execution-context-agent.md` fixture.
+- The generated bash is shellchecked by `tests/bash_lint_tests.rs`
+  via the `execution-context-agent.md` fixture.

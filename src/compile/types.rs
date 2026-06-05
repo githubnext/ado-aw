@@ -1217,29 +1217,16 @@ impl SanitizeConfigTrait for ExecutionContextConfig {
 
 /// Configuration for the PR-context contributor.
 ///
-/// Controls how the precompute step materialises `aw-context/pr/*` for
-/// PR-triggered builds. All fields are optional — defaults are sensible
-/// for typical PR-reviewer agents.
+/// Controls whether the precompute step materialises `aw-context/pr/*` for
+/// PR-triggered builds. v6.2 onward exposes only an opt-out switch — the
+/// agent decides at runtime what to diff (via its own `git diff $BASE..$HEAD`
+/// calls); the compiler no longer scopes or caps the diff.
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct PrContextConfig {
     /// Whether the PR contributor is active. Defaults to `true` when
-    /// `on.pr` is configured. Set `false` to opt out (e.g. on huge
-    /// monorepos where the targeted fetch + diff cost is unacceptable).
+    /// `on.pr` is configured. Set `false` to opt out.
     #[serde(default)]
     pub enabled: Option<bool>,
-    /// Pathspecs scoping the diff + snapshots (passed to `git diff -- …`).
-    /// Empty / unset = include all paths.
-    #[serde(default)]
-    pub scope: Vec<String>,
-    /// `-U` lines of context for `diff.patch`. Default: 3.
-    #[serde(default)]
-    pub unified: Option<u32>,
-    /// Truncate `diff.patch` beyond this many bytes. Default: 524288 (512 KiB).
-    #[serde(default, rename = "max-diff-bytes")]
-    pub max_diff_bytes: Option<u64>,
-    /// Whether to write `head-files/` and `base-files/` snapshots. Default: true.
-    #[serde(default)]
-    pub snapshots: Option<bool>,
 }
 
 impl PrContextConfig {
@@ -1247,27 +1234,11 @@ impl PrContextConfig {
     pub fn explicit_enabled(&self) -> Option<bool> {
         self.enabled
     }
-
-    pub fn unified_or_default(&self) -> u32 {
-        self.unified.unwrap_or(3)
-    }
-
-    pub fn max_diff_bytes_or_default(&self) -> u64 {
-        self.max_diff_bytes.unwrap_or(524_288)
-    }
-
-    pub fn snapshots_or_default(&self) -> bool {
-        self.snapshots.unwrap_or(true)
-    }
 }
 
 impl SanitizeConfigTrait for PrContextConfig {
     fn sanitize_config_fields(&mut self) {
-        self.scope = self
-            .scope
-            .iter()
-            .map(|s| crate::sanitize::sanitize_config(s))
-            .collect();
+        // No string fields to sanitise after the v6.2 collapse.
     }
 }
 

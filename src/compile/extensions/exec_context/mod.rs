@@ -14,6 +14,16 @@
 //! Having one owner — gated by trigger — keeps the trust boundary
 //! tight and the agent-visible layout uniform across trigger types.
 //!
+//! ## Prompt injection
+//!
+//! From v6.2 onward, contributors append their prompt fragments
+//! **directly from their own prepare steps** to
+//! `/tmp/awf-tools/agent-prompt.md` (created earlier by the "Prepare
+//! agent prompt" step in `base.yml`). The extension does NOT implement
+//! `prompt_supplement` — there is no static, always-injected prompt
+//! header. Each contributor chooses at runtime, inside its prepare-step
+//! bash, what (if anything) to append.
+//!
 //! ## Trust boundary
 //!
 //! Per-contributor prepare steps MAY pass `SYSTEM_ACCESSTOKEN` into
@@ -42,11 +52,11 @@ pub struct ExecContextExtension {
     config: ExecutionContextConfig,
     /// Whether the front matter configures any trigger that a context
     /// contributor activates on. Captured at construction time so
-    /// `prompt_supplement()` (which receives no `CompileContext`) can
-    /// suppress the prompt fragment on agents whose triggers no
-    /// contributor cares about. Today that means "is `on.pr`
-    /// configured" — future trigger contributors will OR in their
-    /// own checks here.
+    /// `required_bash_commands()` (which receives no `CompileContext`)
+    /// can suppress the contributor's bash allow-list contributions on
+    /// agents whose triggers no contributor cares about. Today that
+    /// means "is `on.pr` configured" — future trigger contributors
+    /// will OR in their own checks here.
     any_contributor_active: bool,
 }
 
@@ -63,8 +73,8 @@ impl ExecContextExtension {
         // each contributor's `should_activate` logic. The duplication is
         // intentional: keeping `should_activate` as the runtime
         // source-of-truth for `prepare_steps` (which DOES have a
-        // `CompileContext`) and this aggregate for `prompt_supplement`
-        // (which does not).
+        // `CompileContext`) and this aggregate for
+        // `required_bash_commands` (which does not).
         let pr_active = match config.pr.as_ref().and_then(|p| p.enabled) {
             Some(true) => true,
             Some(false) => false,
@@ -113,35 +123,18 @@ impl CompilerExtension for ExecContextExtension {
             .collect()
     }
 
-    fn prompt_supplement(&self) -> Option<String> {
-        if !self.config.is_enabled() || !self.any_contributor_active {
-            return None;
-        }
-        // Concatenate every contributor's prompt fragment under a
-        // single "Execution context" header. We do not gate on
-        // `should_activate` here because `should_activate` needs a
-        // `CompileContext` that the trait method does not receive —
-        // the fragments themselves describe how the agent should
-        // detect whether their context is present at runtime (status
-        // files / missing directories).
-        let mut body = String::from("\n---\n\n## Execution context\n");
-        for c in self.contributors() {
-            let frag = c.prompt_fragment();
-            if !frag.trim().is_empty() {
-                body.push_str(&frag);
-            }
-        }
-        Some(body)
-    }
-
     fn required_bash_commands(&self) -> Vec<String> {
-        if !self.config.is_enabled() {
+        // No bash contributions when the extension is off or when no
+        // contributor will activate (avoids quietly widening the agent
+        // bash allow-list on agents with no PR trigger configured).
+        if !self.config.is_enabled() || !self.any_contributor_active {
             return vec![];
         }
         // Union of every contributor's required commands. The agent
-        // bash allow-list needs these to read the staged context. We
-        // do not gate on activation here because the bash allow-list
-        // is a compile-time *capability* surface: it must be present
+        // bash allow-list needs these to inspect the staged context
+        // (e.g. `git diff $BASE..$HEAD`). We do not gate per-contributor
+        // on `should_activate` here because the bash allow-list is a
+        // compile-time *capability* surface: it must be present
         // whenever the contributor *might* activate at runtime
         // (manual queue of a PR-triggered pipeline, etc.).
         let mut out: Vec<String> = self
@@ -152,43 +145,5 @@ impl CompilerExtension for ExecContextExtension {
         out.sort();
         out.dedup();
         out
-    }
-
-    fn validate(&self, _ctx: &CompileContext) -> anyhow::Result<Vec<String>> {
-        // Reject ADO macro / template / runtime expressions in
-        // `execution-context.pr.scope` entries. The scope values are
-        // splatted into a bash array literal that ADO interpolates
-        // BEFORE bash sees it — an entry like `$(System.AccessToken)`
-        // would otherwise be replaced with the live token at runtime
-        // and could be exfiltrated by an attacker who manages to land
-        // a crafted scope value in the front matter.
-        if let Some(pr) = self.config.pr.as_ref() {
-            for entry in &pr.scope {
-                if crate::validate::contains_ado_expression(entry) {
-                    anyhow::bail!(
-                        "Front matter 'execution-context.pr.scope[]' entry contains an \
-                         ADO expression ('${{{{', '$(', or '$[') which is not allowed. \
-                         Use literal pathspecs only. Found: '{}'",
-                        entry,
-                    );
-                }
-                if crate::validate::contains_pipeline_command(entry) {
-                    anyhow::bail!(
-                        "Front matter 'execution-context.pr.scope[]' entry contains an \
-                         ADO pipeline command ('##vso[' or '##[') which is not allowed. \
-                         Found: '{}'",
-                        entry,
-                    );
-                }
-                if entry.contains('\n') || entry.contains('\r') {
-                    anyhow::bail!(
-                        "Front matter 'execution-context.pr.scope[]' entry contains a \
-                         newline which is not allowed. Found: '{}'",
-                        entry,
-                    );
-                }
-            }
-        }
-        Ok(vec![])
     }
 }

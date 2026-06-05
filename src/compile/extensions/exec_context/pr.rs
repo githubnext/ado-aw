@@ -1,32 +1,55 @@
-//! PR-context contributor.
+//! PR-context contributor (v6.2).
 //!
-//! Materialises `aw-context/pr/*` for PR-triggered builds. Handles the
-//! four footguns documented in issue #860:
+//! Materialises a small, focused set of PR signals for PR-triggered builds
+//! and appends a tailored prompt fragment directly to the agent prompt file.
 //!
-//! 1. **Shallow checkout** — `checkout: self` does a depth-1 fetch by
-//!    default. We progressively deepen the two refs we need
-//!    (`System.PullRequest.SourceBranch` / `TargetBranch`) with
-//!    `--depth=200 → 500 → 2000 → --unshallow` until `merge-base`
-//!    resolves.
-//! 2. **`origin/<target>` not fetched** — we explicitly fetch the
-//!    two PR refs into `refs/remotes/origin/<short>` so they exist
-//!    as local remote-tracking refs.
-//! 3. **Persisted creds variability** — we don't depend on
-//!    `persistCredentials: true`. The step injects
-//!    `SYSTEM_ACCESSTOKEN` only into its own env block (never into the
-//!    agent step) and wraps git fetches with
-//!    `git -c http.extraheader=Authorization: bearer …`. The token
-//!    is never written to `.git/config` and never reaches the agent
-//!    sandbox.
-//! 4. **Synthetic merge commit fragility** — we detect whether `HEAD`
-//!    is a merge commit (`git rev-list --parents -n 1 HEAD` → two
-//!    parents) and pick the right pair of SHAs to diff. If it isn't
-//!    a merge commit, we fall back to `merge-base origin/<target> HEAD`.
+//! ## Artefacts
 //!
-//! The step writes `aw-context/pr/status.txt` as the single source of
-//! truth for whether the agent has usable context. Agents read this
-//! file first and fall back to "no PR context" behaviour if the
-//! status is anything other than `OK`.
+//! On success (merge-base resolved):
+//!
+//! - `aw-context/pr/base.sha` — target merge-base SHA
+//! - `aw-context/pr/head.sha` — PR head SHA
+//!
+//! On failure (validation or merge-base resolution failed):
+//!
+//! - `aw-context/pr/error.txt` — one-line failure reason
+//!
+//! No `status.txt`, no `metadata.txt`, no `changed-files*.txt`, no
+//! `diff.patch`, no `head-files/`/`base-files/`. The agent runs `git diff`
+//! itself against `$BASE..$HEAD` (the workspace's `.git/objects/` are
+//! already populated by the precompute fetch).
+//!
+//! ## Prompt injection
+//!
+//! The PR contributor does NOT use the `prompt_supplement` trait method.
+//! Instead, the precompute step appends the success-or-failure prompt
+//! fragment directly to `/tmp/awf-tools/agent-prompt.md` (which is
+//! created earlier by the "Prepare agent prompt" step in `base.yml`,
+//! ahead of the `{{ prepare_steps }}` marker). This is the same
+//! mechanism gh-aw uses for its built-in PR prompt section, adapted for
+//! ado-aw's per-extension prepare-step model.
+//!
+//! Short identifiers (`PR_ID`, `PROJECT`, `REPO`) are interpolated into
+//! the prompt heredoc via unquoted `<<EOF` so the agent sees literal
+//! values ("This is PR #4242 in project 'OneBranch' / repository
+//! 'awesome-repo'.") and example ADO MCP tool calls with the right
+//! arguments pre-filled.
+//!
+//! Long opaque SHAs stay as files (`base.sha`, `head.sha`) because the
+//! agent reuses them across many shell commands and transcription risk
+//! on a 40-char hex string is non-trivial.
+//!
+//! ## Trust boundary
+//!
+//! - `SYSTEM_ACCESSTOKEN` is mapped only into THIS step's `env:` block,
+//!   never the agent step's env.
+//! - The bearer is injected via `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_0` /
+//!   `GIT_CONFIG_VALUE_0` env vars (NOT via `git -c http.extraheader=...`
+//!   on argv), so the token never appears in process listings.
+//! - The token is never written to `.git/config`; `persistCredentials`
+//!   is never `true`; no checkout override is emitted.
+//! - The step is gated by `condition: eq(variables['Build.Reason'],
+//!   'PullRequest')` so it never runs on non-PR builds.
 
 use crate::compile::extensions::CompileContext;
 use crate::compile::types::PrContextConfig;
@@ -43,18 +66,6 @@ impl PrContextContributor {
     pub(super) fn new(config: PrContextConfig) -> Self {
         Self { config }
     }
-
-    /// Resolve the effective scope as a single space-separated string
-    /// suitable for splatting into a bash array literal. Each pathspec
-    /// has already been sanitised by `PrContextConfig::sanitize_config_fields`.
-    fn scope_for_bash(&self) -> String {
-        self.config
-            .scope
-            .iter()
-            .map(|s| format!("'{}'", s.replace('\'', "'\\''")))
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
 }
 
 impl ContextContributor for PrContextContributor {
@@ -63,16 +74,8 @@ impl ContextContributor for PrContextContributor {
     }
 
     fn should_activate(&self, ctx: &CompileContext) -> bool {
-        // Activates when on.pr is set, unless explicitly disabled via
-        // execution-context.pr.enabled: false. Per-trigger gating at
-        // compile time keeps the prepare step out of the generated
-        // YAML entirely when it can't possibly apply — and the
-        // step-level ADO condition handles the runtime case of a
-        // user manually queuing a non-PR build of a PR-triggered
-        // pipeline.
         let pr_trigger_configured = ctx.front_matter.pr_trigger().is_some();
-        let explicit = self.config.explicit_enabled();
-        match explicit {
+        match self.config.explicit_enabled() {
             Some(true) => true,
             Some(false) => false,
             None => pr_trigger_configured,
@@ -80,145 +83,111 @@ impl ContextContributor for PrContextContributor {
     }
 
     fn prepare_step(&self, _ctx: &CompileContext) -> String {
-        let unified = self.config.unified_or_default();
-        let max_diff_bytes = self.config.max_diff_bytes_or_default();
-        let snapshots = self.config.snapshots_or_default();
-        let scope_array_literal = self.scope_for_bash();
-
-        // Snapshots are gated at compile time (not via a bash
-        // conditional on a compile-time constant) to avoid
-        // shellcheck SC2050 ("constant expression").
-        let snapshot_block = if snapshots {
-            r#"
-    mkdir -p "$AW_PR_DIR/head-files" "$AW_PR_DIR/base-files"
-    while IFS=$'\t' read -r STATUS REST; do
-      case "$STATUS" in
-        A|M|T|R*|C*)
-          FILE="${REST##*$'\t'}"
-          DEST_DIR="$AW_PR_DIR/head-files/$(dirname -- "$FILE")"
-          mkdir -p "$DEST_DIR" 2>/dev/null || true
-          git show "${HEAD_TIP_SHA}:${FILE}" \
-            > "$AW_PR_DIR/head-files/${FILE}" 2>/dev/null || true
-          ;;
-        D)
-          FILE="$REST"
-          DEST_DIR="$AW_PR_DIR/base-files/$(dirname -- "$FILE")"
-          mkdir -p "$DEST_DIR" 2>/dev/null || true
-          git show "${BASE_SHA}:${FILE}" \
-            > "$AW_PR_DIR/base-files/${FILE}" 2>/dev/null || true
-          ;;
-      esac
-    done < "$AW_PR_DIR/changed-files-in-scope.txt""#
-        } else {
-            ""
-        };
-
-        // The prepare step is gated by an ADO `condition:` so it
-        // no-ops on non-PR builds (e.g. manual queue of a PR-triggered
-        // pipeline). Inside the step, `set -uo pipefail` is enabled
-        // and every git fetch goes through the in-step `git_fetch`
-        // wrapper. The wrapper injects the bearer header via Git's
-        // `GIT_CONFIG_*` env vars (NOT via `git -c` on argv) so the
-        // token never appears in a process listing.
+        // The bash below intentionally uses `set -uo pipefail` (no `-e`):
+        // we want to capture failures into `pr/error.txt` and the failure
+        // prompt branch rather than abort the step. The agent-prompt
+        // file gets either the success or failure fragment, never both.
         //
-        // `set -e` is intentionally NOT used: we want to capture
-        // failures into `pr/error.txt` + `pr/status.txt` rather than
-        // abort the step. The agent reads `status.txt` first.
-        format!(
-            r#"- bash: |
+        // The prompt heredoc uses UNQUOTED `<<EOF` (without single
+        // quotes around the delimiter) so `${PR_ID}` / `${PROJECT}` /
+        // `${REPO}` expand into literal values that the agent sees in
+        // the prompt text. References that should stay literal in the
+        // prompt (e.g. `$BASE`, `$HEAD` for the agent to use later)
+        // are escaped with `\$`.
+        r#"- bash: |
     set -uo pipefail
 
-    AW_CONTEXT_DIR="${{BUILD_SOURCESDIRECTORY:-$PWD}}/aw-context"
+    AW_CONTEXT_DIR="${BUILD_SOURCESDIRECTORY:-$PWD}/aw-context"
     AW_PR_DIR="$AW_CONTEXT_DIR/pr"
+    AGENT_PROMPT="/tmp/awf-tools/agent-prompt.md"
 
-    mkdir -p "$AW_CONTEXT_DIR" "$AW_PR_DIR"
-    : > "$AW_CONTEXT_DIR/status.txt"
-    : > "$AW_CONTEXT_DIR/trigger.txt"
-    : > "$AW_CONTEXT_DIR/metadata.txt"
-    : > "$AW_PR_DIR/status.txt"
-    : > "$AW_PR_DIR/metadata.txt"
-    rm -f "$AW_CONTEXT_DIR/error.txt" "$AW_PR_DIR/error.txt" 2>/dev/null || true
+    mkdir -p "$AW_PR_DIR"
+    rm -f "$AW_PR_DIR/error.txt" "$AW_PR_DIR/base.sha" "$AW_PR_DIR/head.sha" 2>/dev/null || true
 
-    echo "pr"  > "$AW_CONTEXT_DIR/trigger.txt"
-    {{
-      echo "build_id=${{BUILD_BUILDID:-}}"
-      echo "build_reason=${{BUILD_REASON:-}}"
-      echo "repository=${{BUILD_REPOSITORY_NAME:-}}"
-      echo "source_branch=${{BUILD_SOURCEBRANCH:-}}"
-    }} > "$AW_CONTEXT_DIR/metadata.txt"
+    PR_ID="${SYSTEM_PULLREQUEST_PULLREQUESTID:-}"
+    PR_TARGET_BRANCH="${SYSTEM_PULLREQUEST_TARGETBRANCH:-}"
+    PROJECT="${SYSTEM_TEAMPROJECT:-}"
+    REPO="${BUILD_REPOSITORY_NAME:-}"
 
-    PR_ID="${{SYSTEM_PULLREQUEST_PULLREQUESTID:-}}"
-    PR_SOURCE_BRANCH="${{SYSTEM_PULLREQUEST_SOURCEBRANCH:-}}"
-    PR_TARGET_BRANCH="${{SYSTEM_PULLREQUEST_TARGETBRANCH:-}}"
-
-    if [ -z "$PR_ID" ] || [ -z "$PR_TARGET_BRANCH" ]; then
-      echo "NO_PR_CONTEXT" > "$AW_PR_DIR/status.txt"
-      echo "OK"            > "$AW_CONTEXT_DIR/status.txt"
-      echo "System.PullRequest.* variables missing; build is not a PR." \
-        > "$AW_PR_DIR/error.txt"
-      echo "[aw-context] not a PR build; skipping PR context."
+    fail() {
+      local _reason="$1"
+      echo "$_reason" > "$AW_PR_DIR/error.txt"
+      {
+        printf '\n'
+        printf '## PR context\n\n'
+        printf 'PR #%s in project %s / repository %s -- context preparation failed.\n' \
+          "${PR_ID:-<unknown>}" "${PROJECT:-<unknown>}" "${REPO:-<unknown>}"
+        printf 'Reason: %s\n\n' "$_reason"
+        # shellcheck disable=SC2016
+        printf 'Local `git diff` is unavailable (the PR merge-base could not be resolved\n'
+        printf 'within the depth budget, or PR identifier validation failed). You may\n'
+        printf 'still call Azure DevOps MCP using the identifiers above\n'
+        # shellcheck disable=SC2016
+        printf '(e.g. `repo_get_pull_request_by_id`), OR surface the failure and stop.\n'
+        printf 'Do NOT produce an empty review or pretend the PR has no changes.\n'
+      } >> "$AGENT_PROMPT"
+      echo "[aw-context] pr context preparation failed: $_reason"
       exit 0
+    }
+
+    # Strict allowlist validation of identifiers before interpolating
+    # them into the agent prompt. These come from ADO predefined vars
+    # (infra-set, not PR-author-controlled) but defence-in-depth is
+    # cheap and prevents future regressions if ADO ever changes its
+    # variable population.
+    if [[ ! "$PR_ID" =~ ^[0-9]+$ ]]; then
+      fail "PR identifier validation failed (PR_ID='$PR_ID' is not a positive integer)."
+    fi
+    if [[ ! "$PROJECT" =~ ^[A-Za-z0-9._\ -]+$ ]]; then
+      fail "PR identifier validation failed (PROJECT='$PROJECT' contains disallowed characters)."
+    fi
+    if [[ ! "$REPO" =~ ^[A-Za-z0-9._-]+$ ]]; then
+      fail "PR identifier validation failed (REPO='$REPO' contains disallowed characters)."
+    fi
+    if [ -z "$PR_TARGET_BRANCH" ]; then
+      fail "System.PullRequest.TargetBranch is empty; cannot resolve merge-base."
     fi
 
-    PR_TARGET_SHORT="${{PR_TARGET_BRANCH#refs/heads/}}"
-    PR_SOURCE_SHORT="${{PR_SOURCE_BRANCH#refs/heads/}}"
+    PR_TARGET_SHORT="${PR_TARGET_BRANCH#refs/heads/}"
 
     # Bearer header is injected via GIT_CONFIG_* env vars (not via
     # `git -c` on argv) so the token does NOT appear in process
-    # listings. The variables are scoped to each git_fetch call's
-    # subshell via env-prefixing.
-    if [ -n "${{SYSTEM_ACCESSTOKEN:-}}" ]; then
-      git_fetch() {{
+    # listings.
+    if [ -n "${SYSTEM_ACCESSTOKEN:-}" ]; then
+      git_fetch() {
         GIT_CONFIG_COUNT=1 \
         GIT_CONFIG_KEY_0="http.extraheader" \
-        GIT_CONFIG_VALUE_0="Authorization: bearer ${{SYSTEM_ACCESSTOKEN}}" \
+        GIT_CONFIG_VALUE_0="Authorization: bearer ${SYSTEM_ACCESSTOKEN}" \
           git fetch "$@"
-      }}
+      }
     else
-      git_fetch() {{ git fetch "$@"; }}
+      git_fetch() { git fetch "$@"; }
     fi
 
-    # Fetch a single ref at one depth (no probing). Returns 0 on
-    # successful fetch, non-zero on failure. Callers chain depths
-    # themselves.
-    fetch_ref_at_depth() {{
-      local _short="$1"
-      local _depth_arg="$2"
+    fetch_target_at_depth() {
+      local _depth_arg="$1"
       git_fetch --no-tags "$_depth_arg" origin \
-        "+refs/heads/${{_short}}:refs/remotes/origin/${{_short}}" \
+        "+refs/heads/${PR_TARGET_SHORT}:refs/remotes/origin/${PR_TARGET_SHORT}" \
         >/dev/null 2>&1
-    }}
+    }
 
-    # Fetch the source branch (best-effort; only needed for
-    # informational head-tip resolution, not for the diff).
-    if [ -n "$PR_SOURCE_SHORT" ]; then
-      fetch_ref_at_depth "$PR_SOURCE_SHORT" "--depth=200" || \
-        fetch_ref_at_depth "$PR_SOURCE_SHORT" "--depth=2000" || \
-        fetch_ref_at_depth "$PR_SOURCE_SHORT" "--unshallow" || \
-        echo "fetch failed for source branch: $PR_SOURCE_BRANCH" \
-          >> "$AW_PR_DIR/error.txt"
-    fi
-
-    # Detect merge commit shape up front: if HEAD is a 2-parent merge
-    # commit, base = HEAD^1 / head = HEAD^2 and we don't need the
-    # target branch fetched for the diff. Otherwise, fetch the target
-    # branch progressively until `merge-base` actually resolves.
     HEAD_SHA="$(git rev-parse HEAD 2>/dev/null || true)"
     PARENTS="$(git rev-list --parents -n 1 HEAD 2>/dev/null | wc -w || echo 0)"
 
     BASE_SHA=""
     HEAD_TIP_SHA=""
-    if [ "${{PARENTS:-0}}" -ge 3 ]; then
-      BASE_SHA="$(git rev-parse "HEAD^1" 2>/dev/null || true)"
-      HEAD_TIP_SHA="$(git rev-parse "HEAD^2" 2>/dev/null || true)"
+    if [ "${PARENTS:-0}" -ge 3 ]; then
+      # ADO synthetic merge commit: HEAD^1 is the target tip, HEAD^2
+      # is the PR head. No fetch needed.
+      BASE_SHA="$(git rev-parse 'HEAD^1' 2>/dev/null || true)"
+      HEAD_TIP_SHA="$(git rev-parse 'HEAD^2' 2>/dev/null || true)"
     else
       HEAD_TIP_SHA="$HEAD_SHA"
-      # Progressive deepening: only stop when merge-base ACTUALLY
-      # resolves against the deepened target ref. A successful fetch
-      # at shallow depth is not enough on its own.
+      # Progressive deepening: stop ONLY when merge-base actually
+      # resolves against the deepened target ref.
       for _depth_arg in --depth=200 --depth=500 --depth=2000 --unshallow; do
-        fetch_ref_at_depth "$PR_TARGET_SHORT" "$_depth_arg" || continue
-        BASE_SHA="$(git merge-base "origin/${{PR_TARGET_SHORT}}" HEAD 2>/dev/null || true)"
+        fetch_target_at_depth "$_depth_arg" || continue
+        BASE_SHA="$(git merge-base "origin/${PR_TARGET_SHORT}" HEAD 2>/dev/null || true)"
         if [ -n "$BASE_SHA" ]; then
           break
         fi
@@ -226,154 +195,76 @@ impl ContextContributor for PrContextContributor {
     fi
 
     if [ -z "$BASE_SHA" ] || [ -z "$HEAD_TIP_SHA" ]; then
-      echo "DIFF_RESOLUTION_FAILED" > "$AW_PR_DIR/status.txt"
-      echo "OK"                    > "$AW_CONTEXT_DIR/status.txt"
-      {{
-        echo "Could not resolve base/head SHAs after progressive deepening."
-        echo "HEAD_SHA=$HEAD_SHA"
-        echo "PARENTS=$PARENTS"
-        echo "PR_TARGET_BRANCH=$PR_TARGET_BRANCH"
-      }} >> "$AW_PR_DIR/error.txt"
-      exit 0
+      fail "Could not resolve base/head SHAs after progressive deepening of '$PR_TARGET_BRANCH' (HEAD=$HEAD_SHA, parents=$PARENTS)."
     fi
 
-    {{
-      echo "pr_id=$PR_ID"
-      echo "source_branch=$PR_SOURCE_BRANCH"
-      echo "target_branch=$PR_TARGET_BRANCH"
-      echo "base_sha=$BASE_SHA"
-      echo "head_sha=$HEAD_TIP_SHA"
-    }} > "$AW_PR_DIR/metadata.txt"
+    printf '%s' "$BASE_SHA"     > "$AW_PR_DIR/base.sha"
+    printf '%s' "$HEAD_TIP_SHA" > "$AW_PR_DIR/head.sha"
 
-    SCOPE=({scope})
+    # Success prompt: use printf calls (not a heredoc) because YAML
+    # block-scalar indentation interacts badly with bash heredoc
+    # terminator-at-column-0 requirements. Format-string substitution
+    # (%s) keeps ${PR_ID}/${PROJECT}/${REPO} interpolation safe even
+    # if they contained characters that would be unsafe in a `cat`
+    # argument; the strict identifier regex above already restricts
+    # them to alphanumerics, '.', '_', '-' (and space, for project).
+    {
+      printf '\n'
+      printf '## PR context\n\n'
+      printf "This is PR #%s in project '%s' / repository '%s'.\n\n" "$PR_ID" "$PROJECT" "$REPO"
+      printf 'For git inspection (offline; objects are already in the workspace):\n\n'
+      # shellcheck disable=SC2016
+      printf '  BASE=$(cat aw-context/pr/base.sha)\n'
+      # shellcheck disable=SC2016
+      printf '  HEAD=$(cat aw-context/pr/head.sha)\n'
+      # shellcheck disable=SC2016
+      printf '  git diff --stat $BASE..$HEAD          # size budget first\n'
+      # shellcheck disable=SC2016
+      printf '  git diff --name-status $BASE..$HEAD   # changed files\n'
+      # shellcheck disable=SC2016
+      printf '  git diff $BASE..$HEAD                 # full patch\n'
+      # shellcheck disable=SC2016
+      printf '  git diff $BASE..$HEAD -- <path>       # per-file\n'
+      # shellcheck disable=SC2016
+      printf '  git show $HEAD:<path>                  # file at PR head\n'
+      # shellcheck disable=SC2016
+      printf '  git log  $BASE..$HEAD                 # PR commits\n\n'
+      # shellcheck disable=SC2016
+      printf 'For Azure DevOps MCP (if the `azure-devops` tool is configured),\n'
+      printf 'the PR identifiers are pre-filled in these example calls:\n\n'
+      printf "  repo_get_pull_request_by_id(project='%s', repositoryId='%s', pullRequestId=%s)\n" \
+        "$PROJECT" "$REPO" "$PR_ID"
+      printf "  repo_list_pull_request_threads(project='%s', repositoryId='%s', pullRequestId=%s)\n" \
+        "$PROJECT" "$REPO" "$PR_ID"
+      printf "  repo_create_pull_request_thread(project='%s', repositoryId='%s', pullRequestId=%s, comments=[...], status='active')\n" \
+        "$PROJECT" "$REPO" "$PR_ID"
+    } >> "$AGENT_PROMPT"
 
-    # Track failures of the core diff commands. We do NOT swallow
-    # errors with `|| true` — any failure here means we cannot trust
-    # the staged context, and we must signal that to the agent via
-    # status.txt.
-    CTX_OK=1
-    if ! git diff --name-status "$BASE_SHA" "$HEAD_TIP_SHA" \
-        > "$AW_PR_DIR/changed-files.txt" 2>>"$AW_PR_DIR/error.txt"; then
-      CTX_OK=0
-    fi
-
-    if [ "${{#SCOPE[@]}}" -gt 0 ]; then
-      if ! git diff --name-status "$BASE_SHA" "$HEAD_TIP_SHA" -- "${{SCOPE[@]}}" \
-          > "$AW_PR_DIR/changed-files-in-scope.txt" 2>>"$AW_PR_DIR/error.txt"; then
-        CTX_OK=0
-      fi
-    else
-      cp "$AW_PR_DIR/changed-files.txt" "$AW_PR_DIR/changed-files-in-scope.txt"
-    fi
-
-    DIFF_TMP="$(mktemp)"
-    DIFF_OK=1
-    if [ "${{#SCOPE[@]}}" -gt 0 ]; then
-      git diff --find-renames -U{unified} "$BASE_SHA" "$HEAD_TIP_SHA" \
-        -- "${{SCOPE[@]}}" > "$DIFF_TMP" 2>>"$AW_PR_DIR/error.txt" \
-        || DIFF_OK=0
-    else
-      git diff --find-renames -U{unified} "$BASE_SHA" "$HEAD_TIP_SHA" \
-        > "$DIFF_TMP" 2>>"$AW_PR_DIR/error.txt" \
-        || DIFF_OK=0
-    fi
-    if [ "$DIFF_OK" -eq 0 ]; then
-      CTX_OK=0
-    fi
-    DIFF_SIZE="$(wc -c < "$DIFF_TMP" | tr -d ' ')"
-    if [ "${{DIFF_SIZE:-0}}" -gt {max_diff_bytes} ]; then
-      head -c {max_diff_bytes} "$DIFF_TMP" > "$AW_PR_DIR/diff.patch"
-      printf '\n--- TRUNCATED at %d bytes; full diff suppressed ---\n' \
-        {max_diff_bytes} >> "$AW_PR_DIR/diff.patch"
-    else
-      cp "$DIFF_TMP" "$AW_PR_DIR/diff.patch"
-    fi
-    rm -f "$DIFF_TMP"
-{snapshot_block}
-
-    if [ "$CTX_OK" -eq 1 ]; then
-      echo "OK" > "$AW_PR_DIR/status.txt"
-    else
-      echo "CONTEXT_GENERATION_FAILED" > "$AW_PR_DIR/status.txt"
-    fi
-    echo "OK" > "$AW_CONTEXT_DIR/status.txt"
-    echo "[aw-context] pr context staged: base=$BASE_SHA head=$HEAD_TIP_SHA diff_bytes=$DIFF_SIZE ctx_ok=$CTX_OK"
+    echo "[aw-context] pr context staged: base=$BASE_SHA head=$HEAD_TIP_SHA pr=$PR_ID project=$PROJECT repo=$REPO"
   env:
     SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   displayName: "Stage PR execution context (aw-context/pr/*)"
-  condition: eq(variables['Build.Reason'], 'PullRequest')"#,
-            scope = scope_array_literal,
-            unified = unified,
-            max_diff_bytes = max_diff_bytes,
-            snapshot_block = snapshot_block,
-        )
-    }
-
-    fn prompt_fragment(&self) -> String {
-        // Always appended. On non-PR runs the directory is absent and
-        // the agent's `cat status.txt` call returns NO_PR_CONTEXT (or
-        // the file is missing, which the agent must also treat as
-        // "no PR context").
-        //
-        // The fragment deliberately does NOT mention env vars: the
-        // ado-aw env-var injection channel rejects ADO `$(...)`
-        // expressions, so all PR metadata flows through files. This
-        // is a single source of truth and avoids per-channel drift.
-        r#"
-### PR context (when triggered by a pull request)
-
-A pipeline step stages execution context for you under `aw-context/`,
-relative to your working directory.
-
-**Read `aw-context/pr/status.txt` first** — it's the single source of
-truth for whether usable PR context is available:
-
-- `OK` — `aw-context/pr/*` is fully populated. Prefer reading those files
-  over running `git fetch` / `git diff` yourself.
-- `NO_PR_CONTEXT` — this build is not a PR. The `aw-context/pr/` directory
-  may exist but its contents are not meaningful. Skip PR-specific logic.
-- `DIFF_RESOLUTION_FAILED` — the precompute step ran but could not resolve
-  the base / head SHAs. See `aw-context/pr/error.txt` for the reason.
-  Surface this in your output rather than silently producing an empty review.
-- `CONTEXT_GENERATION_FAILED` — base / head SHAs resolved, but at least one
-  of the `git diff` commands that populates `changed-files.txt`,
-  `changed-files-in-scope.txt`, or `diff.patch` failed. The metadata file
-  is still trustworthy, but the diff / file-list contents may be empty or
-  partial. See `aw-context/pr/error.txt`.
-
-If `aw-context/pr/status.txt` does not exist at all, treat it as
-`NO_PR_CONTEXT` and skip PR-specific logic.
-
-When `status.txt` is `OK`, you can rely on these files:
-
-| File                                          | Contents                              |
-|-----------------------------------------------|---------------------------------------|
-| `aw-context/pr/metadata.txt`                  | `pr_id`, `source_branch`, `target_branch`, `base_sha`, `head_sha` |
-| `aw-context/pr/changed-files.txt`             | Full `git diff --name-status` output  |
-| `aw-context/pr/changed-files-in-scope.txt`    | Name-status restricted to the configured scope |
-| `aw-context/pr/diff.patch`                    | Unified diff, scoped, capped (may end with a `--- TRUNCATED …` marker) |
-| `aw-context/pr/head-files/<path>`             | Post-PR snapshots of added / modified files |
-| `aw-context/pr/base-files/<path>`             | Pre-PR snapshots of deleted files     |
-"#
-        .to_string()
+  condition: eq(variables['Build.Reason'], 'PullRequest')"#
+            .to_string()
     }
 
     fn agent_env_vars(&self) -> Vec<(String, String)> {
-        // None: the compiler's agent-env-var channel rejects ADO
-        // `$(...)` expressions, and we'd otherwise need to bounce
-        // everything through pipeline output variables. Files are
-        // a single source of truth and avoid that complexity. The
-        // agent reads metadata from `aw-context/pr/metadata.txt`.
         vec![]
     }
 
     fn required_bash_commands(&self) -> Vec<String> {
-        // None: the agent reads `aw-context/*` via its normal
-        // file-reading mechanism (e.g. the `edit` tool or native
-        // copilot file reads), not via shell. We deliberately do
-        // NOT inject `cat`/`ls` into the bash allow-list — that
-        // would silently widen the agent's shell capability when
-        // the user has restricted or disabled bash.
-        vec![]
+        // Read-only git commands the agent needs to inspect the PR diff
+        // locally. Added unconditionally when this contributor activates
+        // (matches the runtime-extension pattern in
+        // `src/runtimes/*/extension.rs::required_bash_commands`).
+        vec![
+            "git".to_string(),
+            "git diff".to_string(),
+            "git log".to_string(),
+            "git show".to_string(),
+            "git status".to_string(),
+            "git rev-parse".to_string(),
+            "git symbolic-ref".to_string(),
+        ]
     }
 }

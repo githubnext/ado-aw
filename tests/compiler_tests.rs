@@ -4956,8 +4956,8 @@ fn test_execution_context_pr_compiled_output_is_valid_yaml() {
     assert_valid_yaml(&compiled, "execution-context-agent.md");
 }
 
-/// Spot-checks the key components of the precompute step + prompt
-/// supplement that the agent depends on.
+/// Spot-checks the key components of the precompute step + the
+/// directly-injected prompt fragment that the agent depends on.
 #[test]
 fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
     let compiled = compile_fixture("execution-context-agent.md");
@@ -4984,27 +4984,79 @@ fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
         "Prepare step must source the bearer from the in-process SYSTEM_ACCESSTOKEN env"
     );
 
+    // v6.2: artefact set is {base.sha, head.sha} on success + error.txt on failure.
     assert!(
-        compiled.contains("-U5"),
-        "Custom unified=5 must reach the bash"
+        compiled.contains("$AW_PR_DIR/base.sha"),
+        "Prepare step must write base.sha (the merge-base SHA the agent diffs against)"
     );
     assert!(
-        compiled.contains("262144"),
-        "Custom max-diff-bytes must reach the bash"
+        compiled.contains("$AW_PR_DIR/head.sha"),
+        "Prepare step must write head.sha (the PR head SHA)"
     );
     assert!(
-        compiled.contains("'src/**'") && compiled.contains("'docs/**'"),
-        "Custom scope entries must reach the bash as quoted pathspecs"
+        compiled.contains("$AW_PR_DIR/error.txt"),
+        "Prepare step must write error.txt on failure"
+    );
+    assert!(
+        !compiled.contains("aw-context/pr/status.txt") &&
+            !compiled.contains("$AW_PR_DIR/status.txt"),
+        "v6.2: status.txt is gone -- the prompt text encodes the outcome instead"
+    );
+    assert!(
+        !compiled.contains("$AW_PR_DIR/diff.patch"),
+        "v6.2: diff.patch is gone -- the agent runs `git diff $BASE..$HEAD` itself"
+    );
+    assert!(
+        !compiled.contains("$AW_PR_DIR/metadata.txt"),
+        "v6.2: metadata.txt is gone -- short identifiers are inlined in the prompt"
     );
 
+    // v6.2: PR identifier regex validation must be present.
     assert!(
-        compiled.contains("## Execution context"),
-        "Prompt should include the Execution context section"
+        compiled.contains("PR identifier validation failed"),
+        "Prepare step must validate PR_ID / PROJECT / REPO with an allowlist regex \
+         before interpolating them into the agent prompt"
     );
     assert!(
-        compiled.contains("aw-context/pr/status.txt"),
-        "Prompt should describe the canonical status file"
+        compiled.contains(r#"[[ ! "$PR_ID" =~ ^[0-9]+$ ]]"#),
+        "Prepare step must require numeric PR id"
     );
+
+    // v6.2: prompt is appended directly to /tmp/awf-tools/agent-prompt.md
+    // via printf calls inside the prepare step (not via the
+    // `prompt_supplement` trait).
+    assert!(
+        compiled.contains("AGENT_PROMPT=\"/tmp/awf-tools/agent-prompt.md\""),
+        "Prepare step must target the AWF agent-prompt file directly"
+    );
+    assert!(
+        compiled.contains(">> \"$AGENT_PROMPT\""),
+        "Prepare step must append its prompt fragment to the agent prompt file"
+    );
+    assert!(
+        compiled.contains("## PR context"),
+        "Agent prompt should gain a `## PR context` section at runtime"
+    );
+    assert!(
+        compiled.contains(r#"repo_get_pull_request_by_id(project='%s', repositoryId='%s', pullRequestId=%s)"#),
+        "Prompt should illustrate ADO MCP usage with interpolated identifiers"
+    );
+
+    // v6.2: prompt_supplement is no longer emitted for the
+    // execution-context extension -- the wrapper that would emit
+    // "Append Execution Context prompt" should not appear.
+    assert!(
+        !compiled.contains("Append Execution Context prompt"),
+        "v6.2: ExecContextExtension::prompt_supplement is removed; \
+         the wrapper step must not be emitted"
+    );
+
+    // v6.2: the agent bash allow-list must include the read-only
+    // git commands so the agent can actually diff inside the sandbox.
+    // The fixture's tools.bash is unset (= wildcard), so the engine
+    // bypasses the per-command allow-list entirely. We assert the
+    // explicit-allow-list case via the dedicated bash-allowlist test
+    // below.
 }
 
 /// **Trust-boundary regression test.** `SYSTEM_ACCESSTOKEN` must appear
@@ -5099,52 +5151,49 @@ fn test_execution_context_pr_not_emitted_when_no_pr_trigger() {
         "minimal-agent has no on.pr trigger - PR contributor must not activate."
     );
     assert!(
-        !compiled.contains("aw-context/pr/status.txt"),
+        !compiled.contains("aw-context/pr"),
         "Prompt supplement should not mention PR context when there's no PR trigger"
     );
 }
 
-/// **Compile-time validation.** Reject ADO macro / template / runtime
-/// expressions in `execution-context.pr.scope[]` — those values are
-/// interpolated by ADO before bash runs, so an entry like
-/// `$(System.AccessToken)` would be expanded to the live token at
-/// runtime and could be exfiltrated.
+/// v6.2: When the PR contributor activates AND the agent has an
+/// explicit (non-wildcard) bash allow-list, the agent's bash allow-list
+/// MUST include the read-only git commands so the agent can `git diff`
+/// the PR locally inside the AWF sandbox.
 #[test]
-fn test_execution_context_pr_scope_rejects_ado_expressions() {
+fn test_execution_context_pr_auto_extends_bash_allowlist() {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let unique_id = COUNTER.fetch_add(1, Ordering::Relaxed);
 
     let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-scope-validation-{}-{}",
+        "agentic-pipeline-exec-context-bash-{}-{}",
         std::process::id(),
         unique_id,
     ));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
-    let fixture_path = temp_dir.join("bad-scope.md");
-    // Minimal agent fixture with a malicious scope entry.
+    let fixture_path = temp_dir.join("pr-bash-restricted.md");
     let body = r#"---
-name: "Bad scope test"
-description: "Should fail because scope contains an ADO expression"
+name: "PR bash restricted"
+description: "PR-triggered agent with an explicit, restricted bash allow-list"
 on:
   pr:
     branches:
       include: [main]
-execution-context:
-  pr:
-    scope:
-      - "src/**"
-      - "$(System.AccessToken)"
+tools:
+  bash:
+    - "echo"
+    - "cat"
 ---
 
-# Bad scope
+# PR bash restricted
 
 Body.
 "#;
     fs::write(&fixture_path, body).expect("write fixture");
 
-    let output_path = temp_dir.join("bad-scope.yml");
+    let output_path = temp_dir.join("pr-bash-restricted.yml");
     let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
     let output = std::process::Command::new(&binary_path)
         .args([
@@ -5152,20 +5201,110 @@ Body.
             fixture_path.to_str().unwrap(),
             "-o",
             output_path.to_str().unwrap(),
+            "--force",
         ])
         .output()
         .expect("run compiler");
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        !output.status.success(),
-        "Compilation MUST fail when execution-context.pr.scope[] contains an ADO expression; \
-         instead compiled OK. stderr: {stderr}"
+        output.status.success(),
+        "Compilation must succeed for PR-triggered restricted-bash fixture. stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
     );
+
+    let compiled = fs::read_to_string(&output_path).expect("read compiled YAML");
+
+    // Each of these should appear as a `shell(...)` entry in the
+    // agent's --allow-tool list.
+    for cmd in [
+        "shell(git)",
+        "shell(git diff)",
+        "shell(git log)",
+        "shell(git show)",
+        "shell(git status)",
+        "shell(git rev-parse)",
+        "shell(git symbolic-ref)",
+    ] {
+        assert!(
+            compiled.contains(cmd),
+            "agent --allow-tool list should contain {cmd:?} after the exec-context PR contributor extends it; \
+             not found in compiled YAML"
+        );
+    }
+    // The user's original commands must still be present.
     assert!(
-        stderr.contains("execution-context.pr.scope") && stderr.contains("ADO expression"),
-        "Error message should clearly mention the offending field and reason. Got: {stderr}"
+        compiled.contains("shell(echo)") && compiled.contains("shell(cat)"),
+        "user-supplied bash entries must remain in the allow-list"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// v6.2: When `execution-context.pr.enabled: false`, the PR contributor
+/// MUST NOT extend the agent bash allow-list even on a PR-triggered
+/// agent with a restricted bash list.
+#[test]
+fn test_execution_context_pr_does_not_extend_bash_when_disabled() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique_id = COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-exec-context-bash-disabled-{}-{}",
+        std::process::id(),
+        unique_id,
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let fixture_path = temp_dir.join("pr-disabled.md");
+    let body = r#"---
+name: "PR exec-context disabled"
+description: "PR-triggered agent that opts out of execution-context"
+on:
+  pr:
+    branches:
+      include: [main]
+execution-context:
+  pr:
+    enabled: false
+tools:
+  bash:
+    - "echo"
+---
+
+# PR disabled
+
+Body.
+"#;
+    fs::write(&fixture_path, body).expect("write fixture");
+
+    let output_path = temp_dir.join("pr-disabled.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            fixture_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+            "--force",
+        ])
+        .output()
+        .expect("run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compilation must succeed. stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let compiled = fs::read_to_string(&output_path).expect("read compiled YAML");
+
+    assert!(
+        !compiled.contains("Stage PR execution context"),
+        "Prepare step must not be emitted when exec-context.pr is explicitly disabled"
+    );
+    assert!(
+        !compiled.contains("shell(git diff)"),
+        "Bash allow-list must NOT be extended with git commands when exec-context.pr is disabled"
+    );
 }
