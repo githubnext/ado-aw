@@ -70,7 +70,11 @@ entirely, defaults are *"on for the triggers configured in `on:`"*.
 - **`pr.enabled`** (`bool`, default `true` when `on.pr` is set) —
   whether to activate the PR contributor. Set `false` to opt out
   (e.g. when an agent already does its own precompute or doesn't need
-  PR context).
+  PR context). **`on.pr` must be configured** for the contributor to
+  activate at all — `pr.enabled: true` without an `on.pr` trigger has
+  no effect (the prepare step would be dead code, and silently widening
+  the agent's bash allow-list with git commands for a non-PR agent
+  would be a footgun).
 
 `pr.enabled: false` also suppresses the auto-extension of the agent's
 bash allow-list with git commands described below.
@@ -86,9 +90,17 @@ working directory):
 ```
 aw-context/
   pr/
-    base.sha          # target merge-base SHA (40-char hex, no trailing newline)
+    base.sha          # PR merge-base SHA (40-char hex, no trailing newline)
     head.sha          # PR head SHA (40-char hex, no trailing newline)
 ```
+
+`base.sha` is the common ancestor of the PR head and the PR target
+branch — `git merge-base` in both the synthetic-merge-commit path and
+the progressive-deepening path. This makes `git diff $BASE..$HEAD`
+produce the SAME change set regardless of whether ADO checked out a
+real branch tip or a synthetic merge commit (i.e. the diff is "what
+the PR introduces since branch-point", not "what the PR introduces
+versus the current target tip").
 
 ### Failure case (1 file)
 
@@ -172,12 +184,14 @@ The PR contributor's generated bash step:
    discovery — ADO already populates these.
 2. **Validates identifiers** with strict allowlist regexes
    (`PR_ID` ⊆ digits, `PROJECT`/`REPO` ⊆ alphanumeric + `._-`,
-   `PROJECT` additionally allows space). Failure writes
-   `error.txt` and appends the failure prompt fragment.
+   `PROJECT` additionally allows space, `PR_TARGET_BRANCH` ⊆
+   alphanumeric + `._/-`). Failure writes `error.txt` and appends
+   the failure prompt fragment.
 3. **Detects merge-commit shape.** If `HEAD` has two parents (the
    synthetic merge commit ADO checks out for PR builds), uses
-   `HEAD^1` / `HEAD^2` as base / head and skips the target-branch
-   fetch entirely. Otherwise:
+   `HEAD^2` as the PR head and computes `git merge-base HEAD^1 HEAD^2`
+   as the base — same semantics as the deepening path, no
+   target-branch fetch needed. Otherwise:
 4. **Fetches the PR target branch with progressive deepening** —
    `--depth=200`, then `500`, then `2000`, then finally `--unshallow`.
    After each successful fetch, attempts `git merge-base

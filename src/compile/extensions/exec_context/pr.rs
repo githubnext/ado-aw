@@ -74,11 +74,25 @@ impl ContextContributor for PrContextContributor {
     }
 
     fn should_activate(&self, ctx: &CompileContext) -> bool {
-        let pr_trigger_configured = ctx.front_matter.pr_trigger().is_some();
+        // The PR contributor is meaningful ONLY when `on.pr` is
+        // configured: the prepare step is gated at runtime by
+        // `Build.Reason == 'PullRequest'`, and `required_bash_commands`
+        // (which extends the agent's bash allow-list with 7 git
+        // commands) is a compile-time artifact. Without `on.pr`, the
+        // step would be dead code AND we would silently widen the
+        // agent's bash surface for no runtime benefit.
+        //
+        // So `on.pr` is REQUIRED. `pr.enabled` is then an opt-out
+        // switch (defaults to true, set false to suppress). An
+        // explicit `pr.enabled: true` without `on.pr` is treated
+        // the same as the default (i.e. inactive); we do not honour
+        // it as an unconditional activate-anyway.
+        if ctx.front_matter.pr_trigger().is_none() {
+            return false;
+        }
         match self.config.explicit_enabled() {
-            Some(true) => true,
             Some(false) => false,
-            None => pr_trigger_configured,
+            Some(true) | None => true,
         }
     }
 
@@ -147,6 +161,16 @@ impl ContextContributor for PrContextContributor {
     if [ -z "$PR_TARGET_BRANCH" ]; then
       fail "System.PullRequest.TargetBranch is empty; cannot resolve merge-base."
     fi
+    # Defence-in-depth: PR_TARGET_BRANCH comes from ADO infra
+    # (System.PullRequest.TargetBranch) but we interpolate it into a
+    # git refspec ("+refs/heads/...:refs/remotes/origin/..."), so
+    # validate it with the same posture as the other identifiers.
+    # Allowed: refs/heads/-prefixed branches with `[A-Za-z0-9._/-]`
+    # name characters (the same character set git itself accepts for
+    # branch names in `refs/heads/<name>`).
+    if [[ ! "$PR_TARGET_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+      fail "PR identifier validation failed (PR_TARGET_BRANCH='$PR_TARGET_BRANCH' contains disallowed characters)."
+    fi
 
     PR_TARGET_SHORT="${PR_TARGET_BRANCH#refs/heads/}"
 
@@ -172,15 +196,36 @@ impl ContextContributor for PrContextContributor {
     }
 
     HEAD_SHA="$(git rev-parse HEAD 2>/dev/null || true)"
-    PARENTS="$(git rev-list --parents -n 1 HEAD 2>/dev/null | wc -w || echo 0)"
+    # `wc -w` itself returns 0 on empty input ("0"), so a `|| echo 0`
+    # fallback is unreachable. Default to "0" via parameter expansion
+    # when the upstream command produced no output at all.
+    PARENTS="$(git rev-list --parents -n 1 HEAD 2>/dev/null | wc -w)"
+    PARENTS="${PARENTS:-0}"
 
     BASE_SHA=""
     HEAD_TIP_SHA=""
     if [ "${PARENTS:-0}" -ge 3 ]; then
-      # ADO synthetic merge commit: HEAD^1 is the target tip, HEAD^2
-      # is the PR head. No fetch needed.
-      BASE_SHA="$(git rev-parse 'HEAD^1' 2>/dev/null || true)"
-      HEAD_TIP_SHA="$(git rev-parse 'HEAD^2' 2>/dev/null || true)"
+      # ADO synthetic merge commit: HEAD^1 is the target tip at PR
+      # preparation time, HEAD^2 is the PR head. Compute the true
+      # common ancestor (`merge-base HEAD^1 HEAD^2`) so `BASE_SHA`
+      # has the SAME semantics as the progressive-deepening path.
+      # If we used HEAD^1 directly, `git diff $BASE..$HEAD` would
+      # silently produce a narrower "vs current target tip" change set
+      # in the synthetic-merge case and a broader "since branch point"
+      # change set in the deepening case — agents would see different
+      # diffs depending on ADO's checkout mode.
+      MERGE_P1="$(git rev-parse 'HEAD^1' 2>/dev/null || true)"
+      MERGE_P2="$(git rev-parse 'HEAD^2' 2>/dev/null || true)"
+      HEAD_TIP_SHA="$MERGE_P2"
+      if [ -n "$MERGE_P1" ] && [ -n "$MERGE_P2" ]; then
+        BASE_SHA="$(git merge-base "$MERGE_P1" "$MERGE_P2" 2>/dev/null || true)"
+        # Fall back to the target tip if merge-base cannot resolve
+        # within the workspace's shallow history (rare on a synthetic
+        # merge commit since both parents are present, but be safe).
+        if [ -z "$BASE_SHA" ]; then
+          BASE_SHA="$MERGE_P1"
+        fi
+      fi
     else
       HEAD_TIP_SHA="$HEAD_SHA"
       # Progressive deepening: stop ONLY when merge-base actually

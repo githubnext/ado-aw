@@ -5308,3 +5308,128 @@ Body.
         "Bash allow-list must NOT be extended with git commands when exec-context.pr is disabled"
     );
 }
+
+/// v6.2 footgun fix: explicit `execution-context.pr.enabled: true` on
+/// an agent WITHOUT an `on.pr` trigger must NOT activate the PR
+/// contributor. Otherwise the agent's bash allow-list silently widens
+/// (the 7 git commands get added at compile time) for a step that can
+/// never run (the runtime condition gate is `Build.Reason ==
+/// 'PullRequest'`).
+#[test]
+fn test_execution_context_pr_enabled_true_without_on_pr_is_inactive() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique_id = COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-exec-context-pr-no-trigger-{}-{}",
+        std::process::id(),
+        unique_id,
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let fixture_path = temp_dir.join("pr-enabled-no-trigger.md");
+    // No `on.pr` is configured; `execution-context.pr.enabled: true`
+    // alone must not be enough to activate the contributor.
+    let body = r#"---
+name: "PR enabled without on.pr"
+description: "Verify explicit pr.enabled does not override missing on.pr"
+on:
+  schedule: daily around 14:00
+execution-context:
+  pr:
+    enabled: true
+tools:
+  bash:
+    - "echo"
+---
+
+# PR enabled without on.pr
+
+Body.
+"#;
+    fs::write(&fixture_path, body).expect("write fixture");
+
+    let output_path = temp_dir.join("pr-enabled-no-trigger.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            fixture_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+            "--force",
+        ])
+        .output()
+        .expect("run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compilation must succeed. stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let compiled = fs::read_to_string(&output_path).expect("read compiled YAML");
+
+    assert!(
+        !compiled.contains("Stage PR execution context"),
+        "Prepare step must not be emitted when on.pr is not configured, \
+         even with explicit `pr.enabled: true`"
+    );
+    assert!(
+        !compiled.contains("shell(git diff)"),
+        "Bash allow-list must NOT be silently widened with git commands when \
+         on.pr is not configured (compile-time artifact for a step that can \
+         never run is a footgun)"
+    );
+}
+
+/// v6.2 correctness fix: in BOTH the synthetic-merge-commit path and
+/// the progressive-deepening path, `BASE_SHA` is the true common
+/// ancestor (`git merge-base`), so `git diff $BASE..$HEAD` produces
+/// the same change set regardless of which path runs. Regression
+/// guard against the old behaviour where the synthetic path used
+/// `HEAD^1` (the target tip) directly, giving a narrower diff.
+#[test]
+fn test_execution_context_pr_synthetic_merge_uses_merge_base() {
+    let compiled = compile_fixture("execution-context-agent.md");
+
+    // The synthetic-merge branch of the prepare step MUST compute
+    // merge-base from the two parents, not use HEAD^1 directly as
+    // BASE_SHA. We look for the literal `git merge-base "$MERGE_P1"
+    // "$MERGE_P2"` invocation.
+    assert!(
+        compiled.contains(r#"git merge-base "$MERGE_P1" "$MERGE_P2""#),
+        "synthetic-merge-commit branch must compute merge-base from the two \
+         parents so BASE_SHA has the same semantics as the deepening path. \
+         Compiled YAML does not contain the expected merge-base invocation."
+    );
+
+    // Defensive: the OLD (incorrect) shape — assigning HEAD^1
+    // directly to BASE_SHA — must NOT appear.
+    assert!(
+        !compiled.contains(r#"BASE_SHA="$(git rev-parse 'HEAD^1'"#),
+        "regression: synthetic-merge branch must not assign HEAD^1 directly \
+         to BASE_SHA; that gives a narrower 'vs target tip' diff instead of \
+         the consistent 'since branch-point' diff."
+    );
+}
+
+/// v6.2 defence-in-depth: `PR_TARGET_BRANCH` (which gets interpolated
+/// into a git refspec) is validated with the same posture as the
+/// other identifiers — strict allowlist regex — even though it
+/// comes from ADO infra rather than user-controlled input.
+#[test]
+fn test_execution_context_pr_target_branch_validated() {
+    let compiled = compile_fixture("execution-context-agent.md");
+
+    // The validation line for PR_TARGET_BRANCH must be present.
+    // Character class matches the regex in pr.rs:
+    //     ^[A-Za-z0-9._/-]+$
+    assert!(
+        compiled.contains(r#"[[ ! "$PR_TARGET_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]]"#),
+        "PR_TARGET_BRANCH must be validated with a strict allowlist regex \
+         before interpolation into a git refspec. Compiled YAML lacks the \
+         expected validation."
+    );
+}

@@ -75,10 +75,26 @@ impl ExecContextExtension {
         // source-of-truth for `prepare_steps` (which DOES have a
         // `CompileContext`) and this aggregate for
         // `required_bash_commands` (which does not).
-        let pr_active = match config.pr.as_ref().and_then(|p| p.enabled) {
-            Some(true) => true,
-            Some(false) => false,
-            None => front_matter.pr_trigger().is_some(),
+        //
+        // MAINTENANCE: keep this aggregate in lock-step with each
+        // contributor's `should_activate`. When adding a new
+        // contributor, OR-in its activation predicate here so its
+        // `required_bash_commands` are not silently suppressed.
+        //
+        // For the PR contributor specifically: `on.pr` is REQUIRED.
+        // An explicit `pr.enabled: true` on a non-PR-triggered agent
+        // does NOT activate (the prepare step would be dead code
+        // because of the runtime `Build.Reason == 'PullRequest'` gate,
+        // and silently widening the agent's bash allow-list with the
+        // 7 git commands for a step that can never run is a footgun).
+        let pr_trigger_configured = front_matter.pr_trigger().is_some();
+        let pr_active = if !pr_trigger_configured {
+            false
+        } else {
+            match config.pr.as_ref().and_then(|p| p.enabled) {
+                Some(false) => false,
+                Some(true) | None => true,
+            }
         };
         Self {
             config,
