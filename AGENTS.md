@@ -63,6 +63,10 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   │   ├── github.rs # Always-on GitHub MCP extension
 │   │   │   ├── safe_outputs.rs # Always-on SafeOutputs MCP extension
 │   │   │   ├── ado_script.rs # Always-on ado-script extension (gate evaluator + runtime-import resolver, per-job downloads)
+│   │   │   ├── exec_context/ # Always-on execution-context extension (issue #860)
+│   │   │   │   ├── mod.rs    # ExecContextExtension; CompilerExtension impl; contributor fan-out
+│   │   │   │   ├── contributor.rs # Internal ContextContributor trait + Contributor enum
+│   │   │   │   └── pr.rs     # PrContextContributor — stages aw-context/pr/* for PR builds
 │   │   │   └── tests.rs  # Extension integration tests
 │   │   ├── codemods/     # Front-matter codemods (one file per transformation)
 │   │   │   ├── mod.rs    # Codemod struct, CODEMODS registry, runner
@@ -235,6 +239,10 @@ index to jump to the right page.
   Python, Node.js, .NET).
 - [`docs/targets.md`](docs/targets.md) — target platforms: `standalone`,
   `1es`, `job`, and `stage`.
+- [`docs/execution-context.md`](docs/execution-context.md) — built-in
+  `aw-context/` precompute (issue #860): PR target-branch fetch,
+  unified diff, file snapshots, base/head SHAs, configured via the
+  `execution-context:` front-matter block.
 - [`docs/safe-outputs.md`](docs/safe-outputs.md) — full reference for every
   safe-output tool agents can use to propose actions (PRs, work items, wiki
   pages, comments, etc.) plus their per-agent configuration.

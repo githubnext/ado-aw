@@ -4940,3 +4940,232 @@ fn test_job_target_with_setup_emits_dual_branch_dependson_with_each() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+
+
+// ============================================================================
+// Execution-context extension (issue #860)
+// ============================================================================
+
+/// The execution-context extension is always-on and emits an `aw-context`
+/// prepare step on PR-triggered agents. This sanity check makes sure the
+/// generated YAML round-trips through `serde_yaml`.
+#[test]
+fn test_execution_context_pr_compiled_output_is_valid_yaml() {
+    let compiled = compile_fixture("execution-context-agent.md");
+    assert_valid_yaml(&compiled, "execution-context-agent.md");
+}
+
+/// Spot-checks the key components of the precompute step + prompt
+/// supplement that the agent depends on.
+#[test]
+fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
+    let compiled = compile_fixture("execution-context-agent.md");
+
+    assert!(
+        compiled.contains("Stage PR execution context (aw-context/pr/*)"),
+        "Should emit the PR context prepare step displayName"
+    );
+    assert!(
+        compiled.contains("condition: eq(variables['Build.Reason'], 'PullRequest')"),
+        "Prepare step must be gated on PR builds at the ADO condition layer"
+    );
+    assert!(
+        compiled.contains("SYSTEM_ACCESSTOKEN: $(System.AccessToken)"),
+        "Prepare step must map the system access token into its own env"
+    );
+    assert!(
+        compiled.contains("GIT_CONFIG_KEY_0=\"http.extraheader\""),
+        "Prepare step must use GIT_CONFIG_* env vars (not `git -c`) to inject the bearer, \
+         so the token does not appear in process argv"
+    );
+    assert!(
+        compiled.contains("GIT_CONFIG_VALUE_0=\"Authorization: bearer ${SYSTEM_ACCESSTOKEN}\""),
+        "Prepare step must source the bearer from the in-process SYSTEM_ACCESSTOKEN env"
+    );
+
+    assert!(
+        compiled.contains("-U5"),
+        "Custom unified=5 must reach the bash"
+    );
+    assert!(
+        compiled.contains("262144"),
+        "Custom max-diff-bytes must reach the bash"
+    );
+    assert!(
+        compiled.contains("'src/**'") && compiled.contains("'docs/**'"),
+        "Custom scope entries must reach the bash as quoted pathspecs"
+    );
+
+    assert!(
+        compiled.contains("## Execution context"),
+        "Prompt should include the Execution context section"
+    );
+    assert!(
+        compiled.contains("aw-context/pr/status.txt"),
+        "Prompt should describe the canonical status file"
+    );
+}
+
+/// **Trust-boundary regression test.** `SYSTEM_ACCESSTOKEN` must appear
+/// only inside the execution-context prepare step's `env:` block, never
+/// in `.git/config` writes, and never under `persistCredentials: true`.
+///
+/// Walks the parsed YAML and checks every step: any step whose `env:`
+/// declares `SYSTEM_ACCESSTOKEN` MUST be the exec-context PR prepare
+/// step (identified by its `displayName`). Any other location for the
+/// token would indicate a leak — most importantly, it must NOT appear
+/// in the agent step's env (where the AWF sandbox would inherit it).
+#[test]
+fn test_execution_context_pr_does_not_leak_system_accesstoken() {
+    let compiled = compile_fixture("execution-context-agent.md");
+
+    assert!(
+        !compiled.contains("persistCredentials: true"),
+        "execution-context must NEVER emit `persistCredentials: true`."
+    );
+    assert!(
+        !compiled.contains(".git/config"),
+        "execution-context must NEVER write to .git/config."
+    );
+
+    // Parse the YAML and walk every mapping. For any mapping that has
+    // an `env:` child mapping containing `SYSTEM_ACCESSTOKEN`, the
+    // enclosing step's `displayName` MUST be the exec-context prepare
+    // step. Anything else is a leak.
+    use serde_yaml::Value;
+    let yaml: Value =
+        serde_yaml::from_str(&compiled).expect("compiled output should parse as YAML");
+
+    fn walk(v: &Value, found: &mut Vec<Option<String>>) {
+        match v {
+            Value::Mapping(m) => {
+                // Inspect this mapping: if it has an `env:` child mapping
+                // that contains SYSTEM_ACCESSTOKEN, capture the
+                // sibling `displayName` (if any).
+                if let Some(Value::Mapping(env_map)) = m.get(Value::String("env".to_string())) {
+                    let has_token = env_map.iter().any(|(k, _v)| {
+                        matches!(k, Value::String(s) if s == "SYSTEM_ACCESSTOKEN")
+                    });
+                    if has_token {
+                        let display = m
+                            .get(Value::String("displayName".to_string()))
+                            .and_then(|d| d.as_str())
+                            .map(|s| s.to_string());
+                        found.push(display);
+                    }
+                }
+                for (_, vv) in m {
+                    walk(vv, found);
+                }
+            }
+            Value::Sequence(seq) => {
+                for item in seq {
+                    walk(item, found);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut env_blocks_with_token: Vec<Option<String>> = Vec::new();
+    walk(&yaml, &mut env_blocks_with_token);
+
+    assert!(
+        !env_blocks_with_token.is_empty(),
+        "expected at least one env block with SYSTEM_ACCESSTOKEN (the exec-context prepare step)"
+    );
+
+    for display in &env_blocks_with_token {
+        match display {
+            Some(d) if d == "Stage PR execution context (aw-context/pr/*)" => {}
+            other => panic!(
+                "SYSTEM_ACCESSTOKEN was found in a step env block that is NOT the \
+                 exec-context PR prepare step. displayName = {:?}. \
+                 This indicates a credential leak into another step.",
+                other
+            ),
+        }
+    }
+}
+
+/// When the agent is not PR-triggered, the execution-context extension
+/// must NOT emit the PR prepare step.
+#[test]
+fn test_execution_context_pr_not_emitted_when_no_pr_trigger() {
+    let compiled = compile_fixture("minimal-agent.md");
+    assert!(
+        !compiled.contains("Stage PR execution context"),
+        "minimal-agent has no on.pr trigger - PR contributor must not activate."
+    );
+    assert!(
+        !compiled.contains("aw-context/pr/status.txt"),
+        "Prompt supplement should not mention PR context when there's no PR trigger"
+    );
+}
+
+/// **Compile-time validation.** Reject ADO macro / template / runtime
+/// expressions in `execution-context.pr.scope[]` — those values are
+/// interpolated by ADO before bash runs, so an entry like
+/// `$(System.AccessToken)` would be expanded to the live token at
+/// runtime and could be exfiltrated.
+#[test]
+fn test_execution_context_pr_scope_rejects_ado_expressions() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique_id = COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-scope-validation-{}-{}",
+        std::process::id(),
+        unique_id,
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let fixture_path = temp_dir.join("bad-scope.md");
+    // Minimal agent fixture with a malicious scope entry.
+    let body = r#"---
+name: "Bad scope test"
+description: "Should fail because scope contains an ADO expression"
+on:
+  pr:
+    branches:
+      include: [main]
+execution-context:
+  pr:
+    scope:
+      - "src/**"
+      - "$(System.AccessToken)"
+---
+
+# Bad scope
+
+Body.
+"#;
+    fs::write(&fixture_path, body).expect("write fixture");
+
+    let output_path = temp_dir.join("bad-scope.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            fixture_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run compiler");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "Compilation MUST fail when execution-context.pr.scope[] contains an ADO expression; \
+         instead compiled OK. stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("execution-context.pr.scope") && stderr.contains("ADO expression"),
+        "Error message should clearly mention the offending field and reason. Got: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}

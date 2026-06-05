@@ -717,6 +717,15 @@ pub struct FrontMatter {
     /// Runtime parameters for the pipeline (surfaced in ADO UI when queuing a run)
     #[serde(default)]
     pub parameters: Vec<PipelineParameter>,
+    /// Execution-context configuration — controls the always-on
+    /// `ExecContextExtension` that stages per-trigger context (PR diff,
+    /// changed files, snapshots, etc.) under `aw-context/` before the
+    /// agent runs. See `docs/execution-context.md`.
+    ///
+    /// When omitted, defaults activate per trigger configured in `on:`:
+    /// PR context is on when `on.pr` is set.
+    #[serde(default, rename = "execution-context")]
+    pub execution_context: Option<ExecutionContextConfig>,
 }
 
 impl FrontMatter {
@@ -804,6 +813,9 @@ impl SanitizeConfigTrait for FrontMatter {
         }
         if let Some(ref mut d) = self.ado_aw_debug {
             d.sanitize_config_fields();
+        }
+        if let Some(ref mut ec) = self.execution_context {
+            ec.sanitize_config_fields();
         }
     }
 }
@@ -1160,6 +1172,102 @@ impl SanitizeConfigTrait for PipelineFilters {
         if let Some(ref mut e) = self.expression {
             *e = crate::sanitize::sanitize_config(e);
         }
+    }
+}
+
+// ─── Execution Context Types ────────────────────────────────────────────────
+
+/// Top-level configuration for the always-on execution-context plugin.
+///
+/// The plugin owns a small framework of per-trigger "context contributors"
+/// that materialise execution context on disk under `aw-context/` and as
+/// `AW_*` environment variables before the agent runs. v1 ships one
+/// contributor (`pr`); future contributors can plug in via the same
+/// internal trait without breaking changes.
+///
+/// All fields are optional. Defaults activate per trigger configured in
+/// `on:` — e.g. the PR contributor is on by default when `on.pr` is set.
+///
+/// See `docs/execution-context.md`.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ExecutionContextConfig {
+    /// Master switch. When `false`, no contributor runs and no
+    /// `aw-context/` is staged. Defaults to `true`.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// PR-context contributor configuration.
+    #[serde(default)]
+    pub pr: Option<PrContextConfig>,
+}
+
+impl ExecutionContextConfig {
+    /// Whether the master switch is on. Defaults to `true` when unset.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+}
+
+impl SanitizeConfigTrait for ExecutionContextConfig {
+    fn sanitize_config_fields(&mut self) {
+        if let Some(ref mut p) = self.pr {
+            p.sanitize_config_fields();
+        }
+    }
+}
+
+/// Configuration for the PR-context contributor.
+///
+/// Controls how the precompute step materialises `aw-context/pr/*` for
+/// PR-triggered builds. All fields are optional — defaults are sensible
+/// for typical PR-reviewer agents.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct PrContextConfig {
+    /// Whether the PR contributor is active. Defaults to `true` when
+    /// `on.pr` is configured. Set `false` to opt out (e.g. on huge
+    /// monorepos where the targeted fetch + diff cost is unacceptable).
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Pathspecs scoping the diff + snapshots (passed to `git diff -- …`).
+    /// Empty / unset = include all paths.
+    #[serde(default)]
+    pub scope: Vec<String>,
+    /// `-U` lines of context for `diff.patch`. Default: 3.
+    #[serde(default)]
+    pub unified: Option<u32>,
+    /// Truncate `diff.patch` beyond this many bytes. Default: 524288 (512 KiB).
+    #[serde(default, rename = "max-diff-bytes")]
+    pub max_diff_bytes: Option<u64>,
+    /// Whether to write `head-files/` and `base-files/` snapshots. Default: true.
+    #[serde(default)]
+    pub snapshots: Option<bool>,
+}
+
+impl PrContextConfig {
+    /// Resolved-enabled value; `None` means "depends on whether `on.pr` is set".
+    pub fn explicit_enabled(&self) -> Option<bool> {
+        self.enabled
+    }
+
+    pub fn unified_or_default(&self) -> u32 {
+        self.unified.unwrap_or(3)
+    }
+
+    pub fn max_diff_bytes_or_default(&self) -> u64 {
+        self.max_diff_bytes.unwrap_or(524_288)
+    }
+
+    pub fn snapshots_or_default(&self) -> bool {
+        self.snapshots.unwrap_or(true)
+    }
+}
+
+impl SanitizeConfigTrait for PrContextConfig {
+    fn sanitize_config_fields(&mut self) {
+        self.scope = self
+            .scope
+            .iter()
+            .map(|s| crate::sanitize::sanitize_config(s))
+            .collect();
     }
 }
 

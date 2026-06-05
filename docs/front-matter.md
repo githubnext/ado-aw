@@ -124,6 +124,16 @@ on:                            # trigger configuration (unified under on: key)
       build-reason:
         include: [PullRequest]
       expression: "eq(variables['Custom.Flag'], 'true')"  # raw ADO condition
+execution-context:             # optional execution-context plugin (see docs/execution-context.md)
+  enabled: true                # master switch; defaults to true. Set false to disable globally.
+  pr:                          # PR-context contributor. Activates on PR-triggered builds when on.pr is set.
+    enabled: true              # defaults to true when on.pr is configured. Set false to opt out.
+    scope:                     # pathspecs scoping the diff + snapshots
+      - "src/**"
+      - "docs/**"
+    unified: 3                 # `-U` lines of context for diff.patch; default: 3
+    max-diff-bytes: 524288     # truncate diff.patch beyond this size; default: 524288 (512 KiB)
+    snapshots: true            # whether to write head-files/ and base-files/; default: true
 steps:                         # inline steps before agent runs (same job, generate context)
   - bash: echo "Preparing context for agent"
     displayName: "Prepare context"

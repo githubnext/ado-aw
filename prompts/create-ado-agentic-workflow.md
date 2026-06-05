@@ -429,6 +429,8 @@ on:
 
 When `on.pr` is set: the native ADO `pr:` trigger block is generated from `branches:` and `paths:`. Runtime `filters:` compile to a gate step in the Setup job that self-cancels the build when they do not match.
 
+**PR-reviewer agents — DO NOT write your own precompute step.** When `on.pr` is set, the compiler automatically stages PR context (changed files, unified diff, base/head SHAs, optional file snapshots) under `aw-context/pr/*` before the agent runs. Tell the agent to read `aw-context/pr/status.txt` first, then consume `aw-context/pr/diff.patch` and `aw-context/pr/changed-files-in-scope.txt` as needed. Customise via the top-level `execution-context:` block (scope, unified context size, max diff bytes, snapshots). Full reference: [`docs/execution-context.md`](../docs/execution-context.md).
+
 #### Pipeline Triggers (`on.pipeline`)
 
 Trigger from another pipeline completing:

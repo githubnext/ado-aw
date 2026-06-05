@@ -80,6 +80,7 @@ const FIXTURES: &[&str] = &[
     "runtime-coverage-1es-agent.md",
     "job-agent.md",
     "stage-agent.md",
+    "execution-context-agent.md",
 ];
 
 /// Step display names that the lint expects to find at least once across all
@@ -116,6 +117,7 @@ const REQUIRED_STEP_DISPLAY_NAMES: &[&str] = &[
     "Append Node prompt",   // src/runtimes/node/extension.rs via wrap_prompt_append("Node")
     "Append dotnet prompt", // src/runtimes/dotnet/extension.rs via wrap_prompt_append("dotnet")
     "ado-aw",               // src/compile/extensions/ado_aw_marker.rs metadata marker step
+    "Stage PR execution context (aw-context/pr/*)", // src/compile/extensions/exec_context/pr.rs
 ];
 
 fn ado_aw_binary() -> PathBuf {
