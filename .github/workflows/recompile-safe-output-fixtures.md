@@ -125,17 +125,63 @@ chmod +x ado-aw
 
 If the version printed by `./ado-aw --version` does not contain `BARE`, abort with `missing-data` describing the mismatch — you have downloaded the wrong asset.
 
-## Step 3 — Recompile every fixture in `tests/safe-outputs/`
+## Step 2.5 — Pre-flight integrity check on the existing lock files
 
-The `tests/safe-outputs/README.md` documents the idempotent recompile command. Run it under strict shell mode so a single fixture failure aborts the whole run instead of leaving partial output on disk:
+Before recompiling, run `ado-aw check` against every existing `tests/safe-outputs/*.lock.yml` using the **released** binary. The `check` subcommand recompiles each pipeline from its source `.md` and compares against the committed lock file; a non-zero exit means the on-disk lock file does **not** match what the released compiler would produce — i.e. it drifted (for example because someone recompiled with a dev build off `main` and merged that, or because a release shipped output changes that were never propagated). This is a primary signal that we need to recompile, independent of whether the source `.md` changed.
 
 ```bash
 set -euo pipefail
 cd "$GITHUB_WORKSPACE"
-/tmp/gh-aw/agent/ado-aw-bin/ado-aw compile tests/safe-outputs/ 2>&1 | tee /tmp/gh-aw/agent/recompile.log
+mkdir -p /tmp/gh-aw/agent
+: > /tmp/gh-aw/agent/integrity-failures.txt
+INTEGRITY_FAIL_COUNT=0
+for lock in tests/safe-outputs/*.lock.yml; do
+  if /tmp/gh-aw/agent/ado-aw-bin/ado-aw check "$lock" \
+       > "/tmp/gh-aw/agent/check-$(basename "$lock").log" 2>&1; then
+    echo "PASS $lock"
+  else
+    echo "FAIL $lock (exit $?)"
+    echo "$lock" >> /tmp/gh-aw/agent/integrity-failures.txt
+    INTEGRITY_FAIL_COUNT=$((INTEGRITY_FAIL_COUNT + 1))
+  fi
+done
+echo "integrity_failures=$INTEGRITY_FAIL_COUNT"
 ```
 
-If the compile exits non-zero, do **not** open a PR with partial output. Emit `report-incomplete` with the last ~80 lines of `/tmp/gh-aw/agent/recompile.log` so a maintainer can investigate. Stop.
+Record the failure count and the failing-file list — both go in the PR body (Step 6) when a PR is opened. Do **not** abort on integrity failure here; this step is diagnostic only. Recompilation in Step 3 is what fixes the drift. If a single per-file check log shows an error other than a content mismatch (for example a missing source file, a codemod-required source, or an internal compiler error), include the relevant log excerpt in the PR body or — if recompile in Step 3 cannot succeed either — fall back to `report-incomplete` from Step 3.
+
+## Step 3 — Recompile every fixture in `tests/safe-outputs/`
+
+`ado-aw compile` accepts a single `.md` path or no arguments (cwd autodiscovery). It does **not** accept a directory argument — passing one silently produces `0 compiled, N skipped`, which is exactly the failure mode that took down [run 27020309715](https://github.com/githubnext/ado-aw/actions/runs/27020309715) and is tracked in [issue #867](https://github.com/githubnext/ado-aw/issues/867). Loop per-file from the repo root instead, and pass `--force` to bypass the GitHub-remote guard (required when running inside `githubnext/ado-aw` itself):
+
+```bash
+set -euo pipefail
+cd "$GITHUB_WORKSPACE"
+: > /tmp/gh-aw/agent/recompile.log
+for md in tests/safe-outputs/*.md; do
+  echo ">>> compiling $md" | tee -a /tmp/gh-aw/agent/recompile.log
+  /tmp/gh-aw/agent/ado-aw-bin/ado-aw compile --force "$md" 2>&1 | tee -a /tmp/gh-aw/agent/recompile.log
+done
+```
+
+If any per-file compile exits non-zero, the script aborts via `set -euo pipefail` and partial output is left on disk. Do **not** open a PR in that state — emit `report-incomplete` with the last ~80 lines of `/tmp/gh-aw/agent/recompile.log` so a maintainer can investigate. Stop.
+
+## Step 3.5 — Post-compile sanity check
+
+After recompiling, re-run `ado-aw check` against every lock file using the same released binary. Every check **must** now pass — if any still fails, our just-produced output disagrees with itself, which means the compile silently mis-handled something. That is a hard failure:
+
+```bash
+set -euo pipefail
+cd "$GITHUB_WORKSPACE"
+for lock in tests/safe-outputs/*.lock.yml; do
+  /tmp/gh-aw/agent/ado-aw-bin/ado-aw check "$lock" \
+    > "/tmp/gh-aw/agent/postcheck-$(basename "$lock").log" 2>&1 \
+    || { echo "post-compile integrity STILL failing for $lock"; cat "/tmp/gh-aw/agent/postcheck-$(basename "$lock").log"; exit 1; }
+done
+echo "all lock files pass integrity check against ado-aw ${TAG}"
+```
+
+If this step fails, emit `report-incomplete` with the offending file name and the tail of its postcheck log; do **not** open a PR with broken integrity.
 
 ## Step 4 — Detect actual changes
 
@@ -146,7 +192,9 @@ git status --porcelain -- tests/safe-outputs/ > /tmp/gh-aw/agent/recompile-statu
 cat /tmp/gh-aw/agent/recompile-status.txt
 ```
 
-If `/tmp/gh-aw/agent/recompile-status.txt` is empty, the fixtures already match the released version — emit `noop` with the message `"tests/safe-outputs/ already compiled against ado-aw ${TAG}"` and stop. Do **not** open an empty PR.
+If `/tmp/gh-aw/agent/recompile-status.txt` is empty **and** `INTEGRITY_FAIL_COUNT` from Step 2.5 was `0`, the fixtures already match the released version — emit `noop` with the message `"tests/safe-outputs/ already compiled against ado-aw ${TAG} and all integrity checks pass"` and stop. Do **not** open an empty PR.
+
+If `/tmp/gh-aw/agent/recompile-status.txt` is empty **but** `INTEGRITY_FAIL_COUNT > 0`, this is contradictory — recompile produced no diff yet `check` reported drift. That should not happen in practice (a passing `check` and a no-op `compile` against the same source and binary must agree). Emit `report-incomplete` with the contents of `/tmp/gh-aw/agent/integrity-failures.txt` and the relevant `check-*.log` files so a maintainer can investigate. Stop.
 
 If non-empty, inspect the diff briefly to make sure only `.lock.yml` files under `tests/safe-outputs/` changed:
 
@@ -183,6 +231,14 @@ The `safe-outputs.create-pull-request.title-prefix` is configured to `chore(work
 
   Bumps the `version` field in every `tests/safe-outputs/*.lock.yml` metadata marker from `${OLD_VER}` to `${NEW_VER}`, picking up any compile-output changes shipped in [`ado-aw ${TAG}`](https://github.com/githubnext/ado-aw/releases/tag/${TAG}).
 
+  ### Pre-flight integrity check
+
+  Before recompiling, `ado-aw check` was run against every existing lock file using the released `${TAG}` binary:
+
+  - **Integrity failures**: `${INTEGRITY_FAIL_COUNT}` of N files
+
+  <if INTEGRITY_FAIL_COUNT > 0, include a fenced block listing the contents of `/tmp/gh-aw/agent/integrity-failures.txt`>
+
   ### Files updated
 
   <list of files from `git diff --name-only -- tests/safe-outputs/`, one per line in a fenced block>
@@ -190,7 +246,9 @@ The `safe-outputs.create-pull-request.title-prefix` is configured to `chore(work
   ### How this was produced
 
   - Downloaded `ado-aw-linux-x64` from the `${TAG}` release and verified its SHA256 against `checksums.txt`.
+  - Ran `ado-aw check tests/safe-outputs/*.lock.yml` against the released binary to detect drift (see counts above).
   - Ran `ado-aw compile tests/safe-outputs/` from the repo root.
+  - Re-ran `ado-aw check` against every regenerated lock file; all passed.
   - The `allowed-files` glob in this workflow restricts the diff to `tests/safe-outputs/**/*.lock.yml`.
 
   ### Reviewer checklist
@@ -212,7 +270,9 @@ The `safe-outputs.close-pull-request` configuration on this workflow targets any
 - Release assets never appear within the bounded retry window (Step 2) — emit `report-incomplete`.
 - `ado-aw --version` does not contain `BARE` (Step 2) — emit `missing-data`.
 - `ado-aw compile` fails (Step 3) — emit `report-incomplete`.
-- `tests/safe-outputs/` is already at `BARE` (Step 4) — emit `noop`.
+- Post-compile `ado-aw check` still fails for any lock file (Step 3.5) — emit `report-incomplete`.
+- `tests/safe-outputs/` is already at `BARE` **and** pre-flight integrity reported zero failures (Step 4) — emit `noop`.
+- Recompile produced no diff but pre-flight integrity reported failures (Step 4) — emit `report-incomplete`.
 - Compile output touched paths outside `tests/safe-outputs/*.lock.yml` (Step 4) — emit `report-incomplete`.
 
 Keep the PR small, mechanical, and reviewable. One release, one PR.
