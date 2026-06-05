@@ -24,6 +24,7 @@ safe-outputs:
     title-prefix: "chore(workflows): "
     max: 1
     allowed-files:
+      - "tests/safe-outputs/*.lock.yml"
       - "tests/safe-outputs/**/*.lock.yml"
   close-pull-request:
     required-title-prefix: "chore(workflows): recompile safe-output fixtures"
