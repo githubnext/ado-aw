@@ -261,16 +261,6 @@ jobs:
         displayName: "ado-aw"
 
       - bash: |
-          set -eo pipefail
-
-          mkdir -p "$(Agent.TempDirectory)/staging"
-          cat >"$(Agent.TempDirectory)/staging/aw_info.json" <<'AW_INFO_EOF'
-          {"agent_name":"Daily safe-output smoke: missing-data","build_definition_id":"$(System.DefinitionId)","build_id":"$(Build.BuildId)","compiler_version":"0.31.1","engine":"copilot","model":"gpt-5-mini","org":"","repo":"","schema":"ado-aw/aw_info/1","source":"tests/safe-outputs/missing-data.md","source_branch":"$(Build.SourceBranch)","source_version":"$(Build.SourceVersion)","target":"standalone"}
-          AW_INFO_EOF
-        displayName: "Emit aw_info.json"
-        condition: always()
-
-      - bash: |
           cat >> "/tmp/awf-tools/agent-prompt.md" << 'SAFEOUTPUTS_EOF'
           ---
 
