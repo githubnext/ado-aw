@@ -2910,11 +2910,11 @@ safe-outputs:
 
     let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
     assert!(
-        compiled.contains("NodeTool@0"),
+        compiled.contains("UseNode@1"),
         "should have Node install step"
     );
     assert!(
-        compiled.contains("versionSpec: '22.x'"),
+        compiled.contains("version: '22.x'"),
         "should default to Node 22.x"
     );
 
@@ -4263,8 +4263,8 @@ fn test_both_features_active_downloads_bundle_in_both_jobs() {
 fn test_neither_feature_active_emits_no_node_or_download_anywhere() {
     let yaml = compile_fixture("dedupe_neither.md");
     assert!(
-        !yaml.contains("NodeTool@0"),
-        "No NodeTool@0 expected when neither gate nor runtime imports are active"
+        !yaml.contains("UseNode@1"),
+        "No UseNode@1 expected when neither gate nor runtime imports are active"
     );
     assert!(
         !yaml.contains("Download ado-aw scripts"),
@@ -4273,10 +4273,10 @@ fn test_neither_feature_active_emits_no_node_or_download_anywhere() {
 }
 
 /// When a user pins a Node version via `runtimes.node:` AND runtime imports
-/// are active, both extensions emit `NodeTool@0` into the Agent job. ADO's
-/// `NodeTool@0` prepends to PATH, so the LAST install wins. The ado-script
+/// are active, both extensions emit `UseNode@1` into the Agent job. ADO's
+/// `UseNode@1` prepends to PATH, so the LAST install wins. The ado-script
 /// extension must run in the `System` phase so its Node 20.x install lands
-/// FIRST, and the user's Runtime-phase `NodeTool@0 22.x` lands second —
+/// FIRST, and the user's Runtime-phase `UseNode@1 22.x` lands second —
 /// the user's pinned version then wins on PATH for the rest of the job.
 #[test]
 fn test_node_runtime_install_orders_after_ado_script_so_user_version_wins() {
@@ -4285,7 +4285,7 @@ fn test_node_runtime_install_orders_after_ado_script_so_user_version_wins() {
 
     // Find offsets within the Agent block. The ado-script Node install
     // is identifiable by its displayName; the user's runtime install
-    // carries the explicit user-pinned versionSpec.
+    // carries the explicit user-pinned version.
     let ado_script_install_idx = agent
         .find("displayName: \"Install Node.js 20.x\"")
         .expect("ado-script Node 20.x install step missing from Agent job");
@@ -4295,7 +4295,7 @@ fn test_node_runtime_install_orders_after_ado_script_so_user_version_wins() {
 
     assert!(
         ado_script_install_idx < user_runtime_install_idx,
-        "ado-script NodeTool@0 must precede user NodeTool@0 in the Agent job so the \
+        "ado-script UseNode@1 must precede user UseNode@1 in the Agent job so the \
          user's pinned Node version wins on PATH after both run. \
          ado-script idx = {ado_script_install_idx}, user idx = {user_runtime_install_idx}"
     );

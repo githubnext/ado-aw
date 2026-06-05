@@ -566,7 +566,7 @@ fn test_node_prepare_steps() {
     let ctx = ctx_from(&fm);
     let steps = ext.prepare_steps(&ctx);
     assert_eq!(steps.len(), 1, "no auth steps without feed-url/config");
-    assert!(steps[0].contains("NodeTool@0"));
+    assert!(steps[0].contains("UseNode@1"));
 }
 
 #[test]
@@ -580,7 +580,7 @@ fn test_node_prepare_steps_with_feed_url() {
     let ctx = ctx_from(&fm);
     let steps = ext.prepare_steps(&ctx);
     assert_eq!(steps.len(), 3);
-    assert!(steps[0].contains("NodeTool@0"));
+    assert!(steps[0].contains("UseNode@1"));
     assert!(steps[1].contains("Ensure .npmrc"));
     assert!(steps[2].contains("npmAuthenticate@0"));
 }

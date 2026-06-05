@@ -75,7 +75,7 @@ action and is read directly from disk — no marker, no resolver).
        ┌──────────────────────┐
        │  Generated pipeline  │
        │  Setup job:          │
-       │   1. NodeTool@0      │
+       │   1. UseNode@1       │
        │   2. curl + sha256   │     downloads ado-script.zip
        │      + unzip         │     from the matching ado-aw release
        │   3. node gate/index │     reads GATE_SPEC env var
@@ -243,7 +243,7 @@ bundle**:
 When `filters:` lowers to non-empty checks, `setup_steps()` returns
 three step strings into the Setup job:
 
-1. **`NodeTool@0`** — installs Node 20.x LTS, capped at
+1. **`UseNode@1`** — installs Node 20.x LTS, capped at
    `timeoutInMinutes: 5`.
 2. **`curl` download + verify + extract** — fetches `checksums.txt`
    and `ado-script.zip` from the `githubnext/ado-aw` release matching
@@ -260,7 +260,7 @@ When `inlined-imports: false` (the default), `prepare_steps()` returns
 the same install + download pair plus the resolver invocation, into
 the Agent job's existing `{{ prepare_steps }}` block:
 
-1. **`NodeTool@0`** — same shape as above.
+1. **`UseNode@1`** — same shape as above.
 2. **`curl` download + verify + extract** — same artefact, same
    verification.
 3. **`bash: node '/tmp/ado-aw-scripts/ado-script/import.js'`** —
@@ -381,7 +381,7 @@ If a future bundle blows the budget:
   Node. Stage 3 keeps a Rust-only execution path.
 - Migrating the agent-stats parser. It runs in-pipeline as part of
   Stage 1 wrap-up and has no TypeScript dependency need.
-- Bundling Node itself. Pipelines install Node via `NodeTool@0`.
+- Bundling Node itself. Pipelines install Node via `UseNode@1`.
 
 ## See also
 

@@ -78,20 +78,20 @@ impl AdoScriptExtension {
     }
 }
 
-/// Returns the two-step bundle: NodeTool@0 install + checksumed unzip of
+/// Returns the two-step bundle: UseNode@1 install + checksumed unzip of
 /// `ado-script.zip`. Shared between [`AdoScriptExtension::setup_steps`]
 /// and [`AdoScriptExtension::prepare_steps`] — emitted twice in the YAML
 /// when both consumers are active, once per consuming job's VM.
 fn install_and_download_steps() -> Vec<String> {
     let version = env!("CARGO_PKG_VERSION");
     vec![
-        // NodeTool@0 — install Node 20.x. Pinned LTS major; any patch
+        // UseNode@1 — install Node 20.x. Pinned LTS major; any patch
         // release is fine for this use. The display name no longer
         // mentions the gate evaluator because import.js uses Node too.
         // A 5-minute timeout caps the worst-case cold-image install.
-        r#"- task: NodeTool@0
+        r#"- task: UseNode@1
   inputs:
-    versionSpec: "20.x"
+    version: "20.x"
   displayName: "Install Node.js 20.x"
   timeoutInMinutes: 5
   condition: succeeded()"#
@@ -140,7 +140,7 @@ impl CompilerExtension for AdoScriptExtension {
     }
 
     fn phase(&self) -> ExtensionPhase {
-        // System phase: ado-script's NodeTool@0 install + bundle download +
+        // System phase: ado-script's UseNode@1 install + bundle download +
         // resolver step must complete BEFORE any user-facing Runtime
         // extension (e.g. NodeExtension) runs. Otherwise our Node 20
         // install would prepend onto PATH after the user's pinned Node,
@@ -212,7 +212,7 @@ impl CompilerExtension for AdoScriptExtension {
         // Only request github.com when the bundle is actually downloaded.
         // When `inlined-imports: true` AND no filters are configured,
         // neither `setup_steps()` nor `prepare_steps()` emits the
-        // NodeTool@0 + curl pair, so the github.com release-asset host
+        // UseNode@1 + curl pair, so the github.com release-asset host
         // is never reached and shouldn't be on the allowlist. The host
         // list is allowlist-additive across extensions, so this stays
         // safe even when other extensions independently need github.com.
@@ -387,7 +387,7 @@ mod tests {
     fn name_and_phase() {
         let ext = ext_with(None, None, true);
         assert_eq!(ext.name(), "ado-script");
-        // System phase ensures NodeTool@0 install + bundle download +
+        // System phase ensures UseNode@1 install + bundle download +
         // resolver run BEFORE user-facing Runtime extensions (e.g. the
         // Node runtime), so the user's pinned Node version wins on PATH
         // for the rest of the Agent job.
@@ -416,7 +416,7 @@ mod tests {
         let ctx = CompileContext::for_test(&fm);
         let steps = ext.setup_steps(&ctx).unwrap();
         assert_eq!(steps.len(), 3, "install + download + gate");
-        assert!(steps[0].contains("NodeTool@0"));
+        assert!(steps[0].contains("UseNode@1"));
         assert!(steps[0].contains("Install Node.js 20.x"));
         assert!(!steps[0].contains("for gate evaluator"));
         assert!(steps[1].contains("Download ado-aw scripts"));
@@ -473,7 +473,7 @@ mod tests {
         let ctx = CompileContext::for_test(&fm);
         let steps = ext.prepare_steps(&ctx);
         assert_eq!(steps.len(), 3, "install + download + resolver");
-        assert!(steps[0].contains("NodeTool@0"));
+        assert!(steps[0].contains("UseNode@1"));
         assert!(steps[1].contains("Download ado-aw scripts"));
         assert!(steps[2].contains("node '/tmp/ado-aw-scripts/ado-script/import.js'"));
         assert!(steps[2].contains("Resolve runtime imports (agent prompt)"));
@@ -506,7 +506,7 @@ mod tests {
 
     #[test]
     fn required_hosts_empty_when_no_consumer_active() {
-        // inlined-imports: true AND no filters ⇒ no NodeTool / no
+        // inlined-imports: true AND no filters ⇒ no UseNode / no
         // download / no gate / no resolver step. The github.com host
         // (used to fetch the release asset) is therefore unreachable
         // and must NOT be requested.

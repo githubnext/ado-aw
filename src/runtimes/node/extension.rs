@@ -8,7 +8,7 @@ use anyhow::Result;
 /// Node.js runtime extension.
 ///
 /// Injects: ecosystem network hosts (node), bash commands (node, npm, npx),
-/// install steps (NodeTool@0), authenticate steps (npmAuthenticate@0),
+/// install steps (UseNode@1), authenticate steps (npmAuthenticate@0),
 /// env vars (NPM_CONFIG_REGISTRY when feed-url is set), and a prompt
 /// supplement.
 pub struct NodeExtension {

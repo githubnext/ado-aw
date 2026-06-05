@@ -244,9 +244,9 @@ jobs:
           docker pull ghcr.io/github/gh-aw-mcpg:v0.3.12
         displayName: "Pre-pull AWF and MCPG container images (v0.25.48)"
 
-      - task: NodeTool@0
+      - task: UseNode@1
         inputs:
-          versionSpec: "20.x"
+          version: "20.x"
         displayName: "Install Node.js 20.x"
         timeoutInMinutes: 5
         condition: succeeded()

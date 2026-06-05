@@ -555,7 +555,7 @@ pub struct RuntimesConfig {
     pub python: Option<crate::runtimes::python::PythonRuntimeConfig>,
 
     /// Node.js runtime.
-    /// Auto-installs Node.js via NodeTool@0, emits npmAuthenticate@0,
+    /// Auto-installs Node.js via UseNode@1, emits npmAuthenticate@0,
     /// adds Node ecosystem domains to the AWF network allowlist, extends
     /// the bash command allow-list, and optionally injects feed URL env vars.
     #[serde(default)]
