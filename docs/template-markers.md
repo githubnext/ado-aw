@@ -532,23 +532,24 @@ If `permissions.read` is not configured, this marker is replaced with an empty s
 
 ## {{ acquire_write_token }}
 
-Generates an `AzureCLI@2` step that acquires a write-capable ADO-scoped access token from the ARM service connection specified in `permissions.write`. This token is used only by the executor in Stage 3 (`SafeOutputs` job) and is never exposed to the agent.
+Generates an `AzureCLI@2` step that acquires a write-capable ADO-scoped access token from the ARM service connection specified in `permissions.write`. When present, this token is used by the executor in Stage 3 (`SafeOutputs` job) instead of the default `$(System.AccessToken)`, and is never exposed to the agent.
 
 The step:
 - Uses the ARM service connection from `permissions.write`
 - Calls `az account get-access-token` with the ADO resource ID
 - Stores the token in a secret pipeline variable `SC_WRITE_TOKEN`
 
-If `permissions.write` is not configured, this marker is replaced with an empty string.
+If `permissions.write` is not configured (the default), this marker is replaced with an empty string and the executor uses `$(System.AccessToken)` instead — see `{{ executor_ado_env }}` below.
 
 ## {{ executor_ado_env }}
 
-Generates the complete `env:` block (including the `env:` key) for the Stage 3 executor step. The block contains zero, one, or two lines depending on which features are configured:
+Generates the complete `env:` block (including the `env:` key) for the Stage 3 executor step. The block always contains at least `SYSTEM_ACCESSTOKEN` and is **never empty** — the executor always needs a write-capable ADO token to perform safe-output operations.
 
-* `SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)` — emitted when `permissions.write` is configured. Provides the write-capable ADO token to the executor.
-* `ADO_AW_DEBUG_GITHUB_TOKEN: $(ADO_AW_DEBUG_GITHUB_TOKEN)` — emitted when `ado-aw-debug.create-issue` is configured. Provides the GitHub PAT used by the debug-only `create-issue` safe output. See [`docs/ado-aw-debug.md`](ado-aw-debug.md).
+* `SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)` — emitted when `permissions.write` is configured. Sources the executor's token from the ARM-minted write token. Use this for cross-org writes or when you need named-identity attribution.
+* `SYSTEM_ACCESSTOKEN: $(System.AccessToken)` — emitted by default (no `permissions.write` set). Sources the executor's token from the pipeline's built-in OAuth token, scoped by the pipeline's "Limit job authorization scope" settings. This is the *Project Collection Build Service* identity. Sufficient for the vast majority of agents.
+* `ADO_AW_DEBUG_GITHUB_TOKEN: $(ADO_AW_DEBUG_GITHUB_TOKEN)` — additionally emitted when `ado-aw-debug.create-issue` is configured. Provides the GitHub PAT used by the debug-only `create-issue` safe output. See [`docs/ado-aw-debug.md`](ado-aw-debug.md).
 
-If neither feature is configured, this marker is replaced with an empty string so that no `env:` block is emitted at all. Note: `System.AccessToken` is never used directly — all ADO tokens come from explicitly configured service connections, and the GitHub PAT is sourced from a dedicated pipeline variable separate from the read-only `GITHUB_TOKEN` the agent sees in Stage 1.
+The agent (Stage 1) never maps `SYSTEM_ACCESSTOKEN` — that is the cross-stage trust boundary that allows the executor to safely receive a write-capable token while the agent stays read-only. (The Setup-job trigger filter gate also maps `SYSTEM_ACCESSTOKEN` for self-cancellation and PR metadata fetching, but that runs before the agent.)
 
 ## {{ compiler_version }}
 

@@ -26,33 +26,6 @@ pub const ALWAYS_ON_TOOLS: &[&str] = tool_names![
     ReportIncompleteResult,
 ];
 
-/// Safe-output tools that require write access to ADO.
-/// Compile-time derived from tool types via `ToolResult::NAME`.
-///
-/// Adding a new write-requiring tool: create the struct with `tool_result!{ write = true, ... }`,
-/// then add its type to this list.
-pub const WRITE_REQUIRING_SAFE_OUTPUTS: &[&str] = tool_names![
-    CreateWorkItemResult,
-    CommentOnWorkItemResult,
-    UpdateWorkItemResult,
-    CreatePrResult,
-    CreateWikiPageResult,
-    UpdateWikiPageResult,
-    AddPrCommentResult,
-    LinkWorkItemsResult,
-    QueueBuildResult,
-    CreateGitTagResult,
-    AddBuildTagResult,
-    CreateBranchResult,
-    UpdatePrResult,
-    UploadBuildAttachmentResult,
-    UploadPipelineArtifactResult,
-    UploadWorkitemAttachmentResult,
-    SubmitPrReviewResult,
-    ReplyToPrCommentResult,
-    ResolvePrThreadResult,
-];
-
 /// Non-MCP safe-output keys handled by the compiler/executor, not the MCP server.
 /// These must not appear in `--enabled-tools` or they cause real MCP tools to be
 /// filtered out (the router has no route for them).
@@ -803,17 +776,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_write_requiring_subset_of_all_known() {
-        for name in WRITE_REQUIRING_SAFE_OUTPUTS {
-            assert!(
-                ALL_KNOWN_SAFE_OUTPUTS.contains(name),
-                "WRITE_REQUIRING_SAFE_OUTPUTS entry '{}' is missing from ALL_KNOWN_SAFE_OUTPUTS",
-                name
-            );
-        }
-    }
-
-    #[test]
     fn test_always_on_subset_of_all_known() {
         for name in ALWAYS_ON_TOOLS {
             assert!(
@@ -868,24 +830,25 @@ mod tests {
         const { assert!(!ReportIncompleteResult::REQUIRES_WRITE); }
     }
 
-    /// Verify ALL_KNOWN_SAFE_OUTPUTS has exactly the right count:
-    /// write tools + diagnostics + non-MCP keys.
+    /// Verify ALL_KNOWN_SAFE_OUTPUTS contains no duplicate entries, and
+    /// that the always-on and non-MCP sub-lists are disjoint.
     #[test]
     fn test_all_known_completeness() {
-        // The three sub-lists must be disjoint — a tool in multiple lists would
-        // be duplicated in ALL_KNOWN and the count would mismatch.
-        for name in WRITE_REQUIRING_SAFE_OUTPUTS {
+        // No duplicates: a tool name appearing twice in ALL_KNOWN would
+        // mean `all_safe_output_names!` was given the same type twice
+        // and would silently break tool routing.
+        let mut seen = std::collections::HashSet::new();
+        for name in ALL_KNOWN_SAFE_OUTPUTS {
             assert!(
-                !ALWAYS_ON_TOOLS.contains(name),
-                "Tool '{}' appears in both WRITE_REQUIRING and ALWAYS_ON — lists must be disjoint",
-                name
-            );
-            assert!(
-                !NON_MCP_SAFE_OUTPUT_KEYS.contains(name),
-                "Tool '{}' appears in both WRITE_REQUIRING and NON_MCP — lists must be disjoint",
+                seen.insert(*name),
+                "ALL_KNOWN_SAFE_OUTPUTS contains duplicate entry '{}'",
                 name
             );
         }
+
+        // ALWAYS_ON and NON_MCP must be disjoint — a diagnostic tool
+        // that also appears as a non-MCP key would be both routed and
+        // intercepted, giving inconsistent behaviour.
         for name in ALWAYS_ON_TOOLS {
             assert!(
                 !NON_MCP_SAFE_OUTPUT_KEYS.contains(name),
@@ -893,15 +856,6 @@ mod tests {
                 name
             );
         }
-
-        let expected = WRITE_REQUIRING_SAFE_OUTPUTS.len()
-            + ALWAYS_ON_TOOLS.len()
-            + NON_MCP_SAFE_OUTPUT_KEYS.len();
-        assert_eq!(
-            ALL_KNOWN_SAFE_OUTPUTS.len(),
-            expected,
-            "ALL_KNOWN_SAFE_OUTPUTS should be the union of write + diagnostic + non-MCP lists"
-        );
     }
 
     // ─── validate_git_ref_name ──────────────────────────────────────────────

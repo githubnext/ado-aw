@@ -47,6 +47,81 @@ The following domains are always allowed. Most are defined in `CORE_ALLOWED_HOST
 | `rt.services.visualstudio.com` | Visual Studio runtime telemetry |
 | `config.edge.skype.com` | Configuration |
 | `host.docker.internal` | MCP Gateway (MCPG) on host — added by the standalone compiler, not part of `CORE_ALLOWED_HOSTS` |
+| `aka.ms` | Microsoft link shortener (used by `az` subcommand metadata) — contributed by the always-on Azure CLI extension |
+
+## Always-on Azure CLI (`az`)
+
+Every compiled pipeline adds the Azure auth and management hosts listed
+above (`login.microsoftonline.com`, `login.windows.net`,
+`management.azure.com`, `graph.microsoft.com`, `aka.ms`) to the AWF
+allowlist and emits a small *Detect Azure CLI on host* prepare step
+that runs early in the Agent job. This mirrors gh-aw's "assume `gh` is
+on the runner" model: agents can call `az` from their bash tool
+without opting in — *when the runner has it*.
+
+### Runtime detection and graceful degradation
+
+Because `azure-cli` is not universally pre-installed on every ADO
+runner image (notably some 1ES self-hosted pools), the compiler does
+**not** declare static AWF bind-mounts for `/opt/az` and `/usr/bin/az`.
+Static mounts would cause `docker run` to fail with "bind source path
+does not exist" on runners without `az`, breaking the pipeline before
+the agent ever started.
+
+Instead, the prepare step does the detection itself at pipeline time:
+
+* If both `/usr/bin/az` (the launcher shim) and `/opt/az` (the Python
+  venv that `az` actually runs in) exist on the host, the step sets
+  the ADO pipeline variable
+  `AW_AZ_MOUNTS=--mount /opt/az:/opt/az:ro --mount /usr/bin/az:/usr/bin/az:ro`
+  via `##vso[task.setvariable]`.
+* If either is missing, the step emits a
+  `##vso[task.logissue type=warning]` explaining `az` won't be
+  available inside the agent sandbox and sets `AW_AZ_MOUNTS` to the
+  *empty string* (also via `##vso[task.setvariable]` — leaving the
+  variable undefined would make ADO render the literal `$(AW_AZ_MOUNTS)`
+  in the AWF bash step, where bash would interpret it as a `$(...)`
+  command substitution and kill the step under `set -e`).
+
+The AWF invocation in the compiled YAML then includes a literal
+`$(AW_AZ_MOUNTS) \` line on its own in the `--mount` chain.
+At step start, ADO interpolates that pipeline variable into the bash
+script: when az is present the two `--mount` args appear; when it's
+absent the line collapses to empty whitespace + the `\` continuation,
+which is a no-op.
+
+### Agent prompt advisory (conditional)
+
+When (and only when) `AW_AZ_MOUNTS` is non-empty, a follow-up
+*Append Azure CLI prompt* step appends an Azure CLI advisory section
+to `/tmp/awf-tools/agent-prompt.md`. The agent reads the prompt on
+startup and learns that `az` is on PATH, what it's good for
+(`az devops` autoauthed via `$AZURE_DEVOPS_EXT_PAT`, ARM and Graph
+requiring separate auth), and the fallback path (`missing-tool`
+safe output naming `azure-cli`).
+
+The step is gated by `condition: ne(variables['AW_AZ_MOUNTS'], '')`,
+which reuses the same pipeline variable the detection step writes.
+On runners where `az` is missing, the advisory step is skipped
+entirely — the agent never sees Azure CLI guidance and never tries
+to call `az`, avoiding the "told to use `az`, fails with command
+not found" failure mode.
+
+### Operator implications
+
+- **Microsoft-hosted `ubuntu-latest`**: `az` is detected, mounted, and
+  available inside the agent sandbox. Nothing to do.
+- **1ES self-hosted runners *with* azure-cli baked in**: same as above.
+- **1ES self-hosted runners *without* azure-cli**: the pipeline runs
+  successfully, but agents that invoke `az` get the standard
+  `command not found` inside the sandbox. The warning emitted by the
+  prepare step is visible in the ADO log as a yellow-flagged issue on
+  the build summary; treat it as a signal to either ignore (if no
+  agent on that runner needs `az`) or to install `azure-cli` on the
+  runner image.
+
+See [`docs/tools.md`](tools.md#built-in-clis) for the agent-facing
+contract (auth scope, available subcommands).
 
 ## Adding Additional Hosts
 
@@ -108,46 +183,83 @@ network:
 
 ## Permissions (ADO Access Tokens)
 
-ADO does not support fine-grained permissions — there are two access levels: blanket read and blanket write. Tokens are minted from ARM service connections; `System.AccessToken` is never used for agent or executor operations.
+ADO does not support fine-grained permissions — there are two access levels:
+blanket read and blanket write. The executor (Stage 3) always has a
+write-capable token; what changes is its *source* and *attribution*:
 
-**Exception:** The trigger filter gate step (Setup job) uses `System.AccessToken`
-for two purposes: (1) self-cancelling the build when filters don't match
-(`PATCH` to `_apis/build/builds/{id}`), and (2) fetching PR metadata for
-Tier 2 filters (labels, draft status, changed files). This runs in the
-Setup job before the agent starts, outside the AWF sandbox. The pipeline
-must have "Allow scripts to access the OAuth token" enabled for this to
-work. This is a deliberate scoped exception — the token is not passed to
-the agent or executor.
+| Source                              | When                                          | Identity                                        |
+| ----------------------------------- | --------------------------------------------- | ----------------------------------------------- |
+| `$(System.AccessToken)` *(default)* | No `permissions.write` configured             | `Project Collection Build Service (org)`        |
+| `$(SC_WRITE_TOKEN)` *(opt-in)*      | `permissions.write: <arm-service-connection>` | The federated identity behind the ARM SC        |
+
+The agent (Stage 1) never receives the executor's token. Stage separation —
+not token type — is the trust boundary.
+
+**`System.AccessToken` exceptions.** Two other steps also map
+`System.AccessToken`:
+
+1. **Setup-job trigger filter gate** — self-cancels the build when filters
+   don't match (`PATCH _apis/build/builds/{id}`) and fetches PR metadata for
+   Tier 2 filters (labels, draft status, changed files). Runs before the
+   agent, outside the AWF sandbox.
+2. **Stage 3 executor** — when no ARM write SC is configured (the default),
+   the executor's `SYSTEM_ACCESSTOKEN` env var is sourced from
+   `$(System.AccessToken)`.
+
+Both require the pipeline setting "Allow scripts to access the OAuth token"
+to be enabled (the ADO default).
+
+`System.AccessToken` is scoped by the pipeline's
+**"Limit job authorization scope to current project"** toggle. With this on
+(strongly recommended), writes are limited to the pipeline's host project.
+Operators can scope further per-pipeline by editing the build definition's
+*Run-time settings*.
 
 ```yaml
 permissions:
   read: my-read-arm-connection    # Stage 1 agent — read-only ADO access
-  write: my-write-arm-connection  # Stage 3 executor — write access for safe-outputs
+  # write: my-write-arm-connection  # Optional — see below
 ```
+
+### When to set `permissions.write`
+
+The default (`$(System.AccessToken)`) is sufficient for the vast majority of
+agents. Set `permissions.write` only when you need:
+
+1. **Cross-org or cross-project writes** — `System.AccessToken` is scoped to
+   the host project. Targeting work items or repos in a different ADO
+   project / organization requires an ARM SC with broader scope.
+2. **Named-identity attribution** — `System.AccessToken` writes are
+   attributed to the `Project Collection Build Service` identity. An ARM SC
+   attributes writes to its underlying federated identity (e.g.
+   `safe-output-bot@contoso.com`), useful when audit logs or work-item
+   notifications need a specific actor.
 
 ### Security Model
 
-- **`permissions.read`**: Mints a read-only ADO-scoped token given to the agent inside the AWF sandbox (Stage 1). The agent can query ADO APIs but cannot write.
-- **`permissions.write`**: Mints a write-capable ADO-scoped token used **only** by the executor in Stage 3 (`SafeOutputs` job). This token is never exposed to the agent.
-- **Both omitted**: No ADO tokens are passed anywhere. The agent has no ADO API access.
-
-### Compile-Time Validation
-
-If write-requiring safe-outputs (`create-pull-request`, `create-work-item`) are configured but `permissions.write` is missing, compilation fails with a clear error message.
+- **`permissions.read`**: Mints a read-only ADO-scoped token given to the
+  agent inside the AWF sandbox (Stage 1). The agent can query ADO APIs but
+  cannot write.
+- **`permissions.write` (optional)**: Mints a write-capable ADO-scoped token
+  used **only** by the executor in Stage 3 (`SafeOutputs` job). Overrides
+  the default `$(System.AccessToken)` for write operations. Never exposed
+  to the agent.
+- **Both omitted**: The agent has no ADO API access. The executor still has
+  a write-capable token via `$(System.AccessToken)`, scoped by the
+  pipeline's job-authorization settings.
 
 ### Examples
 
 ```yaml
-# Agent can read ADO, safe-outputs can write
+# Default: agent can read ADO, executor writes via $(System.AccessToken).
+permissions:
+  read: my-read-sc
+
+# Cross-org / named-identity attribution — executor writes via ARM SC.
 permissions:
   read: my-read-sc
   write: my-write-sc
 
-# Agent can read ADO, no write safe-outputs needed
-permissions:
-  read: my-read-sc
-
-# Agent has no ADO access, but safe-outputs can create PRs/work items
-permissions:
-  write: my-write-sc
+# Agent has no ADO read access; executor still writes via $(System.AccessToken).
+# (Empty front matter — no `permissions:` key at all.)
 ```

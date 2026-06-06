@@ -112,7 +112,7 @@ Stage 3 authenticates against GitHub using the
 
 ```yaml
 env:
-  SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)                  # if write permissions: are set
+  SYSTEM_ACCESSTOKEN: $(System.AccessToken)              # default executor token (or $(SC_WRITE_TOKEN) if permissions.write is set)
   ADO_AW_DEBUG_GITHUB_TOKEN: $(ADO_AW_DEBUG_GITHUB_TOKEN) # only when ado-aw-debug.create-issue is set
 ```
 

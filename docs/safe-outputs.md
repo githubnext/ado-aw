@@ -37,6 +37,18 @@ safe-outputs:
 
 Safe output configurations are passed to Stage 3 execution and used when processing safe outputs.
 
+### Executor authentication
+
+All write-bearing safe outputs (e.g. `create-pull-request`,
+`create-work-item`, `add-pr-comment`, `upload-build-attachment`) run in the
+Stage 3 `SafeOutputs` job and authenticate to Azure DevOps using
+`SYSTEM_ACCESSTOKEN`. By default this is `$(System.AccessToken)` — the
+pipeline's built-in OAuth token running as the *Project Collection Build
+Service* identity. Set `permissions.write` to override this with an
+ARM-minted token, e.g. for cross-org writes or named-identity attribution.
+See [`docs/network.md`](network.md) and
+[`docs/template-markers.md`](template-markers.md) for details.
+
 ## Available Safe Output Tools
 
 ### comment-on-work-item
@@ -604,7 +616,7 @@ multiple uploads.
 **Notes:**
 - Single-file only; directory uploads are not supported.
 - When `build_id` is omitted and `allowed-build-ids` is configured, the allow-list check is skipped — the current build is implicitly trusted.
-- Requires `BUILD_CONTAINERID`, `BUILD_BUILDID`, and `SYSTEM_TEAMPROJECTID` (all set automatically inside an Azure DevOps pipeline job) and `vso.build_execute` scope on the executor's token (the existing write service connection provides this).
+- Requires `BUILD_CONTAINERID`, `BUILD_BUILDID`, and `SYSTEM_TEAMPROJECTID` (all set automatically inside an Azure DevOps pipeline job) and `vso.build_execute` scope on the executor's token (granted to `$(System.AccessToken)` by default, and to the ARM-minted token when `permissions.write` is set).
 
 ### cache-memory (moved to `tools:`)
 Memory is now configured as a first-class tool under `tools: cache-memory:` instead of `safe-outputs: memory:`. See the [Cache Memory section](./tools.md#cache-memory-cache-memory) in `docs/tools.md` for details.

@@ -2,6 +2,7 @@
 # BEGIN ado-aw managed (do not edit)
 tests/safe-outputs/add-build-tag.lock.yml linguist-generated=true merge=ours text eol=lf
 tests/safe-outputs/add-pr-comment.lock.yml linguist-generated=true merge=ours text eol=lf
+tests/safe-outputs/azure-cli.lock.yml linguist-generated=true merge=ours text eol=lf
 tests/safe-outputs/comment-on-work-item.lock.yml linguist-generated=true merge=ours text eol=lf
 tests/safe-outputs/create-branch.lock.yml linguist-generated=true merge=ours text eol=lf
 tests/safe-outputs/create-git-tag.lock.yml linguist-generated=true merge=ours text eol=lf

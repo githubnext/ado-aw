@@ -625,11 +625,13 @@ macro_rules! extension_enum {
 
 mod ado_aw_marker;
 pub mod ado_script;
+mod azure_cli;
 mod github;
 mod safe_outputs;
 
 // Re-export tool/runtime extensions from their colocated homes
 pub use ado_aw_marker::AdoAwMarkerExtension;
+pub use azure_cli::AzureCliExtension;
 pub use crate::runtimes::dotnet::DotnetExtension;
 pub use crate::runtimes::lean::LeanExtension;
 pub use crate::runtimes::node::NodeExtension;
@@ -656,6 +658,7 @@ extension_enum! {
         Dotnet(DotnetExtension),
         AzureDevOps(AzureDevOpsExtension),
         CacheMemory(CacheMemoryExtension),
+        AzureCli(AzureCliExtension),
     }
 }
 // ──────────────────────────────────────────────────────────────────────
@@ -696,6 +699,11 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
             pipeline_filters: front_matter.pipeline_filters().cloned(),
             inlined_imports: front_matter.inlined_imports,
         })),
+        // Always-on Azure CLI. Tool phase — mounts host /opt/az and
+        // /usr/bin/az into AWF and adds Azure auth hosts to the
+        // allowlist so the agent can call `az`. No install step is
+        // emitted: host pre-install is assumed (gh-aw parity).
+        Extension::AzureCli(AzureCliExtension),
     ];
 
     // ── Runtimes (ExtensionPhase::Runtime) ──
