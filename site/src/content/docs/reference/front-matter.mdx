@@ -250,10 +250,9 @@ Custom steps are inserted at these points in the three-stage pipeline:
 
 ```mermaid
 flowchart TB
-    subgraph SetupJob[Setup Job]
-        S1[setup steps]
+    subgraph SetupJob["Setup Job (optional)"]
         S2[Gate step]
-        S3[Runtime setup]
+        S1[setup steps]
     end
     subgraph AgentJob[Agent Job]
         A1[steps]
@@ -266,12 +265,14 @@ flowchart TB
     subgraph TeardownJob[Teardown Job]
         T1[teardown steps]
     end
-    S1 --> S2 --> S3 --> A1 --> A2 --> A3 --> E1 --> T1
+    S2 --> S1 --> A1 --> A2 --> A3 --> E1 --> T1
 ```
+
+The Setup job is only created when `on:` filters or `setup:` steps are configured. When both are present, the gate step runs first — `setup:` steps are conditioned on the gate passing.
 
 | Field | Job | Position | Use Cases |
 |-------|-----|----------|-----------|
-| `setup` | Setup (separate job) | **Before** gate step and runtime setup | Pre-flight checks, credentials setup, external service initialization |
+| `setup` | Setup (separate job) | **After** gate step (conditioned on gate when filters active) | Pre-flight checks, credentials setup, external service initialization |
 | `steps` | Agent (inline) | **Before** agent runs | Generate context files, fetch external data, prepare workspace |
 | `post-steps` | Agent (inline) | **After** agent completes | Process agent outputs, run validation, upload diagnostics |
 | `teardown` | Teardown (separate job) | **After** safe outputs execute | Cleanup, notification, metrics collection |
@@ -319,7 +320,7 @@ post-steps:
 
 ### `setup:` — Pre-Flight Setup Job
 
-Runs as a **separate job** before the Setup job's gate step. Use for infrastructure provisioning or external service preparation:
+Runs in the **Setup job** (a separate job that executes before the Agent job). When `on:` filters are configured, the gate step runs first and `setup:` steps are automatically conditioned on the gate passing — they are skipped if the trigger doesn't match your filters. When no filters are configured, `setup:` steps run unconditionally. Use for pre-flight infrastructure or workspace preparation the agent job depends on:
 
 ```yaml
 setup:
@@ -349,7 +350,8 @@ Teardown steps run even if the agent or executor jobs fail (condition: `always()
 
 ### Job Conditions
 
-- **`setup`** and inline **`steps`** run unconditionally (subject to gate filters)
+- **`setup`** steps run unconditionally when no filters are configured; when `on:` filters are active, they are conditioned on the gate passing
+- **`steps`** (inline pre-agent) run unconditionally within the Agent job
 - **`post-steps`** run only if the agent job reaches that phase (condition: `always()` within the job)
 - **`teardown`** runs unconditionally after the executor job completes (condition: `always()`)
 
