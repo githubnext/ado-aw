@@ -28,13 +28,18 @@
 //! ## Trust boundary
 //!
 //! - `SYSTEM_ACCESSTOKEN` is mapped only into THIS step's `env:` block,
-//!   never the agent step's env.
-//! - The bearer is passed to `git` via `GIT_CONFIG_*` env vars (see
-//!   `scripts/ado-script/src/exec-context-pr/git.ts::bearerEnv`) only
-//!   in the spawned git child's environment — NOT in the Node parent's
-//!   nor in argv. This is a strict improvement over the v6.2 bash
-//!   implementation, where the bearer lived in the wrapping shell's
-//!   env (shared with the `fail()` function, regex validation, etc.).
+//!   never the agent step's env. Within this step, Node inherits the
+//!   variable on its `process.env` (unavoidable — the ADO `env:` block
+//!   exports to the step process), but it is never logged, never
+//!   passed in argv, and never written to `.git/config`.
+//! - The wrapping `GIT_CONFIG_*` env vars that actually carry the
+//!   bearer into `git`'s `http.extraheader` config (see
+//!   `scripts/ado-script/src/exec-context-pr/git.ts::bearerEnv`) are
+//!   only ever set in the *spawned `git` child's* environment — not
+//!   in Node's global `process.env`. This is a strict improvement
+//!   over the v6.2 bash implementation, where the bearer also lived
+//!   in the wrapping shell's env (shared with the `fail()` function,
+//!   regex validation, etc.) on top of the same Node-step exposure.
 //! - The token is never written to `.git/config`; `persistCredentials`
 //!   is never `true`; no checkout override is emitted.
 //! - The step is gated by `condition: eq(variables['Build.Reason'],

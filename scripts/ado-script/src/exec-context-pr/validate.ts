@@ -12,6 +12,19 @@ export const PR_ID_RE = /^[0-9]+$/;
 
 // Project names may contain spaces (e.g. "My Project"); the character
 // set matches what ADO accepts at project-creation time.
+//
+// NOTE: This is intentionally a *conservative* subset of what ADO
+// actually permits. ADO also allows e.g. `+`, `(`, `)`, and other
+// punctuation in project names, but those characters carry shell /
+// URL / JSON-escaping risk if they ever leak into a downstream
+// system, and the precompute step's job is to *fail closed* and
+// surface a graceful fragment to the agent. The cost of being strict
+// here is that a project like `My-Project (test)` will degrade to
+// the failure-fragment path; that's preferable to silently widening
+// the validator surface. If a legitimate user reports being blocked
+// by this, expand the allow-list deliberately rather than by
+// reflex — re-check the sanitiser, the git refspec interpolation,
+// and the URL construction in `git.ts::repoUrl` first.
 export const PROJECT_RE = /^[A-Za-z0-9._ -]+$/;
 
 // Repository names have no spaces.
