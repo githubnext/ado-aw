@@ -108,8 +108,11 @@ two things at pipeline time:
    pipeline variable
    `AW_AZ_MOUNTS=--mount /opt/az:/opt/az:ro --mount /usr/bin/az:/usr/bin/az:ro`.
 2. If either is missing, it emits a yellow ADO warning
-   (`##vso[task.logissue type=warning]`) and leaves the variable
-   unset.
+   (`##vso[task.logissue type=warning]`) and sets the variable to
+   the *empty string* (leaving it undefined would make ADO render
+   the literal `$(AW_AZ_MOUNTS)` in the AWF bash step, where bash
+   would interpret it as command substitution and kill the step
+   under `set -e`).
 
 The AWF invocation includes a `$(AW_AZ_MOUNTS) \` line in its
 `--mount` chain. ADO expands the variable at step start: present →
@@ -119,6 +122,15 @@ pipeline never crashes `docker run` with "bind source path does not
 exist" on runners without `az`. See
 [`docs/network.md`](network.md#always-on-azure-cli-az) for the full
 design.
+
+**Conditional agent prompt advisory.** When (and only when) `az` is
+detected, a follow-up *Append Azure CLI prompt* step appends an
+Azure CLI advisory section to the agent prompt. The agent then knows
+`az` is on PATH and what it's good for (use cases and auth model
+below). The step is gated by
+`condition: ne(variables['AW_AZ_MOUNTS'], '')`; on runners without
+`az` it is skipped and the agent never sees Azure CLI guidance —
+preventing "told to use `az`, fails with command not found" loops.
 
 | Host posture                          | What you get                                              |
 | ------------------------------------- | --------------------------------------------------------- |

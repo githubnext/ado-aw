@@ -4595,6 +4595,47 @@ fn test_default_pipeline_mounts_az_and_allows_azure_hosts() {
          AWF invocation. See AzureCliExtension::prepare_steps for the rationale."
     );
 
+    // (1b) Conditional prompt-append step: when az is detected, the
+    // agent prompt receives an Azure CLI advisory section so the
+    // agent knows az is on PATH, what it's good for, and the auth
+    // model. The step is gated by `condition: ne(variables['AW_AZ_MOUNTS'], '')`
+    // so agents on runners WITHOUT az never see the advisory and
+    // never try to call az.
+    assert!(
+        compiled.contains(r#"displayName: "Append Azure CLI prompt""#),
+        "compiled YAML must contain the 'Append Azure CLI prompt' step \
+         emitted by AzureCliExtension::prepare_steps. Compiled:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("condition: ne(variables['AW_AZ_MOUNTS'], '')"),
+        "the Azure CLI prompt-append step must carry a condition: \
+         ne(variables['AW_AZ_MOUNTS'], '') so it is skipped when az \
+         is not detected. Compiled:\n{compiled}"
+    );
+    // Proximity check — the condition: must live on the SAME step as
+    // the displayName, otherwise we may have accidentally gated the
+    // wrong step. Find the displayName index, then check the next ~200
+    // chars for the condition line.
+    let display_idx = compiled
+        .find(r#"displayName: "Append Azure CLI prompt""#)
+        .expect("displayName already asserted to be present");
+    let window_end = (display_idx + 300).min(compiled.len());
+    let window = &compiled[display_idx..window_end];
+    assert!(
+        window.contains("condition: ne(variables['AW_AZ_MOUNTS'], '')"),
+        "the condition: line must appear in the same step block as the \
+         'Append Azure CLI prompt' displayName (looked at the 300 \
+         chars after the displayName). Window:\n{window}"
+    );
+    // Anchor strings: lock the load-bearing parts of the advisory.
+    for anchor in ["/usr/bin/az", "az devops", "AZURE_DEVOPS_EXT_PAT", "missing-tool"] {
+        assert!(
+            compiled.contains(anchor),
+            "compiled YAML must contain advisory anchor `{anchor}`. \
+             Compiled:\n{compiled}"
+        );
+    }
+
     // (2) The AWF invocation must reference $(AW_AZ_MOUNTS) so the
     // pipeline-variable value (the two --mount args, or empty) is
     // word-split into the docker run command at runtime. Unquoted on

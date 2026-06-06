@@ -77,8 +77,11 @@ Instead, the prepare step does the detection itself at pipeline time:
   via `##vso[task.setvariable]`.
 * If either is missing, the step emits a
   `##vso[task.logissue type=warning]` explaining `az` won't be
-  available inside the agent sandbox and leaves `AW_AZ_MOUNTS` unset
-  (which expands to the empty string).
+  available inside the agent sandbox and sets `AW_AZ_MOUNTS` to the
+  *empty string* (also via `##vso[task.setvariable]` — leaving the
+  variable undefined would make ADO render the literal `$(AW_AZ_MOUNTS)`
+  in the AWF bash step, where bash would interpret it as a `$(...)`
+  command substitution and kill the step under `set -e`).
 
 The AWF invocation in the compiled YAML then includes a literal
 `$(AW_AZ_MOUNTS) \` line on its own in the `--mount` chain.
@@ -86,6 +89,23 @@ At step start, ADO interpolates that pipeline variable into the bash
 script: when az is present the two `--mount` args appear; when it's
 absent the line collapses to empty whitespace + the `\` continuation,
 which is a no-op.
+
+### Agent prompt advisory (conditional)
+
+When (and only when) `AW_AZ_MOUNTS` is non-empty, a follow-up
+*Append Azure CLI prompt* step appends an Azure CLI advisory section
+to `/tmp/awf-tools/agent-prompt.md`. The agent reads the prompt on
+startup and learns that `az` is on PATH, what it's good for
+(`az devops` autoauthed via `$AZURE_DEVOPS_EXT_PAT`, ARM and Graph
+requiring separate auth), and the fallback path (`missing-tool`
+safe output naming `azure-cli`).
+
+The step is gated by `condition: ne(variables['AW_AZ_MOUNTS'], '')`,
+which reuses the same pipeline variable the detection step writes.
+On runners where `az` is missing, the advisory step is skipped
+entirely — the agent never sees Azure CLI guidance and never tries
+to call `az`, avoiding the "told to use `az`, fails with command
+not found" failure mode.
 
 ### Operator implications
 

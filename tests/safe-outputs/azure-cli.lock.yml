@@ -295,6 +295,26 @@ jobs:
           fi
         displayName: "Detect Azure CLI on host (for AWF mount)"
 
+      - bash: |
+          cat >> "/tmp/awf-tools/agent-prompt.md" << 'AZURE_CLI_PROMPT_EOF'
+
+          ---
+
+          ## Azure CLI (`az`)
+
+          The Azure CLI is available inside this sandbox at `/usr/bin/az`. Prefer it over hand-rolled curl calls when it covers what you need:
+
+          - **Azure DevOps management** — `az devops`, `az pipelines`, `az repos`, `az boards`. These are authenticated automatically from `$AZURE_DEVOPS_EXT_PAT` when the pipeline declares `permissions: read:`. List/inspect operations Just Work; write operations honour the PAT's scopes.
+          - **Azure Resource Manager** — `az resource`, `az account`, `az group`. These require a separate Azure identity that ado-aw does not provision out of the box; sign in with `az login` using credentials supplied by another mechanism (e.g. a service connection writing them into your sandbox env) before invoking them.
+          - **Microsoft Graph** — `az ad`, `az rest`. Same caveat as ARM.
+
+          If a command you need isn't covered above, file a `missing-tool` safe output naming `azure-cli` so the operator can extend coverage rather than blocking on it silently.
+          AZURE_CLI_PROMPT_EOF
+
+          echo "Azure CLI prompt appended"
+        displayName: "Append Azure CLI prompt"
+        condition: ne(variables['AW_AZ_MOUNTS'], '')
+
       # Start SafeOutputs HTTP server on host (MCPG proxies to it)
       - bash: |
           SAFE_OUTPUTS_PORT=8100
