@@ -53,11 +53,16 @@ use pr::PrContextContributor;
 /// while this helper only needs the front matter (because `target` is
 /// not relevant to PR activation today).
 pub fn pr_contributor_will_activate(front_matter: &FrontMatter) -> bool {
+    // Borrow the embedded config when present; fall back to a stack-
+    // local default. Avoids the per-call clone — this helper is called
+    // on every `collect_extensions` invocation, which is hot during
+    // compile.
+    let default_cfg = ExecutionContextConfig::default();
     let cfg = front_matter
         .execution_context
-        .clone()
-        .unwrap_or_default();
-    pr_contributor_will_activate_with_cfg(&cfg, front_matter)
+        .as_ref()
+        .unwrap_or(&default_cfg);
+    pr_contributor_will_activate_with_cfg(cfg, front_matter)
 }
 
 /// Variant that takes the resolved `ExecutionContextConfig` explicitly.

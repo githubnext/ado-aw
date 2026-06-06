@@ -41,6 +41,18 @@ const DEFAULT_AGENT_PROMPT_PATH = "/tmp/awf-tools/agent-prompt.md";
  * `/tmp/awf-tools/agent-prompt.md` (created by base.yml's
  * "Prepare agent prompt" step). Tests may override via the
  * `AW_AGENT_PROMPT_FILE` env var.
+ *
+ * SECURITY NOTE: `AW_AGENT_PROMPT_FILE` is a *test-only* seam. The
+ * compiled step's `env:` block (see `pr.rs::prepare_step`) only maps
+ * `SYSTEM_ACCESSTOKEN`, but Node still inherits the full pipeline
+ * environment, so a pipeline variable named `AW_AGENT_PROMPT_FILE`
+ * would silently redirect where the prompt fragment is appended.
+ * This requires pipeline-variable write access (already a high-trust
+ * capability) and only changes where the *contributor's own* prompt
+ * fragment lands — it cannot expand the agent's read surface. If we
+ * ever need to harden this further, the right move is to read the
+ * default path from a const here and stop honouring the env var
+ * outside of unit-test mode (e.g. gate on `process.env.NODE_ENV`).
  */
 function agentPromptPath(env: NodeJS.ProcessEnv): string {
   return env.AW_AGENT_PROMPT_FILE && env.AW_AGENT_PROMPT_FILE.length > 0

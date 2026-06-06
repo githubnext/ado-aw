@@ -33,9 +33,14 @@ use crate::compile::extensions::CompileContext;
 /// inside `prepare_step` for whatever (success / failure) fragment the
 /// runtime decides on.
 pub(super) trait ContextContributor {
-    /// Display name for diagnostics (e.g. `"pr"`).
+    /// Display name for diagnostics (e.g. `"pr"`). Defaults to
+    /// `"unknown"`; implementors with a meaningful identifier should
+    /// override. Currently no caller reads this — kept as a low-cost
+    /// hook so a future log-line / audit step has a stable channel.
     #[allow(dead_code)]
-    fn name(&self) -> &str;
+    fn name(&self) -> &str {
+        "unknown"
+    }
 
     /// Whether this contributor activates for the given compile context.
     fn should_activate(&self, ctx: &CompileContext) -> bool;
@@ -50,13 +55,15 @@ pub(super) trait ContextContributor {
     /// "Prepare agent prompt" step before any prepare_steps run).
     fn prepare_step(&self, ctx: &CompileContext) -> String;
 
-    /// Agent env vars this contributor exposes. Currently unused
-    /// (the ado-aw env-var channel rejects ADO `$(...)` expressions,
-    /// so all per-trigger metadata flows through files), but kept on
-    /// the trait so a future contributor can opt in if it only needs
-    /// literal values.
+    /// Agent env vars this contributor exposes. Defaults to none —
+    /// the ado-aw env-var channel rejects ADO `$(...)` expressions, so
+    /// all per-trigger metadata currently flows through files. Kept
+    /// on the trait so a future contributor that only needs literal
+    /// values can opt in without changing the wiring.
     #[allow(dead_code)]
-    fn agent_env_vars(&self) -> Vec<(String, String)>;
+    fn agent_env_vars(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
 
     /// Bash commands the agent must have on its allow-list to inspect
     /// the staged context (e.g. `git diff`, `git show`). Aggregated by

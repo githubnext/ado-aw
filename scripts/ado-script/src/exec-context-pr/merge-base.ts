@@ -1,5 +1,7 @@
 import { gitOk as defaultGitOk, runGit as defaultRunGit, type GitResult } from "./git.js";
 
+const SHA40_RE = /^[0-9a-f]{40}$/i;
+
 export type MergeBaseSuccess = {
   ok: true;
   baseSha: string;
@@ -135,6 +137,20 @@ export function resolveMergeBase(
     return {
       ok: false,
       reason: `Could not resolve base/head SHAs after progressive deepening of '${targetShort}' (HEAD=${headSha}, parentTokens=${parentTokens}).`,
+    };
+  }
+
+  // Defensive: every successful return must be a full 40-char hex SHA.
+  // `git rev-parse` and `git merge-base` normally output exactly that,
+  // but a misconfigured `core.abbrev`, an unexpected `.gitconfig`
+  // override, or a future git-version quirk could yield abbreviated or
+  // multi-line output. We do NOT want a partial SHA staged into the
+  // safe-output dir — the agent's `git diff $BASE..$HEAD` would error
+  // out in-sandbox with a confusing message. Fail closed here instead.
+  if (!SHA40_RE.test(baseSha) || !SHA40_RE.test(headTipSha)) {
+    return {
+      ok: false,
+      reason: `Resolved SHAs are not 40-char hex (baseSha='${baseSha}', headSha='${headTipSha}', targetShort='${targetShort}').`,
     };
   }
 
