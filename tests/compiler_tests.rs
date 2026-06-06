@@ -4577,6 +4577,24 @@ fn test_default_pipeline_mounts_az_and_allows_azure_hosts() {
          Compiled:\n{compiled}"
     );
 
+    // (1a) Regression guard: `setvariable` for AW_AZ_MOUNTS must appear
+    // TWICE — once per branch of the if/else. If the missing-az branch
+    // skips the setvariable, ADO leaves the literal `$(AW_AZ_MOUNTS)`
+    // in the AWF bash step, where bash interprets it as a `$(...)`
+    // command substitution, attempts to run a program named
+    // `AW_AZ_MOUNTS`, gets exit 127, and `set -e` kills the pipeline —
+    // the exact failure mode this PR set out to prevent on runners
+    // without azure-cli installed.
+    let setvar_count = compiled
+        .matches("##vso[task.setvariable variable=AW_AZ_MOUNTS]")
+        .count();
+    assert_eq!(
+        setvar_count, 2,
+        "AW_AZ_MOUNTS must be set in BOTH branches of the detection step (got {setvar_count} \
+         occurrences); leaving it unset in the missing-az branch breaks `set -e` in the \
+         AWF invocation. See AzureCliExtension::prepare_steps for the rationale."
+    );
+
     // (2) The AWF invocation must reference $(AW_AZ_MOUNTS) so the
     // pipeline-variable value (the two --mount args, or empty) is
     // word-split into the docker run command at runtime. Unquoted on

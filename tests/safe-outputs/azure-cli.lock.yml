@@ -290,6 +290,7 @@ jobs:
             echo "##vso[task.setvariable variable=AW_AZ_MOUNTS]--mount /opt/az:/opt/az:ro --mount /usr/bin/az:/usr/bin/az:ro"
             echo "Azure CLI detected on host; mounting /opt/az and /usr/bin/az into AWF sandbox."
           else
+            echo "##vso[task.setvariable variable=AW_AZ_MOUNTS]"
             echo "##vso[task.logissue type=warning]Azure CLI not detected on this runner (missing /usr/bin/az or /opt/az). The az command will not be available inside the agent sandbox. Install azure-cli on the runner image to enable it."
           fi
         displayName: "Detect Azure CLI on host (for AWF mount)"

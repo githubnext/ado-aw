@@ -26,9 +26,16 @@ use super::{AwfMount, CompilerExtension, CompileContext, ExtensionPhase};
 ///   sets the ADO pipeline variable `AW_AZ_MOUNTS` to
 ///   `--mount /opt/az:/opt/az:ro --mount /usr/bin/az:/usr/bin/az:ro`
 ///   via `##vso[task.setvariable]`.
-/// * Otherwise, the step emits a `##vso[task.logissue type=warning]`
-///   explaining `az` won't be available inside the agent sandbox and
-///   leaves `AW_AZ_MOUNTS` unset (expands to the empty string).
+/// * Otherwise, the step sets `AW_AZ_MOUNTS` to the **empty string**
+///   (still via `##vso[task.setvariable]`) and emits a
+///   `##vso[task.logissue type=warning]` explaining `az` won't be
+///   available inside the agent sandbox. Setting the variable to empty
+///   is important: ADO leaves an *undefined* `$(VAR)` as the literal
+///   string `$(VAR)` in later bash steps, where bash would interpret
+///   it as a command substitution (`$(...)`) and fail under
+///   `set -e` with exit 127. An empty-but-defined variable expands to
+///   nothing, and the `$(AW_AZ_MOUNTS) \` line in the AWF chain
+///   becomes a harmless `\`-continuation no-op.
 ///
 /// The AWF invocation in `base.yml`/`1es-base.yml`/etc. then includes a
 /// `$(AW_AZ_MOUNTS) \` line (injected by
@@ -107,6 +114,15 @@ impl CompilerExtension for AzureCliExtension {
         // contains only path chars, `:`, and spaces — no shell
         // metachars — so unquoted expansion is safe.
         //
+        // Both branches MUST set the variable (the else branch sets it
+        // to empty string). If left undefined, ADO leaves the literal
+        // `$(AW_AZ_MOUNTS)` in subsequent bash steps, where bash
+        // interprets it as a `$(...)` command substitution, tries to
+        // run a program named `AW_AZ_MOUNTS`, gets exit 127, and the
+        // AWF invocation step dies under `set -e` — the opposite of
+        // graceful degradation. Defining the variable as empty makes
+        // ADO expand it to nothing, leaving a harmless `\`-continuation.
+        //
         // Warning text is intentionally short and operator-facing.
         // Agents that don't invoke `az` are unaffected; agents that do
         // will get a normal "command not found" inside the sandbox.
@@ -116,6 +132,7 @@ impl CompilerExtension for AzureCliExtension {
       echo "##vso[task.setvariable variable=AW_AZ_MOUNTS]--mount /opt/az:/opt/az:ro --mount /usr/bin/az:/usr/bin/az:ro"
       echo "Azure CLI detected on host; mounting /opt/az and /usr/bin/az into AWF sandbox."
     else
+      echo "##vso[task.setvariable variable=AW_AZ_MOUNTS]"
       echo "##vso[task.logissue type=warning]Azure CLI not detected on this runner (missing /usr/bin/az or /opt/az). The az command will not be available inside the agent sandbox. Install azure-cli on the runner image to enable it."
     fi
   displayName: "Detect Azure CLI on host (for AWF mount)"
@@ -237,6 +254,51 @@ mod tests {
         assert!(
             step.contains("else") && step.contains("fi"),
             "must use a proper if/else/fi structure: {step}"
+        );
+    }
+
+    #[test]
+    fn test_azure_cli_prepare_steps_defines_aw_az_mounts_in_else_branch() {
+        // Regression guard for the graceful-degradation bug:
+        // if the `else` branch doesn't explicitly setvariable on
+        // AW_AZ_MOUNTS, ADO leaves the literal `$(AW_AZ_MOUNTS)` in
+        // the subsequent AWF bash step, bash interprets it as a
+        // `$(...)` command substitution, tries to execute a program
+        // named AW_AZ_MOUNTS, gets exit 127, and `set -e` kills the
+        // step — exactly the failure mode this PR set out to prevent.
+        let ext = AzureCliExtension;
+        let fm = fm();
+        let ctx = CompileContext::for_test(&fm);
+        let step = ext.prepare_steps(&ctx).into_iter().next().unwrap();
+
+        // Count setvariable occurrences — must be 2 (one per branch).
+        let setvar_count = step
+            .matches("##vso[task.setvariable variable=AW_AZ_MOUNTS]")
+            .count();
+        assert_eq!(
+            setvar_count, 2,
+            "AW_AZ_MOUNTS must be set in BOTH branches of the if/else (got {setvar_count}); \
+             leaving it undefined in the missing-az branch causes bash to interpret \
+             the literal `$(AW_AZ_MOUNTS)` as command substitution and fail under set -e. \
+             Step:\n{step}"
+        );
+
+        // Verify the else branch sets it to empty (no `--mount` chars
+        // after the `]`). We slice the step from "else" to "fi" and
+        // assert the else block contains a setvariable line that ends
+        // with `]"` (closing-bracket-then-quote = empty value).
+        let else_start = step.find("else").expect("must have else branch");
+        let fi_end = step[else_start..].find("fi").expect("must have fi");
+        let else_block = &step[else_start..else_start + fi_end];
+        assert!(
+            else_block.contains("##vso[task.setvariable variable=AW_AZ_MOUNTS]\""),
+            "else branch must set AW_AZ_MOUNTS to empty string (line must end with `]\"`), got:\n{else_block}"
+        );
+        // And the else branch must NOT include any --mount arg (would
+        // mean we're accidentally setting non-empty when az is missing).
+        assert!(
+            !else_block.contains("--mount"),
+            "else branch must not contain --mount args (those belong to the detected branch only): {else_block}"
         );
     }
 
