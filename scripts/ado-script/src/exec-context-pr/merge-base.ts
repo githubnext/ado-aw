@@ -29,14 +29,17 @@ const defaultRunners: GitRunners = {
 };
 
 /**
- * Count the parents reported by `git rev-list --parents -n 1 HEAD`.
- * Output is `"<commit> <parent1> [<parent2> ...]"`. Three or more
- * tokens indicates a merge commit (1 commit + 2+ parents).
+ * Count the tokens reported by `git rev-list --parents -n 1 HEAD`.
+ * Output is `"<commit> <parent1> [<parent2> ...]"`, so the token count
+ * is `1 + parentCount`. A normal merge commit (2 parents) yields 3
+ * tokens; the synthetic merge ADO creates for PR builds also yields 3
+ * tokens. We treat `>= 3` as "merge commit" for the synthetic-merge
+ * branch — see [`resolveMergeBase`].
  *
- * Returns 0 on any git failure (the bash version does the same via
+ * Returns 0 on any git failure (the bash version did the same via
  * `|| true` + `wc -w` of empty input, then parameter expansion).
  */
-function countParents(runners: GitRunners): number {
+function countParentTokens(runners: GitRunners): number {
   const result = runners.runGit(["rev-list", "--parents", "-n", "1", "HEAD"]);
   if (result.status !== 0) return 0;
   const tokens = result.stdout.trim().split(/\s+/).filter((t) => t.length > 0);
@@ -94,13 +97,13 @@ export function resolveMergeBase(
   runners: GitRunners = defaultRunners,
 ): MergeBaseResult {
   const headSha = runners.gitOk(["rev-parse", "HEAD"]) ?? "";
-  const parents = countParents(runners);
+  const parentTokens = countParentTokens(runners);
 
   let baseSha = "";
   let headTipSha = "";
 
-  if (parents >= 3) {
-    // Synthetic merge commit.
+  if (parentTokens >= 3) {
+    // Synthetic merge commit (3 tokens = 1 commit + 2 parents).
     const p1 = runners.gitOk(["rev-parse", "HEAD^1"]) ?? "";
     const p2 = runners.gitOk(["rev-parse", "HEAD^2"]) ?? "";
     headTipSha = p2;
@@ -131,7 +134,7 @@ export function resolveMergeBase(
   if (baseSha.length === 0 || headTipSha.length === 0) {
     return {
       ok: false,
-      reason: `Could not resolve base/head SHAs after progressive deepening of '${targetShort}' (HEAD=${headSha}, parents=${parents}).`,
+      reason: `Could not resolve base/head SHAs after progressive deepening of '${targetShort}' (HEAD=${headSha}, parentTokens=${parentTokens}).`,
     };
   }
 

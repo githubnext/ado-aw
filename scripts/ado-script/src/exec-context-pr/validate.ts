@@ -38,10 +38,34 @@ export type Identifiers = {
 };
 
 /**
+ * Sanitize an arbitrary string for safe embedding in the agent prompt.
+ * Replaces CR/LF with spaces and truncates to a short cap so a hostile
+ * branch name (which a PR author with push access could choose) cannot
+ * inject markdown headers, code fences, or "ignore previous
+ * instructions"-style text into the prompt via the failure path.
+ *
+ * Used by the validation-failure path where the *unvalidated* raw env
+ * value is embedded in the failure reason — the value has by definition
+ * already failed the strict allowlist regex, so we must treat it as
+ * adversarial input.
+ */
+export function sanitizeForPrompt(value: string, maxLen = 80): string {
+  const oneLine = value.replace(/[\r\n]+/g, " ");
+  if (oneLine.length <= maxLen) return oneLine;
+  return oneLine.slice(0, maxLen) + "…";
+}
+
+/**
  * Validate the 4 PR-identifier env vars and return either the parsed
  * identifiers or a structured error. Both `prId === ""` and
  * `targetBranch === ""` are treated as validation failures — every
  * downstream step needs all four values to be present and well-formed.
+ *
+ * On failure, the raw value of the offending env var is included in the
+ * `reason` string for diagnosis, but is passed through
+ * [`sanitizeForPrompt`] first so a hostile value (e.g. a branch name
+ * with embedded newlines or markdown headers) cannot inject content
+ * into the agent prompt via the failure fragment.
  */
 export function validateIdentifiers(env: NodeJS.ProcessEnv): Identifiers | IdentifierError {
   const prId = env.SYSTEM_PULLREQUEST_PULLREQUESTID ?? "";
@@ -50,20 +74,20 @@ export function validateIdentifiers(env: NodeJS.ProcessEnv): Identifiers | Ident
   const repo = env.BUILD_REPOSITORY_NAME ?? "";
 
   if (!PR_ID_RE.test(prId)) {
-    return { reason: `PR identifier validation failed (PR_ID='${prId}' is not a positive integer).` };
+    return { reason: `PR identifier validation failed (PR_ID='${sanitizeForPrompt(prId)}' is not a positive integer).` };
   }
   if (!PROJECT_RE.test(project)) {
-    return { reason: `PR identifier validation failed (PROJECT='${project}' contains disallowed characters).` };
+    return { reason: `PR identifier validation failed (PROJECT='${sanitizeForPrompt(project)}' contains disallowed characters).` };
   }
   if (!REPO_RE.test(repo)) {
-    return { reason: `PR identifier validation failed (REPO='${repo}' contains disallowed characters).` };
+    return { reason: `PR identifier validation failed (REPO='${sanitizeForPrompt(repo)}' contains disallowed characters).` };
   }
   if (targetBranch.length === 0) {
     return { reason: "System.PullRequest.TargetBranch is empty; cannot resolve merge-base." };
   }
   if (!TARGET_BRANCH_RE.test(targetBranch)) {
     return {
-      reason: `PR identifier validation failed (PR_TARGET_BRANCH='${targetBranch}' contains disallowed characters).`,
+      reason: `PR identifier validation failed (PR_TARGET_BRANCH='${sanitizeForPrompt(targetBranch)}' contains disallowed characters).`,
     };
   }
 

@@ -4,13 +4,12 @@ import { spawnSync } from "node:child_process";
  * Build the `GIT_CONFIG_*` env-var triple that injects an
  * `http.extraheader: Authorization: bearer <token>` config into a
  * spawned git subprocess WITHOUT writing to `.git/config` and WITHOUT
- * the token appearing on the argv command line. This is the in-process
- * equivalent of the v6.2 bash `git_fetch` wrapper.
+ * the token appearing on the argv command line.
  *
- * Returns `{}` when `token` is empty/undefined — the caller should
- * still attempt the fetch (the existing bash path falls through to a
- * plain `git fetch` in that case, which works for public refs and
- * fails for private ones — same posture preserved).
+ * Returns `{}` when `token` is empty/undefined — callers still attempt
+ * the fetch without authentication (which works for public refs and
+ * fails for private ones; same posture preserved from the v6.2 bash
+ * implementation).
  */
 export function bearerEnv(token: string | undefined): Record<string, string> {
   if (!token || token.length === 0) {

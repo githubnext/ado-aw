@@ -173,6 +173,20 @@ describe("exec-context-pr.js smoke", () => {
       const repoDir = resolve(dir, "repo");
       makeSyntheticMergeRepo(repoDir);
 
+      // Compute expected SHAs directly from the synthetic repo so the
+      // bundle's output can be cross-checked against git's own answer.
+      // This guards against silent SHA-transposition / wrong-ref bugs
+      // (e.g. swapping `HEAD^1` and `HEAD^2`, or using `HEAD^1` as
+      // BASE_SHA instead of the true merge-base).
+      const expectedHead = spawnSync("git", ["rev-parse", "HEAD^2"], {
+        cwd: repoDir,
+        encoding: "utf8",
+      }).stdout.trim();
+      const expectedBase = spawnSync("git", ["merge-base", "HEAD^1", "HEAD^2"], {
+        cwd: repoDir,
+        encoding: "utf8",
+      }).stdout.trim();
+
       const awContext = resolve(repoDir, "aw-context");
       const agentPromptDir = resolve(dir, "awf-tools");
       mkdirSync(agentPromptDir, { recursive: true });
@@ -220,6 +234,11 @@ describe("exec-context-pr.js smoke", () => {
       expect(headSha).toMatch(/^[a-f0-9]{40}$/);
       // Base != head (synthetic merge places them on different commits).
       expect(baseSha).not.toBe(headSha);
+      // Cross-check against git's own answer: head must be HEAD^2 (the
+      // PR head, not the target tip) and base must be the merge-base
+      // of HEAD^1 + HEAD^2 (the true common ancestor, not HEAD^1).
+      expect(headSha).toBe(expectedHead);
+      expect(baseSha).toBe(expectedBase);
 
       // The agent prompt was appended with the success fragment.
       const promptContent = readFileSync(agentPromptPath, "utf8");

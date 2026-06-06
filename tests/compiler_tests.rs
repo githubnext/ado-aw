@@ -4272,6 +4272,35 @@ fn test_neither_feature_active_emits_no_node_or_download_anywhere() {
     );
 }
 
+/// Per-job download placement: when the gate is inactive AND runtime imports
+/// are inlined, but `on.pr` is configured and execution-context PR is not
+/// disabled, the `exec-context-pr.js` bundle is the only consumer — the
+/// download must land in the Agent job only.
+///
+/// Closes a coverage gap that `dedupe_gate_only.md` previously left by
+/// pinning `execution-context.pr.enabled: false`.
+#[test]
+fn test_exec_context_pr_only_downloads_bundle_in_agent_job_not_setup() {
+    let yaml = compile_fixture("dedupe_exec_context_pr_only.md");
+    let agent = extract_job_block(&yaml, "Agent").expect("Agent job should exist");
+    assert!(
+        agent.contains("Download ado-aw scripts"),
+        "Agent job is missing the script bundle download (exec-context-pr.js consumer lives here)"
+    );
+    assert!(
+        agent.contains("Stage PR execution context (aw-context/pr/*)"),
+        "Agent job is missing the exec-context-pr prepare step (the consumer of the download)"
+    );
+    if let Some(setup) = extract_job_block(&yaml, "Setup") {
+        assert!(
+            !setup.contains("Download ado-aw scripts"),
+            "Setup job should NOT have the script bundle download when the only consumer is the Agent-job exec-context-pr step. \
+             Setup block contents: {}",
+            setup
+        );
+    }
+}
+
 /// When a user pins a Node version via `runtimes.node:` AND runtime imports
 /// are active, both extensions emit `NodeTool@0` into the Agent job. ADO's
 /// `NodeTool@0` prepends to PATH, so the LAST install wins. The ado-script
