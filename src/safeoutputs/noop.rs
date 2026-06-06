@@ -117,19 +117,6 @@ mod tests {
     }
 
     #[test]
-    fn test_result_serializes_correctly() {
-        let result: NoopResult = NoopParams {
-            context: Some("test context".to_string()),
-        }
-        .try_into()
-        .unwrap();
-        let json = serde_json::to_string(&result).unwrap();
-
-        assert!(json.contains(r#""name":"noop""#));
-        assert!(json.contains(r#""context":"test context""#));
-    }
-
-    #[test]
     fn test_result_serializes_to_valid_json() {
         let result: NoopResult = NoopParams {
             context: Some("test".to_string()),
