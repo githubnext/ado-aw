@@ -303,6 +303,7 @@ jobs:
           # sed -u = unbuffered (line-by-line) so output appears immediately.
           # tee writes to both stdout (ADO pipeline log) and the artifact file.
           # pipefail (set above) ensures AWF's exit code propagates through the pipe.
+          # shellcheck disable=SC2046 # $(AW_AZ_MOUNTS) is an ADO macro substituted before bash sees it, not bash command substitution; word-splitting the expanded value into separate --mount tokens is intentional
           sudo -E "$(Pipeline.Workspace)/awf/awf" \
             --allow-domains "{{ allowed_domains }}" \
             --skip-pull \

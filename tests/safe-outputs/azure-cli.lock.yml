@@ -478,6 +478,7 @@ jobs:
           # sed -u = unbuffered (line-by-line) so output appears immediately.
           # tee writes to both stdout (ADO pipeline log) and the artifact file.
           # pipefail (set above) ensures AWF's exit code propagates through the pipe.
+          # shellcheck disable=SC2046 # $(AW_AZ_MOUNTS) is an ADO macro substituted before bash sees it, not bash command substitution; word-splitting the expanded value into separate --mount tokens is intentional
           sudo -E "$(Pipeline.Workspace)/awf/awf" \
             --allow-domains "*.applicationinsights.azure.com,*.blob.core.windows.net,*.copilot.github.com,*.dev.azure.com,*.github.com,*.githubcopilot.com,*.githubusercontent.com,*.in.applicationinsights.azure.com,*.msauth.net,*.msauthimages.net,*.msftauth.net,*.pkgs.dev.azure.com,*.queue.core.windows.net,*.table.core.windows.net,*.visualstudio.com,*.vsassets.io,*.vsblob.visualstudio.com,*.vsrm.dev.azure.com,*.vssps.visualstudio.com,aex.dev.azure.com,aexus.dev.azure.com,aka.ms,api.github.com,config.edge.skype.com,copilot-proxy.githubusercontent.com,dc.services.visualstudio.com,dev.azure.com,github.com,graph.microsoft.com,host.docker.internal,login.live.com,login.microsoftonline.com,login.windows.net,management.azure.com,pkgs.dev.azure.com,rt.services.visualstudio.com,vsrm.dev.azure.com,vssps.dev.azure.com,vstoken.dev.azure.com" \
             --skip-pull \
