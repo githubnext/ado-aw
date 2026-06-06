@@ -34,7 +34,7 @@ pub(crate) const IMPORT_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/import
 /// Path to the exec-context-pr bundle inside the unpacked `ado-script.zip`.
 /// Consumed by `src/compile/extensions/exec_context/pr.rs` to invoke
 /// the bundle from the PR contributor's prepare step.
-pub const EXEC_CONTEXT_PR_PATH: &str = "/tmp/ado-aw-scripts/ado-script/exec-context-pr.js";
+pub(crate) const EXEC_CONTEXT_PR_PATH: &str = "/tmp/ado-aw-scripts/ado-script/exec-context-pr.js";
 const RELEASE_BASE_URL: &str = "https://github.com/githubnext/ado-aw/releases/download";
 
 /// Single always-on extension that owns all `ado-script` bundle wiring.

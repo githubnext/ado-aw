@@ -1,6 +1,6 @@
 import { appendFileSync } from "node:fs";
 
-import type { Identifiers } from "./validate.js";
+import { sanitizeForPrompt, type Identifiers } from "./validate.js";
 
 /**
  * Build the SUCCESS prompt fragment appended to the agent prompt file
@@ -44,15 +44,25 @@ export function successFragment(ids: Identifiers): string {
  *
  * Uses placeholders (`<unknown>`) when identifiers are themselves the
  * source of failure (mirrors the v6.2 bash `${PR_ID:-<unknown>}` form).
+ *
+ * The `partial` values are passed in **raw and unvalidated** from
+ * `index.ts` (they come straight from the failure-path env-var reads),
+ * so each one is run through [`sanitizeForPrompt`] before
+ * interpolation. Defence-in-depth against a hostile env value (e.g. a
+ * branch name with embedded newlines + markdown headers) injecting
+ * content into the agent prompt via this failure fragment. ADO's
+ * predefined variables are infra-set today, so exploitability is low —
+ * but the consistent-sanitisation posture matches `reason` (which
+ * `validateIdentifiers` already sanitises).
  */
 export function failureFragment(reason: string, partial: {
   prId?: string;
   project?: string;
   repo?: string;
 }): string {
-  const prId = partial.prId && partial.prId.length > 0 ? partial.prId : "<unknown>";
-  const project = partial.project && partial.project.length > 0 ? partial.project : "<unknown>";
-  const repo = partial.repo && partial.repo.length > 0 ? partial.repo : "<unknown>";
+  const prId = partial.prId && partial.prId.length > 0 ? sanitizeForPrompt(partial.prId) : "<unknown>";
+  const project = partial.project && partial.project.length > 0 ? sanitizeForPrompt(partial.project) : "<unknown>";
+  const repo = partial.repo && partial.repo.length > 0 ? sanitizeForPrompt(partial.repo) : "<unknown>";
   return [
     "",
     "## PR context",
