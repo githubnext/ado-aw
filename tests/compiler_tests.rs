@@ -5260,15 +5260,20 @@ fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
     );
 }
 
-/// **Trust-boundary regression test.** `SYSTEM_ACCESSTOKEN` must appear
-/// only inside the execution-context prepare step's `env:` block, never
-/// in `.git/config` writes, and never under `persistCredentials: true`.
+/// **Trust-boundary regression test.** Asserts the exec-context PR
+/// contributor never writes credentials to disk (`.git/config`,
+/// `persistCredentials: true`) and that every `env:` block declaring
+/// `SYSTEM_ACCESSTOKEN` is one of the three sanctioned locations:
 ///
-/// Walks the parsed YAML and checks every step: any step whose `env:`
-/// declares `SYSTEM_ACCESSTOKEN` MUST be the exec-context PR prepare
-/// step (identified by its `displayName`). Any other location for the
-/// token would indicate a leak — most importantly, it must NOT appear
-/// in the agent step's env (where the AWF sandbox would inherit it).
+/// 1. The exec-context PR prepare step — owned by this extension.
+/// 2. The Stage 3 SafeOutputs executor step — runs in its own
+///    non-agent job and legitimately needs the token to apply safe
+///    outputs (PRs, work items, etc.). See PR #873.
+/// 3. The Setup-job filter-gate evaluator (when filters are configured).
+///
+/// The token MUST NOT appear in the agent step's env — that is the
+/// cross-stage trust boundary enforced separately by
+/// `test_agent_job_steps_do_not_map_system_access_token`.
 #[test]
 fn test_execution_context_pr_does_not_leak_system_accesstoken() {
     let compiled = compile_fixture("execution-context-agent.md");
@@ -5284,8 +5289,8 @@ fn test_execution_context_pr_does_not_leak_system_accesstoken() {
 
     // Parse the YAML and walk every mapping. For any mapping that has
     // an `env:` child mapping containing `SYSTEM_ACCESSTOKEN`, the
-    // enclosing step's `displayName` MUST be the exec-context prepare
-    // step. Anything else is a leak.
+    // enclosing step's `displayName` MUST be one of the sanctioned
+    // mappings listed in the docstring above. Anything else is a leak.
     use serde_yaml::Value;
     let yaml: Value =
         serde_yaml::from_str(&compiled).expect("compiled output should parse as YAML");
@@ -5329,17 +5334,42 @@ fn test_execution_context_pr_does_not_leak_system_accesstoken() {
         "expected at least one env block with SYSTEM_ACCESSTOKEN (the exec-context prepare step)"
     );
 
+    // The full set of sanctioned step displayNames that may legitimately
+    // map SYSTEM_ACCESSTOKEN. Keep this list narrow and audited — adding
+    // a new entry requires confirming the step runs outside the AWF
+    // sandbox and the token is not reachable from the agent step.
+    const ALLOWED_DISPLAY_NAMES: &[&str] = &[
+        // Owned by this extension.
+        "Stage PR execution context (aw-context/pr/*)",
+        // Stage 3 SafeOutputs executor — separate non-agent job; needs
+        // the token to apply safe outputs against ADO. See PR #873.
+        "Execute safe outputs (Stage 3)",
+    ];
+
+    let mut saw_exec_context_step = false;
     for display in &env_blocks_with_token {
         match display {
-            Some(d) if d == "Stage PR execution context (aw-context/pr/*)" => {}
+            Some(d) if ALLOWED_DISPLAY_NAMES.contains(&d.as_str()) => {
+                if d == "Stage PR execution context (aw-context/pr/*)" {
+                    saw_exec_context_step = true;
+                }
+            }
             other => panic!(
-                "SYSTEM_ACCESSTOKEN was found in a step env block that is NOT the \
-                 exec-context PR prepare step. displayName = {:?}. \
+                "SYSTEM_ACCESSTOKEN was found in a step env block whose displayName \
+                 is not in the sanctioned allow-list {:?}. displayName = {:?}. \
                  This indicates a credential leak into another step.",
-                other
+                ALLOWED_DISPLAY_NAMES, other
             ),
         }
     }
+
+    assert!(
+        saw_exec_context_step,
+        "expected to find the exec-context PR prepare step (\
+         displayName = \"Stage PR execution context (aw-context/pr/*)\") \
+         among the env blocks declaring SYSTEM_ACCESSTOKEN, but it was missing. \
+         The PR contributor did not activate as expected."
+    );
 }
 
 /// When the agent is not PR-triggered, the execution-context extension
