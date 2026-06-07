@@ -215,7 +215,12 @@ mod tests {
         assert_eq!(noops.len(), 3);
         assert_eq!(missing_tools[0].tool.as_deref(), Some("bash"));
         assert_eq!(missing_tools[1].tool.as_deref(), Some("python"));
-        assert!(noops.iter().all(|report| report.tool.is_none()));
+        assert_eq!(noops[0].context.as_deref(), Some("ctx-4"));
+        assert_eq!(noops[0].reason.as_deref(), Some("nothing to do"));
+        assert_eq!(noops[1].context.as_deref(), Some("ctx-5"));
+        assert_eq!(noops[2].context.as_deref(), Some("ctx-6"));
+        // third noop has no "reason" field — description fallback must apply
+        assert_eq!(noops[2].reason.as_deref(), Some("skipped"));
     }
 
     #[tokio::test]
