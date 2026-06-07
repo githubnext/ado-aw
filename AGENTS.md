@@ -63,6 +63,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   │   ├── github.rs # Always-on GitHub MCP extension
 │   │   │   ├── safe_outputs.rs # Always-on SafeOutputs MCP extension
 │   │   │   ├── ado_script.rs # Always-on ado-script extension (gate evaluator + runtime-import resolver, per-job downloads)
+│   │   │   ├── azure_cli.rs # Always-on Azure CLI extension (runtime detection, AWF mounts, az allowlist)
 │   │   │   └── tests.rs  # Extension integration tests
 │   │   ├── codemods/     # Front-matter codemods (one file per transformation)
 │   │   │   ├── mod.rs    # Codemod struct, CODEMODS registry, runner

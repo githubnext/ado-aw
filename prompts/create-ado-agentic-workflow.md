@@ -684,7 +684,7 @@ When generating the agent file:
 1. **Produce exactly one `.md` file.** Do not create separate documentation, architecture notes, or runbooks.
 2. **Respect existing repository conventions** for file placement. Look at where existing pipeline YAML files or agent markdown files are located in the repo. If no convention exists, ask the user where they'd like the file placed.
 3. **Omit optional fields when they match defaults** — no `engine:` for `claude-opus-4.7`, no `workspace:` for `root`, no `target:` for `standalone`.
-4. **Always validate** that write-requiring safe-outputs (`create-pull-request`, `create-work-item`) have `permissions.write` set.
+4. **`permissions.write` is optional** — the Stage 3 executor defaults to `$(System.AccessToken)`. Only add `permissions.write` when the task requires cross-org writes or named-identity attribution.
 
 ## Compilation
 
@@ -802,4 +802,4 @@ safe-outputs:
 - **Explicit allow-lists**: Restrict MCP tools to only what the agent needs.
 - **No direct writes**: All mutations go through safe outputs — the agent cannot push code or call write APIs directly.
 - **Compile before committing**: Always compile with `ado-aw compile` and commit both the `.md` source and generated `.lock.yml` together.
-- **Check validation**: The compiler will error if write safe-outputs are configured without `permissions.write`.
+- **Check validation**: The compiler validates front-matter fields and emits errors for invalid configurations (e.g., conflicting filter rules, missing required fields like `comment-on-work-item.target`). Write-bearing safe outputs do **not** require `permissions.write` — the executor defaults to `$(System.AccessToken)`.
