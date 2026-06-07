@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.32.0](https://github.com/githubnext/ado-aw/compare/v0.31.1...v0.32.0) (2026-06-07)
+
+
+### Features
+
+* **audit:** add `ado-aw audit <build-id-or-url>` command ([#691](https://github.com/githubnext/ado-aw/issues/691)) ([5c33e40](https://github.com/githubnext/ado-aw/commit/5c33e40d1d51a32077597046f490d1ab52ed8111))
+* **compile:** add execution-context plugin with PR contributor ([#860](https://github.com/githubnext/ado-aw/issues/860)) ([#865](https://github.com/githubnext/ado-aw/issues/865)) ([3de0690](https://github.com/githubnext/ado-aw/commit/3de0690ac7b09ba7ec4c340f45be685a047c0168))
+* **compile:** default executor to System.AccessToken and add always-on Azure CLI ([#873](https://github.com/githubnext/ado-aw/issues/873)) ([ca4a04b](https://github.com/githubnext/ado-aw/commit/ca4a04b156e0631c211eef711bbf6e81d7f9ebc8))
+* **workflows:** recompile tests/safe-outputs fixtures on each ado-aw release ([#863](https://github.com/githubnext/ado-aw/issues/863)) ([7c6fb23](https://github.com/githubnext/ado-aw/commit/7c6fb230184bad74542ead0a74de1d9a3da5a105))
+
+
+### Bug Fixes
+
+* **workflows:** add integrity heuristic and per-file compile loop to recompile-safe-output-fixtures ([#868](https://github.com/githubnext/ado-aw/issues/868)) ([665ad0e](https://github.com/githubnext/ado-aw/commit/665ad0e461f09efc2e2ec3e37ff9595507da62a0))
+* **workflows:** allow github CDN egress in recompile-safe-output-fixtures ([#864](https://github.com/githubnext/ado-aw/issues/864)) ([abc4959](https://github.com/githubnext/ado-aw/commit/abc49599f97bfe7230e19cfbd9e7e763d55085db))
+* **workflows:** broaden allowed-files glob to cover flat tests/safe-outputs layout ([#871](https://github.com/githubnext/ado-aw/issues/871)) ([6d3559f](https://github.com/githubnext/ado-aw/commit/6d3559f7f789a4543ed7edeb6e67fb41aeb8ef4f))
+* **workflows:** switch recompile trigger to release:published and drop broken Step 0 ([#869](https://github.com/githubnext/ado-aw/issues/869)) ([039e547](https://github.com/githubnext/ado-aw/commit/039e5478b978cca0853e87313d5d9f2a63b76822))
+
 ## [0.31.1](https://github.com/githubnext/ado-aw/compare/v0.31.0...v0.31.1) (2026-06-01)
 
 
