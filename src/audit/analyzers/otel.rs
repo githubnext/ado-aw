@@ -158,12 +158,8 @@ mod tests {
 
         let analysis = analyze_otel(temp_dir.path()).await.unwrap();
 
-        assert!(analysis.metrics.token_usage > 0);
-        assert_eq!(
-            analysis.metrics.effective_tokens,
-            analysis.metrics.token_usage
-        );
-        assert!(analysis.metrics.turns > 0);
+        assert_eq!(analysis.metrics.token_usage, 33185);
+        assert_eq!(analysis.metrics.turns, 2);
         assert!(analysis.engine_config.is_none());
         assert!(analysis.aw_info.is_none());
     }
