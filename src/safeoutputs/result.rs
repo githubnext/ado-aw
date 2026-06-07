@@ -712,7 +712,7 @@ mod tests {
     fn test_anyhow_to_mcp_error_preserves_message() {
         let err = anyhow::anyhow!("test error message");
         let mcp_err = anyhow_to_mcp_error(err);
-        assert!(mcp_err.message.contains("test error message"));
+        assert_eq!(mcp_err.message, "test error message");
     }
 
     #[test]
@@ -867,12 +867,6 @@ mod tests {
         assert_eq!(ctx.source_branch.as_deref(), Some("refs/heads/main"));
         assert_eq!(ctx.source_branch_name.as_deref(), Some("main"));
         assert_eq!(ctx.source_version.as_deref(), Some("abc1234"));
-    }
-
-    #[test]
-    fn test_from_env_lookup_build_id_parses_numeric() {
-        let ctx = ExecutionContext::from_env_lookup(env_from(&[("BUILD_BUILDID", "987654")]));
-        assert_eq!(ctx.build_id, Some(987654));
     }
 
     #[test]

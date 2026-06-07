@@ -436,10 +436,10 @@ allowed-link-types:
   - related
 "#;
         let config: LinkWorkItemsConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.allowed_link_types.len(), 3);
-        assert!(config.allowed_link_types.contains(&"parent".to_string()));
-        assert!(config.allowed_link_types.contains(&"child".to_string()));
-        assert!(config.allowed_link_types.contains(&"related".to_string()));
+        assert_eq!(
+            config.allowed_link_types,
+            vec!["parent", "child", "related"]
+        );
     }
 
     #[test]
