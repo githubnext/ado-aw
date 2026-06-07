@@ -15,7 +15,7 @@ The compiled pipeline uses the `AzureCLI@2` task to call `az account get-access-
 
 | Connection | Used by | Purpose |
 |------------|---------|---------|
-| **Write** (required for safe outputs) | Stage 3 — SafeOutputs executor | Create PRs, work items, wiki pages, etc. |
+| **Write** (optional override) | Stage 3 — SafeOutputs executor | Override the default `$(System.AccessToken)` for cross-org writes or named-identity attribution |
 | **Read** (optional) | Stage 1 — Agent | Query ADO APIs (work items, repos, builds) |
 
 :::tip[Reusing existing connections]
@@ -26,7 +26,7 @@ If your project already has ARM service connections with appropriate ADO permiss
 
 ## Create the write service connection
 
-This is the minimum required connection. It powers Stage 3 safe-output execution.
+The write service connection overrides the default `$(System.AccessToken)` — use it when you need writes attributed to a named service principal, or for cross-org / cross-project safe outputs where the pipeline's built-in token lacks sufficient scope.
 
 <Steps>
 1. Go to your **Azure DevOps Project → Project Settings → Service connections**
@@ -90,8 +90,8 @@ This is the minimum required connection. It powers Stage 3 safe-output execution
 Only grant the permissions your workflows actually use. If your agents only create work item comments, you don't need full Contributor access. See [Safe Outputs reference](/ado-aw/reference/safe-outputs/) for what each tool requires.
 :::
 
-:::note[Compile-time safety check]
-If you configure safe outputs that require write access (e.g. `create-pull-request`, `create-work-item`, `add-pr-comment`) but omit `permissions.write`, compilation will fail with a clear error. This ensures write operations always have an explicitly configured credential.
+:::note[Default executor token]
+The Stage 3 executor always has write access — it defaults to `$(System.AccessToken)` (the pipeline's built-in OAuth token), which is sufficient for most same-project safe outputs. A `permissions.write` service connection is only needed for cross-org writes, cross-project operations, or when you need the action attributed to a named service principal rather than the pipeline's build service identity.
 :::
 
 ---
@@ -121,10 +121,10 @@ Separation ensures the Stage 1 agent — which runs untrusted AI-generated code 
 
 | Configuration | Agent can read ADO? | Safe outputs can write? |
 |---|---|---|
-| Both `read` + `write` | ✅ | ✅ |
-| Only `read` | ✅ | ❌ |
-| Only `write` | ❌ | ✅ |
-| Neither (default) | ❌ | ❌ |
+| Both `read` + `write` | ✅ | ✅ (ARM-minted identity) |
+| Only `read` | ✅ | ✅ (default `System.AccessToken`) |
+| Only `write` | ❌ | ✅ (ARM-minted identity) |
+| Neither (default) | ❌ | ✅ (default `System.AccessToken`) |
 
 ---
 

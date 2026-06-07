@@ -109,16 +109,16 @@ network:
 
 ## Permissions (ADO Access Tokens)
 
-ADO does not support fine-grained permissions -- there are two access levels: blanket read and blanket write. Tokens are minted from ARM service connections; `System.AccessToken` is never used for agent or executor operations.
+ADO does not support fine-grained permissions -- there are two access levels: blanket read and blanket write. ARM service connections are used to mint scoped tokens for the agent (`permissions.read`) and optionally for the executor (`permissions.write`). The Stage 3 executor also uses the pipeline's built-in `$(System.AccessToken)` as its default write token when no `permissions.write` override is configured.
 
-**Exception:** The trigger filter gate step (Setup job) uses `System.AccessToken`
+**Note:** The trigger filter gate step (Setup job) uses `System.AccessToken`
 for two purposes: (1) self-cancelling the build when filters don't match
 (`PATCH` to `_apis/build/builds/{id}`), and (2) fetching PR metadata for
-Tier 2 filters (labels, draft status, changed files). This runs in the
-Setup job before the agent starts, outside the AWF sandbox. The pipeline
-must have "Allow scripts to access the OAuth token" enabled for this to
-work. This is a deliberate scoped exception -- the token is not passed to
-the agent or executor.
+Tier 2 filters (labels, draft status, changed files). The Stage 3 executor
+also uses `System.AccessToken` as its default write token. In both cases
+the pipeline must have "Allow scripts to access the OAuth token" enabled.
+The agent (Stage 1) **never** receives `System.AccessToken` — this trust
+boundary ensures the AI agent cannot directly perform write operations.
 
 ```yaml
 permissions:
@@ -129,26 +129,22 @@ permissions:
 ### Security Model
 
 - **`permissions.read`**: Mints a read-only ADO-scoped token given to the agent inside the AWF sandbox (Stage 1). The agent can query ADO APIs but cannot write.
-- **`permissions.write`**: Mints a write-capable ADO-scoped token used **only** by the executor in Stage 3 (`SafeOutputs` job). This token is never exposed to the agent.
-- **Both omitted**: No ADO tokens are passed anywhere. The agent has no ADO API access.
-
-### Compile-Time Validation
-
-If write-requiring safe-outputs (`create-pull-request`, `create-work-item`) are configured but `permissions.write` is missing, compilation fails with a clear error message.
+- **`permissions.write`** *(optional)*: Overrides the Stage 3 executor's default `$(System.AccessToken)` with an ARM-minted write token (`SC_WRITE_TOKEN`). Use this for cross-org or cross-project writes, or when you need the action attributed to a named service principal rather than the pipeline's build service identity.
+- **Both omitted**: The agent has no ADO API access. Stage 3 still uses `$(System.AccessToken)` for write operations (sufficient for most same-project safe outputs).
 
 ### Examples
 
 ```yaml
-# Agent can read ADO, safe-outputs can write
+# Agent can read ADO; executor writes via $(System.AccessToken) (default)
+permissions:
+  read: my-read-sc
+
+# Agent can read ADO; executor writes via named ARM identity
 permissions:
   read: my-read-sc
   write: my-write-sc
 
-# Agent can read ADO, no write safe-outputs needed
-permissions:
-  read: my-read-sc
-
-# Agent has no ADO access, but safe-outputs can create PRs/work items
+# No ADO API read for agent; executor writes via named ARM identity
 permissions:
   write: my-write-sc
 ```

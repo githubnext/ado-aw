@@ -464,9 +464,10 @@ If `permissions.write` is not configured, this marker is replaced with an empty 
 
 ## `{{ executor_ado_env }}`
 
-Generates the complete `env:` block (including the `env:` key) for the Stage 3 executor step when `permissions.write` is configured. Sets `SYSTEM_ACCESSTOKEN` to the write service connection token (`SC_WRITE_TOKEN`).
+Generates the complete `env:` block (including the `env:` key) for the Stage 3 executor step. This block is **always** emitted — the executor always needs `SYSTEM_ACCESSTOKEN` to authenticate ADO write operations.
 
-If `permissions.write` is not configured, this marker is replaced with an empty string so that no `env:` block is emitted at all. Note: `System.AccessToken` is never used directly -- all ADO tokens come from explicitly configured service connections.
+- When `permissions.write` **is** configured: emits `SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)` (the ARM-minted write token from the service connection).
+- When `permissions.write` **is not** configured (the default): emits `SYSTEM_ACCESSTOKEN: $(System.AccessToken)` — the pipeline's built-in OAuth token, sufficient for most same-project writes.
 
 ## `{{ compiler_version }}`
 
