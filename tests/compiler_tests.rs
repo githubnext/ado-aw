@@ -4231,6 +4231,35 @@ fn test_neither_feature_active_emits_no_node_or_download_anywhere() {
     );
 }
 
+/// Per-job download placement: when the gate is inactive AND runtime imports
+/// are inlined, but `on.pr` is configured and execution-context PR is not
+/// disabled, the `exec-context-pr.js` bundle is the only consumer — the
+/// download must land in the Agent job only.
+///
+/// Closes a coverage gap that `dedupe_gate_only.md` previously left by
+/// pinning `execution-context.pr.enabled: false`.
+#[test]
+fn test_exec_context_pr_only_downloads_bundle_in_agent_job_not_setup() {
+    let yaml = compile_fixture("dedupe_exec_context_pr_only.md");
+    let agent = extract_job_block(&yaml, "Agent").expect("Agent job should exist");
+    assert!(
+        agent.contains("Download ado-aw scripts"),
+        "Agent job is missing the script bundle download (exec-context-pr.js consumer lives here)"
+    );
+    assert!(
+        agent.contains("Stage PR execution context (aw-context/pr/*)"),
+        "Agent job is missing the exec-context-pr prepare step (the consumer of the download)"
+    );
+    if let Some(setup) = extract_job_block(&yaml, "Setup") {
+        assert!(
+            !setup.contains("Download ado-aw scripts"),
+            "Setup job should NOT have the script bundle download when the only consumer is the Agent-job exec-context-pr step. \
+             Setup block contents: {}",
+            setup
+        );
+    }
+}
+
 /// When a user pins a Node version via `runtimes.node:` AND runtime imports
 /// are active, both extensions emit `NodeTool@0` into the Agent job. ADO's
 /// `NodeTool@0` prepends to PATH, so the LAST install wins. The ado-script
@@ -5120,3 +5149,456 @@ fn test_job_target_with_setup_emits_dual_branch_dependson_with_each() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+
+
+// ============================================================================
+// Execution-context extension (issue #860)
+// ============================================================================
+
+/// The execution-context extension is always-on and emits an `aw-context`
+/// prepare step on PR-triggered agents. This sanity check makes sure the
+/// generated YAML round-trips through `serde_yaml`.
+#[test]
+fn test_execution_context_pr_compiled_output_is_valid_yaml() {
+    let compiled = compile_fixture("execution-context-agent.md");
+    assert_valid_yaml(&compiled, "execution-context-agent.md");
+}
+
+/// Spot-checks the key components of the precompute step. v7 ports
+/// the precompute logic to an `ado-script` bundle
+/// (`exec-context-pr.js`), so the bash step is now a slim node
+/// invocation. Body-level behavioural coverage (regex validation,
+/// merge-base resolution, GIT_CONFIG_* bearer injection, prompt
+/// fragment shape) lives in vitest unit + smoke tests under
+/// `scripts/ado-script/src/exec-context-pr/__tests__/` and
+/// `scripts/ado-script/test/smoke.test.ts`.
+#[test]
+fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
+    let compiled = compile_fixture("execution-context-agent.md");
+
+    assert!(
+        compiled.contains("Stage PR execution context (aw-context/pr/*)"),
+        "Should emit the PR context prepare step displayName"
+    );
+    assert!(
+        compiled.contains("condition: eq(variables['Build.Reason'], 'PullRequest')"),
+        "Prepare step must be gated on PR builds at the ADO condition layer"
+    );
+    assert!(
+        compiled.contains("SYSTEM_ACCESSTOKEN: $(System.AccessToken)"),
+        "Prepare step must map the system access token into its own env"
+    );
+
+    // v7: the prepare step is a node invocation of the bundle. The
+    // path is the literal `EXEC_CONTEXT_PR_PATH` constant exported by
+    // `ado_script.rs`. The bundle is installed in the Agent job by
+    // `AdoScriptExtension::prepare_steps`, which runs in
+    // `ExtensionPhase::System` and thus appears before this step
+    // (which runs in `ExtensionPhase::Tool`).
+    assert!(
+        compiled.contains("node '/tmp/ado-aw-scripts/ado-script/exec-context-pr.js'"),
+        "v7: prepare step must invoke the exec-context-pr.js bundle"
+    );
+
+    // v7: all the bash-side specifics (GIT_CONFIG_*, regex validation,
+    // $AW_PR_DIR, status.txt, etc.) have moved into the TS bundle.
+    // They MUST NOT appear in the generated YAML.
+    assert!(
+        !compiled.contains("GIT_CONFIG_KEY_0"),
+        "v7: GIT_CONFIG_* bearer injection moved into the bundle's git child env; \
+         it must not appear in the emitted prepare step's bash"
+    );
+    assert!(
+        !compiled.contains("AW_PR_DIR"),
+        "v7: artefact path construction lives in the bundle; \
+         the prepare step must not reference $AW_PR_DIR"
+    );
+    assert!(
+        !compiled.contains("git_fetch()"),
+        "v7: the git_fetch wrapper moved into the bundle"
+    );
+
+    // v7: env passthrough — Node reads the ADO predefined vars from
+    // `process.env` (see `index.ts::main` and `validate.ts`).
+    assert!(
+        compiled.contains("SYSTEM_PULLREQUEST_PULLREQUESTID: $(System.PullRequest.PullRequestId)"),
+        "Prepare step must pass the PR id through to the bundle"
+    );
+    assert!(
+        compiled.contains("SYSTEM_PULLREQUEST_TARGETBRANCH: $(System.PullRequest.TargetBranch)"),
+        "Prepare step must pass the PR target branch through to the bundle"
+    );
+    assert!(
+        compiled.contains("SYSTEM_TEAMPROJECT: $(System.TeamProject)"),
+        "Prepare step must pass the ADO project name through to the bundle"
+    );
+    assert!(
+        compiled.contains("BUILD_REPOSITORY_NAME: $(Build.Repository.Name)"),
+        "Prepare step must pass the repository name through to the bundle"
+    );
+    assert!(
+        compiled.contains("BUILD_SOURCESDIRECTORY: $(Build.SourcesDirectory)"),
+        "Prepare step must pass the workspace root through to the bundle"
+    );
+
+    // v7: the bundle install/download must be present in the Agent
+    // job. AdoScriptExtension owns this — it fires whenever EITHER
+    // import.js OR exec-context-pr.js is needed.
+    assert!(
+        compiled.contains("ado-script.zip"),
+        "v7: AdoScriptExtension must install + download the bundle in the Agent job \
+         when the PR contributor is active"
+    );
+
+    // v6.2 carry-over: the prompt_supplement trait is NOT implemented
+    // by ExecContextExtension. The wrapper step must not be emitted.
+    assert!(
+        !compiled.contains("Append Execution Context prompt"),
+        "ExecContextExtension::prompt_supplement is removed; \
+         the wrapper step must not be emitted"
+    );
+}
+
+/// **Trust-boundary regression test.** `SYSTEM_ACCESSTOKEN` must appear
+/// only inside the execution-context prepare step's `env:` block, never
+/// in `.git/config` writes, and never under `persistCredentials: true`.
+///
+/// Walks the parsed YAML and checks every step: any step whose `env:`
+/// declares `SYSTEM_ACCESSTOKEN` MUST be the exec-context PR prepare
+/// step (identified by its `displayName`). Any other location for the
+/// token would indicate a leak — most importantly, it must NOT appear
+/// in the agent step's env (where the AWF sandbox would inherit it).
+#[test]
+fn test_execution_context_pr_does_not_leak_system_accesstoken() {
+    let compiled = compile_fixture("execution-context-agent.md");
+
+    assert!(
+        !compiled.contains("persistCredentials: true"),
+        "execution-context must NEVER emit `persistCredentials: true`."
+    );
+    assert!(
+        !compiled.contains(".git/config"),
+        "execution-context must NEVER write to .git/config."
+    );
+
+    // Parse the YAML and walk every mapping. For any mapping that has
+    // an `env:` child mapping containing `SYSTEM_ACCESSTOKEN`, the
+    // enclosing step's `displayName` MUST be the exec-context prepare
+    // step. Anything else is a leak.
+    use serde_yaml::Value;
+    let yaml: Value =
+        serde_yaml::from_str(&compiled).expect("compiled output should parse as YAML");
+
+    fn walk(v: &Value, found: &mut Vec<Option<String>>) {
+        match v {
+            Value::Mapping(m) => {
+                // Inspect this mapping: if it has an `env:` child mapping
+                // that contains SYSTEM_ACCESSTOKEN, capture the
+                // sibling `displayName` (if any).
+                if let Some(Value::Mapping(env_map)) = m.get(Value::String("env".to_string())) {
+                    let has_token = env_map.iter().any(|(k, _v)| {
+                        matches!(k, Value::String(s) if s == "SYSTEM_ACCESSTOKEN")
+                    });
+                    if has_token {
+                        let display = m
+                            .get(Value::String("displayName".to_string()))
+                            .and_then(|d| d.as_str())
+                            .map(|s| s.to_string());
+                        found.push(display);
+                    }
+                }
+                for (_, vv) in m {
+                    walk(vv, found);
+                }
+            }
+            Value::Sequence(seq) => {
+                for item in seq {
+                    walk(item, found);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut env_blocks_with_token: Vec<Option<String>> = Vec::new();
+    walk(&yaml, &mut env_blocks_with_token);
+
+    assert!(
+        !env_blocks_with_token.is_empty(),
+        "expected at least one env block with SYSTEM_ACCESSTOKEN (the exec-context prepare step)"
+    );
+
+    for display in &env_blocks_with_token {
+        match display {
+            Some(d) if d == "Stage PR execution context (aw-context/pr/*)" => {}
+            other => panic!(
+                "SYSTEM_ACCESSTOKEN was found in a step env block that is NOT the \
+                 exec-context PR prepare step. displayName = {:?}. \
+                 This indicates a credential leak into another step.",
+                other
+            ),
+        }
+    }
+}
+
+/// When the agent is not PR-triggered, the execution-context extension
+/// must NOT emit the PR prepare step.
+#[test]
+fn test_execution_context_pr_not_emitted_when_no_pr_trigger() {
+    let compiled = compile_fixture("minimal-agent.md");
+    assert!(
+        !compiled.contains("Stage PR execution context"),
+        "minimal-agent has no on.pr trigger - PR contributor must not activate."
+    );
+    assert!(
+        !compiled.contains("aw-context/pr"),
+        "Prompt supplement should not mention PR context when there's no PR trigger"
+    );
+}
+
+/// v6.2: When the PR contributor activates AND the agent has an
+/// explicit (non-wildcard) bash allow-list, the agent's bash allow-list
+/// MUST include the read-only git commands so the agent can `git diff`
+/// the PR locally inside the AWF sandbox.
+#[test]
+fn test_execution_context_pr_auto_extends_bash_allowlist() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique_id = COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-exec-context-bash-{}-{}",
+        std::process::id(),
+        unique_id,
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let fixture_path = temp_dir.join("pr-bash-restricted.md");
+    let body = r#"---
+name: "PR bash restricted"
+description: "PR-triggered agent with an explicit, restricted bash allow-list"
+on:
+  pr:
+    branches:
+      include: [main]
+tools:
+  bash:
+    - "echo"
+    - "cat"
+---
+
+# PR bash restricted
+
+Body.
+"#;
+    fs::write(&fixture_path, body).expect("write fixture");
+
+    let output_path = temp_dir.join("pr-bash-restricted.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            fixture_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+            "--force",
+        ])
+        .output()
+        .expect("run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compilation must succeed for PR-triggered restricted-bash fixture. stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let compiled = fs::read_to_string(&output_path).expect("read compiled YAML");
+
+    // Each of these should appear as a `shell(...)` entry in the
+    // agent's --allow-tool list.
+    for cmd in [
+        "shell(git)",
+        "shell(git diff)",
+        "shell(git log)",
+        "shell(git show)",
+        "shell(git status)",
+        "shell(git rev-parse)",
+        "shell(git symbolic-ref)",
+    ] {
+        assert!(
+            compiled.contains(cmd),
+            "agent --allow-tool list should contain {cmd:?} after the exec-context PR contributor extends it; \
+             not found in compiled YAML"
+        );
+    }
+    // The user's original commands must still be present.
+    assert!(
+        compiled.contains("shell(echo)") && compiled.contains("shell(cat)"),
+        "user-supplied bash entries must remain in the allow-list"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// v6.2: When `execution-context.pr.enabled: false`, the PR contributor
+/// MUST NOT extend the agent bash allow-list even on a PR-triggered
+/// agent with a restricted bash list.
+#[test]
+fn test_execution_context_pr_does_not_extend_bash_when_disabled() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique_id = COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-exec-context-bash-disabled-{}-{}",
+        std::process::id(),
+        unique_id,
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let fixture_path = temp_dir.join("pr-disabled.md");
+    let body = r#"---
+name: "PR exec-context disabled"
+description: "PR-triggered agent that opts out of execution-context"
+on:
+  pr:
+    branches:
+      include: [main]
+execution-context:
+  pr:
+    enabled: false
+tools:
+  bash:
+    - "echo"
+---
+
+# PR disabled
+
+Body.
+"#;
+    fs::write(&fixture_path, body).expect("write fixture");
+
+    let output_path = temp_dir.join("pr-disabled.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            fixture_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+            "--force",
+        ])
+        .output()
+        .expect("run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compilation must succeed. stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let compiled = fs::read_to_string(&output_path).expect("read compiled YAML");
+
+    assert!(
+        !compiled.contains("Stage PR execution context"),
+        "Prepare step must not be emitted when exec-context.pr is explicitly disabled"
+    );
+    assert!(
+        !compiled.contains("shell(git diff)"),
+        "Bash allow-list must NOT be extended with git commands when exec-context.pr is disabled"
+    );
+}
+
+/// v6.2 footgun fix: explicit `execution-context.pr.enabled: true` on
+/// an agent WITHOUT an `on.pr` trigger must NOT activate the PR
+/// contributor. Otherwise the agent's bash allow-list silently widens
+/// (the 7 git commands get added at compile time) for a step that can
+/// never run (the runtime condition gate is `Build.Reason ==
+/// 'PullRequest'`).
+#[test]
+fn test_execution_context_pr_enabled_true_without_on_pr_is_inactive() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique_id = COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-exec-context-pr-no-trigger-{}-{}",
+        std::process::id(),
+        unique_id,
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let fixture_path = temp_dir.join("pr-enabled-no-trigger.md");
+    // No `on.pr` is configured; `execution-context.pr.enabled: true`
+    // alone must not be enough to activate the contributor.
+    let body = r#"---
+name: "PR enabled without on.pr"
+description: "Verify explicit pr.enabled does not override missing on.pr"
+on:
+  schedule: daily around 14:00
+execution-context:
+  pr:
+    enabled: true
+tools:
+  bash:
+    - "echo"
+---
+
+# PR enabled without on.pr
+
+Body.
+"#;
+    fs::write(&fixture_path, body).expect("write fixture");
+
+    let output_path = temp_dir.join("pr-enabled-no-trigger.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            fixture_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+            "--force",
+        ])
+        .output()
+        .expect("run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compilation must succeed. stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let compiled = fs::read_to_string(&output_path).expect("read compiled YAML");
+
+    assert!(
+        !compiled.contains("Stage PR execution context"),
+        "Prepare step must not be emitted when on.pr is not configured, \
+         even with explicit `pr.enabled: true`"
+    );
+    assert!(
+        !compiled.contains("shell(git diff)"),
+        "Bash allow-list must NOT be silently widened with git commands when \
+         on.pr is not configured (compile-time artifact for a step that can \
+         never run is a footgun)"
+    );
+}
+
+// v6.2 correctness fix: in BOTH the synthetic-merge-commit path and
+// the progressive-deepening path, `BASE_SHA` is the true common
+// ancestor (`git merge-base`), so `git diff $BASE..$HEAD` produces
+// the same change set regardless of which path runs. v7: this
+// invariant is now enforced by the `exec-context-pr.js` bundle (see
+// `merge-base.ts::resolveMergeBase`); the vitest test
+// `falls back to HEAD^1 when synthetic-merge merge-base cannot resolve`
+// guards the regression there. This Rust-side test is removed —
+// asserting bash literals against a node-invocation step makes no
+// sense.
+
+// v6.2 defence-in-depth: `PR_TARGET_BRANCH` (which gets interpolated
+// into a git refspec) is validated with a strict allowlist regex.
+// v7: this validation now lives in the `exec-context-pr.js` bundle
+// (see `validate.ts::TARGET_BRANCH_RE`); the vitest tests under
+// `validate.test.ts` guard the regression there. This Rust-side
+// test is removed for the same reason.

@@ -625,6 +625,7 @@ macro_rules! extension_enum {
 
 mod ado_aw_marker;
 pub mod ado_script;
+mod exec_context;
 mod azure_cli;
 mod github;
 mod safe_outputs;
@@ -639,6 +640,7 @@ pub use crate::runtimes::python::PythonExtension;
 pub use crate::tools::azure_devops::AzureDevOpsExtension;
 pub use crate::tools::cache_memory::CacheMemoryExtension;
 pub use ado_script::AdoScriptExtension;
+pub use exec_context::{pr_contributor_will_activate, ExecContextExtension};
 pub use github::GitHubExtension;
 pub use safe_outputs::SafeOutputsExtension;
 
@@ -652,6 +654,7 @@ extension_enum! {
         GitHub(GitHubExtension),
         SafeOutputs(SafeOutputsExtension),
         AdoScript(Box<AdoScriptExtension>),
+        ExecContext(ExecContextExtension),
         Lean(LeanExtension),
         Python(PythonExtension),
         Node(NodeExtension),
@@ -698,7 +701,28 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
             pr_filters: front_matter.pr_filters().cloned(),
             pipeline_filters: front_matter.pipeline_filters().cloned(),
             inlined_imports: front_matter.inlined_imports,
+            // Tell the ado-script extension whether the PR-context
+            // contributor will activate so it can fire the Agent-job
+            // install/download even when `inlined-imports: true` (no
+            // import.js needed). The two extensions stay loosely
+            // coupled: ExecContextExtension owns invoking the bundle;
+            // AdoScriptExtension owns installing it. Shared helper
+            // keeps the activation predicate in lock-step.
+            exec_context_pr_active: pr_contributor_will_activate(front_matter),
         })),
+        // Always-on execution-context extension. Owns the `aw-context/`
+        // precompute pipeline. Defaults to `ExecutionContextConfig::default()`
+        // when the front matter omits the block — internal contributors
+        // (currently: PR) self-gate via `should_activate`, so omitting
+        // the block + having no `on.pr` produces zero output. See
+        // `extensions/exec_context/`.
+        Extension::ExecContext(ExecContextExtension::new(
+            front_matter
+                .execution_context
+                .clone()
+                .unwrap_or_default(),
+            front_matter,
+        )),
         // Always-on Azure CLI. Tool phase — mounts host /opt/az and
         // /usr/bin/az into AWF and adds Azure auth hosts to the
         // allowlist so the agent can call `az`. No install step is

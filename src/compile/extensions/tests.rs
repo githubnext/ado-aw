@@ -82,12 +82,13 @@ fn test_awf_mount_serde_roundtrip() {
 fn test_collect_extensions_empty_front_matter() {
     let fm = minimal_front_matter();
     let exts = collect_extensions(&fm);
-    // Always-on: ado-aw-marker + ado-script + GitHub + SafeOutputs + Azure CLI
-    assert_eq!(exts.len(), 5);
+    // Always-on: ado-aw-marker + ado-script + GitHub + SafeOutputs + ExecContext + Azure CLI
+    assert_eq!(exts.len(), 6);
     assert!(exts.iter().any(|e| e.name() == "ado-aw-marker"));
     assert!(exts.iter().any(|e| e.name() == "ado-script"));
     assert!(exts.iter().any(|e| e.name() == "GitHub"));
     assert!(exts.iter().any(|e| e.name() == "SafeOutputs"));
+    assert!(exts.iter().any(|e| e.name() == "Execution Context"));
     assert!(exts.iter().any(|e| e.name() == "Azure CLI"));
 }
 
@@ -97,7 +98,7 @@ fn test_collect_extensions_lean_enabled() {
         parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  lean: true\n---\n")
             .unwrap();
     let exts = collect_extensions(&fm);
-    assert_eq!(exts.len(), 6); // ado-aw-marker + ado-script + GitHub + SafeOutputs + Azure CLI + Lean
+    assert_eq!(exts.len(), 7); // always-on (6) + Lean
     assert_eq!(exts[0].name(), "ado-script"); // System phase sorts first
     assert_eq!(exts[1].name(), "Lean 4"); // Runtime phase follows System
 }
@@ -108,7 +109,7 @@ fn test_collect_extensions_lean_disabled() {
         parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  lean: false\n---\n")
             .unwrap();
     let exts = collect_extensions(&fm);
-    assert_eq!(exts.len(), 5); // Just always-on (ado-aw-marker + ado-script + GitHub + SafeOutputs + Azure CLI)
+    assert_eq!(exts.len(), 6); // Just always-on
 }
 
 #[test]
@@ -117,7 +118,7 @@ fn test_collect_extensions_azure_devops_enabled() {
         parse_markdown("---\nname: test\ndescription: test\ntools:\n  azure-devops: true\n---\n")
             .unwrap();
     let exts = collect_extensions(&fm);
-    assert_eq!(exts.len(), 6); // ado-aw-marker + ado-script + GitHub + SafeOutputs + Azure CLI + AzureDevOps
+    assert_eq!(exts.len(), 7); // always-on (6) + AzureDevOps
     assert!(exts.iter().any(|e| e.name() == "Azure DevOps MCP"));
 }
 
@@ -127,7 +128,7 @@ fn test_collect_extensions_cache_memory_enabled() {
         parse_markdown("---\nname: test\ndescription: test\ntools:\n  cache-memory: true\n---\n")
             .unwrap();
     let exts = collect_extensions(&fm);
-    assert_eq!(exts.len(), 6); // ado-aw-marker + ado-script + GitHub + SafeOutputs + Azure CLI + CacheMemory
+    assert_eq!(exts.len(), 7); // always-on (6) + CacheMemory
     assert!(exts.iter().any(|e| e.name() == "Cache Memory"));
 }
 
@@ -138,7 +139,7 @@ fn test_collect_extensions_all_enabled() {
     )
     .unwrap();
     let exts = collect_extensions(&fm);
-    assert_eq!(exts.len(), 8); // ado-aw-marker + ado-script + GitHub + SafeOutputs + Azure CLI + Lean + AzureDevOps + CacheMemory
+    assert_eq!(exts.len(), 9); // always-on (6) + Lean + AzureDevOps + CacheMemory
     assert_eq!(exts[0].name(), "ado-script"); // System phase first
     assert_eq!(exts[1].name(), "Lean 4"); // Runtime phase next
     // All trailing extensions are Tool phase
@@ -155,7 +156,7 @@ fn test_collect_extensions_runtimes_always_before_tools() {
     )
     .unwrap();
     let exts = collect_extensions(&fm);
-    assert_eq!(exts.len(), 8); // ado-aw-marker + ado-script + GitHub + SafeOutputs + Azure CLI + Lean + AzureDevOps + CacheMemory
+    assert_eq!(exts.len(), 9); // always-on (6) + Lean + AzureDevOps + CacheMemory
 
     // System sorts first
     assert_eq!(exts[0].phase(), ExtensionPhase::System);

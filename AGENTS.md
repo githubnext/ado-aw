@@ -62,7 +62,11 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   │   ├── ado_aw_marker.rs # Always-on metadata marker extension (emits # ado-aw-metadata JSON)
 │   │   │   ├── github.rs # Always-on GitHub MCP extension
 │   │   │   ├── safe_outputs.rs # Always-on SafeOutputs MCP extension
-│   │   │   ├── ado_script.rs # Always-on ado-script extension (gate evaluator + runtime-import resolver, per-job downloads)
+│   │   │   ├── ado_script.rs # Always-on ado-script extension (gate evaluator + runtime-import resolver + exec-context-pr precompute, per-job downloads)
+│   │   │   ├── exec_context/ # Always-on execution-context extension (issue #860)
+│   │   │   │   ├── mod.rs    # ExecContextExtension; CompilerExtension impl; contributor fan-out
+│   │   │   │   ├── contributor.rs # Internal ContextContributor trait + Contributor enum
+│   │   │   │   └── pr.rs     # PrContextContributor — stages aw-context/pr/* for PR builds
 │   │   │   ├── azure_cli.rs # Always-on Azure CLI extension (runtime detection, AWF mounts, az allowlist)
 │   │   │   └── tests.rs  # Extension integration tests
 │   │   ├── codemods/     # Front-matter codemods (one file per transformation)
@@ -181,10 +185,11 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── update-ado-agentic-workflow.md # Guide for modifying an existing agentic pipeline
 │   └── debug-ado-agentic-workflow.md  # Guide for troubleshooting a failing agentic pipeline
 ├── scripts/              # Supporting scripts shipped as release artifacts
-│   └── ado-script/       # TypeScript workspace for bundled gate.js, import.js, and future bundles
+│   └── ado-script/       # TypeScript workspace for bundled gate.js, import.js, exec-context-pr.js, and future bundles
 │       └── src/
 │           ├── gate/     # Gate evaluator source (bundled to gate.js)
 │           ├── import/   # Runtime prompt resolver source (bundled to import.js)
+│           ├── exec-context-pr/ # PR-context precompute source (bundled to exec-context-pr.js)
 │           └── shared/   # Shared modules across bundles (auth, ado-client, env-facts, types.gen.ts)
 ├── tests/                # Integration tests and fixtures
 ├── docs/                 # Per-concept reference documentation (see index below)
@@ -236,6 +241,12 @@ index to jump to the right page.
   Python, Node.js, .NET).
 - [`docs/targets.md`](docs/targets.md) — target platforms: `standalone`,
   `1es`, `job`, and `stage`.
+- [`docs/execution-context.md`](docs/execution-context.md) — built-in
+  `aw-context/` precompute (issue #860): PR target-branch fetch +
+  merge-base resolution, `base.sha`/`head.sha` artefacts, prompt
+  fragment with pre-filled ADO MCP identifiers, auto-extension of the
+  agent's bash allow-list with read-only git commands; configured via
+  the `execution-context:` front-matter block.
 - [`docs/safe-outputs.md`](docs/safe-outputs.md) — full reference for every
   safe-output tool agents can use to propose actions (PRs, work items, wiki
   pages, comments, etc.) plus their per-agent configuration.
@@ -272,7 +283,7 @@ index to jump to the right page.
   adding codemods.
 - [`docs/ado-script.md`](docs/ado-script.md) — `ado-script` workspace
   (`scripts/ado-script/`): the bundled TypeScript runtime helpers (today:
-  `gate.js` and `import.js`), schemars-driven type codegen, and the A2 design decision.
+  `gate.js`, `import.js`, `exec-context-pr.js`), schemars-driven type codegen, and the A2 design decision.
 - [`docs/local-development.md`](docs/local-development.md) — local development
   setup notes.
 

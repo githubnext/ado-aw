@@ -2,6 +2,9 @@
 name: "Dedupe Gate Only"
 description: "Gate active, runtime imports inlined — download must land in Setup only"
 inlined-imports: true
+execution-context:
+  pr:
+    enabled: false
 on:
   pr:
     branches:

@@ -124,6 +124,12 @@ on:                            # trigger configuration (unified under on: key)
       build-reason:
         include: [PullRequest]
       expression: "eq(variables['Custom.Flag'], 'true')"  # raw ADO condition
+execution-context:             # optional execution-context plugin (see docs/execution-context.md)
+  enabled: true                # master switch; defaults to true. Set false to disable globally.
+  pr:                          # PR-context contributor. Activates on PR-triggered builds when on.pr is set.
+    enabled: true              # defaults to true when on.pr is configured. Set false to opt out
+                               # (also suppresses auto-adding the read-only git commands to the
+                               # agent's bash allow-list).
 steps:                         # inline steps before agent runs (same job, generate context)
   - bash: echo "Preparing context for agent"
     displayName: "Prepare context"

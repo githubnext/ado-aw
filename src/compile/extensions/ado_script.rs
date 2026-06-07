@@ -31,6 +31,10 @@ use crate::compile::types::{PipelineFilters, PrFilters};
 
 const GATE_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/gate.js";
 pub(crate) const IMPORT_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/import.js";
+/// Path to the exec-context-pr bundle inside the unpacked `ado-script.zip`.
+/// Consumed by `src/compile/extensions/exec_context/pr.rs` to invoke
+/// the bundle from the PR contributor's prepare step.
+pub(crate) const EXEC_CONTEXT_PR_PATH: &str = "/tmp/ado-aw-scripts/ado-script/exec-context-pr.js";
 const RELEASE_BASE_URL: &str = "https://github.com/githubnext/ado-aw/releases/download";
 
 /// Single always-on extension that owns all `ado-script` bundle wiring.
@@ -38,6 +42,16 @@ pub struct AdoScriptExtension {
     pub pr_filters: Option<PrFilters>,
     pub pipeline_filters: Option<PipelineFilters>,
     pub inlined_imports: bool,
+    /// Whether the PR-context contributor will activate. When true,
+    /// the Agent-job install/download must fire even if
+    /// `runtime_imports_active()` is false (i.e. the user has
+    /// `inlined-imports: true` but a PR trigger configured), so that
+    /// `exec-context-pr.js` is present for the `pr.rs` invocation.
+    ///
+    /// Populated at construction by `collect_extensions` using the
+    /// shared `exec_context_pr_active` predicate so this stays in
+    /// lock-step with `ExecContextExtension`'s own activation gate.
+    pub exec_context_pr_active: bool,
 }
 
 impl AdoScriptExtension {
@@ -45,10 +59,10 @@ impl AdoScriptExtension {
     /// `(pr_checks, pipeline_checks)`; either may be empty, in which
     /// case the corresponding gate step is not emitted.
     ///
-    /// Lowering is cheap but `setup_steps()` and `has_gate()`-style
-    /// callers used to invoke `lower_*_filters()` twice (once to test
-    /// emptiness, once to materialize). This helper folds both passes
-    /// into a single computation that callers reuse.
+    /// Lowering is cheap but the gate-emitting helpers used to invoke
+    /// `lower_*_filters()` twice (once to test emptiness, once to
+    /// materialize). This helper folds both passes into a single
+    /// computation that callers reuse.
     fn lowered_checks(
         &self,
     ) -> (
@@ -66,11 +80,6 @@ impl AdoScriptExtension {
             .map(lower_pipeline_filters)
             .unwrap_or_default();
         (pr_checks, pipeline_checks)
-    }
-
-    fn has_gate(&self) -> bool {
-        let (pr, pipeline) = self.lowered_checks();
-        !pr.is_empty() || !pipeline.is_empty()
     }
 
     fn runtime_imports_active(&self) -> bool {
@@ -175,11 +184,26 @@ impl CompilerExtension for AdoScriptExtension {
     }
 
     fn prepare_steps(&self, _ctx: &CompileContext) -> Vec<String> {
-        if !self.runtime_imports_active() {
+        // The Agent-job install/download must fire when ANY downstream
+        // consumer is active. Today there are two:
+        //  - `import.js` (runtime-import resolver) — runs when
+        //    `inlined-imports: false`.
+        //  - `exec-context-pr.js` (PR-context precompute) — runs when
+        //    the PR contributor activates (`on.pr` configured AND
+        //    `execution-context.pr.enabled != false`).
+        //
+        // The exec-context-pr invocation itself is emitted by
+        // `ExecContextExtension::prepare_steps` (Tool phase, runs
+        // after this System-phase install/download), not here, so the
+        // two extensions stay loosely coupled.
+        let import_active = self.runtime_imports_active();
+        if !import_active && !self.exec_context_pr_active {
             return vec![];
         }
         let mut steps = install_and_download_steps();
-        steps.push(resolver_step());
+        if import_active {
+            steps.push(resolver_step());
+        }
         steps
     }
 
@@ -209,18 +233,25 @@ impl CompilerExtension for AdoScriptExtension {
     }
 
     fn required_hosts(&self) -> Vec<String> {
-        // Only request github.com when the bundle is actually downloaded.
-        // When `inlined-imports: true` AND no filters are configured,
-        // neither `setup_steps()` nor `prepare_steps()` emits the
-        // NodeTool@0 + curl pair, so the github.com release-asset host
-        // is never reached and shouldn't be on the allowlist. The host
-        // list is allowlist-additive across extensions, so this stays
-        // safe even when other extensions independently need github.com.
-        if self.has_gate() || self.runtime_imports_active() {
-            vec!["github.com".to_string()]
-        } else {
-            vec![]
-        }
+        // ado-script contributes NO hosts to the agent's AWF allowlist.
+        //
+        // `required_hosts()` feeds the AWF sandbox's `--allow-domains`
+        // list — the network policy applied to the agent container.
+        // The `ado-script.zip` bundle is downloaded at the pipeline-
+        // host level (a plain `curl` in a bash step that runs BEFORE
+        // the AWF sandbox starts; see `install_and_download_steps`)
+        // and is then on disk for both the Setup-job gate evaluator
+        // and the Agent-job import resolver / exec-context-pr step.
+        // The agent itself never reaches out to github.com because of
+        // ado-script, so widening the AWF allowlist would be wrong
+        // (a security hole — broader agent network reach without a
+        // legitimate consumer).
+        //
+        // If a future bundle is added that needs network access from
+        // *inside* the AWF sandbox, that bundle's host needs would
+        // belong on the *consumer* extension's `required_hosts()`,
+        // not here.
+        vec![]
     }
 }
 
@@ -380,6 +411,7 @@ mod tests {
             pr_filters: pr,
             pipeline_filters: pipeline,
             inlined_imports: inlined,
+            exec_context_pr_active: false,
         }
     }
 
@@ -506,16 +538,18 @@ mod tests {
 
     #[test]
     fn required_hosts_empty_when_no_consumer_active() {
-        // inlined-imports: true AND no filters ⇒ no NodeTool / no
-        // download / no gate / no resolver step. The github.com host
-        // (used to fetch the release asset) is therefore unreachable
-        // and must NOT be requested.
+        // ado-script never widens the agent's AWF allowlist — the
+        // bundle is downloaded at the pipeline-host level (curl) in
+        // a step that runs BEFORE the AWF sandbox starts, so the
+        // agent never reaches github.com because of ado-script.
         let ext = ext_with(None, None, true);
         assert!(ext.required_hosts().is_empty());
     }
 
     #[test]
-    fn required_hosts_requests_github_when_gate_active() {
+    fn required_hosts_empty_when_gate_active() {
+        // Same invariant when the gate evaluator is wired in: the
+        // gate runs in the Setup job, outside the AWF agent sandbox.
         let filters = PrFilters {
             labels: Some(LabelFilter {
                 any_of: vec!["run-agent".into()],
@@ -524,15 +558,18 @@ mod tests {
             ..Default::default()
         };
         let ext = ext_with(Some(filters), None, true);
-        assert_eq!(ext.required_hosts(), vec!["github.com".to_string()]);
+        assert!(ext.required_hosts().is_empty());
     }
 
     #[test]
-    fn required_hosts_requests_github_when_runtime_imports_active() {
-        // inlined-imports: false (default) ⇒ resolver step runs ⇒
-        // github.com is needed for the bundle download.
+    fn required_hosts_empty_when_runtime_imports_active() {
+        // Same invariant when the runtime import resolver is wired
+        // in: install/download/resolver-invocation all happen in
+        // pipeline-host bash steps before AWF starts wrapping the
+        // agent step. The agent never needs github.com for the
+        // bundle.
         let ext = ext_with(None, None, false);
-        assert_eq!(ext.required_hosts(), vec!["github.com".to_string()]);
+        assert!(ext.required_hosts().is_empty());
     }
 
     // ── resolve_imports_inline ─────────────────────────────────────────

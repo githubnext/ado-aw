@@ -73,7 +73,7 @@ jobs:
         run: |
           set -euo pipefail
           cd scripts
-          zip -r ../ado-script.zip ado-script/gate.js ado-script/import.js
+          zip -r ../ado-script.zip ado-script/gate.js ado-script/import.js ado-script/exec-context-pr.js
 
       - name: Upload release assets
         env:

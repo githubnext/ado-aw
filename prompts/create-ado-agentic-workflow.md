@@ -429,6 +429,8 @@ on:
 
 When `on.pr` is set: the native ADO `pr:` trigger block is generated from `branches:` and `paths:`. Runtime `filters:` compile to a gate step in the Setup job that self-cancels the build when they do not match.
 
+**PR-reviewer agents — DO NOT write your own precompute step.** When `on.pr` is set, the compiler automatically (1) fetches the PR target branch with progressive deepening, (2) resolves and stages `aw-context/pr/base.sha` + `aw-context/pr/head.sha`, (3) appends a prompt fragment listing common `git diff`/`git show`/`git log` commands and example Azure DevOps MCP tool calls (`repo_get_pull_request_by_id`, `repo_list_pull_request_threads`, `repo_create_pull_request_thread`) with the PR id / project / repo pre-filled, and (4) adds `git`, `git diff`, `git log`, `git show`, `git status`, `git rev-parse`, `git symbolic-ref` to the agent's bash allow-list. The agent runs `git diff $BASE..$HEAD` itself inside the AWF sandbox (objects are already fetched into the workspace). On failure (e.g. merge-base could not be resolved), the failure fragment tells the agent to surface the error rather than produce an empty review. Opt out via `execution-context.pr.enabled: false`. Full reference: [`docs/execution-context.md`](../docs/execution-context.md).
+
 #### Pipeline Triggers (`on.pipeline`)
 
 Trigger from another pipeline completing:
