@@ -237,6 +237,8 @@ mod tests {
 
     #[test]
     fn timeline_to_jobs_parses_real_ado_shape() {
+        // Simulates a real ADO timeline response with extra fields (id, parentId)
+        // that the parser should silently ignore.
         let timeline = json!({
             "records": [
                 {
@@ -279,5 +281,13 @@ mod tests {
             jobs.iter().map(|job| job.name.as_str()).collect::<Vec<_>>(),
             vec!["Agent", "Detection", "SafeOutputs"]
         );
+
+        // Verify all fields are correctly parsed for the first job; extra ADO
+        // fields (id, parentId) must be silently ignored.
+        assert_eq!(jobs[0].status, "completed");
+        assert_eq!(jobs[0].result.as_deref(), Some("succeeded"));
+        assert_eq!(jobs[0].duration.as_deref(), Some("1m 0s"));
+        assert_eq!(jobs[0].started_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+        assert_eq!(jobs[0].finished_at.as_deref(), Some("2026-01-01T00:01:00Z"));
     }
 }
