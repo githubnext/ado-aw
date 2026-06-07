@@ -67,6 +67,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   │   │   ├── mod.rs    # ExecContextExtension; CompilerExtension impl; contributor fan-out
 │   │   │   │   ├── contributor.rs # Internal ContextContributor trait + Contributor enum
 │   │   │   │   └── pr.rs     # PrContextContributor — stages aw-context/pr/* for PR builds
+│   │   │   ├── azure_cli.rs # Always-on Azure CLI extension (runtime detection, AWF mounts, az allowlist)
 │   │   │   └── tests.rs  # Extension integration tests
 │   │   ├── codemods/     # Front-matter codemods (one file per transformation)
 │   │   │   ├── mod.rs    # Codemod struct, CODEMODS registry, runner
