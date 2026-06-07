@@ -777,6 +777,15 @@ mod tests {
             .await
             .expect("analyze gate-rejected safe outputs");
 
+        let summary = analysis.summary.expect("summary");
+        assert_eq!(summary.proposed_count, 2);
+        assert_eq!(
+            summary.not_processed_count, 2,
+            "all proposals must be counted as not_processed when the gate fires"
+        );
+        assert_eq!(summary.executed_count, 0);
+        assert_eq!(summary.rejected_by_execution_count, 0);
+
         let execution = analysis.execution.expect("execution");
         assert_eq!(execution.items.len(), 2);
         assert!(execution.items.iter().all(|item| {
@@ -791,6 +800,11 @@ mod tests {
 
         assert_eq!(analysis.findings.len(), 1);
         assert_eq!(analysis.findings[0].severity, Severity::High);
+        assert_eq!(analysis.findings[0].category, "safe_outputs");
+        assert_eq!(
+            analysis.findings[0].title,
+            "Detection rejected 2 safe output(s)"
+        );
     }
 
     #[tokio::test]
@@ -849,6 +863,7 @@ mod tests {
         );
 
         let rollup = analysis.rollup.expect("rollup");
+        assert_eq!(rollup.total_rejected, 2);
         assert_eq!(rollup.by_reason.get("permission denied"), Some(&1));
         assert_eq!(rollup.by_reason.get("skipped"), Some(&1));
     }
