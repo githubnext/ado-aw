@@ -43,16 +43,17 @@ hint: run `ado-aw compile <file>` to apply the codemods in place.
 
 ### "Safe outputs require write access to ADO, but no write service connection is configured"
 
-You configured one or more safe-output tools (e.g. `create-pull-request`, `create-work-item`, `add-pr-comment`) but omitted `permissions.write` from your front matter.
+*(Historical error — no longer emitted.)* Earlier versions of `ado-aw`
+hard-failed compilation when a write-bearing safe-output (e.g.
+`create-pull-request`, `create-work-item`, `add-pr-comment`) was
+configured without `permissions.write`. The compiler now defaults the
+Stage 3 executor to `$(System.AccessToken)` and no longer requires
+`permissions.write` for these tools.
 
-**Solution:** Add a write service connection:
-
-```yaml
-permissions:
-  write: ado-aw-write   # name of your ARM service connection
-```
-
-If you haven't created a service connection yet, see the [Service Connections guide](/ado-aw/setup/service-connections/).
+If you're hitting this from an older release, upgrade `ado-aw`. If you
+genuinely need ARM-minted write tokens (for cross-org writes or
+named-identity attribution), see the
+[Service Connections guide](/ado-aw/setup/service-connections/).
 
 ### "safe-outputs contains unrecognised tool name(s)"
 

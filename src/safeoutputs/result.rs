@@ -17,9 +17,17 @@ pub trait ToolResult: Serialize {
     /// Each tool can override this; the operator can further override via `max` in front matter.
     const DEFAULT_MAX: u32 = 1;
 
-    /// Whether this tool requires write access to ADO.
-    /// Write-requiring tools need a `permissions.write` service connection.
-    /// Diagnostic/read-only tools default to `false`.
+    /// Whether this tool performs write operations against ADO.
+    ///
+    /// The Stage 3 executor always receives a write-capable token via
+    /// `SYSTEM_ACCESSTOKEN`: by default the pipeline's built-in
+    /// `$(System.AccessToken)` (scoped by pipeline settings), or
+    /// `$(SC_WRITE_TOKEN)` minted from an ARM service connection when
+    /// `permissions.write` is configured.
+    ///
+    /// This flag is informational — used by audit and (historically) by
+    /// the compiler's permission validator. It is NOT a gate. Diagnostic /
+    /// read-only tools default to `false`.
     #[allow(dead_code)]
     const REQUIRES_WRITE: bool = false;
 }
@@ -45,7 +53,10 @@ pub struct ExecutionContext {
     pub ado_project: Option<String>,
     /// Azure DevOps project GUID (`SYSTEM_TEAMPROJECTID`)
     pub ado_project_id: Option<String>,
-    /// Personal access token or system access token
+    /// Write-capable ADO access token used by Stage 3 executors. Populated
+    /// from the `SYSTEM_ACCESSTOKEN` env var, which the compiler maps to
+    /// `$(System.AccessToken)` by default or `$(SC_WRITE_TOKEN)` (ARM-minted)
+    /// when `permissions.write` is configured.
     pub access_token: Option<String>,
     /// GitHub PAT used by debug-only safe outputs (e.g. `ado-aw-debug.create-issue`).
     /// Sourced from the `ADO_AW_DEBUG_GITHUB_TOKEN` pipeline variable. Intentionally
@@ -701,7 +712,7 @@ mod tests {
     fn test_anyhow_to_mcp_error_preserves_message() {
         let err = anyhow::anyhow!("test error message");
         let mcp_err = anyhow_to_mcp_error(err);
-        assert!(mcp_err.message.contains("test error message"));
+        assert_eq!(mcp_err.message, "test error message");
     }
 
     #[test]
@@ -856,12 +867,6 @@ mod tests {
         assert_eq!(ctx.source_branch.as_deref(), Some("refs/heads/main"));
         assert_eq!(ctx.source_branch_name.as_deref(), Some("main"));
         assert_eq!(ctx.source_version.as_deref(), Some("abc1234"));
-    }
-
-    #[test]
-    fn test_from_env_lookup_build_id_parses_numeric() {
-        let ctx = ExecutionContext::from_env_lookup(env_from(&[("BUILD_BUILDID", "987654")]));
-        assert_eq!(ctx.build_id, Some(987654));
     }
 
     #[test]

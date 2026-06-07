@@ -590,19 +590,20 @@ Do something.
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
-/// Test that write-requiring safe-outputs fail without write service connection
+/// Test that write-requiring safe-outputs compile successfully without an ARM write SC.
+/// Default behavior: the executor uses `$(System.AccessToken)`; ARM write SC is optional.
 #[test]
-fn test_permissions_validation_fails_without_write_sc() {
+fn test_compile_succeeds_without_write_sc_for_write_requiring_safe_outputs() {
     let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-permissions-fail-{}",
+        "agentic-pipeline-default-token-{}",
         std::process::id()
     ));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
-    let test_input = temp_dir.join("bad-perms-agent.md");
+    let test_input = temp_dir.join("default-token-agent.md");
     let test_content = r#"---
-name: "Bad Permissions Agent"
-description: "Agent with create-work-item but no write SC"
+name: "Default Token Agent"
+description: "Agent with create-work-item; relies on default System AccessToken"
 safe-outputs:
   create-work-item:
     work-item-type: Task
@@ -614,7 +615,7 @@ Do something.
 "#;
     fs::write(&test_input, test_content).expect("Failed to write test input");
 
-    let output_path = temp_dir.join("bad-perms-agent.yml");
+    let output_path = temp_dir.join("default-token-agent.yml");
     let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
     let output = std::process::Command::new(&binary_path)
         .args([
@@ -627,15 +628,21 @@ Do something.
         .expect("Failed to run compiler");
 
     assert!(
-        !output.status.success(),
-        "Compiler should fail when write-requiring safe-outputs lack write SC"
+        output.status.success(),
+        "Compiler should succeed for write-requiring safe-outputs without ARM write SC.\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let compiled =
+        fs::read_to_string(&output_path).expect("Compiled YAML should exist on success");
     assert!(
-        stderr.contains("permissions.write"),
-        "Error message should mention permissions.write: {}",
-        stderr
+        compiled.contains("SYSTEM_ACCESSTOKEN: $(System.AccessToken)"),
+        "Executor must map SYSTEM_ACCESSTOKEN from $(System.AccessToken) by default. \
+         Compiled YAML did not contain it:\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("$(SC_WRITE_TOKEN)"),
+        "Without permissions.write, executor must not reference SC_WRITE_TOKEN.\n{compiled}"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -871,54 +878,6 @@ Comment on work items.
     assert!(
         stderr.contains("target"),
         "Error message should mention target: {stderr}"
-    );
-
-    let _ = fs::remove_dir_all(&temp_dir);
-}
-
-/// Test that comment-on-work-item requires a write service connection
-#[test]
-fn test_comment_on_work_item_requires_write_sc() {
-    let temp_dir =
-        std::env::temp_dir().join(format!("agentic-pipeline-cwi-sc-{}", std::process::id()));
-    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
-
-    let test_input = temp_dir.join("cwi-agent.md");
-    let test_content = r#"---
-name: "Comment Agent"
-description: "Agent that comments on work items but has no write SC"
-safe-outputs:
-  comment-on-work-item:
-    target: "*"
----
-
-## Comment Agent
-
-Comment on work items.
-"#;
-    fs::write(&test_input, test_content).expect("Failed to write test input");
-
-    let output_path = temp_dir.join("cwi-agent.yml");
-    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
-    let output = std::process::Command::new(&binary_path)
-        .args([
-            "compile",
-            test_input.to_str().unwrap(),
-            "-o",
-            output_path.to_str().unwrap(),
-        ])
-        .output()
-        .expect("Failed to run compiler");
-
-    assert!(
-        !output.status.success(),
-        "Compiler should fail when comment-on-work-item lacks a write SC"
-    );
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("permissions.write"),
-        "Error message should mention permissions.write: {stderr}"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -4487,21 +4446,19 @@ fn test_pr_filter_gate_steps_nested_in_setup_job() {
     );
 }
 
-/// Test that a pipeline without `permissions.write` does not emit a bare `env:` block
-/// on the "Execute safe outputs" step (i.e. no invalid empty-mapping YAML).
+/// Test that a pipeline without `permissions.write` still emits an `env:` block
+/// on the "Execute safe outputs" step that maps SYSTEM_ACCESSTOKEN from
+/// `$(System.AccessToken)` (the default executor-token source).
 #[test]
-fn test_executor_step_no_empty_env_block_without_write_permissions() {
-    // minimal-agent.md has no permissions.write — executor env must be absent
+fn test_executor_step_uses_system_access_token_by_default() {
+    // minimal-agent.md has no permissions.write — executor env must
+    // still be present and use System.AccessToken
     let compiled = compile_fixture("minimal-agent.md");
     assert_valid_yaml(&compiled, "minimal-agent.md");
 
-    // Verify the executor step contains no `env:` key at all.
-    // Note: a bare `env:` with no children is valid YAML (parsed as null), so
-    // assert_valid_yaml alone would not catch the regression this test guards against.
     let execute_block_start = compiled
         .find("Execute safe outputs (Stage 3)")
         .expect("Should have executor step");
-    // Find the next step after the executor step (to bound our search window)
     let after_execute = &compiled[execute_block_start..];
     let next_step_offset = after_execute[1..]
         .find("- bash:")
@@ -4510,8 +4467,19 @@ fn test_executor_step_no_empty_env_block_without_write_permissions() {
     let executor_step_text = &after_execute[..next_step_offset];
 
     assert!(
-        !executor_step_text.contains("env:"),
-        "Executor step should not contain an 'env:' block when write permissions are absent: {executor_step_text}"
+        executor_step_text.contains("env:"),
+        "Executor step must always include an env: block (for SYSTEM_ACCESSTOKEN). \
+         Step text:\n{executor_step_text}"
+    );
+    assert!(
+        executor_step_text.contains("SYSTEM_ACCESSTOKEN: $(System.AccessToken)"),
+        "Executor step must map SYSTEM_ACCESSTOKEN from $(System.AccessToken) by default. \
+         Step text:\n{executor_step_text}"
+    );
+    assert!(
+        !executor_step_text.contains("$(SC_WRITE_TOKEN)"),
+        "Without permissions.write, executor step must not reference SC_WRITE_TOKEN. \
+         Step text:\n{executor_step_text}"
     );
 }
 
@@ -4541,6 +4509,218 @@ fn test_executor_step_has_env_block_with_write_permissions() {
     assert!(
         after_execute.contains("SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)"),
         "Executor step should include SYSTEM_ACCESSTOKEN: {after_execute}"
+    );
+}
+
+/// Defense-in-depth: parse a compiled pipeline as YAML, locate the **Agent**
+/// job, and assert no step in that job maps `SYSTEM_ACCESSTOKEN` at all.
+///
+/// Background: the Stage 3 executor now defaults to mapping
+/// `SYSTEM_ACCESSTOKEN: $(System.AccessToken)` (SafeOutputs job). The Setup
+/// job's filter-gate step also legitimately maps it. The agent (Stage 1)
+/// must NEVER see `SYSTEM_ACCESSTOKEN` — that is the cross-stage trust
+/// boundary that motivates the whole three-stage model. A naive global grep
+/// would false-positive on the two legitimate mappings; this test is
+/// agent-job-scoped so it only fires on a real regression.
+#[test]
+fn test_agent_job_steps_do_not_map_system_access_token() {
+    let compiled = compile_fixture("minimal-agent.md");
+    assert_valid_yaml(&compiled, "minimal-agent.md");
+
+    // Strip the leading `# @ado-aw` header comment to reach the YAML root.
+    let yaml_content: String = compiled
+        .lines()
+        .skip_while(|line| line.starts_with('#') || line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let root: serde_yaml::Value =
+        serde_yaml::from_str(&yaml_content).expect("compiled pipeline should be valid YAML");
+
+    let jobs = root
+        .get("jobs")
+        .and_then(|v| v.as_sequence())
+        .expect("pipeline should have a top-level `jobs:` sequence");
+
+    let agent_job = jobs
+        .iter()
+        .find(|j| {
+            j.get("job")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s == "Agent")
+        })
+        .expect("pipeline should have a job named `Agent`");
+
+    let steps = agent_job
+        .get("steps")
+        .and_then(|v| v.as_sequence())
+        .expect("Agent job should have a `steps:` sequence");
+
+    for (idx, step) in steps.iter().enumerate() {
+        if let Some(env) = step.get("env").and_then(|v| v.as_mapping()) {
+            for (key, value) in env.iter() {
+                let key_str = key.as_str().unwrap_or("");
+                let value_str = value.as_str().unwrap_or("");
+                assert_ne!(
+                    key_str, "SYSTEM_ACCESSTOKEN",
+                    "Agent job step {} maps SYSTEM_ACCESSTOKEN ({} = {}). This is the \
+                     cross-stage trust boundary: the agent (Stage 1) must never see \
+                     SYSTEM_ACCESSTOKEN. Only Setup-job filter-gate and Stage 3 \
+                     executor are allowed to map it.",
+                    idx, key_str, value_str
+                );
+            }
+        }
+    }
+}
+
+/// Always-on Azure CLI extension: every compiled pipeline must include a
+/// host-detection prepare step that conditionally sets the `AW_AZ_MOUNTS`
+/// pipeline variable, and the AWF invocation must reference that
+/// variable so the mounts are added at pipeline time only when az is
+/// present on the runner. Also asserts that Azure auth hosts are in the
+/// allow-list and guards against accidental re-introduction of an
+/// install step.
+#[test]
+fn test_default_pipeline_mounts_az_and_allows_azure_hosts() {
+    let compiled = compile_fixture("minimal-agent.md");
+    assert_valid_yaml(&compiled, "minimal-agent.md");
+
+    // (1) The detection prepare step must be present. It is the only
+    // mechanism by which az gets mounted into AWF, so its presence is
+    // load-bearing for the "always-on az" promise. The displayName is
+    // also part of the compiled YAML and is what operators see in the
+    // ADO log; if it changes the documentation in docs/network.md and
+    // docs/tools.md should be updated too.
+    assert!(
+        compiled.contains(r#"displayName: "Detect Azure CLI on host (for AWF mount)""#),
+        "compiled YAML must contain the Azure CLI detection prepare step. \
+         Compiled:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("[ -f /usr/bin/az ]"),
+        "detection step must test for /usr/bin/az. Compiled:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("##vso[task.setvariable variable=AW_AZ_MOUNTS]"),
+        "detection step must set the AW_AZ_MOUNTS pipeline variable. \
+         Compiled:\n{compiled}"
+    );
+
+    // (1a) Regression guard: `setvariable` for AW_AZ_MOUNTS must appear
+    // TWICE — once per branch of the if/else. If the missing-az branch
+    // skips the setvariable, ADO leaves the literal `$(AW_AZ_MOUNTS)`
+    // in the AWF bash step, where bash interprets it as a `$(...)`
+    // command substitution, attempts to run a program named
+    // `AW_AZ_MOUNTS`, gets exit 127, and `set -e` kills the pipeline —
+    // the exact failure mode this PR set out to prevent on runners
+    // without azure-cli installed.
+    let setvar_count = compiled
+        .matches("##vso[task.setvariable variable=AW_AZ_MOUNTS]")
+        .count();
+    assert_eq!(
+        setvar_count, 2,
+        "AW_AZ_MOUNTS must be set in BOTH branches of the detection step (got {setvar_count} \
+         occurrences); leaving it unset in the missing-az branch breaks `set -e` in the \
+         AWF invocation. See AzureCliExtension::prepare_steps for the rationale."
+    );
+
+    // (1b) Conditional prompt-append step: when az is detected, the
+    // agent prompt receives an Azure CLI advisory section so the
+    // agent knows az is on PATH, what it's good for, and the auth
+    // model. The step is gated by `condition: ne(variables['AW_AZ_MOUNTS'], '')`
+    // so agents on runners WITHOUT az never see the advisory and
+    // never try to call az.
+    assert!(
+        compiled.contains(r#"displayName: "Append Azure CLI prompt""#),
+        "compiled YAML must contain the 'Append Azure CLI prompt' step \
+         emitted by AzureCliExtension::prepare_steps. Compiled:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("condition: ne(variables['AW_AZ_MOUNTS'], '')"),
+        "the Azure CLI prompt-append step must carry a condition: \
+         ne(variables['AW_AZ_MOUNTS'], '') so it is skipped when az \
+         is not detected. Compiled:\n{compiled}"
+    );
+    // Proximity check — the condition: must live on the SAME step as
+    // the displayName, otherwise we may have accidentally gated the
+    // wrong step. Find the displayName index, then check the next ~200
+    // chars for the condition line.
+    let display_idx = compiled
+        .find(r#"displayName: "Append Azure CLI prompt""#)
+        .expect("displayName already asserted to be present");
+    let window_end = (display_idx + 300).min(compiled.len());
+    let window = &compiled[display_idx..window_end];
+    assert!(
+        window.contains("condition: ne(variables['AW_AZ_MOUNTS'], '')"),
+        "the condition: line must appear in the same step block as the \
+         'Append Azure CLI prompt' displayName (looked at the 300 \
+         chars after the displayName). Window:\n{window}"
+    );
+    // Anchor strings: lock the load-bearing parts of the advisory.
+    for anchor in ["/usr/bin/az", "az devops", "AZURE_DEVOPS_EXT_PAT", "missing-tool"] {
+        assert!(
+            compiled.contains(anchor),
+            "compiled YAML must contain advisory anchor `{anchor}`. \
+             Compiled:\n{compiled}"
+        );
+    }
+
+    // (2) The AWF invocation must reference $(AW_AZ_MOUNTS) so the
+    // pipeline-variable value (the two --mount args, or empty) is
+    // word-split into the docker run command at runtime. Unquoted on
+    // purpose — see the safety note in `generate_awf_mounts`.
+    assert!(
+        compiled.contains("$(AW_AZ_MOUNTS) \\"),
+        "AWF invocation must include a `$(AW_AZ_MOUNTS) \\` line so the \
+         pipeline variable expands into --mount args at runtime. \
+         Compiled:\n{compiled}"
+    );
+
+    // (3) Critical guard: we must NOT emit static --mount args for az
+    // paths, because that would crash `docker run` on runners without
+    // azure-cli installed (bind source path does not exist). All az
+    // mounting must go through the runtime-detected pipeline variable.
+    assert!(
+        !compiled.contains(r#"--mount "/opt/az:/opt/az:ro""#),
+        "compiled YAML must NOT contain a static --mount for /opt/az — \
+         that would crash `docker run` on runners without azure-cli. \
+         Mounts must be contributed via the AW_AZ_MOUNTS pipeline \
+         variable. Compiled:\n{compiled}"
+    );
+    assert!(
+        !compiled.contains(r#"--mount "/usr/bin/az:/usr/bin/az:ro""#),
+        "compiled YAML must NOT contain a static --mount for /usr/bin/az — \
+         that would crash `docker run` on runners without azure-cli. \
+         Mounts must be contributed via the AW_AZ_MOUNTS pipeline \
+         variable. Compiled:\n{compiled}"
+    );
+
+    // (4) Azure auth/management hosts must be in --allow-domains.
+    for host in [
+        "login.microsoftonline.com",
+        "management.azure.com",
+        "graph.microsoft.com",
+    ] {
+        assert!(
+            compiled.contains(host),
+            "compiled --allow-domains must contain {host}. Compiled:\n{compiled}"
+        );
+    }
+
+    // (5) Regression guard: we deliberately do NOT install az; the host
+    // is assumed to have azure-cli pre-installed (gh-aw parity). If a
+    // future contributor adds an install step we want the test suite to
+    // catch it so the decision is explicit.
+    assert!(
+        !compiled.contains("Install Azure CLI"),
+        "compiled YAML must not contain an 'Install Azure CLI' step — host is assumed \
+         to have az pre-installed. If you genuinely need an install step, update this \
+         test along with the AzureCliExtension. Compiled:\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("InstallAzureCLIDeb"),
+        "compiled YAML must not reference the Microsoft az apt installer URL — host is \
+         assumed to have az pre-installed. Compiled:\n{compiled}"
     );
 }
 

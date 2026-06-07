@@ -253,7 +253,7 @@ mcp-servers:
 
 Safe outputs are the only write operations available to the agent. They are threat-analyzed before execution. Configure defaults in the front matter; the agent provides specifics at runtime.
 
-**create-pull-request** — requires `permissions.write`:
+**create-pull-request** — uses `$(System.AccessToken)` by default; set `permissions.write` only for cross-org writes or named-identity attribution:
 ```yaml
 safe-outputs:
   create-pull-request:
@@ -277,7 +277,7 @@ safe-outputs:
       - 12345
 ```
 
-**create-work-item** — requires `permissions.write`:
+**create-work-item** — uses `$(System.AccessToken)` by default; set `permissions.write` only for cross-org writes or named-identity attribution:
 ```yaml
 safe-outputs:
   create-work-item:
@@ -367,26 +367,26 @@ safe-outputs:
 
 > See `docs/safe-outputs.md` → "Available Safe Output Tools" for full configuration reference of every tool.
 
-Diagnostic tools (`noop`, `missing-data`, `missing-tool`, `report-incomplete`) are always available and require no required configuration. `noop` and `missing-tool` automatically file ADO work items by default — this requires `permissions.write` to actually create work items, but gracefully skips (with a warning) if credentials are unavailable.
+Diagnostic tools (`noop`, `missing-data`, `missing-tool`, `report-incomplete`) are always available and require no required configuration. `noop` and `missing-tool` automatically file ADO work items by default using the executor's token (sourced from `$(System.AccessToken)` by default, or from an ARM SC when `permissions.write` is set); if the token lacks work-item write permission, the call gracefully skips with a warning.
 
-> **Validation**: The compiler enforces that if write-requiring safe outputs are configured, `permissions.write` must be set.
+> **Note**: The compiler no longer requires `permissions.write` for write-bearing safe outputs — the executor defaults to `$(System.AccessToken)`. Set `permissions.write` only when you need cross-org writes or a named identity instead of `Project Collection Build Service`.
 
 ### Step 11 — Permissions
 
-ADO access tokens are minted from ARM service connections. `System.AccessToken` is never used.
+ADO access tokens for the agent (Stage 1) are minted from ARM service connections. The Stage 3 executor defaults to `$(System.AccessToken)`; an optional ARM SC under `permissions.write` overrides that default for cross-org writes or named-identity attribution.
 
 ```yaml
 permissions:
   read: my-read-arm-connection    # Stage 1 agent — read-only ADO access
-  write: my-write-arm-connection  # Stage 3 executor only — write access
+  write: my-write-arm-connection  # OPTIONAL — overrides $(System.AccessToken) for Stage 3 executor
 ```
 
 | Config | Effect |
 |---|---|
-| `read` only | Agent can query ADO; no safe-output writes |
-| `write` only | Agent has no ADO API access; safe-outputs can create PRs/work items |
-| Both | Agent can read; safe-outputs can write |
-| Neither | No ADO tokens anywhere |
+| `read` only | Agent can query ADO; executor writes via `$(System.AccessToken)` (default) |
+| `write` only | Agent has no ADO API access; executor writes via the ARM-minted token |
+| Both | Agent can read; executor writes via the ARM-minted token |
+| Neither | Agent has no ADO API access; executor writes via `$(System.AccessToken)` |
 
 ### Step 12 — Triggers (optional)
 

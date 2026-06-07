@@ -92,7 +92,7 @@ safe-outputs:
     target: "MyProject\\MyTeam"   # Required — scoping policy
 ```
 
-2. Ensure `permissions.write` is set (required for write operations):
+2. Optionally set `permissions.write` if you need cross-org writes or a named identity (not required — the executor defaults to `$(System.AccessToken)`):
 
 ```yaml
 permissions:
@@ -315,7 +315,7 @@ Use `noop` with a summary of what was reviewed.
 **Changes made:**
 1. Updated `description` to reflect new capability
 2. Changed `schedule` from `daily` to `weekly on monday`
-3. Added `permissions.write` (required for `create-work-item`)
+3. Optionally added `permissions.write` (only needed for cross-org writes or named-identity attribution; the executor defaults to `$(System.AccessToken)`)
 4. Added `safe-outputs.create-work-item` configuration
 5. Updated agent instructions to describe when to create work items
 
