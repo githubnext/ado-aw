@@ -75,12 +75,6 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     return 0;
   }
 
-  // Step 4 — quick branch-filter rejection without hitting the API.
-  if (!matchesIncludeExclude(sourceBranch, spec.branches.include, spec.branches.exclude)) {
-    emitSkip(`source branch ${sourceBranch} excluded by on.pr.branches filters`);
-    return 0;
-  }
-
   const project = env.ADO_PROJECT ?? "";
   const repoId = env.ADO_REPO_ID ?? "";
   if (project.length === 0 || repoId.length === 0) {
@@ -90,8 +84,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     return 1;
   }
 
-  // Step 5 — fetch active PRs whose source branch is exactly ours, then
-  // also enforce the agent's branches filter against the TARGET ref.
+  // Step 4 — fetch active PRs whose source branch is exactly ours.
+  // (Skipping a source-branch pre-filter: `on.pr.branches` filters the
+  // PR's TARGET branch, not the build's source branch. For most CI
+  // builds on a non-PR branch the API returns [] cheaply.)
   let prs;
   try {
     prs = await listActivePullRequestsBySourceRef(project, repoId, sourceBranch);
@@ -194,9 +190,22 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
 // Top-level invocation. `process.exit` is called here (not in `main`)
 // so tests can call `main(env)` and inspect the return value without
 // terminating the test process.
-main()
-  .then((code) => process.exit(code))
-  .catch((e: unknown) => {
-    logError(`[synth-pr] unhandled error: ${(e as Error).message}`);
-    process.exit(1);
-  });
+//
+// Guard: only execute when this module is the program entry point.
+// When the test harness imports `main`, the import-side-effect block
+// below is skipped (vitest sets `process.argv[1]` to the runner, not
+// to this module). When ncc bundles for production, `process.argv[1]`
+// is the resolved bundle path, which matches `import.meta.url`.
+import { fileURLToPath } from "node:url";
+
+if (
+  typeof process.argv[1] === "string" &&
+  process.argv[1] === fileURLToPath(import.meta.url)
+) {
+  main()
+    .then((code) => process.exit(code))
+    .catch((e: unknown) => {
+      logError(`[synth-pr] unhandled error: ${(e as Error).message}`);
+      process.exit(1);
+    });
+}
