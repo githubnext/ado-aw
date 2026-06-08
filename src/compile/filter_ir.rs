@@ -1154,6 +1154,89 @@ pub fn compile_gate_step_external(
     Ok(step)
 }
 
+// ─── PR synthetic-from-ci spec ──────────────────────────────────────────────
+
+/// Base64-encoded JSON spec consumed by the `exec-context-pr-synth.js`
+/// bundle at runtime. Carries the PR branch/path filters the agent
+/// declared in front-matter so the bundle can match an active PR by
+/// `sourceRefName` and filter by `targetRefName` + changed-file paths.
+///
+/// Shape:
+/// ```json
+/// {
+///   "branches": { "include": [...], "exclude": [...] },
+///   "paths":    { "include": [...], "exclude": [...] }
+/// }
+/// ```
+///
+/// All four arrays are always present (possibly empty) for shape stability —
+/// the bundle can rely on the fields existing.
+#[derive(Debug, serde::Serialize)]
+struct PrSynthSpec {
+    branches: PrSynthGlobs,
+    paths: PrSynthGlobs,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct PrSynthGlobs {
+    include: Vec<String>,
+    exclude: Vec<String>,
+}
+
+/// Maximum decoded size of `PR_SYNTH_SPEC`. Matches the spirit of the
+/// `GATE_SPEC` 8 KiB ceiling — synth specs are smaller (no checks, no
+/// facts), but the same defence-in-depth bound prevents pathological
+/// front-matter from blowing up the bundle's parser.
+const PR_SYNTH_SPEC_MAX_BYTES: usize = 8 * 1024;
+
+/// Build the base64-encoded `PR_SYNTH_SPEC` value for the given PR
+/// trigger configuration.
+///
+/// The returned string is safe to embed inside a YAML double-quoted
+/// scalar (the base64 alphabet contains no characters that require
+/// YAML escaping).
+pub fn build_pr_synth_spec(
+    pr: &crate::compile::types::PrTriggerConfig,
+) -> anyhow::Result<String> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    let spec = PrSynthSpec {
+        branches: PrSynthGlobs {
+            include: pr
+                .branches
+                .as_ref()
+                .map(|b| b.include.clone())
+                .unwrap_or_default(),
+            exclude: pr
+                .branches
+                .as_ref()
+                .map(|b| b.exclude.clone())
+                .unwrap_or_default(),
+        },
+        paths: PrSynthGlobs {
+            include: pr
+                .paths
+                .as_ref()
+                .map(|p| p.include.clone())
+                .unwrap_or_default(),
+            exclude: pr
+                .paths
+                .as_ref()
+                .map(|p| p.exclude.clone())
+                .unwrap_or_default(),
+        },
+    };
+
+    let json = serde_json::to_string(&spec)?;
+    anyhow::ensure!(
+        json.len() <= PR_SYNTH_SPEC_MAX_BYTES,
+        "PR_SYNTH_SPEC serialised size {} exceeds {}-byte cap; reduce the number/length of on.pr branches/paths globs",
+        json.len(),
+        PR_SYNTH_SPEC_MAX_BYTES
+    );
+    Ok(STANDARD.encode(json.as_bytes()))
+}
+
 /// Collect ADO macro exports needed by the given checks.
 fn collect_ado_exports(
     checks: &[FilterCheck],
@@ -1245,6 +1328,65 @@ fn collect_ordered_facts(checks: &[FilterCheck]) -> anyhow::Result<Vec<Fact>> {
 mod tests {
     use super::*;
     use crate::compile::types::*;
+
+    // ─── PR_SYNTH_SPEC tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_build_pr_synth_spec_roundtrip() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        use serde_json::Value;
+
+        let pr = PrTriggerConfig {
+            branches: Some(BranchFilter {
+                include: vec!["main".into(), "release/*".into()],
+                exclude: vec!["test/*".into()],
+            }),
+            paths: Some(PathFilter {
+                include: vec!["src/*".into()],
+                exclude: vec!["docs/*".into()],
+            }),
+            filters: None,
+            ..Default::default()
+        };
+        let b64 = build_pr_synth_spec(&pr).expect("synth spec must build");
+        let decoded = STANDARD.decode(b64.as_bytes()).expect("must decode base64");
+        let parsed: Value = serde_json::from_slice(&decoded).expect("must be valid JSON");
+        assert_eq!(parsed["branches"]["include"], serde_json::json!(["main", "release/*"]));
+        assert_eq!(parsed["branches"]["exclude"], serde_json::json!(["test/*"]));
+        assert_eq!(parsed["paths"]["include"], serde_json::json!(["src/*"]));
+        assert_eq!(parsed["paths"]["exclude"], serde_json::json!(["docs/*"]));
+    }
+
+    #[test]
+    fn test_build_pr_synth_spec_omitted_arrays_become_empty() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        use serde_json::Value;
+
+        let pr = PrTriggerConfig::default();
+        let b64 = build_pr_synth_spec(&pr).expect("synth spec must build");
+        let decoded = STANDARD.decode(b64.as_bytes()).unwrap();
+        let parsed: Value = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(parsed["branches"]["include"], serde_json::json!([]));
+        assert_eq!(parsed["branches"]["exclude"], serde_json::json!([]));
+        assert_eq!(parsed["paths"]["include"], serde_json::json!([]));
+        assert_eq!(parsed["paths"]["exclude"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn test_build_pr_synth_spec_rejects_oversize() {
+        // Generate enough branch globs to blow past the 8 KiB cap.
+        let pr = PrTriggerConfig {
+            branches: Some(BranchFilter {
+                include: (0..1000).map(|i| format!("very/long/branch/glob/pattern/{i}")).collect(),
+                exclude: vec![],
+            }),
+            paths: None,
+            filters: None,
+            ..Default::default()
+        };
+        let err = build_pr_synth_spec(&pr).expect_err("oversize spec must fail");
+        assert!(err.to_string().contains("PR_SYNTH_SPEC"), "error must mention spec: {err}");
+    }
 
     // ─── Fact tests ─────────────────────────────────────────────────────
 
