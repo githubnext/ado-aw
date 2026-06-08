@@ -46,7 +46,9 @@ the following one-time setup in
 `https://dev.azure.com/msazuresphere/AgentPlayground`:
 
 1. Confirm or create service connections `agent-playground-read` and
-   `agent-playground-write`.
+   `agent-playground-write` (used by the compiled pipelines at runtime
+   via the front-matter `permissions:` block; not to be confused with
+   the GitHub service connection in step 4).
 2. Create branch `daily-smoke-target` and open a perma-PR
    `daily-smoke perma-PR (do not merge)` from `daily-smoke-target` →
    `main` with one comment thread for `reply-to-pr-comment` /
@@ -55,17 +57,47 @@ the following one-time setup in
    - `permaWorkItemId`, `permaWorkItem2Id` (two long-lived work items).
    - `permaPullRequestId`, `permaThreadId` (from step 2).
    - `permaWikiName`, `permaWikiPagePath` (a wiki + a long-lived page).
-   - `noopPipelineId` (filled in after step 4).
-4. Register the `noop-target.lock.yml` pipeline first; capture its ID
-   and update `noopPipelineId` in the variable group.
-5. Register one ADO pipeline per `tests/safe-outputs/*.lock.yml`
-   pointing at this repo's `main` branch. Update the Pipeline ID
-   column above and open a docs-only PR.
-6. Provision pipeline variable `ADO_AW_DEBUG_GITHUB_TOKEN` (secret) on
+   - `noopPipelineId` (filled in after step 5).
+4. **Create the GitHub service connection.** Project settings →
+   Service connections → **New service connection → GitHub**. Either
+   install the Azure Pipelines GitHub App on `githubnext/ado-aw` (no
+   long-lived secret) or paste a fine-grained PAT scoped to the repo.
+   Name it something memorable (e.g. `ado-aw-github`) — that name is
+   passed to `--service-connection` in step 5.
+5. **Bulk-register the smoke pipelines with `ado-aw enable`.** From a
+   `githubnext/ado-aw` checkout:
+   ```powershell
+   ado-aw enable `
+     --org msazuresphere --project AgentPlayground `
+     --service-connection ado-aw-github `
+     --folder '\smoke' `
+     tests/safe-outputs/
+   ```
+   `enable` autodetects the GitHub remote and emits the GitHub-shaped
+   create-definition body for every `*.lock.yml` under
+   `tests/safe-outputs/`. Re-running is idempotent.
+6. Register the `noop-target.lock.yml` pipeline (covered by step 5)
+   and update `noopPipelineId` in the variable group with the
+   captured ID.
+7. Capture each new Pipeline ID from the `enable` output (or via
+   `ado-aw list --org msazuresphere --project AgentPlayground`) and
+   update the column above; open a docs-only PR.
+8. Provision pipeline variable `ADO_AW_DEBUG_GITHUB_TOKEN` (secret) on
    the `smoke-failure-reporter` pipeline **only**. Use a GitHub
    fine-grained PAT scoped to `Issues: Read and write` on
    `githubnext/ado-aw` only. Do **not** put this token in the variable
    group — it must not be reachable by the smoke pipelines themselves.
-7. Register `janitor.lock.yml` (weekly schedule baked in) and
-   `smoke-failure-reporter.lock.yml` (daily schedule baked in,
-   ≈ 30 min after the smokes).
+   ```powershell
+   ado-aw secrets set ADO_AW_DEBUG_GITHUB_TOKEN `
+     --org msazuresphere --project AgentPlayground `
+     --definition-ids <smoke-failure-reporter-pipeline-id> `
+     --value <fine-grained-pat>
+   ```
+9. **Trigger one manual run per pipeline.** ADO's scheduled triggers
+   do not fire until each definition has had at least one successful
+   run. From the same checkout:
+   ```powershell
+   ado-aw run --org msazuresphere --project AgentPlayground tests/safe-outputs/
+   ```
+   After that, the daily schedule baked into each smoke's front-matter
+   takes over.

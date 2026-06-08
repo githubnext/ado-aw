@@ -76,8 +76,22 @@ Both flags route through `ado-aw`'s `discover_ado_aw_pipelines` machinery, which
   - `--dry-run` - Print the planned actions (and the full POST body for creates) without calling the ADO API.
   - `--also-set-token` - After creating a new definition, set its `GITHUB_TOKEN` variable (as an ADO secret).
   - `--token <value>` - The token value for `--also-set-token`. Falls back to `$GITHUB_TOKEN`, then to an interactive prompt. Requires `--also-set-token`.
+  - `--service-connection <name-or-guid>` - GitHub service-connection name (e.g. `ado-aw-github`) or GUID. **Required when the source repository is on GitHub.** Rejected (with a clear error) when the source is Azure DevOps Git.
+  - `--repository-name <owner/repo>` - Source repository override (GitHub source only). Auto-detected from the git remote when omitted; useful when the local checkout's remote points at a fork rather than the canonical source repo the deployment should reference.
 
-  **Source-repo scope (Phase 1):** `enable` requires the local git remote to be an Azure DevOps Git remote (the source repo is what gets registered as the definition's repository). GitHub-hosted source repos are gated on a follow-up.
+  **Source-repo autodetect:** `enable` parses `git remote get-url origin` and routes to either the TfsGit or GitHub create-definition body shape automatically. ADO Git remotes (`dev.azure.com/...`, legacy `*.visualstudio.com`) emit a `TfsGit` body. `github.com` remotes (HTTPS or SSH) emit a `GitHub` body whose `repository.properties.connectedServiceId` references the project-level GitHub service connection resolved from `--service-connection`. If the local remote can't be parsed at all, pass both `--repository-name owner/repo` and `--service-connection` explicitly. GitHub Enterprise (`github.example.com`) is not supported in v1.
+
+  **GitHub-source pre-requisites:** create a GitHub service connection in the target ADO project (Project settings → Service connections → GitHub) before running `enable --service-connection ...`. ADO has no REST API for creating service connections — this is a one-time portal action. Then either install the Azure Pipelines GitHub App on the source repo or paste a fine-grained PAT.
+
+  **Example (smoke fixtures registered in `msazuresphere/AgentPlayground` from a `githubnext/ado-aw` checkout):**
+  ```powershell
+  ado-aw enable `
+    --org msazuresphere --project AgentPlayground `
+    --service-connection ado-aw-github `
+    --folder '\smoke' `
+    tests/safe-outputs/
+  ```
+  Re-running is idempotent. `disable`, `remove`, `list`, `status`, and `run` work against the same definitions from the same GitHub checkout — they match by YAML path (provider-agnostic) and require explicit `--org`/`--project` because the git remote can't infer the deployment target for GitHub-source pipelines.
 
 - `disable [PATH]`- Set `queueStatus` to `disabled` (default) or `paused` on every ADO build definition that matches a local fixture under `PATH`. Refuses to touch any ADO definition that is not the target of a local fixture match — that safety property falls naturally out of the same yaml-path + name match used by `configure`. Skips definitions that are already at the requested status; fail-soft per fixture; exits non-zero if any patch failed or if zero local fixtures matched ADO definitions.
   - `--org <url>` - Override: Azure DevOps organization (URL or bare org name). Inferred from git remote by default.

@@ -40,6 +40,8 @@ fn enable_help_describes_command() {
         "--dry-run",
         "--also-set-token",
         "--token",
+        "--service-connection",
+        "--repository-name",
     ] {
         assert!(
             stdout.contains(flag),
@@ -63,5 +65,90 @@ fn enable_rejects_token_without_also_set_token() {
     assert!(
         stderr.contains("--also-set-token") || stderr.contains("also_set_token"),
         "stderr should reference the requires-constraint, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn enable_help_describes_github_source_support() {
+    // The new --service-connection flag should have a help string
+    // that mentions GitHub so operators discover the feature.
+    let output = std::process::Command::new(binary())
+        .args(["enable", "--help"])
+        .output()
+        .expect("Failed to run ado-aw enable --help");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("GitHub"),
+        "Help text should mention GitHub in the --service-connection / --repository-name docs, got:\n{stdout}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn enable_dry_run_against_subdirectory_uses_repo_root_relative_yaml_path() {
+    // Regression: previously `enable PATH` joined `pipeline.source`
+    // against the scan root rather than the repo root, producing
+    // doubled paths like
+    //   C:\repo\tests\safe-outputs\tests\safe-outputs\noop.md
+    // for every fixture, and posted a yamlFilename of
+    // `/noop.lock.yml` (relative to scan root) instead of the
+    // real repo-relative `/tests/safe-outputs/noop.lock.yml`.
+    //
+    // `enable` always calls `list_definitions` (to know which
+    // fixtures already exist) even in --dry-run, so we point at a
+    // wiremock that returns an empty list. The dry-run path then
+    // prints the would-be POST body for every fixture without ever
+    // making a real network call.
+    use wiremock::matchers::{method, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"/AgentPlayground/_apis/build/definitions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "count": 0,
+            "value": []
+        })))
+        .mount(&server)
+        .await;
+
+    let output = std::process::Command::new(binary())
+        .args([
+            "enable",
+            "--service-connection",
+            "00000000-0000-0000-0000-000000000000",
+            "--project",
+            "AgentPlayground",
+            "--org",
+            "msazuresphere",
+            "--pat",
+            "dummy-pat-for-dry-run",
+            "--dry-run",
+            "tests/safe-outputs",
+        ])
+        // Redirect ADO REST calls at the wiremock; explicit dummy
+        // PAT keeps `resolve_auth` off the Azure-CLI / interactive-
+        // prompt fallback which CI doesn't support.
+        .env("ADO_AW_TEST_ORG_URL", server.uri())
+        .env_remove("AZURE_DEVOPS_EXT_PAT")
+        .output()
+        .expect("Failed to run ado-aw enable");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "expected --dry-run exit 0; stdout=\n{stdout}\nstderr=\n{stderr}"
+    );
+    assert!(
+        stdout.contains("Found ") && stdout.contains(" agentic pipeline(s)."),
+        "expected pipeline-discovery line, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("\"yamlFilename\": \"/tests/safe-outputs/"),
+        "yamlFilename must be repo-root-relative, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("Failed to read source"),
+        "no fixture should fail to read; got:\n{stdout}"
     );
 }

@@ -18,9 +18,10 @@ use log::debug;
 use std::path::{Path, PathBuf};
 
 use crate::ado::{
-    AdoAuth, AdoContext, DefinitionSummary, create_definition, get_git_remote_url,
-    get_repository_id, list_definitions, normalize_ado_yaml_path, parse_ado_remote,
-    patch_queue_status, resolve_ado_context, resolve_auth, update_pipeline_variable,
+    AdoAuth, AdoContext, DefinitionSummary, RepoProvider, RepoSource, create_definition,
+    get_git_remote_url, get_repository_id, list_definitions, normalize_ado_yaml_path,
+    parse_git_remote, patch_queue_status, resolve_ado_context, resolve_auth,
+    resolve_service_connection_id, update_pipeline_variable,
 };
 use crate::compile;
 use crate::detect;
@@ -132,28 +133,65 @@ pub fn decide_action(
     }
 }
 
+/// How `build_create_body` should describe the backing repository on
+/// the create-definition POST body. The two variants emit different
+/// shapes for the `repository:` object.
+#[derive(Debug, Clone, Copy)]
+pub enum RepositoryRef<'a> {
+    /// Azure DevOps Git source. `repo_id` is the repository GUID
+    /// returned by `get_repository_id`; `repo_name` is the bare repo
+    /// name (e.g. `myrepo`).
+    AdoGit {
+        repo_id: &'a str,
+        repo_name: &'a str,
+    },
+    /// GitHub source. `full_name` is `owner/repo` (the form ADO
+    /// expects in `repository.name`); `connected_service_id` is the
+    /// GUID of a project-level GitHub service connection.
+    Github {
+        full_name: &'a str,
+        connected_service_id: &'a str,
+    },
+}
+
 /// Build the JSON body for `POST /_apis/build/definitions`. Pure
 /// function so we can snapshot-test the wire shape.
 pub fn build_create_body(
     name: &str,
     folder: &str,
-    repo_id: &str,
-    repo_name: &str,
+    repo: RepositoryRef<'_>,
     default_branch: &str,
     yaml_filename: &str,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "name": name,
-        "path": folder,
-        "type": "build",
-        "queueStatus": "enabled",
-        "repository": {
+    let repository = match repo {
+        RepositoryRef::AdoGit { repo_id, repo_name } => serde_json::json!({
             "id": repo_id,
             "type": "TfsGit",
             "name": repo_name,
             "defaultBranch": default_branch,
             "properties": { "reportBuildStatus": "true" }
-        },
+        }),
+        RepositoryRef::Github {
+            full_name,
+            connected_service_id,
+        } => serde_json::json!({
+            "type": "GitHub",
+            "name": full_name,
+            "url": format!("https://github.com/{}.git", full_name),
+            "defaultBranch": default_branch,
+            "properties": {
+                "connectedServiceId": connected_service_id,
+                "reportBuildStatus": "true"
+            }
+        }),
+    };
+
+    serde_json::json!({
+        "name": name,
+        "path": folder,
+        "type": "build",
+        "queueStatus": "enabled",
+        "repository": repository,
         "process": {
             "type": 2,
             "yamlFilename": yaml_filename
@@ -174,11 +212,187 @@ pub struct EnableOptions<'a> {
     pub dry_run: bool,
     pub also_set_token: bool,
     pub token: Option<&'a str>,
+    /// GitHub service-connection name or GUID. Required when source
+    /// is GitHub; clap-level error when source is ADO Git.
+    pub service_connection: Option<&'a str>,
+    /// Source repository override as `owner/repo`. Only honoured for
+    /// GitHub source (mostly an escape hatch when the local git
+    /// remote can't be parsed and the operator wants to register a
+    /// pipeline backed by a specific GitHub repo).
+    pub repository_name: Option<&'a str>,
+}
+
+/// Resolved source identity for an `enable` invocation.
+///
+/// Captures the autodetect outcome from the git remote plus operator
+/// overrides. Drives the create-definition body shape and any
+/// provider-specific REST lookups (repo GUID for ADO; service
+/// connection GUID for GitHub).
+#[derive(Debug)]
+enum ResolvedSource {
+    AdoGit { source: RepoSource },
+    Github { source: RepoSource, service_connection: String },
+}
+
+/// Resolved provider-specific identifiers required by the
+/// create-definition POST body. Always paired with the matching
+/// `ResolvedSource` variant — keeping them in a tagged enum (rather
+/// than a `(String, String)` tuple with empty-string sentinels on the
+/// unused half) means a future refactor can't silently swap the two
+/// or forget to wire one of them.
+#[derive(Debug)]
+enum ResolvedIdentifiers {
+    /// `repo_id` is the ADO repository GUID returned by
+    /// `get_repository_id`.
+    AdoGit { repo_id: String },
+    /// `service_connection_id` is the GUID resolved from the
+    /// operator's `--service-connection` value. `full_name` is the
+    /// cached `owner/repo` composition (built once per invocation
+    /// rather than per fixture).
+    Github {
+        full_name: String,
+        service_connection_id: String,
+    },
+}
+
+/// Apply the autodetect rule to a parsed git remote (or its absence)
+/// plus operator-supplied overrides.
+///
+/// Rules (mirrors `docs/cli.md`):
+/// - ADO remote: ignore `--repository-name`; reject
+///   `--service-connection` with a clear message.
+/// - GitHub remote: require `--service-connection`; allow
+///   `--repository-name` to override the auto-detected owner/repo.
+/// - Neither: require both `--repository-name owner/repo` and
+///   `--service-connection`; treat as GitHub source.
+fn resolve_source(
+    parsed_remote: Result<RepoSource>,
+    remote_url: Option<&str>,
+    repository_name_override: Option<&str>,
+    service_connection: Option<&str>,
+) -> Result<ResolvedSource> {
+    let parsed = match parsed_remote {
+        Ok(source) => source,
+        Err(_) => {
+            // Remote is missing or unparseable; require explicit
+            // flags to treat as GitHub source.
+            let sc = service_connection.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Could not infer source repository from the git remote. \
+                     For a GitHub-source pipeline, pass --repository-name owner/repo and --service-connection."
+                )
+            })?;
+            let name = repository_name_override.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Could not infer source repository from the git remote. \
+                     Pass --repository-name owner/repo to identify the GitHub source repo."
+                )
+            })?;
+            let (owner, repo) = split_owner_repo_arg(name)?;
+            return Ok(ResolvedSource::Github {
+                source: RepoSource {
+                    provider: RepoProvider::Github,
+                    owner,
+                    repo,
+                    project: None,
+                },
+                service_connection: sc.to_string(),
+            });
+        }
+    };
+
+    // Match on `provider` directly (rather than guarded patterns with
+    // a catch-all `Ok(_)` arm) so adding a new `RepoProvider` variant
+    // is a compile-time exhaustiveness error instead of silently
+    // falling into the GitHub code path.
+    match parsed.provider {
+        RepoProvider::AdoGit => {
+            if service_connection.is_some() {
+                anyhow::bail!(
+                    "--service-connection is only valid when the source repository is on GitHub. \
+                     The current git remote ({}) is an Azure DevOps Git repository.",
+                    remote_url.unwrap_or("?")
+                );
+            }
+            if repository_name_override.is_some() {
+                anyhow::bail!(
+                    "--repository-name is only valid when the source repository is on GitHub. \
+                     The current git remote ({}) is an Azure DevOps Git repository.",
+                    remote_url.unwrap_or("?")
+                );
+            }
+            Ok(ResolvedSource::AdoGit { source: parsed })
+        }
+        RepoProvider::Github => {
+            let mut source = parsed;
+            let sc = service_connection.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--service-connection <name-or-guid> is required when the source repository is on GitHub. \
+                     Create a GitHub service connection in the target ADO project (Project settings → \
+                     Service connections → GitHub) and pass its name or GUID."
+                )
+            })?;
+            if let Some(over) = repository_name_override {
+                let (owner, repo) = split_owner_repo_arg(over)?;
+                source.owner = owner;
+                source.repo = repo;
+            }
+            Ok(ResolvedSource::Github {
+                source,
+                service_connection: sc.to_string(),
+            })
+        }
+    }
+}
+
+/// Parse a CLI-supplied `owner/repo` argument with a useful error
+/// message when the shape is wrong.
+///
+/// Trims a trailing `.git` on the repo half so `--repository-name
+/// owner/repo.git` (operators sometimes copy-paste this from a clone
+/// URL) round-trips identically to `--repository-name owner/repo`.
+/// Mirrors `split_owner_repo` in `src/ado/mod.rs` which does the same
+/// for parsed remote URLs.
+///
+/// Rejects inputs with more than one `/` (`owner/repo/extra`) — a CLI
+/// arg is held to a stricter contract than a parsed URL, where
+/// trailing path noise is more forgivable. Without this check, the
+/// extra segment slides into the `repository.name` POST field and
+/// ADO returns an opaque API error rather than the operator seeing
+/// the targeted "must be in the form 'owner/repo'" message here.
+fn split_owner_repo_arg(value: &str) -> Result<(String, String)> {
+    let trimmed = value.trim();
+    let parts: Vec<&str> = trimmed.splitn(3, '/').collect();
+    if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
+        // Catches both "no slash at all" (parts.len() == 1) and
+        // "more than one slash" (parts.len() == 3, the third part is
+        // the tail after the second `/`). Empty halves are rejected
+        // here too: `/repo` → ["", "repo"], `owner/` → ["owner", ""].
+        anyhow::bail!(
+            "--repository-name must be in the form 'owner/repo' (got: '{}')",
+            value
+        );
+    }
+    let owner = parts[0].trim().to_string();
+    let repo = parts[1].trim().trim_end_matches(".git").to_string();
+    if repo.is_empty() {
+        anyhow::bail!(
+            "--repository-name must be in the form 'owner/repo' (got: '{}')",
+            value
+        );
+    }
+    Ok((owner, repo))
 }
 
 /// Run the `enable` command.
 pub async fn run(opts: EnableOptions<'_>) -> Result<()> {
-    let repo_path: PathBuf = match opts.path {
+    // `scan_root` is where we look for compiled pipelines (defaults
+    // to cwd; can be a subdirectory like `tests/safe-outputs` when
+    // the operator passes a `PATH` arg). `repo_root` is the
+    // containing git checkout's root, used to anchor the
+    // repo-root-relative `source` paths stored in pipeline markers
+    // and the `yaml_filename` we POST to ADO.
+    let scan_root: PathBuf = match opts.path {
         Some(p) => tokio::fs::canonicalize(p)
             .await
             .with_context(|| format!("Could not resolve path: {}", p.display()))?,
@@ -186,29 +400,52 @@ pub async fn run(opts: EnableOptions<'_>) -> Result<()> {
             .await
             .context("Could not resolve current directory")?,
     };
-
-    // GitHub-source guard: Phase 1 only supports ADO Git source
-    // repositories. We use parse_ado_remote success on the raw git
-    // remote URL as the gate — if we can't parse it as ADO we don't
-    // have a `repository.name` to put in the POST body.
-    let remote_url = get_git_remote_url(&repo_path).await.with_context(|| {
-        format!(
-            "Could not read the git remote 'origin' from {}. \
-             `ado-aw enable` requires an Azure DevOps Git remote.",
-            repo_path.display()
+    let repo_root = crate::compile::find_repo_root(&scan_root).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Could not find a git repository containing '{}'. \
+             `ado-aw enable` must be run inside a git checkout — the YAML \
+             paths registered against ADO are anchored to the repo root.",
+            scan_root.display()
         )
     })?;
-    let remote_ctx = match parse_ado_remote(&remote_url) {
-        Ok(ctx) => ctx,
-        Err(_) => anyhow::bail!(
-            "This command requires an Azure DevOps Git remote.\n\
-             The current remote is {}.\n\
-             Phase 1 of `ado-aw enable` does not yet support GitHub-hosted source \
-             repos. Follow https://github.com/githubnext/ado-aw/issues for the \
-             GitHub-source follow-up.",
-            remote_url
-        ),
+
+    // Autodetect source identity from the git remote. The remote is
+    // best-effort — `resolve_source` decides whether the absence is
+    // fatal based on which CLI overrides the operator passed.
+    let remote_url = get_git_remote_url(&repo_root).await.ok();
+    let parsed = match remote_url.as_deref() {
+        Some(url) => parse_git_remote(url),
+        None => Err(anyhow::anyhow!(
+            "no git remote 'origin' configured in {}",
+            repo_root.display()
+        )),
     };
+    let resolved = resolve_source(
+        parsed,
+        remote_url.as_deref(),
+        opts.repository_name,
+        opts.service_connection,
+    )?;
+
+    // For GitHub-source, the git remote can't tell us the ADO
+    // deployment target (org/project). Pre-check upfront so we surface
+    // a clear, audience-appropriate error before falling through to
+    // `resolve_ado_context`'s generic "use --org/--project, e.g. for
+    // --definition-ids" message — which makes no sense in the `enable`
+    // context and is the first-time-user failure mode for the very
+    // operators this code path targets.
+    if matches!(resolved, ResolvedSource::Github { .. })
+        && (opts.org.is_none() || opts.project.is_none())
+    {
+        anyhow::bail!(
+            "--org <ado-org> and --project <ado-project> are required for GitHub-source pipelines. \
+             The git remote identifies the GitHub source repo, but the ADO project that hosts the \
+             registered build definitions must be supplied explicitly.\n\
+             Example:\n  \
+             ado-aw enable --org msazuresphere --project AgentPlayground \\\n    \
+             --service-connection <github-conn-name> tests/safe-outputs/"
+        );
+    }
 
     // Skip interactive token resolution on dry-run: --also-set-token is
     // silently suppressed in that path anyway, so prompting the operator
@@ -219,16 +456,33 @@ pub async fn run(opts: EnableOptions<'_>) -> Result<()> {
         resolve_token_arg(opts.also_set_token, opts.token)?
     };
     let auth = resolve_auth(opts.pat).await?;
-    let ado_ctx = resolve_ado_context(&repo_path, opts.org, opts.project).await?;
+    let ado_ctx = resolve_ado_context(&repo_root, opts.org, opts.project).await?;
 
-    println!(
-        "ADO context: org={}, project={}, repo={}",
-        ado_ctx.org_url, ado_ctx.project, remote_ctx.repo_name
-    );
+    match &resolved {
+        ResolvedSource::AdoGit { source } => {
+            println!(
+                "ADO context: org={}, project={}, repo={} (ADO Git source)",
+                ado_ctx.org_url, ado_ctx.project, source.repo
+            );
+        }
+        ResolvedSource::Github {
+            source,
+            service_connection,
+        } => {
+            println!(
+                "ADO context: org={}, project={}",
+                ado_ctx.org_url, ado_ctx.project
+            );
+            println!(
+                "GitHub source: {}/{} (service connection: {})",
+                source.owner, source.repo, service_connection
+            );
+        }
+    }
     println!();
 
     println!("Scanning for agentic pipelines...");
-    let detected = detect::detect_pipelines(&repo_path).await?;
+    let detected = detect::detect_pipelines(&scan_root).await?;
     if detected.is_empty() {
         println!(
             "No agentic pipelines found. Make sure your pipelines were compiled with the latest ado-aw."
@@ -245,20 +499,59 @@ pub async fn run(opts: EnableOptions<'_>) -> Result<()> {
 
     let definitions = list_definitions(&client, &ado_ctx, &auth).await?;
 
-    // Resolve the repository GUID once. Dry-run skips this — the
-    // POST body printout uses a placeholder GUID so operators still
-    // see the full body shape.
-    let repo_id = if opts.dry_run {
-        String::from("<repo-id>")
-    } else {
-        get_repository_id(&client, &ado_ctx, &auth, &remote_ctx.repo_name)
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to look up ADO repository '{}'",
-                    remote_ctx.repo_name
+    // Resolve provider-specific identifiers once per invocation, in
+    // a structurally-tagged form that keeps the "only one is
+    // meaningful per variant" invariant at the type level. Previously
+    // we returned a `(repo_id, service_conn_id)` tuple with empty-
+    // string sentinels on the unused half, which would silently
+    // tolerate a future swap.
+    //
+    // - ADO Git source: look up the repository GUID (required by the
+    //   `repository.id` field in the POST body).
+    // - GitHub source: resolve the service-connection name → GUID
+    //   (required by `repository.properties.connectedServiceId`).
+    //
+    // Dry-run skips the network calls; the POST body printout uses
+    // placeholders so operators still see the full body shape.
+    let identifiers = match &resolved {
+        ResolvedSource::AdoGit { source } => {
+            let repo_id = if opts.dry_run {
+                String::from("<repo-id>")
+            } else {
+                get_repository_id(&client, &ado_ctx, &auth, &source.repo)
+                    .await
+                    .with_context(|| {
+                        format!("Failed to look up ADO repository '{}'", source.repo)
+                    })?
+            };
+            ResolvedIdentifiers::AdoGit { repo_id }
+        }
+        ResolvedSource::Github {
+            source,
+            service_connection,
+        } => {
+            let service_connection_id = if opts.dry_run {
+                String::from("<service-connection-id>")
+            } else {
+                resolve_service_connection_id(
+                    &client,
+                    &ado_ctx,
+                    &auth,
+                    service_connection,
                 )
-            })?
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to resolve GitHub service connection '{}' in project '{}'",
+                        service_connection, ado_ctx.project
+                    )
+                })?
+            };
+            ResolvedIdentifiers::Github {
+                full_name: format!("{}/{}", source.owner, source.repo),
+                service_connection_id,
+            }
+        }
     };
 
     let mut success = 0usize;
@@ -266,16 +559,55 @@ pub async fn run(opts: EnableOptions<'_>) -> Result<()> {
     let mut newly_created_ids: Vec<u64> = Vec::new();
 
     for pipeline in &detected {
-        let source_path = repo_path.join(&pipeline.source);
+        // `pipeline.source` is the path from the agent-file marker
+        // (repo-root-relative, e.g. `tests/safe-outputs/noop.md`).
+        // `pipeline.yaml_path` is the compiled `.lock.yml` path
+        // *relative to the scan root*, so we have to re-anchor it on
+        // `repo_root` before computing the `yamlFilename` we POST to
+        // ADO — otherwise running `enable tests/safe-outputs` would
+        // register every fixture at `/noop.lock.yml` (repo root)
+        // instead of the actual `/tests/safe-outputs/noop.lock.yml`.
+        let source_path = repo_root.join(&pipeline.source);
+        let abs_yaml = scan_root.join(&pipeline.yaml_path);
+        let repo_relative_yaml = abs_yaml
+            .strip_prefix(&repo_root)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|_| pipeline.yaml_path.clone());
+        let repo_ref = match (&resolved, &identifiers) {
+            (
+                ResolvedSource::AdoGit { source },
+                ResolvedIdentifiers::AdoGit { repo_id },
+            ) => RepositoryRef::AdoGit {
+                repo_id,
+                repo_name: &source.repo,
+            },
+            (
+                ResolvedSource::Github { .. },
+                ResolvedIdentifiers::Github {
+                    full_name,
+                    service_connection_id,
+                },
+            ) => RepositoryRef::Github {
+                full_name,
+                connected_service_id: service_connection_id,
+            },
+            // Both halves are built from the same `resolved` value
+            // immediately above, so the cross-variant pairings are
+            // unreachable. We bail rather than `unreachable!()` so a
+            // future refactor that decouples the two can't silently
+            // produce a malformed POST body.
+            _ => anyhow::bail!(
+                "internal error: resolved source and identifier variants disagree"
+            ),
+        };
         let result = process_one(
             &client,
             &ado_ctx,
             &auth,
             &definitions,
-            &pipeline.yaml_path,
+            &repo_relative_yaml,
             &source_path,
-            &repo_id,
-            &remote_ctx.repo_name,
+            repo_ref,
             opts.folder,
             opts.default_branch,
             opts.dry_run,
@@ -362,8 +694,7 @@ async fn process_one(
     definitions: &[DefinitionSummary],
     yaml_path: &Path,
     source_path: &Path,
-    repo_id: &str,
-    repo_name: &str,
+    repo: RepositoryRef<'_>,
     folder: &str,
     default_branch: &str,
     dry_run: bool,
@@ -413,8 +744,7 @@ async fn process_one(
             let body = build_create_body(
                 &sanitized,
                 folder,
-                repo_id,
-                repo_name,
+                repo,
                 default_branch,
                 &yaml_filename,
             );
@@ -455,6 +785,208 @@ mod tests {
             path: None,
             repository: None,
             revision: None,
+        }
+    }
+
+    fn ado_source() -> RepoSource {
+        RepoSource {
+            provider: RepoProvider::AdoGit,
+            owner: "myorg".to_string(),
+            repo: "myrepo".to_string(),
+            project: Some("MyProject".to_string()),
+        }
+    }
+
+    fn github_source() -> RepoSource {
+        RepoSource {
+            provider: RepoProvider::Github,
+            owner: "githubnext".to_string(),
+            repo: "ado-aw".to_string(),
+            project: None,
+        }
+    }
+
+    // ============ split_owner_repo_arg ============
+
+    #[test]
+    fn split_owner_repo_arg_accepts_owner_slash_repo() {
+        assert_eq!(
+            split_owner_repo_arg("githubnext/ado-aw").unwrap(),
+            ("githubnext".to_string(), "ado-aw".to_string())
+        );
+    }
+
+    #[test]
+    fn split_owner_repo_arg_rejects_missing_slash() {
+        let err = split_owner_repo_arg("just-a-name").unwrap_err().to_string();
+        assert!(err.contains("--repository-name"));
+        assert!(err.contains("owner/repo"));
+    }
+
+    #[test]
+    fn split_owner_repo_arg_rejects_empty_halves() {
+        assert!(split_owner_repo_arg("/repo").is_err());
+        assert!(split_owner_repo_arg("owner/").is_err());
+        assert!(split_owner_repo_arg("/").is_err());
+    }
+
+    #[test]
+    fn split_owner_repo_arg_strips_dotgit_suffix() {
+        // Mirrors split_owner_repo (in src/ado/mod.rs) which strips
+        // `.git` when parsing remote URLs — operators sometimes paste
+        // the `owner/repo.git` form from a clone URL and expect it to
+        // work identically.
+        assert_eq!(
+            split_owner_repo_arg("githubnext/ado-aw.git").unwrap(),
+            ("githubnext".to_string(), "ado-aw".to_string())
+        );
+    }
+
+    #[test]
+    fn split_owner_repo_arg_rejects_repo_that_becomes_empty_after_strip() {
+        // Pathological: `owner/.git` strips to `owner/` which is
+        // invalid. Must bail rather than silently treat `repo == ""`
+        // as success.
+        assert!(split_owner_repo_arg("owner/.git").is_err());
+    }
+
+    #[test]
+    fn split_owner_repo_arg_rejects_extra_path_segments() {
+        // splitn(3, '/') guards against `owner/repo/extra` silently
+        // flowing into `repository.name = "owner/repo/extra"` and
+        // surfacing as an opaque ADO API error later.
+        let err = split_owner_repo_arg("owner/repo/extra")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("owner/repo"));
+        assert!(err.contains("owner/repo/extra"));
+
+        // Even further nesting.
+        assert!(split_owner_repo_arg("a/b/c/d").is_err());
+    }
+
+    // ============ resolve_source ============
+
+    #[test]
+    fn resolve_source_ado_remote_no_overrides() {
+        let resolved = resolve_source(Ok(ado_source()), Some("https://..."), None, None).unwrap();
+        assert!(matches!(resolved, ResolvedSource::AdoGit { .. }));
+    }
+
+    #[test]
+    fn resolve_source_ado_remote_rejects_service_connection() {
+        let err = resolve_source(
+            Ok(ado_source()),
+            Some("https://dev.azure.com/myorg/MyProject/_git/myrepo"),
+            None,
+            Some("ado-aw-github"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("--service-connection is only valid"));
+        assert!(err.contains("GitHub"));
+    }
+
+    #[test]
+    fn resolve_source_ado_remote_rejects_repository_name() {
+        let err = resolve_source(
+            Ok(ado_source()),
+            Some("https://dev.azure.com/myorg/MyProject/_git/myrepo"),
+            Some("owner/repo"),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("--repository-name is only valid"));
+    }
+
+    #[test]
+    fn resolve_source_github_remote_requires_service_connection() {
+        let err = resolve_source(Ok(github_source()), Some("https://..."), None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--service-connection"));
+        assert!(err.contains("required"));
+    }
+
+    #[test]
+    fn resolve_source_github_remote_with_service_connection() {
+        let resolved = resolve_source(
+            Ok(github_source()),
+            Some("https://..."),
+            None,
+            Some("ado-aw-github"),
+        )
+        .unwrap();
+        match resolved {
+            ResolvedSource::Github {
+                source,
+                service_connection,
+            } => {
+                assert_eq!(source.owner, "githubnext");
+                assert_eq!(source.repo, "ado-aw");
+                assert_eq!(service_connection, "ado-aw-github");
+            }
+            _ => panic!("expected Github"),
+        }
+    }
+
+    #[test]
+    fn resolve_source_github_remote_repository_name_override() {
+        let resolved = resolve_source(
+            Ok(github_source()),
+            Some("https://..."),
+            Some("other-org/other-repo"),
+            Some("conn"),
+        )
+        .unwrap();
+        match resolved {
+            ResolvedSource::Github { source, .. } => {
+                assert_eq!(source.owner, "other-org");
+                assert_eq!(source.repo, "other-repo");
+            }
+            _ => panic!("expected Github"),
+        }
+    }
+
+    #[test]
+    fn resolve_source_no_remote_requires_both_overrides() {
+        let parsed_err = || Err(anyhow::anyhow!("no remote"));
+        let err = resolve_source(parsed_err(), None, None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--service-connection"));
+
+        let err = resolve_source(parsed_err(), None, None, Some("conn"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--repository-name"));
+
+        let err = resolve_source(parsed_err(), None, Some("owner/repo"), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--service-connection"));
+    }
+
+    #[test]
+    fn resolve_source_no_remote_with_both_overrides_treats_as_github() {
+        let resolved = resolve_source(
+            Err(anyhow::anyhow!("no remote")),
+            None,
+            Some("githubnext/ado-aw"),
+            Some("conn-guid"),
+        )
+        .unwrap();
+        match resolved {
+            ResolvedSource::Github {
+                source,
+                service_connection,
+            } => {
+                assert_eq!(source.owner, "githubnext");
+                assert_eq!(source.repo, "ado-aw");
+                assert_eq!(service_connection, "conn-guid");
+            }
+            _ => panic!("expected Github"),
         }
     }
 
@@ -681,12 +1213,14 @@ mod tests {
     // ============ build_create_body ============
 
     #[test]
-    fn build_create_body_matches_expected_shape() {
+    fn build_create_body_ado_git_shape() {
         let body = build_create_body(
             "Daily smoke",
             "\\smoke",
-            "abc-123",
-            "myrepo",
+            RepositoryRef::AdoGit {
+                repo_id: "abc-123",
+                repo_name: "myrepo",
+            },
             "refs/heads/main",
             "/tests/noop.lock.yml",
         );
@@ -709,6 +1243,66 @@ mod tests {
             "triggers": []
         });
         assert_eq!(body, expected);
+    }
+
+    #[test]
+    fn build_create_body_github_shape() {
+        let body = build_create_body(
+            "Daily smoke noop",
+            "\\smoke",
+            RepositoryRef::Github {
+                full_name: "githubnext/ado-aw",
+                connected_service_id: "11111111-2222-3333-4444-555555555555",
+            },
+            "refs/heads/main",
+            "/tests/safe-outputs/noop.lock.yml",
+        );
+        let expected = serde_json::json!({
+            "name": "Daily smoke noop",
+            "path": "\\smoke",
+            "type": "build",
+            "queueStatus": "enabled",
+            "repository": {
+                "type": "GitHub",
+                "name": "githubnext/ado-aw",
+                "url": "https://github.com/githubnext/ado-aw.git",
+                "defaultBranch": "refs/heads/main",
+                "properties": {
+                    "connectedServiceId": "11111111-2222-3333-4444-555555555555",
+                    "reportBuildStatus": "true"
+                }
+            },
+            "process": {
+                "type": 2,
+                "yamlFilename": "/tests/safe-outputs/noop.lock.yml"
+            },
+            "triggers": []
+        });
+        assert_eq!(body, expected);
+    }
+
+    #[test]
+    fn build_create_body_github_omits_repo_id() {
+        // GitHub-source bodies must not carry a `repository.id` field
+        // — ADO uses `repository.name = owner/repo` to identify the
+        // GitHub repo, and the connectedServiceId tells it how to
+        // authenticate.
+        let body = build_create_body(
+            "n",
+            "\\",
+            RepositoryRef::Github {
+                full_name: "owner/repo",
+                connected_service_id: "guid",
+            },
+            "refs/heads/main",
+            "/x.yml",
+        );
+        assert!(
+            body.get("repository")
+                .and_then(|r| r.get("id"))
+                .is_none(),
+            "GitHub-source body must not include repository.id"
+        );
     }
 
     // ============ resolve_token_arg ============

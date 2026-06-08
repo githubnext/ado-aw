@@ -175,6 +175,180 @@ pub fn parse_ado_remote(remote_url: &str) -> Result<AdoContext> {
     )
 }
 
+// ==================== Source identity (RepoSource) ====================
+
+/// Which forge a pipeline's source markdown lives on.
+///
+/// `AdoGit` and `Github` are the only providers supported in v1. The
+/// `repository.url` form ADO stores for a build definition uses a
+/// different shape per provider — see [`RepoSource::url`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepoProvider {
+    /// Azure DevOps Git (TfsGit).
+    AdoGit,
+    /// GitHub on `github.com` (GitHub Enterprise is out of scope for
+    /// v1; see `docs/cli.md` for the follow-up roadmap).
+    Github,
+}
+
+/// Where the agent markdown for a compiled pipeline lives.
+///
+/// `RepoSource` is the **source identity** half of the two-namespace
+/// model — distinct from [`AdoContext`], which carries the ADO
+/// **deployment target** (`org_url`, `project`). They coincide for
+/// ADO-source pipelines (both halves derived from the same git remote)
+/// and diverge for GitHub-source pipelines (the source lives on
+/// GitHub but the pipeline runs in some ADO project supplied via
+/// `--org`/`--project`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoSource {
+    /// Which forge hosts the repository.
+    pub provider: RepoProvider,
+    /// For `AdoGit`: the ADO organisation name (e.g. `myorg`).
+    /// For `Github`: the GitHub owner (e.g. `githubnext`).
+    pub owner: String,
+    /// Bare repository name in both cases (e.g. `templates-a`,
+    /// `ado-aw`). Never `owner/repo` — composing the slashed form is
+    /// the caller's job when the API requires it (e.g. the GitHub
+    /// build-definition body's `repository.name` field).
+    pub repo: String,
+    /// `Some("MyProject")` for `AdoGit` (ADO organisations contain
+    /// projects). `None` for `Github`.
+    pub project: Option<String>,
+}
+
+impl RepoSource {
+    /// Return the canonical browse URL ADO surfaces in
+    /// `repository.url` for a build definition backed by this source.
+    ///
+    /// Returned in the form expected by [`crate::ado::discovery`]'s
+    /// `normalize_repo_url` (no trailing `.git` — the discovery
+    /// normalizer also strips it). Not currently wired into the
+    /// `CurrentRepo` URL filter for GitHub source — see the PR
+    /// landing this type for the deferred-work rationale.
+    ///
+    /// Invariant: `provider == AdoGit` implies `project.is_some()`
+    /// (every `AdoGit`-yielding `parse_git_remote` path sets it).
+    /// A debug assertion guards against a future producer that
+    /// forgets to populate the field — release builds fall back to
+    /// an empty path segment rather than panicking, since the URL is
+    /// only used for comparison and a mismatch is the right failure
+    /// mode there.
+    pub fn url(&self) -> String {
+        match self.provider {
+            RepoProvider::AdoGit => {
+                let project = self.project.as_deref().unwrap_or_default();
+                debug_assert!(
+                    !project.is_empty(),
+                    "RepoSource::url(): AdoGit invariant violated — project must be Some"
+                );
+                format!(
+                    "https://dev.azure.com/{}/{}/_git/{}",
+                    self.owner, project, self.repo,
+                )
+            }
+            RepoProvider::Github => {
+                format!("https://github.com/{}/{}", self.owner, self.repo)
+            }
+        }
+    }
+}
+
+/// Parse a git remote URL into a [`RepoSource`].
+///
+/// Tries [`parse_ado_remote`] first (regression-safe for every existing
+/// ADO call site), then `github.com` HTTPS / SSH. Bails with a unified
+/// "could not parse as ADO Git or GitHub" message when neither matches.
+///
+/// Accepted GitHub forms:
+/// - `https://github.com/{owner}/{repo}` (with or without `.git`)
+/// - `git@github.com:{owner}/{repo}` (with or without `.git`)
+///
+/// GitHub Enterprise (`github.example.com`) is **not** matched in v1.
+pub fn parse_git_remote(remote_url: &str) -> Result<RepoSource> {
+    if let Ok(ctx) = parse_ado_remote(remote_url) {
+        // Defensive: every shape `parse_ado_remote` accepts populates
+        // `org_url` with a `/{org}` segment, so `org_name()` should
+        // always return `Some`. Bail explicitly on the unreachable
+        // path rather than silently producing an empty `owner` that
+        // would surface later as a confusing ADO API error.
+        let owner = ctx.org_name().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Parsed '{}' as an ADO remote but could not extract the org segment from '{}'",
+                remote_url,
+                ctx.org_url
+            )
+        })?.to_string();
+        return Ok(RepoSource {
+            provider: RepoProvider::AdoGit,
+            owner,
+            repo: ctx.repo_name,
+            project: Some(ctx.project),
+        });
+    }
+
+    if let Some(source) = parse_github_remote(remote_url) {
+        return Ok(source);
+    }
+
+    anyhow::bail!(
+        "Could not parse '{}' as either an Azure DevOps Git remote \
+         (https://dev.azure.com/{{org}}/{{project}}/_git/{{repo}}) or a \
+         GitHub remote (https://github.com/{{owner}}/{{repo}} or \
+         git@github.com:{{owner}}/{{repo}})",
+        remote_url
+    )
+}
+
+/// Try to parse `remote_url` as a `github.com` HTTPS or SSH URL.
+///
+/// Returns `None` on any other host (including GitHub Enterprise) so
+/// the caller can fall through to its own error path.
+fn parse_github_remote(remote_url: &str) -> Option<RepoSource> {
+    let url = remote_url.trim();
+
+    // SSH: git@github.com:owner/repo(.git)
+    if let Some(rest) = url.strip_prefix("git@github.com:") {
+        let (owner, repo) = split_owner_repo(rest)?;
+        return Some(RepoSource {
+            provider: RepoProvider::Github,
+            owner,
+            repo,
+            project: None,
+        });
+    }
+
+    // HTTPS: https://github.com/owner/repo(.git)
+    let parsed = url::Url::parse(url).ok()?;
+    if parsed.host_str() != Some("github.com") {
+        return None;
+    }
+    let path = parsed.path().trim_start_matches('/');
+    let (owner, repo) = split_owner_repo(path)?;
+    Some(RepoSource {
+        provider: RepoProvider::Github,
+        owner,
+        repo,
+        project: None,
+    })
+}
+
+/// Split a `owner/repo[.git][/...]` fragment, trimming the `.git`
+/// suffix on the repo half. Returns `None` if either half is empty.
+fn split_owner_repo(path: &str) -> Option<(String, String)> {
+    let mut parts = path.splitn(3, '/');
+    let owner = parts.next()?.trim();
+    let repo_raw = parts.next()?.trim();
+    if owner.is_empty() || repo_raw.is_empty() {
+        return None;
+    }
+    let repo = repo_raw.trim_end_matches(".git");
+    if repo.is_empty() {
+        return None;
+    }
+    Some((owner.to_string(), repo.to_string()))
+}
+
 /// Get the git remote URL for the repository at `repo_path`.
 pub async fn get_git_remote_url(repo_path: &Path) -> Result<String> {
     let output = tokio::process::Command::new("git")
@@ -951,6 +1125,42 @@ pub const PATH_SEGMENT: &percent_encoding::AsciiSet = &percent_encoding::CONTROL
     .add(b':')
     .add(b'!');
 
+/// Characters that must be percent-encoded when used as a URL
+/// **query-string value** (the bit after `?key=` and before `&` /
+/// `#`). Preserves the RFC 3986 unreserved set (`A-Z`, `a-z`, `0-9`,
+/// `-`, `_`, `.`, `~`) so common identifiers like `ado-aw-github` are
+/// emitted literally rather than as `ado%2Daw%2Dgithub` — strictly
+/// correct ADO/RFC behaviour either way, but the unencoded form is
+/// what humans read in debug logs and what most servers' strict
+/// matchers prefer. Encodes:
+///
+/// - query-syntax metachars (`&`, `=`, `#`, `?`) that would split
+///   the parameter,
+/// - `%` (escape char) and `+` (form-encoding space alias),
+/// - whitespace and structural ASCII (`/`, `:`, `@`, `<`, `>`, `"`,
+///   `'`, `{`, `}`, `` ` ``).
+///
+/// Stricter than `NON_ALPHANUMERIC` (which would encode `-`/`_`/`.`/`~`)
+/// and weaker than `PATH_SEGMENT` (which does *not* encode `&`/`=`).
+pub const QUERY_VALUE: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'\'')
+    .add(b'#')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'{')
+    .add(b'}')
+    .add(b'/')
+    .add(b'%')
+    .add(b'@')
+    .add(b':')
+    .add(b'&')
+    .add(b'=')
+    .add(b'+');
+
 /// Look up an ADO Git repository's GUID by name.
 ///
 /// Calls `GET /_apis/git/repositories/{repoName}?api-version=7.1` and reads
@@ -997,6 +1207,150 @@ pub async fn get_repository_id(
         .and_then(|v| v.as_str())
         .map(str::to_string)
         .with_context(|| format!("Repository '{}' response has no 'id' field", repo_name))
+}
+
+/// Resolve a GitHub service-connection identifier to its GUID.
+///
+/// Accepts either a raw UUID (returned unchanged — no API call) or a
+/// human-readable endpoint name (e.g. `ado-aw-github`) which is
+/// resolved via the project-scoped service-endpoint API.
+///
+/// Used by `ado-aw enable` when registering GitHub-source build
+/// definitions: the ADO `repository.properties.connectedServiceId`
+/// field requires a GUID, but operators prefer typing the friendly
+/// name they set up in the portal.
+///
+/// Returns a useful error on 0-match (the connection doesn't exist in
+/// this project) or >1-match (rare, but possible if two endpoints
+/// happen to share a display name; operator must pass the GUID
+/// directly to disambiguate).
+pub async fn resolve_service_connection_id(
+    client: &reqwest::Client,
+    ctx: &AdoContext,
+    auth: &AdoAuth,
+    value: &str,
+) -> Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("--service-connection value is empty");
+    }
+    if is_uuid_like(trimmed) {
+        return Ok(trimmed.to_string());
+    }
+
+    let url = format!(
+        "{}/{}/_apis/serviceendpoint/endpoints?type=github&endpointNames={}&api-version=7.1-preview.4",
+        ctx.org_url.trim_end_matches('/'),
+        percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
+        // The endpoint name is a query-string value (not a path
+        // segment), so `&` and `=` must be percent-encoded or they'd
+        // split the parameter. Use `QUERY_VALUE` rather than
+        // `PATH_SEGMENT` (leaves `&`/`=` unencoded) or
+        // `NON_ALPHANUMERIC` (over-encodes `-`/`_`/`.`/`~`); the
+        // common `ado-aw-github` style emits literally.
+        percent_encoding::utf8_percent_encode(trimmed, QUERY_VALUE),
+    );
+
+    debug!("Looking up GitHub service connection '{}': {}", trimmed, url);
+
+    let resp = auth
+        .apply(client.get(&url))
+        .send()
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to look up GitHub service connection '{}' in project '{}'",
+                trimmed, ctx.project
+            )
+        })?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "ADO API returned {} when looking up service connection '{}': {}",
+            status,
+            trimmed,
+            body
+        );
+    }
+
+    let body: serde_json::Value = resp.json().await.with_context(|| {
+        format!("Failed to parse service-endpoint response for '{}'", trimmed)
+    })?;
+
+    pick_service_endpoint_id(&body, trimmed, &ctx.project)
+}
+
+/// Returns `true` when `value` looks like a UUID
+/// (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`, hex only). Case-insensitive.
+///
+/// The check is intentionally lenient — ADO accepts any GUID, so we
+/// only need to recognise the canonical hyphenated form well enough to
+/// skip the resolution API call. A false negative (resolver runs even
+/// though `value` was a GUID) is harmless; the API returns the same
+/// id back.
+fn is_uuid_like(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 36 {
+        return false;
+    }
+    for (i, b) in bytes.iter().enumerate() {
+        let is_hyphen_position = matches!(i, 8 | 13 | 18 | 23);
+        if is_hyphen_position {
+            if *b != b'-' {
+                return false;
+            }
+        } else if !b.is_ascii_hexdigit() {
+            return false;
+        }
+    }
+    true
+}
+
+/// Pick the single service-endpoint `id` from the
+/// `/_apis/serviceendpoint/endpoints` list response.
+///
+/// Factored out for unit-testability: the JSON shape is stable
+/// (`{ count, value: [ { id, name, … } ] }`) and the 0 / 1 / >1 result
+/// triage logic is the interesting part.
+fn pick_service_endpoint_id(
+    body: &serde_json::Value,
+    name: &str,
+    project: &str,
+) -> Result<String> {
+    let entries = body
+        .get("value")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "service-endpoint response missing `value` array (got: {})",
+                body
+            )
+        })?;
+
+    match entries.len() {
+        0 => anyhow::bail!(
+            "No GitHub service connection named '{}' was found in project '{}'. \
+             Create one under Project settings → Service connections → GitHub, then re-run.",
+            name,
+            project
+        ),
+        1 => entries[0]
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                anyhow::anyhow!("Service connection '{}' has no `id` field", name)
+            }),
+        n => anyhow::bail!(
+            "{} GitHub service connections named '{}' in project '{}'. \
+             Pass the GUID directly to --service-connection to disambiguate.",
+            n,
+            name,
+            project
+        ),
+    }
 }
 
 /// Fetch the full JSON body of a build definition.
@@ -1709,6 +2063,271 @@ mod tests {
     fn test_parse_ado_remote_invalid() {
         assert!(parse_ado_remote("https://github.com/user/repo").is_err());
         assert!(parse_ado_remote("not-a-url").is_err());
+    }
+
+    // ==================== RepoSource / parse_git_remote ====================
+
+    #[test]
+    fn parse_git_remote_ado_https() {
+        let source =
+            parse_git_remote("https://dev.azure.com/myorg/MyProject/_git/myrepo").unwrap();
+        assert_eq!(source.provider, RepoProvider::AdoGit);
+        assert_eq!(source.owner, "myorg");
+        assert_eq!(source.repo, "myrepo");
+        assert_eq!(source.project.as_deref(), Some("MyProject"));
+    }
+
+    #[test]
+    fn parse_git_remote_ado_ssh() {
+        let source =
+            parse_git_remote("git@ssh.dev.azure.com:v3/myorg/MyProject/myrepo").unwrap();
+        assert_eq!(source.provider, RepoProvider::AdoGit);
+        assert_eq!(source.owner, "myorg");
+        assert_eq!(source.repo, "myrepo");
+        assert_eq!(source.project.as_deref(), Some("MyProject"));
+    }
+
+    #[test]
+    fn parse_git_remote_ado_legacy_visualstudio() {
+        let source =
+            parse_git_remote("https://myorg.visualstudio.com/MyProject/_git/myrepo").unwrap();
+        assert_eq!(source.provider, RepoProvider::AdoGit);
+        assert_eq!(source.owner, "myorg");
+        assert_eq!(source.repo, "myrepo");
+        assert_eq!(source.project.as_deref(), Some("MyProject"));
+    }
+
+    #[test]
+    fn parse_git_remote_github_https() {
+        let source = parse_git_remote("https://github.com/githubnext/ado-aw").unwrap();
+        assert_eq!(source.provider, RepoProvider::Github);
+        assert_eq!(source.owner, "githubnext");
+        assert_eq!(source.repo, "ado-aw");
+        assert!(source.project.is_none());
+    }
+
+    #[test]
+    fn parse_git_remote_github_https_dotgit_suffix() {
+        let source = parse_git_remote("https://github.com/githubnext/ado-aw.git").unwrap();
+        assert_eq!(source.provider, RepoProvider::Github);
+        assert_eq!(source.owner, "githubnext");
+        assert_eq!(source.repo, "ado-aw");
+    }
+
+    #[test]
+    fn parse_git_remote_github_ssh() {
+        let source = parse_git_remote("git@github.com:githubnext/ado-aw.git").unwrap();
+        assert_eq!(source.provider, RepoProvider::Github);
+        assert_eq!(source.owner, "githubnext");
+        assert_eq!(source.repo, "ado-aw");
+    }
+
+    #[test]
+    fn parse_git_remote_github_ssh_no_dotgit() {
+        let source = parse_git_remote("git@github.com:githubnext/ado-aw").unwrap();
+        assert_eq!(source.provider, RepoProvider::Github);
+        assert_eq!(source.owner, "githubnext");
+        assert_eq!(source.repo, "ado-aw");
+    }
+
+    #[test]
+    fn parse_git_remote_rejects_ghes() {
+        // GitHub Enterprise is out of scope for v1; the parser must
+        // not silently accept a non-github.com host as Github.
+        assert!(parse_git_remote("https://github.example.com/owner/repo").is_err());
+    }
+
+    #[test]
+    fn parse_git_remote_rejects_unrelated() {
+        assert!(parse_git_remote("https://gitlab.com/owner/repo").is_err());
+        assert!(parse_git_remote("not-a-url").is_err());
+        // Missing repo half.
+        assert!(parse_git_remote("https://github.com/owner").is_err());
+        assert!(parse_git_remote("git@github.com:owner").is_err());
+    }
+
+    #[test]
+    fn repo_source_url_ado_shape() {
+        let source = RepoSource {
+            provider: RepoProvider::AdoGit,
+            owner: "myorg".to_string(),
+            repo: "myrepo".to_string(),
+            project: Some("MyProject".to_string()),
+        };
+        assert_eq!(
+            source.url(),
+            "https://dev.azure.com/myorg/MyProject/_git/myrepo"
+        );
+    }
+
+    #[test]
+    fn repo_source_url_github_shape() {
+        let source = RepoSource {
+            provider: RepoProvider::Github,
+            owner: "githubnext".to_string(),
+            repo: "ado-aw".to_string(),
+            project: None,
+        };
+        assert_eq!(source.url(), "https://github.com/githubnext/ado-aw");
+    }
+
+    /// In release builds (where `debug_assert!` is a no-op), an
+    /// `AdoGit` `RepoSource` with `project: None` must still produce
+    /// a well-formed-ish URL — we tolerate the empty middle segment
+    /// rather than panicking, because `url()` is comparison-only.
+    /// `parse_git_remote` never produces this shape in practice; this
+    /// test only documents the defensive fallback.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn repo_source_url_ado_without_project_release_fallback() {
+        let source = RepoSource {
+            provider: RepoProvider::AdoGit,
+            owner: "myorg".to_string(),
+            repo: "myrepo".to_string(),
+            project: None,
+        };
+        // Empty project segment is the documented fallback.
+        assert_eq!(source.url(), "https://dev.azure.com/myorg//_git/myrepo");
+    }
+
+    // ==================== Service-connection resolver ====================
+
+    #[test]
+    fn is_uuid_like_accepts_canonical() {
+        assert!(is_uuid_like("12345678-1234-1234-1234-1234567890ab"));
+        assert!(is_uuid_like("ABCDEF12-3456-7890-ABCD-EF1234567890"));
+    }
+
+    #[test]
+    fn is_uuid_like_rejects_non_uuid() {
+        assert!(!is_uuid_like("ado-aw-github"));
+        assert!(!is_uuid_like(""));
+        // Wrong length.
+        assert!(!is_uuid_like("12345678-1234-1234-1234-1234567890"));
+        // Missing hyphens.
+        assert!(!is_uuid_like("123456781234123412341234567890ab"));
+        // Hyphens in wrong positions.
+        assert!(!is_uuid_like("12345678-12341-1234-1234-1234567890a"));
+        // Non-hex character.
+        assert!(!is_uuid_like("12345678-1234-1234-1234-1234567890zz"));
+    }
+
+    #[test]
+    fn pick_service_endpoint_id_single_match() {
+        let body = serde_json::json!({
+            "count": 1,
+            "value": [
+                { "id": "abc-123", "name": "ado-aw-github" }
+            ]
+        });
+        let id = pick_service_endpoint_id(&body, "ado-aw-github", "AgentPlayground").unwrap();
+        assert_eq!(id, "abc-123");
+    }
+
+    #[test]
+    fn pick_service_endpoint_id_no_match_bails_with_useful_message() {
+        let body = serde_json::json!({ "count": 0, "value": [] });
+        let err = pick_service_endpoint_id(&body, "missing-conn", "AgentPlayground")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("No GitHub service connection named 'missing-conn'"));
+        assert!(err.contains("'AgentPlayground'"));
+        assert!(err.contains("Project settings"));
+    }
+
+    #[test]
+    fn pick_service_endpoint_id_multi_match_bails_with_disambiguation_hint() {
+        let body = serde_json::json!({
+            "count": 2,
+            "value": [
+                { "id": "abc-1", "name": "shared-name" },
+                { "id": "abc-2", "name": "shared-name" }
+            ]
+        });
+        let err = pick_service_endpoint_id(&body, "shared-name", "AgentPlayground")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("2 GitHub service connections named 'shared-name'"));
+        assert!(err.contains("GUID"));
+    }
+
+    #[test]
+    fn pick_service_endpoint_id_missing_value_array_bails() {
+        let body = serde_json::json!({ "count": 0 });
+        let err = pick_service_endpoint_id(&body, "any", "AgentPlayground")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing `value` array"));
+    }
+
+    /// The `endpointNames=` query-string value must encode `&` and `=`
+    /// — otherwise an endpoint named e.g. `foo&bar=baz` would
+    /// shatter into two `endpointNames` params and a stray `baz=` on
+    /// the URL. We use a custom `QUERY_VALUE` set rather than
+    /// `NON_ALPHANUMERIC` (over-encodes `-`/`_`/`.`/`~`) or
+    /// `PATH_SEGMENT` (leaves `&`/`=` unencoded). Test pins both:
+    /// query metachars escape, RFC 3986 unreserved chars don't.
+    #[test]
+    fn service_connection_query_value_encodes_query_metacharacters() {
+        let encoded =
+            percent_encoding::utf8_percent_encode("foo&bar=baz", QUERY_VALUE).to_string();
+        assert!(!encoded.contains('&'), "must encode '&' in query value");
+        assert!(!encoded.contains('='), "must encode '=' in query value");
+        assert!(encoded.contains("foo"));
+        assert!(encoded.contains("bar"));
+        assert!(encoded.contains("baz"));
+    }
+
+    #[test]
+    fn service_connection_query_value_preserves_unreserved_chars() {
+        // RFC 3986 unreserved set: A-Z a-z 0-9 - _ . ~ — these must
+        // pass through literally. Pins that we don't regress to
+        // `NON_ALPHANUMERIC` which would over-encode them.
+        let encoded =
+            percent_encoding::utf8_percent_encode("ado-aw_github.v1~beta", QUERY_VALUE)
+                .to_string();
+        assert_eq!(encoded, "ado-aw_github.v1~beta");
+    }
+
+    // ==================== match_definitions_in (provider-agnostic) ====================
+
+    /// `match_definitions_in` only consults `process.yamlFilename` and
+    /// `name` — both stable across provider. A GitHub-source
+    /// `DefinitionSummary` (one with `repository.type = "GitHub"` in
+    /// the ADO response) must match a locally-detected lock file
+    /// exactly as well as a TfsGit one does. This pins that contract
+    /// so a future refactor of `match_definitions_in` can't
+    /// accidentally start gating on provider.
+    #[test]
+    fn match_definitions_in_works_for_github_source_definition() {
+        use std::path::PathBuf;
+
+        let definitions = vec![DefinitionSummary {
+            id: 99,
+            name: "Daily smoke noop".to_string(),
+            process: Some(ProcessInfo {
+                yaml_filename: Some("/tests/safe-outputs/noop.lock.yml".to_string()),
+            }),
+            queue_status: Some("enabled".to_string()),
+            path: Some("\\smoke".to_string()),
+            repository: Some(Repository {
+                url: Some("https://github.com/githubnext/ado-aw".to_string()),
+                name: Some("githubnext/ado-aw".to_string()),
+                repo_type: Some("GitHub".to_string()),
+                id: None,
+            }),
+            revision: Some(1),
+        }];
+        let detected = vec![crate::detect::DetectedPipeline {
+            yaml_path: PathBuf::from("tests/safe-outputs/noop.lock.yml"),
+            source: "tests/safe-outputs/noop.md".to_string(),
+            version: "0.32.0".to_string(),
+        }];
+
+        let matched = match_definitions_in(&definitions, &detected);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].id, 99);
+        assert_eq!(matched[0].name, "Daily smoke noop");
     }
 
     // ==================== Org URL normalization ====================
