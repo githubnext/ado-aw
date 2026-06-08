@@ -226,6 +226,7 @@ impl CompilerExtension for AdoScriptExtension {
                 GateContext::PullRequest,
                 &pr_checks,
                 GATE_EVAL_PATH,
+                self.synthetic_pr_active,
             )?);
         }
         if !pipeline_checks.is_empty() {
@@ -233,6 +234,10 @@ impl CompilerExtension for AdoScriptExtension {
                 GateContext::PipelineCompletion,
                 &pipeline_checks,
                 GATE_EVAL_PATH,
+                // Pipeline-completion gates never observe synthetic PR
+                // semantics; the coalesce wiring only applies to
+                // PullRequest gates.
+                false,
             )?);
         }
         Ok(steps)

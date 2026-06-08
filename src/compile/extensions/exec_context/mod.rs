@@ -101,6 +101,11 @@ pub struct ExecContextExtension {
     /// means "is `on.pr` configured" — future trigger contributors
     /// will OR in their own checks here.
     any_contributor_active: bool,
+    /// Whether `on.pr.synthetic-from-ci` is on. Passed through to the
+    /// PR contributor so it can emit coalesced
+    /// `SYSTEM_PULLREQUEST_*` env vars (real value preferred, synthPr
+    /// Setup-job output as fallback).
+    synthetic_pr_active: bool,
 }
 
 impl ExecContextExtension {
@@ -120,9 +125,13 @@ impl ExecContextExtension {
         // activation answer.
         let any_contributor_active =
             pr_contributor_will_activate_with_cfg(&config, front_matter);
+        let synthetic_pr_active = front_matter
+            .pr_trigger()
+            .is_some_and(|p| p.synthetic_from_ci);
         Self {
             config,
             any_contributor_active,
+            synthetic_pr_active,
         }
     }
 
@@ -134,7 +143,14 @@ impl ExecContextExtension {
         // "on by default when on.pr is configured" behaviour without
         // the user having to write `execution-context.pr: {}`.
         let pr_cfg = self.config.pr.clone().unwrap_or_default();
-        vec![Contributor::Pr(PrContextContributor::new(pr_cfg))]
+        // The PR contributor needs to know whether synthetic-from-ci
+        // is on so it can emit coalesced SYSTEM_PULLREQUEST_* env vars
+        // (real value preferred, synthPr output as fallback).
+        let synthetic_pr_active = self.synthetic_pr_active;
+        vec![Contributor::Pr(PrContextContributor::new(
+            pr_cfg,
+            synthetic_pr_active,
+        ))]
     }
 }
 

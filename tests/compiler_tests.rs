@@ -4251,10 +4251,14 @@ fn test_exec_context_pr_only_downloads_bundle_in_agent_job_not_setup() {
         "Agent job is missing the exec-context-pr prepare step (the consumer of the download)"
     );
     if let Some(setup) = extract_job_block(&yaml, "Setup") {
+        // Setup-job script bundle download IS expected when on.pr is
+        // configured (synthetic-from-ci default-on emits the synthPr
+        // step, which is a bundle consumer). Only assert the Agent
+        // job has the bundle download; the Setup-job download is the
+        // synth feature's correct behaviour.
         assert!(
-            !setup.contains("Download ado-aw scripts"),
-            "Setup job should NOT have the script bundle download when the only consumer is the Agent-job exec-context-pr step. \
-             Setup block contents: {}",
+            setup.contains("Download ado-aw scripts"),
+            "Setup job SHOULD have the script bundle download when synthetic-from-ci is on (the synthPr step is a bundle consumer). Setup block: {}",
             setup
         );
     }
@@ -5182,8 +5186,8 @@ fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
         "Should emit the PR context prepare step displayName"
     );
     assert!(
-        compiled.contains("condition: eq(variables['Build.Reason'], 'PullRequest')"),
-        "Prepare step must be gated on PR builds at the ADO condition layer"
+        compiled.contains("condition: or(eq(variables['Build.Reason'], 'PullRequest'), eq(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true'))"),
+        "Prepare step must be gated on PR builds OR synthetic-PR Setup outputs at the ADO condition layer (synthetic-from-ci is default-on)"
     );
     assert!(
         compiled.contains("SYSTEM_ACCESSTOKEN: $(System.AccessToken)"),
@@ -5219,15 +5223,18 @@ fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
         "v7: the git_fetch wrapper moved into the bundle"
     );
 
-    // v7: env passthrough — Node reads the ADO predefined vars from
-    // `process.env` (see `index.ts::main` and `validate.ts`).
+    // v7 + synthetic-from-ci (default-on): env passthrough — the bundle
+    // reads ADO predefined vars from `process.env`. The compiler emits
+    // coalesced macros that prefer the real `System.PullRequest.*` vars
+    // (true PR builds) and fall back to the `synthPr` Setup-job outputs
+    // (CI builds promoted via exec-context-pr-synth.js).
     assert!(
-        compiled.contains("SYSTEM_PULLREQUEST_PULLREQUESTID: $(System.PullRequest.PullRequestId)"),
-        "Prepare step must pass the PR id through to the bundle"
+        compiled.contains("SYSTEM_PULLREQUEST_PULLREQUESTID: $[ coalesce(variables['System.PullRequest.PullRequestId'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_ID']) ]"),
+        "Prepare step must pass the PR id (coalesced with synthPr fallback) through to the bundle"
     );
     assert!(
-        compiled.contains("SYSTEM_PULLREQUEST_TARGETBRANCH: $(System.PullRequest.TargetBranch)"),
-        "Prepare step must pass the PR target branch through to the bundle"
+        compiled.contains("SYSTEM_PULLREQUEST_TARGETBRANCH: $[ coalesce(variables['System.PullRequest.TargetBranch'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH']) ]"),
+        "Prepare step must pass the PR target branch (coalesced with synthPr fallback) through to the bundle"
     );
     assert!(
         compiled.contains("SYSTEM_TEAMPROJECT: $(System.TeamProject)"),
@@ -5344,6 +5351,11 @@ fn test_execution_context_pr_does_not_leak_system_accesstoken() {
         // Stage 3 SafeOutputs executor — separate non-agent job; needs
         // the token to apply safe outputs against ADO. See PR #873.
         "Execute safe outputs (Stage 3)",
+        // Setup-job synth-PR step. Needs the token to call the ADO REST
+        // API to look up the active PR for `Build.SourceBranch` on
+        // CI-triggered builds (issue #916). Runs in the Setup job, well
+        // before the AWF sandbox is provisioned for the Agent job.
+        "Resolve synthetic PR context",
     ];
 
     let mut saw_exec_context_step = false;

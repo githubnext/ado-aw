@@ -1118,10 +1118,19 @@ pub fn build_gate_spec(ctx: GateContext, checks: &[FilterCheck]) -> anyhow::Resu
 /// Compile filter checks into a bash gate step using an external evaluator
 /// script. ADO variables are passed via the step's `env:` block (idiomatic
 /// ADO pattern), and the gate spec is base64-encoded in GATE_SPEC.
+///
+/// When `synthetic_pr_active` is true AND `ctx == GateContext::PullRequest`,
+/// PR-identifier env vars (`ADO_PR_ID`, `ADO_SOURCE_BRANCH`,
+/// `ADO_TARGET_BRANCH`) are emitted using `$[ coalesce(...) ]` so they
+/// pick up either the real `System.PullRequest.*` variables (on a true
+/// PR build) OR the `synthPr` Setup-job outputs (on a CI build promoted
+/// by `exec-context-pr-synth.js`). Also exports `AW_SYNTHETIC_PR` so
+/// `gate/bypass.ts` knows to skip the "not a PR build" bypass.
 pub fn compile_gate_step_external(
     ctx: GateContext,
     checks: &[FilterCheck],
     evaluator_path: &str,
+    synthetic_pr_active: bool,
 ) -> anyhow::Result<String> {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
 
@@ -1147,8 +1156,36 @@ pub fn compile_gate_step_external(
     step.push_str("    SYSTEM_ACCESSTOKEN: $(System.AccessToken)\n");
     step.push_str(&format!("    GATE_SPEC: \"{}\"\n", spec_b64));
 
+    // Synthetic-from-ci flag: tells gate/bypass.ts that this CI build
+    // has been promoted to PR semantics, so the "not a PullRequest
+    // build" bypass must not auto-pass. Always safe to emit (the gate
+    // checks it strictly for the literal "true"), but only meaningful
+    // for PR gates.
+    let pr_synth_active = synthetic_pr_active && matches!(ctx, GateContext::PullRequest);
+    if pr_synth_active {
+        step.push_str(
+            "    AW_SYNTHETIC_PR: $[ coalesce(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], '') ]\n",
+        );
+    }
+
     for (env_var, ado_macro) in &exports {
-        step.push_str(&format!("    {}: {}\n", env_var, ado_macro));
+        let macro_str = if pr_synth_active {
+            match *env_var {
+                "ADO_PR_ID" => {
+                    "$[ coalesce(variables['System.PullRequest.PullRequestId'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_ID']) ]"
+                }
+                "ADO_SOURCE_BRANCH" => {
+                    "$[ coalesce(variables['System.PullRequest.SourceBranch'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_SOURCEBRANCH']) ]"
+                }
+                "ADO_TARGET_BRANCH" => {
+                    "$[ coalesce(variables['System.PullRequest.TargetBranch'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH']) ]"
+                }
+                _ => ado_macro,
+            }
+        } else {
+            ado_macro
+        };
+        step.push_str(&format!("    {}: {}\n", env_var, macro_str));
     }
 
     Ok(step)
@@ -1698,6 +1735,7 @@ mod tests {
             GateContext::PullRequest,
             &[],
             "/tmp/ado-aw-scripts/ado-script/gate.js",
+            false,
         )
         .unwrap();
         assert!(result.is_empty());
@@ -1716,8 +1754,7 @@ mod tests {
         let result = compile_gate_step_external(
             GateContext::PullRequest,
             &checks,
-            "/tmp/ado-aw-scripts/ado-script/gate.js",
-        )
+            "/tmp/ado-aw-scripts/ado-script/gate.js", false)
         .unwrap();
         assert!(result.contains("- bash:"), "should be a bash step");
         assert!(
@@ -1748,8 +1785,7 @@ mod tests {
         let result = compile_gate_step_external(
             GateContext::PullRequest,
             &checks,
-            "/tmp/ado-aw-scripts/ado-script/gate.js",
-        )
+            "/tmp/ado-aw-scripts/ado-script/gate.js", false)
         .unwrap();
         assert!(
             result.contains("ADO_BUILD_REASON"),
@@ -1775,8 +1811,7 @@ mod tests {
         let result = compile_gate_step_external(
             GateContext::PipelineCompletion,
             &checks,
-            "/tmp/ado-aw-scripts/ado-script/gate.js",
-        )
+            "/tmp/ado-aw-scripts/ado-script/gate.js", false)
         .unwrap();
         assert!(
             result.contains("name: pipelineGate"),
@@ -1805,8 +1840,7 @@ mod tests {
         let result = compile_gate_step_external(
             GateContext::PullRequest,
             &checks,
-            "/tmp/ado-aw-scripts/ado-script/gate.js",
-        )
+            "/tmp/ado-aw-scripts/ado-script/gate.js", false)
         .unwrap();
         assert!(
             result.contains("ADO_REPO_ID"),
@@ -1831,8 +1865,7 @@ mod tests {
         let result = compile_gate_step_external(
             GateContext::PullRequest,
             &checks,
-            "/tmp/ado-aw-scripts/ado-script/gate.js",
-        )
+            "/tmp/ado-aw-scripts/ado-script/gate.js", false)
         .unwrap();
         // Verify tier-1 (pipeline-var only) checks do not export API-related env vars
         // Look for the env: block exports (YAML format with leading spaces)
@@ -1948,8 +1981,7 @@ mod tests {
         let _step = compile_gate_step_external(
             GateContext::PullRequest,
             &checks,
-            "/tmp/ado-aw-scripts/ado-script/gate.js",
-        )
+            "/tmp/ado-aw-scripts/ado-script/gate.js", false)
         .unwrap();
 
         // Verify the spec captures all three filters with correct fact dependencies

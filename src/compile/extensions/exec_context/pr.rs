@@ -68,11 +68,19 @@ use super::contributor::ContextContributor;
 /// (unless explicitly disabled via `execution-context.pr.enabled: false`).
 pub(super) struct PrContextContributor {
     config: PrContextConfig,
+    /// Whether `on.pr.synthetic-from-ci` is on for this agent. Drives
+    /// emission of the coalesced `SYSTEM_PULLREQUEST_*` env vars so the
+    /// bundle reads either real PR identifiers (true PR builds) or the
+    /// `synthPr` Setup-job outputs (CI builds promoted via synth).
+    synthetic_pr_active: bool,
 }
 
 impl PrContextContributor {
-    pub(super) fn new(config: PrContextConfig) -> Self {
-        Self { config }
+    pub(super) fn new(config: PrContextConfig, synthetic_pr_active: bool) -> Self {
+        Self {
+            config,
+            synthetic_pr_active,
+        }
     }
 }
 
@@ -113,19 +121,40 @@ impl ContextContributor for PrContextContributor {
         // block. Node receives it on `process.env` and passes it to
         // the spawned `git` subprocess via `GIT_CONFIG_*` env vars
         // (never argv). It is NEVER visible to the agent step.
+        //
+        // When `synthetic-from-ci` is on, the PR-identifier env vars
+        // are emitted using `$[ coalesce(...) ]` so the bundle picks
+        // up either the real `System.PullRequest.*` (on a true PR
+        // build) OR the synthPr Setup-job output (on a CI build
+        // promoted via exec-context-pr-synth.js). The step's
+        // condition is also broadened in the
+        // `compile-exec-context-cond` todo.
+        let (pr_id_macro, target_branch_macro, condition) = if self.synthetic_pr_active {
+            (
+                "$[ coalesce(variables['System.PullRequest.PullRequestId'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_ID']) ]",
+                "$[ coalesce(variables['System.PullRequest.TargetBranch'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH']) ]",
+                "or(eq(variables['Build.Reason'], 'PullRequest'), eq(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true'))",
+            )
+        } else {
+            (
+                "$(System.PullRequest.PullRequestId)",
+                "$(System.PullRequest.TargetBranch)",
+                "eq(variables['Build.Reason'], 'PullRequest')",
+            )
+        };
         format!(
             r#"- bash: |
     set -euo pipefail
     node '{EXEC_CONTEXT_PR_PATH}'
   env:
     SYSTEM_ACCESSTOKEN: $(System.AccessToken)
-    SYSTEM_PULLREQUEST_PULLREQUESTID: $(System.PullRequest.PullRequestId)
-    SYSTEM_PULLREQUEST_TARGETBRANCH: $(System.PullRequest.TargetBranch)
+    SYSTEM_PULLREQUEST_PULLREQUESTID: {pr_id_macro}
+    SYSTEM_PULLREQUEST_TARGETBRANCH: {target_branch_macro}
     SYSTEM_TEAMPROJECT: $(System.TeamProject)
     BUILD_REPOSITORY_NAME: $(Build.Repository.Name)
     BUILD_SOURCESDIRECTORY: $(Build.SourcesDirectory)
   displayName: "Stage PR execution context (aw-context/pr/*)"
-  condition: eq(variables['Build.Reason'], 'PullRequest')"#
+  condition: {condition}"#
         )
     }
 
