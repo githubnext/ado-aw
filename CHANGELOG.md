@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.33.0](https://github.com/githubnext/ado-aw/compare/v0.32.0...v0.33.0) (2026-06-08)
+
+
+### Features
+
+* **enable:** support GitHub-source pipelines via --service-connection ([#905](https://github.com/githubnext/ado-aw/issues/905)) ([6ab5f9a](https://github.com/githubnext/ado-aw/commit/6ab5f9a50efb44858e166813fe6ea318548353d6))
+
+
+### Bug Fixes
+
+* **test:** permit Stage 3 executor SYSTEM_ACCESSTOKEN env mapping ([#887](https://github.com/githubnext/ado-aw/issues/887)) ([e3beb0f](https://github.com/githubnext/ado-aw/commit/e3beb0ff6e15d377d061bcf4fc1ee95e72336215))
+
 ## [0.32.0](https://github.com/githubnext/ado-aw/compare/v0.31.1...v0.32.0) (2026-06-07)
 
 
