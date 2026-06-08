@@ -10,6 +10,7 @@ import type {
   GitPullRequestIteration,
   GitPullRequestIterationChanges,
 } from "azure-devops-node-api/interfaces/GitInterfaces.js";
+import { PullRequestStatus } from "azure-devops-node-api/interfaces/GitInterfaces.js";
 import { BuildStatus, type Build } from "azure-devops-node-api/interfaces/BuildInterfaces.js";
 
 const SLEEP_MS = 1000;
@@ -92,6 +93,33 @@ export async function getPullRequestById(
   return withRetry("getPullRequestById", async () => {
     const git = await (await getWebApi()).getGitApi();
     return git.getPullRequestById(prId, project);
+  });
+}
+
+/**
+ * Lists active pull requests whose `sourceRefName` matches the given
+ * value. Used by `exec-context-pr-synth` to discover the open PR for
+ * `Build.SourceBranch` on CI-triggered builds (no Build Validation
+ * branch policy required).
+ *
+ * Returns an empty array if no PRs match. The ADO REST API caps page
+ * size; for the synth path we deliberately fetch only the first page
+ * (200 PRs) since the synth contract requires *exactly one* match —
+ * a source branch with >200 simultaneous active PRs against it is
+ * pathological and the bundle will skip via the "multi-match" path.
+ */
+export async function listActivePullRequestsBySourceRef(
+  project: string,
+  repoId: string,
+  sourceRefName: string,
+): Promise<GitPullRequest[]> {
+  return withRetry("listActivePullRequestsBySourceRef", async () => {
+    const git = await (await getWebApi()).getGitApi();
+    return git.getPullRequests(
+      repoId,
+      { sourceRefName, status: PullRequestStatus.Active },
+      project,
+    );
   });
 }
 
