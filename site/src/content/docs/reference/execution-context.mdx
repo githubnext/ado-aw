@@ -1,0 +1,249 @@
+---
+title: "Execution Context"
+description: "Reference for the always-on execution-context plugin that stages PR diff context before the agent runs."
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+The **execution-context plugin** is an always-on compiler extension that stages a
+focused set of per-run context signals on disk *before* the agent starts. For
+PR-triggered builds, it fetches the target branch (with a bearer token it keeps
+strictly in its own step) and resolves the merge-base SHA — the part the agent
+cannot safely do inside its own sandbox — then hands the agent the pre-populated
+SHAs and a tailored prompt fragment so the agent can run `git diff`, `git log`, and
+`git show` directly without re-fetching anything.
+
+<Aside type="note" title="Always-on, not a tool">
+  There is no `tools:` entry to enable this. The extension is registered on every
+  compiled pipeline; individual contributors gate themselves based on your `on:`
+  trigger configuration. If you have `on.pr:` configured, the PR contributor
+  activates automatically.
+</Aside>
+
+## Why this exists
+
+ADO's default `checkout: self` is shallow (`fetchDepth: 1`), does not fetch the PR
+target branch, and does not persist the OAuth bearer into `.git/config` for later
+reuse. Every PR-reviewer agent has historically re-invented the same ~120 lines of
+bash to work around this.
+
+The execution-context plugin owns that step centrally — but only the part the agent
+cannot do itself:
+
+- **Fetches the PR target branch** with progressive deepening until `git merge-base`
+  resolves. Requires the bearer; cannot happen inside the AWF sandbox.
+- **Writes `base.sha` and `head.sha`** so the agent can reuse them across many `git
+  diff` invocations without repeating the resolution.
+- **Appends a prompt fragment** listing ready-to-use `git` commands and ADO MCP
+  tool calls (with PR id / project / repo pre-filled).
+
+The agent does its own diff, show, log, and stat work. All git objects are already
+local once the precompute step finishes.
+
+## Contributors
+
+| Contributor | Activates when | Output layout |
+|-------------|----------------|---------------|
+| `pr` | `on.pr` is configured (and not explicitly disabled) | `aw-context/pr/` |
+
+Future contributors (pipeline-completion, scheduled, manual) will plug in via the
+same internal `ContextContributor` trait without changing the agent-facing layout.
+
+## Front-matter configuration
+
+```yaml
+execution-context:
+  enabled: true   # master switch; default: true
+  pr:
+    enabled: true # default: true when on.pr is configured
+```
+
+All keys are optional. When the `execution-context:` block is omitted entirely,
+defaults activate per trigger — PR context is on whenever `on.pr` is set.
+
+### Fields
+
+**`enabled`** (`bool`, default `true`) — master switch. When `false`, no contributor
+runs and no `aw-context/` directory is staged.
+
+**`pr.enabled`** (`bool`, default `true` when `on.pr` is configured) — whether to
+activate the PR contributor. Set `false` to opt out (e.g. when your agent already
+does its own precompute, or simply does not need diff context).
+
+<Aside type="tip">
+  `pr.enabled: true` without an `on.pr` trigger has no effect — the contributor
+  would be dead code, and silently widening the bash allow-list with git commands
+  on a non-PR agent would be a footgun. The compiler detects this and skips
+  activation.
+</Aside>
+
+Setting `pr.enabled: false` also suppresses the automatic git commands in the
+agent's bash allow-list (see [Bash allow-list](#bash-allow-list-auto-extension)
+below).
+
+## Agent-visible layout
+
+For PR-triggered builds, the precompute step stages files under
+`$(Build.SourcesDirectory)/aw-context/` — i.e. the agent's working directory.
+
+### Success case
+
+```
+aw-context/
+  pr/
+    base.sha   # merge-base SHA (40-char hex, no trailing newline)
+    head.sha   # PR head SHA   (40-char hex, no trailing newline)
+```
+
+`base.sha` is the common ancestor of the PR head and the PR target branch —
+`git merge-base` in both the synthetic-merge-commit and progressive-deepening
+paths. This makes `git diff $BASE..$HEAD` produce the same change set regardless
+of how ADO checked out the workspace.
+
+### Failure case
+
+```
+aw-context/
+  pr/
+    error.txt  # one-line failure reason
+```
+
+`base.sha` / `head.sha` are not written on failure. The bundle also appends a
+failure prompt fragment explaining the reason and reminding the agent not to
+produce an empty review — it should surface the failure via `report_incomplete` or
+fall back to the ADO API.
+
+### Short identifiers in the prompt
+
+PR id, ADO project name, and repository name are **not** staged as files. They are
+interpolated directly into the prompt fragment ("This is PR #4242 in project
+`OneBranch` / repository `my-repo`.") as natural English and as literal arguments
+in example ADO MCP tool calls (`repo_get_pull_request_by_id`,
+`repo_list_pull_request_threads`, `repo_create_pull_request_thread`). Files are
+reserved for the opaque 40-char SHAs the agent reuses across many commands.
+
+## Bash allow-list auto-extension
+
+When the PR contributor activates, these read-only git commands are added to the
+agent's bash allow-list:
+
+```
+git
+git diff
+git log
+git show
+git status
+git rev-parse
+git symbolic-ref
+```
+
+| `tools.bash` setting | Behaviour |
+|----------------------|-----------|
+| `bash:` omitted (allow-all) | Extension is a no-op — all commands are already permitted. |
+| `bash: ["..."]` (explicit list) | The 7 git commands are appended to your list. |
+| `pr.enabled: false` | The git commands are **not** added. |
+
+This keeps the agent's bash surface intentional: opting out of the PR contributor
+also opts out of the corresponding git capability.
+
+## What the precompute step does
+
+The step invokes `node /tmp/ado-aw-scripts/ado-script/exec-context-pr.js` with
+`SYSTEM_ACCESSTOKEN` plus the five `SYSTEM_*` / `BUILD_*` identifier env vars.
+The bundle:
+
+<Steps>
+1. **Reads ADO-injected env vars** — `System.PullRequest.*`, `System.TeamProject`,
+   `Build.Repository.Name`. No manual ref discovery needed.
+
+2. **Validates identifiers** with strict allowlist regexes (PR_ID ⊆ digits;
+   PROJECT/REPO ⊆ alphanumeric + `._-`; PROJECT additionally allows space;
+   PR_TARGET_BRANCH ⊆ alphanumeric + `._/-`). Writes `error.txt` and the failure
+   prompt fragment on failure.
+
+3. **Detects the merge-commit shape.** If `HEAD` has ≥ 3 tokens in `git rev-list
+   --parents HEAD` (ADO's synthetic merge commit for PR builds), uses `HEAD^2` as
+   the PR head and computes `git merge-base HEAD^1 HEAD^2` — no target-branch
+   fetch needed.
+
+4. **Otherwise fetches the PR target branch** with progressive deepening: `--depth=200`,
+   `500`, `2000`, then `--unshallow`. After each fetch, attempts `git merge-base
+   origin/<target> HEAD` and proceeds to the next depth if it cannot resolve yet.
+
+5. **Writes `base.sha` and `head.sha`** on success and appends the success prompt
+   fragment to `/tmp/awf-tools/agent-prompt.md`.
+
+6. **Appends a failure prompt fragment** (writes `error.txt`) if identifier
+   validation or merge-base resolution exhausts the depth budget.
+</Steps>
+
+The bundle exits 0 on every soft failure (the agent surfaces problems via the
+prompt). Only true infra failures (e.g. the workspace root is not writable) produce
+exit 1, propagated by `set -euo pipefail` as a hard pipeline failure.
+
+The step is gated by `condition: eq(variables['Build.Reason'], 'PullRequest')`, so
+it is a no-op on manual or scheduled runs of a PR-triggered pipeline.
+
+### Why a TypeScript bundle?
+
+The previous implementation embedded ~190 lines of bash heredoc into the emitted
+YAML, with only end-to-end shellcheck for coverage. The TypeScript bundle gains:
+
+- **Unit-test coverage** — 32 vitest tests across `validate.ts`, `git.ts`,
+  `merge-base.ts`, `prompt.ts`, plus 3 end-to-end smoke tests against a synthetic
+  merge git repo.
+- **Tighter trust boundary** — the bearer lives only in the Node process's env and
+  is injected into spawned `git` children via `GIT_CONFIG_*` env vars (see
+  [Trust boundary](#trust-boundary) below), never into the wrapping bash shell.
+- **Smaller emitted YAML** — `pr.rs` shrinks from ~320 lines to ~145; the emitted
+  step body is 4 lines instead of ~190.
+
+See [ado-script](/ado-aw/reference/ado-script/) for the bundle architecture and
+release asset layout.
+
+## Trust boundary
+
+The PR contributor must fetch the PR target branch but doing so requires an OAuth
+bearer. `ado-aw` preserves the Stage 1 read-only invariant:
+
+| Mechanism | Decision |
+|-----------|----------|
+| Override `checkout: self` with `persistCredentials: true` | **Rejected.** Writes the bearer into `.git/config` inside the workspace, which is then mounted into the AWF sandbox. |
+| Override `checkout: self` with `fetchDepth: 0` | **Rejected.** Unnecessary — the precompute fetches exactly the refs it needs. |
+| In-step `SYSTEM_ACCESSTOKEN` + `GIT_CONFIG_*` bearer env | **Adopted.** The token is mapped only into the `exec-context-pr.js` step's `env:` block. The bundle's `git.ts::bearerEnv` injects `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_0` / `GIT_CONFIG_VALUE_0` into the *spawned `git` child's* env only — never into the Node process's global `process.env`, never via `git -c` on argv. After the Node process exits, the bearer is gone. |
+
+The compile-time test `test_execution_context_pr_does_not_leak_system_accesstoken`
+walks the generated YAML and asserts that `SYSTEM_ACCESSTOKEN` appears only in the
+precompute step's `env:` block, never in the agent step's.
+
+## Migrating from a hand-rolled precompute
+
+If you have a `steps:` block that manually fetches the target branch and resolves
+merge-base: delete that block, ensure `on.pr` is configured, and read
+`aw-context/pr/{base,head}.sha` directly from the agent. The prompt fragment is
+appended automatically.
+
+## Notes and edge cases
+
+- **Non-`self` checkouts.** v1 diffs only the `self` checkout. Additional
+  repositories in `repos:` do not receive their own `aw-context/` entries.
+- **Workspace alias.** When `workspace:` points to a non-`self` alias,
+  `aw-context/` is still relative to `$(Build.SourcesDirectory)` — the pipeline's
+  working directory, not the alias directory.
+- **Ordering.** The precompute step runs in the Agent job after the `checkout: self`
+  step and after "Prepare agent prompt" (so it can append to the prompt file), but
+  before the agent itself (so the agent sees the appended fragment).
+- **Identifiers in the prompt, SHAs on disk.** Short values (PR id, project, repo)
+  are embedded in the prompt heredoc as natural English; long opaque 40-char SHAs
+  go to disk where `BASE=$(cat aw-context/pr/base.sha)` is the natural shell idiom.
+
+## Compiler internals
+
+- Extension: `src/compile/extensions/exec_context/mod.rs`
+  (`ExtensionPhase::Tool`)
+- Contributor trait: `src/compile/extensions/exec_context/contributor.rs`
+- PR contributor: `src/compile/extensions/exec_context/pr.rs`
+- Front-matter types: `ExecutionContextConfig` / `PrContextConfig` in
+  `src/compile/types.rs`
+- Compile tests: `tests/compiler_tests.rs` (search `test_execution_context_pr_*`)
+- Bash lint fixture: `execution-context-agent.md`

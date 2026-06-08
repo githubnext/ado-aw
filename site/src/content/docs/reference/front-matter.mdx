@@ -152,6 +152,10 @@ parameters:                    # optional ADO runtime parameters (surfaced in UI
     displayName: "Clear agent memory"
     type: boolean
     default: false
+# execution-context:          # always-on PR diff precompute (see docs/execution-context.md)
+#   enabled: true             # master switch; default: true
+#   pr:
+#     enabled: true           # default: true when on.pr is configured; set false to opt out
 ---
 
 
@@ -478,3 +482,26 @@ The filter gate step uses `System.AccessToken` for self-cancellation
 If the token is unavailable, the gate step logs a warning and the build
 completes as "Succeeded" (with the agent job skipped via condition)
 rather than "Cancelled".
+
+## Execution Context
+
+The `execution-context:` block controls the **always-on execution-context plugin**
+that stages PR diff context on disk before the agent runs. For PR-triggered
+pipelines, it fetches the target branch and resolves the merge-base SHA, writes
+`aw-context/pr/base.sha` and `aw-context/pr/head.sha`, and appends a tailored
+prompt fragment — so the agent can run `git diff $BASE..$HEAD` directly without
+re-fetching anything.
+
+```yaml
+execution-context:
+  enabled: true  # master switch; default: true
+  pr:
+    enabled: true  # default: true when on.pr is configured; set false to opt out
+```
+
+When the block is omitted entirely, the PR contributor activates automatically
+whenever `on.pr:` is configured.
+
+See the [Execution Context reference](/ado-aw/reference/execution-context/) for the
+full agent-visible layout, bash allow-list behavior, trust boundary, and migration
+notes.
