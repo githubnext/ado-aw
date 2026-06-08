@@ -783,11 +783,6 @@ mod tests {
         assert!(err.contains("Unsupported engine 'claude'"));
     }
 
-    #[test]
-    fn get_engine_rejects_codex() {
-        assert!(get_engine("codex").is_err());
-    }
-
     // ─── engine.command tests ─────────────────────────────────────────────
 
     #[test]

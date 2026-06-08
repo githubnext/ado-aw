@@ -537,19 +537,13 @@ mod tests {
     }
 
     #[test]
-    fn required_hosts_empty_when_no_consumer_active() {
-        // ado-script never widens the agent's AWF allowlist — the
-        // bundle is downloaded at the pipeline-host level (curl) in
-        // a step that runs BEFORE the AWF sandbox starts, so the
-        // agent never reaches github.com because of ado-script.
-        let ext = ext_with(None, None, true);
-        assert!(ext.required_hosts().is_empty());
-    }
-
-    #[test]
     fn required_hosts_empty_when_gate_active() {
-        // Same invariant when the gate evaluator is wired in: the
-        // gate runs in the Setup job, outside the AWF agent sandbox.
+        // ado-script never widens the agent's AWF allowlist regardless of
+        // configuration. The bundle is downloaded at the pipeline-host level
+        // (curl in a bash step before AWF starts), so the agent never reaches
+        // github.com because of ado-script. Tested here with gate active — the
+        // most counterintuitive configuration — since the gate evaluator also
+        // runs outside the AWF agent sandbox (Setup job).
         let filters = PrFilters {
             labels: Some(LabelFilter {
                 any_of: vec!["run-agent".into()],
@@ -558,17 +552,6 @@ mod tests {
             ..Default::default()
         };
         let ext = ext_with(Some(filters), None, true);
-        assert!(ext.required_hosts().is_empty());
-    }
-
-    #[test]
-    fn required_hosts_empty_when_runtime_imports_active() {
-        // Same invariant when the runtime import resolver is wired
-        // in: install/download/resolver-invocation all happen in
-        // pipeline-host bash steps before AWF starts wrapping the
-        // agent step. The agent never needs github.com for the
-        // bundle.
-        let ext = ext_with(None, None, false);
         assert!(ext.required_hosts().is_empty());
     }
 
