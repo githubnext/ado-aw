@@ -234,7 +234,7 @@ pub async fn discover_ado_aw_pipelines(
     auth: &AdoAuth,
     scope: DiscoveryScope,
     local_lock_paths: Option<&[PathBuf]>,
-    active_only: bool,
+    include_disabled: bool,
 ) -> Result<Vec<DiscoveredPipeline>> {
     let definitions = list_definitions(client, ctx, auth)
         .await
@@ -242,27 +242,28 @@ pub async fn discover_ado_aw_pipelines(
 
     let scoped = apply_scope_filter(definitions, &scope, &ctx.repo_url());
 
-    // Active-only filter: drop `disabled` / `paused` definitions *before*
-    // the per-definition Preview fan-out below, since each Preview call is
-    // the expensive part of discovery. This is the actual speedup for
+    // By default, drop `disabled` / `paused` definitions *before* the
+    // per-definition Preview fan-out below, since each Preview call is the
+    // expensive part of discovery. This is the actual speedup for
     // `--all-repos` runs against large projects. Definitions with an
     // absent `queueStatus` are treated as active so we never silently skip
-    // a definition the API didn't annotate.
-    let filtered = if active_only {
+    // a definition the API didn't annotate. Pass `--include-disabled` to
+    // opt back into Previewing every in-scope definition.
+    let filtered = if include_disabled {
+        scoped
+    } else {
         let before = scoped.len();
         let kept: Vec<DefinitionSummary> =
             scoped.into_iter().filter(is_active_definition).collect();
         let skipped = before - kept.len();
         if skipped > 0 {
             debug!(
-                "Active-only filter skipped {skipped} disabled/paused definition(s) \
-                 before the Preview step ({} remain).",
+                "Skipped {skipped} disabled/paused definition(s) before the Preview step \
+                 ({} remain). Pass --include-disabled to include them.",
                 kept.len()
             );
         }
         kept
-    } else {
-        scoped
     };
 
     // Build a (normalized yamlFilename → local lock path) map for the
@@ -353,8 +354,8 @@ fn apply_scope_filter(
     }
 }
 
-/// Returns `true` if a definition should be considered "active" for the
-/// `--active-only` discovery filter.
+/// Returns `true` if a definition should be considered "active" — i.e.
+/// kept by default (when `--include-disabled` is not passed).
 ///
 /// Only `queueStatus == "disabled"` and `"paused"` are treated as
 /// inactive (a paused definition exists but won't queue new runs, so it's
@@ -733,10 +734,11 @@ pub async fn resolve_definitions_via_discovery(
     scope: DiscoveryScope,
     local_lock_paths: Option<&[PathBuf]>,
     source_filter: Option<&str>,
-    active_only: bool,
+    include_disabled: bool,
 ) -> Result<Vec<MatchedDefinition>> {
     let discovered =
-        discover_ado_aw_pipelines(client, ctx, auth, scope, local_lock_paths, active_only).await?;
+        discover_ado_aw_pipelines(client, ctx, auth, scope, local_lock_paths, include_disabled)
+            .await?;
 
     // Normalize the user-supplied `--source` value through the same
     // canonical form the compiler uses for the marker JSON's `source`
@@ -997,7 +999,7 @@ mod tests {
         assert_eq!(kept[0].id, 43);
     }
 
-    // ── is_active_definition / active-only filter ───────────────────
+    // ── is_active_definition / default disabled-pruning filter ──────
 
     fn def_with_status(id: u64, status: Option<&str>) -> DefinitionSummary {
         let mut d = def_with(id, "d", None, None);
