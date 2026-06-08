@@ -271,43 +271,8 @@ fn resolve_source(
     repository_name_override: Option<&str>,
     service_connection: Option<&str>,
 ) -> Result<ResolvedSource> {
-    match parsed_remote {
-        Ok(source) if source.provider == RepoProvider::AdoGit => {
-            if service_connection.is_some() {
-                anyhow::bail!(
-                    "--service-connection is only valid when the source repository is on GitHub. \
-                     The current git remote ({}) is an Azure DevOps Git repository.",
-                    remote_url.unwrap_or("?")
-                );
-            }
-            if repository_name_override.is_some() {
-                anyhow::bail!(
-                    "--repository-name is only valid when the source repository is on GitHub. \
-                     The current git remote ({}) is an Azure DevOps Git repository.",
-                    remote_url.unwrap_or("?")
-                );
-            }
-            Ok(ResolvedSource::AdoGit { source })
-        }
-        Ok(mut source) => {
-            // GitHub remote.
-            let sc = service_connection.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "--service-connection <name-or-guid> is required when the source repository is on GitHub. \
-                     Create a GitHub service connection in the target ADO project (Project settings → \
-                     Service connections → GitHub) and pass its name or GUID."
-                )
-            })?;
-            if let Some(over) = repository_name_override {
-                let (owner, repo) = split_owner_repo_arg(over)?;
-                source.owner = owner;
-                source.repo = repo;
-            }
-            Ok(ResolvedSource::Github {
-                source,
-                service_connection: sc.to_string(),
-            })
-        }
+    let parsed = match parsed_remote {
+        Ok(source) => source,
         Err(_) => {
             // Remote is missing or unparseable; require explicit
             // flags to treat as GitHub source.
@@ -324,13 +289,56 @@ fn resolve_source(
                 )
             })?;
             let (owner, repo) = split_owner_repo_arg(name)?;
-            Ok(ResolvedSource::Github {
+            return Ok(ResolvedSource::Github {
                 source: RepoSource {
                     provider: RepoProvider::Github,
                     owner,
                     repo,
                     project: None,
                 },
+                service_connection: sc.to_string(),
+            });
+        }
+    };
+
+    // Match on `provider` directly (rather than guarded patterns with
+    // a catch-all `Ok(_)` arm) so adding a new `RepoProvider` variant
+    // is a compile-time exhaustiveness error instead of silently
+    // falling into the GitHub code path.
+    match parsed.provider {
+        RepoProvider::AdoGit => {
+            if service_connection.is_some() {
+                anyhow::bail!(
+                    "--service-connection is only valid when the source repository is on GitHub. \
+                     The current git remote ({}) is an Azure DevOps Git repository.",
+                    remote_url.unwrap_or("?")
+                );
+            }
+            if repository_name_override.is_some() {
+                anyhow::bail!(
+                    "--repository-name is only valid when the source repository is on GitHub. \
+                     The current git remote ({}) is an Azure DevOps Git repository.",
+                    remote_url.unwrap_or("?")
+                );
+            }
+            Ok(ResolvedSource::AdoGit { source: parsed })
+        }
+        RepoProvider::Github => {
+            let mut source = parsed;
+            let sc = service_connection.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--service-connection <name-or-guid> is required when the source repository is on GitHub. \
+                     Create a GitHub service connection in the target ADO project (Project settings → \
+                     Service connections → GitHub) and pass its name or GUID."
+                )
+            })?;
+            if let Some(over) = repository_name_override {
+                let (owner, repo) = split_owner_repo_arg(over)?;
+                source.owner = owner;
+                source.repo = repo;
+            }
+            Ok(ResolvedSource::Github {
+                source,
                 service_connection: sc.to_string(),
             })
         }

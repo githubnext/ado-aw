@@ -350,15 +350,20 @@ fn normalize_repo_url(url: &str) -> String {
     let decoded = percent_encoding::percent_decode_str(url)
         .decode_utf8_lossy()
         .into_owned();
-    // Trim a trailing `.git` (after stripping a trailing `/`) so the
-    // form ADO returns in `repository.url` (typically without `.git`)
-    // compares equal to the form callers pass in via `RepoSource::url()`
-    // or that we POST in `build_create_body` for GitHub
-    // (`https://github.com/owner/repo.git`). Without this, GitHub-source
-    // pipelines would silently miss the `CurrentRepo` filter.
+    // Three-pass trim handles every realistic and pathological form
+    // without depending on the order ADO and GitHub emit them in:
+    //   `repo`        → `repo`
+    //   `repo/`       → `repo`
+    //   `repo.git`    → `repo`
+    //   `repo.git/`   → `repo`  (trailing `/` first, then `.git`)
+    //   `repo/.git`   → `repo`  (no trailing `/`, then `.git`, then `/`)
+    // The final `/` trim only matters for the `/.git` form — no
+    // real-world ADO or GitHub URL takes that shape, but the cost
+    // here is one extra method call, so we may as well be exhaustive.
     decoded
         .trim_end_matches('/')
         .trim_end_matches(".git")
+        .trim_end_matches('/')
         .to_ascii_lowercase()
 }
 
@@ -949,6 +954,33 @@ mod tests {
         let kept = apply_scope_filter(defs, &DiscoveryScope::CurrentRepo, &current);
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].id, 43);
+    }
+
+    // ── normalize_repo_url ──────────────────────────────────────────
+
+    /// `normalize_repo_url`'s three-pass strip must collapse every
+    /// realistic *and* pathological suffix combination to the same
+    /// canonical form. Pins the contract so a future reorder of the
+    /// `.trim_end_matches` chain can't silently break it.
+    #[test]
+    fn normalize_repo_url_collapses_all_suffix_forms() {
+        let want = "https://github.com/githubnext/ado-aw";
+        for input in [
+            "https://github.com/githubnext/ado-aw",
+            "https://github.com/githubnext/ado-aw/",
+            "https://github.com/githubnext/ado-aw.git",
+            "https://github.com/githubnext/ado-aw.git/",
+            "https://github.com/githubnext/ado-aw/.git",
+            // Casing normalises too.
+            "HTTPS://GITHUB.COM/GitHubNext/ADO-AW.git",
+        ] {
+            assert_eq!(
+                normalize_repo_url(input),
+                want,
+                "normalize_repo_url({:?}) should produce the canonical form",
+                input
+            );
+        }
     }
 
     // ── is_direct_match ──────────────────────────────────────────────
