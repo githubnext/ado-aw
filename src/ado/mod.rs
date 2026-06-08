@@ -267,7 +267,18 @@ impl RepoSource {
 /// GitHub Enterprise (`github.example.com`) is **not** matched in v1.
 pub fn parse_git_remote(remote_url: &str) -> Result<RepoSource> {
     if let Ok(ctx) = parse_ado_remote(remote_url) {
-        let owner = ctx.org_name().unwrap_or("").to_string();
+        // Defensive: every shape `parse_ado_remote` accepts populates
+        // `org_url` with a `/{org}` segment, so `org_name()` should
+        // always return `Some`. Bail explicitly on the unreachable
+        // path rather than silently producing an empty `owner` that
+        // would surface later as a confusing ADO API error.
+        let owner = ctx.org_name().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Parsed '{}' as an ADO remote but could not extract the org segment from '{}'",
+                remote_url,
+                ctx.org_url
+            )
+        })?.to_string();
         return Ok(RepoSource {
             provider: RepoProvider::AdoGit,
             owner,
@@ -1114,6 +1125,42 @@ pub const PATH_SEGMENT: &percent_encoding::AsciiSet = &percent_encoding::CONTROL
     .add(b':')
     .add(b'!');
 
+/// Characters that must be percent-encoded when used as a URL
+/// **query-string value** (the bit after `?key=` and before `&` /
+/// `#`). Preserves the RFC 3986 unreserved set (`A-Z`, `a-z`, `0-9`,
+/// `-`, `_`, `.`, `~`) so common identifiers like `ado-aw-github` are
+/// emitted literally rather than as `ado%2Daw%2Dgithub` — strictly
+/// correct ADO/RFC behaviour either way, but the unencoded form is
+/// what humans read in debug logs and what most servers' strict
+/// matchers prefer. Encodes:
+///
+/// - query-syntax metachars (`&`, `=`, `#`, `?`) that would split
+///   the parameter,
+/// - `%` (escape char) and `+` (form-encoding space alias),
+/// - whitespace and structural ASCII (`/`, `:`, `@`, `<`, `>`, `"`,
+///   `'`, `{`, `}`, `` ` ``).
+///
+/// Stricter than `NON_ALPHANUMERIC` (which would encode `-`/`_`/`.`/`~`)
+/// and weaker than `PATH_SEGMENT` (which does *not* encode `&`/`=`).
+pub const QUERY_VALUE: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'\'')
+    .add(b'#')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'{')
+    .add(b'}')
+    .add(b'/')
+    .add(b'%')
+    .add(b'@')
+    .add(b':')
+    .add(b'&')
+    .add(b'=')
+    .add(b'+');
+
 /// Look up an ADO Git repository's GUID by name.
 ///
 /// Calls `GET /_apis/git/repositories/{repoName}?api-version=7.1` and reads
@@ -1197,9 +1244,11 @@ pub async fn resolve_service_connection_id(
         percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
         // The endpoint name is a query-string value (not a path
         // segment), so `&` and `=` must be percent-encoded or they'd
-        // split the parameter. `PATH_SEGMENT` deliberately leaves
-        // both unescaped; use `NON_ALPHANUMERIC` for query values.
-        percent_encoding::utf8_percent_encode(trimmed, percent_encoding::NON_ALPHANUMERIC),
+        // split the parameter. Use `QUERY_VALUE` rather than
+        // `PATH_SEGMENT` (leaves `&`/`=` unencoded) or
+        // `NON_ALPHANUMERIC` (over-encodes `-`/`_`/`.`/`~`); the
+        // common `ado-aw-github` style emits literally.
+        percent_encoding::utf8_percent_encode(trimmed, QUERY_VALUE),
     );
 
     debug!("Looking up GitHub service connection '{}': {}", trimmed, url);
@@ -2214,21 +2263,30 @@ mod tests {
     /// The `endpointNames=` query-string value must encode `&` and `=`
     /// — otherwise an endpoint named e.g. `foo&bar=baz` would
     /// shatter into two `endpointNames` params and a stray `baz=` on
-    /// the URL. `PATH_SEGMENT` leaves both unescaped (legal sub-delims
-    /// in a path segment), so we use `NON_ALPHANUMERIC` for query
-    /// values. Test pins that we don't regress.
+    /// the URL. We use a custom `QUERY_VALUE` set rather than
+    /// `NON_ALPHANUMERIC` (over-encodes `-`/`_`/`.`/`~`) or
+    /// `PATH_SEGMENT` (leaves `&`/`=` unencoded). Test pins both:
+    /// query metachars escape, RFC 3986 unreserved chars don't.
     #[test]
     fn service_connection_query_value_encodes_query_metacharacters() {
-        let encoded = percent_encoding::utf8_percent_encode(
-            "foo&bar=baz",
-            percent_encoding::NON_ALPHANUMERIC,
-        )
-        .to_string();
+        let encoded =
+            percent_encoding::utf8_percent_encode("foo&bar=baz", QUERY_VALUE).to_string();
         assert!(!encoded.contains('&'), "must encode '&' in query value");
         assert!(!encoded.contains('='), "must encode '=' in query value");
         assert!(encoded.contains("foo"));
         assert!(encoded.contains("bar"));
         assert!(encoded.contains("baz"));
+    }
+
+    #[test]
+    fn service_connection_query_value_preserves_unreserved_chars() {
+        // RFC 3986 unreserved set: A-Z a-z 0-9 - _ . ~ — these must
+        // pass through literally. Pins that we don't regress to
+        // `NON_ALPHANUMERIC` which would over-encode them.
+        let encoded =
+            percent_encoding::utf8_percent_encode("ado-aw_github.v1~beta", QUERY_VALUE)
+                .to_string();
+        assert_eq!(encoded, "ado-aw_github.v1~beta");
     }
 
     // ==================== match_definitions_in (provider-agnostic) ====================

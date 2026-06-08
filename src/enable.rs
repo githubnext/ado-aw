@@ -353,10 +353,21 @@ fn resolve_source(
 /// URL) round-trips identically to `--repository-name owner/repo`.
 /// Mirrors `split_owner_repo` in `src/ado/mod.rs` which does the same
 /// for parsed remote URLs.
+///
+/// Rejects inputs with more than one `/` (`owner/repo/extra`) — a CLI
+/// arg is held to a stricter contract than a parsed URL, where
+/// trailing path noise is more forgivable. Without this check, the
+/// extra segment slides into the `repository.name` POST field and
+/// ADO returns an opaque API error rather than the operator seeing
+/// the targeted "must be in the form 'owner/repo'" message here.
 fn split_owner_repo_arg(value: &str) -> Result<(String, String)> {
     let trimmed = value.trim();
-    let parts: Vec<&str> = trimmed.splitn(2, '/').collect();
+    let parts: Vec<&str> = trimmed.splitn(3, '/').collect();
     if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
+        // Catches both "no slash at all" (parts.len() == 1) and
+        // "more than one slash" (parts.len() == 3, the third part is
+        // the tail after the second `/`). Empty halves are rejected
+        // here too: `/repo` → ["", "repo"], `owner/` → ["owner", ""].
         anyhow::bail!(
             "--repository-name must be in the form 'owner/repo' (got: '{}')",
             value
@@ -810,6 +821,21 @@ mod tests {
         // invalid. Must bail rather than silently treat `repo == ""`
         // as success.
         assert!(split_owner_repo_arg("owner/.git").is_err());
+    }
+
+    #[test]
+    fn split_owner_repo_arg_rejects_extra_path_segments() {
+        // splitn(3, '/') guards against `owner/repo/extra` silently
+        // flowing into `repository.name = "owner/repo/extra"` and
+        // surfacing as an opaque ADO API error later.
+        let err = split_owner_repo_arg("owner/repo/extra")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("owner/repo"));
+        assert!(err.contains("owner/repo/extra"));
+
+        // Even further nesting.
+        assert!(split_owner_repo_arg("a/b/c/d").is_err());
     }
 
     // ============ resolve_source ============
