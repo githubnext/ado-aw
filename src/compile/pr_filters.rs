@@ -241,7 +241,7 @@ mod tests {
 
     #[test]
     fn test_generate_agentic_depends_on_with_pr_filters() {
-        let result = generate_agentic_depends_on(&[], true, false, &[], false);
+        let result = generate_agentic_depends_on(&[], true, false, &[], false, false);
         assert!(result.contains("dependsOn: Setup"), "should depend on Setup");
         assert!(result.contains("condition:"), "should have condition");
         assert!(result.contains("Build.Reason"), "should check Build.Reason");
@@ -251,14 +251,14 @@ mod tests {
     #[test]
     fn test_generate_agentic_depends_on_setup_only_no_condition() {
         let step: serde_yaml::Value = serde_yaml::from_str("bash: echo hello").unwrap();
-        let result = generate_agentic_depends_on(&[step], false, false, &[], false);
+        let result = generate_agentic_depends_on(&[step], false, false, &[], false, false);
         assert_eq!(result, "dependsOn: Setup");
         assert!(!result.contains("condition:"), "no condition without PR filters");
     }
 
     #[test]
     fn test_generate_agentic_depends_on_nothing() {
-        let result = generate_agentic_depends_on(&[], false, false, &[], false);
+        let result = generate_agentic_depends_on(&[], false, false, &[], false, false);
         assert!(result.is_empty());
     }
 
@@ -544,6 +544,7 @@ mod tests {
             false,
             &["eq(variables['Custom.ShouldRun'], 'true')"],
             false,
+            false,
         );
         // No setup steps, no PR filters → no dependsOn, but the expression produces a condition.
         assert!(!result.contains("dependsOn"), "no dependsOn without setup/filters");
@@ -559,6 +560,7 @@ mod tests {
             true,
             false,
             &["eq(variables['Custom.Flag'], 'yes')"],
+            false,
             false,
         );
         assert!(result.contains("prGate.SHOULD_RUN"), "should check gate output");

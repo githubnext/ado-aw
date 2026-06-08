@@ -2359,23 +2359,52 @@ pub fn generate_agentic_depends_on(
     has_pipeline_filters: bool,
     expressions: &[&str],
     is_jobs_template_target: bool,
+    synthetic_pr_active: bool,
 ) -> String {
     let has_gate = has_pr_filters || has_pipeline_filters;
-    let has_setup = !setup_steps.is_empty() || has_gate;
-    let has_internal_condition = has_gate || !expressions.is_empty();
+    let has_setup = !setup_steps.is_empty() || has_gate || synthetic_pr_active;
+    let has_internal_condition = has_gate || !expressions.is_empty() || synthetic_pr_active;
 
     // Build the shared condition body once. Reused across the internal-only
     // (standalone/1es/stage) path and the dual-branch jobs-template path.
     let condition_body: Option<String> = if has_internal_condition {
         let mut parts = vec!["succeeded()".to_string()];
-        if has_pr_filters {
+        // Synthetic-from-ci: the synthPr Setup-job step may have decided
+        // this build should self-skip (no matching PR, wrong target
+        // branch, no matching changed files). Always honour that flag —
+        // it must trump every other reason to run.
+        if synthetic_pr_active {
             parts.push(
-                r"or(
+                r"ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_SKIP'], 'true')"
+                    .to_string(),
+            );
+        }
+        if has_pr_filters {
+            // With synthetic-from-ci, the agent should run when EITHER
+            // (a) it is a real PR build (existing path) OR
+            // (b) the synthPr step promoted this CI build to PR semantics
+            //     (synthPr.AW_SYNTHETIC_PR=true) OR
+            // (c) the gate passed for any other reason.
+            // Without synthetic-from-ci, the existing two-arm condition
+            // is preserved verbatim.
+            if synthetic_pr_active {
+                parts.push(
+                    r"or(
+         eq(variables['Build.Reason'], 'PullRequest'),
+         eq(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true'),
+         eq(dependencies.Setup.outputs['prGate.SHOULD_RUN'], 'true')
+       )"
+                    .to_string(),
+                );
+            } else {
+                parts.push(
+                    r"or(
          ne(variables['Build.Reason'], 'PullRequest'),
          eq(dependencies.Setup.outputs['prGate.SHOULD_RUN'], 'true')
        )"
-                .to_string(),
-            );
+                    .to_string(),
+                );
+            }
         }
         if has_pipeline_filters {
             parts.push(
@@ -3301,12 +3330,16 @@ pub async fn compile_shared(
         }
     }
 
+    let synthetic_pr_active = front_matter
+        .pr_trigger()
+        .is_some_and(|p| p.synthetic_from_ci);
     let agentic_depends_on = generate_agentic_depends_on(
         &front_matter.setup,
         has_pr_filters,
         has_pipeline_filters,
         &expressions,
         matches!(front_matter.target, crate::compile::types::CompileTarget::Job),
+        synthetic_pr_active,
     );
     let job_timeout = generate_job_timeout(front_matter);
 
@@ -8146,14 +8179,14 @@ safe-outputs:
 
     #[test]
     fn test_generate_agentic_depends_on_empty_steps() {
-        assert!(generate_agentic_depends_on(&[], false, false, &[], false).is_empty());
+        assert!(generate_agentic_depends_on(&[], false, false, &[], false, false).is_empty());
     }
 
     #[test]
     fn test_generate_agentic_depends_on_with_steps() {
         let step: serde_yaml::Value = serde_yaml::from_str("bash: x").unwrap();
         assert_eq!(
-            generate_agentic_depends_on(&[step], false, false, &[], false),
+            generate_agentic_depends_on(&[step], false, false, &[], false, false),
             "dependsOn: Setup"
         );
     }
@@ -8165,7 +8198,7 @@ safe-outputs:
         // dual-branch ${{ if }} template expressions so external template
         // parameters merge correctly.
         let step: serde_yaml::Value = serde_yaml::from_str("bash: x").unwrap();
-        let out = generate_agentic_depends_on(&[step], false, false, &[], true);
+        let out = generate_agentic_depends_on(&[step], false, false, &[], true, false);
         // dependsOn branches
         assert!(
             out.contains("${{ if eq(length(parameters.dependsOn), 0) }}:"),
@@ -8196,7 +8229,7 @@ safe-outputs:
     fn test_generate_agentic_depends_on_jobs_template_no_setup() {
         // No internal Setup, no gates: only the non-empty-external branches
         // are emitted (both dependsOn and condition default to omitted).
-        let out = generate_agentic_depends_on(&[], false, false, &[], true);
+        let out = generate_agentic_depends_on(&[], false, false, &[], true, false);
         assert!(
             !out.contains("${{ if eq(length(parameters.dependsOn), 0) }}:"),
             "should not emit empty-deps branch when no internal Setup: {out}"
@@ -8224,7 +8257,7 @@ safe-outputs:
         // With internal PR gate, the condition block emits BOTH branches:
         // empty-external uses the existing internal expression verbatim;
         // non-empty-external ANDs the external clause into the body.
-        let out = generate_agentic_depends_on(&[], true, false, &[], true);
+        let out = generate_agentic_depends_on(&[], true, false, &[], true, false);
         assert!(
             out.contains("${{ if eq(parameters.condition, '') }}:"),
             "missing empty-condition branch: {out}"
@@ -8243,6 +8276,47 @@ safe-outputs:
             out.matches("prGate.SHOULD_RUN").count(),
             2,
             "PR gate clause must appear in both empty/non-empty branches: {out}"
+        );
+    }
+
+    #[test]
+    fn test_agentic_depends_on_synthetic_pr_active_emits_skip_guard_and_broader_pr_clause() {
+        // synthetic_pr_active=true + has_pr_filters=true → emits the
+        // AW_SYNTHETIC_PR_SKIP guard and broadens the PR clause to
+        // accept real PR builds OR synthPr promotion OR gate-passed.
+        let out = generate_agentic_depends_on(&[], true, false, &[], false, true);
+        assert!(out.contains("dependsOn: Setup"), "should depend on Setup");
+        assert!(
+            out.contains("ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_SKIP'], 'true')"),
+            "must honour the synth-skip flag: {out}"
+        );
+        assert!(
+            out.contains("eq(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true')"),
+            "must accept synthetic-PR promotion as an activation reason: {out}"
+        );
+        assert!(
+            out.contains("eq(variables['Build.Reason'], 'PullRequest')"),
+            "must still accept real PR builds: {out}"
+        );
+        // Old "ne(Build.Reason, PullRequest)" arm must be GONE — that was
+        // the pre-synthetic permissive default and now contradicts the
+        // synth-skip guard.
+        assert!(
+            !out.contains("ne(variables['Build.Reason'], 'PullRequest')"),
+            "synth path must replace the permissive ne(Build.Reason, PullRequest) arm: {out}"
+        );
+    }
+
+    #[test]
+    fn test_agentic_depends_on_synthetic_pr_without_filters_still_emits_skip_guard() {
+        // synthetic_pr_active=true but no filters → Setup job still
+        // exists (the synthPr step lives there) so the dependsOn must
+        // be present and the skip guard must apply.
+        let out = generate_agentic_depends_on(&[], false, false, &[], false, true);
+        assert!(out.contains("dependsOn: Setup"), "should depend on Setup: {out}");
+        assert!(
+            out.contains("ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_SKIP'], 'true')"),
+            "must honour the synth-skip flag even without filters: {out}"
         );
     }
 
