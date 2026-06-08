@@ -8,7 +8,7 @@ import { cancelBuild } from "../shared/ado-client.js";
 import { logWarning, addBuildTag } from "../shared/vso-logger.js";
 
 export async function selfCancelIfRequested(spec: GateSpec): Promise<void> {
-  addBuildTag(`${spec.context.tag_prefix}:skipped`);
+  addBuildTag(`${spec.context.tag_prefix}.skipped`);
 
   const project = process.env.ADO_PROJECT ?? "";
   const buildIdRaw = process.env.ADO_BUILD_ID ?? "";
