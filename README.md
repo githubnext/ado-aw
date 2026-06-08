@@ -204,22 +204,21 @@ sees.
      write: ado-agent-write
    ```
 
-> [!IMPORTANT]
-> If you configure any safe output that requires write access (e.g.
-> `create-pull-request`, `create-work-item`, `add-pr-comment`, `queue-build`,
-> `upload-pipeline-artifact`, and others — see the [Safe Outputs](#safe-outputs)
-> table for the full list) but omit `permissions.write`, compilation will fail
-> with a clear error. This is a safety check — write operations must always
-> have an explicitly configured credential.
+> [!NOTE]
+> `permissions.write` is **optional**. The Stage 3 executor always has a
+> write-capable token available via `$(System.AccessToken)` (the pipeline's
+> built-in OAuth token, running as *Project Collection Build Service*). Configure
+> `permissions.write` only when you need cross-org writes or named-identity
+> attribution — it overrides the default token with an ARM-minted credential.
 
 #### Permission Combinations
 
 | Configuration | Agent can read ADO? | Safe outputs can write? |
 |---|---|---|
-| Both `read` + `write` | ✅ | ✅ |
-| Only `read` | ✅ | ❌ |
-| Only `write` | ❌ | ✅ |
-| Neither (default) | ❌ | ❌ |
+| Both `read` + `write` | ✅ | ✅ (via ARM-minted token) |
+| Only `read` | ✅ | ✅ (via `$(System.AccessToken)`) |
+| Only `write` | ❌ | ✅ (via ARM-minted token) |
+| Neither (default) | ❌ | ✅ (via `$(System.AccessToken)`) |
 
 ### Step 4: Authorize the Pipeline
 
@@ -255,6 +254,7 @@ the service connections. Approve the permissions and the pipeline is ready.
 | `network` | object | — | Additional allowed/blocked hosts |
 | `inlined-imports` | boolean | `false` | When `true`, resolves all `{{#runtime-import …}}` markers at compile time; the generated YAML is self-contained but prompt-body edits require recompilation. See [runtime-imports.md](docs/runtime-imports.md). |
 | `env` | map | — | Workflow-level environment variables (reserved, not yet implemented) |
+| `execution-context` | object | — | Configuration for the always-on execution-context plugin (PR context precompute). See [execution-context.md](docs/execution-context.md). |
 
 ### Markdown Body
 
