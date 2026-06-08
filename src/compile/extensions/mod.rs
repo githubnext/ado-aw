@@ -697,18 +697,32 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
         Extension::AdoAwMarker(AdoAwMarkerExtension),
         Extension::GitHub(GitHubExtension),
         Extension::SafeOutputs(SafeOutputsExtension),
-        Extension::AdoScript(Box::new(AdoScriptExtension {
-            pr_filters: front_matter.pr_filters().cloned(),
-            pipeline_filters: front_matter.pipeline_filters().cloned(),
-            inlined_imports: front_matter.inlined_imports,
-            // Tell the ado-script extension whether the PR-context
-            // contributor will activate so it can fire the Agent-job
-            // install/download even when `inlined-imports: true` (no
-            // import.js needed). The two extensions stay loosely
-            // coupled: ExecContextExtension owns invoking the bundle;
-            // AdoScriptExtension owns installing it. Shared helper
-            // keeps the activation predicate in lock-step.
-            exec_context_pr_active: pr_contributor_will_activate(front_matter),
+        Extension::AdoScript(Box::new({
+            // PR trigger config drives both the PR-context contributor
+            // (exec-context-pr.js) and the new synthetic-from-ci path
+            // (exec-context-pr-synth.js). Compute the two flags from
+            // the same source so they stay in lock-step.
+            let pr_cfg = front_matter.pr_trigger();
+            let synthetic_pr_active = pr_cfg.is_some_and(|p| p.synthetic_from_ci);
+            AdoScriptExtension {
+                pr_filters: front_matter.pr_filters().cloned(),
+                pipeline_filters: front_matter.pipeline_filters().cloned(),
+                inlined_imports: front_matter.inlined_imports,
+                // Tell the ado-script extension whether the PR-context
+                // contributor will activate so it can fire the Agent-job
+                // install/download even when `inlined-imports: true` (no
+                // import.js needed). The two extensions stay loosely
+                // coupled: ExecContextExtension owns invoking the bundle;
+                // AdoScriptExtension owns installing it. Shared helper
+                // keeps the activation predicate in lock-step.
+                exec_context_pr_active: pr_contributor_will_activate(front_matter),
+                synthetic_pr_active,
+                pr_trigger_for_synth: if synthetic_pr_active {
+                    pr_cfg.cloned()
+                } else {
+                    None
+                },
+            }
         })),
         // Always-on execution-context extension. Owns the `aw-context/`
         // precompute pipeline. Defaults to `ExecutionContextConfig::default()`
