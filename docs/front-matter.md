@@ -104,6 +104,21 @@ on:                            # trigger configuration (unified under on: key)
       include: [main]
     paths:
       include: [src/*]
+    synthetic-from-ci: true    # default true. When true (and `on.pr.branches.include`
+                               # is non-empty), CI builds on the included branches
+                               # call the ADO REST API at Setup time to find the
+                               # open PR for `Build.SourceBranch`. If exactly one
+                               # matches, the build is promoted to behave as
+                               # `Build.Reason == PullRequest` — gate evaluator
+                               # runs, exec-context-pr stages `aw-context/pr/`,
+                               # and the agent runs against the PR diff. No Build
+                               # Validation branch policy required. Zero or
+                               # multiple matches → the Agent job self-skips
+                               # cleanly. Also auto-emits a top-level `trigger:`
+                               # block mirroring `pr.branches.include` so CI fires
+                               # only on those branches. Set to `false` to opt out
+                               # (requires an operator-installed branch policy).
+                               # See "PR triggering in Azure Repos" callout below.
     filters:                   # runtime PR filters (compiled to gate step)
       title: "*[review]*"
       author:
@@ -328,3 +343,62 @@ The filter gate step uses `System.AccessToken` for self-cancellation
 If the token is unavailable, the gate step logs a warning and the build
 completes as "Succeeded" (with the agent job skipped via condition)
 rather than "Cancelled".
+
+## PR Triggering in Azure Repos
+
+Azure DevOps Services **ignores the YAML `pr:` block unless a per-branch
+Build Validation branch policy is registered server-side**. Without that
+policy, a `git push` to a feature branch fires the compiled pipeline as
+`Build.Reason = IndividualCI` even when an open PR exists — the gate
+evaluator's "not a PR build" bypass triggers and `exec-context-pr.js`
+is skipped. PR-aware agents (e.g. PR reviewers) silently degrade.
+
+`ado-aw` works around this with the always-on `on.pr.synthetic-from-ci`
+feature: when `on.pr` is configured, a Setup-job script
+(`exec-context-pr-synth.js`) calls the ADO REST API at build time to
+find the active PR for `Build.SourceBranch` and promotes the build to
+PR semantics if a single match is found. **No branch policy required.**
+
+### How it works under the hood
+
+On every CI build with `on.pr.synthetic-from-ci: true` (the default):
+
+1. **Real PR build?** If `Build.Reason == PullRequest` (a branch policy
+   is configured), the synth step no-ops and the existing PR path
+   handles everything.
+2. **GitHub-typed repo resource?** GitHub repos already get correct
+   `pr:` semantics from ADO. The synth step no-ops.
+3. **Look up the PR.** Otherwise, the script calls
+   `GET /{project}/_apis/git/repositories/{repoId}/pullrequests`
+   filtered by `sourceRefName == Build.SourceBranch` and
+   `status = active`.
+4. **Filter by target branch.** PRs whose `targetRefName` does not match
+   `on.pr.branches.include` (respecting `exclude`) are dropped.
+5. **Exactly one match.** Zero or multiple matches → emit
+   `AW_SYNTHETIC_PR_SKIP=true`; the Agent job self-skips cleanly with a
+   single info log line. Never noisy, never red.
+6. **Path filter.** If `on.pr.paths` is configured, the script enforces
+   it against the PR's changed-file list (which ADO's CI trigger
+   ignores). Empty intersection → skip.
+7. **Promote.** Otherwise, emit `AW_SYNTHETIC_PR=true` plus the PR
+   identifiers as Setup-job outputs. Downstream `gate.js` and
+   `exec-context-pr.js` env blocks coalesce these with the real
+   `System.PullRequest.*` variables, so the gate evaluator runs the
+   full PR-spec predicates and `aw-context/pr/{base.sha,head.sha}` is
+   staged for the agent.
+
+### Auto-narrowed CI trigger
+
+When `synthetic-from-ci` is on AND `on.pr.branches.include` is
+non-empty, the compiler also auto-emits a top-level `trigger:` block
+mirroring those branches so unrelated branches do not queue builds
+that would only self-skip. Pipeline/schedule triggers and an explicit
+`synthetic-from-ci: false` both suppress this narrowing.
+
+### Opting out
+
+Set `on.pr.synthetic-from-ci: false` to disable. The compiled YAML
+will then contain none of the synthesis wiring (`synthPr`,
+`AW_SYNTHETIC_PR`, `PR_SYNTH_SPEC`) and PR triggering will require an
+operator-installed branch policy as before.
+

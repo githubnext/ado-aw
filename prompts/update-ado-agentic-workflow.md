@@ -44,6 +44,13 @@ triggers → steps → post-steps → setup → teardown → network →
 permissions → parameters
 ```
 
+> **`on.pr` knob update**: when changing `on.pr.branches` or
+> `on.pr.paths`, also confirm whether `synthetic-from-ci` (default
+> `true`) is appropriate. With it on, the compiler emits a Setup-job
+> ADO REST call to discover the open PR for `Build.SourceBranch` and
+> auto-narrows the top-level `trigger:` block to those branches.
+> Reference: [`docs/front-matter.md#pr-triggering-in-azure-repos`](../docs/front-matter.md#pr-triggering-in-azure-repos).
+
 ### Step 3 — Validate the Changes
 
 Run through the validation checklist (see below) before finalizing. Fix any issues and inform the user of corrections made.
