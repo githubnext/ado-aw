@@ -122,6 +122,23 @@ flowchart TD
 
 ---
 
+## Augment your existing pipelines
+
+Already have Azure DevOps pipelines you rely on? You don't have to start from scratch. Compile an agent with `target: job` and ado-aw emits a reusable, job-level template you can drop straight into an existing pipeline -- no rewrites required.
+
+```yaml
+jobs:
+  - job: Build
+    steps: ...
+  - template: agents/review.lock.yml   # the agentic workflow, slotted in
+    parameters:
+      dependsOn: [Build]
+```
+
+The same three-job security chain (Agent → Detection → SafeOutputs) runs as part of your current pipeline, so you can layer continuous AI onto the workflows you already trust. See [Target platforms](/ado-aw/reference/targets/) for details.
+
+---
+
 ## Get started in minutes
 
 <CardGrid>
