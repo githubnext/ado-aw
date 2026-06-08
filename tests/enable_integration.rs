@@ -83,8 +83,8 @@ fn enable_help_describes_github_source_support() {
     );
 }
 
-#[test]
-fn enable_dry_run_against_subdirectory_uses_repo_root_relative_yaml_path() {
+#[tokio::test(flavor = "current_thread")]
+async fn enable_dry_run_against_subdirectory_uses_repo_root_relative_yaml_path() {
     // Regression: previously `enable PATH` joined `pipeline.source`
     // against the scan root rather than the repo root, producing
     // doubled paths like
@@ -93,11 +93,24 @@ fn enable_dry_run_against_subdirectory_uses_repo_root_relative_yaml_path() {
     // `/noop.lock.yml` (relative to scan root) instead of the
     // real repo-relative `/tests/safe-outputs/noop.lock.yml`.
     //
-    // This test exercises the subdirectory PATH form via --dry-run
-    // (so no network calls are made) and asserts:
-    //   1) at least one fixture was found,
-    //   2) the printed yamlFilename starts with `/tests/safe-outputs/`,
-    //   3) no "Failed to read source" errors appear.
+    // `enable` always calls `list_definitions` (to know which
+    // fixtures already exist) even in --dry-run, so we point at a
+    // wiremock that returns an empty list. The dry-run path then
+    // prints the would-be POST body for every fixture without ever
+    // making a real network call.
+    use wiremock::matchers::{method, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"/AgentPlayground/_apis/build/definitions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "count": 0,
+            "value": []
+        })))
+        .mount(&server)
+        .await;
+
     let output = std::process::Command::new(binary())
         .args([
             "enable",
@@ -107,9 +120,16 @@ fn enable_dry_run_against_subdirectory_uses_repo_root_relative_yaml_path() {
             "AgentPlayground",
             "--org",
             "msazuresphere",
+            "--pat",
+            "dummy-pat-for-dry-run",
             "--dry-run",
             "tests/safe-outputs",
         ])
+        // Redirect ADO REST calls at the wiremock; explicit dummy
+        // PAT keeps `resolve_auth` off the Azure-CLI / interactive-
+        // prompt fallback which CI doesn't support.
+        .env("ADO_AW_TEST_ORG_URL", server.uri())
+        .env_remove("AZURE_DEVOPS_EXT_PAT")
         .output()
         .expect("Failed to run ado-aw enable");
     let stdout = String::from_utf8_lossy(&output.stdout);
