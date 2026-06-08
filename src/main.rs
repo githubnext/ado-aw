@@ -79,6 +79,14 @@ enum SecretsCmd {
         /// pass the path in the same case it was compiled with.
         #[arg(long, conflicts_with = "definition_ids")]
         source: Option<String>,
+        /// Include pipelines whose `queueStatus` is `disabled` or
+        /// `paused` in project-wide discovery. By default these are
+        /// skipped before the (expensive) Preview step to speed up
+        /// discovery; only takes effect on the discovery code path
+        /// (`--all-repos` or `--source`). Pipelines without a reported
+        /// status are always treated as active.
+        #[arg(long)]
+        include_disabled: bool,
     },
     /// List variable names + flags on every matched definition. Never prints values.
     List {
@@ -104,6 +112,14 @@ enum SecretsCmd {
         /// pass the path in the same case it was compiled with.
         #[arg(long, conflicts_with = "definition_ids")]
         source: Option<String>,
+        /// Include pipelines whose `queueStatus` is `disabled` or
+        /// `paused` in project-wide discovery. By default these are
+        /// skipped before the (expensive) Preview step to speed up
+        /// discovery; only takes effect on the discovery code path
+        /// (`--all-repos` or `--source`). Pipelines without a reported
+        /// status are always treated as active.
+        #[arg(long)]
+        include_disabled: bool,
     },
     /// Delete a named variable from every matched definition.
     Delete {
@@ -130,6 +146,14 @@ enum SecretsCmd {
         /// pass the path in the same case it was compiled with.
         #[arg(long, conflicts_with = "definition_ids")]
         source: Option<String>,
+        /// Include pipelines whose `queueStatus` is `disabled` or
+        /// `paused` in project-wide discovery. By default these are
+        /// skipped before the (expensive) Preview step to speed up
+        /// discovery; only takes effect on the discovery code path
+        /// (`--all-repos` or `--source`). Pipelines without a reported
+        /// status are always treated as active.
+        #[arg(long)]
+        include_disabled: bool,
     },
 }
 
@@ -985,6 +1009,7 @@ async fn main() -> Result<()> {
                 definition_ids,
                 all_repos,
                 source,
+                include_disabled,
             } => {
                 secrets::run_set(secrets::SetOptions {
                     name: &name,
@@ -999,6 +1024,7 @@ async fn main() -> Result<()> {
                     definition_ids: definition_ids.as_deref(),
                     all_repos,
                     source: source.as_deref(),
+                    include_disabled,
                 })
                 .await?;
             }
@@ -1011,6 +1037,7 @@ async fn main() -> Result<()> {
                 definition_ids,
                 all_repos,
                 source,
+                include_disabled,
             } => {
                 secrets::run_list(secrets::ListOptions {
                     org: org.as_deref(),
@@ -1021,6 +1048,7 @@ async fn main() -> Result<()> {
                     definition_ids: definition_ids.as_deref(),
                     all_repos,
                     source: source.as_deref(),
+                    include_disabled,
                 })
                 .await?;
             }
@@ -1034,6 +1062,7 @@ async fn main() -> Result<()> {
                 definition_ids,
                 all_repos,
                 source,
+                include_disabled,
             } => {
                 secrets::run_delete(secrets::DeleteOptions {
                     name: &name,
@@ -1045,6 +1074,7 @@ async fn main() -> Result<()> {
                     definition_ids: definition_ids.as_deref(),
                     all_repos,
                     source: source.as_deref(),
+                    include_disabled,
                 })
                 .await?;
             }

@@ -180,12 +180,17 @@ pub struct SetOptions<'a> {
     /// template source path (e.g. `agents/security-scan.md`). When set
     /// alongside `all_repos=false`, scopes discovery to the current repo.
     pub source: Option<&'a str>,
+    /// Include `disabled` / `paused` definitions in project-wide
+    /// discovery. By default they are pruned before the Preview step,
+    /// speeding up large projects.
+    pub include_disabled: bool,
 }
 
 /// Decide between the legacy lexical resolver and Preview-driven
 /// discovery based on which flags the caller passed. Returns
 /// `Ok(Some(vec))` on success, `Ok(None)` only when the legacy path
 /// signaled "no local fixtures found; exit clean".
+#[allow(clippy::too_many_arguments)]
 async fn resolve_for_command(
     client: &reqwest::Client,
     ado_ctx: &AdoContext,
@@ -193,6 +198,7 @@ async fn resolve_for_command(
     definition_ids: Option<&[u64]>,
     all_repos: bool,
     source_filter: Option<&str>,
+    include_disabled: bool,
     repo_path: &Path,
 ) -> Result<Option<Vec<MatchedDefinition>>> {
     // Discovery code path: activated by --all-repos or --source.
@@ -268,6 +274,7 @@ async fn resolve_for_command(
             scope,
             local_lock_slice,
             source_filter,
+            include_disabled,
         )
         .await?;
         return Ok(Some(matched));
@@ -330,6 +337,7 @@ pub async fn run_set(opts: SetOptions<'_>) -> Result<()> {
         opts.definition_ids,
         opts.all_repos,
         opts.source,
+        opts.include_disabled,
         &repo_path,
     )
     .await?
@@ -455,6 +463,7 @@ pub struct ListOptions<'a> {
     pub definition_ids: Option<&'a [u64]>,
     pub all_repos: bool,
     pub source: Option<&'a str>,
+    pub include_disabled: bool,
 }
 
 pub async fn run_list(opts: ListOptions<'_>) -> Result<()> {
@@ -482,6 +491,7 @@ pub async fn run_list(opts: ListOptions<'_>) -> Result<()> {
         opts.definition_ids,
         opts.all_repos,
         opts.source,
+        opts.include_disabled,
         &repo_path,
     )
     .await?
@@ -541,6 +551,7 @@ pub struct DeleteOptions<'a> {
     pub definition_ids: Option<&'a [u64]>,
     pub all_repos: bool,
     pub source: Option<&'a str>,
+    pub include_disabled: bool,
 }
 
 pub async fn run_delete(opts: DeleteOptions<'_>) -> Result<()> {
@@ -570,6 +581,7 @@ pub async fn run_delete(opts: DeleteOptions<'_>) -> Result<()> {
         opts.definition_ids,
         opts.all_repos,
         opts.source,
+        opts.include_disabled,
         &repo_path,
     )
     .await?
@@ -678,6 +690,7 @@ pub async fn run_set_github_token(
         definition_ids,
         all_repos: false,
         source: None,
+        include_disabled: false,
     })
     .await
 }
@@ -759,6 +772,7 @@ mod tests {
             None,
             false,
             Some("agents/foo.md"),
+            false,
             tmp.path(),
         )
         .await
@@ -803,6 +817,7 @@ mod tests {
             None,
             true, // --all-repos
             Some("agents/foo.md"),
+            false,
             tmp.path(),
         )
         .await
