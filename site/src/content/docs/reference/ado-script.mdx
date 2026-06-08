@@ -1,16 +1,18 @@
 ---
 title: ado-script
-description: Bundled TypeScript runtime helpers for gate evaluation and import resolution
+description: Bundled TypeScript runtime helpers for gate evaluation, import resolution, and PR execution context
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 `ado-script` is the umbrella name for the TypeScript workspace at
 [`scripts/ado-script/`](https://github.com/githubnext/ado-aw/tree/main/scripts/ado-script).
-It produces small, ncc-bundled Node programs that the **compiler injects into every emitted
-pipeline** as runtime helpers. Today it produces `gate.js`, the
-trigger-filter gate evaluator, and `import.js`, the runtime prompt
-resolver described in [Runtime Imports](/ado-aw/reference/runtime-imports/).
+It produces small, ncc-bundled Node programs that the **compiler injects into emitted
+pipelines** as runtime helpers. Today it produces three bundles:
+
+- **`gate.js`** — trigger-filter gate evaluator (Setup job)
+- **`import.js`** — runtime prompt resolver described in [Runtime Imports](/ado-aw/reference/runtime-imports/) (Agent job)
+- **`exec-context-pr.js`** — PR execution-context precompute described in [Execution Context](/ado-aw/reference/execution-context/) (Agent job, PR builds only)
 
 <Aside type="caution" title="Internal-only">
   `ado-script` is not a user-facing front-matter feature. Authors never write an `ado-script:` block in their agent
@@ -67,6 +69,63 @@ The Stage-2 threat-analysis prompt is **not** runtime-imported.
 binary and inlined into the emitted YAML at compile time, matching
 gh-aw's pattern (their `threat_detection.md` ships with the setup
 action and is read directly from disk — no marker, no resolver).
+
+## What `exec-context-pr.js` does
+
+`exec-context-pr.js` is a single-shot Node program injected into the Agent
+job's prepare phase **only on PR-triggered builds**. It resolves the PR
+merge-base and stages artefacts the agent can use to reason about the diff:
+
+```
+aw-context/
+└── pr/
+    ├── base.sha     # target merge-base SHA (40-char hex)
+    ├── head.sha     # PR head SHA (40-char hex)
+    └── error.txt    # present only on failure; one-line reason
+```
+
+It also appends a tailored prompt fragment to `/tmp/awf-tools/agent-prompt.md`
+(the file assembled by the "Prepare agent prompt" base-YAML step). On success
+the fragment tells the agent its PR number, project, repository, and provides
+pre-filled example ADO MCP tool call arguments. On failure it surfaces a
+graceful degradation message so the agent can still proceed without panicking.
+
+### Merge-base resolution
+
+Two paths, both computing the same "merge-base of target tip and PR head":
+
+1. **Synthetic merge commit** — ADO's default PR checkout produces a merge
+   commit (`HEAD` has ≥ 2 parents). `HEAD^1` is the target tip; `HEAD^2` is
+   the PR head. The bundle runs `git merge-base HEAD^1 HEAD^2`.
+2. **Progressive deepening** — when `HEAD` is a normal commit (shallow clone
+   without a merge commit), the bundle fetches the target branch at increasing
+   depths (`--depth=200`, `500`, `2000`, `--unshallow`) until
+   `git merge-base origin/<target> HEAD` resolves.
+
+### Trust boundary
+
+`SYSTEM_ACCESSTOKEN` is mapped only into this step's `env:` block — never into
+the agent step's env. The bearer is passed to spawned `git` child processes via
+`GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_0` / `GIT_CONFIG_VALUE_0` env vars (the
+`http.extraheader` pattern), so it never appears in argv or in `.git/config`.
+
+### Env-var contract
+
+| Env var | ADO source | Purpose |
+|---|---|---|
+| `SYSTEM_ACCESSTOKEN` | `$(System.AccessToken)` | Bearer for `git fetch` of the target branch |
+| `SYSTEM_PULLREQUEST_PULLREQUESTID` | `$(System.PullRequest.PullRequestId)` | PR number (validated: digits only) |
+| `SYSTEM_PULLREQUEST_TARGETBRANCH` | `$(System.PullRequest.TargetBranch)` | Target branch ref (e.g. `refs/heads/main`) |
+| `SYSTEM_TEAMPROJECT` | `$(System.TeamProject)` | ADO project name (validated: alphanumeric + `. _ -`) |
+| `BUILD_REPOSITORY_NAME` | `$(Build.Repository.Name)` | Repository name (validated: alphanumeric + `. _ -`) |
+| `BUILD_SOURCESDIRECTORY` | `$(Build.SourcesDirectory)` | Workspace root — where `aw-context/pr/` is staged |
+
+All four identifier env vars are validated against strict allowlist regexes
+before any value is interpolated into a git refspec or the agent prompt. A
+validation failure writes `aw-context/pr/error.txt` and a failure-fragment to
+the agent prompt, then exits 0 so the rest of the pipeline can continue.
+
+
 
 ## End-to-end data flow
 
@@ -188,17 +247,24 @@ scripts/ado-script/
 │   │   ├── facts.ts             # fact acquisition (env + REST)
 │   │   ├── predicates.ts        # 11 predicate evaluators + validatePredicateTree + glob ReDoS hardening
 │   │   └── selfcancel.ts        # best-effort build cancellation
-│   └── import/                  # import.js entry point + runtime prompt resolver
-│       ├── index.ts             # main(): expand runtime-import markers in place
-│       └── __tests__/           # marker, path-resolution, and single-pass coverage
+│   ├── import/                  # import.js entry point + runtime prompt resolver
+│   │   ├── index.ts             # main(): expand runtime-import markers in place
+│   │   └── __tests__/           # marker, path-resolution, and single-pass coverage
+│   └── exec-context-pr/         # exec-context-pr.js entry point + PR context modules
+│       ├── index.ts             # main(): validate IDs → merge-base → stage artefacts → append prompt fragment
+│       ├── validate.ts          # strict allowlist regexes for all 4 PR identifier env vars
+│       ├── merge-base.ts        # synthetic-merge + progressive-deepening resolution
+│       ├── git.ts               # git runner helpers + bearerEnv() for token isolation
+│       └── prompt.ts            # successFragment() / failureFragment() for agent-prompt.md
 ├── test/                        # End-to-end smoke tests
 ├── gate.js                      # ncc bundle output (gitignored)
-└── import.js                    # ncc bundle output (gitignored)
+├── import.js                    # ncc bundle output (gitignored)
+└── exec-context-pr.js           # ncc bundle output (gitignored)
 ```
 
 The release workflow (`.github/workflows/release.yml`) runs
-`npm ci && npm run build`, then zips `scripts/ado-script/gate.js` and
-`scripts/ado-script/import.js` into
+`npm ci && npm run build`, then zips `scripts/ado-script/gate.js`,
+`scripts/ado-script/import.js`, and `scripts/ado-script/exec-context-pr.js` into
 the `ado-script.zip` release asset. Pipelines download that asset at
 runtime by URL pinned to the compiler's `CARGO_PKG_VERSION`, verify
 its SHA-256 against the `checksums.txt` asset, then extract.
@@ -239,7 +305,7 @@ cargo run -- export-gate-schema --output schema/gate-spec.schema.json
 
 `AdoScriptExtension`
 (`src/compile/extensions/ado_script.rs`) is the always-on single
-extension that owns all `ado-script` wiring. It has two independent
+extension that owns all `ado-script` wiring. It has three independent
 features, each emitted **into the job that actually consumes the
 bundle**:
 
@@ -259,37 +325,51 @@ three step strings into the Setup job:
    runs the gate with `GATE_SPEC` and the env-var contract documented
    above.
 
-### Agent job (runtime-import resolver)
+### Agent job (runtime-import resolver and PR context)
 
-When `inlined-imports: false` (the default), `prepare_steps()` returns
-the same install + download pair plus the resolver invocation, into
-the Agent job's existing `{{ prepare_steps }}` block:
+The Agent job's `prepare_steps()` fires when **either** `import.js` or
+`exec-context-pr.js` is active. It always returns install + download first, then
+appends the relevant invocation steps.
 
-1. **`NodeTool@0`** — same shape as above.
-2. **`curl` download + verify + extract** — same artefact, same
-   verification.
+**`import.js` invocation** — active when `inlined-imports: false` (the default):
+
+1. **`NodeTool@0`** — installs Node 20.x LTS, capped at `timeoutInMinutes: 5`.
+2. **`curl` download + verify + extract** — same artefact and verification as the Setup job.
 3. **`bash: node '/tmp/ado-aw-scripts/ado-script/import.js'`** —
    expands `{{#runtime-import …}}` markers in
    `/tmp/awf-tools/agent-prompt.md` in place. See
    [Runtime Imports](/ado-aw/reference/runtime-imports/) for marker syntax.
 
+**`exec-context-pr.js` invocation** — emitted by `ExecContextExtension`
+(`src/compile/extensions/exec_context/pr.rs`, `Tool` phase) when `on.pr` is
+configured and `execution-context.pr.enabled` is not `false`:
+
+4. **`bash: node '/tmp/ado-aw-scripts/ado-script/exec-context-pr.js'`** —
+   resolves the merge-base and stages `aw-context/pr/{base,head}.sha`, then
+   appends a prompt fragment. Gated by
+   `condition: eq(variables['Build.Reason'], 'PullRequest')` so it is a no-op
+   on non-PR builds.
+
 ### Per-job download (NOT a duplication bug)
 
 ADO jobs use **isolated VMs** — `/tmp` is not shared between jobs.
 The `ado-script.zip` bundle therefore has to be downloaded once per
-job that consumes it. When both features are active (a pipeline with
-both `filters:` and `inlined-imports: false`), install + download
-steps appear in **both** Setup and Agent. That's correct architecture
-given ADO's topology, not waste.
+job that consumes it. When both the Setup gate and Agent resolver/PR-context
+are active, install + download steps appear in **both** Setup and Agent.
+That's correct architecture given ADO's topology, not waste.
 
 ### What gets emitted, by case
 
-| `filters:` | `inlined-imports` | Setup-job steps | Agent-job extra steps |
-|---|---|---|---|
-| inactive   | `true`  | (none)                              | (none)                              |
-| inactive   | `false` | (no Setup job)                      | install + download + resolver       |
-| active     | `true`  | install + download + gate           | (none)                              |
-| active     | `false` | install + download + gate           | install + download + resolver       |
+| `filters:` | `inlined-imports` | `on.pr` w/ exec-context | Setup-job steps | Agent-job extra steps |
+|---|---|---|---|---|
+| inactive | `true`  | no  | (none)                    | (none)                                       |
+| inactive | `true`  | yes | (none)                    | install + download + exec-context-pr         |
+| inactive | `false` | no  | (no Setup job)            | install + download + resolver                |
+| inactive | `false` | yes | (no Setup job)            | install + download + resolver + exec-context-pr |
+| active   | `true`  | no  | install + download + gate | (none)                                       |
+| active   | `true`  | yes | install + download + gate | install + download + exec-context-pr         |
+| active   | `false` | no  | install + download + gate | install + download + resolver                |
+| active   | `false` | yes | install + download + gate | install + download + resolver + exec-context-pr |
 
 The IR-to-bash codegen that produces the gate step is
 `compile_gate_step_external` in `src/compile/filter_ir.rs`.
@@ -324,6 +404,9 @@ The IR-to-bash codegen that produces the gate step is
    the exported `BRANCH_FACTS` set so the read-time strip is applied.
 
 ### Add a new bundle (e.g. `poll.js`)
+
+The existing `exec-context-pr.js` bundle is a working example of this pattern — see
+`scripts/ado-script/src/exec-context-pr/` and `src/compile/extensions/exec_context/pr.rs`.
 
 1. Create `src/poll/index.ts` and supporting modules under
    `scripts/ado-script/src/poll/`. Reuse anything in `src/shared/`.
@@ -391,4 +474,6 @@ If a future bundle blows the budget:
 ## See also
 
 - [Filter IR](/ado-aw/reference/filter-ir/) — the IR consumed by `gate.js`.
+- [Runtime Imports](/ado-aw/reference/runtime-imports/) — author-facing marker syntax for `import.js`.
+- [Execution Context](/ado-aw/reference/execution-context/) — user-facing configuration for `exec-context-pr.js`.
 - [Extending the Compiler](/ado-aw/guides/extending/) — generic compiler-extension guide.
