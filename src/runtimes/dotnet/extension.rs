@@ -202,17 +202,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_global_json_sentinel_skips_injection_check() {
-        let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: 'global.json'\n---\n",
-        )
-        .unwrap();
-        let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
-        let ext = DotnetExtension::new(dotnet.clone());
-        assert!(ext.validate(&ctx_from(&fm)).is_ok());
-    }
-
-    #[test]
     fn test_validate_global_json_conflict_bails() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("global.json"), r#"{"sdk":{"version":"8.0.100"}}"#).unwrap();

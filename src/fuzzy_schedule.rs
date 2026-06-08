@@ -954,6 +954,13 @@ mod tests {
         // Validate hour field
         let hour: u32 = parts[1].parse().expect("Hour should be a number");
         assert!(hour < 24, "Hour should be 0-23");
+
+        // Daily schedule must not restrict day-of-month, month, or day-of-week.
+        // A regression that adds e.g. a day-of-week constraint would silently
+        // turn a daily schedule into a weekly one.
+        assert_eq!(parts[2], "*", "Day-of-month should be * for a daily schedule");
+        assert_eq!(parts[3], "*", "Month should be * for a daily schedule");
+        assert_eq!(parts[4], "*", "Day-of-week should be * for a daily schedule");
     }
 
     #[test]
@@ -991,6 +998,10 @@ mod tests {
         let yaml = generate_schedule_yaml("daily", "test/agent", &[]).unwrap();
         assert!(yaml.contains("schedules:"));
         assert!(yaml.contains("cron:"));
+        // `always: true` is load-bearing — without it ADO only fires the schedule
+        // when the target branch has changed since the last run, turning a
+        // "run unconditionally on schedule" pipeline into one that silently skips.
+        assert!(yaml.contains("always: true"), "schedule YAML must include always: true");
         // No branches filter by default
         assert!(!yaml.contains("branches:"));
     }
@@ -1001,6 +1012,7 @@ mod tests {
         let yaml = generate_schedule_yaml("daily", "test/agent", &branches).unwrap();
         assert!(yaml.contains("schedules:"));
         assert!(yaml.contains("cron:"));
+        assert!(yaml.contains("always: true"), "schedule YAML must include always: true");
         assert!(yaml.contains("branches:"));
         assert!(yaml.contains("include:"));
         assert!(yaml.contains("- main"));
