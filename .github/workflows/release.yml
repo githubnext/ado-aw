@@ -186,3 +186,30 @@ jobs:
         run: |
           TAG="${{ needs.release-please.outputs.tag_name || github.event.inputs.tag_name }}"
           gh release upload "$TAG" checksums.txt --clobber --repo "${{ github.repository }}"
+
+  trigger-recompile-safe-output-fixtures:
+    name: Trigger safe-output fixture recompile
+    needs: [release-please, checksums]
+    # Run only once all release assets (binaries + checksums.txt) are uploaded.
+    # Releases published via release-please use the default GITHUB_TOKEN, which
+    # does NOT fire the `release: published` event on other workflows (GitHub
+    # actively suppresses this to prevent recursive triggers). Dispatch the
+    # recompile workflow explicitly here using a PAT so the dispatched run can
+    # itself open a PR.
+    if: >-
+      always() &&
+      (needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch') &&
+      needs.checksums.result == 'success'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Dispatch recompile-safe-output-fixtures
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_AW_CI_TRIGGER_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.release-please.outputs.tag_name || github.event.inputs.tag_name }}"
+          echo "Dispatching recompile-safe-output-fixtures for $TAG"
+          gh workflow run recompile-safe-output-fixtures.lock.yml \
+            --repo "${{ github.repository }}" \
+            --ref main \
+            -f "version=$TAG"
