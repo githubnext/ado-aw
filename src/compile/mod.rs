@@ -775,7 +775,19 @@ async fn read_existing_pipeline_version(path: &Path) -> Option<String> {
 }
 
 /// Walk up from `start` to find the nearest directory containing `.git`.
-fn find_repo_root(start: &Path) -> Option<PathBuf> {
+/// Walk up from `start` looking for the nearest ancestor containing a
+/// `.git` directory or file.
+///
+/// Returns the directory containing `.git` on success, `None` if the
+/// filesystem root is reached without finding one. The check accepts
+/// any `.git` entry (directory for regular checkouts, file for git
+/// worktrees / submodules) — both forms correctly anchor the repo
+/// root for our path-resolution callers.
+///
+/// Exposed for use by other CLI commands (e.g. `enable`) that take an
+/// optional `PATH` subdirectory and need to resolve repo-root-relative
+/// paths from the marker JSON.
+pub fn find_repo_root(start: &Path) -> Option<PathBuf> {
     let mut current = start.to_path_buf();
     loop {
         if current.join(".git").exists() {

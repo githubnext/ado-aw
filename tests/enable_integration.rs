@@ -82,3 +82,53 @@ fn enable_help_describes_github_source_support() {
         "Help text should mention GitHub in the --service-connection / --repository-name docs, got:\n{stdout}"
     );
 }
+
+#[test]
+fn enable_dry_run_against_subdirectory_uses_repo_root_relative_yaml_path() {
+    // Regression: previously `enable PATH` joined `pipeline.source`
+    // against the scan root rather than the repo root, producing
+    // doubled paths like
+    //   C:\repo\tests\safe-outputs\tests\safe-outputs\noop.md
+    // for every fixture, and posted a yamlFilename of
+    // `/noop.lock.yml` (relative to scan root) instead of the
+    // real repo-relative `/tests/safe-outputs/noop.lock.yml`.
+    //
+    // This test exercises the subdirectory PATH form via --dry-run
+    // (so no network calls are made) and asserts:
+    //   1) at least one fixture was found,
+    //   2) the printed yamlFilename starts with `/tests/safe-outputs/`,
+    //   3) no "Failed to read source" errors appear.
+    let output = std::process::Command::new(binary())
+        .args([
+            "enable",
+            "--service-connection",
+            "00000000-0000-0000-0000-000000000000",
+            "--project",
+            "AgentPlayground",
+            "--org",
+            "msazuresphere",
+            "--dry-run",
+            "tests/safe-outputs",
+        ])
+        .output()
+        .expect("Failed to run ado-aw enable");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "expected --dry-run exit 0; stdout=\n{stdout}\nstderr=\n{stderr}"
+    );
+    assert!(
+        stdout.contains("Found ") && stdout.contains(" agentic pipeline(s)."),
+        "expected pipeline-discovery line, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("\"yamlFilename\": \"/tests/safe-outputs/"),
+        "yamlFilename must be repo-root-relative, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("Failed to read source"),
+        "no fixture should fail to read; got:\n{stdout}"
+    );
+}

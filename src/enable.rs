@@ -386,7 +386,13 @@ fn split_owner_repo_arg(value: &str) -> Result<(String, String)> {
 
 /// Run the `enable` command.
 pub async fn run(opts: EnableOptions<'_>) -> Result<()> {
-    let repo_path: PathBuf = match opts.path {
+    // `scan_root` is where we look for compiled pipelines (defaults
+    // to cwd; can be a subdirectory like `tests/safe-outputs` when
+    // the operator passes a `PATH` arg). `repo_root` is the
+    // containing git checkout's root, used to anchor the
+    // repo-root-relative `source` paths stored in pipeline markers
+    // and the `yaml_filename` we POST to ADO.
+    let scan_root: PathBuf = match opts.path {
         Some(p) => tokio::fs::canonicalize(p)
             .await
             .with_context(|| format!("Could not resolve path: {}", p.display()))?,
@@ -394,16 +400,24 @@ pub async fn run(opts: EnableOptions<'_>) -> Result<()> {
             .await
             .context("Could not resolve current directory")?,
     };
+    let repo_root = crate::compile::find_repo_root(&scan_root).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Could not find a git repository containing '{}'. \
+             `ado-aw enable` must be run inside a git checkout — the YAML \
+             paths registered against ADO are anchored to the repo root.",
+            scan_root.display()
+        )
+    })?;
 
     // Autodetect source identity from the git remote. The remote is
     // best-effort — `resolve_source` decides whether the absence is
     // fatal based on which CLI overrides the operator passed.
-    let remote_url = get_git_remote_url(&repo_path).await.ok();
+    let remote_url = get_git_remote_url(&repo_root).await.ok();
     let parsed = match remote_url.as_deref() {
         Some(url) => parse_git_remote(url),
         None => Err(anyhow::anyhow!(
             "no git remote 'origin' configured in {}",
-            repo_path.display()
+            repo_root.display()
         )),
     };
     let resolved = resolve_source(
@@ -442,7 +456,7 @@ pub async fn run(opts: EnableOptions<'_>) -> Result<()> {
         resolve_token_arg(opts.also_set_token, opts.token)?
     };
     let auth = resolve_auth(opts.pat).await?;
-    let ado_ctx = resolve_ado_context(&repo_path, opts.org, opts.project).await?;
+    let ado_ctx = resolve_ado_context(&repo_root, opts.org, opts.project).await?;
 
     match &resolved {
         ResolvedSource::AdoGit { source } => {
@@ -468,7 +482,7 @@ pub async fn run(opts: EnableOptions<'_>) -> Result<()> {
     println!();
 
     println!("Scanning for agentic pipelines...");
-    let detected = detect::detect_pipelines(&repo_path).await?;
+    let detected = detect::detect_pipelines(&scan_root).await?;
     if detected.is_empty() {
         println!(
             "No agentic pipelines found. Make sure your pipelines were compiled with the latest ado-aw."
@@ -545,7 +559,20 @@ pub async fn run(opts: EnableOptions<'_>) -> Result<()> {
     let mut newly_created_ids: Vec<u64> = Vec::new();
 
     for pipeline in &detected {
-        let source_path = repo_path.join(&pipeline.source);
+        // `pipeline.source` is the path from the agent-file marker
+        // (repo-root-relative, e.g. `tests/safe-outputs/noop.md`).
+        // `pipeline.yaml_path` is the compiled `.lock.yml` path
+        // *relative to the scan root*, so we have to re-anchor it on
+        // `repo_root` before computing the `yamlFilename` we POST to
+        // ADO — otherwise running `enable tests/safe-outputs` would
+        // register every fixture at `/noop.lock.yml` (repo root)
+        // instead of the actual `/tests/safe-outputs/noop.lock.yml`.
+        let source_path = repo_root.join(&pipeline.source);
+        let abs_yaml = scan_root.join(&pipeline.yaml_path);
+        let repo_relative_yaml = abs_yaml
+            .strip_prefix(&repo_root)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|_| pipeline.yaml_path.clone());
         let repo_ref = match (&resolved, &identifiers) {
             (
                 ResolvedSource::AdoGit { source },
@@ -578,7 +605,7 @@ pub async fn run(opts: EnableOptions<'_>) -> Result<()> {
             &ado_ctx,
             &auth,
             &definitions,
-            &pipeline.yaml_path,
+            &repo_relative_yaml,
             &source_path,
             repo_ref,
             opts.folder,
