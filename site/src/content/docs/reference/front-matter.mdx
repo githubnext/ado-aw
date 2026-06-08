@@ -164,6 +164,102 @@ parameters:                    # optional ADO runtime parameters (surfaced in UI
 Build the project and run all tests...
 ```
 
+## Triggers (`on:`)
+
+The `on:` field consolidates all trigger types under one key. Three
+sub-fields are supported — `schedule`, `pipeline`, and `pr` — and any
+combination of them is valid.
+
+### `on.schedule` — recurring schedule
+
+Runs the pipeline on a repeating schedule. Accepts a human-friendly fuzzy
+expression:
+
+```yaml
+on:
+  schedule: daily around 14:00
+```
+
+See the [Schedule Syntax guide](/ado-aw/guides/schedule-syntax/) for the
+full expression syntax, timezones, scattering, and day-of-week forms.
+
+When `schedule` is set and `on.pr` is not explicitly configured, the
+compiler emits `trigger: none` and `pr: none` — the pipeline only runs on
+schedule, not on code pushes or PRs.
+
+### `on.pipeline` — pipeline completion trigger
+
+Triggers the pipeline when another ADO pipeline finishes. Maps to an ADO
+[`pipelines` resource](https://learn.microsoft.com/en-us/azure/devops/pipelines/yaml-schema/resources-pipelines-pipeline).
+
+```yaml
+on:
+  pipeline:
+    name: "Build Pipeline"       # source pipeline name (required)
+    project: "OtherProject"      # only when in a different ADO project
+    branches: [main, release/*]  # omit to trigger on any branch
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | **Yes** | Source pipeline name; maps to `source:` in the generated `pipelines:` resource block |
+| `project` | No | ADO project that owns the source pipeline; omit when both pipelines are in the same project |
+| `branches` | No | Branch filter; empty list triggers on any branch completing |
+| `filters` | No | Runtime gate filters evaluated inside the Setup job (see [Filter IR](/ado-aw/reference/filter-ir/)) |
+
+When `pipeline` is set and `on.pr` is not configured, CI push triggers and
+PR triggers are suppressed (`trigger: none`, `pr: none`).
+
+### `on.pr` — pull request trigger
+
+Triggers the pipeline on pull request events. Supports two independent
+layers of filtering:
+
+| Layer | Field | Evaluated | Effect on unmatched builds |
+|-------|-------|-----------|---------------------------|
+| Native ADO | `branches:`, `paths:` | By ADO, before the pipeline starts | Pipeline is not queued at all — no runner consumed |
+| Runtime gate | `filters:` | Inside the Setup job, after the pipeline starts | Gate script self-cancels the build |
+
+Use **native ADO filters** for broad exclusions (e.g. restrict to certain
+target branches). Use **runtime gate filters** for conditions that require
+runtime context: PR title pattern, author allowlist, label requirements,
+changed-file globs, time windows, draft status, and more.
+
+```yaml
+on:
+  pr:
+    branches:
+      include: [main, release/*]  # native ADO — only PRs targeting these branches
+    paths:
+      include: [src/*]            # native ADO — only PRs that touch these paths
+    filters:                      # runtime gate — evaluated inside the Setup job
+      title: "*[run-agent]*"
+      draft: false
+      labels:
+        any-of: ["run-agent"]
+      source-branch: "feature/*"
+```
+
+See the [Filter IR reference](/ado-aw/reference/filter-ir/) for the full
+catalog of runtime filter types, validation rules, and compilation details.
+
+### Trigger suppression
+
+When `on.schedule` or `on.pipeline` is configured, the compiler emits
+`trigger: none` and `pr: none` to prevent the pipeline from also firing on
+every code push or PR. Setting `on.pr` explicitly re-enables the PR trigger
+regardless of whether `schedule` or `pipeline` is also set.
+
+| `on.schedule` | `on.pipeline` | `on.pr` | CI (push) | PR events |
+|:---:|:---:|:---:|---|---|
+| — | — | — | ADO default | ADO default |
+| ✓ | — | — | `none` | `none` |
+| — | ✓ | — | `none` | `none` |
+| ✓ | ✓ | — | `none` | `none` |
+| — | — | ✓ | ADO default | ✓ enabled |
+| ✓ | — | ✓ | `none` | ✓ enabled |
+| — | ✓ | ✓ | `none` | ✓ enabled |
+
 ## Workspace Defaults
 
 The `workspace:` field controls which directory the agent runs in. When it is
