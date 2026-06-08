@@ -1245,7 +1245,7 @@ impl SanitizeConfigTrait for PrContextConfig {
 // ─── PR Trigger Types ───────────────────────────────────────────────────────
 
 /// PR trigger configuration with native ADO filters and runtime gate filters.
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct PrTriggerConfig {
     /// Native ADO branch filter for PR triggers
     #[serde(default)]
@@ -1256,6 +1256,34 @@ pub struct PrTriggerConfig {
     /// Runtime filters evaluated via gate steps in the Setup job
     #[serde(default)]
     pub filters: Option<PrFilters>,
+    /// Whether to synthesise PullRequest semantics on CI builds when an
+    /// open PR matches the configured branches/paths. Defaults to `true`.
+    ///
+    /// Azure DevOps Services ignores the YAML `pr:` block unless a Build
+    /// Validation branch policy is registered server-side. When this knob
+    /// is on, an Setup-job script (`exec-context-pr-synth.js`) looks up
+    /// the open PR via the ADO REST API on CI-triggered builds and
+    /// exposes PR identifiers as `dependencies.Setup.outputs['synthPr.*']`
+    /// so downstream gate/exec-context-pr steps behave as if
+    /// `Build.Reason == PullRequest`. Set to `false` to opt out and
+    /// require an operator-installed branch policy.
+    #[serde(default = "pr_synthetic_from_ci_default", rename = "synthetic-from-ci")]
+    pub synthetic_from_ci: bool,
+}
+
+impl Default for PrTriggerConfig {
+    fn default() -> Self {
+        Self {
+            branches: None,
+            paths: None,
+            filters: None,
+            synthetic_from_ci: pr_synthetic_from_ci_default(),
+        }
+    }
+}
+
+fn pr_synthetic_from_ci_default() -> bool {
+    true
 }
 
 impl SanitizeConfigTrait for PrTriggerConfig {
@@ -2217,6 +2245,53 @@ triggers:
         let changed = tc.pr.unwrap().filters.unwrap().changed_files.unwrap();
         assert_eq!(changed.include, vec!["src/**/*.rs"]);
         assert_eq!(changed.exclude, vec!["docs/**"]);
+    }
+
+    #[test]
+    fn test_pr_trigger_config_synthetic_from_ci_default_true() {
+        let yaml = r#"
+triggers:
+  pr:
+    branches:
+      include: [main]
+"#;
+        let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
+        assert!(
+            tc.pr.unwrap().synthetic_from_ci,
+            "synthetic-from-ci must default to true when omitted"
+        );
+    }
+
+    #[test]
+    fn test_pr_trigger_config_synthetic_from_ci_explicit_false() {
+        let yaml = r#"
+triggers:
+  pr:
+    branches:
+      include: [main]
+    synthetic-from-ci: false
+"#;
+        let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
+        assert!(
+            !tc.pr.unwrap().synthetic_from_ci,
+            "synthetic-from-ci: false must opt out of synthesis"
+        );
+    }
+
+    #[test]
+    fn test_pr_trigger_config_synthetic_from_ci_explicit_true() {
+        let yaml = r#"
+triggers:
+  pr:
+    branches:
+      include: [main]
+    synthetic-from-ci: true
+"#;
+        let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
+        assert!(tc.pr.unwrap().synthetic_from_ci);
     }
 
     #[test]

@@ -140,6 +140,7 @@ mod tests {
                 }),
                 paths: None,
                 filters: None,
+                ..Default::default()
             }),
         schedule: None,
         });
@@ -163,6 +164,7 @@ mod tests {
                     exclude: vec!["docs/*".into()],
                 }),
                 filters: None,
+                ..Default::default()
             }),
         schedule: None,
         });
@@ -184,6 +186,7 @@ mod tests {
                     title: Some(PatternFilter { pattern: "*[agent]*".into() }),
                     ..Default::default()
                 }),
+                ..Default::default()
             }),
         schedule: None,
         });

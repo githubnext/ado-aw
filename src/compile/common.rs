@@ -6420,6 +6420,7 @@ safe-outputs:
                 }),
                 paths: None,
                 filters: None,
+                ..Default::default()
             }),
             schedule: None,
         });
@@ -6445,6 +6446,7 @@ safe-outputs:
                 }),
                 paths: None,
                 filters: None,
+                ..Default::default()
             }),
             schedule: None,
         });
@@ -6470,6 +6472,7 @@ safe-outputs:
                     exclude: vec![],
                 }),
                 filters: None,
+                ..Default::default()
             }),
             schedule: None,
         });
@@ -6495,6 +6498,7 @@ safe-outputs:
                     exclude: vec!["tests/\ninjected: true".to_string()],
                 }),
                 filters: None,
+                ..Default::default()
             }),
             schedule: None,
         });
@@ -6520,6 +6524,7 @@ safe-outputs:
                 }),
                 paths: None,
                 filters: None,
+                ..Default::default()
             }),
             schedule: None,
         });
@@ -6543,6 +6548,7 @@ safe-outputs:
                     exclude: vec!["tests/**".to_string()],
                 }),
                 filters: None,
+                ..Default::default()
             }),
             schedule: None,
         });
