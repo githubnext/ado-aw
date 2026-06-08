@@ -249,9 +249,7 @@ pub async fn discover_ado_aw_pipelines(
     // absent `queueStatus` are treated as active so we never silently skip
     // a definition the API didn't annotate. Pass `--include-disabled` to
     // opt back into Previewing every in-scope definition.
-    let filtered = if include_disabled {
-        scoped
-    } else {
+    let filtered = if !include_disabled {
         let before = scoped.len();
         let kept: Vec<DefinitionSummary> =
             scoped.into_iter().filter(is_active_definition).collect();
@@ -264,6 +262,8 @@ pub async fn discover_ado_aw_pipelines(
             );
         }
         kept
+    } else {
+        scoped
     };
 
     // Build a (normalized yamlFilename → local lock path) map for the
