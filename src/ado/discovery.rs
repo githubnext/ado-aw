@@ -234,12 +234,36 @@ pub async fn discover_ado_aw_pipelines(
     auth: &AdoAuth,
     scope: DiscoveryScope,
     local_lock_paths: Option<&[PathBuf]>,
+    active_only: bool,
 ) -> Result<Vec<DiscoveredPipeline>> {
     let definitions = list_definitions(client, ctx, auth)
         .await
         .context("Failed to list ADO definitions for discovery")?;
 
-    let filtered = apply_scope_filter(definitions, &scope, &ctx.repo_url());
+    let scoped = apply_scope_filter(definitions, &scope, &ctx.repo_url());
+
+    // Active-only filter: drop `disabled` / `paused` definitions *before*
+    // the per-definition Preview fan-out below, since each Preview call is
+    // the expensive part of discovery. This is the actual speedup for
+    // `--all-repos` runs against large projects. Definitions with an
+    // absent `queueStatus` are treated as active so we never silently skip
+    // a definition the API didn't annotate.
+    let filtered = if active_only {
+        let before = scoped.len();
+        let kept: Vec<DefinitionSummary> =
+            scoped.into_iter().filter(is_active_definition).collect();
+        let skipped = before - kept.len();
+        if skipped > 0 {
+            debug!(
+                "Active-only filter skipped {skipped} disabled/paused definition(s) \
+                 before the Preview step ({} remain).",
+                kept.len()
+            );
+        }
+        kept
+    } else {
+        scoped
+    };
 
     // Build a (normalized yamlFilename → local lock path) map for the
     // fast-path. Path comparison uses the same normalization as
@@ -326,6 +350,24 @@ fn apply_scope_filter(
                 })
                 .collect()
         }
+    }
+}
+
+/// Returns `true` if a definition should be considered "active" for the
+/// `--active-only` discovery filter.
+///
+/// Only `queueStatus == "disabled"` and `"paused"` are treated as
+/// inactive (a paused definition exists but won't queue new runs, so it's
+/// excluded too). Any other value — including the common `"enabled"` and a
+/// missing/`None` status — is treated as active. Matching is
+/// case-insensitive to be robust to API casing variations.
+fn is_active_definition(def: &DefinitionSummary) -> bool {
+    match def.queue_status.as_deref() {
+        Some(s) => {
+            let s = s.to_ascii_lowercase();
+            s != "disabled" && s != "paused"
+        }
+        None => true,
     }
 }
 
@@ -694,8 +736,10 @@ pub async fn resolve_definitions_via_discovery(
     scope: DiscoveryScope,
     local_lock_paths: Option<&[PathBuf]>,
     source_filter: Option<&str>,
+    active_only: bool,
 ) -> Result<Vec<MatchedDefinition>> {
-    let discovered = discover_ado_aw_pipelines(client, ctx, auth, scope, local_lock_paths).await?;
+    let discovered =
+        discover_ado_aw_pipelines(client, ctx, auth, scope, local_lock_paths, active_only).await?;
 
     // Normalize the user-supplied `--source` value through the same
     // canonical form the compiler uses for the marker JSON's `source`
@@ -954,6 +998,56 @@ mod tests {
         let kept = apply_scope_filter(defs, &DiscoveryScope::CurrentRepo, &current);
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].id, 43);
+    }
+
+    // ── is_active_definition / active-only filter ───────────────────
+
+    fn def_with_status(id: u64, status: Option<&str>) -> DefinitionSummary {
+        let mut d = def_with(id, "d", None, None);
+        d.queue_status = status.map(|s| s.to_string());
+        d
+    }
+
+    #[test]
+    fn active_filter_keeps_enabled_and_missing_status() {
+        assert!(is_active_definition(&def_with_status(1, Some("enabled"))));
+        assert!(is_active_definition(&def_with_status(2, None)));
+    }
+
+    #[test]
+    fn active_filter_drops_disabled_and_paused() {
+        assert!(!is_active_definition(&def_with_status(1, Some("disabled"))));
+        assert!(!is_active_definition(&def_with_status(2, Some("paused"))));
+    }
+
+    #[test]
+    fn active_filter_is_case_insensitive() {
+        assert!(!is_active_definition(&def_with_status(1, Some("Disabled"))));
+        assert!(!is_active_definition(&def_with_status(2, Some("PAUSED"))));
+        assert!(is_active_definition(&def_with_status(3, Some("Enabled"))));
+    }
+
+    #[test]
+    fn active_filter_retains_unknown_status() {
+        // Forward-compatibility: an unrecognised status is treated as
+        // active so we never silently drop a definition we can't classify.
+        assert!(is_active_definition(&def_with_status(1, Some("queued"))));
+    }
+
+    #[test]
+    fn active_filter_prunes_collection() {
+        let defs = vec![
+            def_with_status(1, Some("enabled")),
+            def_with_status(2, Some("disabled")),
+            def_with_status(3, Some("paused")),
+            def_with_status(4, None),
+        ];
+        let kept: Vec<u64> = defs
+            .into_iter()
+            .filter(is_active_definition)
+            .map(|d| d.id)
+            .collect();
+        assert_eq!(kept, vec![1, 4]);
     }
 
     // ── normalize_repo_url ──────────────────────────────────────────

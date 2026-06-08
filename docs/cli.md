@@ -46,25 +46,27 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - `--definition-ids <ids>` - Explicit pipeline definition IDs (comma-separated; skips local-fixture auto-detection).
   - `--all-repos` - **Project-scope mode.** Activates Preview-driven discovery and operates on every ado-aw pipeline ADO knows about in the project — direct ado-aw definitions *and* consumer pipelines that include ado-aw templates — regardless of which repo their root YAML lives in. Mutually exclusive with `--definition-ids`. Ignores local lock files for matching (uses ADO Pipeline Preview to find marker steps).
   - `--source <path>` - **Filter by template.** Restricts to definitions whose `# ado-aw-metadata` marker references the given source path (e.g. `agents/security-scan.md`). Activates the discovery code path; pairs with `--all-repos` to scope across the whole project. Mutually exclusive with `--definition-ids`.
+  - `--active-only` - **Speed up project-wide discovery.** Skips definitions whose `queueStatus` is `disabled` or `paused` *before* the per-definition Preview call (the expensive part), so large projects with many inactive pipelines resolve much faster. Only takes effect on the discovery code path (`--all-repos` or `--source`). Definitions with no reported `queueStatus` are treated as active and kept.
 
 - `secrets list [PATH]` - List variable names and their `isSecret` / `allowOverride` flags on every matched definition. **Never prints values.**
   - `--json` - Emit machine-readable JSON.
   - `--org / --project / --pat / --definition-ids` - As above.
-  - `--all-repos / --source <path>` - As for `secrets set` (project-scope discovery).
+  - `--all-repos / --source <path> / --active-only` - As for `secrets set` (project-scope discovery).
 
 - `secrets delete <name> [PATH]` - Delete the named variable from every matched definition. No-op when the variable is absent.
   - `--dry-run` - Print the planned deletion plan without calling the ADO API.
   - `--org / --project / --pat / --definition-ids` - As above.
-  - `--all-repos / --source <path>` - As for `secrets set` (project-scope discovery).
+  - `--all-repos / --source <path> / --active-only` - As for `secrets set` (project-scope discovery).
 
 ### Project-scope discovery (`--all-repos` / `--source`)
 
-`secrets set / list / delete` accept two opt-in flags that activate **Preview-driven discovery** instead of the default lexical local-fixture matching. They are the surface that solves token management for templates that get included by other pipelines.
+`secrets set / list / delete` accept opt-in flags that activate **Preview-driven discovery** instead of the default lexical local-fixture matching. They are the surface that solves token management for templates that get included by other pipelines.
 
 - **`--all-repos`** — search every definition in the ADO project. With it, you can `secrets set GITHUB_TOKEN --all-repos` from anywhere; no local checkout of the consumer pipelines is needed.
 - **`--source <path>`** — filter results to definitions whose `# ado-aw-metadata` marker references that template. Useful for fan-out: `secrets set GITHUB_TOKEN --source agents/security-scan.md` rotates the token on every consumer pipeline that includes that template.
+- **`--active-only`** — prune `disabled` / `paused` definitions before the Preview fan-out. Because discovery issues one Pipeline Preview call per in-scope definition, dropping inactive pipelines up-front is where the time is saved on large projects. Pair it with `--all-repos` (e.g. `secrets set GITHUB_TOKEN --all-repos --active-only`) when a full-project run is slow. Definitions without a reported `queueStatus` are treated as active so nothing the API failed to annotate is silently skipped.
 
-Both flags route through `ado-aw`'s `discover_ado_aw_pipelines` machinery, which calls ADO's Pipeline Preview API per definition and scans the expanded YAML for an `ado-aw-marker` step that every compiled pipeline now carries. `--definition-ids` remains the explicit-ID escape hatch and is mutually exclusive with these flags. `enable`, `disable`, and `remove` are **not** changed — they retain their source-scoped safety semantics.
+Both `--all-repos` and `--source` route through `ado-aw`'s `discover_ado_aw_pipelines` machinery, which calls ADO's Pipeline Preview API per definition and scans the expanded YAML for an `ado-aw-marker` step that every compiled pipeline now carries. `--definition-ids` remains the explicit-ID escape hatch and is mutually exclusive with these flags. `enable`, `disable`, and `remove` are **not** changed — they retain their source-scoped safety semantics.
 
 
 - `enable [PATH]` - Register an ADO build definition for each compiled pipeline discovered under `PATH` (or the current directory) and ensure it is `enabled`. For each fixture, matches against the existing ADO definitions by `yamlFilename` first, then by sanitized display name; creates a new definition when neither matches, flips `queueStatus` to `enabled` when an existing definition is `disabled` / `paused`, and skips when it is already `enabled`. Fail-soft per fixture; exits non-zero if any fixture failed.
