@@ -234,6 +234,27 @@ enum ResolvedSource {
     Github { source: RepoSource, service_connection: String },
 }
 
+/// Resolved provider-specific identifiers required by the
+/// create-definition POST body. Always paired with the matching
+/// `ResolvedSource` variant — keeping them in a tagged enum (rather
+/// than a `(String, String)` tuple with empty-string sentinels on the
+/// unused half) means a future refactor can't silently swap the two
+/// or forget to wire one of them.
+#[derive(Debug)]
+enum ResolvedIdentifiers {
+    /// `repo_id` is the ADO repository GUID returned by
+    /// `get_repository_id`.
+    AdoGit { repo_id: String },
+    /// `service_connection_id` is the GUID resolved from the
+    /// operator's `--service-connection` value. `full_name` is the
+    /// cached `owner/repo` composition (built once per invocation
+    /// rather than per fixture).
+    Github {
+        full_name: String,
+        service_connection_id: String,
+    },
+}
+
 /// Apply the autodetect rule to a parsed git remote (or its absence)
 /// plus operator-supplied overrides.
 ///
@@ -318,6 +339,12 @@ fn resolve_source(
 
 /// Parse a CLI-supplied `owner/repo` argument with a useful error
 /// message when the shape is wrong.
+///
+/// Trims a trailing `.git` on the repo half so `--repository-name
+/// owner/repo.git` (operators sometimes copy-paste this from a clone
+/// URL) round-trips identically to `--repository-name owner/repo`.
+/// Mirrors `split_owner_repo` in `src/ado/mod.rs` which does the same
+/// for parsed remote URLs.
 fn split_owner_repo_arg(value: &str) -> Result<(String, String)> {
     let trimmed = value.trim();
     let parts: Vec<&str> = trimmed.splitn(2, '/').collect();
@@ -327,7 +354,15 @@ fn split_owner_repo_arg(value: &str) -> Result<(String, String)> {
             value
         );
     }
-    Ok((parts[0].trim().to_string(), parts[1].trim().to_string()))
+    let owner = parts[0].trim().to_string();
+    let repo = parts[1].trim().trim_end_matches(".git").to_string();
+    if repo.is_empty() {
+        anyhow::bail!(
+            "--repository-name must be in the form 'owner/repo' (got: '{}')",
+            value
+        );
+    }
+    Ok((owner, repo))
 }
 
 /// Run the `enable` command.
@@ -358,6 +393,26 @@ pub async fn run(opts: EnableOptions<'_>) -> Result<()> {
         opts.repository_name,
         opts.service_connection,
     )?;
+
+    // For GitHub-source, the git remote can't tell us the ADO
+    // deployment target (org/project). Pre-check upfront so we surface
+    // a clear, audience-appropriate error before falling through to
+    // `resolve_ado_context`'s generic "use --org/--project, e.g. for
+    // --definition-ids" message — which makes no sense in the `enable`
+    // context and is the first-time-user failure mode for the very
+    // operators this code path targets.
+    if matches!(resolved, ResolvedSource::Github { .. })
+        && (opts.org.is_none() || opts.project.is_none())
+    {
+        anyhow::bail!(
+            "--org <ado-org> and --project <ado-project> are required for GitHub-source pipelines. \
+             The git remote identifies the GitHub source repo, but the ADO project that hosts the \
+             registered build definitions must be supplied explicitly.\n\
+             Example:\n  \
+             ado-aw enable --org msazuresphere --project AgentPlayground \\\n    \
+             --service-connection <github-conn-name> tests/safe-outputs/"
+        );
+    }
 
     // Skip interactive token resolution on dry-run: --also-set-token is
     // silently suppressed in that path anyway, so prompting the operator
@@ -411,7 +466,12 @@ pub async fn run(opts: EnableOptions<'_>) -> Result<()> {
 
     let definitions = list_definitions(&client, &ado_ctx, &auth).await?;
 
-    // Resolve provider-specific identifiers once per invocation.
+    // Resolve provider-specific identifiers once per invocation, in
+    // a structurally-tagged form that keeps the "only one is
+    // meaningful per variant" invariant at the type level. Previously
+    // we returned a `(repo_id, service_conn_id)` tuple with empty-
+    // string sentinels on the unused half, which would silently
+    // tolerate a future swap.
     //
     // - ADO Git source: look up the repository GUID (required by the
     //   `repository.id` field in the POST body).
@@ -420,9 +480,9 @@ pub async fn run(opts: EnableOptions<'_>) -> Result<()> {
     //
     // Dry-run skips the network calls; the POST body printout uses
     // placeholders so operators still see the full body shape.
-    let (repo_id, service_conn_id) = match &resolved {
+    let identifiers = match &resolved {
         ResolvedSource::AdoGit { source } => {
-            let id = if opts.dry_run {
+            let repo_id = if opts.dry_run {
                 String::from("<repo-id>")
             } else {
                 get_repository_id(&client, &ado_ctx, &auth, &source.repo)
@@ -431,12 +491,13 @@ pub async fn run(opts: EnableOptions<'_>) -> Result<()> {
                         format!("Failed to look up ADO repository '{}'", source.repo)
                     })?
             };
-            (id, String::new())
+            ResolvedIdentifiers::AdoGit { repo_id }
         }
         ResolvedSource::Github {
-            service_connection, ..
+            source,
+            service_connection,
         } => {
-            let id = if opts.dry_run {
+            let service_connection_id = if opts.dry_run {
                 String::from("<service-connection-id>")
             } else {
                 resolve_service_connection_id(
@@ -453,7 +514,10 @@ pub async fn run(opts: EnableOptions<'_>) -> Result<()> {
                     )
                 })?
             };
-            (String::new(), id)
+            ResolvedIdentifiers::Github {
+                full_name: format!("{}/{}", source.owner, source.repo),
+                service_connection_id,
+            }
         }
     };
 
@@ -461,26 +525,34 @@ pub async fn run(opts: EnableOptions<'_>) -> Result<()> {
     let mut failure = 0usize;
     let mut newly_created_ids: Vec<u64> = Vec::new();
 
-    // Compose the GitHub `owner/repo` once if applicable — it's
-    // identical for every fixture in this invocation. We bind it
-    // unconditionally to a `String` so the inner loop never has to
-    // unwrap an `Option`; for `AdoGit` it stays empty and is unused.
-    let github_full_name = match &resolved {
-        ResolvedSource::Github { source, .. } => format!("{}/{}", source.owner, source.repo),
-        ResolvedSource::AdoGit { .. } => String::new(),
-    };
-
     for pipeline in &detected {
         let source_path = repo_path.join(&pipeline.source);
-        let repo_ref = match &resolved {
-            ResolvedSource::AdoGit { source } => RepositoryRef::AdoGit {
-                repo_id: &repo_id,
+        let repo_ref = match (&resolved, &identifiers) {
+            (
+                ResolvedSource::AdoGit { source },
+                ResolvedIdentifiers::AdoGit { repo_id },
+            ) => RepositoryRef::AdoGit {
+                repo_id,
                 repo_name: &source.repo,
             },
-            ResolvedSource::Github { .. } => RepositoryRef::Github {
-                full_name: &github_full_name,
-                connected_service_id: &service_conn_id,
+            (
+                ResolvedSource::Github { .. },
+                ResolvedIdentifiers::Github {
+                    full_name,
+                    service_connection_id,
+                },
+            ) => RepositoryRef::Github {
+                full_name,
+                connected_service_id: service_connection_id,
             },
+            // Both halves are built from the same `resolved` value
+            // immediately above, so the cross-variant pairings are
+            // unreachable. We bail rather than `unreachable!()` so a
+            // future refactor that decouples the two can't silently
+            // produce a malformed POST body.
+            _ => anyhow::bail!(
+                "internal error: resolved source and identifier variants disagree"
+            ),
         };
         let result = process_one(
             &client,
@@ -710,6 +782,26 @@ mod tests {
         assert!(split_owner_repo_arg("/repo").is_err());
         assert!(split_owner_repo_arg("owner/").is_err());
         assert!(split_owner_repo_arg("/").is_err());
+    }
+
+    #[test]
+    fn split_owner_repo_arg_strips_dotgit_suffix() {
+        // Mirrors split_owner_repo (in src/ado/mod.rs) which strips
+        // `.git` when parsing remote URLs — operators sometimes paste
+        // the `owner/repo.git` form from a clone URL and expect it to
+        // work identically.
+        assert_eq!(
+            split_owner_repo_arg("githubnext/ado-aw.git").unwrap(),
+            ("githubnext".to_string(), "ado-aw".to_string())
+        );
+    }
+
+    #[test]
+    fn split_owner_repo_arg_rejects_repo_that_becomes_empty_after_strip() {
+        // Pathological: `owner/.git` strips to `owner/` which is
+        // invalid. Must bail rather than silently treat `repo == ""`
+        // as success.
+        assert!(split_owner_repo_arg("owner/.git").is_err());
     }
 
     // ============ resolve_source ============

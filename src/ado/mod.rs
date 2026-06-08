@@ -226,14 +226,27 @@ impl RepoSource {
     /// normalizer also strips it). Not currently wired into the
     /// `CurrentRepo` URL filter for GitHub source — see the PR
     /// landing this type for the deferred-work rationale.
+    ///
+    /// Invariant: `provider == AdoGit` implies `project.is_some()`
+    /// (every `AdoGit`-yielding `parse_git_remote` path sets it).
+    /// A debug assertion guards against a future producer that
+    /// forgets to populate the field — release builds fall back to
+    /// an empty path segment rather than panicking, since the URL is
+    /// only used for comparison and a mismatch is the right failure
+    /// mode there.
     pub fn url(&self) -> String {
         match self.provider {
-            RepoProvider::AdoGit => format!(
-                "https://dev.azure.com/{}/{}/_git/{}",
-                self.owner,
-                self.project.as_deref().unwrap_or(""),
-                self.repo,
-            ),
+            RepoProvider::AdoGit => {
+                let project = self.project.as_deref().unwrap_or_default();
+                debug_assert!(
+                    !project.is_empty(),
+                    "RepoSource::url(): AdoGit invariant violated — project must be Some"
+                );
+                format!(
+                    "https://dev.azure.com/{}/{}/_git/{}",
+                    self.owner, project, self.repo,
+                )
+            }
             RepoProvider::Github => {
                 format!("https://github.com/{}/{}", self.owner, self.repo)
             }
@@ -2107,6 +2120,25 @@ mod tests {
             project: None,
         };
         assert_eq!(source.url(), "https://github.com/githubnext/ado-aw");
+    }
+
+    /// In release builds (where `debug_assert!` is a no-op), an
+    /// `AdoGit` `RepoSource` with `project: None` must still produce
+    /// a well-formed-ish URL — we tolerate the empty middle segment
+    /// rather than panicking, because `url()` is comparison-only.
+    /// `parse_git_remote` never produces this shape in practice; this
+    /// test only documents the defensive fallback.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn repo_source_url_ado_without_project_release_fallback() {
+        let source = RepoSource {
+            provider: RepoProvider::AdoGit,
+            owner: "myorg".to_string(),
+            repo: "myrepo".to_string(),
+            project: None,
+        };
+        // Empty project segment is the documented fallback.
+        assert_eq!(source.url(), "https://dev.azure.com/myorg//_git/myrepo");
     }
 
     // ==================== Service-connection resolver ====================
