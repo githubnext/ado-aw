@@ -289,6 +289,17 @@ enum Commands {
         /// Falls back to the GITHUB_TOKEN env var, then to an interactive prompt.
         #[arg(long, requires = "also_set_token")]
         token: Option<String>,
+        /// GitHub service-connection name or GUID. Required when the
+        /// source repository is on GitHub; rejected with a clear error
+        /// when the source is Azure DevOps Git.
+        #[arg(long = "service-connection")]
+        service_connection: Option<String>,
+        /// Source repository override as `owner/repo`. Only honoured
+        /// for GitHub source; auto-detected from the git remote when
+        /// omitted. Useful when the local checkout's remote points at
+        /// a different fork than the deployment should reference.
+        #[arg(long = "repository-name")]
+        repository_name: Option<String>,
     },
     /// Disable (or pause) every ADO build definition that matches a local fixture.
     Disable {
@@ -1048,6 +1059,8 @@ async fn main() -> Result<()> {
             dry_run,
             also_set_token,
             token,
+            service_connection,
+            repository_name,
         } => {
             enable::run(enable::EnableOptions {
                 org: org.as_deref(),
@@ -1059,6 +1072,8 @@ async fn main() -> Result<()> {
                 dry_run,
                 also_set_token,
                 token: token.as_deref(),
+                service_connection: service_connection.as_deref(),
+                repository_name: repository_name.as_deref(),
             })
             .await?;
         }

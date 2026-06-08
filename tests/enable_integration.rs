@@ -40,6 +40,8 @@ fn enable_help_describes_command() {
         "--dry-run",
         "--also-set-token",
         "--token",
+        "--service-connection",
+        "--repository-name",
     ] {
         assert!(
             stdout.contains(flag),
@@ -63,5 +65,20 @@ fn enable_rejects_token_without_also_set_token() {
     assert!(
         stderr.contains("--also-set-token") || stderr.contains("also_set_token"),
         "stderr should reference the requires-constraint, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn enable_help_describes_github_source_support() {
+    // The new --service-connection flag should have a help string
+    // that mentions GitHub so operators discover the feature.
+    let output = std::process::Command::new(binary())
+        .args(["enable", "--help"])
+        .output()
+        .expect("Failed to run ado-aw enable --help");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("GitHub"),
+        "Help text should mention GitHub in the --service-connection / --repository-name docs, got:\n{stdout}"
     );
 }
