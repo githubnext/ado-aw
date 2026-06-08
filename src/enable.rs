@@ -462,10 +462,12 @@ pub async fn run(opts: EnableOptions<'_>) -> Result<()> {
     let mut newly_created_ids: Vec<u64> = Vec::new();
 
     // Compose the GitHub `owner/repo` once if applicable — it's
-    // identical for every fixture in this invocation.
+    // identical for every fixture in this invocation. We bind it
+    // unconditionally to a `String` so the inner loop never has to
+    // unwrap an `Option`; for `AdoGit` it stays empty and is unused.
     let github_full_name = match &resolved {
-        ResolvedSource::Github { source, .. } => Some(format!("{}/{}", source.owner, source.repo)),
-        _ => None,
+        ResolvedSource::Github { source, .. } => format!("{}/{}", source.owner, source.repo),
+        ResolvedSource::AdoGit { .. } => String::new(),
     };
 
     for pipeline in &detected {
@@ -476,7 +478,7 @@ pub async fn run(opts: EnableOptions<'_>) -> Result<()> {
                 repo_name: &source.repo,
             },
             ResolvedSource::Github { .. } => RepositoryRef::Github {
-                full_name: github_full_name.as_deref().unwrap_or(""),
+                full_name: &github_full_name,
                 connected_service_id: &service_conn_id,
             },
         };

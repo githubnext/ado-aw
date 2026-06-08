@@ -350,7 +350,16 @@ fn normalize_repo_url(url: &str) -> String {
     let decoded = percent_encoding::percent_decode_str(url)
         .decode_utf8_lossy()
         .into_owned();
-    decoded.trim_end_matches('/').to_ascii_lowercase()
+    // Trim a trailing `.git` (after stripping a trailing `/`) so the
+    // form ADO returns in `repository.url` (typically without `.git`)
+    // compares equal to the form callers pass in via `RepoSource::url()`
+    // or that we POST in `build_create_body` for GitHub
+    // (`https://github.com/owner/repo.git`). Without this, GitHub-source
+    // pipelines would silently miss the `CurrentRepo` filter.
+    decoded
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .to_ascii_lowercase()
 }
 
 /// Build a `(normalized yamlFilename → local lock path)` lookup table
@@ -909,6 +918,37 @@ mod tests {
         let kept = apply_scope_filter(defs, &DiscoveryScope::CurrentRepo, &current);
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].id, 2);
+    }
+
+    #[test]
+    fn scope_current_repo_matches_github_source_with_dotgit_suffix() {
+        // ADO stores the repository.url for a GitHub-source definition
+        // typically without a `.git` suffix, but `build_create_body`
+        // POSTs it with `.git`. `normalize_repo_url` strips the suffix
+        // so both forms compare equal — this pins that contract for
+        // the GitHub-source CurrentRepo filter.
+        let defs = vec![def_with(
+            42,
+            "gh-source",
+            None,
+            Some("https://github.com/githubnext/ado-aw"),
+        )];
+        let current = Some("https://github.com/githubnext/ado-aw.git".to_string());
+        let kept = apply_scope_filter(defs, &DiscoveryScope::CurrentRepo, &current);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, 42);
+
+        // And the reverse — stored with `.git`, queried without.
+        let defs = vec![def_with(
+            43,
+            "gh-source-rev",
+            None,
+            Some("https://github.com/githubnext/ado-aw.git"),
+        )];
+        let current = Some("https://github.com/githubnext/ado-aw".to_string());
+        let kept = apply_scope_filter(defs, &DiscoveryScope::CurrentRepo, &current);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, 43);
     }
 
     // ── is_direct_match ──────────────────────────────────────────────

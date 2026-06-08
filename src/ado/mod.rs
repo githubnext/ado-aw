@@ -218,12 +218,14 @@ pub struct RepoSource {
 }
 
 impl RepoSource {
-    /// Return the form ADO stores in `repository.url` for a build
-    /// definition backed by this source.
+    /// Return the canonical browse URL ADO surfaces in
+    /// `repository.url` for a build definition backed by this source.
     ///
-    /// Used by discovery's `CurrentRepo` URL filter — both shapes
-    /// flow through `normalize_repo_url` for the equality check, so
-    /// minor casing / encoding differences are handled there.
+    /// Returned in the form expected by [`crate::ado::discovery`]'s
+    /// `normalize_repo_url` (no trailing `.git` — the discovery
+    /// normalizer also strips it). Not currently wired into the
+    /// `CurrentRepo` URL filter for GitHub source — see the PR
+    /// landing this type for the deferred-work rationale.
     pub fn url(&self) -> String {
         match self.provider {
             RepoProvider::AdoGit => format!(
@@ -1180,7 +1182,11 @@ pub async fn resolve_service_connection_id(
         "{}/{}/_apis/serviceendpoint/endpoints?type=github&endpointNames={}&api-version=7.1-preview.4",
         ctx.org_url.trim_end_matches('/'),
         percent_encoding::utf8_percent_encode(&ctx.project, PATH_SEGMENT),
-        percent_encoding::utf8_percent_encode(trimmed, PATH_SEGMENT),
+        // The endpoint name is a query-string value (not a path
+        // segment), so `&` and `=` must be percent-encoded or they'd
+        // split the parameter. `PATH_SEGMENT` deliberately leaves
+        // both unescaped; use `NON_ALPHANUMERIC` for query values.
+        percent_encoding::utf8_percent_encode(trimmed, percent_encoding::NON_ALPHANUMERIC),
     );
 
     debug!("Looking up GitHub service connection '{}': {}", trimmed, url);
@@ -2171,6 +2177,26 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("missing `value` array"));
+    }
+
+    /// The `endpointNames=` query-string value must encode `&` and `=`
+    /// — otherwise an endpoint named e.g. `foo&bar=baz` would
+    /// shatter into two `endpointNames` params and a stray `baz=` on
+    /// the URL. `PATH_SEGMENT` leaves both unescaped (legal sub-delims
+    /// in a path segment), so we use `NON_ALPHANUMERIC` for query
+    /// values. Test pins that we don't regress.
+    #[test]
+    fn service_connection_query_value_encodes_query_metacharacters() {
+        let encoded = percent_encoding::utf8_percent_encode(
+            "foo&bar=baz",
+            percent_encoding::NON_ALPHANUMERIC,
+        )
+        .to_string();
+        assert!(!encoded.contains('&'), "must encode '&' in query value");
+        assert!(!encoded.contains('='), "must encode '=' in query value");
+        assert!(encoded.contains("foo"));
+        assert!(encoded.contains("bar"));
+        assert!(encoded.contains("baz"));
     }
 
     // ==================== match_definitions_in (provider-agnostic) ====================
