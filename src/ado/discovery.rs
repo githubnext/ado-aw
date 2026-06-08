@@ -363,10 +363,7 @@ fn apply_scope_filter(
 /// case-insensitive to be robust to API casing variations.
 fn is_active_definition(def: &DefinitionSummary) -> bool {
     match def.queue_status.as_deref() {
-        Some(s) => {
-            let s = s.to_ascii_lowercase();
-            s != "disabled" && s != "paused"
-        }
+        Some(s) => !s.eq_ignore_ascii_case("disabled") && !s.eq_ignore_ascii_case("paused"),
         None => true,
     }
 }
