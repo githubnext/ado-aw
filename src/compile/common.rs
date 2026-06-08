@@ -4692,8 +4692,9 @@ mod tests {
         });
         let result = generate_pr_trigger(&triggers, true);
         assert!(result.contains("pr: none"));
-        // Contains text indicating both reasons
-        assert!(result.contains("schedule") || result.contains("upstream pipeline"));
+        // When both pipeline and schedule are active, the comment must mention both reasons.
+        assert!(result.contains("schedule"), "should mention schedule: {result}");
+        assert!(result.contains("upstream pipeline"), "should mention upstream pipeline: {result}");
     }
 
     // ─── generate_ci_trigger ─────────────────────────────────────────────────

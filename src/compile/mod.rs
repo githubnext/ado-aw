@@ -930,17 +930,19 @@ Body
 
     #[test]
     fn test_schedule_object_form_no_branches() {
+        // Object form without a `branches` key: schedule.branches() must default to empty.
         let content = r#"---
 name: "Agent"
 description: "Test"
 on:
-  schedule: daily
+  schedule:
+    run: daily around 10:00
 ---
 Body
 "#;
         let (fm, _) = parse_markdown(content).unwrap();
         let schedule = fm.schedule().unwrap();
-        assert_eq!(schedule.expression(), "daily");
+        assert_eq!(schedule.expression(), "daily around 10:00");
         assert!(schedule.branches().is_empty());
     }
 
