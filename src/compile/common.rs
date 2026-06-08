@@ -564,7 +564,21 @@ pub fn generate_pr_trigger(on_config: &Option<OnConfig>, has_schedule: bool) -> 
     }
 }
 
-/// Generate CI trigger configuration
+/// Generate CI trigger configuration.
+///
+/// Three branches, in priority order:
+///  1. **Suppression** — when a pipeline-completion trigger or a schedule
+///     is configured, `trigger: none` is emitted so unrelated commits do
+///     not also queue a build (existing behaviour).
+///  2. **Synthetic-from-ci narrowing** — when `on.pr.synthetic-from-ci`
+///     is on (default) AND `on.pr.branches.include` is non-empty AND
+///     branch (1) does not apply, emit a `trigger:` block mirroring
+///     `pr.branches.include` so CI fires only on those branches.
+///     Without this, ADO's implicit "trigger on every branch" would
+///     queue a build for every push, only for the synthPr step to skip
+///     most of them — wasted compute. (Issue #916, decision 2.)
+///  3. **Default** — otherwise emit the empty string (ADO's "trigger
+///     on every branch" default).
 pub fn generate_ci_trigger(on_config: &Option<OnConfig>, has_schedule: bool) -> String {
     let has_pipeline_trigger = on_config
         .as_ref()
@@ -572,10 +586,31 @@ pub fn generate_ci_trigger(on_config: &Option<OnConfig>, has_schedule: bool) -> 
         .is_some();
 
     if has_pipeline_trigger || has_schedule {
-        "trigger: none".to_string()
-    } else {
-        String::new()
+        return "trigger: none".to_string();
     }
+
+    // Branch 2 — narrowed trigger emitted by the synthetic-from-ci feature.
+    if let Some(pr) = on_config.as_ref().and_then(|o| o.pr.as_ref())
+        && pr.synthetic_from_ci
+        && let Some(branches) = pr.branches.as_ref()
+        && !branches.include.is_empty()
+    {
+        let mut yaml = String::from("trigger:\n  branches:\n    include:\n");
+        for b in &branches.include {
+            yaml.push_str(&format!("      - '{}'\n", b.replace('\'', "''")));
+        }
+        // Mirror exclude if the agent declared one — keeps CI exactly
+        // aligned with the PR-trigger configuration.
+        if !branches.exclude.is_empty() {
+            yaml.push_str("    exclude:\n");
+            for b in &branches.exclude {
+                yaml.push_str(&format!("      - '{}'\n", b.replace('\'', "''")));
+            }
+        }
+        return yaml.trim_end().to_string();
+    }
+
+    String::new()
 }
 
 /// Generate pipeline resource YAML for pipeline completion triggers
@@ -4777,6 +4812,120 @@ mod tests {
         });
         let result = generate_ci_trigger(&triggers, true);
         assert_eq!(result, "trigger: none");
+    }
+
+    // ─── generate_ci_trigger: synthetic-from-ci narrowing (issue #916) ────────
+
+    #[test]
+    fn test_generate_ci_trigger_synthetic_pr_narrows_to_include_branches() {
+        let triggers = Some(crate::compile::types::OnConfig {
+            pipeline: None,
+            pr: Some(crate::compile::types::PrTriggerConfig {
+                branches: Some(crate::compile::types::BranchFilter {
+                    include: vec!["main".into(), "release/*".into()],
+                    exclude: vec![],
+                }),
+                paths: None,
+                filters: None,
+                ..Default::default() // synthetic_from_ci defaults to true
+            }),
+            schedule: None,
+        });
+        let result = generate_ci_trigger(&triggers, false);
+        assert!(result.starts_with("trigger:\n  branches:\n    include:"));
+        assert!(result.contains("- 'main'"));
+        assert!(result.contains("- 'release/*'"));
+        assert!(!result.contains("exclude:"), "no exclude was configured");
+    }
+
+    #[test]
+    fn test_generate_ci_trigger_synthetic_pr_mirrors_exclude() {
+        let triggers = Some(crate::compile::types::OnConfig {
+            pipeline: None,
+            pr: Some(crate::compile::types::PrTriggerConfig {
+                branches: Some(crate::compile::types::BranchFilter {
+                    include: vec!["main".into()],
+                    exclude: vec!["users/*".into()],
+                }),
+                paths: None,
+                filters: None,
+                ..Default::default()
+            }),
+            schedule: None,
+        });
+        let result = generate_ci_trigger(&triggers, false);
+        assert!(result.contains("include:"));
+        assert!(result.contains("- 'main'"));
+        assert!(result.contains("exclude:"));
+        assert!(result.contains("- 'users/*'"));
+    }
+
+    #[test]
+    fn test_generate_ci_trigger_synthetic_pr_off_returns_default_empty() {
+        let triggers = Some(crate::compile::types::OnConfig {
+            pipeline: None,
+            pr: Some(crate::compile::types::PrTriggerConfig {
+                branches: Some(crate::compile::types::BranchFilter {
+                    include: vec!["main".into()],
+                    exclude: vec![],
+                }),
+                paths: None,
+                filters: None,
+                synthetic_from_ci: false,
+            }),
+            schedule: None,
+        });
+        let result = generate_ci_trigger(&triggers, false);
+        assert!(
+            result.is_empty(),
+            "synthetic-from-ci: false must NOT auto-narrow the CI trigger (back-compat): {result}"
+        );
+    }
+
+    #[test]
+    fn test_generate_ci_trigger_synthetic_pr_empty_include_returns_default_empty() {
+        let triggers = Some(crate::compile::types::OnConfig {
+            pipeline: None,
+            pr: Some(crate::compile::types::PrTriggerConfig {
+                branches: Some(crate::compile::types::BranchFilter {
+                    include: vec![],
+                    exclude: vec![],
+                }),
+                paths: None,
+                filters: None,
+                ..Default::default()
+            }),
+            schedule: None,
+        });
+        let result = generate_ci_trigger(&triggers, false);
+        assert!(
+            result.is_empty(),
+            "empty include list means no narrowing — keep ADO default trigger: {result}"
+        );
+    }
+
+    #[test]
+    fn test_generate_ci_trigger_pipeline_trigger_suppresses_synthetic_narrowing() {
+        let triggers = Some(crate::compile::types::OnConfig {
+            pipeline: Some(crate::compile::types::PipelineTrigger {
+                name: "Build".into(),
+                project: None,
+                branches: vec![],
+                filters: None,
+            }),
+            pr: Some(crate::compile::types::PrTriggerConfig {
+                branches: Some(crate::compile::types::BranchFilter {
+                    include: vec!["main".into()],
+                    exclude: vec![],
+                }),
+                paths: None,
+                filters: None,
+                ..Default::default()
+            }),
+            schedule: None,
+        });
+        let result = generate_ci_trigger(&triggers, false);
+        assert_eq!(result, "trigger: none", "pipeline trigger must take priority over synth narrowing");
     }
 
     // ─── generate_pipeline_resources ─────────────────────────────────────────
