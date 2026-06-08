@@ -5644,3 +5644,81 @@ Body.
 // (see `validate.ts::TARGET_BRANCH_RE`); the vitest tests under
 // `validate.test.ts` guard the regression there. This Rust-side
 // test is removed for the same reason.
+
+// ─── Synthetic-from-ci snapshot fixtures (issue #916) ────────────────────────
+
+/// Fixture A: agent with on.pr and default synthetic-from-ci: true.
+/// Compiled YAML must contain the full synth wiring (synthPr Setup step,
+/// PR_SYNTH_SPEC env, broadened exec-context-pr.js condition, agent-job
+/// AW_SYNTHETIC_PR_SKIP guard) plus the narrowed top-level `trigger:` block.
+#[test]
+fn test_synthetic_pr_default_emits_full_synth_wiring() {
+    let compiled = compile_fixture_with_flags("synthetic-pr-default.md", &["--skip-integrity"]);
+    assert_valid_yaml(&compiled, "synthetic-pr-default.md");
+
+    // synthPr step in Setup job, before prGate.
+    assert!(
+        compiled.contains("name: synthPr"),
+        "Fixture A must emit the synthPr Setup-job step"
+    );
+    assert!(
+        compiled.contains("PR_SYNTH_SPEC:"),
+        "Fixture A must emit the PR_SYNTH_SPEC env var carrying the base64 spec"
+    );
+    assert!(
+        compiled.contains("exec-context-pr-synth.js"),
+        "Fixture A must reference the synth bundle path"
+    );
+
+    // Broadened exec-context-pr condition.
+    assert!(
+        compiled.contains(
+            "condition: or(eq(variables['Build.Reason'], 'PullRequest'), eq(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true'))"
+        ),
+        "Fixture A must broaden the exec-context-pr.js condition to accept synthetic PRs"
+    );
+
+    // Agent-job AW_SYNTHETIC_PR_SKIP guard.
+    assert!(
+        compiled.contains("ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_SKIP'], 'true')"),
+        "Fixture A's Agent-job condition must honour the synth-skip flag"
+    );
+    assert!(
+        compiled.contains("eq(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true')"),
+        "Fixture A's Agent-job condition must accept synth promotion as an activation reason"
+    );
+
+    // Narrowed CI trigger block.
+    assert!(
+        compiled.contains("trigger:\n  branches:\n    include:\n      - 'main'"),
+        "Fixture A must auto-emit a narrowed CI trigger mirroring on.pr.branches.include"
+    );
+}
+
+/// Fixture B: agent with on.pr and synthetic-from-ci: false.
+/// Back-compat guard — the compiled YAML must contain NONE of the
+/// synthesis artefacts. (Substring-negation; no stored baseline required.)
+#[test]
+fn test_synthetic_pr_opt_out_omits_all_synth_artefacts() {
+    let compiled = compile_fixture_with_flags("synthetic-pr-opt-out.md", &["--skip-integrity"]);
+    assert_valid_yaml(&compiled, "synthetic-pr-opt-out.md");
+
+    for needle in &[
+        "synthPr",
+        "AW_SYNTHETIC_PR",
+        "PR_SYNTH_SPEC",
+        "exec-context-pr-synth",
+    ] {
+        assert!(
+            !compiled.contains(needle),
+            "synthetic-from-ci: false must produce zero synth artefacts; \
+             found {needle} in compiled YAML"
+        );
+    }
+
+    // Auto-narrowed CI trigger is ALSO suppressed when synthetic-from-ci is off.
+    assert!(
+        !compiled.contains("trigger:\n  branches:\n    include:\n      - 'main'"),
+        "synthetic-from-ci: false must NOT auto-narrow the CI trigger (back-compat)"
+    );
+}
