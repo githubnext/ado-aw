@@ -14,7 +14,7 @@ export async function runBypass(spec: GateSpec): Promise<boolean> {
     // into the line. Mirrors the Python log line for parity.
     logInfo(`Not a ${spec.context.bypass_label} build -- gate passes automatically`);
     setOutput("SHOULD_RUN", "true");
-    addBuildTag(`${spec.context.tag_prefix}:passed`);
+    addBuildTag(`${spec.context.tag_prefix}.passed`);
     complete("Succeeded");
     return true;
   }

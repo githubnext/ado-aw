@@ -29,6 +29,6 @@ describe("evaluatePredicates integration ports", () => {
 
     expect(evaluatePredicates(spec, factMap({ pr_title: "bad" }), tracker)).toEqual(["fail"]);
     expect(tracker.summary()).toEqual({ passed: 0, failed: 1, skipped: 0 });
-    expect(writes).toContain("##vso[build.addbuildtag]gate:title\n");
+    expect(writes).toContain("##vso[build.addbuildtag]gate.title\n");
   });
 });

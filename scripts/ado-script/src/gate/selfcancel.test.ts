@@ -56,8 +56,18 @@ describe("selfCancelIfRequested", () => {
     process.env.ADO_BUILD_ID = "42";
     cancelBuildMock.mockResolvedValue(undefined);
     await selfCancelIfRequested(baseSpec);
-    expect(writes.join("")).toContain("##vso[build.addbuildtag]pr-gate:skipped");
+    expect(writes.join("")).toContain("##vso[build.addbuildtag]pr-gate.skipped");
     expect(cancelBuildMock).toHaveBeenCalledWith("p", 42);
+  });
+
+  it("emits a build tag that contains no ':' (ADO rejects ':' in the tag REST path)", async () => {
+    process.env.ADO_PROJECT = "p";
+    process.env.ADO_BUILD_ID = "42";
+    cancelBuildMock.mockResolvedValue(undefined);
+    await selfCancelIfRequested(baseSpec);
+    const tagLine = writes.find((w) => w.startsWith("##vso[build.addbuildtag]"));
+    expect(tagLine).toBeDefined();
+    expect((tagLine as string).slice("##vso[build.addbuildtag]".length)).not.toContain(":");
   });
 
   it("logs warning and does NOT call cancelBuild when ADO_PROJECT missing", async () => {

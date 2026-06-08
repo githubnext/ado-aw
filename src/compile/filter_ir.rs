@@ -1748,6 +1748,22 @@ mod tests {
     }
 
     #[test]
+    fn test_tag_prefix_has_no_colon() {
+        // Build tags are PUT into the ADO REST request path
+        // (…/builds/<id>/tags/<tag>); a ':' trips ASP.NET's
+        // dangerous-request-path validator and fails the whole build.
+        // The gate composes tags as `${tag_prefix}.${suffix}`, so a colon
+        // in tag_prefix itself would reintroduce the rejected character.
+        for ctx in [GateContext::PullRequest, GateContext::PipelineCompletion] {
+            assert!(
+                !ctx.tag_prefix().contains(':'),
+                "tag_prefix {:?} must not contain ':'",
+                ctx.tag_prefix(),
+            );
+        }
+    }
+
+    #[test]
     fn test_gate_spec_serializes_to_valid_json() {
         let checks = vec![FilterCheck {
             name: "title",

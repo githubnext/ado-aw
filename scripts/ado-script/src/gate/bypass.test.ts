@@ -33,8 +33,16 @@ describe("runBypass", () => {
     const joined = writes.join("");
     expect(joined).toContain("Not a Pull Request build");
     expect(joined).toContain("setvariable variable=SHOULD_RUN;isOutput=true]true");
-    expect(joined).toContain("##vso[build.addbuildtag]pr-gate:passed");
+    expect(joined).toContain("##vso[build.addbuildtag]pr-gate.passed");
     expect(joined).toContain("##vso[task.complete result=Succeeded;]");
+  });
+
+  it("emits a build tag that contains no ':' (ADO rejects ':' in the tag REST path)", async () => {
+    process.env.ADO_BUILD_REASON = "Manual";
+    await runBypass(baseSpec);
+    const tagLine = writes.find((w) => w.startsWith("##vso[build.addbuildtag]"));
+    expect(tagLine).toBeDefined();
+    expect((tagLine as string).slice("##vso[build.addbuildtag]".length)).not.toContain(":");
   });
 
   it("returns false when build reason matches (no bypass)", async () => {

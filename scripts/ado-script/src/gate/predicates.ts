@@ -40,7 +40,7 @@ export function evaluatePredicates(
     }
 
     if (result === "fail") {
-      addBuildTag(`${spec.context.tag_prefix}:${check.tag_suffix}`);
+      addBuildTag(`${spec.context.tag_prefix}.${check.tag_suffix}`);
     }
     tracker.recordCheckResult(result);
     results.push(result);

@@ -422,7 +422,7 @@ describe("evaluatePredicates", () => {
 
     expect(results).toEqual(["pass", "fail"]);
     expect(tracker.summary()).toEqual({ passed: 1, failed: 1, skipped: 0 });
-    expect(writes).toContain("##vso[build.addbuildtag]gate:reason\n");
+    expect(writes).toContain("##vso[build.addbuildtag]gate.reason\n");
   });
 
   it("uses tracker verdicts for unavailable facts before evaluating predicates", () => {
@@ -443,7 +443,7 @@ describe("evaluatePredicates", () => {
 
     expect(results).toEqual(["fail"]);
     expect(tracker.summary()).toEqual({ passed: 0, failed: 1, skipped: 0 });
-    expect(writes).toContain("##vso[build.addbuildtag]gate:missing-title\n");
+    expect(writes).toContain("##vso[build.addbuildtag]gate.missing-title\n");
   });
 });
 
