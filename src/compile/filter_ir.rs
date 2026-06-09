@@ -1419,7 +1419,23 @@ mod tests {
         let checks = lower_pipeline_filters(&filters);
         assert_eq!(checks.len(), 2);
         assert_eq!(checks[0].name, "source-pipeline");
+        assert!(
+            matches!(
+                &checks[0].predicate,
+                Predicate::GlobMatch { fact: Fact::TriggeredByPipeline, pattern }
+                    if pattern == "Build.*"
+            ),
+            "source-pipeline should lower to GlobMatch on TriggeredByPipeline"
+        );
         assert_eq!(checks[1].name, "branch");
+        assert!(
+            matches!(
+                &checks[1].predicate,
+                Predicate::GlobMatch { fact: Fact::TriggeringBranch, pattern }
+                    if pattern == "^refs/heads/main$"
+            ),
+            "branch should lower to GlobMatch on TriggeringBranch"
+        );
     }
 
     // ─── Validation tests ──────────────────────────────────────────────
@@ -1435,7 +1451,7 @@ mod tests {
         assert!(
             diags
                 .iter()
-                .any(|d| d.severity == Severity::Error && d.filter.contains("min-changes"))
+                .any(|d| d.severity == Severity::Error && d.filter == "min-changes / max-changes")
         );
     }
 
@@ -1803,12 +1819,26 @@ mod tests {
         let diags = validate_pr_filters(&filters);
         assert!(diags.iter().all(|d| d.severity != Severity::Error));
 
-        let _step = compile_gate_step_external(
+        let step = compile_gate_step_external(
             GateContext::PullRequest,
             &checks,
             "/tmp/ado-aw-scripts/ado-script/gate.js",
         )
         .unwrap();
+
+        // Tier-2 facts (PrIsDraft, PrLabels) require API calls — env vars must be present
+        assert!(
+            step.contains("ADO_PR_ID"),
+            "draft/labels filters require ADO_PR_ID for API calls"
+        );
+        assert!(
+            step.contains("ADO_REPO_ID"),
+            "draft/labels filters require ADO_REPO_ID for API calls"
+        );
+        assert!(
+            step.contains("GATE_SPEC"),
+            "step should embed the serialised gate spec"
+        );
 
         // Verify the spec captures all three filters with correct fact dependencies
         let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
