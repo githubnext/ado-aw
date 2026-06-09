@@ -83,6 +83,7 @@ Options:
 - `--definition-ids <ids>` -- explicit comma-separated definition IDs (skips auto-detection); mutually exclusive with `--all-repos` / `--source`
 - `--all-repos` -- **project-scope mode**: search every ado-aw definition in the ADO project, not just those with a local lock file; mutually exclusive with `--definition-ids`
 - `--source <path>` -- filter to definitions whose `# ado-aw-metadata` marker references this template path (e.g. `agents/security-scan.md`); activates the discovery code path; pairs with `--all-repos` to scope across the whole project
+- `--include-disabled` -- include `disabled` / `paused` definitions in project-wide discovery (only effective with `--all-repos` or `--source`); by default disabled and paused definitions are skipped to speed up the Preview step
 - `--dry-run` -- print the planned set without calling the ADO API
 
 ### `secrets list [path]`
@@ -94,6 +95,7 @@ Options:
 - `--json` -- emit machine-readable JSON
 - `--org`, `--project`, `--pat`, `--definition-ids` -- same as `secrets set`
 - `--all-repos`, `--source` -- same as `secrets set`
+- `--include-disabled` -- same as `secrets set`
 
 ### `secrets delete <name> [path]`
 
@@ -103,6 +105,7 @@ Options:
 
 - `--org`, `--project`, `--pat`, `--definition-ids` -- same as `secrets set`
 - `--all-repos`, `--source` -- same as `secrets set`
+- `--include-disabled` -- same as `secrets set`
 - `--dry-run` -- print the planned deletion without calling the ADO API
 
 ### Project-scope discovery (`--all-repos` / `--source`)
@@ -113,6 +116,8 @@ By default, `secrets` commands match ADO definitions by scanning **local lock fi
 - **`--source <path>`** — restrict results to definitions whose `# ado-aw-metadata` marker references the given template path. Useful for fan-out token rotation: `ado-aw secrets set GITHUB_TOKEN --source agents/security-scan.md` updates every pipeline that includes that template across the entire project. **Without `--all-repos`, only definitions in the current repository are searched** — pair with `--all-repos` to search the full project.
 
 Both flags are mutually exclusive with `--definition-ids`. `--definition-ids` remains the explicit-ID escape hatch when you know exactly which definitions to target.
+
+**Disabled and paused definitions** are pruned by default during project-wide discovery: the Preview step is expensive, so `disabled` / `paused` definitions are skipped before the expansion call to keep large projects fast. Definitions with no reported status are treated as active. Pass **`--include-disabled`** to include them — useful when you need to rotate a token on a pipeline that is temporarily paused.
 
 :::caution[Not available for other lifecycle commands]
 `enable`, `disable`, `remove`, `list`, `status`, and `run` are **not** affected by these flags — they retain their local-fixture-scoped safety semantics. Only `secrets` commands support project-scope discovery because token rotation is the primary use case for cross-repo operations.
@@ -127,6 +132,9 @@ ado-aw secrets set GITHUB_TOKEN --all-repos --source agents/security-scan.md
 
 # Preview which definitions would be updated
 ado-aw secrets set GITHUB_TOKEN --all-repos --dry-run
+
+# Include disabled/paused pipelines in the sweep (e.g. to rotate their token before re-enabling)
+ado-aw secrets set GITHUB_TOKEN --all-repos --include-disabled
 ```
 
 ### `enable [path]`
