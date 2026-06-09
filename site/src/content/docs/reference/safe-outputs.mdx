@@ -347,8 +347,12 @@ Submits a review vote on a pull request.
 **Agent parameters:**
 - `pull_request_id` - The PR ID to review (required)
 - `event` - Review decision: `approve`, `approve-with-suggestions`, `request-changes`, or `comment` (required)
-- `body` *(optional)* - Review rationale in markdown (required for `request-changes`, at least 10 characters)
+- `body` *(optional)* - Review rationale in markdown (required for `request-changes`, at least 10 characters). When provided, the executor also posts a **separate comment thread** on the PR alongside the vote.
 - `repository` - Repository alias (default: "self")
+
+:::note[Self-approval guard]
+`approve` and `approve-with-suggestions` are blocked at Stage 3 when the pipeline's authenticated identity is the same user who created the PR. This prevents an agent from endorsing its own work. The executor returns a failure result (not a pipeline error) so the rest of the safe-output batch continues.
+:::
 
 **Configuration options (front matter):**
 ```yaml
@@ -370,6 +374,10 @@ Updates pull request metadata (reviewers, labels, auto-complete, vote, descripti
 - `vote` - Vote value: `approve`, `approve-with-suggestions`, `wait-for-author`, `reject`, or `reset` (required for `vote`)
 - `description` - New PR description in markdown (required for `update-description`, at least 10 characters)
 - `repository` - Repository alias (default: "self")
+
+:::note[Self-approval guard (vote operation)]
+`approve` and `approve-with-suggestions` votes are blocked at Stage 3 when the pipeline's authenticated identity is the same user who created the PR. The executor returns a failure result so the rest of the safe-output batch continues.
+:::
 
 **Configuration options (front matter):**
 ```yaml
