@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.33.1](https://github.com/githubnext/ado-aw/compare/v0.33.0...v0.33.1) (2026-06-09)
+
+
+### Bug Fixes
+
+* **gate:** use '.' separator in build tags so ADO doesn't reject ':' in REST path ([#917](https://github.com/githubnext/ado-aw/issues/917)) ([4122a64](https://github.com/githubnext/ado-aw/commit/4122a64086ba9e64b6fbda8afcee3398f4d10dad))
+
+
+### Performance Improvements
+
+* **secrets:** prune disabled/paused pipelines by default in discovery, add --include-disabled opt-out ([#914](https://github.com/githubnext/ado-aw/issues/914)) ([f7e9d17](https://github.com/githubnext/ado-aw/commit/f7e9d17e3efcf68e2c6670ee1adf5e12d3f760c6))
+
 ## [0.33.0](https://github.com/githubnext/ado-aw/compare/v0.32.0...v0.33.0) (2026-06-08)
 
 
