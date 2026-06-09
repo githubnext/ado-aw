@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.34.2](https://github.com/githubnext/ado-aw/compare/v0.34.1...v0.34.2) (2026-06-09)
+
+
+### Bug Fixes
+
+* **compile:** gate exec-context-pr synth path in bash, not step condition ([#937](https://github.com/githubnext/ado-aw/issues/937)) ([6e67699](https://github.com/githubnext/ado-aw/commit/6e6769974ee56b7b840d8f104a789093cdf00743))
+
 ## [0.34.1](https://github.com/githubnext/ado-aw/compare/v0.34.0...v0.34.1) (2026-06-09)
 
 
