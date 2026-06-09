@@ -699,11 +699,12 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
         Extension::SafeOutputs(SafeOutputsExtension),
         Extension::AdoScript(Box::new({
             // PR trigger config drives both the PR-context contributor
-            // (exec-context-pr.js) and the new synthetic-from-ci path
+            // (exec-context-pr.js) and the synthetic-from-ci path
             // (exec-context-pr-synth.js). Compute the two flags from
             // the same source so they stay in lock-step.
             let pr_cfg = front_matter.pr_trigger();
-            let synthetic_pr_active = pr_cfg.is_some_and(|p| p.synthetic_from_ci);
+            let synthetic_pr_active =
+                pr_cfg.is_some_and(|p| matches!(p.mode, crate::compile::types::PrMode::Synthetic));
             AdoScriptExtension {
                 pr_filters: front_matter.pr_filters().cloned(),
                 pipeline_filters: front_matter.pipeline_filters().cloned(),

@@ -1245,7 +1245,7 @@ impl SanitizeConfigTrait for PrContextConfig {
 // ─── PR Trigger Types ───────────────────────────────────────────────────────
 
 /// PR trigger configuration with native ADO filters and runtime gate filters.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct PrTriggerConfig {
     /// Native ADO branch filter for PR triggers
     #[serde(default)]
@@ -1257,33 +1257,47 @@ pub struct PrTriggerConfig {
     #[serde(default)]
     pub filters: Option<PrFilters>,
     /// Whether to synthesise PullRequest semantics on CI builds when an
-    /// open PR matches the configured branches/paths. Defaults to `true`.
-    ///
-    /// Azure DevOps Services ignores the YAML `pr:` block unless a Build
-    /// Validation branch policy is registered server-side. When this knob
-    /// is on, an Setup-job script (`exec-context-pr-synth.js`) looks up
-    /// the open PR via the ADO REST API on CI-triggered builds and
-    /// exposes PR identifiers as `dependencies.Setup.outputs['synthPr.*']`
-    /// so downstream gate/exec-context-pr steps behave as if
-    /// `Build.Reason == PullRequest`. Set to `false` to opt out and
-    /// require an operator-installed branch policy.
-    #[serde(default = "pr_synthetic_from_ci_default", rename = "synthetic-from-ci")]
-    pub synthetic_from_ci: bool,
+    /// PR-trigger mode. Drives whether the compiler emits the
+    /// synthetic-from-ci Setup-job step (`mode: synthetic`, default) or
+    /// steps back and expects an operator-installed Build Validation
+    /// branch policy to drive PR builds (`mode: policy`). See
+    /// [`PrMode`] for the two values.
+    #[serde(default, rename = "mode")]
+    pub mode: PrMode,
 }
 
-impl Default for PrTriggerConfig {
-    fn default() -> Self {
-        Self {
-            branches: None,
-            paths: None,
-            filters: None,
-            synthetic_from_ci: pr_synthetic_from_ci_default(),
-        }
-    }
-}
-
-fn pr_synthetic_from_ci_default() -> bool {
-    true
+/// How `on.pr` builds reach the pipeline.
+///
+/// Azure DevOps Services ignores the YAML `pr:` block unless a
+/// per-branch Build Validation policy is registered server-side. This
+/// enum lets the agent author pick one of two coherent strategies:
+///
+/// * [`PrMode::Synthetic`] (default) — the compiler emits a Setup-job
+///   script (`exec-context-pr-synth.js`) that calls the ADO REST API
+///   on CI-triggered builds, finds the open PR for `Build.SourceBranch`,
+///   and exposes PR identifiers as `dependencies.Setup.outputs['synthPr.*']`
+///   so the gate and `exec-context-pr.js` behave as if
+///   `Build.Reason == PullRequest`. The top-level `trigger:` stays at
+///   ADO's "trigger on every branch" default. **No branch policy
+///   required.** This is the right choice for the vast majority of
+///   agents.
+///
+/// * [`PrMode::Policy`] — the compiler omits all synth wiring AND
+///   emits `trigger: none` at the top level, so the pipeline only
+///   queues when ADO's Build Validation branch policy fires a real
+///   `Build.Reason == PullRequest` build. Choose this when the
+///   operator has explicitly installed a branch policy and wants to
+///   avoid duplicate CI builds firing on every push.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrMode {
+    /// Synthesise PR context from the ADO REST API on CI-triggered
+    /// builds. Top-level `trigger:` left at ADO default.
+    #[default]
+    Synthetic,
+    /// Operator-installed Build Validation branch policy drives PR
+    /// builds; CI trigger is suppressed via `trigger: none`.
+    Policy,
 }
 
 impl SanitizeConfigTrait for PrTriggerConfig {
@@ -2246,7 +2260,7 @@ triggers:
     }
 
     #[test]
-    fn test_pr_trigger_config_synthetic_from_ci_default_true() {
+    fn test_pr_trigger_config_mode_default_synthetic() {
         let yaml = r#"
 triggers:
   pr:
@@ -2255,41 +2269,62 @@ triggers:
 "#;
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
-        assert!(
-            tc.pr.unwrap().synthetic_from_ci,
-            "synthetic-from-ci must default to true when omitted"
+        assert_eq!(
+            tc.pr.unwrap().mode,
+            PrMode::Synthetic,
+            "mode must default to synthetic when omitted"
         );
     }
 
     #[test]
-    fn test_pr_trigger_config_synthetic_from_ci_explicit_false() {
+    fn test_pr_trigger_config_mode_explicit_synthetic() {
         let yaml = r#"
 triggers:
   pr:
     branches:
       include: [main]
-    synthetic-from-ci: false
+    mode: synthetic
 "#;
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
-        assert!(
-            !tc.pr.unwrap().synthetic_from_ci,
-            "synthetic-from-ci: false must opt out of synthesis"
+        assert_eq!(tc.pr.unwrap().mode, PrMode::Synthetic);
+    }
+
+    #[test]
+    fn test_pr_trigger_config_mode_explicit_policy() {
+        let yaml = r#"
+triggers:
+  pr:
+    branches:
+      include: [main]
+    mode: policy
+"#;
+        let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
+        assert_eq!(
+            tc.pr.unwrap().mode,
+            PrMode::Policy,
+            "mode: policy must deserialise correctly"
         );
     }
 
     #[test]
-    fn test_pr_trigger_config_synthetic_from_ci_explicit_true() {
+    fn test_pr_trigger_config_mode_invalid_value_errors() {
         let yaml = r#"
 triggers:
   pr:
     branches:
       include: [main]
-    synthetic-from-ci: true
+    mode: bananas
 "#;
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
-        let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
-        assert!(tc.pr.unwrap().synthetic_from_ci);
+        let err = serde_yaml::from_value::<OnConfig>(val["triggers"].clone())
+            .expect_err("mode: bananas must be rejected at deserialisation");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("bananas") || msg.contains("variant") || msg.contains("unknown"),
+            "error must mention the bad variant; got: {msg}"
+        );
     }
 
     #[test]

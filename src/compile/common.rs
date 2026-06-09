@@ -566,24 +566,27 @@ pub fn generate_pr_trigger(on_config: &Option<OnConfig>, has_schedule: bool) -> 
 
 /// Generate CI trigger configuration.
 ///
-/// Two branches, in priority order:
-///  1. **Suppression** — when a pipeline-completion trigger or a schedule
-///     is configured, `trigger: none` is emitted so unrelated commits do
-///     not also queue a build (existing behaviour).
-///  2. **Default** — otherwise emit the empty string (ADO's "trigger
-///     on every branch" default).
+/// Three branches, in priority order:
+///  1. **Suppression by pipeline / schedule** — when a
+///     pipeline-completion trigger or a schedule is configured,
+///     `trigger: none` is emitted so unrelated commits do not also
+///     queue a build (existing behaviour).
+///  2. **`on.pr.mode: policy`** — the operator has installed a Build
+///     Validation branch policy and the agent author has declared
+///     intent to rely on it. Emit `trigger: none` so feature-branch
+///     pushes do not queue duplicate CI builds alongside the real
+///     PR-typed build the policy fires.
+///  3. **Default** — otherwise emit the empty string (ADO's "trigger
+///     on every branch" default). This is the `on.pr.mode: synthetic`
+///     path: the synthPr Setup step will promote CI builds to PR
+///     semantics, and the synthPr step's fast-exit (`AW_SYNTHETIC_PR_SKIP`)
+///     handles wasted CI builds on branches without a matching PR.
 ///
-/// Note: `on.pr.synthetic-from-ci` (issue #916) must NOT narrow the CI
-/// trigger to `pr.branches.include`. Those branches are PR **target**
-/// branches (e.g. `main`); ADO `trigger:` fires on pushes **to** the
-/// listed branches. Narrowing to target branches suppresses CI on the
-/// feature branches the synth flow actually needs to react to — pushing
-/// to `feature/x` with an open PR `feature/x → main` would never queue
-/// a build. The cost of "wasted" CI builds on branches without a
-/// matching PR is bounded: the synthPr Setup step issues one
-/// `listActivePullRequestsBySourceRef` call that returns `[]` for those
-/// branches and emits `AW_SYNTHETIC_PR_SKIP=true`, which the Agent-job
-/// `dependsOn` condition honours to skip cleanly.
+/// Note: synth mode must NOT narrow the CI trigger to
+/// `pr.branches.include` — those are PR **target** branches, but ADO
+/// `trigger:` fires on pushes **to** the listed branches. Narrowing
+/// would suppress CI on the feature branches synthPr needs to react
+/// to.
 pub fn generate_ci_trigger(on_config: &Option<OnConfig>, has_schedule: bool) -> String {
     let has_pipeline_trigger = on_config
         .as_ref()
@@ -591,6 +594,16 @@ pub fn generate_ci_trigger(on_config: &Option<OnConfig>, has_schedule: bool) -> 
         .is_some();
 
     if has_pipeline_trigger || has_schedule {
+        return "trigger: none".to_string();
+    }
+
+    // Branch 2 — `on.pr.mode: policy`. The operator owns trigger semantics
+    // via a Build Validation branch policy, so the YAML CI trigger must be
+    // silenced to avoid duplicate builds. We still emit the `pr:` block
+    // (the policy uses the YAML `paths:` filter to refine queueing).
+    if let Some(pr) = on_config.as_ref().and_then(|o| o.pr.as_ref())
+        && matches!(pr.mode, crate::compile::types::PrMode::Policy)
+    {
         return "trigger: none".to_string();
     }
 
@@ -2388,8 +2401,8 @@ pub fn generate_agentic_depends_on(
     // (standalone/1es/stage) path and the dual-branch jobs-template path.
     let condition_body: Option<String> = if has_internal_condition {
         let mut parts = vec!["succeeded()".to_string()];
-        // Synthetic-from-ci: the synthPr Setup-job step may have decided
-        // this build should self-skip (no matching PR, wrong target
+        // `mode: synthetic` (default): the synthPr Setup-job step may have
+        // decided this build should self-skip (no matching PR, wrong target
         // branch, no matching changed files). Always honour that flag —
         // it must trump every other reason to run.
         if synthetic_pr_active {
@@ -2399,13 +2412,13 @@ pub fn generate_agentic_depends_on(
             );
         }
         if has_pr_filters {
-            // With synthetic-from-ci, the agent should run when EITHER
+            // With `mode: synthetic`, the agent should run when EITHER
             // (a) it is a real PR build (existing path) OR
             // (b) the synthPr step promoted this CI build to PR semantics
             //     (synthPr.AW_SYNTHETIC_PR=true) OR
             // (c) the gate passed for any other reason.
-            // Without synthetic-from-ci, the existing two-arm condition
-            // is preserved verbatim.
+            // With `mode: policy`, the existing two-arm condition
+            // is preserved verbatim (no synth path is active).
             if synthetic_pr_active {
                 parts.push(
                     r"or(
@@ -3351,7 +3364,7 @@ pub async fn compile_shared(
 
     let synthetic_pr_active = front_matter
         .pr_trigger()
-        .is_some_and(|p| p.synthetic_from_ci);
+        .is_some_and(|p| matches!(p.mode, crate::compile::types::PrMode::Synthetic));
     let agentic_depends_on = generate_agentic_depends_on(
         &front_matter.setup,
         has_pr_filters,
@@ -4807,20 +4820,16 @@ mod tests {
         assert_eq!(result, "trigger: none");
     }
 
-    // ─── generate_ci_trigger: synthetic-from-ci must NOT narrow (issue #916) ──
+    // ─── generate_ci_trigger: on.pr.mode behaviour (issue #916) ──────────────
     //
-    // Earlier iterations of the synth feature auto-narrowed the top-level
-    // `trigger:` block to `pr.branches.include`. That broke the feature:
-    // ADO `trigger:` fires on pushes *to* the listed branches, but
-    // `pr.branches.include` lists PR **target** branches. Narrowing to
-    // `[main]` suppressed CI on feature branches — which are exactly the
-    // pushes the synth flow needs to react to. The tests below pin the
-    // current behaviour: synth-active configs leave the CI trigger at the
-    // ADO default (empty string → "trigger on every branch") and rely on
-    // the synthPr Setup step's fast-exit for cost control.
+    // The synth path (default, `mode: synthetic`) leaves the CI trigger at
+    // ADO default ("trigger on every branch") and relies on the synthPr
+    // Setup step to promote / skip per build. Policy path (`mode: policy`)
+    // emits `trigger: none` so the operator-installed Build Validation
+    // policy is the sole source of pipeline runs — no duplicate builds.
 
     #[test]
-    fn test_generate_ci_trigger_synthetic_pr_does_not_narrow() {
+    fn test_generate_ci_trigger_pr_mode_synthetic_keeps_default() {
         let triggers = Some(crate::compile::types::OnConfig {
             pipeline: None,
             pr: Some(crate::compile::types::PrTriggerConfig {
@@ -4830,21 +4839,22 @@ mod tests {
                 }),
                 paths: None,
                 filters: None,
-                ..Default::default() // synthetic_from_ci defaults to true
+                ..Default::default() // mode defaults to Synthetic
             }),
             schedule: None,
         });
         let result = generate_ci_trigger(&triggers, false);
         assert!(
             result.is_empty(),
-            "synthetic-from-ci must NOT narrow the CI trigger — pr.branches.include lists \
-             PR TARGET branches, but ADO trigger: fires on pushes TO listed branches, so \
-             narrowing would suppress CI on the feature branches synthPr needs. Got: {result}"
+            "mode: synthetic must leave the CI trigger at ADO default — \
+             pr.branches.include lists PR TARGET branches, but ADO trigger: \
+             fires on pushes TO listed branches, so narrowing would suppress \
+             CI on the feature branches synthPr needs. Got: {result}"
         );
     }
 
     #[test]
-    fn test_generate_ci_trigger_synthetic_pr_off_returns_default_empty() {
+    fn test_generate_ci_trigger_pr_mode_policy_emits_trigger_none() {
         let triggers = Some(crate::compile::types::OnConfig {
             pipeline: None,
             pr: Some(crate::compile::types::PrTriggerConfig {
@@ -4854,23 +4864,24 @@ mod tests {
                 }),
                 paths: None,
                 filters: None,
-                synthetic_from_ci: false,
+                mode: crate::compile::types::PrMode::Policy,
             }),
             schedule: None,
         });
         let result = generate_ci_trigger(&triggers, false);
-        assert!(
-            result.is_empty(),
-            "synthetic-from-ci: false must leave the CI trigger at ADO default: {result}"
+        assert_eq!(
+            result, "trigger: none",
+            "mode: policy must suppress the CI trigger so the operator-installed \
+             branch policy is the sole source of pipeline runs (no duplicate builds)"
         );
     }
 
     #[test]
     fn test_generate_ci_trigger_pipeline_trigger_still_suppresses() {
         // Pipeline-completion trigger continues to emit `trigger: none`
-        // regardless of any `on.pr` configuration; this branch was never
-        // about synth narrowing — it's the long-standing rule that
-        // upstream-pipeline triggers exclude commit-driven CI.
+        // regardless of any `on.pr` configuration; this branch is the
+        // long-standing rule that upstream-pipeline triggers exclude
+        // commit-driven CI.
         let triggers = Some(crate::compile::types::OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build".into(),

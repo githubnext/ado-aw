@@ -58,7 +58,7 @@ pub struct AdoScriptExtension {
     /// lock-step with `ExecContextExtension`'s own activation gate.
     pub exec_context_pr_active: bool,
     /// Whether the synthetic-from-ci path is active for this agent.
-    /// Set when `on.pr.synthetic-from-ci != false`. Drives:
+    /// Set when `on.pr.mode == Synthetic` (the default). Drives:
     ///  - Setup-job install/download fire (even with no `filters:`).
     ///  - Setup-job `synthPr` step emission (before any gate step).
     ///  - Downstream env coalescing (handled in `compile-coalesce-env`).

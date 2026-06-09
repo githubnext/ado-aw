@@ -4249,13 +4249,13 @@ fn test_exec_context_pr_only_downloads_bundle_in_agent_job_not_setup() {
     );
     if let Some(setup) = extract_job_block(&yaml, "Setup") {
         // Setup-job script bundle download IS expected when on.pr is
-        // configured (synthetic-from-ci default-on emits the synthPr
+        // configured (default `mode: synthetic` emits the synthPr
         // step, which is a bundle consumer). Only assert the Agent
         // job has the bundle download; the Setup-job download is the
         // synth feature's correct behaviour.
         assert!(
             setup.contains("Download ado-aw scripts"),
-            "Setup job SHOULD have the script bundle download when synthetic-from-ci is on (the synthPr step is a bundle consumer). Setup block: {}",
+            "Setup job SHOULD have the script bundle download when mode: synthetic is on (the synthPr step is a bundle consumer). Setup block: {}",
             setup
         );
     }
@@ -5187,7 +5187,7 @@ fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
     );
     assert!(
         compiled.contains("condition: or(eq(variables['Build.Reason'], 'PullRequest'), eq(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true'))"),
-        "Prepare step must be gated on PR builds OR synthetic-PR Setup outputs at the ADO condition layer (synthetic-from-ci is default-on)"
+        "Prepare step must be gated on PR builds OR synthetic-PR Setup outputs at the ADO condition layer (mode: synthetic is the default)"
     );
     assert!(
         compiled.contains("SYSTEM_ACCESSTOKEN: $(System.AccessToken)"),
@@ -5223,7 +5223,7 @@ fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
         "v7: the git_fetch wrapper moved into the bundle"
     );
 
-    // v7 + synthetic-from-ci (default-on): env passthrough — the bundle
+    // v7 + mode: synthetic (the default): env passthrough — the bundle
     // reads ADO predefined vars from `process.env`. The compiler emits
     // coalesced macros that prefer the real `System.PullRequest.*` vars
     // (true PR builds) and fall back to the `synthPr` Setup-job outputs
@@ -5647,7 +5647,7 @@ Body.
 
 // ─── Synthetic-from-ci snapshot fixtures (issue #916) ────────────────────────
 
-/// Fixture A: agent with on.pr and default synthetic-from-ci: true.
+/// Fixture A: agent with on.pr and default `mode: synthetic`.
 /// Compiled YAML must contain the full synth wiring (synthPr Setup step,
 /// PR_SYNTH_SPEC env, broadened exec-context-pr.js condition, agent-job
 /// AW_SYNTHETIC_PR_SKIP guard). The CI trigger must NOT be auto-narrowed
@@ -5701,13 +5701,15 @@ fn test_synthetic_pr_default_emits_full_synth_wiring() {
     );
 }
 
-/// Fixture B: agent with on.pr and synthetic-from-ci: false.
-/// Back-compat guard — the compiled YAML must contain NONE of the
-/// synthesis artefacts. (Substring-negation; no stored baseline required.)
+/// Fixture B: agent with on.pr and `mode: policy`.
+/// The compiled YAML must contain NONE of the synthesis artefacts AND
+/// must emit `trigger: none` so feature-branch pushes do not queue
+/// duplicate CI builds alongside the operator's branch-policy-driven PR
+/// builds.
 #[test]
-fn test_synthetic_pr_opt_out_omits_all_synth_artefacts() {
-    let compiled = compile_fixture_with_flags("synthetic-pr-opt-out.md", &["--skip-integrity"]);
-    assert_valid_yaml(&compiled, "synthetic-pr-opt-out.md");
+fn test_pr_mode_policy_omits_synth_and_emits_trigger_none() {
+    let compiled = compile_fixture_with_flags("pr-mode-policy.md", &["--skip-integrity"]);
+    assert_valid_yaml(&compiled, "pr-mode-policy.md");
 
     for needle in &[
         "synthPr",
@@ -5717,14 +5719,22 @@ fn test_synthetic_pr_opt_out_omits_all_synth_artefacts() {
     ] {
         assert!(
             !compiled.contains(needle),
-            "synthetic-from-ci: false must produce zero synth artefacts; \
+            "mode: policy must produce zero synth artefacts; \
              found {needle} in compiled YAML"
         );
     }
 
-    // Auto-narrowed CI trigger is ALSO suppressed when synthetic-from-ci is off.
+    // CI trigger must be suppressed so we don't double-queue with the
+    // policy-driven PR build.
+    assert!(
+        compiled.contains("trigger: none"),
+        "mode: policy must emit `trigger: none` so feature-branch pushes do not \
+         queue duplicate CI builds alongside the branch-policy-driven PR build"
+    );
+
+    // And of course must NOT auto-narrow either (defensive).
     assert!(
         !compiled.contains("trigger:\n  branches:\n    include:\n      - 'main'"),
-        "synthetic-from-ci: false must NOT auto-narrow the CI trigger (back-compat)"
+        "mode: policy must not emit a narrowed CI trigger"
     );
 }

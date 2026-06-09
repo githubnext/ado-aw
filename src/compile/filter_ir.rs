@@ -1191,7 +1191,7 @@ pub fn compile_gate_step_external(
     Ok(step)
 }
 
-// ─── PR synthetic-from-ci spec ──────────────────────────────────────────────
+// ─── PR synthetic-from-ci spec (mode: synthetic) ────────────────────────────
 
 /// Base64-encoded JSON spec consumed by the `exec-context-pr-synth.js`
 /// bundle at runtime. Carries the PR branch/path filters the agent

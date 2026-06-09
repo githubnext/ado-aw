@@ -32,7 +32,7 @@ Agent             →  Detection          →  SafeOutputs
 | **SafeOutputs** | Executes approved safe outputs (create PRs, work items, wiki pages, etc.) | Write (`permissions.write`) | Standard ADO agent |
 
 Additional optional jobs:
-- **Setup** — runs before `Agent` (from `setup:` front matter). When `on.pr` is set with default `synthetic-from-ci: true`, this job also runs a `synthPr` step that calls the ADO REST API to promote CI-triggered builds to PR semantics when an open PR matches; if it sets `AW_SYNTHETIC_PR_SKIP=true`, the Agent job is skipped cleanly. See [`docs/front-matter.md#pr-triggering-in-azure-repos`](../docs/front-matter.md#pr-triggering-in-azure-repos).
+- **Setup** — runs before `Agent` (from `setup:` front matter). When `on.pr` is set with the default `mode: synthetic`, this job also runs a `synthPr` step that calls the ADO REST API to promote CI-triggered builds to PR semantics when an open PR matches; if it sets `AW_SYNTHETIC_PR_SKIP=true`, the Agent job is skipped cleanly. With `mode: policy` there is no synthPr step (and `trigger: none` is emitted so the operator's Build Validation branch policy is the sole source of PR builds). See [`docs/front-matter.md#pr-triggering-in-azure-repos`](../docs/front-matter.md#pr-triggering-in-azure-repos).
 - **Teardown** — runs after `SafeOutputs` (from `teardown:` front matter)
 
 ---

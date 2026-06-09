@@ -68,7 +68,7 @@ use super::contributor::ContextContributor;
 /// (unless explicitly disabled via `execution-context.pr.enabled: false`).
 pub(super) struct PrContextContributor {
     config: PrContextConfig,
-    /// Whether `on.pr.synthetic-from-ci` is on for this agent. Drives
+    /// Whether `on.pr.mode == Synthetic` for this agent. Drives
     /// emission of the coalesced `SYSTEM_PULLREQUEST_*` env vars so the
     /// bundle reads either real PR identifiers (true PR builds) or the
     /// `synthPr` Setup-job outputs (CI builds promoted via synth).
@@ -122,7 +122,7 @@ impl ContextContributor for PrContextContributor {
         // the spawned `git` subprocess via `GIT_CONFIG_*` env vars
         // (never argv). It is NEVER visible to the agent step.
         //
-        // When `synthetic-from-ci` is on, the PR-identifier env vars
+        // When `mode: synthetic` is on, the PR-identifier env vars
         // are emitted using `$[ coalesce(...) ]` so the bundle picks
         // up either the real `System.PullRequest.*` (on a true PR
         // build) OR the synthPr Setup-job output (on a CI build
