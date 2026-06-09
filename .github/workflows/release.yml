@@ -1,5 +1,9 @@
 name: Release
 
+# Note: the v0.34.0 entry re-records the on.pr.mode change from #922,
+# whose squash-merge body broke release-please's commit parser and was
+# silently dropped from the v0.33.2 release PR (#924).
+
 on:
   push:
     branches:
