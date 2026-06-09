@@ -5336,9 +5336,27 @@ fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
         compiled.contains("Stage PR execution context (aw-context/pr/*)"),
         "Should emit the PR context prepare step displayName"
     );
+    // The synth-active prepare step uses `condition: succeeded()` and
+    // gates in bash (cross-job `dependencies.Setup.outputs[...]` refs
+    // are ILLEGAL in step-level `condition:` — ADO rejects them with
+    // "Unrecognized value: 'dependencies'"). The synth flag is
+    // projected through step `env:` (legal there) so a tiny bash
+    // prelude can do the gate.
     assert!(
-        compiled.contains("condition: or(eq(variables['Build.Reason'], 'PullRequest'), eq(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true'))"),
-        "Prepare step must be gated on PR builds OR synthetic-PR Setup outputs at the ADO condition layer (mode: synthetic is the default)"
+        compiled.contains(
+            "if [ \"$BUILD_REASON\" != \"PullRequest\" ] && [ \"$AW_SYNTHETIC_PR\" != \"true\" ]; then"
+        ),
+        "Prepare step must include the bash gate that replaces the (illegal) cross-job step condition (mode: synthetic is the default)"
+    );
+    assert!(
+        compiled.contains(
+            "AW_SYNTHETIC_PR: \"$[ coalesce(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], '') ]\""
+        ),
+        "Prepare step must project the synth flag through env (coalesced to '' on real-PR builds) for the bash gate to read"
+    );
+    assert!(
+        compiled.contains("BUILD_REASON: $(Build.Reason)"),
+        "Prepare step must project Build.Reason through env so the bash gate sees a plain $BUILD_REASON"
     );
     assert!(
         compiled.contains("SYSTEM_ACCESSTOKEN: $(System.AccessToken)"),
@@ -5533,6 +5551,113 @@ fn test_execution_context_pr_does_not_leak_system_accesstoken() {
          among the env blocks declaring SYSTEM_ACCESSTOKEN, but it was missing. \
          The PR contributor did not activate as expected."
     );
+}
+
+/// Regression trap for an entire bug class: ADO step-level `condition:`
+/// fields MUST NOT reference `dependencies.<Job>.outputs[...]`. That
+/// syntax is only legal in **job**-level conditions, in `variables:`
+/// mappings, and in step-level `env:` values (via `$[ ... ]`). Using
+/// it in a step condition produces a pipeline-validation error
+/// ("Unrecognized value: 'dependencies'") and the build fails before
+/// any job step runs.
+///
+/// This test walks compiled YAML for fixtures exercising both the
+/// synth-active (default-mode) and synth-inactive (no-synth) PR
+/// contributor paths AND a fixture with `mode: synthetic` + explicit
+/// `pr.filters`. If any step's `condition:` value contains the
+/// substring `dependencies.`, the test fails with a pointer to the
+/// offending step. This protects every extension that emits a step
+/// condition, not just `exec_context/pr`.
+///
+/// History: v6.x emitted `condition: or(eq(variables['Build.Reason'],
+/// 'PullRequest'), eq(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'],
+/// 'true'))` on the "Stage PR execution context" step. ADO accepted
+/// the YAML at parse time (it IS valid YAML) but rejected the
+/// expression at expand time, breaking every synth-active pipeline.
+#[test]
+fn test_no_step_condition_references_cross_job_dependencies() {
+    use serde_yaml::Value;
+
+    /// Fixtures that should exercise different branches of step
+    /// `condition:` emission (synth-active, synth-inactive, with
+    /// filters, etc.). Add new fixtures here as we add new extensions
+    /// or new step-condition emission paths.
+    const FIXTURES: &[&str] = &[
+        "synthetic-pr-default.md",     // synth-active, no pr.filters
+        "execution-context-agent.md",  // exec_context_pr active, default config
+        "pr-mode-policy.md",           // synth-inactive, on.pr present
+        "minimal-agent.md",            // no on.pr at all
+    ];
+
+    /// Walk the YAML. For every mapping that has a `condition:` key,
+    /// if the value contains `dependencies.`, record the enclosing
+    /// `displayName` (or `job` / `stage` as fallback identifiers) so
+    /// the failure points at a specific step.
+    ///
+    /// Distinguishes step vs job/stage by the presence of sibling
+    /// keys that are step-exclusive (`bash`, `script`, `task`,
+    /// `displayName` is shared, but together with one of the
+    /// step keys it's clearly a step). Jobs/stages have their own
+    /// `condition:` and DO allow cross-job dep refs, so they must
+    /// be filtered OUT.
+    fn walk(v: &Value, hits: &mut Vec<String>) {
+        match v {
+            Value::Mapping(m) => {
+                if let Some(Value::String(cond)) = m.get(Value::String("condition".to_string())) {
+                    if cond.contains("dependencies.") {
+                        // Decide: step or job/stage? A mapping is a STEP if it
+                        // has any of the step-exclusive keys. Otherwise treat
+                        // as job/stage (legal location for the ref) and skip.
+                        let is_step = ["bash", "script", "task", "powershell", "pwsh", "checkout"]
+                            .iter()
+                            .any(|k| m.contains_key(Value::String((*k).to_string())));
+                        if is_step {
+                            let display = m
+                                .get(Value::String("displayName".to_string()))
+                                .and_then(|d| d.as_str())
+                                .unwrap_or("<no displayName>");
+                            hits.push(format!(
+                                "step `{display}` has illegal cross-job dep ref in condition: `{cond}`"
+                            ));
+                        }
+                    }
+                }
+                for (_, vv) in m {
+                    walk(vv, hits);
+                }
+            }
+            Value::Sequence(seq) => {
+                for item in seq {
+                    walk(item, hits);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for fixture in FIXTURES {
+        let compiled = compile_fixture_with_flags(fixture, &["--skip-integrity"]);
+        let yaml_content: String = compiled
+            .lines()
+            .skip_while(|line| line.starts_with('#') || line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parsed: Value = serde_yaml::from_str(&yaml_content)
+            .unwrap_or_else(|e| panic!("{fixture}: compiled YAML must parse: {e}"));
+
+        let mut hits: Vec<String> = Vec::new();
+        walk(&parsed, &mut hits);
+
+        assert!(
+            hits.is_empty(),
+            "{fixture}: found {} step(s) with illegal cross-job `dependencies.X.outputs[...]` \
+             refs in `condition:`. ADO rejects these at pipeline-expansion time with \
+             \"Unrecognized value: 'dependencies'\". Project the value through step `env:` \
+             (legal via `$[ ... ]`) and gate in the script body instead. Offenders:\n  - {}",
+            hits.len(),
+            hits.join("\n  - ")
+        );
+    }
 }
 
 /// When the agent is not PR-triggered, the execution-context extension
@@ -5823,12 +5948,22 @@ fn test_synthetic_pr_default_emits_full_synth_wiring() {
         "Fixture A must reference the synth bundle path"
     );
 
-    // Broadened exec-context-pr condition.
+    // Broadened exec-context-pr gate — now a bash guard rather than a
+    // step-level `condition:` (cross-job `dependencies.Setup.outputs[...]`
+    // refs are ILLEGAL in step `condition:`; ADO rejects them with
+    // "Unrecognized value: 'dependencies'"). The synth flag is
+    // projected through step `env:` so the bash prelude can read it.
     assert!(
         compiled.contains(
-            "condition: or(eq(variables['Build.Reason'], 'PullRequest'), eq(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true'))"
+            "if [ \"$BUILD_REASON\" != \"PullRequest\" ] && [ \"$AW_SYNTHETIC_PR\" != \"true\" ]; then"
         ),
-        "Fixture A must broaden the exec-context-pr.js condition to accept synthetic PRs"
+        "Fixture A must include the bash gate on exec-context-pr.js (accepts real-PR OR synth-promoted builds)"
+    );
+    assert!(
+        compiled.contains(
+            "AW_SYNTHETIC_PR: \"$[ coalesce(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], '') ]\""
+        ),
+        "Fixture A must project the synth flag into the exec-context-pr.js step env for the bash gate"
     );
 
     // Agent-job AW_SYNTHETIC_PR_SKIP guard.
@@ -5840,10 +5975,12 @@ fn test_synthetic_pr_default_emits_full_synth_wiring() {
     // Agent-job condition has only the skip guard (no AND-NOT gate
     // clause). The `eq(synthPr.AW_SYNTHETIC_PR, 'true')` literal is
     // therefore expected ONLY in the exec-context-pr.js step's
-    // broadened condition (asserted above) — never as an Agent-job
-    // OR-arm, which would silently bypass the gate for real-PR or
-    // synth-PR builds. A separate fixture covers the gate-enforced
-    // shape when `pr.filters` is present.
+    // env-projected `AW_SYNTHETIC_PR` value (asserted above as the
+    // `coalesce(dependencies.Setup.outputs[...]', '')` shape) — never
+    // as an Agent-job OR-arm in the dependsOn condition, which would
+    // silently bypass the gate for real-PR or synth-PR builds. A
+    // separate fixture covers the gate-enforced shape when
+    // `pr.filters` is present.
 
     // No auto-narrowed CI trigger — `pr.branches.include` lists PR TARGET
     // branches, and ADO `trigger:` fires on pushes TO listed branches, so
