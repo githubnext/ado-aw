@@ -707,10 +707,15 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
             // the synthPr Setup-job step and downstream wiring; when
             // `None` it doesn't. The previous separate `bool` flag is
             // now derived via `AdoScriptExtension::synthetic_pr_active()`.
-            let pr_cfg = front_matter.pr_trigger();
-            let pr_trigger_for_synth = pr_cfg
-                .filter(|p| matches!(p.mode, crate::compile::types::PrMode::Synthetic))
-                .cloned();
+            // The activation predicate (`mode == Synthetic`) lives in
+            // `FrontMatter::is_synthetic_pr()` so it stays in lock-step
+            // with the other two call sites (`compile_shared` and
+            // `ExecContextExtension::new`).
+            let pr_trigger_for_synth = if front_matter.is_synthetic_pr() {
+                front_matter.pr_trigger().cloned()
+            } else {
+                None
+            };
             AdoScriptExtension {
                 pr_filters: front_matter.pr_filters().cloned(),
                 pipeline_filters: front_matter.pipeline_filters().cloned(),

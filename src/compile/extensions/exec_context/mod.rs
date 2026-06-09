@@ -124,9 +124,7 @@ impl ExecContextExtension {
         // from `front_matter.execution_context`) still see the right
         // activation answer.
         let any_contributor_active = pr_contributor_will_activate_with_cfg(&config, front_matter);
-        let synthetic_pr_active = front_matter
-            .pr_trigger()
-            .is_some_and(|p| matches!(p.mode, crate::compile::types::PrMode::Synthetic));
+        let synthetic_pr_active = front_matter.is_synthetic_pr();
         Self {
             config,
             any_contributor_active,

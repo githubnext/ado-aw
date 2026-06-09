@@ -749,6 +749,17 @@ impl FrontMatter {
         self.on_config.as_ref().and_then(|o| o.pr.as_ref())
     }
 
+    /// Whether the synthetic-from-ci path is active for this agent —
+    /// i.e. `on.pr` is configured AND `on.pr.mode == PrMode::Synthetic`
+    /// (the default). Centralised here so the three compile-time call
+    /// sites (`collect_extensions`, `ExecContextExtension::new`,
+    /// `compile_shared`) cannot drift on the predicate if a future
+    /// `PrMode` variant is added.
+    pub fn is_synthetic_pr(&self) -> bool {
+        self.pr_trigger()
+            .is_some_and(|p| matches!(p.mode, PrMode::Synthetic))
+    }
+
     /// Get the PR runtime filters (if any).
     pub fn pr_filters(&self) -> Option<&PrFilters> {
         self.pr_trigger().and_then(|pr| pr.filters.as_ref())
@@ -1256,12 +1267,9 @@ pub struct PrTriggerConfig {
     /// Runtime filters evaluated via gate steps in the Setup job
     #[serde(default)]
     pub filters: Option<PrFilters>,
-    /// Whether to synthesise PullRequest semantics on CI builds when an
-    /// PR-trigger mode. Drives whether the compiler emits the
-    /// synthetic-from-ci Setup-job step (`mode: synthetic`, default) or
-    /// steps back and expects an operator-installed Build Validation
-    /// branch policy to drive PR builds (`mode: policy`). See
-    /// [`PrMode`] for the two values.
+    /// Determines how `on.pr` builds reach the pipeline; see
+    /// [`PrMode`] for the two supported strategies (`synthetic`,
+    /// `policy`). Defaults to [`PrMode::Synthetic`].
     #[serde(default, rename = "mode")]
     pub mode: PrMode,
 }

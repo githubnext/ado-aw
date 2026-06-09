@@ -3373,9 +3373,7 @@ pub async fn compile_shared(
         }
     }
 
-    let synthetic_pr_active = front_matter
-        .pr_trigger()
-        .is_some_and(|p| matches!(p.mode, crate::compile::types::PrMode::Synthetic));
+    let synthetic_pr_active = front_matter.is_synthetic_pr();
     let agentic_depends_on = generate_agentic_depends_on(
         &front_matter.setup,
         has_pr_filters,

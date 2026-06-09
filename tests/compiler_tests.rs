@@ -4229,14 +4229,18 @@ fn test_neither_feature_active_emits_no_node_or_download_anywhere() {
 }
 
 /// Per-job download placement: when the gate is inactive AND runtime imports
-/// are inlined, but `on.pr` is configured and execution-context PR is not
-/// disabled, the `exec-context-pr.js` bundle is the only consumer — the
-/// download must land in the Agent job only.
+/// are inlined, but `on.pr` is configured (default `mode: synthetic`) and
+/// execution-context PR is not disabled, two bundle consumers are active:
+///
+///   * `synthPr` (Setup job) — emitted by the synthetic-from-ci path
+///   * `exec-context-pr.js` (Agent job) — staged by the PR contributor
+///
+/// so the script bundle download MUST land in BOTH jobs.
 ///
 /// Closes a coverage gap that `dedupe_gate_only.md` previously left by
 /// pinning `execution-context.pr.enabled: false`.
 #[test]
-fn test_exec_context_pr_only_downloads_bundle_in_agent_job_not_setup() {
+fn test_exec_context_pr_downloads_bundle_in_both_jobs_with_synth_mode() {
     let yaml = compile_fixture("dedupe_exec_context_pr_only.md");
     let agent = extract_job_block(&yaml, "Agent").expect("Agent job should exist");
     assert!(
