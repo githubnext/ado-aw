@@ -191,20 +191,23 @@ jobs:
     name: Trigger safe-output fixture recompile
     needs: [release-please, checksums]
     # Run only once all release assets (binaries + checksums.txt) are uploaded.
-    # Releases published via release-please use the default GITHUB_TOKEN, which
-    # does NOT fire the `release: published` event on other workflows (GitHub
-    # actively suppresses this to prevent recursive triggers). Dispatch the
-    # recompile workflow explicitly here using a PAT so the dispatched run can
-    # itself open a PR.
+    # Releases published via release-please do NOT fire the `release: published`
+    # event on other workflows (GitHub suppresses this to prevent recursive
+    # triggers), so we explicitly dispatch the recompile workflow here. The
+    # default GITHUB_TOKEN has the `actions:write` scope needed to run
+    # `gh workflow run`; the dispatched workflow uses its own secrets for any
+    # downstream PR creation.
     if: >-
       always() &&
       (needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch') &&
       needs.checksums.result == 'success'
     runs-on: ubuntu-22.04
+    permissions:
+      actions: write
     steps:
       - name: Dispatch recompile-safe-output-fixtures
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_AW_CI_TRIGGER_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           TAG="${{ needs.release-please.outputs.tag_name || github.event.inputs.tag_name }}"
