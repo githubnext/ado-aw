@@ -34,9 +34,5 @@ describe("getWebApi", () => {
     const a = await getWebApi();
     const b = await getWebApi();
     expect(a).toBe(b);
-  }, 30_000);
-  // ^ explicit 30 s timeout: the first call dynamically imports the
-  // ~2.7 MB azure-devops-node-api chunk (see shared/auth.ts comment),
-  // which can take a few seconds when 20 vitest workers race for disk
-  // I/O. Subsequent calls hit the cache and are fast.
+  });
 });
