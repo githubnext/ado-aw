@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.34.0](https://github.com/githubnext/ado-aw/compare/v0.33.1...v0.34.0) (2026-06-09)
+
+
+### ⚠ BREAKING CHANGES
+
+* **compile:** record on.pr.mode (synthetic|policy) trigger model ([#933](https://github.com/githubnext/ado-aw/issues/933))
+
+### Features
+
+* **compile:** record on.pr.mode (synthetic|policy) trigger model ([#933](https://github.com/githubnext/ado-aw/issues/933)) ([925e3ee](https://github.com/githubnext/ado-aw/commit/925e3eeb8c9f41693a1408981dd0435398888aef))
+
+
+### Bug Fixes
+
+* **release:** use built-in GITHUB_TOKEN to dispatch recompile workflow ([#923](https://github.com/githubnext/ado-aw/issues/923)) ([ce617a7](https://github.com/githubnext/ado-aw/commit/ce617a7b019f85b7860733fd33dc4fe59bb78831))
+
 ## [0.33.1](https://github.com/githubnext/ado-aw/compare/v0.33.0...v0.33.1) (2026-06-09)
 
 
