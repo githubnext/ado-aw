@@ -55,7 +55,7 @@ mcp-servers:
 
 **Common (both types):**
 - `enabled:` - Whether this MCP server is active (default: `true`). Set to `false` to temporarily disable an entry without removing it from the front matter.
-- `allowed:` - Array of tool names the agent is permitted to call (required for security)
+- `allowed:` - Array of tool names the agent is permitted to call. Optional — when omitted or empty, all tools from that MCP server are accessible to the agent. **Strongly recommended for security**: restrict to only the tools the agent needs.
 - `env:` - Environment variables for the MCP server process. Use `""` (empty string) for passthrough from the pipeline environment.
 
 ## Environment Variable Passthrough
@@ -93,7 +93,7 @@ network:
 
 ## Security Notes
 
-1. **Allow-listing**: Only tools explicitly listed in `allowed:` are accessible to agents
+1. **Allow-listing**: When `allowed:` is set, only the listed tools are accessible to the agent. When omitted or empty, **all** tools from that server are accessible. Always specify an explicit `allowed:` list to limit the agent's tool surface.
 2. **Containerization**: Stdio MCP servers run as isolated Docker containers (per MCPG spec §3.2.1)
 3. **Environment Isolation**: MCP containers are spawned by MCPG with only the configured environment variables
 4. **MCPG Gateway**: All MCP traffic flows through the MCP Gateway which enforces tool-level filtering
