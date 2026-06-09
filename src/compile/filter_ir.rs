@@ -1126,6 +1126,18 @@ pub fn build_gate_spec(ctx: GateContext, checks: &[FilterCheck]) -> anyhow::Resu
 /// PR build) OR the `synthPr` Setup-job outputs (on a CI build promoted
 /// by `exec-context-pr-synth.js`). Also exports `AW_SYNTHETIC_PR` so
 /// `gate/bypass.ts` knows to skip the "not a PR build" bypass.
+///
+/// **Same-job vs cross-job reference**: this gate step lives in the
+/// **Setup job** (`AdoScriptExtension::setup_steps` returns it), the
+/// same job as `synthPr`. Within the producing job, the cross-job form
+/// `dependencies.Setup.outputs['synthPr.X']` is undefined (a job has
+/// no entry for itself in `dependencies`), so we use the same-job
+/// runtime expression `variables['synthPr.X']` instead, which resolves
+/// step output variables added to the job's variable scope by prior
+/// `isOutput=true` setvariable commands. See
+/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/process/variables#use-output-variables-from-tasks>.
+/// Runtime expressions (`$[ ... ]`) are valid in step-level `env:`
+/// blocks per the same docs.
 pub fn compile_gate_step_external(
     ctx: GateContext,
     checks: &[FilterCheck],
@@ -1160,11 +1172,12 @@ pub fn compile_gate_step_external(
     // has been promoted to PR semantics, so the "not a PullRequest
     // build" bypass must not auto-pass. Always safe to emit (the gate
     // checks it strictly for the literal "true"), but only meaningful
-    // for PR gates.
+    // for PR gates. Same-job ref via `variables['synthPr.X']` — see
+    // function doc-comment for why this is NOT `dependencies.Setup...`.
     let pr_synth_active = synthetic_pr_active && matches!(ctx, GateContext::PullRequest);
     if pr_synth_active {
         step.push_str(
-            "    AW_SYNTHETIC_PR: $[ coalesce(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], '') ]\n",
+            "    AW_SYNTHETIC_PR: $[ coalesce(variables['synthPr.AW_SYNTHETIC_PR'], '') ]\n",
         );
     }
 
@@ -1172,13 +1185,13 @@ pub fn compile_gate_step_external(
         let macro_str = if pr_synth_active {
             match *env_var {
                 "ADO_PR_ID" => {
-                    "$[ coalesce(variables['System.PullRequest.PullRequestId'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_ID']) ]"
+                    "$[ coalesce(variables['System.PullRequest.PullRequestId'], variables['synthPr.AW_SYNTHETIC_PR_ID']) ]"
                 }
                 "ADO_SOURCE_BRANCH" => {
-                    "$[ coalesce(variables['System.PullRequest.SourceBranch'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_SOURCEBRANCH']) ]"
+                    "$[ coalesce(variables['System.PullRequest.SourceBranch'], variables['synthPr.AW_SYNTHETIC_PR_SOURCEBRANCH']) ]"
                 }
                 "ADO_TARGET_BRANCH" => {
-                    "$[ coalesce(variables['System.PullRequest.TargetBranch'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH']) ]"
+                    "$[ coalesce(variables['System.PullRequest.TargetBranch'], variables['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH']) ]"
                 }
                 _ => ado_macro,
             }

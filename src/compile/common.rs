@@ -2413,17 +2413,28 @@ pub fn generate_agentic_depends_on(
         }
         if has_pr_filters {
             // With `mode: synthetic`, the agent should run when EITHER
-            // (a) it is a real PR build (existing path) OR
-            // (b) the synthPr step promoted this CI build to PR semantics
-            //     (synthPr.AW_SYNTHETIC_PR=true) OR
-            // (c) the gate passed for any other reason.
-            // With `mode: policy`, the existing two-arm condition
-            // is preserved verbatim (no synth path is active).
+            // (a) the build is neither a real PR build NOR a synth-promoted
+            //     CI build — in that case the gate doesn't apply (bypass.ts
+            //     auto-passes) and the agent runs unconditionally, OR
+            // (b) the gate evaluator passed (`prGate.SHOULD_RUN=true`),
+            //     covering both the real-PR-with-filter-match path and the
+            //     synth-PR-with-filter-match path.
+            //
+            // CRITICAL: do NOT emit `eq(Build.Reason, 'PullRequest')` or
+            // `eq(synthPr.AW_SYNTHETIC_PR, 'true')` as standalone OR
+            // arms — that would let a real PR or synth-promoted build run
+            // the agent EVEN WHEN `pr.filters` failed (i.e. silently
+            // bypass the gate for the very builds it's meant to filter).
+            //
+            // With `mode: policy` (synth not active), the original
+            // two-arm condition is preserved verbatim.
             if synthetic_pr_active {
                 parts.push(
                     r"or(
-         eq(variables['Build.Reason'], 'PullRequest'),
-         eq(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true'),
+         and(
+           ne(variables['Build.Reason'], 'PullRequest'),
+           ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true')
+         ),
          eq(dependencies.Setup.outputs['prGate.SHOULD_RUN'], 'true')
        )"
                     .to_string(),
@@ -8411,30 +8422,41 @@ safe-outputs:
     }
 
     #[test]
-    fn test_agentic_depends_on_synthetic_pr_active_emits_skip_guard_and_broader_pr_clause() {
+    fn test_agentic_depends_on_synthetic_pr_active_emits_skip_guard_and_gate_enforced_pr_clause() {
         // synthetic_pr_active=true + has_pr_filters=true → emits the
-        // AW_SYNTHETIC_PR_SKIP guard and broadens the PR clause to
-        // accept real PR builds OR synthPr promotion OR gate-passed.
+        // AW_SYNTHETIC_PR_SKIP guard and a gate-enforced PR clause: real
+        // and synth PR builds must pass the gate (no permissive
+        // bypass arms).
         let out = generate_agentic_depends_on(&[], true, false, &[], false, true);
         assert!(out.contains("dependsOn: Setup"), "should depend on Setup");
         assert!(
             out.contains("ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_SKIP'], 'true')"),
             "must honour the synth-skip flag: {out}"
         );
+        // The PR clause must REQUIRE the gate for real-PR AND synth-PR
+        // builds — i.e. allow unconditional run only when neither
+        // applies. Both AND-NOT arms must be present.
         assert!(
-            out.contains("eq(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true')"),
-            "must accept synthetic-PR promotion as an activation reason: {out}"
+            out.contains("ne(variables['Build.Reason'], 'PullRequest')"),
+            "must contain the `ne(Build.Reason, 'PullRequest')` AND-NOT arm: {out}"
         );
         assert!(
-            out.contains("eq(variables['Build.Reason'], 'PullRequest')"),
-            "must still accept real PR builds: {out}"
+            out.contains("ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true')"),
+            "must contain the `ne(synthPr.AW_SYNTHETIC_PR, 'true')` AND-NOT arm: {out}"
         );
-        // Old "ne(Build.Reason, PullRequest)" arm must be GONE — that was
-        // the pre-synthetic permissive default and now contradicts the
-        // synth-skip guard.
         assert!(
-            !out.contains("ne(variables['Build.Reason'], 'PullRequest')"),
-            "synth path must replace the permissive ne(Build.Reason, PullRequest) arm: {out}"
+            out.contains("eq(dependencies.Setup.outputs['prGate.SHOULD_RUN'], 'true')"),
+            "must still accept gate-passed as an activation reason: {out}"
+        );
+        // Defensive regression guards: the old permissive arms that
+        // bypassed the gate for any PR build MUST be gone.
+        assert!(
+            !out.contains("eq(variables['Build.Reason'], 'PullRequest')"),
+            "the buggy `eq(Build.Reason, PullRequest)` bypass arm must be gone: {out}"
+        );
+        assert!(
+            !out.contains("eq(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true')"),
+            "the buggy `eq(synthPr.AW_SYNTHETIC_PR, true)` bypass arm must be gone: {out}"
         );
     }
 

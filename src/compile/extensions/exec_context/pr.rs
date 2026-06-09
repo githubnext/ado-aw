@@ -127,8 +127,20 @@ impl ContextContributor for PrContextContributor {
         // up either the real `System.PullRequest.*` (on a true PR
         // build) OR the synthPr Setup-job output (on a CI build
         // promoted via exec-context-pr-synth.js). The step's
-        // condition is also broadened in the
-        // `compile-exec-context-cond` todo.
+        // condition is also broadened to accept synth-promoted builds.
+        //
+        // Cross-job reference is correct here: this step runs in the
+        // **Agent** job (which depends on Setup), so
+        // `dependencies.Setup.outputs['synthPr.X']` resolves at runtime.
+        // (Same-job references would need `variables['synthPr.X']`
+        // instead — used by the gate step inside the Setup job itself.)
+        // Runtime expressions `$[ ... ]` are documented as valid in
+        // step-level `env:` blocks; see
+        // <https://learn.microsoft.com/en-us/azure/devops/pipelines/process/variables>.
+        // `System.PullRequest.TargetBranch` is `refs/heads/<name>` (full
+        // ref form), matching the `targetRefName` shape returned by the
+        // ADO REST API and stored in `AW_SYNTHETIC_PR_TARGETBRANCH`, so
+        // the coalesce yields a consistent value either way.
         let (pr_id_macro, target_branch_macro, condition) = if self.synthetic_pr_active {
             (
                 "$[ coalesce(variables['System.PullRequest.PullRequestId'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_ID']) ]",

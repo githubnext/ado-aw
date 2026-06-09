@@ -172,9 +172,19 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
   }
 
   // Step 8 — emit synthetic PR identifiers. Downstream gate +
-  // exec-context-pr steps coalesce these with real
-  // System.PullRequest.* via $[ coalesce(...) ] env wiring (added in
-  // the compile-coalesce-env todo).
+  // exec-context-pr steps coalesce these with the corresponding
+  // `System.PullRequest.*` predefined variables via `$[ coalesce(...) ]`
+  // env wiring on the consumer steps.
+  //
+  // Format note: `System.PullRequest.TargetBranch` (and `SourceBranch`)
+  // are documented as the full ref form `refs/heads/<name>`, matching
+  // the `targetRefName` / `sourceRefName` shape returned by the ADO
+  // REST API (`refs/heads/main`, `refs/heads/feature/x`, etc.). The
+  // coalesce on consumer steps therefore yields a consistent
+  // refs-prefixed value whether the build was a real PR or synth-
+  // promoted. (The unprefixed short form is `TargetBranchName` —
+  // a separate predefined variable we deliberately do not use here.)
+  // See <https://learn.microsoft.com/en-us/azure/devops/pipelines/build/variables>.
   setOutput("AW_SYNTHETIC_PR", "true");
   setOutput("AW_SYNTHETIC_PR_ID", String(prId));
   setOutput("AW_SYNTHETIC_PR_TARGETBRANCH", pr.targetRefName ?? "");
