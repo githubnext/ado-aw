@@ -126,8 +126,7 @@ impl ContextContributor for PrContextContributor {
         // are emitted using `$[ coalesce(...) ]` so the bundle picks
         // up either the real `System.PullRequest.*` (on a true PR
         // build) OR the synthPr Setup-job output (on a CI build
-        // promoted via exec-context-pr-synth.js). The step's
-        // condition is also broadened to accept synth-promoted builds.
+        // promoted via exec-context-pr-synth.js).
         //
         // Cross-job reference is correct here: this step runs in the
         // **Agent** job (which depends on Setup), so
@@ -147,30 +146,70 @@ impl ContextContributor for PrContextContributor {
         // them unquoted in practice, but double-quoting matches the
         // form shown in ADO docs and is strictly conformant to the
         // YAML spec (which reserves `'` as a scalar indicator).
-        let (pr_id_macro, target_branch_macro, condition) = if self.synthetic_pr_active {
+        //
+        // ## Synth-active gating — bash, not step `condition:`
+        //
+        // ADO step-level `condition:` fields CANNOT reference
+        // `dependencies.<Job>.outputs[...]`. That syntax is only legal
+        // in **job**-level `condition:`, in `variables:` mappings,
+        // and in step-level `env:` values (via `$[ ... ]`). Attempting
+        // to use it in a step condition produces a pipeline-validation
+        // error ("Unrecognized value: 'dependencies'") and the build
+        // fails before the Agent job starts.
+        //
+        // We therefore project the synth flag through the same
+        // step-level `env:` indirection used for the PR id / target
+        // branch and gate in the bash body. The step still emits as
+        // `succeeded` in the ADO UI on non-PR / non-synth builds
+        // (with a single skip log line) rather than as `skipped` —
+        // a minor cosmetic cost for avoiding a cross-cutting
+        // template / trait change.
+        //
+        // The synth-INACTIVE branch is unchanged: its
+        // `condition: eq(variables['Build.Reason'], 'PullRequest')`
+        // only reads `variables[...]`, which IS legal at step level.
+        let (pr_id_macro, target_branch_macro, prelude, condition) = if self.synthetic_pr_active {
             (
                 "\"$[ coalesce(variables['System.PullRequest.PullRequestId'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_ID']) ]\"",
                 "\"$[ coalesce(variables['System.PullRequest.TargetBranch'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH']) ]\"",
-                "or(eq(variables['Build.Reason'], 'PullRequest'), eq(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true'))",
+                // Bash gate. `coalesce(..., '')` on the env-var side
+                // ensures `$AW_SYNTHETIC_PR` is `""` (not an unresolved
+                // `$()` literal) when Setup's `synthPr` step skipped
+                // itself on a real-PR build. Both var refs are quoted
+                // for shellcheck; both args to `[` are literal-string
+                // comparisons so `set -u` is safe on either side.
+                "    if [ \"$BUILD_REASON\" != \"PullRequest\" ] && [ \"$AW_SYNTHETIC_PR\" != \"true\" ]; then\n      echo \"[aw-context] Not a PR build and not synth-promoted; skipping exec-context-pr.\"\n      exit 0\n    fi\n",
+                "succeeded()",
             )
         } else {
             (
                 "$(System.PullRequest.PullRequestId)",
                 "$(System.PullRequest.TargetBranch)",
+                "",
                 "eq(variables['Build.Reason'], 'PullRequest')",
             )
+        };
+        // Synth-active path adds two env vars (BUILD_REASON + the
+        // coalesced synth flag) the bash prelude reads. They're
+        // omitted on the synth-inactive path because that path's step
+        // condition (a plain `variables[...]` ref) is legal at step
+        // level and needs no in-bash gate.
+        let synth_env = if self.synthetic_pr_active {
+            "\n    BUILD_REASON: $(Build.Reason)\n    AW_SYNTHETIC_PR: \"$[ coalesce(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], '') ]\""
+        } else {
+            ""
         };
         format!(
             r#"- bash: |
     set -euo pipefail
-    node '{EXEC_CONTEXT_PR_PATH}'
+{prelude}    node '{EXEC_CONTEXT_PR_PATH}'
   env:
     SYSTEM_ACCESSTOKEN: $(System.AccessToken)
     SYSTEM_PULLREQUEST_PULLREQUESTID: {pr_id_macro}
     SYSTEM_PULLREQUEST_TARGETBRANCH: {target_branch_macro}
     SYSTEM_TEAMPROJECT: $(System.TeamProject)
     BUILD_REPOSITORY_NAME: $(Build.Repository.Name)
-    BUILD_SOURCESDIRECTORY: $(Build.SourcesDirectory)
+    BUILD_SOURCESDIRECTORY: $(Build.SourcesDirectory){synth_env}
   displayName: "Stage PR execution context (aw-context/pr/*)"
   condition: {condition}"#
         )
@@ -221,7 +260,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_step_synth_active_emits_coalesced_env_and_broadened_condition() {
+    fn prepare_step_synth_active_emits_coalesced_env_and_bash_synth_guard() {
         let contributor = PrContextContributor::new(PrContextConfig::default(), true);
         let fm = pr_fm();
         let ctx = CompileContext::for_test(&fm);
@@ -244,13 +283,54 @@ mod tests {
             "synth-active prepare step must coalesce target branch with synthPr fallback: {step}"
         );
 
-        // Condition: broadened to accept real PR builds OR synth-promoted
-        // CI builds.
+        // Env: BUILD_REASON + synth flag projected through env so the
+        // bash gate has plain `$BUILD_REASON` / `$AW_SYNTHETIC_PR` to
+        // read (cross-job refs are illegal in step `condition:` but
+        // legal in step `env:` values).
+        assert!(
+            step.contains("BUILD_REASON: $(Build.Reason)"),
+            "synth-active prepare step must project Build.Reason through env for the bash guard: {step}"
+        );
         assert!(
             step.contains(
-                "condition: or(eq(variables['Build.Reason'], 'PullRequest'), eq(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true'))"
+                "AW_SYNTHETIC_PR: \"$[ coalesce(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], '') ]\""
             ),
-            "synth-active prepare step must broaden the condition to accept synth-promoted builds: {step}"
+            "synth-active prepare step must project the synth flag through env (coalesced to '' on real-PR builds): {step}"
+        );
+
+        // Bash guard: literal `if` chain that exits 0 when neither
+        // condition holds. Variables are double-quoted so shellcheck
+        // is clean and `set -u` is safe.
+        assert!(
+            step.contains(
+                "if [ \"$BUILD_REASON\" != \"PullRequest\" ] && [ \"$AW_SYNTHETIC_PR\" != \"true\" ]; then"
+            ),
+            "synth-active prepare step must include the bash gate (replaces the illegal step-level condition): {step}"
+        );
+        assert!(
+            step.contains(
+                "[aw-context] Not a PR build and not synth-promoted; skipping exec-context-pr."
+            ),
+            "synth-active prepare step must emit a single skip log line so the no-op is discoverable: {step}"
+        );
+
+        // Step condition: must be `succeeded()` (the only legal form
+        // here — cross-job dep refs are illegal at step level).
+        assert!(
+            step.contains("condition: succeeded()"),
+            "synth-active prepare step must use `condition: succeeded()` and gate in bash: {step}"
+        );
+
+        // Regression trap: the v6.x emission put a cross-job ref in
+        // the step `condition:`. ADO rejects that with
+        // "Unrecognized value: 'dependencies'" and the pipeline never
+        // starts the Agent job. Must NEVER come back.
+        assert!(
+            !step.contains(
+                "condition: or(eq(variables['Build.Reason'], 'PullRequest'), eq(dependencies.Setup.outputs"
+            ),
+            "synth-active prepare step must NOT use the illegal cross-job dep ref in step `condition:` \
+             (only legal in job-level conditions / `variables:` mappings / step `env:` values): {step}"
         );
     }
 
