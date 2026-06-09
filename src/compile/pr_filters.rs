@@ -130,10 +130,6 @@ mod tests {
             result.is_empty(),
             "default PrTriggerConfig should produce empty string (trigger on all PRs)"
         );
-        assert!(
-            !result.contains("pr: none"),
-            "triggers.pr should override schedule/pipeline suppression"
-        );
     }
 
     #[test]
@@ -289,10 +285,6 @@ mod tests {
         let step: serde_yaml::Value = serde_yaml::from_str("bash: echo hello").unwrap();
         let result = generate_agentic_depends_on(&[step], false, false, &[], false, false);
         assert_eq!(result, "dependsOn: Setup");
-        assert!(
-            !result.contains("condition:"),
-            "no condition without PR filters"
-        );
     }
 
     #[test]
@@ -592,6 +584,8 @@ mod tests {
             }
             other => panic!("expected NumericRange, got {:?}", other),
         }
+        assert!(spec.facts.iter().any(|f| f.kind == "changed_file_count"), "should include changed_file_count fact");
+        assert_eq!(spec.checks[0].tag_suffix, "changes-mismatch");
     }
 
     #[test]
@@ -681,6 +675,7 @@ mod tests {
             result.contains("prGate.SHOULD_RUN"),
             "should check gate output"
         );
+        assert!(result.contains("dependsOn: Setup"), "pr filters require a Setup dependency");
         assert!(result.contains("Custom.Flag"), "should include expression");
         assert!(result.contains("Build.Reason"), "should check build reason");
     }
@@ -811,9 +806,13 @@ on:
         let oc: OnConfig = serde_yaml::from_value(val["on"].clone()).unwrap();
         let schedule = oc.schedule.unwrap();
         assert_eq!(schedule.expression(), "weekly on monday");
+        assert_eq!(schedule.branches(), &["main"], "schedule branches should round-trip");
         let pipeline = oc.pipeline.unwrap();
         assert_eq!(pipeline.name, "Build Pipeline");
+        assert_eq!(pipeline.project.as_deref(), Some("OtherProject"), "pipeline project should round-trip");
+        assert_eq!(pipeline.branches, vec!["main"], "pipeline branches should round-trip");
         let pr = oc.pr.unwrap();
+        assert_eq!(pr.branches.as_ref().unwrap().include, vec!["main"], "pr branches should round-trip");
         let filters = pr.filters.unwrap();
         assert_eq!(filters.title.unwrap().pattern, "*[agent]*");
         assert_eq!(filters.commit_message.unwrap().pattern, "*[skip-agent]*");
