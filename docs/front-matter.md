@@ -104,11 +104,11 @@ on:                            # trigger configuration (unified under on: key)
       include: [main]
     paths:
       include: [src/*]
-    synthetic-from-ci: true    # default true. When true (and `on.pr.branches.include`
-                               # is non-empty), CI builds on the included branches
-                               # call the ADO REST API at Setup time to find the
+    synthetic-from-ci: true    # default true. When true, every CI build
+                               # calls the ADO REST API at Setup time to find the
                                # open PR for `Build.SourceBranch`. If exactly one
-                               # matches, the build is promoted to behave as
+                               # matches `on.pr.branches`/`on.pr.paths`, the build
+                               # is promoted to behave as
                                # `Build.Reason == PullRequest` — gate evaluator
                                # runs, exec-context-pr stages `aw-context/pr/`,
                                # and the agent runs against the PR diff. No Build
@@ -387,13 +387,19 @@ On every CI build with `on.pr.synthetic-from-ci: true` (the default):
    full PR-spec predicates and `aw-context/pr/{base.sha,head.sha}` is
    staged for the agent.
 
-### Auto-narrowed CI trigger
+### Why the CI trigger is not auto-narrowed
 
-When `synthetic-from-ci` is on AND `on.pr.branches.include` is
-non-empty, the compiler also auto-emits a top-level `trigger:` block
-mirroring those branches so unrelated branches do not queue builds
-that would only self-skip. Pipeline/schedule triggers and an explicit
-`synthetic-from-ci: false` both suppress this narrowing.
+`pr.branches.include` lists PR **target** branches (e.g. `main`), but
+ADO `trigger:` fires on pushes **to** the listed branches. Narrowing
+`trigger:` to `pr.branches.include` would suppress CI on the feature
+branches synthPr actually needs to react to (pushing to `feature/x`
+with an open PR `feature/x → main` would never queue a build). The
+compiler therefore leaves the top-level `trigger:` at the ADO default
+("trigger on every branch") when synth is on, and relies on the
+synthPr Setup step's fast-exit for cost control: a single
+`listActivePullRequestsBySourceRef` call returns `[]` on branches
+without a matching PR and the Agent job self-skips cleanly via
+`AW_SYNTHETIC_PR_SKIP=true`.
 
 ### Opting out
 

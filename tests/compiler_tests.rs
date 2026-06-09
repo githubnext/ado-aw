@@ -5650,7 +5650,9 @@ Body.
 /// Fixture A: agent with on.pr and default synthetic-from-ci: true.
 /// Compiled YAML must contain the full synth wiring (synthPr Setup step,
 /// PR_SYNTH_SPEC env, broadened exec-context-pr.js condition, agent-job
-/// AW_SYNTHETIC_PR_SKIP guard) plus the narrowed top-level `trigger:` block.
+/// AW_SYNTHETIC_PR_SKIP guard). The CI trigger must NOT be auto-narrowed
+/// to `pr.branches.include` — those are PR target branches, and narrowing
+/// would suppress CI on the feature branches synthPr actually needs.
 #[test]
 fn test_synthetic_pr_default_emits_full_synth_wiring() {
     let compiled = compile_fixture_with_flags("synthetic-pr-default.md", &["--skip-integrity"]);
@@ -5688,10 +5690,14 @@ fn test_synthetic_pr_default_emits_full_synth_wiring() {
         "Fixture A's Agent-job condition must accept synth promotion as an activation reason"
     );
 
-    // Narrowed CI trigger block.
+    // No auto-narrowed CI trigger — `pr.branches.include` lists PR TARGET
+    // branches, and ADO `trigger:` fires on pushes TO listed branches, so
+    // narrowing would suppress CI on the feature branches synthPr needs.
     assert!(
-        compiled.contains("trigger:\n  branches:\n    include:\n      - 'main'"),
-        "Fixture A must auto-emit a narrowed CI trigger mirroring on.pr.branches.include"
+        !compiled.contains("trigger:\n  branches:\n    include:\n      - 'main'"),
+        "Fixture A must NOT auto-narrow the top-level CI trigger to pr.branches.include — \
+         narrowing to PR target branches would defeat synthPr by suppressing CI on the \
+         feature branches it must react to"
     );
 }
 

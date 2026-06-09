@@ -566,19 +566,24 @@ pub fn generate_pr_trigger(on_config: &Option<OnConfig>, has_schedule: bool) -> 
 
 /// Generate CI trigger configuration.
 ///
-/// Three branches, in priority order:
+/// Two branches, in priority order:
 ///  1. **Suppression** — when a pipeline-completion trigger or a schedule
 ///     is configured, `trigger: none` is emitted so unrelated commits do
 ///     not also queue a build (existing behaviour).
-///  2. **Synthetic-from-ci narrowing** — when `on.pr.synthetic-from-ci`
-///     is on (default) AND `on.pr.branches.include` is non-empty AND
-///     branch (1) does not apply, emit a `trigger:` block mirroring
-///     `pr.branches.include` so CI fires only on those branches.
-///     Without this, ADO's implicit "trigger on every branch" would
-///     queue a build for every push, only for the synthPr step to skip
-///     most of them — wasted compute. (Issue #916, decision 2.)
-///  3. **Default** — otherwise emit the empty string (ADO's "trigger
+///  2. **Default** — otherwise emit the empty string (ADO's "trigger
 ///     on every branch" default).
+///
+/// Note: `on.pr.synthetic-from-ci` (issue #916) must NOT narrow the CI
+/// trigger to `pr.branches.include`. Those branches are PR **target**
+/// branches (e.g. `main`); ADO `trigger:` fires on pushes **to** the
+/// listed branches. Narrowing to target branches suppresses CI on the
+/// feature branches the synth flow actually needs to react to — pushing
+/// to `feature/x` with an open PR `feature/x → main` would never queue
+/// a build. The cost of "wasted" CI builds on branches without a
+/// matching PR is bounded: the synthPr Setup step issues one
+/// `listActivePullRequestsBySourceRef` call that returns `[]` for those
+/// branches and emits `AW_SYNTHETIC_PR_SKIP=true`, which the Agent-job
+/// `dependsOn` condition honours to skip cleanly.
 pub fn generate_ci_trigger(on_config: &Option<OnConfig>, has_schedule: bool) -> String {
     let has_pipeline_trigger = on_config
         .as_ref()
@@ -587,27 +592,6 @@ pub fn generate_ci_trigger(on_config: &Option<OnConfig>, has_schedule: bool) -> 
 
     if has_pipeline_trigger || has_schedule {
         return "trigger: none".to_string();
-    }
-
-    // Branch 2 — narrowed trigger emitted by the synthetic-from-ci feature.
-    if let Some(pr) = on_config.as_ref().and_then(|o| o.pr.as_ref())
-        && pr.synthetic_from_ci
-        && let Some(branches) = pr.branches.as_ref()
-        && !branches.include.is_empty()
-    {
-        let mut yaml = String::from("trigger:\n  branches:\n    include:\n");
-        for b in &branches.include {
-            yaml.push_str(&format!("      - '{}'\n", b.replace('\'', "''")));
-        }
-        // Mirror exclude if the agent declared one — keeps CI exactly
-        // aligned with the PR-trigger configuration.
-        if !branches.exclude.is_empty() {
-            yaml.push_str("    exclude:\n");
-            for b in &branches.exclude {
-                yaml.push_str(&format!("      - '{}'\n", b.replace('\'', "''")));
-            }
-        }
-        return yaml.trim_end().to_string();
     }
 
     String::new()
@@ -4823,16 +4807,26 @@ mod tests {
         assert_eq!(result, "trigger: none");
     }
 
-    // ─── generate_ci_trigger: synthetic-from-ci narrowing (issue #916) ────────
+    // ─── generate_ci_trigger: synthetic-from-ci must NOT narrow (issue #916) ──
+    //
+    // Earlier iterations of the synth feature auto-narrowed the top-level
+    // `trigger:` block to `pr.branches.include`. That broke the feature:
+    // ADO `trigger:` fires on pushes *to* the listed branches, but
+    // `pr.branches.include` lists PR **target** branches. Narrowing to
+    // `[main]` suppressed CI on feature branches — which are exactly the
+    // pushes the synth flow needs to react to. The tests below pin the
+    // current behaviour: synth-active configs leave the CI trigger at the
+    // ADO default (empty string → "trigger on every branch") and rely on
+    // the synthPr Setup step's fast-exit for cost control.
 
     #[test]
-    fn test_generate_ci_trigger_synthetic_pr_narrows_to_include_branches() {
+    fn test_generate_ci_trigger_synthetic_pr_does_not_narrow() {
         let triggers = Some(crate::compile::types::OnConfig {
             pipeline: None,
             pr: Some(crate::compile::types::PrTriggerConfig {
                 branches: Some(crate::compile::types::BranchFilter {
                     include: vec!["main".into(), "release/*".into()],
-                    exclude: vec![],
+                    exclude: vec!["users/*".into()],
                 }),
                 paths: None,
                 filters: None,
@@ -4841,32 +4835,12 @@ mod tests {
             schedule: None,
         });
         let result = generate_ci_trigger(&triggers, false);
-        assert!(result.starts_with("trigger:\n  branches:\n    include:"));
-        assert!(result.contains("- 'main'"));
-        assert!(result.contains("- 'release/*'"));
-        assert!(!result.contains("exclude:"), "no exclude was configured");
-    }
-
-    #[test]
-    fn test_generate_ci_trigger_synthetic_pr_mirrors_exclude() {
-        let triggers = Some(crate::compile::types::OnConfig {
-            pipeline: None,
-            pr: Some(crate::compile::types::PrTriggerConfig {
-                branches: Some(crate::compile::types::BranchFilter {
-                    include: vec!["main".into()],
-                    exclude: vec!["users/*".into()],
-                }),
-                paths: None,
-                filters: None,
-                ..Default::default()
-            }),
-            schedule: None,
-        });
-        let result = generate_ci_trigger(&triggers, false);
-        assert!(result.contains("include:"));
-        assert!(result.contains("- 'main'"));
-        assert!(result.contains("exclude:"));
-        assert!(result.contains("- 'users/*'"));
+        assert!(
+            result.is_empty(),
+            "synthetic-from-ci must NOT narrow the CI trigger — pr.branches.include lists \
+             PR TARGET branches, but ADO trigger: fires on pushes TO listed branches, so \
+             narrowing would suppress CI on the feature branches synthPr needs. Got: {result}"
+        );
     }
 
     #[test]
@@ -4887,34 +4861,16 @@ mod tests {
         let result = generate_ci_trigger(&triggers, false);
         assert!(
             result.is_empty(),
-            "synthetic-from-ci: false must NOT auto-narrow the CI trigger (back-compat): {result}"
+            "synthetic-from-ci: false must leave the CI trigger at ADO default: {result}"
         );
     }
 
     #[test]
-    fn test_generate_ci_trigger_synthetic_pr_empty_include_returns_default_empty() {
-        let triggers = Some(crate::compile::types::OnConfig {
-            pipeline: None,
-            pr: Some(crate::compile::types::PrTriggerConfig {
-                branches: Some(crate::compile::types::BranchFilter {
-                    include: vec![],
-                    exclude: vec![],
-                }),
-                paths: None,
-                filters: None,
-                ..Default::default()
-            }),
-            schedule: None,
-        });
-        let result = generate_ci_trigger(&triggers, false);
-        assert!(
-            result.is_empty(),
-            "empty include list means no narrowing — keep ADO default trigger: {result}"
-        );
-    }
-
-    #[test]
-    fn test_generate_ci_trigger_pipeline_trigger_suppresses_synthetic_narrowing() {
+    fn test_generate_ci_trigger_pipeline_trigger_still_suppresses() {
+        // Pipeline-completion trigger continues to emit `trigger: none`
+        // regardless of any `on.pr` configuration; this branch was never
+        // about synth narrowing — it's the long-standing rule that
+        // upstream-pipeline triggers exclude commit-driven CI.
         let triggers = Some(crate::compile::types::OnConfig {
             pipeline: Some(crate::compile::types::PipelineTrigger {
                 name: "Build".into(),
@@ -4936,7 +4892,7 @@ mod tests {
         let result = generate_ci_trigger(&triggers, false);
         assert_eq!(
             result, "trigger: none",
-            "pipeline trigger must take priority over synth narrowing"
+            "pipeline-completion trigger must continue to emit `trigger: none`"
         );
     }
 
