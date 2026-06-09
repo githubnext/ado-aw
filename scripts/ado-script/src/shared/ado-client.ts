@@ -108,6 +108,10 @@ export async function getPullRequestById(
  * synth contract requires *exactly one* match — a source branch with
  * >100 simultaneous active PRs against it is pathological and the
  * bundle will skip via the "multi-match" path anyway.
+ *
+ * The `?? []` guard handles the SDK's habit of returning `null` for
+ * empty result bodies on some REST responses; callers iterate / filter
+ * the result, so an empty array is the only safe contract.
  */
 export async function listActivePullRequestsBySourceRef(
   project: string,
@@ -116,10 +120,12 @@ export async function listActivePullRequestsBySourceRef(
 ): Promise<GitPullRequest[]> {
   return withRetry("listActivePullRequestsBySourceRef", async () => {
     const git = await (await getWebApi()).getGitApi();
-    return git.getPullRequests(
-      repoId,
-      { sourceRefName, status: PullRequestStatus.Active },
-      project,
+    return (
+      (await git.getPullRequests(
+        repoId,
+        { sourceRefName, status: PullRequestStatus.Active },
+        project,
+      )) ?? []
     );
   });
 }

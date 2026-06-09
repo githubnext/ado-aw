@@ -1302,6 +1302,10 @@ pub enum PrMode {
 
 impl SanitizeConfigTrait for PrTriggerConfig {
     fn sanitize_config_fields(&mut self) {
+        // `mode` (PrMode enum, `Copy`) has no string content to
+        // sanitize — it's a closed kebab-case-deserialised enum, so
+        // any malformed input is already rejected at deserialisation
+        // time. Intentionally absent here.
         if let Some(ref mut b) = self.branches {
             b.sanitize_config_fields();
         }

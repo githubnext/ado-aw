@@ -196,3 +196,97 @@ impl ContextContributor for PrContextContributor {
         ]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Direct unit tests for `PrContextContributor::prepare_step` —
+    //! pins both the `mode: synthetic` (default) and `mode: policy`
+    //! emitted YAML shapes for the env-coalesce macros and the
+    //! step-level `condition:`. Catches accidental regressions of the
+    //! coalesce wiring without round-tripping through a full snapshot
+    //! fixture.
+    use super::*;
+    use crate::compile::extensions::CompileContext;
+    use crate::compile::types::{FrontMatter, PrContextConfig};
+
+    fn parse_fm(src: &str) -> FrontMatter {
+        let (fm, _) = crate::compile::common::parse_markdown(src).unwrap();
+        fm
+    }
+
+    fn pr_fm() -> FrontMatter {
+        parse_fm(
+            "---\nname: test\ndescription: test\non:\n  pr:\n    branches:\n      include: [main]\n---\n",
+        )
+    }
+
+    #[test]
+    fn prepare_step_synth_active_emits_coalesced_env_and_broadened_condition() {
+        let contributor = PrContextContributor::new(PrContextConfig::default(), true);
+        let fm = pr_fm();
+        let ctx = CompileContext::for_test(&fm);
+        let step = contributor.prepare_step(&ctx);
+
+        // Env: PR id + target branch are coalesced via cross-job runtime
+        // expressions wrapped in YAML double quotes (Agent job depends
+        // on Setup, so `dependencies.Setup.outputs[...]` is the correct
+        // form here — distinct from the gate step which is same-job).
+        assert!(
+            step.contains(
+                "SYSTEM_PULLREQUEST_PULLREQUESTID: \"$[ coalesce(variables['System.PullRequest.PullRequestId'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_ID']) ]\""
+            ),
+            "synth-active prepare step must coalesce PR id with synthPr fallback: {step}"
+        );
+        assert!(
+            step.contains(
+                "SYSTEM_PULLREQUEST_TARGETBRANCH: \"$[ coalesce(variables['System.PullRequest.TargetBranch'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH']) ]\""
+            ),
+            "synth-active prepare step must coalesce target branch with synthPr fallback: {step}"
+        );
+
+        // Condition: broadened to accept real PR builds OR synth-promoted
+        // CI builds.
+        assert!(
+            step.contains(
+                "condition: or(eq(variables['Build.Reason'], 'PullRequest'), eq(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true'))"
+            ),
+            "synth-active prepare step must broaden the condition to accept synth-promoted builds: {step}"
+        );
+    }
+
+    #[test]
+    fn prepare_step_synth_inactive_emits_plain_macros_and_narrow_condition() {
+        let contributor = PrContextContributor::new(PrContextConfig::default(), false);
+        let fm = pr_fm();
+        let ctx = CompileContext::for_test(&fm);
+        let step = contributor.prepare_step(&ctx);
+
+        // Env: plain `$(...)` macros for the real System.PullRequest.*
+        // predefined variables — no coalesce, no quoting.
+        assert!(
+            step.contains("SYSTEM_PULLREQUEST_PULLREQUESTID: $(System.PullRequest.PullRequestId)"),
+            "synth-inactive prepare step must use the plain ADO macro form: {step}"
+        );
+        assert!(
+            step.contains("SYSTEM_PULLREQUEST_TARGETBRANCH: $(System.PullRequest.TargetBranch)"),
+            "synth-inactive prepare step must use the plain ADO macro form: {step}"
+        );
+
+        // Condition: narrow to real PR builds only.
+        assert!(
+            step.contains("condition: eq(variables['Build.Reason'], 'PullRequest')"),
+            "synth-inactive prepare step must keep the narrow PR-build condition: {step}"
+        );
+
+        // Defensive: the synth-mode signature MUST NOT appear when the
+        // synth path is inactive.
+        assert!(
+            !step.contains("synthPr.AW_SYNTHETIC_PR"),
+            "synth-inactive prepare step must not reference any synthPr Setup-job output: {step}"
+        );
+        assert!(
+            !step.contains("coalesce("),
+            "synth-inactive prepare step must not emit a coalesce expression: {step}"
+        );
+    }
+}
