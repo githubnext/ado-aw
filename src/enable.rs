@@ -384,6 +384,222 @@ fn split_owner_repo_arg(value: &str) -> Result<(String, String)> {
     Ok((owner, repo))
 }
 
+/// Print the resolved source identity and ADO context to stdout.
+fn print_context_header(resolved: &ResolvedSource, ado_ctx: &AdoContext) {
+    match resolved {
+        ResolvedSource::AdoGit { source } => {
+            println!(
+                "ADO context: org={}, project={}, repo={} (ADO Git source)",
+                ado_ctx.org_url, ado_ctx.project, source.repo
+            );
+        }
+        ResolvedSource::Github {
+            source,
+            service_connection,
+        } => {
+            println!(
+                "ADO context: org={}, project={}",
+                ado_ctx.org_url, ado_ctx.project
+            );
+            println!(
+                "GitHub source: {}/{} (service connection: {})",
+                source.owner, source.repo, service_connection
+            );
+        }
+    }
+    println!();
+}
+
+/// Resolve the provider-specific network identifiers (ADO repository GUID or
+/// GitHub service-connection GUID) needed for the create-definition POST body.
+///
+/// - ADO Git source: look up the repository GUID (required by the
+///   `repository.id` field in the POST body).
+/// - GitHub source: resolve the service-connection name → GUID
+///   (required by `repository.properties.connectedServiceId`).
+///
+/// Dry-run skips the network calls; the POST body printout uses
+/// placeholders so operators still see the full body shape.
+async fn resolve_identifiers(
+    resolved: &ResolvedSource,
+    client: &reqwest::Client,
+    ado_ctx: &AdoContext,
+    auth: &AdoAuth,
+    dry_run: bool,
+) -> Result<ResolvedIdentifiers> {
+    match resolved {
+        ResolvedSource::AdoGit { source } => {
+            let repo_id = if dry_run {
+                String::from("<repo-id>")
+            } else {
+                get_repository_id(client, ado_ctx, auth, &source.repo)
+                    .await
+                    .with_context(|| {
+                        format!("Failed to look up ADO repository '{}'", source.repo)
+                    })?
+            };
+            Ok(ResolvedIdentifiers::AdoGit { repo_id })
+        }
+        ResolvedSource::Github {
+            source,
+            service_connection,
+        } => {
+            let service_connection_id = if dry_run {
+                String::from("<service-connection-id>")
+            } else {
+                resolve_service_connection_id(client, ado_ctx, auth, service_connection)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Failed to resolve GitHub service connection '{}' in project '{}'",
+                            service_connection, ado_ctx.project
+                        )
+                    })?
+            };
+            Ok(ResolvedIdentifiers::Github {
+                full_name: format!("{}/{}", source.owner, source.repo),
+                service_connection_id,
+            })
+        }
+    }
+}
+
+/// Process every detected pipeline: decide the action, perform it, and
+/// return `(success_count, failure_count, newly_created_definition_ids)`.
+#[allow(clippy::too_many_arguments)]
+async fn process_all_pipelines(
+    detected: &[detect::DetectedPipeline],
+    scan_root: &Path,
+    repo_root: &Path,
+    resolved: &ResolvedSource,
+    identifiers: &ResolvedIdentifiers,
+    client: &reqwest::Client,
+    ado_ctx: &AdoContext,
+    auth: &AdoAuth,
+    definitions: &[DefinitionSummary],
+    folder: &str,
+    default_branch: &str,
+    dry_run: bool,
+) -> Result<(usize, usize, Vec<u64>)> {
+    let mut success = 0usize;
+    let mut failure = 0usize;
+    let mut newly_created_ids: Vec<u64> = Vec::new();
+
+    for pipeline in detected {
+        // `pipeline.source` is the path from the agent-file marker
+        // (repo-root-relative, e.g. `tests/safe-outputs/noop.md`).
+        // `pipeline.yaml_path` is the compiled `.lock.yml` path
+        // *relative to the scan root*, so we have to re-anchor it on
+        // `repo_root` before computing the `yamlFilename` we POST to
+        // ADO — otherwise running `enable tests/safe-outputs` would
+        // register every fixture at `/noop.lock.yml` (repo root)
+        // instead of the actual `/tests/safe-outputs/noop.lock.yml`.
+        let source_path = repo_root.join(&pipeline.source);
+        let abs_yaml = scan_root.join(&pipeline.yaml_path);
+        let repo_relative_yaml = abs_yaml
+            .strip_prefix(repo_root)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|_| pipeline.yaml_path.clone());
+        let repo_ref = match (resolved, identifiers) {
+            (
+                ResolvedSource::AdoGit { source },
+                ResolvedIdentifiers::AdoGit { repo_id },
+            ) => RepositoryRef::AdoGit {
+                repo_id,
+                repo_name: &source.repo,
+            },
+            (
+                ResolvedSource::Github { .. },
+                ResolvedIdentifiers::Github {
+                    full_name,
+                    service_connection_id,
+                },
+            ) => RepositoryRef::Github {
+                full_name,
+                connected_service_id: service_connection_id,
+            },
+            // Both halves are built from the same `resolved` value
+            // immediately above, so the cross-variant pairings are
+            // unreachable. We bail rather than `unreachable!()` so a
+            // future refactor that decouples the two can't silently
+            // produce a malformed POST body.
+            _ => anyhow::bail!(
+                "internal error: resolved source and identifier variants disagree"
+            ),
+        };
+        let result = process_one(
+            client,
+            ado_ctx,
+            auth,
+            definitions,
+            &repo_relative_yaml,
+            &source_path,
+            repo_ref,
+            folder,
+            default_branch,
+            dry_run,
+        )
+        .await;
+        match result {
+            Ok(Some(new_id)) => {
+                newly_created_ids.push(new_id);
+                success += 1;
+            }
+            Ok(None) => success += 1,
+            Err(e) => {
+                eprintln!("✗ failed: {}: {:#}", pipeline.source, e);
+                failure += 1;
+            }
+        }
+    }
+
+    Ok((success, failure, newly_created_ids))
+}
+
+/// Set GITHUB_TOKEN on newly-created pipeline definitions when
+/// `--also-set-token` is active.  Returns the number of additional
+/// failures encountered.
+async fn apply_github_token(
+    also_set_token: bool,
+    dry_run: bool,
+    github_token: Option<&str>,
+    newly_created_ids: &[u64],
+    client: &reqwest::Client,
+    ado_ctx: &AdoContext,
+    auth: &AdoAuth,
+) -> usize {
+    if !also_set_token || newly_created_ids.is_empty() {
+        return 0;
+    }
+    if dry_run {
+        println!();
+        println!(
+            "[dry-run] would set GITHUB_TOKEN on {} newly-created definition(s)",
+            newly_created_ids.len()
+        );
+        return 0;
+    }
+    let Some(token) = github_token else {
+        unreachable!("resolve_token_arg guarantees Some when also_set_token is true");
+    };
+    println!();
+    println!(
+        "Setting GITHUB_TOKEN on {} newly-created definition(s)...",
+        newly_created_ids.len()
+    );
+    let mut extra_failures = 0usize;
+    for id in newly_created_ids {
+        match update_pipeline_variable(client, ado_ctx, auth, *id, "GITHUB_TOKEN", token).await {
+            Ok(()) => println!("  ✓ set GITHUB_TOKEN on definition {}", id),
+            Err(e) => {
+                eprintln!("  ✗ failed to set GITHUB_TOKEN on {}: {:#}", id, e);
+                extra_failures += 1;
+            }
+        }
+    }
+    extra_failures
+}
+
 /// Run the `enable` command.
 pub async fn run(opts: EnableOptions<'_>) -> Result<()> {
     // `scan_root` is where we look for compiled pipelines (defaults
@@ -458,28 +674,7 @@ pub async fn run(opts: EnableOptions<'_>) -> Result<()> {
     let auth = resolve_auth(opts.pat).await?;
     let ado_ctx = resolve_ado_context(&repo_root, opts.org, opts.project).await?;
 
-    match &resolved {
-        ResolvedSource::AdoGit { source } => {
-            println!(
-                "ADO context: org={}, project={}, repo={} (ADO Git source)",
-                ado_ctx.org_url, ado_ctx.project, source.repo
-            );
-        }
-        ResolvedSource::Github {
-            source,
-            service_connection,
-        } => {
-            println!(
-                "ADO context: org={}, project={}",
-                ado_ctx.org_url, ado_ctx.project
-            );
-            println!(
-                "GitHub source: {}/{} (service connection: {})",
-                source.owner, source.repo, service_connection
-            );
-        }
-    }
-    println!();
+    print_context_header(&resolved, &ado_ctx);
 
     println!("Scanning for agentic pipelines...");
     let detected = detect::detect_pipelines(&scan_root).await?;
@@ -498,161 +693,35 @@ pub async fn run(opts: EnableOptions<'_>) -> Result<()> {
         .context("Failed to create HTTP client")?;
 
     let definitions = list_definitions(&client, &ado_ctx, &auth).await?;
+    let identifiers =
+        resolve_identifiers(&resolved, &client, &ado_ctx, &auth, opts.dry_run).await?;
 
-    // Resolve provider-specific identifiers once per invocation, in
-    // a structurally-tagged form that keeps the "only one is
-    // meaningful per variant" invariant at the type level. Previously
-    // we returned a `(repo_id, service_conn_id)` tuple with empty-
-    // string sentinels on the unused half, which would silently
-    // tolerate a future swap.
-    //
-    // - ADO Git source: look up the repository GUID (required by the
-    //   `repository.id` field in the POST body).
-    // - GitHub source: resolve the service-connection name → GUID
-    //   (required by `repository.properties.connectedServiceId`).
-    //
-    // Dry-run skips the network calls; the POST body printout uses
-    // placeholders so operators still see the full body shape.
-    let identifiers = match &resolved {
-        ResolvedSource::AdoGit { source } => {
-            let repo_id = if opts.dry_run {
-                String::from("<repo-id>")
-            } else {
-                get_repository_id(&client, &ado_ctx, &auth, &source.repo)
-                    .await
-                    .with_context(|| {
-                        format!("Failed to look up ADO repository '{}'", source.repo)
-                    })?
-            };
-            ResolvedIdentifiers::AdoGit { repo_id }
-        }
-        ResolvedSource::Github {
-            source,
-            service_connection,
-        } => {
-            let service_connection_id = if opts.dry_run {
-                String::from("<service-connection-id>")
-            } else {
-                resolve_service_connection_id(
-                    &client,
-                    &ado_ctx,
-                    &auth,
-                    service_connection,
-                )
-                .await
-                .with_context(|| {
-                    format!(
-                        "Failed to resolve GitHub service connection '{}' in project '{}'",
-                        service_connection, ado_ctx.project
-                    )
-                })?
-            };
-            ResolvedIdentifiers::Github {
-                full_name: format!("{}/{}", source.owner, source.repo),
-                service_connection_id,
-            }
-        }
-    };
+    let (success, mut failure, newly_created_ids) = process_all_pipelines(
+        &detected,
+        &scan_root,
+        &repo_root,
+        &resolved,
+        &identifiers,
+        &client,
+        &ado_ctx,
+        &auth,
+        &definitions,
+        opts.folder,
+        opts.default_branch,
+        opts.dry_run,
+    )
+    .await?;
 
-    let mut success = 0usize;
-    let mut failure = 0usize;
-    let mut newly_created_ids: Vec<u64> = Vec::new();
-
-    for pipeline in &detected {
-        // `pipeline.source` is the path from the agent-file marker
-        // (repo-root-relative, e.g. `tests/safe-outputs/noop.md`).
-        // `pipeline.yaml_path` is the compiled `.lock.yml` path
-        // *relative to the scan root*, so we have to re-anchor it on
-        // `repo_root` before computing the `yamlFilename` we POST to
-        // ADO — otherwise running `enable tests/safe-outputs` would
-        // register every fixture at `/noop.lock.yml` (repo root)
-        // instead of the actual `/tests/safe-outputs/noop.lock.yml`.
-        let source_path = repo_root.join(&pipeline.source);
-        let abs_yaml = scan_root.join(&pipeline.yaml_path);
-        let repo_relative_yaml = abs_yaml
-            .strip_prefix(&repo_root)
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|_| pipeline.yaml_path.clone());
-        let repo_ref = match (&resolved, &identifiers) {
-            (
-                ResolvedSource::AdoGit { source },
-                ResolvedIdentifiers::AdoGit { repo_id },
-            ) => RepositoryRef::AdoGit {
-                repo_id,
-                repo_name: &source.repo,
-            },
-            (
-                ResolvedSource::Github { .. },
-                ResolvedIdentifiers::Github {
-                    full_name,
-                    service_connection_id,
-                },
-            ) => RepositoryRef::Github {
-                full_name,
-                connected_service_id: service_connection_id,
-            },
-            // Both halves are built from the same `resolved` value
-            // immediately above, so the cross-variant pairings are
-            // unreachable. We bail rather than `unreachable!()` so a
-            // future refactor that decouples the two can't silently
-            // produce a malformed POST body.
-            _ => anyhow::bail!(
-                "internal error: resolved source and identifier variants disagree"
-            ),
-        };
-        let result = process_one(
-            &client,
-            &ado_ctx,
-            &auth,
-            &definitions,
-            &repo_relative_yaml,
-            &source_path,
-            repo_ref,
-            opts.folder,
-            opts.default_branch,
-            opts.dry_run,
-        )
-        .await;
-        match result {
-            Ok(Some(new_id)) => {
-                newly_created_ids.push(new_id);
-                success += 1;
-            }
-            Ok(None) => success += 1,
-            Err(e) => {
-                eprintln!("✗ failed: {}: {:#}", pipeline.source, e);
-                failure += 1;
-            }
-        }
-    }
-
-    if opts.also_set_token && !opts.dry_run && !newly_created_ids.is_empty() {
-        let Some(token) = github_token.as_deref() else {
-            unreachable!("resolve_token_arg guarantees Some when also_set_token is true");
-        };
-        println!();
-        println!(
-            "Setting GITHUB_TOKEN on {} newly-created definition(s)...",
-            newly_created_ids.len()
-        );
-        for id in &newly_created_ids {
-            match update_pipeline_variable(&client, &ado_ctx, &auth, *id, "GITHUB_TOKEN", token)
-                .await
-            {
-                Ok(()) => println!("  ✓ set GITHUB_TOKEN on definition {}", id),
-                Err(e) => {
-                    eprintln!("  ✗ failed to set GITHUB_TOKEN on {}: {:#}", id, e);
-                    failure += 1;
-                }
-            }
-        }
-    } else if opts.also_set_token && opts.dry_run && !newly_created_ids.is_empty() {
-        println!();
-        println!(
-            "[dry-run] would set GITHUB_TOKEN on {} newly-created definition(s)",
-            newly_created_ids.len()
-        );
-    }
+    failure += apply_github_token(
+        opts.also_set_token,
+        opts.dry_run,
+        github_token.as_deref(),
+        &newly_created_ids,
+        &client,
+        &ado_ctx,
+        &auth,
+    )
+    .await;
 
     println!();
     println!("Done: {} succeeded, {} failed.", success, failure);
