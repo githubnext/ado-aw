@@ -141,10 +141,16 @@ impl ContextContributor for PrContextContributor {
         // ref form), matching the `targetRefName` shape returned by the
         // ADO REST API and stored in `AW_SYNTHETIC_PR_TARGETBRANCH`, so
         // the coalesce yields a consistent value either way.
+        // `$[ ... ]` runtime expressions are wrapped in YAML double
+        // quotes because their values contain single quotes (e.g.
+        // `variables['System.PullRequest.PullRequestId']`). ADO accepts
+        // them unquoted in practice, but double-quoting matches the
+        // form shown in ADO docs and is strictly conformant to the
+        // YAML spec (which reserves `'` as a scalar indicator).
         let (pr_id_macro, target_branch_macro, condition) = if self.synthetic_pr_active {
             (
-                "$[ coalesce(variables['System.PullRequest.PullRequestId'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_ID']) ]",
-                "$[ coalesce(variables['System.PullRequest.TargetBranch'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH']) ]",
+                "\"$[ coalesce(variables['System.PullRequest.PullRequestId'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_ID']) ]\"",
+                "\"$[ coalesce(variables['System.PullRequest.TargetBranch'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH']) ]\"",
                 "or(eq(variables['Build.Reason'], 'PullRequest'), eq(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true'))",
             )
         } else {

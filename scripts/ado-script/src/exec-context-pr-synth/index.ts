@@ -23,10 +23,14 @@
  *   1. real PR build (BUILD_REASON=PullRequest) → no-op
  *   2. GitHub-typed repo (BUILD_REPOSITORY_PROVIDER=GitHub) → no-op
  *   3. Decode PR_SYNTH_SPEC (hard fail on corruption)
- *   4. branches.include/exclude miss on BUILD_SOURCEBRANCH → skip
- *   5. fetch open PRs by sourceRefName + filter by targetRefName
+ *   4. fetch active PRs whose `sourceRefName == BUILD_SOURCEBRANCH`
+ *      (no source-branch pre-filter against the spec — `on.pr.branches`
+ *      lists *target* branches per ADO semantics, not the build's
+ *      source branch)
+ *   5. filter matched PRs by `targetRefName` against
+ *      `spec.branches.include` / `spec.branches.exclude`
  *   6. count != 1 → skip
- *   7. paths.include/exclude reject everything → skip
+ *   7. paths.include/exclude reject every changed file → skip
  *   8. emit AW_SYNTHETIC_PR* outputs
  */
 import {

@@ -57,17 +57,30 @@ pub struct AdoScriptExtension {
     /// shared `exec_context_pr_active` predicate so this stays in
     /// lock-step with `ExecContextExtension`'s own activation gate.
     pub exec_context_pr_active: bool,
-    /// Whether the synthetic-from-ci path is active for this agent.
-    /// Set when `on.pr.mode == Synthetic` (the default). Drives:
+    /// PR trigger config required to build `PR_SYNTH_SPEC`. `Some(_)`
+    /// is the single source of truth for "synthetic-from-ci path is
+    /// active for this agent" — `is_some()` replaces what used to be a
+    /// separate `synthetic_pr_active: bool` field, eliminating the
+    /// invariant that the two had to be set together. Drives:
+    ///
     ///  - Setup-job install/download fire (even with no `filters:`).
     ///  - Setup-job `synthPr` step emission (before any gate step).
     ///  - Downstream env coalescing (handled in `compile-coalesce-env`).
-    pub synthetic_pr_active: bool,
-    /// The PR trigger config required to build `PR_SYNTH_SPEC`. Only
-    /// populated when `synthetic_pr_active` is `true`. Cloned because
-    /// the extension outlives the borrow of `FrontMatter` in
-    /// `collect_extensions`.
+    ///
+    /// Cloned from the front-matter because the extension outlives the
+    /// borrow of `FrontMatter` in `collect_extensions`.
     pub pr_trigger_for_synth: Option<crate::compile::types::PrTriggerConfig>,
+}
+
+impl AdoScriptExtension {
+    /// Whether the synthetic-from-ci path is active for this agent.
+    /// Set when `on.pr.mode == Synthetic` (the default), in which case
+    /// `pr_trigger_for_synth` is populated. The compile-time
+    /// invariant "if active, the spec must be available" is encoded in
+    /// the field type, so this is just a thin accessor.
+    pub fn synthetic_pr_active(&self) -> bool {
+        self.pr_trigger_for_synth.is_some()
+    }
 }
 
 impl AdoScriptExtension {
@@ -207,17 +220,15 @@ impl CompilerExtension for AdoScriptExtension {
 
     fn setup_steps(&self, _ctx: &CompileContext) -> Result<Vec<String>> {
         let (pr_checks, pipeline_checks) = self.lowered_checks();
-        if pr_checks.is_empty() && pipeline_checks.is_empty() && !self.synthetic_pr_active {
+        if pr_checks.is_empty() && pipeline_checks.is_empty() && !self.synthetic_pr_active() {
             return Ok(vec![]);
         }
         let mut steps = install_and_download_steps();
-        if self.synthetic_pr_active {
-            let pr = self.pr_trigger_for_synth.as_ref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "synthetic_pr_active is true but pr_trigger_for_synth is None — \
-                     collect_extensions must populate both together"
-                )
-            })?;
+        // `pr_trigger_for_synth.is_some()` is the type-level encoding
+        // of "synth path is active for this agent" — no separate flag
+        // to keep in lock-step. If `Some(_)`, the spec is guaranteed
+        // available.
+        if let Some(pr) = self.pr_trigger_for_synth.as_ref() {
             let spec_b64 = crate::compile::filter_ir::build_pr_synth_spec(pr)?;
             steps.push(synthetic_pr_step(&spec_b64));
         }
@@ -226,7 +237,7 @@ impl CompilerExtension for AdoScriptExtension {
                 GateContext::PullRequest,
                 &pr_checks,
                 GATE_EVAL_PATH,
-                self.synthetic_pr_active,
+                self.synthetic_pr_active(),
             )?);
         }
         if !pipeline_checks.is_empty() {
@@ -472,7 +483,6 @@ mod tests {
             pipeline_filters: pipeline,
             inlined_imports: inlined,
             exec_context_pr_active: false,
-            synthetic_pr_active: false,
             pr_trigger_for_synth: None,
         }
     }
@@ -526,7 +536,6 @@ mod tests {
             pipeline_filters: None,
             inlined_imports: true,
             exec_context_pr_active: false,
-            synthetic_pr_active: true,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -567,7 +576,6 @@ mod tests {
             pipeline_filters: None,
             inlined_imports: true,
             exec_context_pr_active: false,
-            synthetic_pr_active: true,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],

@@ -104,9 +104,10 @@ export async function getPullRequestById(
  *
  * Returns an empty array if no PRs match. The ADO REST API caps page
  * size; for the synth path we deliberately fetch only the first page
- * (200 PRs) since the synth contract requires *exactly one* match —
- * a source branch with >200 simultaneous active PRs against it is
- * pathological and the bundle will skip via the "multi-match" path.
+ * (the SDK default is 100 PRs without an explicit `$top`) since the
+ * synth contract requires *exactly one* match — a source branch with
+ * >100 simultaneous active PRs against it is pathological and the
+ * bundle will skip via the "multi-match" path anyway.
  */
 export async function listActivePullRequestsBySourceRef(
   project: string,

@@ -700,11 +700,17 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
         Extension::AdoScript(Box::new({
             // PR trigger config drives both the PR-context contributor
             // (exec-context-pr.js) and the synthetic-from-ci path
-            // (exec-context-pr-synth.js). Compute the two flags from
-            // the same source so they stay in lock-step.
+            // (exec-context-pr-synth.js).
+            //
+            // `pr_trigger_for_synth` is the SINGLE source of truth for
+            // synth-path activation: when `Some(_)` the extension emits
+            // the synthPr Setup-job step and downstream wiring; when
+            // `None` it doesn't. The previous separate `bool` flag is
+            // now derived via `AdoScriptExtension::synthetic_pr_active()`.
             let pr_cfg = front_matter.pr_trigger();
-            let synthetic_pr_active =
-                pr_cfg.is_some_and(|p| matches!(p.mode, crate::compile::types::PrMode::Synthetic));
+            let pr_trigger_for_synth = pr_cfg
+                .filter(|p| matches!(p.mode, crate::compile::types::PrMode::Synthetic))
+                .cloned();
             AdoScriptExtension {
                 pr_filters: front_matter.pr_filters().cloned(),
                 pipeline_filters: front_matter.pipeline_filters().cloned(),
@@ -717,12 +723,7 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
                 // AdoScriptExtension owns installing it. Shared helper
                 // keeps the activation predicate in lock-step.
                 exec_context_pr_active: pr_contributor_will_activate(front_matter),
-                synthetic_pr_active,
-                pr_trigger_for_synth: if synthetic_pr_active {
-                    pr_cfg.cloned()
-                } else {
-                    None
-                },
+                pr_trigger_for_synth,
             }
         })),
         // Always-on execution-context extension. Owns the `aw-context/`

@@ -4457,8 +4457,9 @@ fn test_pr_filter_synth_mode_gate_step_uses_same_job_synth_ref() {
     let compiled = compile_fixture("pr-filter-tier1-agent.md");
 
     assert!(
-        compiled
-            .contains("AW_SYNTHETIC_PR: $[ coalesce(variables['synthPr.AW_SYNTHETIC_PR'], '') ]"),
+        compiled.contains(
+            "AW_SYNTHETIC_PR: \"$[ coalesce(variables['synthPr.AW_SYNTHETIC_PR'], '') ]\""
+        ),
         "Gate step env must use same-job `variables['synthPr.X']` runtime expression — \
          `dependencies.Setup.outputs[...]` is undefined inside the producing Setup job"
     );
@@ -4468,13 +4469,13 @@ fn test_pr_filter_synth_mode_gate_step_uses_same_job_synth_ref() {
     // exported by this fixture's filter set, so we don't assert it here.)
     assert!(
         compiled.contains(
-            "ADO_SOURCE_BRANCH: $[ coalesce(variables['System.PullRequest.SourceBranch'], variables['synthPr.AW_SYNTHETIC_PR_SOURCEBRANCH']) ]"
+            "ADO_SOURCE_BRANCH: \"$[ coalesce(variables['System.PullRequest.SourceBranch'], variables['synthPr.AW_SYNTHETIC_PR_SOURCEBRANCH']) ]\""
         ),
         "ADO_SOURCE_BRANCH coalesce must use same-job `variables[...]` form"
     );
     assert!(
         compiled.contains(
-            "ADO_TARGET_BRANCH: $[ coalesce(variables['System.PullRequest.TargetBranch'], variables['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH']) ]"
+            "ADO_TARGET_BRANCH: \"$[ coalesce(variables['System.PullRequest.TargetBranch'], variables['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH']) ]\""
         ),
         "ADO_TARGET_BRANCH coalesce must use same-job `variables[...]` form"
     );
@@ -5375,11 +5376,11 @@ fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
     // (true PR builds) and fall back to the `synthPr` Setup-job outputs
     // (CI builds promoted via exec-context-pr-synth.js).
     assert!(
-        compiled.contains("SYSTEM_PULLREQUEST_PULLREQUESTID: $[ coalesce(variables['System.PullRequest.PullRequestId'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_ID']) ]"),
+        compiled.contains("SYSTEM_PULLREQUEST_PULLREQUESTID: \"$[ coalesce(variables['System.PullRequest.PullRequestId'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_ID']) ]\""),
         "Prepare step must pass the PR id (coalesced with synthPr fallback) through to the bundle"
     );
     assert!(
-        compiled.contains("SYSTEM_PULLREQUEST_TARGETBRANCH: $[ coalesce(variables['System.PullRequest.TargetBranch'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH']) ]"),
+        compiled.contains("SYSTEM_PULLREQUEST_TARGETBRANCH: \"$[ coalesce(variables['System.PullRequest.TargetBranch'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH']) ]\""),
         "Prepare step must pass the PR target branch (coalesced with synthPr fallback) through to the bundle"
     );
     assert!(

@@ -1176,8 +1176,13 @@ pub fn compile_gate_step_external(
     // function doc-comment for why this is NOT `dependencies.Setup...`.
     let pr_synth_active = synthetic_pr_active && matches!(ctx, GateContext::PullRequest);
     if pr_synth_active {
+        // YAML-quote runtime expressions whose value contains single quotes.
+        // Per ADO docs, `$[ ... ]` runtime expressions are valid in step
+        // `env:` blocks; wrapping in double quotes keeps the value
+        // strictly conformant to the YAML spec (which reserves `'` as a
+        // scalar indicator) and matches the form shown in ADO docs.
         step.push_str(
-            "    AW_SYNTHETIC_PR: $[ coalesce(variables['synthPr.AW_SYNTHETIC_PR'], '') ]\n",
+            "    AW_SYNTHETIC_PR: \"$[ coalesce(variables['synthPr.AW_SYNTHETIC_PR'], '') ]\"\n",
         );
     }
 
@@ -1185,13 +1190,13 @@ pub fn compile_gate_step_external(
         let macro_str = if pr_synth_active {
             match *env_var {
                 "ADO_PR_ID" => {
-                    "$[ coalesce(variables['System.PullRequest.PullRequestId'], variables['synthPr.AW_SYNTHETIC_PR_ID']) ]"
+                    "\"$[ coalesce(variables['System.PullRequest.PullRequestId'], variables['synthPr.AW_SYNTHETIC_PR_ID']) ]\""
                 }
                 "ADO_SOURCE_BRANCH" => {
-                    "$[ coalesce(variables['System.PullRequest.SourceBranch'], variables['synthPr.AW_SYNTHETIC_PR_SOURCEBRANCH']) ]"
+                    "\"$[ coalesce(variables['System.PullRequest.SourceBranch'], variables['synthPr.AW_SYNTHETIC_PR_SOURCEBRANCH']) ]\""
                 }
                 "ADO_TARGET_BRANCH" => {
-                    "$[ coalesce(variables['System.PullRequest.TargetBranch'], variables['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH']) ]"
+                    "\"$[ coalesce(variables['System.PullRequest.TargetBranch'], variables['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH']) ]\""
                 }
                 _ => ado_macro,
             }
