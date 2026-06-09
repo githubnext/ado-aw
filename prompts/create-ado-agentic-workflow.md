@@ -245,7 +245,7 @@ mcp-servers:
       - query_data
 ```
 
-> **Security**: All `mcp-servers:` entries must have an explicit `allowed:` list.
+> **Security**: Specifying an explicit `allowed:` list for `mcp-servers:` entries is strongly recommended. Without it, all tools from that server are accessible to the agent.
 >
 > **Standalone target** (the default): MCPs without a `container:` or `url:` field are skipped at compile time with a compile-time warning — they have no effect and will not be available to the agent. Both containerized MCPs (with `container:`) and remote HTTP MCPs (with `url:`) are supported in standalone target.
 
