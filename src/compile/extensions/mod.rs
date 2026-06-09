@@ -625,22 +625,22 @@ macro_rules! extension_enum {
 
 mod ado_aw_marker;
 pub mod ado_script;
-mod exec_context;
 mod azure_cli;
+mod exec_context;
 mod github;
 mod safe_outputs;
 
 // Re-export tool/runtime extensions from their colocated homes
-pub use ado_aw_marker::AdoAwMarkerExtension;
-pub use azure_cli::AzureCliExtension;
 pub use crate::runtimes::dotnet::DotnetExtension;
 pub use crate::runtimes::lean::LeanExtension;
 pub use crate::runtimes::node::NodeExtension;
 pub use crate::runtimes::python::PythonExtension;
 pub use crate::tools::azure_devops::AzureDevOpsExtension;
 pub use crate::tools::cache_memory::CacheMemoryExtension;
+pub use ado_aw_marker::AdoAwMarkerExtension;
 pub use ado_script::AdoScriptExtension;
-pub use exec_context::{pr_contributor_will_activate, ExecContextExtension};
+pub use azure_cli::AzureCliExtension;
+pub use exec_context::{ExecContextExtension, pr_contributor_will_activate};
 pub use github::GitHubExtension;
 pub use safe_outputs::SafeOutputsExtension;
 
@@ -697,18 +697,39 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
         Extension::AdoAwMarker(AdoAwMarkerExtension),
         Extension::GitHub(GitHubExtension),
         Extension::SafeOutputs(SafeOutputsExtension),
-        Extension::AdoScript(Box::new(AdoScriptExtension {
-            pr_filters: front_matter.pr_filters().cloned(),
-            pipeline_filters: front_matter.pipeline_filters().cloned(),
-            inlined_imports: front_matter.inlined_imports,
-            // Tell the ado-script extension whether the PR-context
-            // contributor will activate so it can fire the Agent-job
-            // install/download even when `inlined-imports: true` (no
-            // import.js needed). The two extensions stay loosely
-            // coupled: ExecContextExtension owns invoking the bundle;
-            // AdoScriptExtension owns installing it. Shared helper
-            // keeps the activation predicate in lock-step.
-            exec_context_pr_active: pr_contributor_will_activate(front_matter),
+        Extension::AdoScript(Box::new({
+            // PR trigger config drives both the PR-context contributor
+            // (exec-context-pr.js) and the synthetic-from-ci path
+            // (exec-context-pr-synth.js).
+            //
+            // `pr_trigger_for_synth` is the SINGLE source of truth for
+            // synth-path activation: when `Some(_)` the extension emits
+            // the synthPr Setup-job step and downstream wiring; when
+            // `None` it doesn't. The previous separate `bool` flag is
+            // now derived via `AdoScriptExtension::synthetic_pr_active()`.
+            // The activation predicate (`mode == Synthetic`) lives in
+            // `FrontMatter::is_synthetic_pr()` so it stays in lock-step
+            // with the other two call sites (`compile_shared` and
+            // `ExecContextExtension::new`).
+            let pr_trigger_for_synth = if front_matter.is_synthetic_pr() {
+                front_matter.pr_trigger().cloned()
+            } else {
+                None
+            };
+            AdoScriptExtension {
+                pr_filters: front_matter.pr_filters().cloned(),
+                pipeline_filters: front_matter.pipeline_filters().cloned(),
+                inlined_imports: front_matter.inlined_imports,
+                // Tell the ado-script extension whether the PR-context
+                // contributor will activate so it can fire the Agent-job
+                // install/download even when `inlined-imports: true` (no
+                // import.js needed). The two extensions stay loosely
+                // coupled: ExecContextExtension owns invoking the bundle;
+                // AdoScriptExtension owns installing it. Shared helper
+                // keeps the activation predicate in lock-step.
+                exec_context_pr_active: pr_contributor_will_activate(front_matter),
+                pr_trigger_for_synth,
+            }
         })),
         // Always-on execution-context extension. Owns the `aw-context/`
         // precompute pipeline. Defaults to `ExecutionContextConfig::default()`
@@ -717,10 +738,7 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
         // the block + having no `on.pr` produces zero output. See
         // `extensions/exec_context/`.
         Extension::ExecContext(ExecContextExtension::new(
-            front_matter
-                .execution_context
-                .clone()
-                .unwrap_or_default(),
+            front_matter.execution_context.clone().unwrap_or_default(),
             front_matter,
         )),
         // Always-on Azure CLI. Tool phase — mounts host /opt/az and

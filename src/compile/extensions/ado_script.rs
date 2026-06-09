@@ -35,6 +35,11 @@ pub(crate) const IMPORT_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/import
 /// Consumed by `src/compile/extensions/exec_context/pr.rs` to invoke
 /// the bundle from the PR contributor's prepare step.
 pub(crate) const EXEC_CONTEXT_PR_PATH: &str = "/tmp/ado-aw-scripts/ado-script/exec-context-pr.js";
+/// Path to the synthetic-PR-context bundle inside the unpacked
+/// `ado-script.zip`. Runs in the Setup job before `prGate`; consumed
+/// by [`AdoScriptExtension::setup_steps`].
+pub(crate) const EXEC_CONTEXT_PR_SYNTH_PATH: &str =
+    "/tmp/ado-aw-scripts/ado-script/exec-context-pr-synth.js";
 const RELEASE_BASE_URL: &str = "https://github.com/githubnext/ado-aw/releases/download";
 
 /// Single always-on extension that owns all `ado-script` bundle wiring.
@@ -52,6 +57,30 @@ pub struct AdoScriptExtension {
     /// shared `exec_context_pr_active` predicate so this stays in
     /// lock-step with `ExecContextExtension`'s own activation gate.
     pub exec_context_pr_active: bool,
+    /// PR trigger config required to build `PR_SYNTH_SPEC`. `Some(_)`
+    /// is the single source of truth for "synthetic-from-ci path is
+    /// active for this agent" — `is_some()` replaces what used to be a
+    /// separate `synthetic_pr_active: bool` field, eliminating the
+    /// invariant that the two had to be set together. Drives:
+    ///
+    ///  - Setup-job install/download fire (even with no `filters:`).
+    ///  - Setup-job `synthPr` step emission (before any gate step).
+    ///  - Downstream env coalescing (handled in `compile-coalesce-env`).
+    ///
+    /// Cloned from the front-matter because the extension outlives the
+    /// borrow of `FrontMatter` in `collect_extensions`.
+    pub pr_trigger_for_synth: Option<crate::compile::types::PrTriggerConfig>,
+}
+
+impl AdoScriptExtension {
+    /// Whether the synthetic-from-ci path is active for this agent.
+    /// Set when `on.pr.mode == Synthetic` (the default), in which case
+    /// `pr_trigger_for_synth` is populated. The compile-time
+    /// invariant "if active, the spec must be available" is encoded in
+    /// the field type, so this is just a thin accessor.
+    pub fn synthetic_pr_active(&self) -> bool {
+        self.pr_trigger_for_synth.is_some()
+    }
 }
 
 impl AdoScriptExtension {
@@ -143,6 +172,35 @@ fn resolver_step() -> String {
     )
 }
 
+/// The synthetic-PR-context step that runs in the Setup job BEFORE
+/// `prGate`. Looks up the open PR for `Build.SourceBranch` via the
+/// ADO REST API and emits `AW_SYNTHETIC_PR*` outputs that downstream
+/// gate + exec-context-pr steps coalesce with the real
+/// `System.PullRequest.*` variables.
+///
+/// `condition: ne(Build.Reason, 'PullRequest')` short-circuits the
+/// bundle on real PR builds (the bundle would no-op anyway, but the
+/// step-level condition skips the env-block evaluation too).
+fn synthetic_pr_step(spec_b64: &str) -> String {
+    format!(
+        r#"- bash: |
+    set -euo pipefail
+    node '{EXEC_CONTEXT_PR_SYNTH_PATH}'
+  name: synthPr
+  displayName: "Resolve synthetic PR context"
+  condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+  env:
+    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+    ADO_COLLECTION_URI: $(System.CollectionUri)
+    ADO_PROJECT: $(System.TeamProject)
+    ADO_REPO_ID: $(Build.Repository.ID)
+    BUILD_REASON: $(Build.Reason)
+    BUILD_REPOSITORY_PROVIDER: $(Build.Repository.Provider)
+    BUILD_SOURCEBRANCH: $(Build.SourceBranch)
+    PR_SYNTH_SPEC: "{spec_b64}""#
+    )
+}
+
 impl CompilerExtension for AdoScriptExtension {
     fn name(&self) -> &str {
         "ado-script"
@@ -162,15 +220,24 @@ impl CompilerExtension for AdoScriptExtension {
 
     fn setup_steps(&self, _ctx: &CompileContext) -> Result<Vec<String>> {
         let (pr_checks, pipeline_checks) = self.lowered_checks();
-        if pr_checks.is_empty() && pipeline_checks.is_empty() {
+        if pr_checks.is_empty() && pipeline_checks.is_empty() && !self.synthetic_pr_active() {
             return Ok(vec![]);
         }
         let mut steps = install_and_download_steps();
+        // `pr_trigger_for_synth.is_some()` is the type-level encoding
+        // of "synth path is active for this agent" — no separate flag
+        // to keep in lock-step. If `Some(_)`, the spec is guaranteed
+        // available.
+        if let Some(pr) = self.pr_trigger_for_synth.as_ref() {
+            let spec_b64 = crate::compile::filter_ir::build_pr_synth_spec(pr)?;
+            steps.push(synthetic_pr_step(&spec_b64));
+        }
         if !pr_checks.is_empty() {
             steps.push(compile_gate_step_external(
                 GateContext::PullRequest,
                 &pr_checks,
                 GATE_EVAL_PATH,
+                self.synthetic_pr_active(),
             )?);
         }
         if !pipeline_checks.is_empty() {
@@ -178,6 +245,10 @@ impl CompilerExtension for AdoScriptExtension {
                 GateContext::PipelineCompletion,
                 &pipeline_checks,
                 GATE_EVAL_PATH,
+                // Pipeline-completion gates never observe synthetic PR
+                // semantics; the coalesce wiring only applies to
+                // PullRequest gates.
+                false,
             )?);
         }
         Ok(steps)
@@ -412,6 +483,7 @@ mod tests {
             pipeline_filters: pipeline,
             inlined_imports: inlined,
             exec_context_pr_active: false,
+            pr_trigger_for_synth: None,
         }
     }
 
@@ -454,6 +526,72 @@ mod tests {
         assert!(steps[1].contains("Download ado-aw scripts"));
         assert!(steps[1].contains("sha256sum -c -"));
         assert!(steps[2].contains("node '/tmp/ado-aw-scripts/ado-script/gate.js'"));
+    }
+
+    #[test]
+    fn setup_steps_emits_synth_step_when_synthetic_pr_active_without_gate() {
+        use crate::compile::types::{BranchFilter, PrTriggerConfig};
+        let ext = AdoScriptExtension {
+            pr_filters: None,
+            pipeline_filters: None,
+            inlined_imports: true,
+            exec_context_pr_active: false,
+            pr_trigger_for_synth: Some(PrTriggerConfig {
+                branches: Some(BranchFilter {
+                    include: vec!["main".into()],
+                    exclude: vec![],
+                }),
+                paths: None,
+                filters: None,
+                ..Default::default()
+            }),
+        };
+        let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
+        let ctx = CompileContext::for_test(&fm);
+        let steps = ext.setup_steps(&ctx).unwrap();
+        assert_eq!(steps.len(), 3, "install + download + synthPr");
+        assert!(steps[0].contains("NodeTool@0"));
+        assert!(steps[1].contains("Download ado-aw scripts"));
+        assert!(
+            steps[2].contains("name: synthPr"),
+            "third step must be synthPr"
+        );
+        assert!(steps[2].contains("exec-context-pr-synth.js"));
+        assert!(steps[2].contains("PR_SYNTH_SPEC:"));
+        assert!(steps[2].contains("ne(variables['Build.Reason'], 'PullRequest')"));
+    }
+
+    #[test]
+    fn setup_steps_emits_synth_step_before_gate_when_both_active() {
+        use crate::compile::types::{BranchFilter, PrTriggerConfig};
+        let filters = PrFilters {
+            labels: Some(LabelFilter {
+                any_of: vec!["run-agent".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let ext = AdoScriptExtension {
+            pr_filters: Some(filters),
+            pipeline_filters: None,
+            inlined_imports: true,
+            exec_context_pr_active: false,
+            pr_trigger_for_synth: Some(PrTriggerConfig {
+                branches: Some(BranchFilter {
+                    include: vec!["main".into()],
+                    exclude: vec![],
+                }),
+                paths: None,
+                filters: None,
+                ..Default::default()
+            }),
+        };
+        let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
+        let ctx = CompileContext::for_test(&fm);
+        let steps = ext.setup_steps(&ctx).unwrap();
+        assert_eq!(steps.len(), 4, "install + download + synthPr + prGate");
+        assert!(steps[2].contains("name: synthPr"));
+        assert!(steps[3].contains("name: prGate"));
     }
 
     #[test]
@@ -654,11 +792,8 @@ mod tests {
     #[test]
     fn rejects_absolute_posix_path_at_compile_time() {
         let workspace = TestWorkspace::new();
-        let err = resolve_imports_inline(
-            "{{#runtime-import /etc/passwd}}",
-            &workspace.path,
-        )
-        .unwrap_err();
+        let err =
+            resolve_imports_inline("{{#runtime-import /etc/passwd}}", &workspace.path).unwrap_err();
         assert!(
             err.to_string().contains("absolute paths are not allowed"),
             "expected absolute-path rejection, got: {err}"
@@ -716,11 +851,8 @@ mod tests {
     #[test]
     fn rejects_path_containing_closing_brace() {
         let workspace = TestWorkspace::new();
-        let err = resolve_imports_inline(
-            "{{#runtime-import foo}bar.md}}",
-            &workspace.path,
-        )
-        .unwrap_err();
+        let err =
+            resolve_imports_inline("{{#runtime-import foo}bar.md}}", &workspace.path).unwrap_err();
         assert!(
             err.to_string().contains("is not allowed"),
             "expected `}}` rejection, got: {err}"
@@ -734,13 +866,11 @@ mod tests {
     #[test]
     fn rejects_relative_path_with_dotdot_segment() {
         let workspace = TestWorkspace::new();
-        let err = resolve_imports_inline(
-            "{{#runtime-import ../escape.md}}",
-            &workspace.path,
-        )
-        .unwrap_err();
+        let err = resolve_imports_inline("{{#runtime-import ../escape.md}}", &workspace.path)
+            .unwrap_err();
         assert!(
-            err.to_string().contains("'..' path components are not allowed"),
+            err.to_string()
+                .contains("'..' path components are not allowed"),
             "expected '..' rejection, got: {err}"
         );
     }
@@ -748,13 +878,12 @@ mod tests {
     #[test]
     fn rejects_path_with_embedded_dotdot_segment() {
         let workspace = TestWorkspace::new();
-        let err = resolve_imports_inline(
-            "{{#runtime-import sub/../../escape.md}}",
-            &workspace.path,
-        )
-        .unwrap_err();
+        let err =
+            resolve_imports_inline("{{#runtime-import sub/../../escape.md}}", &workspace.path)
+                .unwrap_err();
         assert!(
-            err.to_string().contains("'..' path components are not allowed"),
+            err.to_string()
+                .contains("'..' path components are not allowed"),
             "expected '..' rejection, got: {err}"
         );
     }
@@ -772,7 +901,8 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            err.to_string().contains("'..' path components are not allowed"),
+            err.to_string()
+                .contains("'..' path components are not allowed"),
             "expected '..' rejection, got: {err}"
         );
     }
@@ -780,13 +910,12 @@ mod tests {
     #[test]
     fn rejects_backslash_dotdot_segment_on_windows_style_paths() {
         let workspace = TestWorkspace::new();
-        let err = resolve_imports_inline(
-            r"{{#runtime-import sub\..\..\escape.md}}",
-            &workspace.path,
-        )
-        .unwrap_err();
+        let err =
+            resolve_imports_inline(r"{{#runtime-import sub\..\..\escape.md}}", &workspace.path)
+                .unwrap_err();
         assert!(
-            err.to_string().contains("'..' path components are not allowed"),
+            err.to_string()
+                .contains("'..' path components are not allowed"),
             "expected '..' rejection, got: {err}"
         );
     }
@@ -800,16 +929,8 @@ mod tests {
         workspace.write("..hidden.md", "DOTHIDDEN");
         workspace.write("name..md", "DOUBLE");
 
-        let a = resolve_imports_inline(
-            "{{#runtime-import ..hidden.md}}",
-            &workspace.path,
-        )
-        .unwrap();
-        let b = resolve_imports_inline(
-            "{{#runtime-import name..md}}",
-            &workspace.path,
-        )
-        .unwrap();
+        let a = resolve_imports_inline("{{#runtime-import ..hidden.md}}", &workspace.path).unwrap();
+        let b = resolve_imports_inline("{{#runtime-import name..md}}", &workspace.path).unwrap();
 
         assert_eq!(a, "DOTHIDDEN");
         assert_eq!(b, "DOUBLE");

@@ -81,4 +81,54 @@ describe("runBypass", () => {
     expect(failedCompletes).toEqual([]);
     expect(writes.join("")).toContain("%0A"); // embedded \n encoded
   });
+
+  // ─── Synthetic-PR support (issue #916) ────────────────────────────
+
+  it("does NOT bypass when AW_SYNTHETIC_PR=true even on a non-PR build reason", async () => {
+    process.env.ADO_BUILD_REASON = "IndividualCI";
+    process.env.AW_SYNTHETIC_PR = "true";
+    try {
+      const result = await runBypass(baseSpec);
+      expect(result).toBe(false);
+      expect(writes.join("")).not.toContain("setvariable variable=SHOULD_RUN");
+      expect(writes.join("")).not.toContain("build.addbuildtag");
+    } finally {
+      delete process.env.AW_SYNTHETIC_PR;
+    }
+  });
+
+  it("still bypasses when AW_SYNTHETIC_PR is anything other than 'true'", async () => {
+    process.env.ADO_BUILD_REASON = "IndividualCI";
+    process.env.AW_SYNTHETIC_PR = "false";
+    try {
+      const result = await runBypass(baseSpec);
+      expect(result).toBe(true);
+    } finally {
+      delete process.env.AW_SYNTHETIC_PR;
+    }
+  });
+
+  it("still bypasses when AW_SYNTHETIC_PR is unset (existing behaviour)", async () => {
+    process.env.ADO_BUILD_REASON = "IndividualCI";
+    delete process.env.AW_SYNTHETIC_PR;
+    const result = await runBypass(baseSpec);
+    expect(result).toBe(true);
+  });
+
+  it("AW_SYNTHETIC_PR only suppresses bypass for PullRequest specs", async () => {
+    // For non-PR specs (e.g. PipelineCompletion), AW_SYNTHETIC_PR is
+    // irrelevant; bypass should fall through to the regular reason check.
+    process.env.ADO_BUILD_REASON = "Manual";
+    process.env.AW_SYNTHETIC_PR = "true";
+    try {
+      const pipelineSpec: GateSpec = {
+        ...baseSpec,
+        context: { ...baseSpec.context, build_reason: "ResourceTrigger", bypass_label: "pipeline-completion" },
+      };
+      const result = await runBypass(pipelineSpec);
+      expect(result).toBe(true); // bypass still triggers — synth only affects PullRequest
+    } finally {
+      delete process.env.AW_SYNTHETIC_PR;
+    }
+  });
 });

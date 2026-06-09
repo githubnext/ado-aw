@@ -749,6 +749,17 @@ impl FrontMatter {
         self.on_config.as_ref().and_then(|o| o.pr.as_ref())
     }
 
+    /// Whether the synthetic-from-ci path is active for this agent —
+    /// i.e. `on.pr` is configured AND `on.pr.mode == PrMode::Synthetic`
+    /// (the default). Centralised here so the three compile-time call
+    /// sites (`collect_extensions`, `ExecContextExtension::new`,
+    /// `compile_shared`) cannot drift on the predicate if a future
+    /// `PrMode` variant is added.
+    pub fn is_synthetic_pr(&self) -> bool {
+        self.pr_trigger()
+            .is_some_and(|p| matches!(p.mode, PrMode::Synthetic))
+    }
+
     /// Get the PR runtime filters (if any).
     pub fn pr_filters(&self) -> Option<&PrFilters> {
         self.pr_trigger().and_then(|pr| pr.filters.as_ref())
@@ -1256,10 +1267,53 @@ pub struct PrTriggerConfig {
     /// Runtime filters evaluated via gate steps in the Setup job
     #[serde(default)]
     pub filters: Option<PrFilters>,
+    /// Determines how `on.pr` builds reach the pipeline; see
+    /// [`PrMode`] for the two supported strategies (`synthetic`,
+    /// `policy`). Defaults to [`PrMode::Synthetic`].
+    #[serde(default, rename = "mode")]
+    pub mode: PrMode,
+}
+
+/// How `on.pr` builds reach the pipeline.
+///
+/// Azure DevOps Services ignores the YAML `pr:` block unless a
+/// per-branch Build Validation policy is registered server-side. This
+/// enum lets the agent author pick one of two coherent strategies:
+///
+/// * [`PrMode::Synthetic`] (default) — the compiler emits a Setup-job
+///   script (`exec-context-pr-synth.js`) that calls the ADO REST API
+///   on CI-triggered builds, finds the open PR for `Build.SourceBranch`,
+///   and exposes PR identifiers as `dependencies.Setup.outputs['synthPr.*']`
+///   so the gate and `exec-context-pr.js` behave as if
+///   `Build.Reason == PullRequest`. The top-level `trigger:` stays at
+///   ADO's "trigger on every branch" default. **No branch policy
+///   required.** This is the right choice for the vast majority of
+///   agents.
+///
+/// * [`PrMode::Policy`] — the compiler omits all synth wiring AND
+///   emits `trigger: none` at the top level, so the pipeline only
+///   queues when ADO's Build Validation branch policy fires a real
+///   `Build.Reason == PullRequest` build. Choose this when the
+///   operator has explicitly installed a branch policy and wants to
+///   avoid duplicate CI builds firing on every push.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrMode {
+    /// Synthesise PR context from the ADO REST API on CI-triggered
+    /// builds. Top-level `trigger:` left at ADO default.
+    #[default]
+    Synthetic,
+    /// Operator-installed Build Validation branch policy drives PR
+    /// builds; CI trigger is suppressed via `trigger: none`.
+    Policy,
 }
 
 impl SanitizeConfigTrait for PrTriggerConfig {
     fn sanitize_config_fields(&mut self) {
+        // `mode` (PrMode enum, `Copy`) has no string content to
+        // sanitize — it's a closed kebab-case-deserialised enum, so
+        // any malformed input is already rejected at deserialisation
+        // time. Intentionally absent here.
         if let Some(ref mut b) = self.branches {
             b.sanitize_config_fields();
         }
@@ -1599,8 +1653,6 @@ timeout-minutes: 60
         assert_eq!(env.get("DEBUG_MODE").unwrap(), "true");
         assert_eq!(env.get("AWS_REGION").unwrap(), "us-west-2");
     }
-
-
 
     // ─── PermissionsConfig deserialization ───────────────────────────────
 
@@ -2220,6 +2272,74 @@ triggers:
     }
 
     #[test]
+    fn test_pr_trigger_config_mode_default_synthetic() {
+        let yaml = r#"
+triggers:
+  pr:
+    branches:
+      include: [main]
+"#;
+        let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
+        assert_eq!(
+            tc.pr.unwrap().mode,
+            PrMode::Synthetic,
+            "mode must default to synthetic when omitted"
+        );
+    }
+
+    #[test]
+    fn test_pr_trigger_config_mode_explicit_synthetic() {
+        let yaml = r#"
+triggers:
+  pr:
+    branches:
+      include: [main]
+    mode: synthetic
+"#;
+        let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
+        assert_eq!(tc.pr.unwrap().mode, PrMode::Synthetic);
+    }
+
+    #[test]
+    fn test_pr_trigger_config_mode_explicit_policy() {
+        let yaml = r#"
+triggers:
+  pr:
+    branches:
+      include: [main]
+    mode: policy
+"#;
+        let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
+        assert_eq!(
+            tc.pr.unwrap().mode,
+            PrMode::Policy,
+            "mode: policy must deserialise correctly"
+        );
+    }
+
+    #[test]
+    fn test_pr_trigger_config_mode_invalid_value_errors() {
+        let yaml = r#"
+triggers:
+  pr:
+    branches:
+      include: [main]
+    mode: bananas
+"#;
+        let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let err = serde_yaml::from_value::<OnConfig>(val["triggers"].clone())
+            .expect_err("mode: bananas must be rejected at deserialisation");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("bananas") || msg.contains("variant") || msg.contains("unknown"),
+            "error must mention the bad variant; got: {msg}"
+        );
+    }
+
+    #[test]
     fn test_pr_trigger_config_paths_only() {
         let yaml = r#"
 triggers:
@@ -2246,10 +2366,7 @@ triggers:
 "#;
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
-        assert_eq!(
-            tc.pipeline.as_ref().unwrap().name,
-            "Build Pipeline"
-        );
+        assert_eq!(tc.pipeline.as_ref().unwrap().name, "Build Pipeline");
         assert_eq!(
             tc.pr.unwrap().filters.unwrap().title.unwrap().pattern,
             "*[review]*"
