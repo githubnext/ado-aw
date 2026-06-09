@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.34.1](https://github.com/githubnext/ado-aw/compare/v0.34.0...v0.34.1) (2026-06-09)
+
+
+### Bug Fixes
+
+* **ado-script:** inline azure-devops-node-api to avoid missing ncc chunk ([#935](https://github.com/githubnext/ado-aw/issues/935)) ([7a568fa](https://github.com/githubnext/ado-aw/commit/7a568fae8e42710d7905979060a2c20de3ad7982))
+
 ## [0.34.0](https://github.com/githubnext/ado-aw/compare/v0.33.1...v0.34.0) (2026-06-09)
 
 
