@@ -564,7 +564,29 @@ pub fn generate_pr_trigger(on_config: &Option<OnConfig>, has_schedule: bool) -> 
     }
 }
 
-/// Generate CI trigger configuration
+/// Generate CI trigger configuration.
+///
+/// Three branches, in priority order:
+///  1. **Suppression by pipeline / schedule** — when a
+///     pipeline-completion trigger or a schedule is configured,
+///     `trigger: none` is emitted so unrelated commits do not also
+///     queue a build (existing behaviour).
+///  2. **`on.pr.mode: policy`** — the operator has installed a Build
+///     Validation branch policy and the agent author has declared
+///     intent to rely on it. Emit `trigger: none` so feature-branch
+///     pushes do not queue duplicate CI builds alongside the real
+///     PR-typed build the policy fires.
+///  3. **Default** — otherwise emit the empty string (ADO's "trigger
+///     on every branch" default). This is the `on.pr.mode: synthetic`
+///     path: the synthPr Setup step will promote CI builds to PR
+///     semantics, and the synthPr step's fast-exit (`AW_SYNTHETIC_PR_SKIP`)
+///     handles wasted CI builds on branches without a matching PR.
+///
+/// Note: synth mode must NOT narrow the CI trigger to
+/// `pr.branches.include` — those are PR **target** branches, but ADO
+/// `trigger:` fires on pushes **to** the listed branches. Narrowing
+/// would suppress CI on the feature branches synthPr needs to react
+/// to.
 pub fn generate_ci_trigger(on_config: &Option<OnConfig>, has_schedule: bool) -> String {
     let has_pipeline_trigger = on_config
         .as_ref()
@@ -572,10 +594,20 @@ pub fn generate_ci_trigger(on_config: &Option<OnConfig>, has_schedule: bool) -> 
         .is_some();
 
     if has_pipeline_trigger || has_schedule {
-        "trigger: none".to_string()
-    } else {
-        String::new()
+        return "trigger: none".to_string();
     }
+
+    // Branch 2 — `on.pr.mode: policy`. The operator owns trigger semantics
+    // via a Build Validation branch policy, so the YAML CI trigger must be
+    // silenced to avoid duplicate builds. We still emit the `pr:` block
+    // (the policy uses the YAML `paths:` filter to refine queueing).
+    if let Some(pr) = on_config.as_ref().and_then(|o| o.pr.as_ref())
+        && matches!(pr.mode, crate::compile::types::PrMode::Policy)
+    {
+        return "trigger: none".to_string();
+    }
+
+    String::new()
 }
 
 /// Generate pipeline resource YAML for pipeline completion triggers
@@ -2359,23 +2391,63 @@ pub fn generate_agentic_depends_on(
     has_pipeline_filters: bool,
     expressions: &[&str],
     is_jobs_template_target: bool,
+    synthetic_pr_active: bool,
 ) -> String {
     let has_gate = has_pr_filters || has_pipeline_filters;
-    let has_setup = !setup_steps.is_empty() || has_gate;
-    let has_internal_condition = has_gate || !expressions.is_empty();
+    let has_setup = !setup_steps.is_empty() || has_gate || synthetic_pr_active;
+    let has_internal_condition = has_gate || !expressions.is_empty() || synthetic_pr_active;
 
     // Build the shared condition body once. Reused across the internal-only
     // (standalone/1es/stage) path and the dual-branch jobs-template path.
     let condition_body: Option<String> = if has_internal_condition {
         let mut parts = vec!["succeeded()".to_string()];
-        if has_pr_filters {
+        // `mode: synthetic` (default): the synthPr Setup-job step may have
+        // decided this build should self-skip (no matching PR, wrong target
+        // branch, no matching changed files). Always honour that flag —
+        // it must trump every other reason to run.
+        if synthetic_pr_active {
             parts.push(
-                r"or(
+                r"ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_SKIP'], 'true')"
+                    .to_string(),
+            );
+        }
+        if has_pr_filters {
+            // With `mode: synthetic`, the agent should run when EITHER
+            // (a) the build is neither a real PR build NOR a synth-promoted
+            //     CI build — in that case the gate doesn't apply (bypass.ts
+            //     auto-passes) and the agent runs unconditionally, OR
+            // (b) the gate evaluator passed (`prGate.SHOULD_RUN=true`),
+            //     covering both the real-PR-with-filter-match path and the
+            //     synth-PR-with-filter-match path.
+            //
+            // CRITICAL: do NOT emit `eq(Build.Reason, 'PullRequest')` or
+            // `eq(synthPr.AW_SYNTHETIC_PR, 'true')` as standalone OR
+            // arms — that would let a real PR or synth-promoted build run
+            // the agent EVEN WHEN `pr.filters` failed (i.e. silently
+            // bypass the gate for the very builds it's meant to filter).
+            //
+            // With `mode: policy` (synth not active), the original
+            // two-arm condition is preserved verbatim.
+            if synthetic_pr_active {
+                parts.push(
+                    r"or(
+         and(
+           ne(variables['Build.Reason'], 'PullRequest'),
+           ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true')
+         ),
+         eq(dependencies.Setup.outputs['prGate.SHOULD_RUN'], 'true')
+       )"
+                    .to_string(),
+                );
+            } else {
+                parts.push(
+                    r"or(
          ne(variables['Build.Reason'], 'PullRequest'),
          eq(dependencies.Setup.outputs['prGate.SHOULD_RUN'], 'true')
        )"
-                .to_string(),
-            );
+                    .to_string(),
+                );
+            }
         }
         if has_pipeline_filters {
             parts.push(
@@ -3301,12 +3373,17 @@ pub async fn compile_shared(
         }
     }
 
+    let synthetic_pr_active = front_matter.is_synthetic_pr();
     let agentic_depends_on = generate_agentic_depends_on(
         &front_matter.setup,
         has_pr_filters,
         has_pipeline_filters,
         &expressions,
-        matches!(front_matter.target, crate::compile::types::CompileTarget::Job),
+        matches!(
+            front_matter.target,
+            crate::compile::types::CompileTarget::Job
+        ),
+        synthetic_pr_active,
     );
     let job_timeout = generate_job_timeout(front_matter);
 
@@ -4693,8 +4770,14 @@ mod tests {
         let result = generate_pr_trigger(&triggers, true);
         assert!(result.contains("pr: none"));
         // When both pipeline and schedule are active, the comment must mention both reasons.
-        assert!(result.contains("schedule"), "should mention schedule: {result}");
-        assert!(result.contains("upstream pipeline"), "should mention upstream pipeline: {result}");
+        assert!(
+            result.contains("schedule"),
+            "should mention schedule: {result}"
+        );
+        assert!(
+            result.contains("upstream pipeline"),
+            "should mention upstream pipeline: {result}"
+        );
     }
 
     // ─── generate_ci_trigger ─────────────────────────────────────────────────
@@ -4744,6 +4827,93 @@ mod tests {
         });
         let result = generate_ci_trigger(&triggers, true);
         assert_eq!(result, "trigger: none");
+    }
+
+    // ─── generate_ci_trigger: on.pr.mode behaviour (issue #916) ──────────────
+    //
+    // The synth path (default, `mode: synthetic`) leaves the CI trigger at
+    // ADO default ("trigger on every branch") and relies on the synthPr
+    // Setup step to promote / skip per build. Policy path (`mode: policy`)
+    // emits `trigger: none` so the operator-installed Build Validation
+    // policy is the sole source of pipeline runs — no duplicate builds.
+
+    #[test]
+    fn test_generate_ci_trigger_pr_mode_synthetic_keeps_default() {
+        let triggers = Some(crate::compile::types::OnConfig {
+            pipeline: None,
+            pr: Some(crate::compile::types::PrTriggerConfig {
+                branches: Some(crate::compile::types::BranchFilter {
+                    include: vec!["main".into(), "release/*".into()],
+                    exclude: vec!["users/*".into()],
+                }),
+                paths: None,
+                filters: None,
+                ..Default::default() // mode defaults to Synthetic
+            }),
+            schedule: None,
+        });
+        let result = generate_ci_trigger(&triggers, false);
+        assert!(
+            result.is_empty(),
+            "mode: synthetic must leave the CI trigger at ADO default — \
+             pr.branches.include lists PR TARGET branches, but ADO trigger: \
+             fires on pushes TO listed branches, so narrowing would suppress \
+             CI on the feature branches synthPr needs. Got: {result}"
+        );
+    }
+
+    #[test]
+    fn test_generate_ci_trigger_pr_mode_policy_emits_trigger_none() {
+        let triggers = Some(crate::compile::types::OnConfig {
+            pipeline: None,
+            pr: Some(crate::compile::types::PrTriggerConfig {
+                branches: Some(crate::compile::types::BranchFilter {
+                    include: vec!["main".into()],
+                    exclude: vec![],
+                }),
+                paths: None,
+                filters: None,
+                mode: crate::compile::types::PrMode::Policy,
+            }),
+            schedule: None,
+        });
+        let result = generate_ci_trigger(&triggers, false);
+        assert_eq!(
+            result, "trigger: none",
+            "mode: policy must suppress the CI trigger so the operator-installed \
+             branch policy is the sole source of pipeline runs (no duplicate builds)"
+        );
+    }
+
+    #[test]
+    fn test_generate_ci_trigger_pipeline_trigger_still_suppresses() {
+        // Pipeline-completion trigger continues to emit `trigger: none`
+        // regardless of any `on.pr` configuration; this branch is the
+        // long-standing rule that upstream-pipeline triggers exclude
+        // commit-driven CI.
+        let triggers = Some(crate::compile::types::OnConfig {
+            pipeline: Some(crate::compile::types::PipelineTrigger {
+                name: "Build".into(),
+                project: None,
+                branches: vec![],
+                filters: None,
+            }),
+            pr: Some(crate::compile::types::PrTriggerConfig {
+                branches: Some(crate::compile::types::BranchFilter {
+                    include: vec!["main".into()],
+                    exclude: vec![],
+                }),
+                paths: None,
+                filters: None,
+                ..Default::default()
+            }),
+            schedule: None,
+        });
+        let result = generate_ci_trigger(&triggers, false);
+        assert_eq!(
+            result, "trigger: none",
+            "pipeline-completion trigger must continue to emit `trigger: none`"
+        );
     }
 
     // ─── generate_pipeline_resources ─────────────────────────────────────────
@@ -6420,6 +6590,7 @@ safe-outputs:
                 }),
                 paths: None,
                 filters: None,
+                ..Default::default()
             }),
             schedule: None,
         });
@@ -6445,6 +6616,7 @@ safe-outputs:
                 }),
                 paths: None,
                 filters: None,
+                ..Default::default()
             }),
             schedule: None,
         });
@@ -6470,6 +6642,7 @@ safe-outputs:
                     exclude: vec![],
                 }),
                 filters: None,
+                ..Default::default()
             }),
             schedule: None,
         });
@@ -6495,6 +6668,7 @@ safe-outputs:
                     exclude: vec!["tests/\ninjected: true".to_string()],
                 }),
                 filters: None,
+                ..Default::default()
             }),
             schedule: None,
         });
@@ -6520,6 +6694,7 @@ safe-outputs:
                 }),
                 paths: None,
                 filters: None,
+                ..Default::default()
             }),
             schedule: None,
         });
@@ -6543,6 +6718,7 @@ safe-outputs:
                     exclude: vec!["tests/**".to_string()],
                 }),
                 filters: None,
+                ..Default::default()
             }),
             schedule: None,
         });
@@ -6754,7 +6930,10 @@ safe-outputs:
         let exts = crate::compile::extensions::collect_extensions(&fm);
         let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
         let result = generate_prepare_steps(&[], &exts, &ctx).unwrap();
-        assert!(result.contains("elan-init.sh"), "should include elan installer");
+        assert!(
+            result.contains("elan-init.sh"),
+            "should include elan installer"
+        );
         assert!(result.contains("Lean 4"), "should include Lean prompt");
         assert!(
             result.contains("--default-toolchain stable"),
@@ -8140,14 +8319,14 @@ safe-outputs:
 
     #[test]
     fn test_generate_agentic_depends_on_empty_steps() {
-        assert!(generate_agentic_depends_on(&[], false, false, &[], false).is_empty());
+        assert!(generate_agentic_depends_on(&[], false, false, &[], false, false).is_empty());
     }
 
     #[test]
     fn test_generate_agentic_depends_on_with_steps() {
         let step: serde_yaml::Value = serde_yaml::from_str("bash: x").unwrap();
         assert_eq!(
-            generate_agentic_depends_on(&[step], false, false, &[], false),
+            generate_agentic_depends_on(&[step], false, false, &[], false, false),
             "dependsOn: Setup"
         );
     }
@@ -8159,7 +8338,7 @@ safe-outputs:
         // dual-branch ${{ if }} template expressions so external template
         // parameters merge correctly.
         let step: serde_yaml::Value = serde_yaml::from_str("bash: x").unwrap();
-        let out = generate_agentic_depends_on(&[step], false, false, &[], true);
+        let out = generate_agentic_depends_on(&[step], false, false, &[], true, false);
         // dependsOn branches
         assert!(
             out.contains("${{ if eq(length(parameters.dependsOn), 0) }}:"),
@@ -8190,7 +8369,7 @@ safe-outputs:
     fn test_generate_agentic_depends_on_jobs_template_no_setup() {
         // No internal Setup, no gates: only the non-empty-external branches
         // are emitted (both dependsOn and condition default to omitted).
-        let out = generate_agentic_depends_on(&[], false, false, &[], true);
+        let out = generate_agentic_depends_on(&[], false, false, &[], true, false);
         assert!(
             !out.contains("${{ if eq(length(parameters.dependsOn), 0) }}:"),
             "should not emit empty-deps branch when no internal Setup: {out}"
@@ -8218,7 +8397,7 @@ safe-outputs:
         // With internal PR gate, the condition block emits BOTH branches:
         // empty-external uses the existing internal expression verbatim;
         // non-empty-external ANDs the external clause into the body.
-        let out = generate_agentic_depends_on(&[], true, false, &[], true);
+        let out = generate_agentic_depends_on(&[], true, false, &[], true, false);
         assert!(
             out.contains("${{ if eq(parameters.condition, '') }}:"),
             "missing empty-condition branch: {out}"
@@ -8237,6 +8416,61 @@ safe-outputs:
             out.matches("prGate.SHOULD_RUN").count(),
             2,
             "PR gate clause must appear in both empty/non-empty branches: {out}"
+        );
+    }
+
+    #[test]
+    fn test_agentic_depends_on_synthetic_pr_active_emits_skip_guard_and_gate_enforced_pr_clause() {
+        // synthetic_pr_active=true + has_pr_filters=true → emits the
+        // AW_SYNTHETIC_PR_SKIP guard and a gate-enforced PR clause: real
+        // and synth PR builds must pass the gate (no permissive
+        // bypass arms).
+        let out = generate_agentic_depends_on(&[], true, false, &[], false, true);
+        assert!(out.contains("dependsOn: Setup"), "should depend on Setup");
+        assert!(
+            out.contains("ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_SKIP'], 'true')"),
+            "must honour the synth-skip flag: {out}"
+        );
+        // The PR clause must REQUIRE the gate for real-PR AND synth-PR
+        // builds — i.e. allow unconditional run only when neither
+        // applies. Both AND-NOT arms must be present.
+        assert!(
+            out.contains("ne(variables['Build.Reason'], 'PullRequest')"),
+            "must contain the `ne(Build.Reason, 'PullRequest')` AND-NOT arm: {out}"
+        );
+        assert!(
+            out.contains("ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true')"),
+            "must contain the `ne(synthPr.AW_SYNTHETIC_PR, 'true')` AND-NOT arm: {out}"
+        );
+        assert!(
+            out.contains("eq(dependencies.Setup.outputs['prGate.SHOULD_RUN'], 'true')"),
+            "must still accept gate-passed as an activation reason: {out}"
+        );
+        // Defensive regression guards: the old permissive arms that
+        // bypassed the gate for any PR build MUST be gone.
+        assert!(
+            !out.contains("eq(variables['Build.Reason'], 'PullRequest')"),
+            "the buggy `eq(Build.Reason, PullRequest)` bypass arm must be gone: {out}"
+        );
+        assert!(
+            !out.contains("eq(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true')"),
+            "the buggy `eq(synthPr.AW_SYNTHETIC_PR, true)` bypass arm must be gone: {out}"
+        );
+    }
+
+    #[test]
+    fn test_agentic_depends_on_synthetic_pr_without_filters_still_emits_skip_guard() {
+        // synthetic_pr_active=true but no filters → Setup job still
+        // exists (the synthPr step lives there) so the dependsOn must
+        // be present and the skip guard must apply.
+        let out = generate_agentic_depends_on(&[], false, false, &[], false, true);
+        assert!(
+            out.contains("dependsOn: Setup"),
+            "should depend on Setup: {out}"
+        );
+        assert!(
+            out.contains("ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_SKIP'], 'true')"),
+            "must honour the synth-skip flag even without filters: {out}"
         );
     }
 

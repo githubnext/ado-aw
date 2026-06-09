@@ -1118,10 +1118,31 @@ pub fn build_gate_spec(ctx: GateContext, checks: &[FilterCheck]) -> anyhow::Resu
 /// Compile filter checks into a bash gate step using an external evaluator
 /// script. ADO variables are passed via the step's `env:` block (idiomatic
 /// ADO pattern), and the gate spec is base64-encoded in GATE_SPEC.
+///
+/// When `synthetic_pr_active` is true AND `ctx == GateContext::PullRequest`,
+/// PR-identifier env vars (`ADO_PR_ID`, `ADO_SOURCE_BRANCH`,
+/// `ADO_TARGET_BRANCH`) are emitted using `$[ coalesce(...) ]` so they
+/// pick up either the real `System.PullRequest.*` variables (on a true
+/// PR build) OR the `synthPr` Setup-job outputs (on a CI build promoted
+/// by `exec-context-pr-synth.js`). Also exports `AW_SYNTHETIC_PR` so
+/// `gate/bypass.ts` knows to skip the "not a PR build" bypass.
+///
+/// **Same-job vs cross-job reference**: this gate step lives in the
+/// **Setup job** (`AdoScriptExtension::setup_steps` returns it), the
+/// same job as `synthPr`. Within the producing job, the cross-job form
+/// `dependencies.Setup.outputs['synthPr.X']` is undefined (a job has
+/// no entry for itself in `dependencies`), so we use the same-job
+/// runtime expression `variables['synthPr.X']` instead, which resolves
+/// step output variables added to the job's variable scope by prior
+/// `isOutput=true` setvariable commands. See
+/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/process/variables#use-output-variables-from-tasks>.
+/// Runtime expressions (`$[ ... ]`) are valid in step-level `env:`
+/// blocks per the same docs.
 pub fn compile_gate_step_external(
     ctx: GateContext,
     checks: &[FilterCheck],
     evaluator_path: &str,
+    synthetic_pr_active: bool,
 ) -> anyhow::Result<String> {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
 
@@ -1147,11 +1168,126 @@ pub fn compile_gate_step_external(
     step.push_str("    SYSTEM_ACCESSTOKEN: $(System.AccessToken)\n");
     step.push_str(&format!("    GATE_SPEC: \"{}\"\n", spec_b64));
 
+    // Synthetic-from-ci flag: tells gate/bypass.ts that this CI build
+    // has been promoted to PR semantics, so the "not a PullRequest
+    // build" bypass must not auto-pass. Always safe to emit (the gate
+    // checks it strictly for the literal "true"), but only meaningful
+    // for PR gates. Same-job ref via `variables['synthPr.X']` — see
+    // function doc-comment for why this is NOT `dependencies.Setup...`.
+    let pr_synth_active = synthetic_pr_active && matches!(ctx, GateContext::PullRequest);
+    if pr_synth_active {
+        // YAML-quote runtime expressions whose value contains single quotes.
+        // Per ADO docs, `$[ ... ]` runtime expressions are valid in step
+        // `env:` blocks; wrapping in double quotes keeps the value
+        // strictly conformant to the YAML spec (which reserves `'` as a
+        // scalar indicator) and matches the form shown in ADO docs.
+        step.push_str(
+            "    AW_SYNTHETIC_PR: \"$[ coalesce(variables['synthPr.AW_SYNTHETIC_PR'], '') ]\"\n",
+        );
+    }
+
     for (env_var, ado_macro) in &exports {
-        step.push_str(&format!("    {}: {}\n", env_var, ado_macro));
+        let macro_str = if pr_synth_active {
+            match *env_var {
+                "ADO_PR_ID" => {
+                    "\"$[ coalesce(variables['System.PullRequest.PullRequestId'], variables['synthPr.AW_SYNTHETIC_PR_ID']) ]\""
+                }
+                "ADO_SOURCE_BRANCH" => {
+                    "\"$[ coalesce(variables['System.PullRequest.SourceBranch'], variables['synthPr.AW_SYNTHETIC_PR_SOURCEBRANCH']) ]\""
+                }
+                "ADO_TARGET_BRANCH" => {
+                    "\"$[ coalesce(variables['System.PullRequest.TargetBranch'], variables['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH']) ]\""
+                }
+                _ => ado_macro,
+            }
+        } else {
+            ado_macro
+        };
+        step.push_str(&format!("    {}: {}\n", env_var, macro_str));
     }
 
     Ok(step)
+}
+
+// ─── PR synthetic-from-ci spec (mode: synthetic) ────────────────────────────
+
+/// Base64-encoded JSON spec consumed by the `exec-context-pr-synth.js`
+/// bundle at runtime. Carries the PR branch/path filters the agent
+/// declared in front-matter so the bundle can match an active PR by
+/// `sourceRefName` and filter by `targetRefName` + changed-file paths.
+///
+/// Shape:
+/// ```json
+/// {
+///   "branches": { "include": [...], "exclude": [...] },
+///   "paths":    { "include": [...], "exclude": [...] }
+/// }
+/// ```
+///
+/// All four arrays are always present (possibly empty) for shape stability —
+/// the bundle can rely on the fields existing.
+#[derive(Debug, serde::Serialize)]
+struct PrSynthSpec {
+    branches: PrSynthGlobs,
+    paths: PrSynthGlobs,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct PrSynthGlobs {
+    include: Vec<String>,
+    exclude: Vec<String>,
+}
+
+/// Maximum decoded size of `PR_SYNTH_SPEC`. Matches the spirit of the
+/// `GATE_SPEC` 8 KiB ceiling — synth specs are smaller (no checks, no
+/// facts), but the same defence-in-depth bound prevents pathological
+/// front-matter from blowing up the bundle's parser.
+const PR_SYNTH_SPEC_MAX_BYTES: usize = 8 * 1024;
+
+/// Build the base64-encoded `PR_SYNTH_SPEC` value for the given PR
+/// trigger configuration.
+///
+/// The returned string is safe to embed inside a YAML double-quoted
+/// scalar (the base64 alphabet contains no characters that require
+/// YAML escaping).
+pub fn build_pr_synth_spec(pr: &crate::compile::types::PrTriggerConfig) -> anyhow::Result<String> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    let spec = PrSynthSpec {
+        branches: PrSynthGlobs {
+            include: pr
+                .branches
+                .as_ref()
+                .map(|b| b.include.clone())
+                .unwrap_or_default(),
+            exclude: pr
+                .branches
+                .as_ref()
+                .map(|b| b.exclude.clone())
+                .unwrap_or_default(),
+        },
+        paths: PrSynthGlobs {
+            include: pr
+                .paths
+                .as_ref()
+                .map(|p| p.include.clone())
+                .unwrap_or_default(),
+            exclude: pr
+                .paths
+                .as_ref()
+                .map(|p| p.exclude.clone())
+                .unwrap_or_default(),
+        },
+    };
+
+    let json = serde_json::to_string(&spec)?;
+    anyhow::ensure!(
+        json.len() <= PR_SYNTH_SPEC_MAX_BYTES,
+        "PR_SYNTH_SPEC serialised size {} exceeds {}-byte cap; reduce the number/length of on.pr branches/paths globs",
+        json.len(),
+        PR_SYNTH_SPEC_MAX_BYTES
+    );
+    Ok(STANDARD.encode(json.as_bytes()))
 }
 
 /// Collect ADO macro exports needed by the given checks.
@@ -1245,6 +1381,73 @@ fn collect_ordered_facts(checks: &[FilterCheck]) -> anyhow::Result<Vec<Fact>> {
 mod tests {
     use super::*;
     use crate::compile::types::*;
+
+    // ─── PR_SYNTH_SPEC tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_build_pr_synth_spec_roundtrip() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        use serde_json::Value;
+
+        let pr = PrTriggerConfig {
+            branches: Some(BranchFilter {
+                include: vec!["main".into(), "release/*".into()],
+                exclude: vec!["test/*".into()],
+            }),
+            paths: Some(PathFilter {
+                include: vec!["src/*".into()],
+                exclude: vec!["docs/*".into()],
+            }),
+            filters: None,
+            ..Default::default()
+        };
+        let b64 = build_pr_synth_spec(&pr).expect("synth spec must build");
+        let decoded = STANDARD.decode(b64.as_bytes()).expect("must decode base64");
+        let parsed: Value = serde_json::from_slice(&decoded).expect("must be valid JSON");
+        assert_eq!(
+            parsed["branches"]["include"],
+            serde_json::json!(["main", "release/*"])
+        );
+        assert_eq!(parsed["branches"]["exclude"], serde_json::json!(["test/*"]));
+        assert_eq!(parsed["paths"]["include"], serde_json::json!(["src/*"]));
+        assert_eq!(parsed["paths"]["exclude"], serde_json::json!(["docs/*"]));
+    }
+
+    #[test]
+    fn test_build_pr_synth_spec_omitted_arrays_become_empty() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        use serde_json::Value;
+
+        let pr = PrTriggerConfig::default();
+        let b64 = build_pr_synth_spec(&pr).expect("synth spec must build");
+        let decoded = STANDARD.decode(b64.as_bytes()).unwrap();
+        let parsed: Value = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(parsed["branches"]["include"], serde_json::json!([]));
+        assert_eq!(parsed["branches"]["exclude"], serde_json::json!([]));
+        assert_eq!(parsed["paths"]["include"], serde_json::json!([]));
+        assert_eq!(parsed["paths"]["exclude"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn test_build_pr_synth_spec_rejects_oversize() {
+        // Generate enough branch globs to blow past the 8 KiB cap.
+        let pr = PrTriggerConfig {
+            branches: Some(BranchFilter {
+                include: (0..1000)
+                    .map(|i| format!("very/long/branch/glob/pattern/{i}"))
+                    .collect(),
+                exclude: vec![],
+            }),
+            paths: None,
+            filters: None,
+            ..Default::default()
+        };
+        let err = build_pr_synth_spec(&pr).expect_err("oversize spec must fail");
+        assert!(
+            err.to_string().contains("PR_SYNTH_SPEC"),
+            "error must mention spec: {err}"
+        );
+    }
 
     // ─── Fact tests ─────────────────────────────────────────────────────
 
@@ -1572,6 +1775,7 @@ mod tests {
             GateContext::PullRequest,
             &[],
             "/tmp/ado-aw-scripts/ado-script/gate.js",
+            false,
         )
         .unwrap();
         assert!(result.is_empty());
@@ -1591,6 +1795,7 @@ mod tests {
             GateContext::PullRequest,
             &checks,
             "/tmp/ado-aw-scripts/ado-script/gate.js",
+            false,
         )
         .unwrap();
         assert!(result.contains("- bash:"), "should be a bash step");
@@ -1623,6 +1828,7 @@ mod tests {
             GateContext::PullRequest,
             &checks,
             "/tmp/ado-aw-scripts/ado-script/gate.js",
+            false,
         )
         .unwrap();
         assert!(
@@ -1650,6 +1856,7 @@ mod tests {
             GateContext::PipelineCompletion,
             &checks,
             "/tmp/ado-aw-scripts/ado-script/gate.js",
+            false,
         )
         .unwrap();
         assert!(
@@ -1680,6 +1887,7 @@ mod tests {
             GateContext::PullRequest,
             &checks,
             "/tmp/ado-aw-scripts/ado-script/gate.js",
+            false,
         )
         .unwrap();
         assert!(
@@ -1706,17 +1914,18 @@ mod tests {
             GateContext::PullRequest,
             &checks,
             "/tmp/ado-aw-scripts/ado-script/gate.js",
+            false,
         )
         .unwrap();
         // Verify tier-1 (pipeline-var only) checks do not export API-related env vars
         // Look for the env: block exports (YAML format with leading spaces)
         let lines: Vec<&str> = result.lines().collect();
-        let has_repo_id_export = lines.iter().any(|line| {
-            line.trim_start().starts_with("ADO_REPO_ID:")
-        });
-        let has_pr_id_export = lines.iter().any(|line| {
-            line.trim_start().starts_with("ADO_PR_ID:")
-        });
+        let has_repo_id_export = lines
+            .iter()
+            .any(|line| line.trim_start().starts_with("ADO_REPO_ID:"));
+        let has_pr_id_export = lines
+            .iter()
+            .any(|line| line.trim_start().starts_with("ADO_PR_ID:"));
         assert!(
             !has_repo_id_export,
             "should not export ADO_REPO_ID for title-only (tier-1) check"
@@ -1823,6 +2032,7 @@ mod tests {
             GateContext::PullRequest,
             &checks,
             "/tmp/ado-aw-scripts/ado-script/gate.js",
+            false,
         )
         .unwrap();
 
@@ -1842,11 +2052,27 @@ mod tests {
 
         // Verify the spec captures all three filters with correct fact dependencies
         let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
-        assert_eq!(spec.checks.len(), 3, "should produce 3 checks from 3 filters");
-        assert!(spec.facts.iter().any(|f| f.kind == "pr_title"), "title filter requires pr_title fact");
-        assert!(spec.facts.iter().any(|f| f.kind == "pr_is_draft"), "draft filter requires pr_is_draft fact");
-        assert!(spec.facts.iter().any(|f| f.kind == "pr_labels"), "labels filter requires pr_labels fact");
-        assert!(spec.facts.iter().any(|f| f.kind == "pr_metadata"), "API-derived facts should pull in pr_metadata dependency");
+        assert_eq!(
+            spec.checks.len(),
+            3,
+            "should produce 3 checks from 3 filters"
+        );
+        assert!(
+            spec.facts.iter().any(|f| f.kind == "pr_title"),
+            "title filter requires pr_title fact"
+        );
+        assert!(
+            spec.facts.iter().any(|f| f.kind == "pr_is_draft"),
+            "draft filter requires pr_is_draft fact"
+        );
+        assert!(
+            spec.facts.iter().any(|f| f.kind == "pr_labels"),
+            "labels filter requires pr_labels fact"
+        );
+        assert!(
+            spec.facts.iter().any(|f| f.kind == "pr_metadata"),
+            "API-derived facts should pull in pr_metadata dependency"
+        );
     }
 
     // ─── Schema tests ──────────────────────────────────────────────────
@@ -1898,8 +2124,7 @@ mod tests {
             .join("ado-script")
             .join("schema")
             .join("gate-spec.schema.json");
-        std::fs::create_dir_all(schema_path.parent().unwrap())
-            .expect("should create schema dir");
+        std::fs::create_dir_all(schema_path.parent().unwrap()).expect("should create schema dir");
         std::fs::write(&schema_path, &schema).expect("should write schema file");
 
         // Verify it's readable and valid

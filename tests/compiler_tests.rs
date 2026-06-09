@@ -1,7 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
 
-
 /// Asserts that all required `{{ marker }}` placeholders are present in the template.
 fn assert_required_markers(content: &str) {
     let required = [
@@ -157,7 +156,6 @@ fn test_example_file_structure() {
         "Example should have closing front matter"
     );
 }
-
 
 /// Test that validates the presence of required dependencies
 #[test]
@@ -633,8 +631,7 @@ Do something.
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let compiled =
-        fs::read_to_string(&output_path).expect("Compiled YAML should exist on success");
+    let compiled = fs::read_to_string(&output_path).expect("Compiled YAML should exist on success");
     assert!(
         compiled.contains("SYSTEM_ACCESSTOKEN: $(System.AccessToken)"),
         "Executor must map SYSTEM_ACCESSTOKEN from $(System.AccessToken) by default. \
@@ -4232,14 +4229,18 @@ fn test_neither_feature_active_emits_no_node_or_download_anywhere() {
 }
 
 /// Per-job download placement: when the gate is inactive AND runtime imports
-/// are inlined, but `on.pr` is configured and execution-context PR is not
-/// disabled, the `exec-context-pr.js` bundle is the only consumer — the
-/// download must land in the Agent job only.
+/// are inlined, but `on.pr` is configured (default `mode: synthetic`) and
+/// execution-context PR is not disabled, two bundle consumers are active:
+///
+///   * `synthPr` (Setup job) — emitted by the synthetic-from-ci path
+///   * `exec-context-pr.js` (Agent job) — staged by the PR contributor
+///
+/// so the script bundle download MUST land in BOTH jobs.
 ///
 /// Closes a coverage gap that `dedupe_gate_only.md` previously left by
 /// pinning `execution-context.pr.enabled: false`.
 #[test]
-fn test_exec_context_pr_only_downloads_bundle_in_agent_job_not_setup() {
+fn test_exec_context_pr_downloads_bundle_in_both_jobs_with_synth_mode() {
     let yaml = compile_fixture("dedupe_exec_context_pr_only.md");
     let agent = extract_job_block(&yaml, "Agent").expect("Agent job should exist");
     assert!(
@@ -4251,10 +4252,14 @@ fn test_exec_context_pr_only_downloads_bundle_in_agent_job_not_setup() {
         "Agent job is missing the exec-context-pr prepare step (the consumer of the download)"
     );
     if let Some(setup) = extract_job_block(&yaml, "Setup") {
+        // Setup-job script bundle download IS expected when on.pr is
+        // configured (default `mode: synthetic` emits the synthPr
+        // step, which is a bundle consumer). Only assert the Agent
+        // job has the bundle download; the Setup-job download is the
+        // synth feature's correct behaviour.
         assert!(
-            !setup.contains("Download ado-aw scripts"),
-            "Setup job should NOT have the script bundle download when the only consumer is the Agent-job exec-context-pr step. \
-             Setup block contents: {}",
+            setup.contains("Download ado-aw scripts"),
+            "Setup job SHOULD have the script bundle download when mode: synthetic is on (the synthPr step is a bundle consumer). Setup block: {}",
             setup
         );
     }
@@ -4367,6 +4372,153 @@ fn test_pr_filter_agent_depends_on_setup() {
     assert!(
         compiled.contains("prGate.SHOULD_RUN"),
         "Agent job condition should reference gate output"
+    );
+}
+
+/// Regression guard for the synth-mode gate-bypass bug: with `mode:
+/// synthetic` (the default) AND `on.pr.filters` present, the Agent-job
+/// condition must REQUIRE the gate to pass for real-PR and synth-PR
+/// builds. Earlier iterations emitted `or(eq(Build.Reason, 'PullRequest'),
+/// eq(synthPr.AW_SYNTHETIC_PR, 'true'), ...)` which silently bypassed the
+/// gate for any PR build — defeating the purpose of `pr.filters`.
+#[test]
+fn test_pr_filter_synth_mode_agent_condition_enforces_gate() {
+    let compiled = compile_fixture("pr-filter-tier1-agent.md");
+
+    // Extract the Agent-job dependsOn condition body so the assertions
+    // target only that section (the same strings can appear elsewhere —
+    // e.g. the exec-context-pr.js step's condition — and would create
+    // false positives if we matched the whole compiled output).
+    let agent_block = extract_job_block(&compiled, "Agent").expect("Agent job present");
+    let condition_section = agent_block
+        .split("condition: |")
+        .nth(1)
+        .map(|tail| {
+            // Stop at the next top-level Agent-job field. `steps:` always
+            // exists; `pool:` / `variables:` / `workspace:` may exist
+            // before it. The first one we hit terminates the condition
+            // body. Using exact field names avoids matching inner
+            // condition lines that start with 4+ spaces.
+            let stop_at = [
+                "\n    pool:",
+                "\n    steps:",
+                "\n    variables:",
+                "\n    workspace:",
+            ];
+            let end = stop_at
+                .iter()
+                .filter_map(|needle| tail.find(needle))
+                .min()
+                .unwrap_or(tail.len());
+            &tail[..end]
+        })
+        .unwrap_or("");
+
+    // Correct shape: the AND-NOT clause requiring (not real PR) AND
+    // (not synth PR) before the unconditional-run branch is taken.
+    // Whitespace-agnostic substring matches.
+    assert!(
+        condition_section.contains("ne(variables['Build.Reason'], 'PullRequest')")
+            && condition_section
+                .contains("ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true')"),
+        "Agent-job dependsOn condition must contain the AND-NOT arms \
+         `ne(Build.Reason, 'PullRequest')` and `ne(synthPr.AW_SYNTHETIC_PR, 'true')` \
+         so the gate is enforced for PR builds (real or synth). \
+         Condition section: {condition_section}"
+    );
+    assert!(
+        condition_section.contains("eq(dependencies.Setup.outputs['prGate.SHOULD_RUN'], 'true')"),
+        "Agent-job dependsOn condition must keep the gate-passed activation arm: \
+         {condition_section}"
+    );
+
+    // Defensive: the old permissive bypass arms that bypassed the gate
+    // for any PR build MUST NOT appear inside the Agent-job dependsOn
+    // condition.
+    assert!(
+        !condition_section.contains("eq(variables['Build.Reason'], 'PullRequest')"),
+        "Agent-job dependsOn condition must NOT contain the buggy \
+         `eq(Build.Reason, 'PullRequest')` bypass arm (would auto-run on \
+         every real PR build regardless of gate): {condition_section}"
+    );
+    assert!(
+        !condition_section
+            .contains("eq(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true')"),
+        "Agent-job dependsOn condition must NOT contain the buggy \
+         `eq(synthPr.AW_SYNTHETIC_PR, 'true')` bypass arm (would auto-run on \
+         every synth-promoted build regardless of gate): {condition_section}"
+    );
+}
+
+/// Regression guard for the synth-mode gate-step same-job ref bug: the
+/// gate step lives in the **Setup** job (same job as `synthPr`), so its
+/// env block must use `variables['synthPr.X']` (same-job runtime
+/// expression) — `dependencies.Setup.outputs[...]` is undefined inside
+/// the producing job and silently coalesces to empty, leaving
+/// `AW_SYNTHETIC_PR` empty and causing the bypass to misfire.
+#[test]
+fn test_pr_filter_synth_mode_gate_step_uses_same_job_synth_ref() {
+    let compiled = compile_fixture("pr-filter-tier1-agent.md");
+
+    assert!(
+        compiled.contains(
+            "AW_SYNTHETIC_PR: \"$[ coalesce(variables['synthPr.AW_SYNTHETIC_PR'], '') ]\""
+        ),
+        "Gate step env must use same-job `variables['synthPr.X']` runtime expression — \
+         `dependencies.Setup.outputs[...]` is undefined inside the producing Setup job"
+    );
+    // The fixture exercises source-branch and target-branch filters,
+    // so the synth-coalesce treatment must appear on those env vars
+    // using the same-job `variables[...]` form. (ADO_PR_ID is not
+    // exported by this fixture's filter set, so we don't assert it here.)
+    assert!(
+        compiled.contains(
+            "ADO_SOURCE_BRANCH: \"$[ coalesce(variables['System.PullRequest.SourceBranch'], variables['synthPr.AW_SYNTHETIC_PR_SOURCEBRANCH']) ]\""
+        ),
+        "ADO_SOURCE_BRANCH coalesce must use same-job `variables[...]` form"
+    );
+    assert!(
+        compiled.contains(
+            "ADO_TARGET_BRANCH: \"$[ coalesce(variables['System.PullRequest.TargetBranch'], variables['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH']) ]\""
+        ),
+        "ADO_TARGET_BRANCH coalesce must use same-job `variables[...]` form"
+    );
+
+    // The same-job gate step MUST NOT use the cross-job
+    // `dependencies.Setup.outputs[...]` form for synthPr references.
+    // (It's fine elsewhere — e.g. the Agent-job dependsOn condition — but
+    // not inside the Setup job's own steps.)
+    // The same-job gate step MUST NOT use the cross-job
+    // `dependencies.Setup.outputs[...]` form for synthPr references.
+    // (It's fine elsewhere — e.g. the Agent-job dependsOn condition — but
+    // not inside the Setup job's own steps.) Bound the gate-step
+    // section by the start of the next top-level job (`\n  - job: `),
+    // since extract_job_block's `\n- job: ` boundary doesn't match the
+    // 2-space-indented job list items produced for this target.
+    let setup_block = extract_job_block(&compiled, "Setup").expect("Setup job present");
+    let gate_section = setup_block
+        .split("name: prGate")
+        .nth(1)
+        .map(|tail| {
+            let stop_at = [
+                "\n      - bash:",
+                "\n      - task:",
+                "\n      - script:",
+                "\n  - job: ",
+            ];
+            let end = stop_at
+                .iter()
+                .filter_map(|needle| tail.find(needle))
+                .min()
+                .unwrap_or(tail.len());
+            &tail[..end]
+        })
+        .unwrap_or("");
+    assert!(
+        !gate_section.contains("dependencies.Setup.outputs['synthPr."),
+        "Gate step (inside Setup job) must NOT reference `dependencies.Setup.outputs['synthPr.X']` — \
+         that is cross-job syntax and is undefined within the producing job. \
+         Gate section: {gate_section}"
     );
 }
 
@@ -4657,7 +4809,12 @@ fn test_default_pipeline_mounts_az_and_allows_azure_hosts() {
          chars after the displayName). Window:\n{window}"
     );
     // Anchor strings: lock the load-bearing parts of the advisory.
-    for anchor in ["/usr/bin/az", "az devops", "AZURE_DEVOPS_EXT_PAT", "missing-tool"] {
+    for anchor in [
+        "/usr/bin/az",
+        "az devops",
+        "AZURE_DEVOPS_EXT_PAT",
+        "missing-tool",
+    ] {
         assert!(
             compiled.contains(anchor),
             "compiled YAML must contain advisory anchor `{anchor}`. \
@@ -5150,8 +5307,6 @@ fn test_job_target_with_setup_emits_dual_branch_dependson_with_each() {
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
-
-
 // ============================================================================
 // Execution-context extension (issue #860)
 // ============================================================================
@@ -5182,8 +5337,8 @@ fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
         "Should emit the PR context prepare step displayName"
     );
     assert!(
-        compiled.contains("condition: eq(variables['Build.Reason'], 'PullRequest')"),
-        "Prepare step must be gated on PR builds at the ADO condition layer"
+        compiled.contains("condition: or(eq(variables['Build.Reason'], 'PullRequest'), eq(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true'))"),
+        "Prepare step must be gated on PR builds OR synthetic-PR Setup outputs at the ADO condition layer (mode: synthetic is the default)"
     );
     assert!(
         compiled.contains("SYSTEM_ACCESSTOKEN: $(System.AccessToken)"),
@@ -5219,15 +5374,18 @@ fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
         "v7: the git_fetch wrapper moved into the bundle"
     );
 
-    // v7: env passthrough — Node reads the ADO predefined vars from
-    // `process.env` (see `index.ts::main` and `validate.ts`).
+    // v7 + mode: synthetic (the default): env passthrough — the bundle
+    // reads ADO predefined vars from `process.env`. The compiler emits
+    // coalesced macros that prefer the real `System.PullRequest.*` vars
+    // (true PR builds) and fall back to the `synthPr` Setup-job outputs
+    // (CI builds promoted via exec-context-pr-synth.js).
     assert!(
-        compiled.contains("SYSTEM_PULLREQUEST_PULLREQUESTID: $(System.PullRequest.PullRequestId)"),
-        "Prepare step must pass the PR id through to the bundle"
+        compiled.contains("SYSTEM_PULLREQUEST_PULLREQUESTID: \"$[ coalesce(variables['System.PullRequest.PullRequestId'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_ID']) ]\""),
+        "Prepare step must pass the PR id (coalesced with synthPr fallback) through to the bundle"
     );
     assert!(
-        compiled.contains("SYSTEM_PULLREQUEST_TARGETBRANCH: $(System.PullRequest.TargetBranch)"),
-        "Prepare step must pass the PR target branch through to the bundle"
+        compiled.contains("SYSTEM_PULLREQUEST_TARGETBRANCH: \"$[ coalesce(variables['System.PullRequest.TargetBranch'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH']) ]\""),
+        "Prepare step must pass the PR target branch (coalesced with synthPr fallback) through to the bundle"
     );
     assert!(
         compiled.contains("SYSTEM_TEAMPROJECT: $(System.TeamProject)"),
@@ -5302,9 +5460,9 @@ fn test_execution_context_pr_does_not_leak_system_accesstoken() {
                 // that contains SYSTEM_ACCESSTOKEN, capture the
                 // sibling `displayName` (if any).
                 if let Some(Value::Mapping(env_map)) = m.get(Value::String("env".to_string())) {
-                    let has_token = env_map.iter().any(|(k, _v)| {
-                        matches!(k, Value::String(s) if s == "SYSTEM_ACCESSTOKEN")
-                    });
+                    let has_token = env_map
+                        .iter()
+                        .any(|(k, _v)| matches!(k, Value::String(s) if s == "SYSTEM_ACCESSTOKEN"));
                     if has_token {
                         let display = m
                             .get(Value::String("displayName".to_string()))
@@ -5344,6 +5502,11 @@ fn test_execution_context_pr_does_not_leak_system_accesstoken() {
         // Stage 3 SafeOutputs executor — separate non-agent job; needs
         // the token to apply safe outputs against ADO. See PR #873.
         "Execute safe outputs (Stage 3)",
+        // Setup-job synth-PR step. Needs the token to call the ADO REST
+        // API to look up the active PR for `Build.SourceBranch` on
+        // CI-triggered builds (issue #916). Runs in the Setup job, well
+        // before the AWF sandbox is provisioned for the Agent job.
+        "Resolve synthetic PR context",
     ];
 
     let mut saw_exec_context_step = false;
@@ -5632,3 +5795,101 @@ Body.
 // (see `validate.ts::TARGET_BRANCH_RE`); the vitest tests under
 // `validate.test.ts` guard the regression there. This Rust-side
 // test is removed for the same reason.
+
+// ─── Synthetic-from-ci snapshot fixtures (issue #916) ────────────────────────
+
+/// Fixture A: agent with on.pr and default `mode: synthetic`.
+/// Compiled YAML must contain the full synth wiring (synthPr Setup step,
+/// PR_SYNTH_SPEC env, broadened exec-context-pr.js condition, agent-job
+/// AW_SYNTHETIC_PR_SKIP guard). The CI trigger must NOT be auto-narrowed
+/// to `pr.branches.include` — those are PR target branches, and narrowing
+/// would suppress CI on the feature branches synthPr actually needs.
+#[test]
+fn test_synthetic_pr_default_emits_full_synth_wiring() {
+    let compiled = compile_fixture_with_flags("synthetic-pr-default.md", &["--skip-integrity"]);
+    assert_valid_yaml(&compiled, "synthetic-pr-default.md");
+
+    // synthPr step in Setup job, before prGate.
+    assert!(
+        compiled.contains("name: synthPr"),
+        "Fixture A must emit the synthPr Setup-job step"
+    );
+    assert!(
+        compiled.contains("PR_SYNTH_SPEC:"),
+        "Fixture A must emit the PR_SYNTH_SPEC env var carrying the base64 spec"
+    );
+    assert!(
+        compiled.contains("exec-context-pr-synth.js"),
+        "Fixture A must reference the synth bundle path"
+    );
+
+    // Broadened exec-context-pr condition.
+    assert!(
+        compiled.contains(
+            "condition: or(eq(variables['Build.Reason'], 'PullRequest'), eq(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true'))"
+        ),
+        "Fixture A must broaden the exec-context-pr.js condition to accept synthetic PRs"
+    );
+
+    // Agent-job AW_SYNTHETIC_PR_SKIP guard.
+    assert!(
+        compiled.contains("ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_SKIP'], 'true')"),
+        "Fixture A's Agent-job condition must honour the synth-skip flag"
+    );
+    // NOTE: this fixture does not declare `on.pr.filters`, so the
+    // Agent-job condition has only the skip guard (no AND-NOT gate
+    // clause). The `eq(synthPr.AW_SYNTHETIC_PR, 'true')` literal is
+    // therefore expected ONLY in the exec-context-pr.js step's
+    // broadened condition (asserted above) — never as an Agent-job
+    // OR-arm, which would silently bypass the gate for real-PR or
+    // synth-PR builds. A separate fixture covers the gate-enforced
+    // shape when `pr.filters` is present.
+
+    // No auto-narrowed CI trigger — `pr.branches.include` lists PR TARGET
+    // branches, and ADO `trigger:` fires on pushes TO listed branches, so
+    // narrowing would suppress CI on the feature branches synthPr needs.
+    assert!(
+        !compiled.contains("trigger:\n  branches:\n    include:\n      - 'main'"),
+        "Fixture A must NOT auto-narrow the top-level CI trigger to pr.branches.include — \
+         narrowing to PR target branches would defeat synthPr by suppressing CI on the \
+         feature branches it must react to"
+    );
+}
+
+/// Fixture B: agent with on.pr and `mode: policy`.
+/// The compiled YAML must contain NONE of the synthesis artefacts AND
+/// must emit `trigger: none` so feature-branch pushes do not queue
+/// duplicate CI builds alongside the operator's branch-policy-driven PR
+/// builds.
+#[test]
+fn test_pr_mode_policy_omits_synth_and_emits_trigger_none() {
+    let compiled = compile_fixture_with_flags("pr-mode-policy.md", &["--skip-integrity"]);
+    assert_valid_yaml(&compiled, "pr-mode-policy.md");
+
+    for needle in &[
+        "synthPr",
+        "AW_SYNTHETIC_PR",
+        "PR_SYNTH_SPEC",
+        "exec-context-pr-synth",
+    ] {
+        assert!(
+            !compiled.contains(needle),
+            "mode: policy must produce zero synth artefacts; \
+             found {needle} in compiled YAML"
+        );
+    }
+
+    // CI trigger must be suppressed so we don't double-queue with the
+    // policy-driven PR build.
+    assert!(
+        compiled.contains("trigger: none"),
+        "mode: policy must emit `trigger: none` so feature-branch pushes do not \
+         queue duplicate CI builds alongside the branch-policy-driven PR build"
+    );
+
+    // And of course must NOT auto-narrow either (defensive).
+    assert!(
+        !compiled.contains("trigger:\n  branches:\n    include:\n      - 'main'"),
+        "mode: policy must not emit a narrowed CI trigger"
+    );
+}

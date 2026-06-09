@@ -101,6 +101,11 @@ pub struct ExecContextExtension {
     /// means "is `on.pr` configured" — future trigger contributors
     /// will OR in their own checks here.
     any_contributor_active: bool,
+    /// Whether `on.pr.mode == Synthetic` for this agent. Passed through
+    /// to the PR contributor so it can emit coalesced
+    /// `SYSTEM_PULLREQUEST_*` env vars (real value preferred, synthPr
+    /// Setup-job output as fallback).
+    synthetic_pr_active: bool,
 }
 
 impl ExecContextExtension {
@@ -118,11 +123,12 @@ impl ExecContextExtension {
         // so unit tests that construct a custom `config` (separate
         // from `front_matter.execution_context`) still see the right
         // activation answer.
-        let any_contributor_active =
-            pr_contributor_will_activate_with_cfg(&config, front_matter);
+        let any_contributor_active = pr_contributor_will_activate_with_cfg(&config, front_matter);
+        let synthetic_pr_active = front_matter.is_synthetic_pr();
         Self {
             config,
             any_contributor_active,
+            synthetic_pr_active,
         }
     }
 
@@ -134,7 +140,14 @@ impl ExecContextExtension {
         // "on by default when on.pr is configured" behaviour without
         // the user having to write `execution-context.pr: {}`.
         let pr_cfg = self.config.pr.clone().unwrap_or_default();
-        vec![Contributor::Pr(PrContextContributor::new(pr_cfg))]
+        // The PR contributor needs to know whether `mode: synthetic`
+        // is on so it can emit coalesced SYSTEM_PULLREQUEST_* env vars
+        // (real value preferred, synthPr output as fallback).
+        let synthetic_pr_active = self.synthetic_pr_active;
+        vec![Contributor::Pr(PrContextContributor::new(
+            pr_cfg,
+            synthetic_pr_active,
+        ))]
     }
 }
 
@@ -206,9 +219,7 @@ mod tests {
     //! unit-test time rather than at E2E time.
 
     use super::*;
-    use crate::compile::types::{
-        ExecutionContextConfig, FrontMatter, PrContextConfig,
-    };
+    use crate::compile::types::{ExecutionContextConfig, FrontMatter, PrContextConfig};
 
     /// Parse a minimal markdown agent into a `FrontMatter`.
     fn parse_fm(src: &str) -> FrontMatter {
@@ -234,8 +245,10 @@ mod tests {
     /// `should_activate`, this assertion trips.
     #[test]
     fn required_bash_commands_matches_pr_contributor_active_default() {
-        let ext =
-            ExecContextExtension::new(ExecutionContextConfig::default(), &pr_triggered_front_matter());
+        let ext = ExecContextExtension::new(
+            ExecutionContextConfig::default(),
+            &pr_triggered_front_matter(),
+        );
         let cmds = ext.required_bash_commands();
         assert!(
             !cmds.is_empty(),
@@ -288,8 +301,10 @@ mod tests {
     /// no commands. Mirrors `should_activate`'s `on.pr` gate.
     #[test]
     fn required_bash_commands_suppressed_without_on_pr() {
-        let ext =
-            ExecContextExtension::new(ExecutionContextConfig::default(), &no_trigger_front_matter());
+        let ext = ExecContextExtension::new(
+            ExecutionContextConfig::default(),
+            &no_trigger_front_matter(),
+        );
         assert!(
             ext.required_bash_commands().is_empty(),
             "without on.pr configured, required_bash_commands must be empty"
