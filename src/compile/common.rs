@@ -3373,7 +3373,10 @@ pub async fn compile_shared(
         has_pr_filters,
         has_pipeline_filters,
         &expressions,
-        matches!(front_matter.target, crate::compile::types::CompileTarget::Job),
+        matches!(
+            front_matter.target,
+            crate::compile::types::CompileTarget::Job
+        ),
         synthetic_pr_active,
     );
     let job_timeout = generate_job_timeout(front_matter);
@@ -4761,8 +4764,14 @@ mod tests {
         let result = generate_pr_trigger(&triggers, true);
         assert!(result.contains("pr: none"));
         // When both pipeline and schedule are active, the comment must mention both reasons.
-        assert!(result.contains("schedule"), "should mention schedule: {result}");
-        assert!(result.contains("upstream pipeline"), "should mention upstream pipeline: {result}");
+        assert!(
+            result.contains("schedule"),
+            "should mention schedule: {result}"
+        );
+        assert!(
+            result.contains("upstream pipeline"),
+            "should mention upstream pipeline: {result}"
+        );
     }
 
     // ─── generate_ci_trigger ─────────────────────────────────────────────────
@@ -4925,7 +4934,10 @@ mod tests {
             schedule: None,
         });
         let result = generate_ci_trigger(&triggers, false);
-        assert_eq!(result, "trigger: none", "pipeline trigger must take priority over synth narrowing");
+        assert_eq!(
+            result, "trigger: none",
+            "pipeline trigger must take priority over synth narrowing"
+        );
     }
 
     // ─── generate_pipeline_resources ─────────────────────────────────────────
@@ -6942,7 +6954,10 @@ safe-outputs:
         let exts = crate::compile::extensions::collect_extensions(&fm);
         let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
         let result = generate_prepare_steps(&[], &exts, &ctx).unwrap();
-        assert!(result.contains("elan-init.sh"), "should include elan installer");
+        assert!(
+            result.contains("elan-init.sh"),
+            "should include elan installer"
+        );
         assert!(result.contains("Lean 4"), "should include Lean prompt");
         assert!(
             result.contains("--default-toolchain stable"),
@@ -8462,7 +8477,10 @@ safe-outputs:
         // exists (the synthPr step lives there) so the dependsOn must
         // be present and the skip guard must apply.
         let out = generate_agentic_depends_on(&[], false, false, &[], false, true);
-        assert!(out.contains("dependsOn: Setup"), "should depend on Setup: {out}");
+        assert!(
+            out.contains("dependsOn: Setup"),
+            "should depend on Setup: {out}"
+        );
         assert!(
             out.contains("ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_SKIP'], 'true')"),
             "must honour the synth-skip flag even without filters: {out}"

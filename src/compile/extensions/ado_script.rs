@@ -543,7 +543,10 @@ mod tests {
         assert_eq!(steps.len(), 3, "install + download + synthPr");
         assert!(steps[0].contains("NodeTool@0"));
         assert!(steps[1].contains("Download ado-aw scripts"));
-        assert!(steps[2].contains("name: synthPr"), "third step must be synthPr");
+        assert!(
+            steps[2].contains("name: synthPr"),
+            "third step must be synthPr"
+        );
         assert!(steps[2].contains("exec-context-pr-synth.js"));
         assert!(steps[2].contains("PR_SYNTH_SPEC:"));
         assert!(steps[2].contains("ne(variables['Build.Reason'], 'PullRequest')"));
@@ -781,11 +784,8 @@ mod tests {
     #[test]
     fn rejects_absolute_posix_path_at_compile_time() {
         let workspace = TestWorkspace::new();
-        let err = resolve_imports_inline(
-            "{{#runtime-import /etc/passwd}}",
-            &workspace.path,
-        )
-        .unwrap_err();
+        let err =
+            resolve_imports_inline("{{#runtime-import /etc/passwd}}", &workspace.path).unwrap_err();
         assert!(
             err.to_string().contains("absolute paths are not allowed"),
             "expected absolute-path rejection, got: {err}"
@@ -843,11 +843,8 @@ mod tests {
     #[test]
     fn rejects_path_containing_closing_brace() {
         let workspace = TestWorkspace::new();
-        let err = resolve_imports_inline(
-            "{{#runtime-import foo}bar.md}}",
-            &workspace.path,
-        )
-        .unwrap_err();
+        let err =
+            resolve_imports_inline("{{#runtime-import foo}bar.md}}", &workspace.path).unwrap_err();
         assert!(
             err.to_string().contains("is not allowed"),
             "expected `}}` rejection, got: {err}"
@@ -861,13 +858,11 @@ mod tests {
     #[test]
     fn rejects_relative_path_with_dotdot_segment() {
         let workspace = TestWorkspace::new();
-        let err = resolve_imports_inline(
-            "{{#runtime-import ../escape.md}}",
-            &workspace.path,
-        )
-        .unwrap_err();
+        let err = resolve_imports_inline("{{#runtime-import ../escape.md}}", &workspace.path)
+            .unwrap_err();
         assert!(
-            err.to_string().contains("'..' path components are not allowed"),
+            err.to_string()
+                .contains("'..' path components are not allowed"),
             "expected '..' rejection, got: {err}"
         );
     }
@@ -875,13 +870,12 @@ mod tests {
     #[test]
     fn rejects_path_with_embedded_dotdot_segment() {
         let workspace = TestWorkspace::new();
-        let err = resolve_imports_inline(
-            "{{#runtime-import sub/../../escape.md}}",
-            &workspace.path,
-        )
-        .unwrap_err();
+        let err =
+            resolve_imports_inline("{{#runtime-import sub/../../escape.md}}", &workspace.path)
+                .unwrap_err();
         assert!(
-            err.to_string().contains("'..' path components are not allowed"),
+            err.to_string()
+                .contains("'..' path components are not allowed"),
             "expected '..' rejection, got: {err}"
         );
     }
@@ -899,7 +893,8 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            err.to_string().contains("'..' path components are not allowed"),
+            err.to_string()
+                .contains("'..' path components are not allowed"),
             "expected '..' rejection, got: {err}"
         );
     }
@@ -907,13 +902,12 @@ mod tests {
     #[test]
     fn rejects_backslash_dotdot_segment_on_windows_style_paths() {
         let workspace = TestWorkspace::new();
-        let err = resolve_imports_inline(
-            r"{{#runtime-import sub\..\..\escape.md}}",
-            &workspace.path,
-        )
-        .unwrap_err();
+        let err =
+            resolve_imports_inline(r"{{#runtime-import sub\..\..\escape.md}}", &workspace.path)
+                .unwrap_err();
         assert!(
-            err.to_string().contains("'..' path components are not allowed"),
+            err.to_string()
+                .contains("'..' path components are not allowed"),
             "expected '..' rejection, got: {err}"
         );
     }
@@ -927,16 +921,8 @@ mod tests {
         workspace.write("..hidden.md", "DOTHIDDEN");
         workspace.write("name..md", "DOUBLE");
 
-        let a = resolve_imports_inline(
-            "{{#runtime-import ..hidden.md}}",
-            &workspace.path,
-        )
-        .unwrap();
-        let b = resolve_imports_inline(
-            "{{#runtime-import name..md}}",
-            &workspace.path,
-        )
-        .unwrap();
+        let a = resolve_imports_inline("{{#runtime-import ..hidden.md}}", &workspace.path).unwrap();
+        let b = resolve_imports_inline("{{#runtime-import name..md}}", &workspace.path).unwrap();
 
         assert_eq!(a, "DOTHIDDEN");
         assert_eq!(b, "DOUBLE");

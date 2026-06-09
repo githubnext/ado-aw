@@ -1,7 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
 
-
 /// Asserts that all required `{{ marker }}` placeholders are present in the template.
 fn assert_required_markers(content: &str) {
     let required = [
@@ -157,7 +156,6 @@ fn test_example_file_structure() {
         "Example should have closing front matter"
     );
 }
-
 
 /// Test that validates the presence of required dependencies
 #[test]
@@ -633,8 +631,7 @@ Do something.
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let compiled =
-        fs::read_to_string(&output_path).expect("Compiled YAML should exist on success");
+    let compiled = fs::read_to_string(&output_path).expect("Compiled YAML should exist on success");
     assert!(
         compiled.contains("SYSTEM_ACCESSTOKEN: $(System.AccessToken)"),
         "Executor must map SYSTEM_ACCESSTOKEN from $(System.AccessToken) by default. \
@@ -4661,7 +4658,12 @@ fn test_default_pipeline_mounts_az_and_allows_azure_hosts() {
          chars after the displayName). Window:\n{window}"
     );
     // Anchor strings: lock the load-bearing parts of the advisory.
-    for anchor in ["/usr/bin/az", "az devops", "AZURE_DEVOPS_EXT_PAT", "missing-tool"] {
+    for anchor in [
+        "/usr/bin/az",
+        "az devops",
+        "AZURE_DEVOPS_EXT_PAT",
+        "missing-tool",
+    ] {
         assert!(
             compiled.contains(anchor),
             "compiled YAML must contain advisory anchor `{anchor}`. \
@@ -5154,8 +5156,6 @@ fn test_job_target_with_setup_emits_dual_branch_dependson_with_each() {
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
-
-
 // ============================================================================
 // Execution-context extension (issue #860)
 // ============================================================================
@@ -5309,9 +5309,9 @@ fn test_execution_context_pr_does_not_leak_system_accesstoken() {
                 // that contains SYSTEM_ACCESSTOKEN, capture the
                 // sibling `displayName` (if any).
                 if let Some(Value::Mapping(env_map)) = m.get(Value::String("env".to_string())) {
-                    let has_token = env_map.iter().any(|(k, _v)| {
-                        matches!(k, Value::String(s) if s == "SYSTEM_ACCESSTOKEN")
-                    });
+                    let has_token = env_map
+                        .iter()
+                        .any(|(k, _v)| matches!(k, Value::String(s) if s == "SYSTEM_ACCESSTOKEN"));
                     if has_token {
                         let display = m
                             .get(Value::String("displayName".to_string()))

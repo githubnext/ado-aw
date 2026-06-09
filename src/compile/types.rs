@@ -1628,8 +1628,6 @@ timeout-minutes: 60
         assert_eq!(env.get("AWS_REGION").unwrap(), "us-west-2");
     }
 
-
-
     // ─── PermissionsConfig deserialization ───────────────────────────────
 
     #[test]
@@ -2321,10 +2319,7 @@ triggers:
 "#;
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
-        assert_eq!(
-            tc.pipeline.as_ref().unwrap().name,
-            "Build Pipeline"
-        );
+        assert_eq!(tc.pipeline.as_ref().unwrap().name, "Build Pipeline");
         assert_eq!(
             tc.pr.unwrap().filters.unwrap().title.unwrap().pattern,
             "*[review]*"

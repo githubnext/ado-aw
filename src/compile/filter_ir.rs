@@ -1232,9 +1232,7 @@ const PR_SYNTH_SPEC_MAX_BYTES: usize = 8 * 1024;
 /// The returned string is safe to embed inside a YAML double-quoted
 /// scalar (the base64 alphabet contains no characters that require
 /// YAML escaping).
-pub fn build_pr_synth_spec(
-    pr: &crate::compile::types::PrTriggerConfig,
-) -> anyhow::Result<String> {
+pub fn build_pr_synth_spec(pr: &crate::compile::types::PrTriggerConfig) -> anyhow::Result<String> {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
 
     let spec = PrSynthSpec {
@@ -1388,7 +1386,10 @@ mod tests {
         let b64 = build_pr_synth_spec(&pr).expect("synth spec must build");
         let decoded = STANDARD.decode(b64.as_bytes()).expect("must decode base64");
         let parsed: Value = serde_json::from_slice(&decoded).expect("must be valid JSON");
-        assert_eq!(parsed["branches"]["include"], serde_json::json!(["main", "release/*"]));
+        assert_eq!(
+            parsed["branches"]["include"],
+            serde_json::json!(["main", "release/*"])
+        );
         assert_eq!(parsed["branches"]["exclude"], serde_json::json!(["test/*"]));
         assert_eq!(parsed["paths"]["include"], serde_json::json!(["src/*"]));
         assert_eq!(parsed["paths"]["exclude"], serde_json::json!(["docs/*"]));
@@ -1414,7 +1415,9 @@ mod tests {
         // Generate enough branch globs to blow past the 8 KiB cap.
         let pr = PrTriggerConfig {
             branches: Some(BranchFilter {
-                include: (0..1000).map(|i| format!("very/long/branch/glob/pattern/{i}")).collect(),
+                include: (0..1000)
+                    .map(|i| format!("very/long/branch/glob/pattern/{i}"))
+                    .collect(),
                 exclude: vec![],
             }),
             paths: None,
@@ -1422,7 +1425,10 @@ mod tests {
             ..Default::default()
         };
         let err = build_pr_synth_spec(&pr).expect_err("oversize spec must fail");
-        assert!(err.to_string().contains("PR_SYNTH_SPEC"), "error must mention spec: {err}");
+        assert!(
+            err.to_string().contains("PR_SYNTH_SPEC"),
+            "error must mention spec: {err}"
+        );
     }
 
     // ─── Fact tests ─────────────────────────────────────────────────────
@@ -1754,7 +1760,9 @@ mod tests {
         let result = compile_gate_step_external(
             GateContext::PullRequest,
             &checks,
-            "/tmp/ado-aw-scripts/ado-script/gate.js", false)
+            "/tmp/ado-aw-scripts/ado-script/gate.js",
+            false,
+        )
         .unwrap();
         assert!(result.contains("- bash:"), "should be a bash step");
         assert!(
@@ -1785,7 +1793,9 @@ mod tests {
         let result = compile_gate_step_external(
             GateContext::PullRequest,
             &checks,
-            "/tmp/ado-aw-scripts/ado-script/gate.js", false)
+            "/tmp/ado-aw-scripts/ado-script/gate.js",
+            false,
+        )
         .unwrap();
         assert!(
             result.contains("ADO_BUILD_REASON"),
@@ -1811,7 +1821,9 @@ mod tests {
         let result = compile_gate_step_external(
             GateContext::PipelineCompletion,
             &checks,
-            "/tmp/ado-aw-scripts/ado-script/gate.js", false)
+            "/tmp/ado-aw-scripts/ado-script/gate.js",
+            false,
+        )
         .unwrap();
         assert!(
             result.contains("name: pipelineGate"),
@@ -1840,7 +1852,9 @@ mod tests {
         let result = compile_gate_step_external(
             GateContext::PullRequest,
             &checks,
-            "/tmp/ado-aw-scripts/ado-script/gate.js", false)
+            "/tmp/ado-aw-scripts/ado-script/gate.js",
+            false,
+        )
         .unwrap();
         assert!(
             result.contains("ADO_REPO_ID"),
@@ -1865,17 +1879,19 @@ mod tests {
         let result = compile_gate_step_external(
             GateContext::PullRequest,
             &checks,
-            "/tmp/ado-aw-scripts/ado-script/gate.js", false)
+            "/tmp/ado-aw-scripts/ado-script/gate.js",
+            false,
+        )
         .unwrap();
         // Verify tier-1 (pipeline-var only) checks do not export API-related env vars
         // Look for the env: block exports (YAML format with leading spaces)
         let lines: Vec<&str> = result.lines().collect();
-        let has_repo_id_export = lines.iter().any(|line| {
-            line.trim_start().starts_with("ADO_REPO_ID:")
-        });
-        let has_pr_id_export = lines.iter().any(|line| {
-            line.trim_start().starts_with("ADO_PR_ID:")
-        });
+        let has_repo_id_export = lines
+            .iter()
+            .any(|line| line.trim_start().starts_with("ADO_REPO_ID:"));
+        let has_pr_id_export = lines
+            .iter()
+            .any(|line| line.trim_start().starts_with("ADO_PR_ID:"));
         assert!(
             !has_repo_id_export,
             "should not export ADO_REPO_ID for title-only (tier-1) check"
@@ -1981,16 +1997,34 @@ mod tests {
         let _step = compile_gate_step_external(
             GateContext::PullRequest,
             &checks,
-            "/tmp/ado-aw-scripts/ado-script/gate.js", false)
+            "/tmp/ado-aw-scripts/ado-script/gate.js",
+            false,
+        )
         .unwrap();
 
         // Verify the spec captures all three filters with correct fact dependencies
         let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
-        assert_eq!(spec.checks.len(), 3, "should produce 3 checks from 3 filters");
-        assert!(spec.facts.iter().any(|f| f.kind == "pr_title"), "title filter requires pr_title fact");
-        assert!(spec.facts.iter().any(|f| f.kind == "pr_is_draft"), "draft filter requires pr_is_draft fact");
-        assert!(spec.facts.iter().any(|f| f.kind == "pr_labels"), "labels filter requires pr_labels fact");
-        assert!(spec.facts.iter().any(|f| f.kind == "pr_metadata"), "API-derived facts should pull in pr_metadata dependency");
+        assert_eq!(
+            spec.checks.len(),
+            3,
+            "should produce 3 checks from 3 filters"
+        );
+        assert!(
+            spec.facts.iter().any(|f| f.kind == "pr_title"),
+            "title filter requires pr_title fact"
+        );
+        assert!(
+            spec.facts.iter().any(|f| f.kind == "pr_is_draft"),
+            "draft filter requires pr_is_draft fact"
+        );
+        assert!(
+            spec.facts.iter().any(|f| f.kind == "pr_labels"),
+            "labels filter requires pr_labels fact"
+        );
+        assert!(
+            spec.facts.iter().any(|f| f.kind == "pr_metadata"),
+            "API-derived facts should pull in pr_metadata dependency"
+        );
     }
 
     // ─── Schema tests ──────────────────────────────────────────────────
@@ -2042,8 +2076,7 @@ mod tests {
             .join("ado-script")
             .join("schema")
             .join("gate-spec.schema.json");
-        std::fs::create_dir_all(schema_path.parent().unwrap())
-            .expect("should create schema dir");
+        std::fs::create_dir_all(schema_path.parent().unwrap()).expect("should create schema dir");
         std::fs::write(&schema_path, &schema).expect("should write schema file");
 
         // Verify it's readable and valid

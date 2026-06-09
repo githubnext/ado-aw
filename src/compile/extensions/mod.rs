@@ -625,22 +625,22 @@ macro_rules! extension_enum {
 
 mod ado_aw_marker;
 pub mod ado_script;
-mod exec_context;
 mod azure_cli;
+mod exec_context;
 mod github;
 mod safe_outputs;
 
 // Re-export tool/runtime extensions from their colocated homes
-pub use ado_aw_marker::AdoAwMarkerExtension;
-pub use azure_cli::AzureCliExtension;
 pub use crate::runtimes::dotnet::DotnetExtension;
 pub use crate::runtimes::lean::LeanExtension;
 pub use crate::runtimes::node::NodeExtension;
 pub use crate::runtimes::python::PythonExtension;
 pub use crate::tools::azure_devops::AzureDevOpsExtension;
 pub use crate::tools::cache_memory::CacheMemoryExtension;
+pub use ado_aw_marker::AdoAwMarkerExtension;
 pub use ado_script::AdoScriptExtension;
-pub use exec_context::{pr_contributor_will_activate, ExecContextExtension};
+pub use azure_cli::AzureCliExtension;
+pub use exec_context::{ExecContextExtension, pr_contributor_will_activate};
 pub use github::GitHubExtension;
 pub use safe_outputs::SafeOutputsExtension;
 
@@ -731,10 +731,7 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
         // the block + having no `on.pr` produces zero output. See
         // `extensions/exec_context/`.
         Extension::ExecContext(ExecContextExtension::new(
-            front_matter
-                .execution_context
-                .clone()
-                .unwrap_or_default(),
+            front_matter.execution_context.clone().unwrap_or_default(),
             front_matter,
         )),
         // Always-on Azure CLI. Tool phase — mounts host /opt/az and
