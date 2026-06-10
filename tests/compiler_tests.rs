@@ -5611,23 +5611,23 @@ fn test_no_step_condition_references_cross_job_dependencies() {
     fn walk(v: &Value, hits: &mut Vec<String>) {
         match v {
             Value::Mapping(m) => {
-                if let Some(Value::String(cond)) = m.get(Value::String("condition".to_string())) {
-                    if cond.contains("dependencies.") {
-                        // Decide: step or job/stage? A mapping is a STEP if it
-                        // has any of the step-exclusive keys. Otherwise treat
-                        // as job/stage (legal location for the ref) and skip.
-                        let is_step = ["bash", "script", "task", "powershell", "pwsh", "checkout"]
-                            .iter()
-                            .any(|k| m.contains_key(Value::String((*k).to_string())));
-                        if is_step {
-                            let display = m
-                                .get(Value::String("displayName".to_string()))
-                                .and_then(|d| d.as_str())
-                                .unwrap_or("<no displayName>");
-                            hits.push(format!(
-                                "step `{display}` has illegal cross-job dep ref in condition: `{cond}`"
-                            ));
-                        }
+                if let Some(Value::String(cond)) = m.get(Value::String("condition".to_string()))
+                    && cond.contains("dependencies.")
+                {
+                    // Decide: step or job/stage? A mapping is a STEP if it
+                    // has any of the step-exclusive keys. Otherwise treat
+                    // as job/stage (legal location for the ref) and skip.
+                    let is_step = ["bash", "script", "task", "powershell", "pwsh", "checkout"]
+                        .iter()
+                        .any(|k| m.contains_key(Value::String((*k).to_string())));
+                    if is_step {
+                        let display = m
+                            .get(Value::String("displayName".to_string()))
+                            .and_then(|d| d.as_str())
+                            .unwrap_or("<no displayName>");
+                        hits.push(format!(
+                            "step `{display}` has illegal cross-job dep ref in condition: `{cond}`"
+                        ));
                     }
                 }
                 for (_, vv) in m {
