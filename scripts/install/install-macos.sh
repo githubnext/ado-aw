@@ -62,7 +62,10 @@ INSTALL_PATH="$INSTALL_DIR/ado-aw"
 cp "$BIN_PATH" "$INSTALL_PATH"
 chmod 0755 "$INSTALL_PATH"
 
-if ! printf ':%s:' "$PATH" | grep -q ":$INSTALL_DIR:"; then
+case ":$PATH:" in
+  *":$INSTALL_DIR:"*)
+    ;;
+  *)
   PROFILE="$HOME/.zshrc"
   case "${SHELL:-}" in
     */bash) PROFILE="$HOME/.bash_profile" ;;
@@ -77,7 +80,8 @@ if ! printf ':%s:' "$PATH" | grep -q ":$INSTALL_DIR:"; then
 
   export PATH="$INSTALL_DIR:$PATH"
   echo "Added $INSTALL_DIR to PATH via $PROFILE."
-fi
+  ;;
+esac
 
 echo "Installed ado-aw to $INSTALL_PATH"
 echo "Run: ado-aw --version"

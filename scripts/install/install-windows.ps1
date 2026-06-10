@@ -6,7 +6,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-if (-not $IsWindows) {
+if ($env:OS -ne "Windows_NT") {
     throw "This installer is for Windows only."
 }
 
