@@ -122,30 +122,24 @@ impl ContextContributor for PrContextContributor {
         // the spawned `git` subprocess via `GIT_CONFIG_*` env vars
         // (never argv). It is NEVER visible to the agent step.
         //
-        // When `mode: synthetic` is on, the PR-identifier env vars
-        // are emitted using `$[ coalesce(...) ]` so the bundle picks
-        // up either the real `System.PullRequest.*` (on a true PR
-        // build) OR the synthPr Setup-job output (on a CI build
-        // promoted via exec-context-pr-synth.js).
+        // When `mode: synthetic` is on, PR-identifier env vars are
+        // coalesced via `$[ ... ]` runtime expressions reading the
+        // **Agent-job-level** variables that `generate_agent_job_variables`
+        // hoists from `dependencies.Setup.outputs['synthPr.*']`. We
+        // deliberately do NOT put `dependencies.Setup.outputs[...]`
+        // directly in step-level `env:` here — that combination has
+        // proven unreliable in practice (msazuresphere/4x4 build
+        // #612290: the same reference resolved correctly at
+        // job-condition scope but returned empty at step-env scope,
+        // causing the bash gate to short-circuit on a synth-promoted
+        // build and the agent to emit `noop`). The job-variable hoist
+        // is the documented safe location for cross-job output
+        // references: <https://learn.microsoft.com/en-us/azure/devops/pipelines/process/variables#use-outputs-in-the-same-pipeline>.
         //
-        // Cross-job reference is correct here: this step runs in the
-        // **Agent** job (which depends on Setup), so
-        // `dependencies.Setup.outputs['synthPr.X']` resolves at runtime.
-        // (Same-job references would need `variables['synthPr.X']`
-        // instead — used by the gate step inside the Setup job itself.)
-        // Runtime expressions `$[ ... ]` are documented as valid in
-        // step-level `env:` blocks; see
-        // <https://learn.microsoft.com/en-us/azure/devops/pipelines/process/variables>.
         // `System.PullRequest.TargetBranch` is `refs/heads/<name>` (full
-        // ref form), matching the `targetRefName` shape returned by the
-        // ADO REST API and stored in `AW_SYNTHETIC_PR_TARGETBRANCH`, so
-        // the coalesce yields a consistent value either way.
-        // `$[ ... ]` runtime expressions are wrapped in YAML double
-        // quotes because their values contain single quotes (e.g.
-        // `variables['System.PullRequest.PullRequestId']`). ADO accepts
-        // them unquoted in practice, but double-quoting matches the
-        // form shown in ADO docs and is strictly conformant to the
-        // YAML spec (which reserves `'` as a scalar indicator).
+        // ref form), matching the `targetRefName` shape stashed in
+        // `AW_SYNTHETIC_PR_TARGETBRANCH`, so the coalesce yields a
+        // consistent value either way.
         //
         // ## Synth-active gating — bash, not step `condition:`
         //
@@ -159,24 +153,25 @@ impl ContextContributor for PrContextContributor {
         //
         // We therefore project the synth flag through the same
         // step-level `env:` indirection used for the PR id / target
-        // branch and gate in the bash body. The step still emits as
-        // `succeeded` in the ADO UI on non-PR / non-synth builds
-        // (with a single skip log line) rather than as `skipped` —
-        // a minor cosmetic cost for avoiding a cross-cutting
-        // template / trait change.
+        // branch (reading the hoisted job-level variable, not the
+        // raw cross-job dependency) and gate in the bash body. The
+        // step still emits as `succeeded` in the ADO UI on
+        // non-PR / non-synth builds (with a single skip log line)
+        // rather than as `skipped` — a minor cosmetic cost for
+        // avoiding a cross-cutting template / trait change.
         //
         // The synth-INACTIVE branch is unchanged: its
         // `condition: eq(variables['Build.Reason'], 'PullRequest')`
         // only reads `variables[...]`, which IS legal at step level.
         let (pr_id_macro, target_branch_macro, prelude, condition) = if self.synthetic_pr_active {
             (
-                "\"$[ coalesce(variables['System.PullRequest.PullRequestId'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_ID']) ]\"",
-                "\"$[ coalesce(variables['System.PullRequest.TargetBranch'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH']) ]\"",
-                // Bash gate. `coalesce(..., '')` on the env-var side
-                // ensures `$AW_SYNTHETIC_PR` is `""` (not an unresolved
-                // `$()` literal) when Setup's `synthPr` step skipped
-                // itself on a real-PR build. Both var refs are quoted
-                // for shellcheck; both args to `[` are literal-string
+                "\"$[ coalesce(variables['System.PullRequest.PullRequestId'], variables['AW_SYNTHETIC_PR_ID']) ]\"",
+                "\"$[ coalesce(variables['System.PullRequest.TargetBranch'], variables['AW_SYNTHETIC_PR_TARGETBRANCH']) ]\"",
+                // Bash gate. `$AW_SYNTHETIC_PR` reads the hoisted
+                // job-level variable via the step-env `$(...)` macro
+                // below, which is "true" on a synth-promoted build,
+                // "" otherwise. Both var refs are quoted for
+                // shellcheck; both args to `[` are literal-string
                 // comparisons so `set -u` is safe on either side.
                 "    if [ \"$BUILD_REASON\" != \"PullRequest\" ] && [ \"$AW_SYNTHETIC_PR\" != \"true\" ]; then\n      echo \"[aw-context] Not a PR build and not synth-promoted; skipping exec-context-pr.\"\n      exit 0\n    fi\n",
                 "succeeded()",
@@ -190,12 +185,14 @@ impl ContextContributor for PrContextContributor {
             )
         };
         // Synth-active path adds two env vars (BUILD_REASON + the
-        // coalesced synth flag) the bash prelude reads. They're
-        // omitted on the synth-inactive path because that path's step
-        // condition (a plain `variables[...]` ref) is legal at step
-        // level and needs no in-bash gate.
+        // synth flag) the bash prelude reads. `AW_SYNTHETIC_PR` is
+        // pulled via the `$(name)` macro from the Agent-job-level
+        // `variables:` block (see `generate_agent_job_variables` in
+        // `compile/common.rs`) — NOT directly from
+        // `dependencies.Setup.outputs[...]`, see the doc-comment on
+        // this function for why.
         let synth_env = if self.synthetic_pr_active {
-            "\n    BUILD_REASON: $(Build.Reason)\n    AW_SYNTHETIC_PR: \"$[ coalesce(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], '') ]\""
+            "\n    BUILD_REASON: $(Build.Reason)\n    AW_SYNTHETIC_PR: $(AW_SYNTHETIC_PR)"
         } else {
             ""
         };
@@ -272,30 +269,36 @@ mod tests {
         // form here — distinct from the gate step which is same-job).
         assert!(
             step.contains(
-                "SYSTEM_PULLREQUEST_PULLREQUESTID: \"$[ coalesce(variables['System.PullRequest.PullRequestId'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_ID']) ]\""
+                "SYSTEM_PULLREQUEST_PULLREQUESTID: \"$[ coalesce(variables['System.PullRequest.PullRequestId'], variables['AW_SYNTHETIC_PR_ID']) ]\""
             ),
-            "synth-active prepare step must coalesce PR id with synthPr fallback: {step}"
+            "synth-active prepare step must coalesce PR id with the hoisted job-level AW_SYNTHETIC_PR_ID variable: {step}"
         );
         assert!(
             step.contains(
-                "SYSTEM_PULLREQUEST_TARGETBRANCH: \"$[ coalesce(variables['System.PullRequest.TargetBranch'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH']) ]\""
+                "SYSTEM_PULLREQUEST_TARGETBRANCH: \"$[ coalesce(variables['System.PullRequest.TargetBranch'], variables['AW_SYNTHETIC_PR_TARGETBRANCH']) ]\""
             ),
-            "synth-active prepare step must coalesce target branch with synthPr fallback: {step}"
+            "synth-active prepare step must coalesce target branch with the hoisted job-level AW_SYNTHETIC_PR_TARGETBRANCH variable: {step}"
         );
 
         // Env: BUILD_REASON + synth flag projected through env so the
         // bash gate has plain `$BUILD_REASON` / `$AW_SYNTHETIC_PR` to
-        // read (cross-job refs are illegal in step `condition:` but
-        // legal in step `env:` values).
+        // read. `AW_SYNTHETIC_PR` is read via the same-job macro from
+        // the Agent-job-level `variables:` block (hoisted from
+        // `dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR']` in
+        // `generate_agent_job_variables`), NOT the raw cross-job
+        // dependency reference at step-env scope (that combination
+        // proved unreliable in msazuresphere/4x4 build #612290).
         assert!(
             step.contains("BUILD_REASON: $(Build.Reason)"),
             "synth-active prepare step must project Build.Reason through env for the bash guard: {step}"
         );
         assert!(
-            step.contains(
-                "AW_SYNTHETIC_PR: \"$[ coalesce(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], '') ]\""
-            ),
-            "synth-active prepare step must project the synth flag through env (coalesced to '' on real-PR builds): {step}"
+            step.contains("AW_SYNTHETIC_PR: $(AW_SYNTHETIC_PR)"),
+            "synth-active prepare step must pull AW_SYNTHETIC_PR from the Agent-job-level hoisted variable via the $(...) macro: {step}"
+        );
+        assert!(
+            !step.contains("dependencies.Setup.outputs['synthPr."),
+            "synth-active prepare step must NOT reference `dependencies.Setup.outputs[...]` directly at step-env scope — that combination is unreliable; use the hoisted Agent-job-level variables instead: {step}"
         );
 
         // Bash guard: literal `if` chain that exits 0 when neither
