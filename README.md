@@ -40,12 +40,22 @@ executed with a separate, scoped write token.
 
 ### 1. Install
 
-Download a release binary from [GitHub Releases](https://github.com/githubnext/ado-aw/releases),
-or build from source:
+Run the first-time installer for your platform:
 
 ```bash
-cargo build --release
+# Linux (x64)
+curl -fsSL https://raw.githubusercontent.com/githubnext/ado-aw/main/scripts/install/install-linux.sh | sh
+
+# macOS (Apple Silicon)
+curl -fsSL https://raw.githubusercontent.com/githubnext/ado-aw/main/scripts/install/install-macos.sh | sh
 ```
+
+```powershell
+# Windows (x64)
+powershell -ExecutionPolicy Bypass -NoProfile -Command "iwr https://raw.githubusercontent.com/githubnext/ado-aw/main/scripts/install/install-windows.ps1 -UseBasicParsing | iex"
+```
+
+The installers download the release binary, verify it against `checksums.txt`, install it to a standard path (`/usr/local/bin` when writable, otherwise a user-local path), and update your PATH when needed.
 
 ### 2. Initialize Your Repository
 

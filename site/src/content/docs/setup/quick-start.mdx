@@ -11,37 +11,28 @@ There are two ways to get started with `ado-aw` -- using a Copilot agent to co-c
 
 ## Install ado-aw
 
-Download the latest release for your platform from [GitHub Releases](https://github.com/githubnext/ado-aw/releases/latest).
+Run the first-time installer for your platform.
 
 <Tabs>
   <TabItem label="Linux (x64)">
     ```bash
-    curl -fSL "https://github.com/githubnext/ado-aw/releases/latest/download/ado-aw-linux-x64" \
-      -o ado-aw
-    chmod +x ado-aw
-    sudo mv ado-aw /usr/local/bin/
+    curl -fsSL https://raw.githubusercontent.com/githubnext/ado-aw/main/scripts/install/install-linux.sh | sh
     ```
   </TabItem>
   <TabItem label="macOS (Apple Silicon)">
     ```bash
-    curl -fSL "https://github.com/githubnext/ado-aw/releases/latest/download/ado-aw-darwin-arm64" \
-      -o ado-aw
-    chmod +x ado-aw
-    sudo mv ado-aw /usr/local/bin/
+    curl -fsSL https://raw.githubusercontent.com/githubnext/ado-aw/main/scripts/install/install-macos.sh | sh
     ```
   </TabItem>
   <TabItem label="Windows (x64)">
     ```powershell
-    Invoke-WebRequest `
-      -Uri "https://github.com/githubnext/ado-aw/releases/latest/download/ado-aw-windows-x64.exe" `
-      -OutFile ado-aw.exe
-    Move-Item ado-aw.exe "$env:LOCALAPPDATA\Microsoft\WindowsApps\"
+    powershell -ExecutionPolicy Bypass -NoProfile -Command "iwr https://raw.githubusercontent.com/githubnext/ado-aw/main/scripts/install/install-windows.ps1 -UseBasicParsing | iex"
     ```
   </TabItem>
 </Tabs>
 
-:::tip[Pinning a version]
-Replace `latest` in the URL with a tag name (e.g., `download/v0.19.0/ado-aw-linux-x64`) to pin a specific version.
+:::tip[What the installer does]
+Each installer downloads the latest release binary, validates the SHA-256 checksum from `checksums.txt`, installs to `/usr/local/bin` when writable (or a user-local path), and updates PATH if needed.
 :::
 
 ---
