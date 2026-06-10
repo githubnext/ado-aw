@@ -22,7 +22,9 @@
 //! (e.g., compiler-derived secrets list) can be added without breaking
 //! older parsers, mirroring gh-aw's `# gh-aw-metadata: {...}` shape.
 
-use super::{CompileContext, CompilerExtension, ExtensionPhase};
+use super::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
+use crate::compile::ir::condition::Condition;
+use crate::compile::ir::step::{BashStep, Step};
 
 // ─── ado-aw marker (always-on, internal) ─────────────────────────────
 
@@ -125,6 +127,70 @@ impl CompilerExtension for AdoAwMarkerExtension {
 
         vec![marker_step, aw_info_step]
     }
+
+    /// Typed-IR view of the two prepare steps emitted by
+    /// [`Self::prepare_steps`]. Returns the same two bash steps as
+    /// `Step::Bash(BashStep)` values — the bash bodies are
+    /// byte-identical so lowering through `ir::emit` produces the
+    /// same YAML as today.
+    ///
+    /// Coexists with `prepare_steps` until the
+    /// `compile-target-standalone` commit switches production
+    /// consumption to `declarations`.
+    fn declarations(&self, ctx: &CompileContext) -> anyhow::Result<Declarations> {
+        let Some(metadata) = CompileMetadata::from_ctx(ctx) else {
+            return Ok(Declarations::default());
+        };
+        let agent_prepare_steps = vec![
+            Step::Bash(marker_bash_step(&metadata)),
+            Step::Bash(aw_info_bash_step(&metadata)),
+        ];
+        Ok(Declarations {
+            agent_prepare_steps,
+            ..Declarations::default()
+        })
+    }
+}
+
+/// Build the typed [`BashStep`] form of the `# ado-aw-metadata: …`
+/// marker step. The script body is byte-identical to the YAML
+/// embedded by [`AdoAwMarkerExtension::prepare_steps`] so the two
+/// emission paths produce equivalent pipelines.
+fn marker_bash_step(metadata: &CompileMetadata) -> BashStep {
+    let echo_source = bash_single_quote_escape(&crate::sanitize::neutralize_pipeline_commands(
+        &metadata.source,
+    ));
+    let echo_org = bash_single_quote_escape(&crate::sanitize::neutralize_pipeline_commands(
+        &metadata.org,
+    ));
+    let echo_repo = bash_single_quote_escape(&crate::sanitize::neutralize_pipeline_commands(
+        &metadata.repo,
+    ));
+    let script = format!(
+        "# ado-aw-metadata: {metadata_json}\n\
+         echo 'ado-aw metadata: source={echo_source} org={echo_org} repo={echo_repo} version={version} target={target}'\n",
+        metadata_json = metadata.marker_json(),
+        echo_source = echo_source,
+        echo_org = echo_org,
+        echo_repo = echo_repo,
+        version = metadata.compiler_version.as_str(),
+        target = metadata.target.as_str(),
+    );
+    BashStep::new("ado-aw", script)
+}
+
+/// Build the typed [`BashStep`] form of the `aw_info.json` emit step.
+fn aw_info_bash_step(metadata: &CompileMetadata) -> BashStep {
+    let script = format!(
+        "set -eo pipefail\n\
+         \n\
+         mkdir -p \"$(Agent.TempDirectory)/staging\"\n\
+         cat >\"$(Agent.TempDirectory)/staging/aw_info.json\" <<'AW_INFO_EOF'\n\
+         {aw_info_json}\n\
+         AW_INFO_EOF\n",
+        aw_info_json = metadata.aw_info_json(),
+    );
+    BashStep::new("Emit aw_info.json", script).with_condition(Condition::Always)
 }
 
 struct CompileMetadata {
@@ -424,6 +490,46 @@ mod tests {
         assert_eq!(bash_single_quote_escape("''"), "'\\'''\\''");
         assert_eq!(bash_single_quote_escape("plain"), "plain");
         assert_eq!(bash_single_quote_escape(""), "");
+    }
+
+    /// Typed-IR view of the same two steps. Locks the
+    /// `declarations()` override against silent drift: must return
+    /// exactly two `Step::Bash` values (no `Step::RawYaml` migration
+    /// bridge) with the canonical display names. Detailed bash-body
+    /// assertions still live in the legacy-form tests above; this
+    /// test enforces shape, not content.
+    #[test]
+    fn declarations_returns_typed_bash_steps_not_raw_yaml() {
+        use crate::compile::ir::step::Step;
+        let fm = parse_fm("name: t\ndescription: x\n");
+        let input_path = Path::new("agents/foo.md");
+        let ctx = CompileContext {
+            agent_name: &fm.name,
+            front_matter: &fm,
+            ado_context: None,
+            engine: crate::engine::Engine::Copilot,
+            compile_dir: None,
+            input_path: Some(input_path),
+        };
+        let decl = AdoAwMarkerExtension.declarations(&ctx).unwrap();
+        assert_eq!(decl.agent_prepare_steps.len(), 2);
+        match (&decl.agent_prepare_steps[0], &decl.agent_prepare_steps[1]) {
+            (Step::Bash(marker), Step::Bash(aw_info)) => {
+                assert_eq!(marker.display_name, "ado-aw");
+                assert!(marker.script.contains("# ado-aw-metadata:"));
+                assert_eq!(aw_info.display_name, "Emit aw_info.json");
+                assert!(matches!(
+                    aw_info.condition,
+                    Some(crate::compile::ir::condition::Condition::Always)
+                ));
+            }
+            (a, b) => panic!("expected (Step::Bash, Step::Bash), got ({a:?}, {b:?})"),
+        }
+        // All other Declarations slots must be empty - the marker
+        // extension contributes nothing else.
+        assert!(decl.setup_steps.is_empty());
+        assert!(decl.network_hosts.is_empty());
+        assert!(decl.mcpg_servers.is_empty());
     }
 
     #[test]
