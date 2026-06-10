@@ -2765,7 +2765,7 @@ safe-outputs:
         "should have Python install step"
     );
     assert!(
-        compiled.contains("versionSpec: '3.x'"),
+        compiled.contains("versionSpec: 3.x"),
         "should default to Python 3.x"
     );
 
@@ -2870,7 +2870,7 @@ safe-outputs:
         "should have Node install step"
     );
     assert!(
-        compiled.contains("versionSpec: '22.x'"),
+        compiled.contains("versionSpec: 22.x"),
         "should default to Node 22.x"
     );
 
@@ -3308,10 +3308,10 @@ fn assert_marker_step_present(
         compiled.contains("ado-aw metadata: source="),
         "{fixture_name}: compiled YAML missing runtime echo line for ado-aw marker"
     );
-    // displayName: "ado-aw" identifies the injected step uniquely.
+    // displayName: ado-aw identifies the injected step uniquely.
     assert!(
-        compiled.contains("displayName: \"ado-aw\""),
-        "{fixture_name}: compiled YAML missing displayName: \"ado-aw\" on injected step"
+        compiled.contains("displayName: ado-aw"),
+        "{fixture_name}: compiled YAML missing displayName: ado-aw on injected step"
     );
 }
 
@@ -3323,7 +3323,7 @@ fn assert_aw_info_step_present(
     fixture_name: &str,
 ) {
     assert!(
-        compiled.contains("displayName: \"Emit aw_info.json\""),
+        compiled.contains("displayName: Emit aw_info.json"),
         "{fixture_name}: compiled YAML missing Emit aw_info.json step"
     );
     assert!(
@@ -3806,7 +3806,7 @@ fn test_compiled_yaml_survives_tricky_agent_name_standalone() {
 
     // Build-number names must strip invalid characters such as `"` and `:`.
     assert!(
-        compiled.contains(r#"name: "My special agent with quotes-$(BuildID)""#),
+        compiled.contains("name: My special agent with quotes-$(BuildID)"),
         "standalone output should contain sanitized pipeline name; got:\n{compiled}"
     );
 }
@@ -3820,11 +3820,14 @@ fn test_compiled_yaml_survives_tricky_agent_name_1es() {
     // the ADO build-number format needs a varying token; the stage
     // displayName does NOT carry the suffix (stage labels are static).
     assert!(
-        compiled.contains(r#"name: "My special agent with quotes (1ES)-$(BuildID)""#),
+        compiled.contains("name: My special agent with quotes (1ES)-$(BuildID)"),
         "1ES output should contain sanitized pipeline name; got:\n{compiled}"
     );
+    // serde_yaml's prep-PR normalisation chooses single-quoted style for
+    // scalars containing both `"` and `:` (avoids needing backslash
+    // escapes). The string content is identical to the pre-prep form.
     assert!(
-        compiled.contains(r#"displayName: "My \"special\": agent with quotes (1ES)""#),
+        compiled.contains(r#"displayName: 'My "special": agent with quotes (1ES)'"#),
         "1ES output should contain escaped stage displayName; got:\n{compiled}"
     );
 }
@@ -4280,10 +4283,10 @@ fn test_node_runtime_install_orders_after_ado_script_so_user_version_wins() {
     // is identifiable by its displayName; the user's runtime install
     // carries the explicit user-pinned versionSpec.
     let ado_script_install_idx = agent
-        .find("displayName: \"Install Node.js 20.x\"")
+        .find("displayName: Install Node.js 20.x")
         .expect("ado-script Node 20.x install step missing from Agent job");
     let user_runtime_install_idx = agent
-        .find("'Install Node.js 22.x'")
+        .find("displayName: Install Node.js 22.x")
         .expect("user runtime Node 22.x install step missing from Agent job");
 
     assert!(
@@ -4464,7 +4467,7 @@ fn test_pr_filter_synth_mode_gate_step_uses_same_job_synth_ref() {
     let compiled = compile_fixture("pr-filter-tier1-agent.md");
 
     assert!(
-        compiled.contains("AW_SYNTHETIC_PR: \"$(synthPr.AW_SYNTHETIC_PR)\""),
+        compiled.contains("AW_SYNTHETIC_PR: $(synthPr.AW_SYNTHETIC_PR)"),
         "Gate step env must reference the same-job `synthPr` output via the macro \
          `$(synthPr.AW_SYNTHETIC_PR)` — the `$[ variables['synthPr.X'] ]` runtime \
          expression resolves to empty inside the producing Setup job"
@@ -4475,14 +4478,14 @@ fn test_pr_filter_synth_mode_gate_step_uses_same_job_synth_ref() {
     // exported by this fixture's filter set, so we don't assert it here.)
     assert!(
         compiled.contains(
-            "ADO_SOURCE_BRANCH: \"$(System.PullRequest.SourceBranch)$(synthPr.AW_SYNTHETIC_PR_SOURCEBRANCH)\""
+            "ADO_SOURCE_BRANCH: $(System.PullRequest.SourceBranch)$(synthPr.AW_SYNTHETIC_PR_SOURCEBRANCH)"
         ),
         "ADO_SOURCE_BRANCH must concatenate the real `System.PullRequest.*` macro \
          with the same-job `synthPr.*` macro"
     );
     assert!(
         compiled.contains(
-            "ADO_TARGET_BRANCH: \"$(System.PullRequest.TargetBranch)$(synthPr.AW_SYNTHETIC_PR_TARGETBRANCH)\""
+            "ADO_TARGET_BRANCH: $(System.PullRequest.TargetBranch)$(synthPr.AW_SYNTHETIC_PR_TARGETBRANCH)"
         ),
         "ADO_TARGET_BRANCH must concatenate the real `System.PullRequest.*` macro \
          with the same-job `synthPr.*` macro"
@@ -4752,7 +4755,7 @@ fn test_default_pipeline_mounts_az_and_allows_azure_hosts() {
     // ADO log; if it changes the documentation in docs/network.md and
     // docs/tools.md should be updated too.
     assert!(
-        compiled.contains(r#"displayName: "Detect Azure CLI on host (for AWF mount)""#),
+        compiled.contains("displayName: Detect Azure CLI on host (for AWF mount)"),
         "compiled YAML must contain the Azure CLI detection prepare step. \
          Compiled:\n{compiled}"
     );
@@ -4791,7 +4794,7 @@ fn test_default_pipeline_mounts_az_and_allows_azure_hosts() {
     // so agents on runners WITHOUT az never see the advisory and
     // never try to call az.
     assert!(
-        compiled.contains(r#"displayName: "Append Azure CLI prompt""#),
+        compiled.contains("displayName: Append Azure CLI prompt"),
         "compiled YAML must contain the 'Append Azure CLI prompt' step \
          emitted by AzureCliExtension::prepare_steps. Compiled:\n{compiled}"
     );
@@ -4806,7 +4809,7 @@ fn test_default_pipeline_mounts_az_and_allows_azure_hosts() {
     // wrong step. Find the displayName index, then check the next ~200
     // chars for the condition line.
     let display_idx = compiled
-        .find(r#"displayName: "Append Azure CLI prompt""#)
+        .find("displayName: Append Azure CLI prompt")
         .expect("displayName already asserted to be present");
     let window_end = (display_idx + 300).min(compiled.len());
     let window = &compiled[display_idx..window_end];
@@ -5358,7 +5361,7 @@ fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
     );
     assert!(
         compiled.contains(
-            "AW_SYNTHETIC_PR: \"$[ coalesce(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], '') ]\""
+            "AW_SYNTHETIC_PR: $[ coalesce(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], '') ]"
         ),
         "Prepare step must project the synth flag through env (coalesced to '' on real-PR builds) for the bash gate to read"
     );
@@ -5406,11 +5409,11 @@ fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
     // (true PR builds) and fall back to the `synthPr` Setup-job outputs
     // (CI builds promoted via exec-context-pr-synth.js).
     assert!(
-        compiled.contains("SYSTEM_PULLREQUEST_PULLREQUESTID: \"$[ coalesce(variables['System.PullRequest.PullRequestId'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_ID']) ]\""),
+        compiled.contains("SYSTEM_PULLREQUEST_PULLREQUESTID: $[ coalesce(variables['System.PullRequest.PullRequestId'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_ID']) ]"),
         "Prepare step must pass the PR id (coalesced with synthPr fallback) through to the bundle"
     );
     assert!(
-        compiled.contains("SYSTEM_PULLREQUEST_TARGETBRANCH: \"$[ coalesce(variables['System.PullRequest.TargetBranch'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH']) ]\""),
+        compiled.contains("SYSTEM_PULLREQUEST_TARGETBRANCH: $[ coalesce(variables['System.PullRequest.TargetBranch'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH']) ]"),
         "Prepare step must pass the PR target branch (coalesced with synthPr fallback) through to the bundle"
     );
     assert!(
@@ -5969,7 +5972,7 @@ fn test_synthetic_pr_default_emits_full_synth_wiring() {
     );
     assert!(
         compiled.contains(
-            "AW_SYNTHETIC_PR: \"$[ coalesce(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], '') ]\""
+            "AW_SYNTHETIC_PR: $[ coalesce(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], '') ]"
         ),
         "Fixture A must project the synth flag into the exec-context-pr.js step env for the bash gate"
     );
