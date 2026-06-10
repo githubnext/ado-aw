@@ -47,6 +47,48 @@ fn test_awf_mount_parse_rw_mode() {
     assert_eq!(m.mode, AwfMountMode::ReadWrite);
 }
 
+// ── Declarations bridge (migration scaffold) ─────────────────────
+
+/// The default `declarations()` impl on `CompilerExtension` must
+/// faithfully re-export every legacy per-method output, wrapping
+/// `prepare_steps` / `setup_steps` in `Step::RawYaml`. This smoke
+/// test locks the bridge contract end-to-end for one representative
+/// extension (LeanExtension, which exercises hosts, bash commands,
+/// prompt supplement, prepare steps, and validate warnings).
+///
+/// Removed by `delete-deprecated-trait-aliases` once every extension
+/// owns a real `declarations()` impl and the legacy methods are gone.
+#[test]
+fn declarations_default_bridges_lean_extension_legacy_methods() {
+    use crate::compile::ir::step::Step;
+    let ext = LeanExtension::new(LeanRuntimeConfig::Enabled(true));
+    let fm = minimal_front_matter();
+    let ctx = ctx_from(&fm);
+    let d = ext.declarations(&ctx).expect("declarations must succeed");
+
+    // Network hosts / bash commands / prompt round-trip verbatim.
+    assert_eq!(d.network_hosts, ext.required_hosts());
+    assert_eq!(d.bash_commands, ext.required_bash_commands());
+    assert_eq!(d.prompt_supplement, ext.prompt_supplement());
+
+    // Prepare steps are wrapped as Step::RawYaml.
+    let legacy_prepare = ext.prepare_steps(&ctx);
+    assert_eq!(d.agent_prepare_steps.len(), legacy_prepare.len());
+    for (decl_step, legacy_str) in d.agent_prepare_steps.iter().zip(legacy_prepare.iter()) {
+        match decl_step {
+            Step::RawYaml(s) => assert_eq!(s, legacy_str),
+            other => panic!("expected Step::RawYaml, got {other:?}"),
+        }
+    }
+
+    // Other Declarations slots are empty when the legacy methods
+    // don't populate them.
+    assert!(d.setup_steps.is_empty());
+    assert!(d.agent_finalize_steps.is_empty());
+    assert!(d.detection_prepare_steps.is_empty());
+    assert!(d.safe_outputs_steps.is_empty());
+}
+
 #[test]
 fn test_awf_mount_parse_no_mode() {
     let m: AwfMount = "/tmp/foo:/tmp/foo".parse().unwrap();

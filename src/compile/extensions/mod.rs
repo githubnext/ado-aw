@@ -395,6 +395,117 @@ pub trait CompilerExtension {
     fn agent_env_vars(&self) -> Vec<(String, String)> {
         vec![]
     }
+
+    /// Aggregate every other accessor on this trait into a single
+    /// typed [`Declarations`] bundle.
+    ///
+    /// **Default impl** — wraps the legacy per-method outputs:
+    /// `prepare_steps` / `setup_steps` results land in
+    /// `Declarations::agent_prepare_steps` /
+    /// `Declarations::setup_steps` as
+    /// [`crate::compile::ir::step::Step::RawYaml`] entries
+    /// (the migration bridge — see that variant's doc-comment).
+    /// Every other field is copied through verbatim.
+    ///
+    /// Extensions migrating to the IR override this method to build
+    /// typed [`crate::compile::ir::step::Step`] values directly and
+    /// drop their `prepare_steps` / `setup_steps` overrides. Once
+    /// every extension has done so the legacy methods are removed
+    /// (`delete-deprecated-trait-aliases` commit).
+    ///
+    /// The default impl is intentionally infallible-ish: it bubbles
+    /// up only the existing `setup_steps` failure path, otherwise
+    /// returns `Ok`. Per-extension overrides may surface their own
+    /// errors.
+    ///
+    /// `#[allow(dead_code)]` covers production paths during the
+    /// migration window — see the `Declarations` doc-comment.
+    #[allow(dead_code)]
+    fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
+        use crate::compile::ir::step::Step;
+        let prepare_steps = self
+            .prepare_steps(ctx)
+            .into_iter()
+            .map(Step::RawYaml)
+            .collect();
+        let setup_steps = self
+            .setup_steps(ctx)?
+            .into_iter()
+            .map(Step::RawYaml)
+            .collect();
+        Ok(Declarations {
+            agent_prepare_steps: prepare_steps,
+            setup_steps,
+            agent_finalize_steps: Vec::new(),
+            detection_prepare_steps: Vec::new(),
+            safe_outputs_steps: Vec::new(),
+            network_hosts: self.required_hosts(),
+            bash_commands: self.required_bash_commands(),
+            prompt_supplement: self.prompt_supplement(),
+            mcpg_servers: self.mcpg_servers(ctx)?,
+            copilot_allow_tools: self.allowed_copilot_tools(),
+            pipeline_env: self.required_pipeline_vars(),
+            awf_mounts: self.required_awf_mounts(),
+            awf_path_prepends: self.awf_path_prepends(),
+            agent_env_vars: self.agent_env_vars(),
+            warnings: self.validate(ctx)?,
+        })
+    }
+}
+
+/// Aggregate of every compile-time signal an extension contributes.
+///
+/// Returned by [`CompilerExtension::declarations`]. The default impl
+/// on `CompilerExtension` builds this by calling each of the legacy
+/// per-method accessors and wrapping `prepare_steps` / `setup_steps`
+/// in [`crate::compile::ir::step::Step::RawYaml`] (the migration
+/// bridge).
+///
+/// Per-extension `port-*` commits override `declarations` to return
+/// typed [`crate::compile::ir::step::Step`] values directly.
+///
+/// **Construction**: built only by the trait default impl and the
+/// per-extension overrides; no production caller yet (target
+/// compilers consume it starting in `compile-target-standalone`).
+/// The `dead_code` allow goes away with those wiring commits — the
+/// `Declarations` fields are exercised end-to-end via tests in the
+/// meantime.
+#[allow(dead_code)]
+#[derive(Debug, Default)]
+pub struct Declarations {
+    /// Steps injected into the Agent job's `prepare` phase
+    /// (before the agent invocation).
+    pub agent_prepare_steps: Vec<crate::compile::ir::step::Step>,
+    /// Steps injected into the Setup job (runs before the Agent job).
+    pub setup_steps: Vec<crate::compile::ir::step::Step>,
+    /// Steps injected into the Agent job's `finalize` phase (after
+    /// the agent invocation; conditioned on `always()` typically).
+    pub agent_finalize_steps: Vec<crate::compile::ir::step::Step>,
+    /// Steps injected into the Detection job's `prepare` phase.
+    pub detection_prepare_steps: Vec<crate::compile::ir::step::Step>,
+    /// Steps injected into the SafeOutputs job.
+    pub safe_outputs_steps: Vec<crate::compile::ir::step::Step>,
+    /// AWF network-allowlist domains.
+    pub network_hosts: Vec<String>,
+    /// Bash commands required in the agent's allow-list.
+    pub bash_commands: Vec<String>,
+    /// Markdown to append to the agent prompt.
+    pub prompt_supplement: Option<String>,
+    /// MCPG `(name, config)` entries.
+    pub mcpg_servers: Vec<(String, McpgServerConfig)>,
+    /// Copilot CLI `--allow-tool` values.
+    pub copilot_allow_tools: Vec<String>,
+    /// Container-env → pipeline-var mappings for MCP container processes.
+    pub pipeline_env: Vec<PipelineEnvMapping>,
+    /// AWF bind mounts.
+    pub awf_mounts: Vec<AwfMount>,
+    /// Directories prepended to PATH inside the AWF chroot.
+    pub awf_path_prepends: Vec<String>,
+    /// Agent execution-environment variables (`KEY: "value"` in the
+    /// emitted YAML `env:` block).
+    pub agent_env_vars: Vec<(String, String)>,
+    /// Non-fatal warnings to print at compile time.
+    pub warnings: Vec<String>,
 }
 
 /// Mount access mode for an AWF bind mount.
@@ -618,6 +729,9 @@ macro_rules! extension_enum {
             }
             fn agent_env_vars(&self) -> Vec<(String, String)> {
                 match self { $( $Enum::$Variant(e) => e.agent_env_vars(), )+ }
+            }
+            fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
+                match self { $( $Enum::$Variant(e) => e.declarations(ctx), )+ }
             }
         }
     };

@@ -29,6 +29,24 @@ pub enum Step {
     Checkout(CheckoutStep),
     Download(DownloadStep),
     Publish(PublishStep),
+    /// Migration bridge: a pre-formatted YAML string that is emitted
+    /// verbatim into the surrounding `steps:` sequence.
+    ///
+    /// Introduced by the `extension-trait-port` commit so the new
+    /// [`super::super::extensions::Declarations`] surface can carry
+    /// today's raw `Vec<String>` step outputs through the IR
+    /// unchanged. Per-extension `port-*` commits replace `RawYaml`
+    /// instances with typed [`BashStep`] / [`TaskStep`] / etc. one
+    /// extension at a time. Removed entirely by the
+    /// `delete-deprecated-trait-aliases` commit once no
+    /// `RawYaml` instances remain.
+    ///
+    /// The string is expected to be a complete YAML mapping (e.g.
+    /// `"- bash: |\n    echo hi\n  displayName: …"`); the lowering
+    /// pass parses it back into a `serde_yaml::Value` and re-emits it
+    /// so the canonical normalisation applies. If parsing fails the
+    /// IR returns an error rather than embedding malformed YAML.
+    RawYaml(String),
 }
 
 impl Step {
@@ -45,6 +63,11 @@ impl Step {
             Step::Checkout(_) => None,
             Step::Download(_) => None,
             Step::Publish(_) => None,
+            // `RawYaml` is a pre-formatted string; the IR cannot
+            // introspect any embedded `name:` key. Producers that
+            // need cross-step refs should migrate to a typed variant
+            // before that need arises.
+            Step::RawYaml(_) => None,
         }
     }
 }
@@ -251,5 +274,11 @@ mod tests {
             .with_input("versionSpec", "20.x");
         assert_eq!(t.task, "NodeTool@0");
         assert_eq!(t.inputs.get("versionSpec").map(|s| s.as_str()), Some("20.x"));
+    }
+
+    #[test]
+    fn raw_yaml_step_carries_no_id() {
+        let s = Step::RawYaml("- bash: echo hi\n  displayName: hi".into());
+        assert!(s.id().is_none());
     }
 }

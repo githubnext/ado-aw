@@ -211,11 +211,12 @@ fn collect_step_outputs(step: &Step) -> BTreeSet<String> {
         }
         // TaskStep doesn't currently model outputs; if we ever add
         // them, extend here. CheckoutStep / DownloadStep / PublishStep
-        // don't emit step outputs.
+        // don't emit step outputs. RawYaml is opaque to the IR.
         Step::Task(TaskStep { .. })
         | Step::Checkout(_)
         | Step::Download(_)
-        | Step::Publish(_) => BTreeSet::new(),
+        | Step::Publish(_)
+        | Step::RawYaml(_) => BTreeSet::new(),
     }
 }
 
@@ -268,6 +269,11 @@ fn add_edges_from_job(
                     }
                 }
             }
+            // `RawYaml` carries opaque pre-formatted YAML; the graph
+            // pass cannot introspect it. Per-extension `port-*`
+            // commits replace `RawYaml` with typed Bash/Task variants
+            // before any cross-step ref needs to flow through.
+            Step::RawYaml(_) => {}
         }
     }
     Ok(())

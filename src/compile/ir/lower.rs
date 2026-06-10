@@ -215,7 +215,38 @@ fn lower_step(step: &Step, ctx: &LoweringContext<'_>) -> Result<Value> {
         Step::Checkout(c) => Ok(lower_checkout(c)),
         Step::Download(d) => lower_download(d, ctx),
         Step::Publish(p) => lower_publish(p, ctx),
+        Step::RawYaml(raw) => lower_raw_yaml(raw),
     }
+}
+
+/// Parse a `Step::RawYaml(...)` body into a `serde_yaml::Value`.
+///
+/// The body must be a single YAML mapping; we accept it with or
+/// without a leading `- ` because some legacy emitters include it
+/// (they're emitting a step inside an enclosing sequence). When the
+/// `- ` is present, every subsequent line is also de-indented by two
+/// columns so the mapping parses as a top-level document.
+fn lower_raw_yaml(raw: &str) -> Result<Value> {
+    let trimmed = raw.trim_start();
+    let body = if let Some(rest) = trimmed.strip_prefix("- ") {
+        // Strip 2 leading spaces from every line after the first so
+        // the continuation lines aren't read as part of the first
+        // line's scalar value.
+        let mut out = String::with_capacity(rest.len());
+        for (i, line) in rest.split_inclusive('\n').enumerate() {
+            if i == 0 {
+                out.push_str(line);
+            } else {
+                out.push_str(line.strip_prefix("  ").unwrap_or(line));
+            }
+        }
+        out
+    } else {
+        trimmed.to_string()
+    };
+    let value: Value = serde_yaml::from_str(&body)
+        .context("ir::lower: Step::RawYaml body is not a valid YAML mapping")?;
+    Ok(value)
 }
 
 fn lower_bash(b: &BashStep, ctx: &LoweringContext<'_>) -> Result<Value> {
@@ -562,6 +593,81 @@ mod tests {
         assert_eq!(minutes_ceil(Duration::from_secs(1)), 1);
         assert_eq!(minutes_ceil(Duration::from_secs(60)), 1);
         assert_eq!(minutes_ceil(Duration::from_secs(61)), 2);
+    }
+
+    #[test]
+    fn raw_yaml_step_round_trips_into_steps_sequence() {
+        // The RawYaml migration bridge must carry pre-formatted step
+        // YAML through the canonical normalisation: parse the body
+        // into a serde_yaml::Value, re-emit it as part of the
+        // surrounding sequence.
+        let raw = "bash: |\n  echo legacy\ndisplayName: Legacy step\n";
+        let mut job = Job::new(
+            JobId::new("Agent").unwrap(),
+            "Agent",
+            Pool::VmImage("ubuntu-22.04".into()),
+        );
+        job.push_step(Step::RawYaml(raw.to_string()));
+        let p = Pipeline {
+            name: "t".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers::default(),
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(vec![job]),
+            shape: PipelineShape::Standalone,
+        };
+        let v = super::lower(&p).unwrap();
+        let step = &v["jobs"][0]["steps"][0];
+        assert_eq!(step["bash"].as_str(), Some("echo legacy\n"));
+        assert_eq!(step["displayName"].as_str(), Some("Legacy step"));
+    }
+
+    #[test]
+    fn raw_yaml_step_accepts_leading_dash() {
+        // Some legacy emitters include the leading `- ` because they
+        // were emitting into an enclosing sequence; the lowering must
+        // strip it.
+        let raw = "- bash: echo dash\n  displayName: With dash\n";
+        let mut job = Job::new(
+            JobId::new("Agent").unwrap(),
+            "Agent",
+            Pool::VmImage("ubuntu-22.04".into()),
+        );
+        job.push_step(Step::RawYaml(raw.to_string()));
+        let p = Pipeline {
+            name: "t".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers::default(),
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(vec![job]),
+            shape: PipelineShape::Standalone,
+        };
+        let v = super::lower(&p).unwrap();
+        let step = &v["jobs"][0]["steps"][0];
+        assert_eq!(step["bash"].as_str(), Some("echo dash"));
+    }
+
+    #[test]
+    fn raw_yaml_step_rejects_invalid_body() {
+        let mut job = Job::new(
+            JobId::new("Agent").unwrap(),
+            "Agent",
+            Pool::VmImage("ubuntu-22.04".into()),
+        );
+        job.push_step(Step::RawYaml("not: [valid yaml".to_string()));
+        let p = Pipeline {
+            name: "t".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers::default(),
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(vec![job]),
+            shape: PipelineShape::Standalone,
+        };
+        let err = super::lower(&p).unwrap_err();
+        assert!(format!("{err:#}").contains("Step::RawYaml"));
     }
 }
 
