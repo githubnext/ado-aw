@@ -34,9 +34,11 @@
 #![allow(dead_code)]
 
 pub mod condition;
+pub mod emit;
 pub mod env;
 pub mod ids;
 pub mod job;
+pub mod lower;
 pub mod output;
 pub mod stage;
 pub mod step;
