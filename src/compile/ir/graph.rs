@@ -76,12 +76,25 @@ pub struct Graph {
     pub job_edges: BTreeSet<(JobId, JobId)>,
     /// `(consumer_stage, producer_stage)` edges.
     pub stage_edges: BTreeSet<(StageId, StageId)>,
+    /// For each producer step, the set of declared outputs that have
+    /// at least one cross-step reader. Producers should auto-emit
+    /// `isOutput=true` on the matching `##vso[task.setvariable]`
+    /// lines.
+    ///
+    /// Populated by [`build_graph`] as a side-effect of walking
+    /// every consumer's `OutputRef`s. Same-job references DO count
+    /// here even though they don't add a `dependsOn` edge — ADO
+    /// requires `isOutput=true` on the producer for both
+    /// `$(stepName.X)` (same job) and cross-job/cross-stage syntax.
+    pub outputs_needing_is_output: BTreeMap<StepId, BTreeSet<String>>,
 }
 
 /// Walk the pipeline, validate the OutputRef graph, derive
-/// `dependsOn`, and write the derived edges back to
+/// `dependsOn`, write the derived edges back to
 /// [`super::job::Job::depends_on`] and
-/// [`super::stage::Stage::depends_on`].
+/// [`super::stage::Stage::depends_on`], and propagate the
+/// auto-`isOutput` flag back to every relevant
+/// [`super::output::OutputDecl::auto_is_output`].
 ///
 /// Existing values in either `depends_on` field are treated as
 /// manual overrides and **preserved**; the graph pass adds missing
@@ -90,6 +103,7 @@ pub fn resolve(p: &mut Pipeline) -> Result<()> {
     let graph = build_graph(p)?;
     detect_cycles(&graph)?;
     apply_edges(p, &graph);
+    apply_auto_is_output(p, &graph);
     Ok(())
 }
 
@@ -344,6 +358,14 @@ fn add_edge_for_ref(
     let producer_job = loc.job.clone();
     let producer_stage = loc.stage.clone();
 
+    // Any cross-step (or same-job-different-step) reader is a reason
+    // for the producer to set isOutput=true on its ##vso[task.setvariable]
+    // line; record it so producers can consult the flag at emit time.
+    g.outputs_needing_is_output
+        .entry(r.step.clone())
+        .or_default()
+        .insert(r.name.clone());
+
     // Same-job edges contribute nothing to dependsOn.
     if producer_job == *consumer_job && producer_stage.as_ref() == consumer_stage {
         return Ok(());
@@ -487,6 +509,42 @@ fn merge_job_deps(
     }
 }
 
+/// Set [`super::output::OutputDecl::auto_is_output`] on every output
+/// declaration that has at least one cross-step reader.
+fn apply_auto_is_output(p: &mut Pipeline, g: &Graph) {
+    if g.outputs_needing_is_output.is_empty() {
+        return;
+    }
+    fn visit_job(job: &mut super::job::Job, g: &Graph) {
+        for step in &mut job.steps {
+            if let Step::Bash(b) = step
+                && let Some(id) = &b.id
+                && let Some(promoted) = g.outputs_needing_is_output.get(id)
+            {
+                for decl in &mut b.outputs {
+                    if promoted.contains(&decl.name) {
+                        decl.auto_is_output = true;
+                    }
+                }
+            }
+        }
+    }
+    match &mut p.body {
+        PipelineBody::Jobs(jobs) => {
+            for job in jobs {
+                visit_job(job, g);
+            }
+        }
+        PipelineBody::Stages(stages) => {
+            for stage in stages {
+                for job in &mut stage.jobs {
+                    visit_job(job, g);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -543,8 +601,55 @@ mod tests {
             let agent = jobs.iter().find(|j| j.id.as_str() == "Agent").unwrap();
             assert_eq!(agent.depends_on.len(), 1);
             assert_eq!(agent.depends_on[0].as_str(), "Setup");
+            // Producer's OutputDecl now has auto_is_output = true.
+            let setup = jobs.iter().find(|j| j.id.as_str() == "Setup").unwrap();
+            if let Step::Bash(b) = &setup.steps[0] {
+                assert_eq!(b.outputs.len(), 1);
+                assert!(
+                    b.outputs[0].auto_is_output,
+                    "auto_is_output must be set on producers with cross-step readers"
+                );
+            } else {
+                panic!();
+            }
         } else {
             panic!();
+        }
+    }
+
+    #[test]
+    fn auto_is_output_flag_only_promotes_referenced_outputs() {
+        // Producer declares TWO outputs but only one is read.
+        let synth = StepId::new("synthPr").unwrap();
+        let producer = Step::Bash(
+            BashStep::new("s", "echo s")
+                .with_id(synth.clone())
+                .with_output(OutputDecl::new("READ_ME"))
+                .with_output(OutputDecl::new("IGNORED")),
+        );
+        let mut setup = Job::new(JobId::new("Setup").unwrap(), "Setup", pool());
+        setup.push_step(producer);
+        let mut agent = Job::new(JobId::new("Agent").unwrap(), "Agent", pool());
+        agent.push_step(Step::Bash(BashStep::new("a", "echo a").with_env(
+            "X",
+            EnvValue::step_output(OutputRef::new(synth, "READ_ME")),
+        )));
+        let mut p = pipe(PipelineBody::Jobs(vec![setup, agent]));
+        resolve(&mut p).unwrap();
+
+        if let PipelineBody::Jobs(jobs) = &p.body {
+            let setup = jobs.iter().find(|j| j.id.as_str() == "Setup").unwrap();
+            if let Step::Bash(b) = &setup.steps[0] {
+                let read = b.outputs.iter().find(|o| o.name == "READ_ME").unwrap();
+                let ignored = b.outputs.iter().find(|o| o.name == "IGNORED").unwrap();
+                assert!(read.auto_is_output, "READ_ME must be promoted");
+                assert!(
+                    !ignored.auto_is_output,
+                    "IGNORED has no cross-step reader; must not be promoted"
+                );
+            } else {
+                panic!();
+            }
         }
     }
 

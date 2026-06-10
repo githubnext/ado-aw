@@ -1,20 +1,14 @@
 //! Lower the typed IR ([`super::Pipeline`]) to a
 //! [`serde_yaml::Value`] tree.
 //!
-//! ## Scope of this commit (`ir-yaml-emit`)
+//! ## Lowering context
 //!
-//! - Covers every IR variant that does **not** need cross-step
-//!   resolution: literal env values, plain conditions, all step
-//!   kinds, jobs, stages, the pipeline-level fields modelled so far.
-//! - The variants that need cross-step resolution
-//!   ([`super::env::EnvValue::StepOutput`],
-//!   [`super::env::EnvValue::Coalesce`], and
-//!   [`super::condition::Expr::StepOutput`]) panic via
-//!   [`unimplemented!`] with a pointer to the commit that fills them
-//!   in (`ir-output-lowering` and `ir-condition-codegen`). The unit
-//!   tests in this commit never exercise those variants — they land
-//!   in their own commits where the lowering algorithm is the unit
-//!   under test.
+//! `EnvValue::StepOutput`, `EnvValue::Coalesce`, and
+//! `Expr::StepOutput` need the consumer's location plus the producer's
+//! location to pick the correct ADO reference syntax. The
+//! [`LoweringContext`] carries the graph (see [`super::graph`]) and
+//! the current consumer's stage / job so the recursive lowering
+//! helpers stay pure.
 //!
 //! ## Shape contract
 //!
@@ -32,29 +26,66 @@ use std::time::Duration;
 
 use super::condition::{Condition, Expr};
 use super::env::EnvValue;
+use super::graph::Graph;
+use super::ids::{JobId, StageId};
 use super::job::{Job, Pool};
+use super::output::{ConsumerLocation, OutputRef, ProducerLocation, lower_outputref};
 use super::stage::Stage;
 use super::step::{
     BashStep, CheckoutRepo, CheckoutStep, DownloadStep, PublishStep, Step, SubmodulesOpt, TaskStep,
 };
 use super::{Pipeline, PipelineBody, PipelineShape};
 
+/// Per-step lowering context carried through the recursive helpers.
+///
+/// Built once per step at `lower_job` time. Holds the graph (for
+/// producer lookup) and the consumer's location (for syntax
+/// selection).
+pub struct LoweringContext<'a> {
+    pub graph: &'a Graph,
+    pub stage: Option<&'a StageId>,
+    pub job: &'a JobId,
+}
+
+impl<'a> LoweringContext<'a> {
+    fn consumer(&self) -> ConsumerLocation<'a> {
+        ConsumerLocation {
+            stage: self.stage,
+            job: self.job,
+        }
+    }
+}
+
 /// Lower a [`Pipeline`] to a [`serde_yaml::Value`].
+///
+/// Builds the dependency graph internally so callers don't have to
+/// thread it through; if the graph fails validation, the error is
+/// returned immediately. Use [`lower_with_graph`] when you have an
+/// already-built graph.
 pub fn lower(p: &Pipeline) -> Result<Value> {
+    let graph = super::graph::build_graph(p).context("ir::lower: graph build failed")?;
+    super::graph::detect_cycles(&graph).context("ir::lower: cycle detection failed")?;
+    lower_with_graph(p, &graph)
+}
+
+/// Lower a [`Pipeline`] with an externally-provided [`Graph`]. The
+/// graph **must** be one previously returned by
+/// [`super::graph::build_graph`] for `p` (or equivalent); we trust
+/// the producer locations recorded there.
+pub fn lower_with_graph(p: &Pipeline, graph: &Graph) -> Result<Value> {
     let mut root = Mapping::new();
     root.insert(s("name"), s(&p.name));
 
-    // For the `ir-yaml-emit` commit we only model the canonical
-    // standalone shape end-to-end. OneEs / JobTemplate / StageTemplate
-    // wrap the same body in different outer scaffolding; their
-    // wrapping is added in the target-compiler commits.
+    // For the `ir-yaml-emit`/`ir-output-lowering` commits we only
+    // model the canonical standalone shape end-to-end. OneEs /
+    // JobTemplate / StageTemplate wrap the same body in different
+    // outer scaffolding; their wrapping is added in the
+    // target-compiler commits.
     match &p.shape {
         PipelineShape::Standalone => {}
         PipelineShape::OneEs { .. }
         | PipelineShape::JobTemplate { .. }
         | PipelineShape::StageTemplate { .. } => {
-            // Pre-existing skeleton; populated by compile-target-1es /
-            // compile-target-job / compile-target-stage.
             unimplemented!(
                 "PipelineShape wrapping is introduced by the compile-target-* commits"
             );
@@ -65,14 +96,14 @@ pub fn lower(p: &Pipeline) -> Result<Value> {
         PipelineBody::Jobs(jobs) => {
             let mut seq = Vec::with_capacity(jobs.len());
             for job in jobs {
-                seq.push(lower_job(job)?);
+                seq.push(lower_job(job, None, graph)?);
             }
             root.insert(s("jobs"), Value::Sequence(seq));
         }
         PipelineBody::Stages(stages) => {
             let mut seq = Vec::with_capacity(stages.len());
             for stage in stages {
-                seq.push(lower_stage(stage)?);
+                seq.push(lower_stage(stage, graph)?);
             }
             root.insert(s("stages"), Value::Sequence(seq));
         }
@@ -81,7 +112,7 @@ pub fn lower(p: &Pipeline) -> Result<Value> {
     Ok(Value::Mapping(root))
 }
 
-fn lower_stage(stage: &Stage) -> Result<Value> {
+fn lower_stage(stage: &Stage, graph: &Graph) -> Result<Value> {
     let mut m = Mapping::new();
     m.insert(s("stage"), s(stage.id.as_str()));
     m.insert(s("displayName"), s(&stage.display_name));
@@ -90,17 +121,42 @@ fn lower_stage(stage: &Stage) -> Result<Value> {
         m.insert(s("dependsOn"), Value::Sequence(deps));
     }
     if let Some(cond) = &stage.condition {
-        m.insert(s("condition"), s(&lower_condition(cond)?));
+        let ctx = LoweringContext {
+            graph,
+            stage: Some(&stage.id),
+            // Stage-level conditions can reference cross-stage outputs;
+            // there is no "consumer job" in that context. Use the
+            // first job's id as a placeholder — the lowering only
+            // distinguishes job identity for SAME-stage references,
+            // and a cross-stage ref always picks the
+            // `stageDependencies.*` syntax regardless of consumer job.
+            job: stage
+                .jobs
+                .first()
+                .map(|j| &j.id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "ir::lower: stage '{}' has a condition but no jobs",
+                        stage.id
+                    )
+                })?,
+        };
+        m.insert(s("condition"), s(&lower_condition(&ctx, cond)?));
     }
     let mut jobs = Vec::with_capacity(stage.jobs.len());
     for job in &stage.jobs {
-        jobs.push(lower_job(job)?);
+        jobs.push(lower_job(job, Some(&stage.id), graph)?);
     }
     m.insert(s("jobs"), Value::Sequence(jobs));
     Ok(Value::Mapping(m))
 }
 
-fn lower_job(job: &Job) -> Result<Value> {
+fn lower_job(job: &Job, stage: Option<&StageId>, graph: &Graph) -> Result<Value> {
+    let ctx = LoweringContext {
+        graph,
+        stage,
+        job: &job.id,
+    };
     let mut m = Mapping::new();
     m.insert(s("job"), s(job.id.as_str()));
     m.insert(s("displayName"), s(&job.display_name));
@@ -109,7 +165,7 @@ fn lower_job(job: &Job) -> Result<Value> {
         m.insert(s("dependsOn"), Value::Sequence(deps));
     }
     if let Some(cond) = &job.condition {
-        m.insert(s("condition"), s(&lower_condition(cond)?));
+        m.insert(s("condition"), s(&lower_condition(&ctx, cond)?));
     }
     if let Some(t) = job.timeout {
         m.insert(s("timeoutInMinutes"), Value::from(minutes_ceil(t)));
@@ -117,7 +173,7 @@ fn lower_job(job: &Job) -> Result<Value> {
     m.insert(s("pool"), lower_pool(&job.pool));
     let mut steps = Vec::with_capacity(job.steps.len());
     for step in &job.steps {
-        steps.push(lower_step(step)?);
+        steps.push(lower_step(step, &ctx)?);
     }
     m.insert(s("steps"), Value::Sequence(steps));
     Ok(Value::Mapping(m))
@@ -142,17 +198,17 @@ fn lower_pool(pool: &Pool) -> Value {
     Value::Mapping(m)
 }
 
-fn lower_step(step: &Step) -> Result<Value> {
+fn lower_step(step: &Step, ctx: &LoweringContext<'_>) -> Result<Value> {
     match step {
-        Step::Bash(b) => lower_bash(b),
-        Step::Task(t) => lower_task(t),
+        Step::Bash(b) => lower_bash(b, ctx),
+        Step::Task(t) => lower_task(t, ctx),
         Step::Checkout(c) => Ok(lower_checkout(c)),
-        Step::Download(d) => Ok(lower_download(d)),
-        Step::Publish(p) => Ok(lower_publish(p)),
+        Step::Download(d) => lower_download(d, ctx),
+        Step::Publish(p) => lower_publish(p, ctx),
     }
 }
 
-fn lower_bash(b: &BashStep) -> Result<Value> {
+fn lower_bash(b: &BashStep, ctx: &LoweringContext<'_>) -> Result<Value> {
     let mut m = Mapping::new();
     m.insert(s("bash"), s(&b.script));
     if let Some(id) = &b.id {
@@ -160,7 +216,7 @@ fn lower_bash(b: &BashStep) -> Result<Value> {
     }
     m.insert(s("displayName"), s(&b.display_name));
     if let Some(cond) = &b.condition {
-        m.insert(s("condition"), s(&lower_condition(cond)?));
+        m.insert(s("condition"), s(&lower_condition(ctx, cond)?));
     }
     if let Some(t) = b.timeout {
         m.insert(s("timeoutInMinutes"), Value::from(minutes_ceil(t)));
@@ -174,14 +230,14 @@ fn lower_bash(b: &BashStep) -> Result<Value> {
     if !b.env.is_empty() {
         let mut env_map = Mapping::new();
         for (k, v) in &b.env {
-            env_map.insert(s(k), s(&lower_env_value(v)?));
+            env_map.insert(s(k), s(&lower_env_value(ctx, v)?));
         }
         m.insert(s("env"), Value::Mapping(env_map));
     }
     Ok(Value::Mapping(m))
 }
 
-fn lower_task(t: &TaskStep) -> Result<Value> {
+fn lower_task(t: &TaskStep, ctx: &LoweringContext<'_>) -> Result<Value> {
     let mut m = Mapping::new();
     m.insert(s("task"), s(&t.task));
     if let Some(id) = &t.id {
@@ -189,7 +245,7 @@ fn lower_task(t: &TaskStep) -> Result<Value> {
     }
     m.insert(s("displayName"), s(&t.display_name));
     if let Some(cond) = &t.condition {
-        m.insert(s("condition"), s(&lower_condition(cond)?));
+        m.insert(s("condition"), s(&lower_condition(ctx, cond)?));
     }
     if let Some(timeout) = t.timeout {
         m.insert(s("timeoutInMinutes"), Value::from(minutes_ceil(timeout)));
@@ -207,7 +263,7 @@ fn lower_task(t: &TaskStep) -> Result<Value> {
     if !t.env.is_empty() {
         let mut env_map = Mapping::new();
         for (k, v) in &t.env {
-            env_map.insert(s(k), s(&lower_env_value(v)?));
+            env_map.insert(s(k), s(&lower_env_value(ctx, v)?));
         }
         m.insert(s("env"), Value::Mapping(env_map));
     }
@@ -244,69 +300,129 @@ fn lower_checkout(c: &CheckoutStep) -> Value {
     Value::Mapping(m)
 }
 
-fn lower_download(d: &DownloadStep) -> Value {
+fn lower_download(d: &DownloadStep, ctx: &LoweringContext<'_>) -> Result<Value> {
     let mut m = Mapping::new();
     m.insert(s("download"), s(&d.source));
     m.insert(s("artifact"), s(&d.artifact));
     if let Some(cond) = &d.condition {
-        // `lower_condition` returns Result, but we know inputs to this
-        // helper cannot contain step-output references — DownloadStep's
-        // condition is restricted to the static subset by construction.
-        // Use expect with a load-bearing message so a future regression
-        // surfaces loudly rather than silently.
-        m.insert(
-            s("condition"),
-            s(lower_condition(cond).expect("DownloadStep.condition: simple variants only")),
-        );
+        m.insert(s("condition"), s(&lower_condition(ctx, cond)?));
     }
-    Value::Mapping(m)
+    Ok(Value::Mapping(m))
 }
 
-fn lower_publish(p: &PublishStep) -> Value {
+fn lower_publish(p: &PublishStep, ctx: &LoweringContext<'_>) -> Result<Value> {
     let mut m = Mapping::new();
     m.insert(s("publish"), s(&p.path));
     m.insert(s("artifact"), s(&p.artifact));
     if let Some(cond) = &p.condition {
-        m.insert(
-            s("condition"),
-            s(lower_publish_condition(cond)),
-        );
+        m.insert(s("condition"), s(&lower_condition(ctx, cond)?));
     }
-    Value::Mapping(m)
+    Ok(Value::Mapping(m))
 }
 
-fn lower_publish_condition(cond: &Condition) -> String {
-    lower_condition(cond).expect("PublishStep.condition: simple variants only")
-}
-
-/// Lower an [`EnvValue`] to its ADO scalar form.
-///
-/// The variants that need cross-step resolution
-/// ([`EnvValue::StepOutput`], [`EnvValue::Coalesce`]) are introduced
-/// in the `ir-output-lowering` commit.
-fn lower_env_value(v: &EnvValue) -> Result<String> {
+/// Lower an [`EnvValue`] to its ADO scalar form. `StepOutput` and
+/// `Coalesce` variants use the consumer location from `ctx` to pick
+/// the right reference syntax via [`lower_outputref`].
+fn lower_env_value(ctx: &LoweringContext<'_>, v: &EnvValue) -> Result<String> {
     match v {
         EnvValue::Literal(s) => Ok(s.clone()),
         EnvValue::AdoMacro(name) => Ok(format!("$({name})")),
         EnvValue::PipelineVar(name) => Ok(format!("$({name})")),
         EnvValue::Secret(name) => Ok(format!("$({name})")),
-        EnvValue::StepOutput(_) => Err(anyhow::anyhow!(
-            "ir::lower: EnvValue::StepOutput lowering is introduced by the ir-output-lowering commit"
-        )),
-        EnvValue::Coalesce(_) => Err(anyhow::anyhow!(
-            "ir::lower: EnvValue::Coalesce lowering is introduced by the ir-output-lowering commit"
-        )),
+        EnvValue::StepOutput(r) => Ok(lower_outputref_for(ctx, r)?),
+        EnvValue::Coalesce(children) => {
+            let mut parts: Vec<String> = Vec::with_capacity(children.len() + 1);
+            for c in children {
+                // Inside Coalesce, AdoMacro / PipelineVar / Secret /
+                // StepOutput lower to ADO **expression** atoms (not
+                // macro-form $()). Variables: `variables['Name']`;
+                // step outputs: same reference syntax as outside,
+                // but without the `$()` wrap because we're already
+                // inside `$[ … ]`.
+                parts.push(lower_env_value_as_expr_atom(ctx, c)?);
+            }
+            parts.push("''".to_string());
+            Ok(format!("$[ coalesce({}) ]", parts.join(", ")))
+        }
     }
-    .context("lower_env_value")
+}
+
+/// Sub-expression form for atoms inside `$[ coalesce(...) ]`.
+///
+/// Inside an ADO runtime expression, predefined variables use
+/// `variables['Name']`, not `$(Name)`. Step output references inside
+/// expressions use the *unwrapped* `dependencies.X` /
+/// `stageDependencies.X` / `variables['stepName.X']` form.
+fn lower_env_value_as_expr_atom(ctx: &LoweringContext<'_>, v: &EnvValue) -> Result<String> {
+    match v {
+        EnvValue::Literal(s) => Ok(format!("'{}'", s.replace('\'', "''"))),
+        EnvValue::AdoMacro(name) => Ok(format!("variables['{name}']")),
+        EnvValue::PipelineVar(name) => Ok(format!("variables['{name}']")),
+        EnvValue::Secret(name) => Ok(format!("variables['{name}']")),
+        EnvValue::StepOutput(r) => Ok(lower_outputref_for_expr(ctx, r)?),
+        EnvValue::Coalesce(children) => {
+            // Flatten nested Coalesce: their children appear inline
+            // in the enclosing one's argument list. This matches the
+            // documented behaviour in `EnvValue` doc-comments.
+            let mut parts: Vec<String> = Vec::with_capacity(children.len());
+            for c in children {
+                parts.push(lower_env_value_as_expr_atom(ctx, c)?);
+            }
+            // Don't wrap in `$[ … ]` again — we are already inside one.
+            Ok(format!("coalesce({})", parts.join(", ")))
+        }
+    }
+}
+
+/// Lower an OutputRef in macro form (suitable for direct env-value
+/// substitution): the result is the **whole** ADO scalar.
+fn lower_outputref_for(ctx: &LoweringContext<'_>, r: &OutputRef) -> Result<String> {
+    let producer_loc = ctx.graph.step_locations.get(&r.step).ok_or_else(|| {
+        anyhow::anyhow!(
+            "ir::lower: OutputRef references unknown step '{}' \
+             (graph::build_graph should have caught this)",
+            r.step
+        )
+    })?;
+    let producer = ProducerLocation {
+        stage: producer_loc.stage.as_ref(),
+        job: &producer_loc.job,
+    };
+    Ok(lower_outputref(ctx.consumer(), producer, r))
+}
+
+/// Lower an OutputRef in **expression-atom** form (no `$(...)` wrap).
+fn lower_outputref_for_expr(ctx: &LoweringContext<'_>, r: &OutputRef) -> Result<String> {
+    let producer_loc = ctx.graph.step_locations.get(&r.step).ok_or_else(|| {
+        anyhow::anyhow!(
+            "ir::lower: OutputRef references unknown step '{}' \
+             (graph::build_graph should have caught this)",
+            r.step
+        )
+    })?;
+    let producer = ProducerLocation {
+        stage: producer_loc.stage.as_ref(),
+        job: &producer_loc.job,
+    };
+    // Reuse the same lowering and strip the `$()` wrap for same-job
+    // macro form, since we're inside `$[ … ]` already.
+    let lowered = lower_outputref(ctx.consumer(), producer, r);
+    if let Some(rest) = lowered.strip_prefix("$(").and_then(|s| s.strip_suffix(')')) {
+        // Same-job macro: `$(step.name)` → expression form
+        // `variables['step.name']`. ADO runtime expressions cannot
+        // see step outputs from the producing job via `variables[…]`
+        // either; this is the same limitation as `compile_gate_step_external`
+        // documents in src/compile/filter_ir.rs. Coalesce inputs
+        // should therefore not target same-job outputs — the caller
+        // chooses Coalesce only for cross-job/cross-stage cases.
+        Ok(format!("variables['{rest}']"))
+    } else {
+        Ok(lowered)
+    }
 }
 
 /// Lower a [`Condition`] to its ADO condition string.
-///
-/// Only the static subset (no [`Expr::StepOutput`]) is handled here.
-/// Full codegen — including `Custom` injection checks and pretty
-/// indentation for And/Or chains — is the `ir-condition-codegen`
-/// commit.
-fn lower_condition(c: &Condition) -> Result<String> {
+fn lower_condition(ctx: &LoweringContext<'_>, c: &Condition) -> Result<String> {
     Ok(match c {
         Condition::Succeeded => "succeeded()".to_string(),
         Condition::Always => "always()".to_string(),
@@ -315,31 +431,29 @@ fn lower_condition(c: &Condition) -> Result<String> {
         Condition::And(parts) => {
             let lowered = parts
                 .iter()
-                .map(lower_condition)
+                .map(|p| lower_condition(ctx, p))
                 .collect::<Result<Vec<_>>>()?;
             format!("and({})", lowered.join(", "))
         }
         Condition::Or(parts) => {
             let lowered = parts
                 .iter()
-                .map(lower_condition)
+                .map(|p| lower_condition(ctx, p))
                 .collect::<Result<Vec<_>>>()?;
             format!("or({})", lowered.join(", "))
         }
-        Condition::Not(inner) => format!("not({})", lower_condition(inner)?),
-        Condition::Eq(a, b) => format!("eq({}, {})", lower_expr(a)?, lower_expr(b)?),
-        Condition::Ne(a, b) => format!("ne({}, {})", lower_expr(a)?, lower_expr(b)?),
+        Condition::Not(inner) => format!("not({})", lower_condition(ctx, inner)?),
+        Condition::Eq(a, b) => format!("eq({}, {})", lower_expr(ctx, a)?, lower_expr(ctx, b)?),
+        Condition::Ne(a, b) => format!("ne({}, {})", lower_expr(ctx, a)?, lower_expr(ctx, b)?),
         Condition::Custom(raw) => raw.clone(),
     })
 }
 
-fn lower_expr(e: &Expr) -> Result<String> {
+fn lower_expr(ctx: &LoweringContext<'_>, e: &Expr) -> Result<String> {
     Ok(match e {
         Expr::Literal(v) => format!("'{}'", v.replace('\'', "''")),
         Expr::Variable(name) => format!("variables['{name}']"),
-        Expr::StepOutput(_) => anyhow::bail!(
-            "ir::lower: Expr::StepOutput lowering is introduced by the ir-output-lowering commit"
-        ),
+        Expr::StepOutput(r) => lower_outputref_for_expr(ctx, r)?,
     })
 }
 
@@ -356,15 +470,38 @@ fn s(v: impl Into<String>) -> Value {
 mod tests {
     use super::*;
     use crate::compile::ir::ids::{JobId, StepId};
+    use crate::compile::ir::output::OutputDecl;
+    use crate::compile::ir::step::BashStep;
+    use crate::compile::ir::{PipelineBody, PipelineShape, Resources, Triggers};
+
+    fn ctx_for<'a>(graph: &'a Graph, job: &'a JobId) -> LoweringContext<'a> {
+        LoweringContext {
+            graph,
+            stage: None,
+            job,
+        }
+    }
 
     #[test]
     fn lower_condition_static_variants() {
-        assert_eq!(lower_condition(&Condition::Succeeded).unwrap(), "succeeded()");
+        let g = Graph::default();
+        let job = JobId::new("J").unwrap();
+        let ctx = ctx_for(&g, &job);
         assert_eq!(
-            lower_condition(&Condition::and([
-                Condition::Succeeded,
-                Condition::Ne(Expr::Variable("Build.Reason".into()), Expr::Literal("PullRequest".into())),
-            ]))
+            lower_condition(&ctx, &Condition::Succeeded).unwrap(),
+            "succeeded()"
+        );
+        assert_eq!(
+            lower_condition(
+                &ctx,
+                &Condition::and([
+                    Condition::Succeeded,
+                    Condition::Ne(
+                        Expr::Variable("Build.Reason".into()),
+                        Expr::Literal("PullRequest".into())
+                    ),
+                ])
+            )
             .unwrap(),
             "and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))"
         );
@@ -372,27 +509,64 @@ mod tests {
 
     #[test]
     fn lower_env_value_simple_variants() {
-        assert_eq!(lower_env_value(&EnvValue::literal("x")).unwrap(), "x");
+        let g = Graph::default();
+        let job = JobId::new("J").unwrap();
+        let ctx = ctx_for(&g, &job);
+        assert_eq!(lower_env_value(&ctx, &EnvValue::literal("x")).unwrap(), "x");
         assert_eq!(
-            lower_env_value(&EnvValue::ado_macro("Build.Reason").unwrap()).unwrap(),
+            lower_env_value(&ctx, &EnvValue::ado_macro("Build.Reason").unwrap()).unwrap(),
             "$(Build.Reason)"
         );
         assert_eq!(
-            lower_env_value(&EnvValue::pipeline_var("MY_VAR")).unwrap(),
+            lower_env_value(&ctx, &EnvValue::pipeline_var("MY_VAR")).unwrap(),
             "$(MY_VAR)"
         );
         assert_eq!(
-            lower_env_value(&EnvValue::secret("MCP_API_KEY")).unwrap(),
+            lower_env_value(&ctx, &EnvValue::secret("MCP_API_KEY")).unwrap(),
             "$(MCP_API_KEY)"
         );
     }
 
     #[test]
-    fn lower_env_value_step_output_errors_until_next_commit() {
-        use crate::compile::ir::output::OutputRef;
-        let r = OutputRef::new(StepId::new("synthPr").unwrap(), "X");
-        let err = lower_env_value(&EnvValue::step_output(r)).unwrap_err();
-        assert!(format!("{err:#}").contains("ir-output-lowering"));
+    fn lower_env_value_coalesce_produces_canonical_form() {
+        // Build a pipeline with synthPr producer in Setup and a
+        // consumer in Agent so the producer location resolves through
+        // the graph correctly.
+        let synth = StepId::new("synthPr").unwrap();
+        let producer = Step::Bash(
+            BashStep::new("Setup", "echo s")
+                .with_id(synth.clone())
+                .with_output(OutputDecl::new("AW_SYNTHETIC_PR_ID")),
+        );
+        let mut setup = Job::new(JobId::new("Setup").unwrap(), "Setup", Pool::VmImage("u".into()));
+        setup.push_step(producer);
+        let agent_job = Job::new(JobId::new("Agent").unwrap(), "Agent", Pool::VmImage("u".into()));
+        let p = Pipeline {
+            name: "t".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers::default(),
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(vec![setup, agent_job]),
+            shape: PipelineShape::Standalone,
+        };
+        let g = super::super::graph::build_graph(&p).unwrap();
+
+        let agent_id = JobId::new("Agent").unwrap();
+        let ctx = LoweringContext {
+            graph: &g,
+            stage: None,
+            job: &agent_id,
+        };
+
+        let v = EnvValue::coalesce(vec![
+            EnvValue::ado_macro("System.PullRequest.PullRequestId").unwrap(),
+            EnvValue::step_output(OutputRef::new(synth, "AW_SYNTHETIC_PR_ID")),
+        ]);
+        assert_eq!(
+            lower_env_value(&ctx, &v).unwrap(),
+            "$[ coalesce(variables['System.PullRequest.PullRequestId'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_ID'], '') ]"
+        );
     }
 
     #[test]
@@ -406,15 +580,13 @@ mod tests {
         job.condition = Some(Condition::Succeeded);
         job.push_step(Step::Bash(BashStep::new("ado-aw", "echo hi")));
 
-        let v = lower_job(&job).unwrap();
+        let g = Graph::default();
+        let v = lower_job(&job, None, &g).unwrap();
         let m = match v {
             Value::Mapping(m) => m,
             _ => panic!(),
         };
-        let keys: Vec<&str> = m
-            .keys()
-            .filter_map(|k| k.as_str())
-            .collect();
+        let keys: Vec<&str> = m.keys().filter_map(|k| k.as_str()).collect();
         assert_eq!(
             keys,
             vec!["job", "displayName", "dependsOn", "condition", "pool", "steps"]
