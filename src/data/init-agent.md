@@ -15,13 +15,13 @@ Before creating or compiling workflows, ensure the ado-aw compiler is available.
 
 ```bash
 # Linux
-curl -fsSL https://raw.githubusercontent.com/githubnext/ado-aw/main/scripts/install/install-linux.sh | sh
+curl -fsSL https://github.com/githubnext/ado-aw/releases/latest/download/install-linux.sh | sh
 
 # macOS (Apple Silicon)
-curl -fsSL https://raw.githubusercontent.com/githubnext/ado-aw/main/scripts/install/install-macos.sh | sh
+curl -fsSL https://github.com/githubnext/ado-aw/releases/latest/download/install-macos.sh | sh
 
 # Windows (PowerShell)
-powershell -ExecutionPolicy Bypass -NoProfile -Command "iwr https://raw.githubusercontent.com/githubnext/ado-aw/main/scripts/install/install-windows.ps1 -UseBasicParsing | iex"
+powershell -ExecutionPolicy Bypass -NoProfile -Command "iwr https://github.com/githubnext/ado-aw/releases/latest/download/install-windows.ps1 -UseBasicParsing | iex"
 ```
 
 These scripts validate release checksums, install `ado-aw`, and update PATH when needed.

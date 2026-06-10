@@ -87,6 +87,9 @@ jobs:
           gh release upload "$TAG" \
             target/release/ado-aw-linux-x64 \
             ado-script.zip \
+            scripts/install/install-linux.sh \
+            scripts/install/install-macos.sh \
+            scripts/install/install-windows.ps1 \
             --clobber
 
   build-windows:
@@ -177,12 +180,26 @@ jobs:
           gh release download "$TAG" \
             --pattern "ado-aw-*" \
             --pattern "ado-script.zip" \
+            --pattern "install-linux.sh" \
+            --pattern "install-macos.sh" \
+            --pattern "install-windows.ps1" \
             --repo "${{ github.repository }}"
           test -f ado-aw-linux-x64 || { echo "Missing ado-aw-linux-x64"; exit 1; }
           test -f ado-aw-windows-x64.exe || { echo "Missing ado-aw-windows-x64.exe"; exit 1; }
           test -f ado-aw-darwin-arm64 || { echo "Missing ado-aw-darwin-arm64"; exit 1; }
           test -f ado-script.zip || { echo "Missing ado-script.zip"; exit 1; }
-          sha256sum ado-aw-linux-x64 ado-aw-windows-x64.exe ado-aw-darwin-arm64 ado-script.zip > checksums.txt
+          test -f install-linux.sh || { echo "Missing install-linux.sh"; exit 1; }
+          test -f install-macos.sh || { echo "Missing install-macos.sh"; exit 1; }
+          test -f install-windows.ps1 || { echo "Missing install-windows.ps1"; exit 1; }
+          sha256sum \
+            ado-aw-linux-x64 \
+            ado-aw-windows-x64.exe \
+            ado-aw-darwin-arm64 \
+            ado-script.zip \
+            install-linux.sh \
+            install-macos.sh \
+            install-windows.ps1 \
+            > checksums.txt
 
       - name: Upload checksums
         env:
