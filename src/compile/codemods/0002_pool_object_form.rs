@@ -145,8 +145,10 @@ mod tests {
             serde_yaml::from_str("name: x\ndescription: y\ntarget: 1es").unwrap();
         let changed1 = apply_codemod(&mut fm, &ctx("0.30.0")).expect("first apply");
         assert!(changed1);
+        let snapshot = fm.clone();
         let changed2 = apply_codemod(&mut fm, &ctx("0.30.0")).expect("second apply");
         assert!(!changed2, "second run must be a no-op");
+        assert_eq!(fm, snapshot, "second run must not mutate the mapping");
     }
 
     #[test]
