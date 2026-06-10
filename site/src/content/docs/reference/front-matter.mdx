@@ -242,6 +242,7 @@ changed-file globs, time windows, draft status, and more.
 ```yaml
 on:
   pr:
+    mode: synthetic              # synthetic (default) or policy — see below
     branches:
       include: [main, release/*]  # native ADO — only PRs targeting these branches
     paths:
@@ -280,6 +281,25 @@ on:
 All filter fields are optional and combined with AND semantics — every configured field must pass. `author`, `labels`, and `changed-files` require a REST API call to the ADO PR endpoint; use native ADO `branches:` / `paths:` for broad exclusions that don't need runtime context.
 
 See the [Filter IR reference](/ado-aw/reference/filter-ir/) for compilation details and validation rules.
+
+**`on.pr.mode`** — Controls how the pipeline queues PR builds:
+
+| `mode` | CI `trigger:` | Use when |
+|--------|---------------|----------|
+| `synthetic` (default) | ADO default (all branches) | No Build Validation branch policy is installed. Setup synthesizes PR context from the ADO API. **Recommended for most agents.** |
+| `policy` | `trigger: none` | Operator has installed an ADO Build Validation branch policy. Prevents duplicate CI builds. |
+
+:::note[ADO Azure Repos behavior]
+Azure DevOps ignores the YAML `pr:` block for **Azure Repos** repositories unless a [Build Validation branch policy](https://learn.microsoft.com/en-us/azure/devops/repos/git/branch-policies?view=azure-devops#build-validation) is registered server-side. Without one, every push fires as `Build.Reason = IndividualCI` even when a PR is open — PR-aware agents silently degrade.
+
+`ado-aw` offers two strategies:
+
+**`mode: synthetic` (default)** — fires the pipeline on every push (ADO `trigger:` at its default). A Setup-job step calls the ADO REST API to find an open PR for the pushed branch:
+- **PR found** → promotes the build to PR semantics (`AW_SYNTHETIC_PR=true`), evaluates `filters:`, and stages `aw-context/pr/` context for the agent.
+- **No PR found** → sets `AW_SYNTHETIC_PR_SKIP=true` and the Agent job self-skips cleanly — no noise, no red builds.
+
+**`mode: policy`** — for when the operator has explicitly installed a Build Validation branch policy targeting this pipeline. The compiler emits `trigger: none` so pushes no longer queue duplicate CI builds alongside the policy-driven PR build. Every PR update fires exactly one `Build.Reason = PullRequest` build.
+:::
 
 ### Trigger suppression
 
