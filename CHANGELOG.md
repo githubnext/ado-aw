@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.35.0](https://github.com/githubnext/ado-aw/compare/v0.34.3...v0.35.0) (2026-06-10)
+
+
+### Features
+
+* **install:** add checksum-verified one-line first-time installers ([#942](https://github.com/githubnext/ado-aw/issues/942)) ([040cdad](https://github.com/githubnext/ado-aw/commit/040cdad14f90dd44767dcb84e15a0c9d48fe8a55))
+
 ## [0.34.3](https://github.com/githubnext/ado-aw/compare/v0.34.2...v0.34.3) (2026-06-10)
 
 
