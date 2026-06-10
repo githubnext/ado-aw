@@ -36,6 +36,7 @@
 pub mod condition;
 pub mod emit;
 pub mod env;
+pub mod graph;
 pub mod ids;
 pub mod job;
 pub mod lower;
