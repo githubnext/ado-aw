@@ -24,7 +24,7 @@ use anyhow::{Context, Result};
 use serde_yaml::{Mapping, Value};
 use std::time::Duration;
 
-use super::condition::{Condition, Expr};
+use super::condition::codegen::{CondCodegenCtx, lower_condition};
 use super::env::EnvValue;
 use super::graph::Graph;
 use super::ids::{JobId, StageId};
@@ -50,6 +50,16 @@ pub struct LoweringContext<'a> {
 impl<'a> LoweringContext<'a> {
     fn consumer(&self) -> ConsumerLocation<'a> {
         ConsumerLocation {
+            stage: self.stage,
+            job: self.job,
+        }
+    }
+
+    /// Build a [`CondCodegenCtx`] sharing the same producer-lookup
+    /// and consumer-location data. Cheap (only borrows).
+    fn cond_ctx(&self) -> CondCodegenCtx<'a> {
+        CondCodegenCtx {
+            graph: self.graph,
             stage: self.stage,
             job: self.job,
         }
@@ -141,7 +151,7 @@ fn lower_stage(stage: &Stage, graph: &Graph) -> Result<Value> {
                     )
                 })?,
         };
-        m.insert(s("condition"), s(&lower_condition(&ctx, cond)?));
+        m.insert(s("condition"), s(&lower_condition(&ctx.cond_ctx(), cond)?));
     }
     let mut jobs = Vec::with_capacity(stage.jobs.len());
     for job in &stage.jobs {
@@ -165,7 +175,7 @@ fn lower_job(job: &Job, stage: Option<&StageId>, graph: &Graph) -> Result<Value>
         m.insert(s("dependsOn"), Value::Sequence(deps));
     }
     if let Some(cond) = &job.condition {
-        m.insert(s("condition"), s(&lower_condition(&ctx, cond)?));
+        m.insert(s("condition"), s(&lower_condition(&ctx.cond_ctx(), cond)?));
     }
     if let Some(t) = job.timeout {
         m.insert(s("timeoutInMinutes"), Value::from(minutes_ceil(t)));
@@ -216,7 +226,7 @@ fn lower_bash(b: &BashStep, ctx: &LoweringContext<'_>) -> Result<Value> {
     }
     m.insert(s("displayName"), s(&b.display_name));
     if let Some(cond) = &b.condition {
-        m.insert(s("condition"), s(&lower_condition(ctx, cond)?));
+        m.insert(s("condition"), s(&lower_condition(&ctx.cond_ctx(), cond)?));
     }
     if let Some(t) = b.timeout {
         m.insert(s("timeoutInMinutes"), Value::from(minutes_ceil(t)));
@@ -245,7 +255,7 @@ fn lower_task(t: &TaskStep, ctx: &LoweringContext<'_>) -> Result<Value> {
     }
     m.insert(s("displayName"), s(&t.display_name));
     if let Some(cond) = &t.condition {
-        m.insert(s("condition"), s(&lower_condition(ctx, cond)?));
+        m.insert(s("condition"), s(&lower_condition(&ctx.cond_ctx(), cond)?));
     }
     if let Some(timeout) = t.timeout {
         m.insert(s("timeoutInMinutes"), Value::from(minutes_ceil(timeout)));
@@ -305,7 +315,7 @@ fn lower_download(d: &DownloadStep, ctx: &LoweringContext<'_>) -> Result<Value> 
     m.insert(s("download"), s(&d.source));
     m.insert(s("artifact"), s(&d.artifact));
     if let Some(cond) = &d.condition {
-        m.insert(s("condition"), s(&lower_condition(ctx, cond)?));
+        m.insert(s("condition"), s(&lower_condition(&ctx.cond_ctx(), cond)?));
     }
     Ok(Value::Mapping(m))
 }
@@ -315,7 +325,7 @@ fn lower_publish(p: &PublishStep, ctx: &LoweringContext<'_>) -> Result<Value> {
     m.insert(s("publish"), s(&p.path));
     m.insert(s("artifact"), s(&p.artifact));
     if let Some(cond) = &p.condition {
-        m.insert(s("condition"), s(&lower_condition(ctx, cond)?));
+        m.insert(s("condition"), s(&lower_condition(&ctx.cond_ctx(), cond)?));
     }
     Ok(Value::Mapping(m))
 }
@@ -421,42 +431,6 @@ fn lower_outputref_for_expr(ctx: &LoweringContext<'_>, r: &OutputRef) -> Result<
     }
 }
 
-/// Lower a [`Condition`] to its ADO condition string.
-fn lower_condition(ctx: &LoweringContext<'_>, c: &Condition) -> Result<String> {
-    Ok(match c {
-        Condition::Succeeded => "succeeded()".to_string(),
-        Condition::Always => "always()".to_string(),
-        Condition::Failed => "failed()".to_string(),
-        Condition::SucceededOrFailed => "succeededOrFailed()".to_string(),
-        Condition::And(parts) => {
-            let lowered = parts
-                .iter()
-                .map(|p| lower_condition(ctx, p))
-                .collect::<Result<Vec<_>>>()?;
-            format!("and({})", lowered.join(", "))
-        }
-        Condition::Or(parts) => {
-            let lowered = parts
-                .iter()
-                .map(|p| lower_condition(ctx, p))
-                .collect::<Result<Vec<_>>>()?;
-            format!("or({})", lowered.join(", "))
-        }
-        Condition::Not(inner) => format!("not({})", lower_condition(ctx, inner)?),
-        Condition::Eq(a, b) => format!("eq({}, {})", lower_expr(ctx, a)?, lower_expr(ctx, b)?),
-        Condition::Ne(a, b) => format!("ne({}, {})", lower_expr(ctx, a)?, lower_expr(ctx, b)?),
-        Condition::Custom(raw) => raw.clone(),
-    })
-}
-
-fn lower_expr(ctx: &LoweringContext<'_>, e: &Expr) -> Result<String> {
-    Ok(match e {
-        Expr::Literal(v) => format!("'{}'", v.replace('\'', "''")),
-        Expr::Variable(name) => format!("variables['{name}']"),
-        Expr::StepOutput(r) => lower_outputref_for_expr(ctx, r)?,
-    })
-}
-
 fn minutes_ceil(d: Duration) -> u64 {
     let secs = d.as_secs();
     secs.div_ceil(60)
@@ -469,6 +443,7 @@ fn s(v: impl Into<String>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compile::ir::condition::Condition;
     use crate::compile::ir::ids::{JobId, StepId};
     use crate::compile::ir::output::OutputDecl;
     use crate::compile::ir::step::BashStep;
@@ -484,26 +459,14 @@ mod tests {
 
     #[test]
     fn lower_condition_static_variants() {
+        // Quick sanity that lower.rs threads the condition codegen
+        // through. Full coverage lives in `condition::codegen::tests`.
         let g = Graph::default();
         let job = JobId::new("J").unwrap();
         let ctx = ctx_for(&g, &job);
         assert_eq!(
-            lower_condition(&ctx, &Condition::Succeeded).unwrap(),
+            lower_condition(&ctx.cond_ctx(), &Condition::Succeeded).unwrap(),
             "succeeded()"
-        );
-        assert_eq!(
-            lower_condition(
-                &ctx,
-                &Condition::and([
-                    Condition::Succeeded,
-                    Condition::Ne(
-                        Expr::Variable("Build.Reason".into()),
-                        Expr::Literal("PullRequest".into())
-                    ),
-                ])
-            )
-            .unwrap(),
-            "and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))"
         );
     }
 
@@ -601,3 +564,4 @@ mod tests {
         assert_eq!(minutes_ceil(Duration::from_secs(61)), 2);
     }
 }
+
