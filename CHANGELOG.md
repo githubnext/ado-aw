@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.34.3](https://github.com/githubnext/ado-aw/compare/v0.34.2...v0.34.3) (2026-06-10)
+
+
+### Bug Fixes
+
+* **compile:** use macro form for same-job synthPr gate refs ([#944](https://github.com/githubnext/ado-aw/issues/944)) ([51ae40e](https://github.com/githubnext/ado-aw/commit/51ae40ee4a63f1ae99faee9d47bda158811b5069))
+* **workflows:** lower min-integrity for issue-plan-maker /plan command ([#952](https://github.com/githubnext/ado-aw/issues/952)) ([2808e8a](https://github.com/githubnext/ado-aw/commit/2808e8acd14cf729b2dbd6aeb6b37e287ec3db80))
+
 ## [0.34.2](https://github.com/githubnext/ado-aw/compare/v0.34.1...v0.34.2) (2026-06-09)
 
 
