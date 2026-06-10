@@ -281,7 +281,13 @@ mod tests {
         let mut m: Mapping = serde_yaml::from_str("name: x\n").unwrap();
         let report = apply_codemods_with(&mut m, &[]).unwrap();
         assert!(!report.changed());
-        assert!(report.applied.is_empty());
+        // `changed()` is `!applied.is_empty()`, so the above already covers
+        // the applied list. Verify the mapping itself was not touched.
+        assert_eq!(
+            m,
+            serde_yaml::from_str::<Mapping>("name: x\n").unwrap(),
+            "empty registry must not modify the mapping"
+        );
     }
 
     #[test]
@@ -290,6 +296,16 @@ mod tests {
         let registry: &[&'static Codemod] = &[&TEST_CODEMOD_NOOP];
         let report = apply_codemods_with(&mut m, registry).unwrap();
         assert!(!report.changed());
+        assert!(
+            report.applied_ids().is_empty(),
+            "noop codemod must not appear in applied list, got: {:?}",
+            report.applied_ids()
+        );
+        assert_eq!(
+            m,
+            serde_yaml::from_str::<Mapping>("name: x\n").unwrap(),
+            "noop codemod must not modify the mapping"
+        );
     }
 
     #[test]
@@ -351,10 +367,12 @@ mod tests {
         let mut m: Mapping = serde_yaml::from_str("a: 1\n").unwrap();
         let report1 = apply_codemods_with(&mut m, registry).unwrap();
         assert!(report1.changed());
+        let snapshot = m.clone();
         let report2 = apply_codemods_with(&mut m, registry).unwrap();
         assert!(
             !report2.changed(),
             "second run on already-migrated mapping must be a no-op"
         );
+        assert_eq!(m, snapshot, "second run must not mutate the mapping");
     }
 }
