@@ -4452,49 +4452,51 @@ fn test_pr_filter_synth_mode_agent_condition_enforces_gate() {
 
 /// Regression guard for the synth-mode gate-step same-job ref bug: the
 /// gate step lives in the **Setup** job (same job as `synthPr`), so its
-/// env block must use `variables['synthPr.X']` (same-job runtime
-/// expression) — `dependencies.Setup.outputs[...]` is undefined inside
-/// the producing job and silently coalesces to empty, leaving
-/// `AW_SYNTHETIC_PR` empty and causing the bypass to misfire.
+/// env block must reference the synth outputs with the **macro** form
+/// `$(synthPr.X)`. The same-job runtime-expression form
+/// `$[ variables['synthPr.X'] ]` resolves to empty (step outputs are not
+/// exposed to runtime expressions in the producing job), and the
+/// cross-job form `dependencies.Setup.outputs[...]` is undefined inside
+/// the producing job — both silently coalesce to empty, leaving
+/// `AW_SYNTHETIC_PR` empty and causing the gate bypass to misfire.
 #[test]
 fn test_pr_filter_synth_mode_gate_step_uses_same_job_synth_ref() {
     let compiled = compile_fixture("pr-filter-tier1-agent.md");
 
     assert!(
-        compiled.contains(
-            "AW_SYNTHETIC_PR: \"$[ coalesce(variables['synthPr.AW_SYNTHETIC_PR'], '') ]\""
-        ),
-        "Gate step env must use same-job `variables['synthPr.X']` runtime expression — \
-         `dependencies.Setup.outputs[...]` is undefined inside the producing Setup job"
+        compiled.contains("AW_SYNTHETIC_PR: \"$(synthPr.AW_SYNTHETIC_PR)\""),
+        "Gate step env must reference the same-job `synthPr` output via the macro \
+         `$(synthPr.AW_SYNTHETIC_PR)` — the `$[ variables['synthPr.X'] ]` runtime \
+         expression resolves to empty inside the producing Setup job"
     );
     // The fixture exercises source-branch and target-branch filters,
-    // so the synth-coalesce treatment must appear on those env vars
-    // using the same-job `variables[...]` form. (ADO_PR_ID is not
+    // so the synth treatment must appear on those env vars using the
+    // mutually-exclusive macro-concatenation form. (ADO_PR_ID is not
     // exported by this fixture's filter set, so we don't assert it here.)
     assert!(
         compiled.contains(
-            "ADO_SOURCE_BRANCH: \"$[ coalesce(variables['System.PullRequest.SourceBranch'], variables['synthPr.AW_SYNTHETIC_PR_SOURCEBRANCH']) ]\""
+            "ADO_SOURCE_BRANCH: \"$(System.PullRequest.SourceBranch)$(synthPr.AW_SYNTHETIC_PR_SOURCEBRANCH)\""
         ),
-        "ADO_SOURCE_BRANCH coalesce must use same-job `variables[...]` form"
+        "ADO_SOURCE_BRANCH must concatenate the real `System.PullRequest.*` macro \
+         with the same-job `synthPr.*` macro"
     );
     assert!(
         compiled.contains(
-            "ADO_TARGET_BRANCH: \"$[ coalesce(variables['System.PullRequest.TargetBranch'], variables['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH']) ]\""
+            "ADO_TARGET_BRANCH: \"$(System.PullRequest.TargetBranch)$(synthPr.AW_SYNTHETIC_PR_TARGETBRANCH)\""
         ),
-        "ADO_TARGET_BRANCH coalesce must use same-job `variables[...]` form"
+        "ADO_TARGET_BRANCH must concatenate the real `System.PullRequest.*` macro \
+         with the same-job `synthPr.*` macro"
     );
 
-    // The same-job gate step MUST NOT use the cross-job
-    // `dependencies.Setup.outputs[...]` form for synthPr references.
-    // (It's fine elsewhere — e.g. the Agent-job dependsOn condition — but
-    // not inside the Setup job's own steps.)
-    // The same-job gate step MUST NOT use the cross-job
-    // `dependencies.Setup.outputs[...]` form for synthPr references.
-    // (It's fine elsewhere — e.g. the Agent-job dependsOn condition — but
-    // not inside the Setup job's own steps.) Bound the gate-step
-    // section by the start of the next top-level job (`\n  - job: `),
-    // since extract_job_block's `\n- job: ` boundary doesn't match the
-    // 2-space-indented job list items produced for this target.
+    // The same-job gate step MUST NOT use the broken same-job runtime
+    // expression form `variables['synthPr.X']` (resolves empty) nor the
+    // cross-job `dependencies.Setup.outputs[...]` form (undefined in the
+    // producing job) for synthPr references. (Both are fine elsewhere —
+    // e.g. the Agent-job dependsOn condition — but not inside the Setup
+    // job's own steps.) Bound the gate-step section by the start of the
+    // next top-level job (`\n  - job: `), since extract_job_block's
+    // `\n- job: ` boundary doesn't match the 2-space-indented job list
+    // items produced for this target.
     let setup_block = extract_job_block(&compiled, "Setup").expect("Setup job present");
     let gate_section = setup_block
         .split("name: prGate")
@@ -4519,6 +4521,12 @@ fn test_pr_filter_synth_mode_gate_step_uses_same_job_synth_ref() {
         "Gate step (inside Setup job) must NOT reference `dependencies.Setup.outputs['synthPr.X']` — \
          that is cross-job syntax and is undefined within the producing job. \
          Gate section: {gate_section}"
+    );
+    assert!(
+        !gate_section.contains("variables['synthPr."),
+        "Gate step (inside Setup job) must NOT reference `variables['synthPr.X']` — \
+         step outputs are not exposed to runtime expressions in the producing job \
+         and resolve to empty. Gate section: {gate_section}"
     );
 }
 
