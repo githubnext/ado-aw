@@ -324,6 +324,68 @@ pub fn replace_with_indent(template: &str, placeholder: &str, replacement: &str)
     result
 }
 
+/// Round-trip a YAML body through `serde_yaml::from_str` ➜ `to_string` to
+/// produce a canonical form (deterministic key order via `Mapping`'s preserved
+/// insertion order, normalised quoting, normalised indentation).
+///
+/// This is the **prep-PR normalisation pass** that the IR refactor (see
+/// `docs/ir.md` once it lands) relies on: by establishing a canonical
+/// serde_yaml-formatted baseline *before* the IR work, the IR PR's diff
+/// becomes purely structural — every line of churn after this point is a
+/// real change, not a cosmetic re-quoting.
+///
+/// Behaviour:
+///
+/// - Input must be a single top-level YAML document. Multi-document streams
+///   (`---` separated) are rejected.
+/// - Leading `#` comment lines and blank lines are preserved verbatim and
+///   prepended back onto the normalised body. This keeps the per-file
+///   `# This file is auto-generated …` / `# @ado-aw …` header intact while
+///   normalising everything below it.
+/// - YAML comments *between* mapping keys (e.g. the `# Disable PR triggers`
+///   line emitted by [`generate_pr_trigger`]) are dropped — serde_yaml does
+///   not preserve them. This is intentional and accepted as part of the
+///   canonical-form definition.
+/// - Comments *inside* literal block scalars (e.g. bash `#` comments inside
+///   `script: |` blocks) are not affected, because they are string content
+///   from the YAML parser's perspective.
+///
+/// Used in [`compile_shared`] and [`compile_template_target`] just before
+/// the leading header comment is prepended.
+pub fn normalize_yaml(input: &str) -> Result<String> {
+    // Split off any leading comment / blank lines and preserve them
+    // verbatim. The first non-comment, non-blank line marks the start of
+    // the YAML body. Anything before it round-trips through `serde_yaml`
+    // would be lost (comments are not preserved); we put them back
+    // unchanged after the normalisation pass.
+    let mut header_end = 0usize;
+    for line in input.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            header_end += line.len();
+        } else {
+            break;
+        }
+    }
+    let header = &input[..header_end];
+    let body = &input[header_end..];
+
+    if body.trim().is_empty() {
+        // No body to normalise — return input unchanged.
+        return Ok(input.to_string());
+    }
+
+    let value: serde_yaml::Value =
+        serde_yaml::from_str(body).context("normalize_yaml: failed to parse YAML body")?;
+    let mut normalised = serde_yaml::to_string(&value)
+        .context("normalize_yaml: failed to serialise canonical YAML")?;
+    if !normalised.ends_with('\n') {
+        normalised.push('\n');
+    }
+
+    Ok(format!("{header}{normalised}"))
+}
+
 /// Generate a schedule YAML block from a ScheduleConfig.
 /// Generate the top-level `parameters:` YAML block from front matter parameters.
 ///
@@ -3601,6 +3663,11 @@ pub async fn compile_shared(
             replace_with_indent(&yaml, placeholder, replacement)
         });
 
+    // Canonical normalisation pass: round-trip the assembled YAML through
+    // serde_yaml so committed lock files share a single deterministic
+    // formatting baseline. See `normalize_yaml` for the precise contract.
+    let pipeline_yaml = normalize_yaml(&pipeline_yaml)?;
+
     // 15. Prepend header (unless the caller will prepend its own)
     if skip_header {
         Ok(pipeline_yaml)
@@ -3705,6 +3772,80 @@ mod tests {
     fn minimal_front_matter() -> FrontMatter {
         let (fm, _) = parse_markdown("---\nname: test-agent\ndescription: test\n---\n").unwrap();
         fm
+    }
+
+    // ─── normalize_yaml ───────────────────────────────────────────────────────
+
+    #[test]
+    fn normalize_yaml_round_trips_a_simple_mapping() {
+        let input = "name: foo\nvalue: bar\n";
+        let out = normalize_yaml(input).unwrap();
+        // The output is whatever serde_yaml chooses to emit; the contract is
+        // that re-parsing produces a structurally equal Value.
+        let v1: serde_yaml::Value = serde_yaml::from_str(input).unwrap();
+        let v2: serde_yaml::Value = serde_yaml::from_str(&out).unwrap();
+        assert_eq!(v1, v2);
+    }
+
+    #[test]
+    fn normalize_yaml_preserves_leading_comment_header() {
+        let input = "# Auto-generated header\n# @ado-aw source=foo\n\nname: bar\n";
+        let out = normalize_yaml(input).unwrap();
+        assert!(
+            out.starts_with("# Auto-generated header\n# @ado-aw source=foo\n\n"),
+            "leading comment header must round-trip verbatim, got: {out:?}"
+        );
+        // Parse-equivalent on the body
+        let body_start = out.find("name:").unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&out[body_start..]).unwrap();
+        let expected: serde_yaml::Value = serde_yaml::from_str("name: bar\n").unwrap();
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn normalize_yaml_drops_inline_yaml_comments_by_design() {
+        // Inline comments between mapping keys are dropped by serde_yaml on
+        // round-trip. This is the documented contract — the prep PR exists
+        // precisely so this loss happens now (cosmetic) rather than during
+        // the IR PR (mixed with structural changes).
+        let input = "# leading\nname: foo\n# inline comment\nvalue: bar\n";
+        let out = normalize_yaml(input).unwrap();
+        assert!(out.starts_with("# leading\n"), "leader preserved");
+        assert!(
+            !out.contains("# inline comment"),
+            "inline YAML comments are dropped by design, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn normalize_yaml_preserves_bash_comments_inside_literal_blocks() {
+        // A `#` line inside a `|` literal block is string content from
+        // the YAML parser's perspective, so it survives round-trip.
+        let input = "name: foo\nscript: |\n  # bash comment, not YAML\n  echo hi\n";
+        let out = normalize_yaml(input).unwrap();
+        assert!(
+            out.contains("# bash comment, not YAML"),
+            "bash comments inside literal scalars must survive, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn normalize_yaml_passes_through_empty_body() {
+        // Header-only input (no body) is returned verbatim — there is
+        // nothing to round-trip.
+        let input = "# only a comment\n\n";
+        let out = normalize_yaml(input).unwrap();
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn normalize_yaml_fails_on_invalid_yaml() {
+        let input = "name: [unterminated\n";
+        let err = normalize_yaml(input).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("normalize_yaml"),
+            "error must be wrapped with the helper's context, got: {err:#}"
+        );
     }
 
     // ─── atomic_write ─────────────────────────────────────────────────────────
