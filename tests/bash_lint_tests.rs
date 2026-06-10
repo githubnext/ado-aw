@@ -120,6 +120,7 @@ const REQUIRED_STEP_DISPLAY_NAMES: &[&str] = &[
     "Append Azure CLI prompt", // src/compile/extensions/azure_cli.rs conditional prompt-append step
     "ado-aw",               // src/compile/extensions/ado_aw_marker.rs metadata marker step
     "Stage PR execution context (aw-context/pr/*)", // src/compile/extensions/exec_context/pr.rs
+    "Resolve synthetic PR context", // src/compile/extensions/ado_script.rs synthetic_pr_step()
 ];
 
 fn ado_aw_binary() -> PathBuf {
