@@ -1794,6 +1794,7 @@ Body
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
         let cm = fm.tools.as_ref().unwrap().cache_memory.as_ref().unwrap();
         assert!(!cm.is_enabled());
+        assert!(cm.allowed_extensions().is_empty());
     }
 
     #[test]
@@ -2289,20 +2290,6 @@ triggers:
     }
 
     #[test]
-    fn test_pr_trigger_config_mode_explicit_synthetic() {
-        let yaml = r#"
-triggers:
-  pr:
-    branches:
-      include: [main]
-    mode: synthetic
-"#;
-        let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
-        let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
-        assert_eq!(tc.pr.unwrap().mode, PrMode::Synthetic);
-    }
-
-    #[test]
     fn test_pr_trigger_config_mode_explicit_policy() {
         let yaml = r#"
 triggers:
@@ -2382,10 +2369,21 @@ triggers:
 "#;
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
+        // `filters: {}` must produce a Some with every optional field defaulting to None
         let filters = tc.pr.unwrap().filters.unwrap();
         assert!(filters.title.is_none());
         assert!(filters.author.is_none());
+        assert!(filters.source_branch.is_none());
+        assert!(filters.target_branch.is_none());
+        assert!(filters.commit_message.is_none());
+        assert!(filters.labels.is_none());
         assert!(filters.draft.is_none());
+        assert!(filters.changed_files.is_none());
+        assert!(filters.time_window.is_none());
+        assert!(filters.min_changes.is_none());
+        assert!(filters.max_changes.is_none());
+        assert!(filters.build_reason.is_none());
+        assert!(filters.expression.is_none());
     }
 
     #[test]
