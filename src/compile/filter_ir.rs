@@ -1130,14 +1130,20 @@ pub fn build_gate_spec(ctx: GateContext, checks: &[FilterCheck]) -> anyhow::Resu
 /// **Same-job vs cross-job reference**: this gate step lives in the
 /// **Setup job** (`AdoScriptExtension::setup_steps` returns it), the
 /// same job as `synthPr`. Within the producing job, the cross-job form
-/// `dependencies.Setup.outputs['synthPr.X']` is undefined (a job has
-/// no entry for itself in `dependencies`), so we use the same-job
-/// runtime expression `variables['synthPr.X']` instead, which resolves
-/// step output variables added to the job's variable scope by prior
-/// `isOutput=true` setvariable commands. See
+/// `dependencies.Setup.outputs['synthPr.X']` is undefined (a job has no
+/// entry for itself in `dependencies`), and — critically — the same-job
+/// *runtime expression* form `$[ variables['synthPr.X'] ]` also resolves
+/// to **empty**: step output variables are NOT exposed to runtime
+/// expressions in the producing job. They are only reachable via the
+/// **macro** form `$(synthPr.X)`, which expands them from the job's
+/// output-variable namespace (empty when the producing step was skipped
+/// or never set the output). We therefore reference synth outputs with
+/// macros and rely on macro concatenation: real `System.PullRequest.*`
+/// and synth `synthPr.*` are mutually exclusive (synthPr only runs on
+/// non-PR builds; `System.PullRequest.*` is empty on non-PR builds), so
+/// `$(System.PullRequest.X)$(synthPr.X)` yields exactly one non-empty
+/// value. See
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/process/variables#use-output-variables-from-tasks>.
-/// Runtime expressions (`$[ ... ]`) are valid in step-level `env:`
-/// blocks per the same docs.
 pub fn compile_gate_step_external(
     ctx: GateContext,
     checks: &[FilterCheck],
@@ -1172,31 +1178,36 @@ pub fn compile_gate_step_external(
     // has been promoted to PR semantics, so the "not a PullRequest
     // build" bypass must not auto-pass. Always safe to emit (the gate
     // checks it strictly for the literal "true"), but only meaningful
-    // for PR gates. Same-job ref via `variables['synthPr.X']` — see
-    // function doc-comment for why this is NOT `dependencies.Setup...`.
+    // for PR gates. Same-job ref via the macro `$(synthPr.X)` — see
+    // function doc-comment for why this is NOT `variables['synthPr.X']`
+    // (resolves empty) nor `dependencies.Setup.outputs[...]` (undefined
+    // in the producing job).
     let pr_synth_active = synthetic_pr_active && matches!(ctx, GateContext::PullRequest);
     if pr_synth_active {
-        // YAML-quote runtime expressions whose value contains single quotes.
-        // Per ADO docs, `$[ ... ]` runtime expressions are valid in step
-        // `env:` blocks; wrapping in double quotes keeps the value
-        // strictly conformant to the YAML spec (which reserves `'` as a
-        // scalar indicator) and matches the form shown in ADO docs.
-        step.push_str(
-            "    AW_SYNTHETIC_PR: \"$[ coalesce(variables['synthPr.AW_SYNTHETIC_PR'], '') ]\"\n",
-        );
+        // Macro form: `$(synthPr.AW_SYNTHETIC_PR)` expands to "true" when
+        // the same-job `synthPr` step matched a PR, and to empty when it
+        // was skipped (real PR build) or found no PR — never the literal
+        // "true", so `gate/bypass.ts`'s strict `=== "true"` check stays
+        // correct in every case.
+        step.push_str("    AW_SYNTHETIC_PR: \"$(synthPr.AW_SYNTHETIC_PR)\"\n");
     }
 
     for (env_var, ado_macro) in &exports {
         let macro_str = if pr_synth_active {
+            // Mutually-exclusive macro concatenation: on a real PR build
+            // `System.PullRequest.*` holds the value and `synthPr.*` is
+            // empty (step skipped); on a synth-promoted CI build
+            // `System.PullRequest.*` is empty and `synthPr.*` holds the
+            // value. Exactly one side is ever non-empty.
             match *env_var {
                 "ADO_PR_ID" => {
-                    "\"$[ coalesce(variables['System.PullRequest.PullRequestId'], variables['synthPr.AW_SYNTHETIC_PR_ID']) ]\""
+                    "\"$(System.PullRequest.PullRequestId)$(synthPr.AW_SYNTHETIC_PR_ID)\""
                 }
                 "ADO_SOURCE_BRANCH" => {
-                    "\"$[ coalesce(variables['System.PullRequest.SourceBranch'], variables['synthPr.AW_SYNTHETIC_PR_SOURCEBRANCH']) ]\""
+                    "\"$(System.PullRequest.SourceBranch)$(synthPr.AW_SYNTHETIC_PR_SOURCEBRANCH)\""
                 }
                 "ADO_TARGET_BRANCH" => {
-                    "\"$[ coalesce(variables['System.PullRequest.TargetBranch'], variables['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH']) ]\""
+                    "\"$(System.PullRequest.TargetBranch)$(synthPr.AW_SYNTHETIC_PR_TARGETBRANCH)\""
                 }
                 _ => ado_macro,
             }
