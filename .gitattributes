@@ -28,3 +28,7 @@ tests/safe-outputs/upload-build-attachment.lock.yml linguist-generated=true merg
 tests/safe-outputs/upload-pipeline-artifact.lock.yml linguist-generated=true merge=ours text eol=lf
 tests/safe-outputs/upload-workitem-attachment.lock.yml linguist-generated=true merge=ours text eol=lf
 # END ado-aw managed
+
+# Install scripts must always be LF (executed on Linux/macOS via curl|sh).
+scripts/install/*.sh text eol=lf
+scripts/install/*.ps1 text eol=lf
