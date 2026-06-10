@@ -1,4 +1,6 @@
-use super::{AwfMount, CompilerExtension, CompileContext, ExtensionPhase};
+use super::{AwfMount, CompileContext, CompilerExtension, Declarations, ExtensionPhase};
+use crate::compile::ir::condition::{Condition, Expr};
+use crate::compile::ir::step::{BashStep, Step};
 
 // ─── Azure CLI (always-on, install-free, gh-aw parity) ────────────────
 
@@ -121,6 +123,66 @@ impl CompilerExtension for AzureCliExtension {
         // to this extension.
         vec![self.detection_step(), self.prompt_append_step()]
     }
+
+    /// Typed-IR view of the two Agent-job prepare steps. The
+    /// detection step exports `AW_AZ_MOUNTS` via
+    /// `##vso[task.setvariable]` (a *pipeline variable*, not a step
+    /// output, so it's referenced via `variables['AW_AZ_MOUNTS']`,
+    /// not `$(detect.AW_AZ_MOUNTS)`). The conditional prompt-append
+    /// step uses [`Condition::Ne`] of that pipeline variable against
+    /// the empty-string literal — same wire shape as today's
+    /// `condition: ne(variables['AW_AZ_MOUNTS'], '')`.
+    fn declarations(&self, _ctx: &CompileContext) -> anyhow::Result<Declarations> {
+        Ok(Declarations {
+            network_hosts: self.required_hosts(),
+            bash_commands: self.required_bash_commands(),
+            agent_prepare_steps: vec![
+                Step::Bash(detection_bash_step()),
+                Step::Bash(prompt_append_bash_step()),
+            ],
+            ..Declarations::default()
+        })
+    }
+}
+
+/// Typed `BashStep` mirror of [`AzureCliExtension::detection_step`].
+/// The bash body is the same string; the wrapper goes through the IR
+/// rather than carrying it as `Step::RawYaml`.
+fn detection_bash_step() -> BashStep {
+    let script = "set -eo pipefail\n\
+        if [ -f /usr/bin/az ] && [ -d /opt/az ]; then\n  \
+          echo \"##vso[task.setvariable variable=AW_AZ_MOUNTS]--mount /opt/az:/opt/az:ro --mount /usr/bin/az:/usr/bin/az:ro\"\n  \
+          echo \"Azure CLI detected on host; mounting /opt/az and /usr/bin/az into AWF sandbox.\"\n\
+        else\n  \
+          echo \"##vso[task.setvariable variable=AW_AZ_MOUNTS]\"\n  \
+          echo \"##vso[task.logissue type=warning]Azure CLI not detected on this runner (missing /usr/bin/az or /opt/az). The az command will not be available inside the agent sandbox. Install azure-cli on the runner image to enable it.\"\n\
+        fi\n";
+    BashStep::new("Detect Azure CLI on host (for AWF mount)", script)
+}
+
+/// Typed `BashStep` mirror of [`AzureCliExtension::prompt_append_step`].
+/// Carries `Condition::Ne(variables['AW_AZ_MOUNTS'], '')`.
+fn prompt_append_bash_step() -> BashStep {
+    let script = "cat >> \"/tmp/awf-tools/agent-prompt.md\" << 'AZURE_CLI_PROMPT_EOF'\n\
+\n\
+---\n\
+\n\
+## Azure CLI (`az`)\n\
+\n\
+The Azure CLI is available inside this sandbox at `/usr/bin/az`. Prefer it over hand-rolled curl calls when it covers what you need:\n\
+\n\
+- **Azure DevOps management** \u{2014} `az devops`, `az pipelines`, `az repos`, `az boards`. These are authenticated automatically from `$AZURE_DEVOPS_EXT_PAT` when the pipeline declares `permissions: read:`. List/inspect operations Just Work; write operations honour the PAT's scopes.\n\
+- **Azure Resource Manager** \u{2014} `az resource`, `az account`, `az group`. These require a separate Azure identity that ado-aw does not provision out of the box; sign in with `az login` using credentials supplied by another mechanism (e.g. a service connection writing them into your sandbox env) before invoking them.\n\
+- **Microsoft Graph** \u{2014} `az ad`, `az rest`. Same caveat as ARM.\n\
+\n\
+If a command you need isn't covered above, file a `missing-tool` safe output naming `azure-cli` so the operator can extend coverage rather than blocking on it silently.\n\
+AZURE_CLI_PROMPT_EOF\n\
+\n\
+echo \"Azure CLI prompt appended\"\n";
+    BashStep::new("Append Azure CLI prompt", script).with_condition(Condition::Ne(
+        Expr::Variable("AW_AZ_MOUNTS".to_string()),
+        Expr::Literal(String::new()),
+    ))
 }
 
 impl AzureCliExtension {
