@@ -55,6 +55,19 @@ pub(super) trait ContextContributor {
     /// "Prepare agent prompt" step before any prepare_steps run).
     fn prepare_step(&self, ctx: &CompileContext) -> String;
 
+    /// Typed-IR sibling of [`prepare_step`] returning a
+    /// [`crate::compile::ir::step::Step`] instead of a hand-formatted
+    /// YAML string. Coexists with `prepare_step` while
+    /// `ExecContextExtension::declarations` is exercised only by
+    /// tests; both paths are required to produce semantically
+    /// equivalent steps. The legacy method is removed when
+    /// `compile-target-standalone` switches production callers and
+    /// `delete-deprecated-trait-aliases` finalises the migration.
+    fn prepare_step_typed(
+        &self,
+        ctx: &CompileContext,
+    ) -> anyhow::Result<Option<crate::compile::ir::step::Step>>;
+
     /// Agent env vars this contributor exposes. Defaults to none —
     /// the ado-aw env-var channel rejects ADO `$(...)` expressions, so
     /// all per-trigger metadata currently flows through files. Kept
@@ -96,6 +109,14 @@ impl ContextContributor for Contributor {
     fn prepare_step(&self, ctx: &CompileContext) -> String {
         match self {
             Contributor::Pr(c) => c.prepare_step(ctx),
+        }
+    }
+    fn prepare_step_typed(
+        &self,
+        ctx: &CompileContext,
+    ) -> anyhow::Result<Option<crate::compile::ir::step::Step>> {
+        match self {
+            Contributor::Pr(c) => c.prepare_step_typed(ctx),
         }
     }
     fn agent_env_vars(&self) -> Vec<(String, String)> {

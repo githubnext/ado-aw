@@ -35,7 +35,9 @@
 mod contributor;
 mod pr;
 
-use crate::compile::extensions::{CompileContext, CompilerExtension, ExtensionPhase};
+use crate::compile::extensions::{
+    CompileContext, CompilerExtension, Declarations, ExtensionPhase,
+};
 use crate::compile::types::{ExecutionContextConfig, FrontMatter};
 
 use contributor::{ContextContributor, Contributor};
@@ -199,6 +201,35 @@ impl CompilerExtension for ExecContextExtension {
         out.dedup();
         out
     }
+
+    /// Typed-IR view. Returns the typed equivalent of `prepare_steps`:
+    /// for each active contributor, emit the typed `Step` from its
+    /// `prepare_step_typed`. The PR contributor's synth-active path
+    /// now uses typed [`crate::compile::ir::env::EnvValue::Coalesce`]
+    /// plus [`crate::compile::ir::env::EnvValue::StepOutput`]
+    /// references instead of hand-written `$[ coalesce(...) ]`
+    /// strings — the lowering pass selects the cross-job
+    /// `dependencies.Setup.outputs[...]` form since the Agent-job
+    /// consumer is in a different job from the Setup-job `synthPr`
+    /// producer.
+    fn declarations(&self, ctx: &CompileContext) -> anyhow::Result<Declarations> {
+        let mut agent_prepare_steps = Vec::new();
+        if self.config.is_enabled() {
+            for c in self.contributors() {
+                if !c.should_activate(ctx) {
+                    continue;
+                }
+                if let Some(step) = c.prepare_step_typed(ctx)? {
+                    agent_prepare_steps.push(step);
+                }
+            }
+        }
+        Ok(Declarations {
+            agent_prepare_steps,
+            bash_commands: self.required_bash_commands(),
+            ..Declarations::default()
+        })
+    }
 }
 
 #[cfg(test)]
@@ -341,6 +372,112 @@ mod tests {
         assert!(
             ext.required_bash_commands().is_empty(),
             "execution-context.enabled: false must suppress required_bash_commands"
+        );
+    }
+
+    /// **Marquee end-to-end test (port-exec-context)**: assemble a
+    /// real Pipeline with `synthPr` in Setup and the typed
+    /// exec-context-pr step in Agent, lower the pipeline, and assert
+    /// the cross-job
+    /// `dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_ID']`
+    /// reference is what surfaces in the Agent step's env block.
+    /// This locks the IR's per-consumer-location lowering choice for
+    /// the synth-PR propagation path — the lowering pass, not the
+    /// contributor, is now the single source of truth for the right
+    /// reference syntax.
+    #[test]
+    fn exec_context_pr_step_lowers_to_cross_job_dep_form_in_agent_job() {
+        use crate::compile::extensions::ado_script::synthetic_pr_step_typed;
+        use crate::compile::ir::graph::build_graph;
+        use crate::compile::ir::ids::JobId;
+        use crate::compile::ir::job::{Job, Pool};
+        use crate::compile::ir::lower::{LoweringContext, lower_step};
+        use crate::compile::ir::step::Step;
+        use crate::compile::ir::{Pipeline, PipelineBody, PipelineShape, Resources, Triggers};
+
+        let fm = pr_triggered_front_matter();
+        let ctx = CompileContext::for_test(&fm);
+
+        let ext = ExecContextExtension::new(
+            ExecutionContextConfig::default(),
+            &fm,
+        );
+        // Force synthetic_pr_active so the typed Coalesce(StepOutput)
+        // path is exercised regardless of whether the front-matter
+        // helper's default already enables it.
+        let ext = ExecContextExtension {
+            synthetic_pr_active: true,
+            ..ext
+        };
+
+        let decl = ext.declarations(&ctx).unwrap();
+        assert_eq!(decl.agent_prepare_steps.len(), 1);
+        let pr_step = decl.agent_prepare_steps.into_iter().next().unwrap();
+
+        // Pair the Agent step with a Setup-job `synthPr` producer so
+        // the graph can resolve the OutputRef. The Pipeline only needs
+        // to be a valid skeleton for lowering — no SafeOutputs /
+        // Detection jobs required.
+        let synth = synthetic_pr_step_typed("AAAA").unwrap();
+        let mut setup_job = Job::new(
+            JobId::new("Setup").unwrap(),
+            "Setup",
+            Pool::VmImage("u".into()),
+        );
+        setup_job.push_step(Step::Bash(synth));
+
+        let mut agent_job = Job::new(
+            JobId::new("Agent").unwrap(),
+            "Agent",
+            Pool::VmImage("u".into()),
+        );
+        agent_job.push_step(pr_step);
+
+        let p = Pipeline {
+            name: "t".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers::default(),
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(vec![setup_job, agent_job]),
+            shape: PipelineShape::Standalone,
+        };
+
+        let g = build_graph(&p).unwrap();
+        let agent_id = JobId::new("Agent").unwrap();
+        let ctx = LoweringContext {
+            graph: &g,
+            stage: None,
+            job: &agent_id,
+        };
+        let jobs = match &p.body {
+            PipelineBody::Jobs(j) => j,
+            _ => unreachable!(),
+        };
+        let lowered = lower_step(&jobs[1].steps[0], &ctx).unwrap();
+        let yaml = serde_yaml::to_string(&lowered).unwrap();
+
+        // Cross-job dep ref MUST appear inside the runtime expression
+        // for the PR id — same for target branch and the synth flag.
+        // The trailing `, ''` is added by the IR lowering pass.
+        assert!(
+            yaml.contains("dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_ID']"),
+            "PR id env must use cross-job dep ref; got:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH']"),
+            "target branch env must use cross-job dep ref; got:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR']"),
+            "synth flag env must use cross-job dep ref; got:\n{yaml}"
+        );
+        // Negative assertion: NO macro-form synthPr ref must leak
+        // into the Agent-job step. Macro form would resolve to the
+        // wrong namespace cross-job (it's the same-job-only form).
+        assert!(
+            !yaml.contains("$(synthPr."),
+            "Agent-job consumer must NOT see same-job macro form; got:\n{yaml}"
         );
     }
 }
