@@ -3147,6 +3147,101 @@ fn assert_valid_yaml(compiled: &str, fixture_name: &str) {
     );
 }
 
+/// Assert that no step's `env:` block contains a `$[ ... ]` ADO runtime
+/// expression. ADO ONLY evaluates `$[ ... ]` inside `variables:` mappings
+/// and `condition:` fields — putting one in step `env:` passes the
+/// literal expression string verbatim to the step. This caused
+/// msazuresphere/4x4 build #612528 where downstream PR-identifier
+/// validation rejected a `PR_ID='$[ coalesce(variables['System.Pull…'`
+/// literal as "not a positive integer".
+///
+/// Walks every step under every job (`extends.parameters.stages[*].jobs[*]`,
+/// `jobs[*]`, `stages[*].jobs[*]`) and inspects the `env:` map at the
+/// step level. Job-level `variables:` and `condition:` are correctly
+/// skipped — those are the legitimate places for `$[ ... ]`.
+fn assert_no_dollar_bracket_in_step_env(compiled: &str) {
+    let yaml_content: String = compiled
+        .lines()
+        .skip_while(|line| line.starts_with('#') || line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let doc: serde_yaml::Value =
+        serde_yaml::from_str(&yaml_content).expect("compiled YAML must parse");
+
+    let mut findings: Vec<String> = Vec::new();
+    walk_steps(&doc, "$", &mut |step, path| {
+        let env = step
+            .as_mapping()
+            .and_then(|m| m.get(serde_yaml::Value::String("env".into())))
+            .and_then(|v| v.as_mapping());
+        let Some(env) = env else {
+            return;
+        };
+        for (k, v) in env {
+            let value_str = match v {
+                serde_yaml::Value::String(s) => s.clone(),
+                _ => continue,
+            };
+            if value_str.contains("$[") {
+                let key_str = k.as_str().unwrap_or("<non-string>");
+                let display = step
+                    .as_mapping()
+                    .and_then(|m| m.get(serde_yaml::Value::String("displayName".into())))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("<no displayName>");
+                findings.push(format!(
+                    "  at {path} (step '{display}'): env.{key_str} = {value_str:?}"
+                ));
+            }
+        }
+    });
+    assert!(
+        findings.is_empty(),
+        "Found `$[ ... ]` ADO runtime expressions inside step env blocks. \
+         ADO only evaluates these in `variables:` mappings and `condition:` \
+         fields, NOT in step env values — the literal expression string is \
+         passed verbatim to the step (msazuresphere/4x4 build #612528). \
+         Use a job-level `variables:` hoist + `$(name)` macro instead.\n{}",
+        findings.join("\n")
+    );
+}
+
+/// Helper: walk every step in the YAML document, invoking `f` with each
+/// step mapping and a slash-delimited path describing where it was found.
+fn walk_steps<F: FnMut(&serde_yaml::Value, &str)>(
+    doc: &serde_yaml::Value,
+    path: &str,
+    f: &mut F,
+) {
+    use serde_yaml::Value;
+    match doc {
+        Value::Mapping(m) => {
+            // If this is a job with `steps:`, visit each step.
+            if let Some(Value::Sequence(steps)) =
+                m.get(Value::String("steps".into()))
+            {
+                for (i, step) in steps.iter().enumerate() {
+                    let step_path = format!("{path}/steps[{i}]");
+                    f(step, &step_path);
+                }
+            }
+            // Recurse into common containers that might hold further jobs.
+            for (k, v) in m {
+                let key = k.as_str().unwrap_or("?");
+                let child_path = format!("{path}/{key}");
+                walk_steps(v, &child_path, f);
+            }
+        }
+        Value::Sequence(s) => {
+            for (i, v) in s.iter().enumerate() {
+                let child_path = format!("{path}[{i}]");
+                walk_steps(v, &child_path, f);
+            }
+        }
+        _ => {}
+    }
+}
+
 // ─── ado-aw marker step (always-on extension) ───────────────────────────────
 
 /// Assert that compiled YAML carries exactly one `# ado-aw-metadata: {…}`
@@ -4351,30 +4446,43 @@ fn test_pr_filter_synth_mode_agent_condition_enforces_gate() {
 fn test_pr_filter_synth_mode_gate_step_uses_same_job_synth_ref() {
     let compiled = compile_fixture("pr-filter-tier1-agent.md");
 
+    // Gate step reads `AW_SYNTHETIC_PR` via plain `$(...)` macro — the
+    // `synthPr` step (in the same Setup job) emits this name via
+    // `setVar`, registering it in the regular variable namespace. ADO
+    // `$[ ... ]` runtime expressions are NOT evaluated inside step
+    // `env:` values, so the previous `$[ coalesce(...) ]` form passed
+    // the literal expression string through to gate/facts.ts and
+    // caused `Missing ADO env vars` errors (msazuresphere/4x4
+    // build #612528).
     assert!(
-        compiled.contains("AW_SYNTHETIC_PR: $(synthPr.AW_SYNTHETIC_PR)"),
-        "Gate step env must reference the same-job `synthPr` output via the macro \
-         `$(synthPr.AW_SYNTHETIC_PR)` — the `$[ variables['synthPr.X'] ]` runtime \
-         expression resolves to empty inside the producing Setup job"
+        compiled.contains("AW_SYNTHETIC_PR: $(AW_SYNTHETIC_PR)"),
+        "Gate step env must reference the same-job synthPr value via the plain \
+         `$(AW_SYNTHETIC_PR)` macro — exec-context-pr-synth's `setVar` emits \
+         the regular variable, and `$( )` macros work in step env (whereas \
+         `$[ ... ]` runtime expressions don't)."
     );
     // The fixture exercises source-branch and target-branch filters,
-    // so the synth treatment must appear on those env vars using the
-    // mutually-exclusive macro-concatenation form. (ADO_PR_ID is not
-    // exported by this fixture's filter set, so we don't assert it here.)
+    // so the gate-step env vars must reference the canonical `AW_PR_*`
+    // names that synthPr always emits (resolved real-or-synth values).
+    // (ADO_PR_ID is not exported by this fixture's filter set, so we
+    // don't assert it here.)
     assert!(
-        compiled.contains(
-            "ADO_SOURCE_BRANCH: $(System.PullRequest.SourceBranch)$(synthPr.AW_SYNTHETIC_PR_SOURCEBRANCH)"
-        ),
-        "ADO_SOURCE_BRANCH must concatenate the real `System.PullRequest.*` macro \
-         with the same-job `synthPr.*` macro"
+        compiled.contains("ADO_SOURCE_BRANCH: $(AW_PR_SOURCEBRANCH)"),
+        "ADO_SOURCE_BRANCH must reference the canonical AW_PR_SOURCEBRANCH variable \
+         (emitted by exec-context-pr-synth via setVar — real on PR builds, \
+         discovered on synth-promoted CI builds)."
     );
     assert!(
-        compiled.contains(
-            "ADO_TARGET_BRANCH: $(System.PullRequest.TargetBranch)$(synthPr.AW_SYNTHETIC_PR_TARGETBRANCH)"
-        ),
-        "ADO_TARGET_BRANCH must concatenate the real `System.PullRequest.*` macro \
-         with the same-job `synthPr.*` macro"
+        compiled.contains("ADO_TARGET_BRANCH: $(AW_PR_TARGETBRANCH)"),
+        "ADO_TARGET_BRANCH must reference the canonical AW_PR_TARGETBRANCH variable."
     );
+
+    // Defensive: NO `$[ ... ]` runtime expressions in step env anywhere
+    // in this compiled output. ADO only evaluates them inside
+    // `variables:` mappings and `condition:` fields. (The Agent job's
+    // `variables:` hoist legitimately uses `$[ ... ]` — that's fine
+    // because it's inside `variables:`, not step env.)
+    assert_no_dollar_bracket_in_step_env(&compiled);
 
     // The same-job gate step MUST NOT use the broken same-job runtime
     // expression form `variables['synthPr.X']` (resolves empty) nor the
@@ -5235,24 +5343,52 @@ fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
     // The synth-active prepare step uses `condition: succeeded()` and
     // gates in bash (cross-job `dependencies.Setup.outputs[...]` refs
     // are ILLEGAL in step-level `condition:` — ADO rejects them with
-    // "Unrecognized value: 'dependencies'"). The synth flag is
-    // projected through step `env:` (legal there) so a tiny bash
-    // prelude can do the gate.
+    // "Unrecognized value: 'dependencies'"). `synthPr` now always runs
+    // and emits a single resolved `AW_PR_ID` (real on PR builds,
+    // discovered on synth-promoted CI builds, empty otherwise), so the
+    // gate collapses to a single empty-check.
     assert!(
-        compiled.contains(
-            "if [ \"$BUILD_REASON\" != \"PullRequest\" ] && [ \"$AW_SYNTHETIC_PR\" != \"true\" ]; then"
-        ),
-        "Prepare step must include the bash gate that replaces the (illegal) cross-job step condition (mode: synthetic is the default)"
+        compiled.contains("if [ -z \"$AW_PR_ID\" ]; then"),
+        "Prepare step must include the bash gate on empty AW_PR_ID (replaces the previous \
+         BUILD_REASON + AW_SYNTHETIC_PR pair — the merge now happens inside synthPr)"
     );
+    // The Stage step's own env block must NOT contain a direct
+    // `dependencies.Setup.outputs[...]` reference. (The same expression
+    // IS expected at Agent-job-level `variables:` scope, the documented
+    // safe location — that hoist is asserted separately.) Scope this
+    // check by isolating the Stage step's bash + env body.
+    let stage_step = compiled
+        .split("Stage PR execution context")
+        .nth(1)
+        .map(|tail| {
+            // Stop at the next step (`- bash:` / `- task:` / `- script:`)
+            // or end of the job (a less-indented key).
+            let stop_at = ["\n      - bash:", "\n      - task:", "\n      - script:"];
+            let end = stop_at
+                .iter()
+                .filter_map(|needle| tail.find(needle))
+                .min()
+                .unwrap_or(tail.len());
+            &tail[..end]
+        })
+        .unwrap_or("");
     assert!(
-        compiled.contains(
-            "AW_SYNTHETIC_PR: $[ coalesce(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], '') ]"
-        ),
-        "Prepare step must project the synth flag through env (coalesced to '' on real-PR builds) for the bash gate to read"
+        !stage_step.contains("dependencies.Setup.outputs['synthPr."),
+        "Stage step's own env block must NOT reference \
+         `dependencies.Setup.outputs[...]` — that is cross-job syntax. The cross-job \
+         output is hoisted into Agent-job-level `variables:` (see \
+         `generate_agent_job_variables`) and the Stage step reads it via the \
+         `$(AW_PR_*)` macros. Stage step body: {stage_step}"
     );
+    // ADO does NOT evaluate `$[ ... ]` runtime expressions inside step
+    // `env:` values — only inside `variables:` mappings and
+    // `condition:` fields. Any `$[ ` in this step's env block would be
+    // passed through to bash as a literal string (the bug fixed here).
     assert!(
-        compiled.contains("BUILD_REASON: $(Build.Reason)"),
-        "Prepare step must project Build.Reason through env so the bash gate sees a plain $BUILD_REASON"
+        !stage_step.contains("$["),
+        "Stage step's env block must not contain `$[ ` runtime expressions \
+         (ADO doesn't evaluate them at step-env scope). Use the Agent-job-level \
+         `variables:` hoist + `$(name)` macros instead. Stage step body: {stage_step}"
     );
     assert!(
         compiled.contains("SYSTEM_ACCESSTOKEN: $(System.AccessToken)"),
@@ -5290,16 +5426,17 @@ fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
 
     // v7 + mode: synthetic (the default): env passthrough — the bundle
     // reads ADO predefined vars from `process.env`. The compiler emits
-    // coalesced macros that prefer the real `System.PullRequest.*` vars
-    // (true PR builds) and fall back to the `synthPr` Setup-job outputs
-    // (CI builds promoted via exec-context-pr-synth.js).
+    // plain `$(AW_PR_*)` macros that read the Agent-job-level hoisted
+    // variables (populated from the `synthPr` Setup-job outputs which
+    // hold the resolved real-or-synth PR identifiers). No `$[ ... ]`
+    // in step env — see `generate_agent_job_variables` for the hoist.
     assert!(
-        compiled.contains("SYSTEM_PULLREQUEST_PULLREQUESTID: $[ coalesce(variables['System.PullRequest.PullRequestId'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_ID']"),
-        "Prepare step must pass the PR id (coalesced with synthPr fallback) through to the bundle"
+        compiled.contains("SYSTEM_PULLREQUEST_PULLREQUESTID: $(AW_PR_ID)"),
+        "Prepare step must pass the PR id via the hoisted AW_PR_ID job-variable"
     );
     assert!(
-        compiled.contains("SYSTEM_PULLREQUEST_TARGETBRANCH: $[ coalesce(variables['System.PullRequest.TargetBranch'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH']"),
-        "Prepare step must pass the PR target branch (coalesced with synthPr fallback) through to the bundle"
+        compiled.contains("SYSTEM_PULLREQUEST_TARGETBRANCH: $(AW_PR_TARGETBRANCH)"),
+        "Prepare step must pass the PR target branch via the hoisted AW_PR_TARGETBRANCH job-variable"
     );
     assert!(
         compiled.contains("SYSTEM_TEAMPROJECT: $(System.TeamProject)"),
@@ -5847,20 +5984,33 @@ fn test_synthetic_pr_default_emits_full_synth_wiring() {
     // Broadened exec-context-pr gate — now a bash guard rather than a
     // step-level `condition:` (cross-job `dependencies.Setup.outputs[...]`
     // refs are ILLEGAL in step `condition:`; ADO rejects them with
-    // "Unrecognized value: 'dependencies'"). The synth flag is
-    // projected through step `env:` so the bash prelude can read it.
+    // "Unrecognized value: 'dependencies'"). `synthPr` now always runs
+    // and emits a single resolved `AW_PR_ID` (real on PR builds,
+    // discovered on synth-promoted CI builds), so the gate collapses
+    // to a single empty-check.
     assert!(
-        compiled.contains(
-            "if [ \"$BUILD_REASON\" != \"PullRequest\" ] && [ \"$AW_SYNTHETIC_PR\" != \"true\" ]; then"
-        ),
-        "Fixture A must include the bash gate on exec-context-pr.js (accepts real-PR OR synth-promoted builds)"
+        compiled.contains("if [ -z \"$AW_PR_ID\" ]; then"),
+        "Fixture A must include the bash gate on empty AW_PR_ID (replaces the previous \
+         BUILD_REASON + AW_SYNTHETIC_PR pair — the merge now happens inside synthPr)"
     );
     assert!(
-        compiled.contains(
-            "AW_SYNTHETIC_PR: $[ coalesce(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], '') ]"
-        ),
-        "Fixture A must project the synth flag into the exec-context-pr.js step env for the bash gate"
+        compiled.contains("SYSTEM_PULLREQUEST_PULLREQUESTID: $(AW_PR_ID)"),
+        "Fixture A's exec-context-pr step must read the hoisted Agent-job-level \
+         AW_PR_ID via the $() macro (NOT a $[ ... ] runtime expression in step env — \
+         ADO doesn't evaluate those there, see build #612528)"
     );
+    // The Agent-job-level hoist itself must be present and pull from
+    // the cross-job synth outputs (legal scope for `dependencies.X.outputs[...]`).
+    for name in &["AW_PR_ID", "AW_PR_TARGETBRANCH", "AW_PR_SOURCEBRANCH", "AW_SYNTHETIC_PR"] {
+        let needle = format!(
+            "{name}: $[ coalesce(dependencies.Setup.outputs['synthPr.{name}'], '') ]"
+        );
+        assert!(
+            compiled.contains(&needle),
+            "Fixture A must hoist `synthPr.{name}` into Agent-job-level `variables:` \
+             so step-env consumers can read `$({name})` safely"
+        );
+    }
 
     // Agent-job AW_SYNTHETIC_PR_SKIP guard.
     assert!(
@@ -5870,13 +6020,11 @@ fn test_synthetic_pr_default_emits_full_synth_wiring() {
     // NOTE: this fixture does not declare `on.pr.filters`, so the
     // Agent-job condition has only the skip guard (no AND-NOT gate
     // clause). The `eq(synthPr.AW_SYNTHETIC_PR, 'true')` literal is
-    // therefore expected ONLY in the exec-context-pr.js step's
-    // env-projected `AW_SYNTHETIC_PR` value (asserted above as the
-    // `coalesce(dependencies.Setup.outputs[...]', '')` shape) — never
-    // as an Agent-job OR-arm in the dependsOn condition, which would
-    // silently bypass the gate for real-PR or synth-PR builds. A
-    // separate fixture covers the gate-enforced shape when
-    // `pr.filters` is present.
+    // therefore expected ONLY in the Agent-job-level `variables:` hoist
+    // and the cross-job condition arms — never as an Agent-job OR-arm
+    // in the dependsOn condition, which would silently bypass the gate
+    // for real-PR or synth-PR builds. A separate fixture covers the
+    // gate-enforced shape when `pr.filters` is present.
 
     // No auto-narrowed CI trigger — `pr.branches.include` lists PR TARGET
     // branches, and ADO `trigger:` fires on pushes TO listed branches, so

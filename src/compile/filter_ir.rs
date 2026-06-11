@@ -1121,29 +1121,37 @@ pub fn build_gate_spec(ctx: GateContext, checks: &[FilterCheck]) -> anyhow::Resu
 ///
 /// When `synthetic_pr_active` is true AND `ctx == GateContext::PullRequest`,
 /// PR-identifier env vars (`ADO_PR_ID`, `ADO_SOURCE_BRANCH`,
-/// `ADO_TARGET_BRANCH`) are emitted using `$[ coalesce(...) ]` so they
-/// pick up either the real `System.PullRequest.*` variables (on a true
-/// PR build) OR the `synthPr` Setup-job outputs (on a CI build promoted
-/// by `exec-context-pr-synth.js`). Also exports `AW_SYNTHETIC_PR` so
-/// `gate/bypass.ts` knows to skip the "not a PR build" bypass.
+/// `ADO_TARGET_BRANCH`) read the canonical `AW_PR_*` same-job variables
+/// that the preceding `synthPr` step emits via `setVar` — whether the
+/// build is a real PR (synthPr copied `SYSTEM_PULLREQUEST_*`) or a
+/// synth-promoted CI build (synthPr discovered + emitted the values).
+/// Also exports `AW_SYNTHETIC_PR` so `gate/bypass.ts` knows to skip the
+/// "not a PR build" bypass on synth-promoted builds.
 ///
-/// **Same-job vs cross-job reference**: this gate step lives in the
-/// **Setup job** (`AdoScriptExtension::setup_steps` returns it), the
-/// same job as `synthPr`. Within the producing job, the cross-job form
-/// `dependencies.Setup.outputs['synthPr.X']` is undefined (a job has no
-/// entry for itself in `dependencies`), and — critically — the same-job
-/// *runtime expression* form `$[ variables['synthPr.X'] ]` also resolves
-/// to **empty**: step output variables are NOT exposed to runtime
-/// expressions in the producing job. They are only reachable via the
-/// **macro** form `$(synthPr.X)`, which expands them from the job's
-/// output-variable namespace (empty when the producing step was skipped
-/// or never set the output). We therefore reference synth outputs with
-/// macros and rely on macro concatenation: real `System.PullRequest.*`
-/// and synth `synthPr.*` are mutually exclusive (synthPr only runs on
-/// non-PR builds; `System.PullRequest.*` is empty on non-PR builds), so
-/// `$(System.PullRequest.X)$(synthPr.X)` yields exactly one non-empty
-/// value. See
-/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/process/variables#use-output-variables-from-tasks>.
+/// **Same-job synth references**: this gate step lives in the **Setup
+/// job** (`AdoScriptExtension::setup_steps` returns it), the same job
+/// as `synthPr`. Three ADO behaviours interact here:
+///
+/// 1. The cross-job form `dependencies.Setup.outputs['synthPr.X']` is
+///    undefined inside the producing job (a job has no entry for itself
+///    in `dependencies`).
+/// 2. Step output variables marked `isOutput=true` are NOT added to the
+///    producing job's regular variable namespace, so `$(X)` and
+///    `$[ variables['X'] ]` resolve to empty unless the producer ALSO
+///    emits the same name as a regular (non-output) variable. The
+///    `setVar` call in `exec-context-pr-synth/index.ts` is what makes
+///    `$(AW_PR_*)` work here.
+/// 3. The `$[ ... ]` runtime-expression form is NOT evaluated inside
+///    step `env:` values — only inside `variables:` mappings and
+///    `condition:` fields. Putting `$[ coalesce(...) ]` in step env
+///    passes the literal expression string verbatim to the step
+///    (msazuresphere/4x4 build #612528).
+///
+/// The fix is to do the real-vs-synth merge in `exec-context-pr-synth.js`
+/// (which always runs and always emits the canonical `AW_PR_*` names),
+/// and have this step consume them via plain `$(AW_PR_*)` macros —
+/// reading the same-job regular variable that `setVar` registered.
+/// See <https://learn.microsoft.com/en-us/azure/devops/pipelines/process/variables#use-output-variables-from-tasks>.
 pub fn compile_gate_step_external(
     ctx: GateContext,
     checks: &[FilterCheck],
@@ -1176,39 +1184,28 @@ pub fn compile_gate_step_external(
 
     // Synthetic-from-ci flag: tells gate/bypass.ts that this CI build
     // has been promoted to PR semantics, so the "not a PullRequest
-    // build" bypass must not auto-pass. Always safe to emit (the gate
-    // checks it strictly for the literal "true"), but only meaningful
-    // for PR gates. Same-job ref via the macro `$(synthPr.X)` — see
-    // function doc-comment for why this is NOT `variables['synthPr.X']`
-    // (resolves empty) nor `dependencies.Setup.outputs[...]` (undefined
-    // in the producing job).
+    // build" bypass must not auto-pass. Read via the same-job macro
+    // form — `synthPr` always runs and emits AW_SYNTHETIC_PR (=`"true"`
+    // on synth promotion, empty on real PR / non-promoted CI) via
+    // `setVar`, so `$(AW_SYNTHETIC_PR)` resolves cleanly without any
+    // runtime expression.
     let pr_synth_active = synthetic_pr_active && matches!(ctx, GateContext::PullRequest);
     if pr_synth_active {
-        // Macro form: `$(synthPr.AW_SYNTHETIC_PR)` expands to "true" when
-        // the same-job `synthPr` step matched a PR, and to empty when it
-        // was skipped (real PR build) or found no PR — never the literal
-        // "true", so `gate/bypass.ts`'s strict `=== "true"` check stays
-        // correct in every case.
-        step.push_str("    AW_SYNTHETIC_PR: \"$(synthPr.AW_SYNTHETIC_PR)\"\n");
+        step.push_str("    AW_SYNTHETIC_PR: $(AW_SYNTHETIC_PR)\n");
     }
 
     for (env_var, ado_macro) in &exports {
         let macro_str = if pr_synth_active {
-            // Mutually-exclusive macro concatenation: on a real PR build
-            // `System.PullRequest.*` holds the value and `synthPr.*` is
-            // empty (step skipped); on a synth-promoted CI build
-            // `System.PullRequest.*` is empty and `synthPr.*` holds the
-            // value. Exactly one side is ever non-empty.
+            // Read the canonical `AW_PR_*` variables that `synthPr`
+            // always emits via `setVar` (same-job). On real PR builds
+            // `synthPr` copies `SYSTEM_PULLREQUEST_*` into them; on
+            // synth-promoted CI builds it discovers + emits them. The
+            // merge happens inside the bundle, so this step is blind
+            // to the source — single macro form, single code path.
             match *env_var {
-                "ADO_PR_ID" => {
-                    "\"$(System.PullRequest.PullRequestId)$(synthPr.AW_SYNTHETIC_PR_ID)\""
-                }
-                "ADO_SOURCE_BRANCH" => {
-                    "\"$(System.PullRequest.SourceBranch)$(synthPr.AW_SYNTHETIC_PR_SOURCEBRANCH)\""
-                }
-                "ADO_TARGET_BRANCH" => {
-                    "\"$(System.PullRequest.TargetBranch)$(synthPr.AW_SYNTHETIC_PR_TARGETBRANCH)\""
-                }
+                "ADO_PR_ID" => "$(AW_PR_ID)",
+                "ADO_SOURCE_BRANCH" => "$(AW_PR_SOURCEBRANCH)",
+                "ADO_TARGET_BRANCH" => "$(AW_PR_TARGETBRANCH)",
                 _ => ado_macro,
             }
         } else {

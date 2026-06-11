@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.35.3](https://github.com/githubnext/ado-aw/compare/v0.35.2...v0.35.3) (2026-06-11)
+
+
+### Bug Fixes
+
+* **ado-script:** treat unsubstituted ADO macros as empty in synthPr ([#975](https://github.com/githubnext/ado-aw/issues/975)) ([1164c5f](https://github.com/githubnext/ado-aw/commit/1164c5fefbd2d06d46d46e8c64d869f29a6452a2))
+
+## [0.35.2](https://github.com/githubnext/ado-aw/compare/v0.35.1...v0.35.2) (2026-06-11)
+
+
+### Bug Fixes
+
+* **compile:** unify synthetic-PR variable namespace via ado-script ([#972](https://github.com/githubnext/ado-aw/issues/972)) ([0e05b3a](https://github.com/githubnext/ado-aw/commit/0e05b3a01975d23363d65122cd724174f5c1d329))
+
+## [0.35.1](https://github.com/githubnext/ado-aw/compare/v0.35.0...v0.35.1) (2026-06-11)
+
+
+### Bug Fixes
+
+* **compile:** repair synthetic-PR gate + Stage step env var plumbing ([#956](https://github.com/githubnext/ado-aw/issues/956)) ([79919bd](https://github.com/githubnext/ado-aw/commit/79919bd2280f0fb17a118df17f824a0e9e504691))
+* **workflows:** allow github-actions[bot] to trigger recompile-safe-output-fixtures ([#958](https://github.com/githubnext/ado-aw/issues/958)) ([5d36dfd](https://github.com/githubnext/ado-aw/commit/5d36dfdc4e214b7b056fa5f9c94586941ced7d8a))
+
 ## [0.35.0](https://github.com/githubnext/ado-aw/compare/v0.34.3...v0.35.0) (2026-06-10)
 
 

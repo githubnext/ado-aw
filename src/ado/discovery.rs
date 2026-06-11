@@ -1080,7 +1080,7 @@ mod tests {
 
     #[test]
     fn direct_when_yaml_filename_matches_marker_stem() {
-        let def = def_with(1, "a", Some("/agents/foo.lock.yml"), None);
+        let def = def_with(1, "a", Some("agents/foo.lock.yml"), None);
         let markers = vec![MarkerMetadata {
             schema: 1,
             source: "agents/foo.md".to_string(),

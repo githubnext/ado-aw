@@ -23,18 +23,101 @@ describe("exec-context-pr-synth main", () => {
   });
   afterEach(() => vi.restoreAllMocks());
 
-  it("no-ops on real PR builds (BUILD_REASON=PullRequest)", async () => {
+  // ── Real-PR path ─────────────────────────────────────────────────
+  //
+  // On a real PR build, ADO populates `SYSTEM_PULLREQUEST_*` env vars
+  // directly. The bundle propagates them into the canonical `AW_PR_*`
+  // namespace so downstream consumers can read a single name regardless
+  // of the build's reason. No API call is made; no `AW_SYNTHETIC_PR`
+  // flag is emitted (this is not a synth-promotion).
+
+  it("propagates SYSTEM_PULLREQUEST_* to AW_PR_* on real PR builds", async () => {
     const { code, output } = await runMain(
-      makeEnv({ BUILD_REASON: "PullRequest", PR_SYNTH_SPEC: build_pr_synth_spec() }),
+      makeEnv({
+        BUILD_REASON: "PullRequest",
+        SYSTEM_PULLREQUEST_PULLREQUESTID: "4242",
+        SYSTEM_PULLREQUEST_TARGETBRANCH: "refs/heads/main",
+        SYSTEM_PULLREQUEST_SOURCEBRANCH: "refs/heads/feature/x",
+        SYSTEM_PULLREQUEST_ISDRAFT: "false",
+        PR_SYNTH_SPEC: build_pr_synth_spec(),
+      }),
     );
     expect(code).toBe(0);
     expect(mocked.listActivePullRequestsBySourceRef).not.toHaveBeenCalled();
+    // AW_PR_* are emitted as BOTH output (cross-job) and var (same-job).
+    expect(output).toContain("AW_PR_ID;isOutput=true]4242");
+    expect(output).toContain("##vso[task.setvariable variable=AW_PR_ID]4242");
+    expect(output).toContain("AW_PR_TARGETBRANCH;isOutput=true]refs/heads/main");
+    expect(output).toContain(
+      "##vso[task.setvariable variable=AW_PR_TARGETBRANCH]refs/heads/main",
+    );
+    expect(output).toContain("AW_PR_SOURCEBRANCH;isOutput=true]refs/heads/feature/x");
+    expect(output).toContain(
+      "##vso[task.setvariable variable=AW_PR_SOURCEBRANCH]refs/heads/feature/x",
+    );
+    expect(output).toContain("AW_PR_IS_DRAFT;isOutput=true]false");
+    // No synth-promotion flag on a real PR build.
+    expect(output).not.toContain("AW_SYNTHETIC_PR;isOutput=true]true");
     expect(output).not.toContain("AW_SYNTHETIC_PR_SKIP");
-    expect(output).not.toContain("AW_SYNTHETIC_PR=true");
     expect(output).toContain("real PR build");
   });
 
-  it("no-ops on GitHub-typed repos (BUILD_REPOSITORY_PROVIDER=GitHub)", async () => {
+  it("detects real PR build by SYSTEM_PULLREQUEST_PULLREQUESTID, not BUILD_REASON", async () => {
+    // Defensive: even on builds where BUILD_REASON isn't "PullRequest"
+    // for some reason (e.g. a manual re-queue of a PR build), the
+    // presence of a SYSTEM_PULLREQUEST_PULLREQUESTID is the authoritative
+    // signal — that's the value we need to propagate.
+    const { code, output } = await runMain(
+      makeEnv({
+        BUILD_REASON: "Manual",
+        SYSTEM_PULLREQUEST_PULLREQUESTID: "99",
+        SYSTEM_PULLREQUEST_TARGETBRANCH: "refs/heads/main",
+        PR_SYNTH_SPEC: build_pr_synth_spec(),
+      }),
+    );
+    expect(code).toBe(0);
+    expect(mocked.listActivePullRequestsBySourceRef).not.toHaveBeenCalled();
+    expect(output).toContain("AW_PR_ID;isOutput=true]99");
+  });
+
+  it("does NOT treat unsubstituted $(System.PullRequest.*) ADO macros as a real PR id", async () => {
+    // Regression: ADO leaves undefined predefined-variable macros as
+    // the literal string `$(name)` in step env (it does NOT substitute
+    // to empty). Without resolveAdoMacroEnv, the bundle would treat
+    // `SYSTEM_PULLREQUEST_PULLREQUESTID = "$(System.PullRequest.PullRequestId)"`
+    // (the value seen on every non-PR build) as a real PR id and
+    // mis-emit `AW_PR_ID = $(System.PullRequest.PullRequestId)` as a
+    // literal — observed by @jamesadevine on the first roll-out:
+    //   `[synth-pr] real PR build #$(System.PullRequest.PullRequestId);
+    //    propagating SYSTEM_PULLREQUEST_* to AW_PR_*`
+    // The bundle must instead fall through to the synth-discovery path.
+    mocked.listActivePullRequestsBySourceRef.mockResolvedValue([]);
+    const { code, output } = await runMain(
+      makeEnv({
+        BUILD_REASON: "IndividualCI",
+        SYSTEM_PULLREQUEST_PULLREQUESTID: "$(System.PullRequest.PullRequestId)",
+        SYSTEM_PULLREQUEST_TARGETBRANCH: "$(System.PullRequest.TargetBranch)",
+        SYSTEM_PULLREQUEST_SOURCEBRANCH: "$(System.PullRequest.SourceBranch)",
+        SYSTEM_PULLREQUEST_ISDRAFT: "$(System.PullRequest.IsDraft)",
+        PR_SYNTH_SPEC: build_pr_synth_spec(),
+      }),
+    );
+    expect(code).toBe(0);
+    // The "real PR build" log must NOT appear — the macro literals
+    // should have been resolved to empty and the bundle should have
+    // proceeded to the synth-discovery path (which then no-matched).
+    expect(output).not.toContain("real PR build");
+    // AW_PR_ID must NOT carry the literal macro string.
+    expect(output).not.toContain("AW_PR_ID;isOutput=true]$(");
+    expect(output).not.toContain("##vso[task.setvariable variable=AW_PR_ID]$(");
+    // Should hit the synth-discovery path and emit SKIP on no match.
+    expect(mocked.listActivePullRequestsBySourceRef).toHaveBeenCalledOnce();
+    expect(output).toContain("AW_SYNTHETIC_PR_SKIP;isOutput=true]true");
+  });
+
+  // ── GitHub repo path ────────────────────────────────────────────
+
+  it("skips with empty AW_PR_* on GitHub-typed repos (CI builds)", async () => {
     const { code, output } = await runMain(
       makeEnv({
         BUILD_REPOSITORY_PROVIDER: "GitHub",
@@ -44,7 +127,14 @@ describe("exec-context-pr-synth main", () => {
     expect(code).toBe(0);
     expect(mocked.listActivePullRequestsBySourceRef).not.toHaveBeenCalled();
     expect(output).toContain("GitHub-typed repo");
+    // SKIP marker tells the Agent job's condition to opt out cleanly.
+    expect(output).toContain("AW_SYNTHETIC_PR_SKIP;isOutput=true]true");
+    // Empty AW_PR_* so same-job consumers see stable defined variables.
+    expect(output).toContain("##vso[task.setvariable variable=AW_PR_ID]");
+    expect(output).not.toContain("AW_PR_ID;isOutput=true]4242");
   });
+
+  // ── Hard failures ────────────────────────────────────────────────
 
   it("returns 1 (hard fail) when PR_SYNTH_SPEC is missing", async () => {
     const env = makeEnv({});
@@ -62,6 +152,13 @@ describe("exec-context-pr-synth main", () => {
     expect(output).toContain("PR_SYNTH_SPEC");
   });
 
+  // ── Soft skips (CI build, ADO repo, no matching PR) ─────────────
+  //
+  // Every soft-skip path emits empty AW_PR_* via setVar+setOutput so
+  // downstream consumers see stable defined variables (rather than the
+  // literal `$(AW_PR_ID)` string that ADO leaves when a macro is
+  // undefined). The SKIP marker gates the Agent job's `condition:`.
+
   it("skips when source branch has no active PR (per ADO API)", async () => {
     mocked.listActivePullRequestsBySourceRef.mockResolvedValue([]);
     const { code, output } = await runMain(
@@ -72,6 +169,8 @@ describe("exec-context-pr-synth main", () => {
     );
     expect(code).toBe(0);
     expect(output).toContain("AW_SYNTHETIC_PR_SKIP;isOutput=true]true");
+    // Empty defaults for AW_PR_*.
+    expect(output).toContain("##vso[task.setvariable variable=AW_PR_ID]");
     expect(mocked.listActivePullRequestsBySourceRef).toHaveBeenCalledOnce();
   });
 
@@ -87,6 +186,7 @@ describe("exec-context-pr-synth main", () => {
     const { code, output } = await runMain(makeEnv({ PR_SYNTH_SPEC: spec }));
     expect(code).toBe(0);
     expect(output).toContain("AW_SYNTHETIC_PR_SKIP;isOutput=true]true");
+    expect(output).toContain("##vso[task.setvariable variable=AW_PR_ID]");
   });
 
   it("skips when >1 active PRs match (after target filter)", async () => {
@@ -118,7 +218,9 @@ describe("exec-context-pr-synth main", () => {
     expect(output).toContain("no changed file");
   });
 
-  it("emits AW_SYNTHETIC_PR=true + identifiers on the happy path", async () => {
+  // ── Happy path: synth-promote a CI build with a matching PR ─────
+
+  it("emits AW_PR_* + AW_SYNTHETIC_PR=true on the synth happy path", async () => {
     mocked.listActivePullRequestsBySourceRef.mockResolvedValue([
       {
         pullRequestId: 1234,
@@ -138,14 +240,27 @@ describe("exec-context-pr-synth main", () => {
     const { code, output } = await runMain(makeEnv({ PR_SYNTH_SPEC: spec }));
     expect(code).toBe(0);
     expect(output).not.toContain("AW_SYNTHETIC_PR_SKIP");
+    // AW_PR_* emitted TWICE: once as output (cross-job, hoisted into the
+    // Agent job's `variables:` block) and once as a regular variable
+    // (same-job, consumed by the Setup-job gate step's `env:` via
+    // `$(AW_PR_*)` macros). See `setVar` in `shared/vso-logger.ts`.
+    expect(output).toContain("AW_PR_ID;isOutput=true]1234");
+    expect(output).toContain("##vso[task.setvariable variable=AW_PR_ID]1234");
+    expect(output).toContain("AW_PR_TARGETBRANCH;isOutput=true]refs/heads/main");
+    expect(output).toContain(
+      "##vso[task.setvariable variable=AW_PR_TARGETBRANCH]refs/heads/main",
+    );
+    expect(output).toContain("AW_PR_SOURCEBRANCH;isOutput=true]refs/heads/feature/x");
+    expect(output).toContain(
+      "##vso[task.setvariable variable=AW_PR_SOURCEBRANCH]refs/heads/feature/x",
+    );
+    expect(output).toContain("AW_PR_IS_DRAFT;isOutput=true]false");
+    // Synth-promotion flag (only on this path, not real PR or skip).
     expect(output).toContain("AW_SYNTHETIC_PR;isOutput=true]true");
-    expect(output).toContain("AW_SYNTHETIC_PR_ID;isOutput=true]1234");
-    expect(output).toContain("AW_SYNTHETIC_PR_TARGETBRANCH;isOutput=true]refs/heads/main");
-    expect(output).toContain("AW_SYNTHETIC_PR_SOURCEBRANCH;isOutput=true]refs/heads/feature/x");
-    expect(output).toContain("AW_SYNTHETIC_PR_IS_DRAFT;isOutput=true]false");
+    expect(output).toContain("##vso[task.setvariable variable=AW_SYNTHETIC_PR]true");
   });
 
-  it("emits AW_SYNTHETIC_PR_IS_DRAFT=true when the PR is a draft", async () => {
+  it("emits AW_PR_IS_DRAFT=true when the matched synth PR is a draft", async () => {
     mocked.listActivePullRequestsBySourceRef.mockResolvedValue([
       {
         pullRequestId: 1,
@@ -156,7 +271,7 @@ describe("exec-context-pr-synth main", () => {
     ]);
     const { code, output } = await runMain(makeEnv({ PR_SYNTH_SPEC: build_pr_synth_spec() }));
     expect(code).toBe(0);
-    expect(output).toContain("AW_SYNTHETIC_PR_IS_DRAFT;isOutput=true]true");
+    expect(output).toContain("AW_PR_IS_DRAFT;isOutput=true]true");
   });
 
   it("skips path-filter API calls when paths.include and exclude are both empty", async () => {
