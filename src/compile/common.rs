@@ -1119,19 +1119,32 @@ pub fn generate_job_timeout(front_matter: &FrontMatter) -> String {
 /// (today: the `Stage PR execution context` bash step in
 /// `exec_context/pr.rs`).
 ///
-/// **Why job-level variables and not step-level env**: the canonical
-/// ADO pattern for forwarding a cross-job step output is to declare a
-/// job-level variable using a runtime expression `$[ ... ]`, then
-/// consume that variable from step `env:` blocks via the `$(name)`
-/// macro. Putting `$[ dependencies.<job>.outputs[...] ]` directly in
-/// step-level `env:` is technically documented as supported but has
-/// proven unreliable in practice — empirical evidence from
-/// msazuresphere/4x4 build #612290 showed
-/// `dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR']` resolving to
-/// the empty string when referenced from a step's `env:` even though
-/// the same expression worked in the Agent job's `condition:`. The
-/// job-level form is the documented safe location:
+/// Hoist the synthPr Setup-job outputs into the Agent job's `variables:`
+/// block so step-level `env:` mappings can consume them via the
+/// `$(name)` macro form. Emitted only when the synth path is active.
+///
+/// **Why job-level variables and not step-level env**: ADO `$[ ... ]`
+/// runtime expressions only evaluate inside `variables:` blocks and
+/// `condition:` fields — NOT inside step `env:` values. Putting
+/// `$[ dependencies.<job>.outputs[...] ]` directly in step-level `env:`
+/// fails: the literal expression string is passed verbatim to the step
+/// (msazuresphere/4x4 build #612528 — `[aw-context] pr context
+/// preparation failed: PR identifier validation failed (PR_ID='$[
+/// coalesce(variables['System.PullRequest.PullRequestId'],
+/// variables['AW_SYNTHET…' is not a positive integer)`). The job-level
+/// hoist is the only documented safe location:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/process/variables#use-outputs-in-the-same-pipeline>.
+///
+/// **Variable namespace**:
+///
+///  - `AW_PR_ID` / `AW_PR_TARGETBRANCH` / `AW_PR_SOURCEBRANCH` —
+///    resolved PR identifiers (real on PR builds, discovered on synth
+///    builds). The merge happens inside `exec-context-pr-synth.js` so
+///    every consumer can read a single name regardless of source.
+///  - `AW_SYNTHETIC_PR` — boolean flag set to "true" only when the
+///    build was synth-promoted from CI; empty on real PR builds.
+///    Consumed by the Agent's bash exec-context-pr gate and by gate
+///    bypass logic that needs to distinguish "real PR" from "synth".
 ///
 /// When this hoist is empty (the agent isn't using synthetic-PR-from-CI),
 /// the marker collapses cleanly: the surrounding template indents the
@@ -1155,7 +1168,7 @@ pub fn generate_agent_job_variables(synthetic_pr_active: bool) -> String {
     // rather than the unresolved literal `$[ ... ]` form if the
     // dependency cannot be resolved (e.g. Setup was skipped or the
     // synthPr step did not run).
-    "variables:\n  AW_SYNTHETIC_PR: $[ coalesce(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], '') ]\n  AW_SYNTHETIC_PR_ID: $[ coalesce(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_ID'], '') ]\n  AW_SYNTHETIC_PR_TARGETBRANCH: $[ coalesce(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH'], '') ]\n  AW_SYNTHETIC_PR_SOURCEBRANCH: $[ coalesce(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_SOURCEBRANCH'], '') ]".to_string()
+    "variables:\n  AW_PR_ID: $[ coalesce(dependencies.Setup.outputs['synthPr.AW_PR_ID'], '') ]\n  AW_PR_TARGETBRANCH: $[ coalesce(dependencies.Setup.outputs['synthPr.AW_PR_TARGETBRANCH'], '') ]\n  AW_PR_SOURCEBRANCH: $[ coalesce(dependencies.Setup.outputs['synthPr.AW_PR_SOURCEBRANCH'], '') ]\n  AW_SYNTHETIC_PR: $[ coalesce(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], '') ]".to_string()
 }
 
 /// Format a single step's YAML string with proper indentation
@@ -3840,16 +3853,21 @@ mod tests {
             out.starts_with("variables:"),
             "must declare a `variables:` block: {out}"
         );
-        // Each AW_SYNTHETIC_PR* output that downstream consumers need
-        // must be hoisted via `$[ coalesce(dependencies.Setup.outputs[...], '') ]`.
-        // The `coalesce(..., '')` guarantees the variable is the empty
+        // Each AW_PR_* identifier + the AW_SYNTHETIC_PR flag is hoisted
+        // via `$[ coalesce(dependencies.Setup.outputs[...], '') ]`. The
+        // `coalesce(..., '')` guarantees the variable is the empty
         // string (rather than the literal `$[ ... ]` form) when the
-        // dependency is unresolved (e.g. Setup skipped).
+        // dependency is unresolved (e.g. Setup skipped). `synthPr` now
+        // always emits the canonical `AW_PR_*` names regardless of
+        // build reason (copying from `SYSTEM_PULLREQUEST_*` on real PR
+        // builds, discovered values on synth-promoted CI builds), so
+        // downstream consumers read a single uniform namespace via
+        // `$(AW_PR_*)` macros — no `$[ ... ]` in step `env:`.
         for name in &[
+            "AW_PR_ID",
+            "AW_PR_TARGETBRANCH",
+            "AW_PR_SOURCEBRANCH",
             "AW_SYNTHETIC_PR",
-            "AW_SYNTHETIC_PR_ID",
-            "AW_SYNTHETIC_PR_TARGETBRANCH",
-            "AW_SYNTHETIC_PR_SOURCEBRANCH",
         ] {
             let needle = format!(
                 "{name}: $[ coalesce(dependencies.Setup.outputs['synthPr.{name}'], '') ]"
@@ -3859,6 +3877,21 @@ mod tests {
                 "must hoist {name} from cross-job synth output: {out}"
             );
         }
+        // Regression guard: the old AW_SYNTHETIC_PR_* names must not
+        // leak back — they were renamed to AW_PR_* when the bundle
+        // started normalising the real-vs-synth merge internally.
+        assert!(
+            !out.contains("AW_SYNTHETIC_PR_ID"),
+            "must not hoist legacy AW_SYNTHETIC_PR_ID — use AW_PR_ID: {out}"
+        );
+        assert!(
+            !out.contains("AW_SYNTHETIC_PR_TARGETBRANCH"),
+            "must not hoist legacy AW_SYNTHETIC_PR_TARGETBRANCH — use AW_PR_TARGETBRANCH: {out}"
+        );
+        assert!(
+            !out.contains("AW_SYNTHETIC_PR_SOURCEBRANCH"),
+            "must not hoist legacy AW_SYNTHETIC_PR_SOURCEBRANCH — use AW_PR_SOURCEBRANCH: {out}"
+        );
     }
 
     // ─── normalize_yaml ───────────────────────────────────────────────────────
