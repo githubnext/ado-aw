@@ -96,7 +96,7 @@ impl CompilerExtension for AzureCliExtension {
         vec![]
     }
 
-    fn prepare_steps(&self, _ctx: &CompileContext) -> Vec<String> {
+    fn prepare_steps(&self, ctx: &CompileContext) -> Vec<String> {
         // Returns two YAML steps, in order:
         //
         // 1. Detection — runs in the Agent job's prepare phase (NOT a
@@ -114,12 +114,25 @@ impl CompilerExtension for AzureCliExtension {
         //    actually detected. The detection step above is the source
         //    of truth for that variable and MUST run first.
         //
+        //    The advisory only advertises that `az devops` is
+        //    auto-authenticated when `permissions.read` is configured —
+        //    that subcommand reads `$AZURE_DEVOPS_EXT_PAT`, which is only
+        //    populated when a read-only token (SC_READ_TOKEN) is minted
+        //    from `permissions.read`. Advertising it otherwise would tell
+        //    the agent to use a command that fails to authenticate.
+        //
         // We do not implement `prompt_supplement()` because the
         // existing `wrap_prompt_append` helper doesn't emit a
         // `condition:` field. Emitting our own step here keeps the
         // trait API unchanged and confines the conditionality entirely
         // to this extension.
-        vec![self.detection_step(), self.prompt_append_step()]
+        let has_read = ctx
+            .front_matter
+            .permissions
+            .as_ref()
+            .and_then(|p| p.read.as_deref())
+            .is_some_and(|s| !s.trim().is_empty());
+        vec![self.detection_step(), self.prompt_append_step(has_read)]
     }
 }
 
@@ -179,8 +192,21 @@ impl AzureCliExtension {
     ///
     /// displayName must stay in sync with the entry in
     /// `tests/bash_lint_tests.rs::REQUIRED_STEP_DISPLAY_NAMES`.
-    fn prompt_append_step(&self) -> String {
-        r#"- bash: |
+    ///
+    /// `has_read` controls how the `az devops` bullet is phrased. That
+    /// subcommand only authenticates automatically when `permissions.read`
+    /// is configured (it reads `$AZURE_DEVOPS_EXT_PAT`, populated from the
+    /// read-only token). When `read` is absent the bullet instead tells the
+    /// agent the subcommand is unauthenticated, so it doesn't burn turns on
+    /// `az devops` calls that will fail.
+    fn prompt_append_step(&self, has_read: bool) -> String {
+        let ado_bullet = if has_read {
+            "- **Azure DevOps management** — `az devops`, `az pipelines`, `az repos`, `az boards`. These are authenticated automatically from `$AZURE_DEVOPS_EXT_PAT` (minted from `permissions: read:`). List/inspect operations Just Work; write operations honour the token's scopes."
+        } else {
+            "- **Azure DevOps management** — `az devops`, `az pipelines`, `az repos`, `az boards`. These are NOT authenticated: this pipeline declares no `permissions: read:`, so `$AZURE_DEVOPS_EXT_PAT` is unset and these commands will fail to authenticate. Ask the operator to add `permissions: read: <arm-service-connection>` to enable them."
+        };
+        format!(
+            r#"- bash: |
     cat >> "/tmp/awf-tools/agent-prompt.md" << 'AZURE_CLI_PROMPT_EOF'
 
     ---
@@ -189,7 +215,7 @@ impl AzureCliExtension {
 
     The Azure CLI is available inside this sandbox at `/usr/bin/az`. Prefer it over hand-rolled curl calls when it covers what you need:
 
-    - **Azure DevOps management** — `az devops`, `az pipelines`, `az repos`, `az boards`. These are authenticated automatically from `$AZURE_DEVOPS_EXT_PAT` when the pipeline declares `permissions: read:`. List/inspect operations Just Work; write operations honour the PAT's scopes.
+    {ado_bullet}
     - **Azure Resource Manager** — `az resource`, `az account`, `az group`. These require a separate Azure identity that ado-aw does not provision out of the box; sign in with `az login` using credentials supplied by another mechanism (e.g. a service connection writing them into your sandbox env) before invoking them.
     - **Microsoft Graph** — `az ad`, `az rest`. Same caveat as ARM.
 
@@ -200,7 +226,7 @@ impl AzureCliExtension {
   displayName: "Append Azure CLI prompt"
   condition: ne(variables['AW_AZ_MOUNTS'], '')
 "#
-        .to_string()
+        )
     }
 }
 
@@ -483,6 +509,42 @@ mod tests {
              \"Append Azure CLI prompt\" to match the coverage entry \
              in tests/bash_lint_tests.rs::REQUIRED_STEP_DISPLAY_NAMES. \
              Step:\n{append}"
+        );
+    }
+
+    #[test]
+    fn test_azure_cli_advisory_advertises_az_devops_auth_with_permissions_read() {
+        // When permissions.read is configured the az devops bullet must
+        // advertise it as auto-authenticated (no warning language).
+        let ext = AzureCliExtension;
+        let fm: FrontMatter = serde_yaml::from_str(
+            "name: t\ndescription: x\npermissions:\n  read: my-read-sc\n",
+        )
+        .expect("front matter parses");
+        let ctx = CompileContext::for_test(&fm);
+        let append = &ext.prepare_steps(&ctx)[1];
+        assert!(
+            append.contains("authenticated automatically"),
+            "with permissions.read, az devops bullet must advertise auto-auth. Step:\n{append}"
+        );
+        assert!(
+            !append.contains("NOT authenticated"),
+            "with permissions.read, the unauthenticated warning must not appear. Step:\n{append}"
+        );
+    }
+
+    #[test]
+    fn test_azure_cli_advisory_warns_az_devops_unauth_without_permissions_read() {
+        // Without permissions.read the az devops bullet must warn that the
+        // subcommand is unauthenticated rather than telling the agent it
+        // Just Works.
+        let ext = AzureCliExtension;
+        let fm = fm(); // no permissions
+        let ctx = CompileContext::for_test(&fm);
+        let append = &ext.prepare_steps(&ctx)[1];
+        assert!(
+            append.contains("NOT authenticated"),
+            "without permissions.read, az devops bullet must warn it is unauthenticated. Step:\n{append}"
         );
     }
 

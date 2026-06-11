@@ -152,6 +152,29 @@ impl CompilerExtension for AzureDevOpsExtension {
             ));
         }
 
+        // Warn if the ADO MCP is enabled but no read-only token will be minted.
+        // The MCP's only auth path is ADO_MCP_AUTH_TOKEN, which maps to
+        // SC_READ_TOKEN — and that secret is acquired solely from
+        // `permissions.read` (see `generate_acquire_ado_token`). Without it the
+        // container starts with an empty token and fails to authenticate to
+        // Azure DevOps at runtime, with no other compile-time signal.
+        let has_read = ctx
+            .front_matter
+            .permissions
+            .as_ref()
+            .and_then(|p| p.read.as_deref())
+            .is_some_and(|s| !s.trim().is_empty());
+        if !has_read {
+            warnings.push(format!(
+                "Agent '{}' has tools.azure-devops enabled but no `permissions.read` is \
+                 configured. The Azure DevOps MCP authenticates only via SC_READ_TOKEN, which is \
+                 minted from `permissions.read`; without it ADO_MCP_AUTH_TOKEN is empty and the \
+                 MCP will fail to authenticate to Azure DevOps at runtime. Set \
+                 `permissions:\\n  read: <arm-service-connection>` to provide a read-only token.",
+                ctx.agent_name
+            ));
+        }
+
         Ok(warnings)
     }
     fn required_pipeline_vars(&self) -> Vec<PipelineEnvMapping> {

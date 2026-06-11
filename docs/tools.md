@@ -81,10 +81,22 @@ tools:
 
 When enabled, the compiler:
 - Generates a containerized stdio MCP entry (`node:20-slim` + `npx @azure-devops/mcp`) in the MCPG config
-- Auto-maps `AZURE_DEVOPS_EXT_PAT` token passthrough when `permissions.read` is configured
+- Maps the `AZURE_DEVOPS_EXT_PAT` / `ADO_MCP_AUTH_TOKEN` passthrough to `SC_READ_TOKEN`
 - Adds ADO-specific hosts to the network allowlist
 - Auto-infers org from the git remote URL at compile time (overridable via `org:` field)
 - Fails compilation if org cannot be determined (no explicit override and no ADO git remote)
+
+> **`permissions.read` is required.** The Azure DevOps MCP authenticates
+> *only* via `SC_READ_TOKEN`, which is minted exclusively from
+> `permissions.read`. If you enable `tools.azure-devops` without configuring a
+> read-only ARM service connection, `ADO_MCP_AUTH_TOKEN` is empty and the MCP
+> container starts but cannot authenticate to Azure DevOps — a silent runtime
+> failure. The compiler emits a warning in this case. Configure it with:
+>
+> ```yaml
+> permissions:
+>   read: my-read-arm-connection
+> ```
 
 ## Built-in CLIs
 

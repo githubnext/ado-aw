@@ -322,7 +322,10 @@ fn test_ado_mcpg_servers_no_org_fails() {
 
 #[test]
 fn test_ado_validate_duplicate_mcp_warning() {
-    let (mut fm, _) = parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
+    let (mut fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\npermissions:\n  read: my-read-sc\n---\n",
+    )
+    .unwrap();
     fm.mcp_servers.insert(
         ADO_MCP_SERVER_NAME.to_string(),
         crate::compile::types::McpConfig::Enabled(true),
@@ -332,6 +335,51 @@ fn test_ado_validate_duplicate_mcp_warning() {
     let warnings = ext.validate(&ctx).unwrap();
     assert_eq!(warnings.len(), 1);
     assert!(warnings[0].contains("both tools.azure-devops and mcp-servers"));
+}
+
+#[test]
+fn test_ado_validate_warns_without_permissions_read() {
+    // tools.azure-devops enabled but no permissions.read → the MCP would
+    // start with an empty ADO_MCP_AUTH_TOKEN, so a warning must be emitted.
+    let fm = minimal_front_matter();
+    let ctx = ctx_from(&fm);
+    let ext = AzureDevOpsExtension::new(AzureDevOpsToolConfig::Enabled(true));
+    let warnings = ext.validate(&ctx).unwrap();
+    assert!(
+        warnings.iter().any(|w| w.contains("permissions.read")),
+        "expected a permissions.read warning, got: {warnings:?}"
+    );
+}
+
+#[test]
+fn test_ado_validate_no_warning_with_permissions_read() {
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\npermissions:\n  read: my-read-sc\n---\n",
+    )
+    .unwrap();
+    let ctx = ctx_from(&fm);
+    let ext = AzureDevOpsExtension::new(AzureDevOpsToolConfig::Enabled(true));
+    let warnings = ext.validate(&ctx).unwrap();
+    assert!(
+        !warnings.iter().any(|w| w.contains("permissions.read")),
+        "permissions.read warning should be absent when read is configured, got: {warnings:?}"
+    );
+}
+
+#[test]
+fn test_ado_validate_warns_with_blank_permissions_read() {
+    // An empty/whitespace read connection string is treated as unset.
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\npermissions:\n  read: \"   \"\n---\n",
+    )
+    .unwrap();
+    let ctx = ctx_from(&fm);
+    let ext = AzureDevOpsExtension::new(AzureDevOpsToolConfig::Enabled(true));
+    let warnings = ext.validate(&ctx).unwrap();
+    assert!(
+        warnings.iter().any(|w| w.contains("permissions.read")),
+        "blank permissions.read should still warn, got: {warnings:?}"
+    );
 }
 
 // ── CacheMemoryExtension ───────────────────────────────────────
