@@ -1220,6 +1220,147 @@ pub fn compile_gate_step_external(
     Ok(step)
 }
 
+// ─── Typed-IR gate step (port-ado-script) ───────────────────────────────
+
+/// Typed-IR sibling of [`compile_gate_step_external`]. Constructs a
+/// [`crate::compile::ir::step::BashStep`] with `id` set to the
+/// canonical gate step name (`prGate` / `pipelineGate`), typed
+/// [`crate::compile::ir::condition::Condition::Succeeded`], and a
+/// typed env block that uses
+/// [`crate::compile::ir::env::EnvValue::StepOutput`] for cross-step
+/// references and
+/// [`crate::compile::ir::env::EnvValue::Concat`] for the
+/// `$(System.PullRequest.X)$(synthPr.X)` mutually-empty macro-concat
+/// pattern.
+///
+/// Lowering picks the right reference syntax per consumer location:
+/// when the consumer is in the same job as `synthPr` (today's
+/// production layout — gate + synthPr both live in Setup), the
+/// `StepOutput` lowers to the macro form `$(synthPr.X)`. If a future
+/// caller moves the gate to a different job, lowering would
+/// auto-switch to `dependencies.Setup.outputs['synthPr.X']` without
+/// any change to this builder — that is the whole point of the IR.
+pub fn build_gate_step_typed(
+    ctx: GateContext,
+    checks: &[FilterCheck],
+    evaluator_path: &str,
+    synthetic_pr_active: bool,
+) -> anyhow::Result<crate::compile::ir::step::BashStep> {
+    use crate::compile::ir::condition::Condition;
+    use crate::compile::ir::env::EnvValue;
+    use crate::compile::ir::ids::StepId;
+    use crate::compile::ir::output::OutputRef;
+    use crate::compile::ir::step::BashStep;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    if checks.is_empty() {
+        anyhow::bail!(
+            "build_gate_step_typed called with empty checks — caller must \
+             guard with !checks.is_empty() (matches compile_gate_step_external)"
+        );
+    }
+
+    let spec = build_gate_spec(ctx, checks)?;
+    let spec_json = serde_json::to_string(&spec)?;
+    let spec_b64 = STANDARD.encode(spec_json.as_bytes());
+
+    let exports = collect_ado_exports(checks)?;
+    let pr_synth_active = synthetic_pr_active && matches!(ctx, GateContext::PullRequest);
+
+    let script = format!("node '{evaluator_path}'\n");
+    let mut step = BashStep::new(ctx.display_name(), script)
+        .with_id(StepId::new(ctx.step_name())?)
+        .with_condition(Condition::Succeeded)
+        .with_env(
+            "SYSTEM_ACCESSTOKEN",
+            EnvValue::ado_macro("System.AccessToken")?,
+        )
+        .with_env("GATE_SPEC", EnvValue::literal(spec_b64));
+
+    // AW_SYNTHETIC_PR (same-job consumer of the synthPr step) flows
+    // through as a typed StepOutput → macro form $(synthPr.AW_SYNTHETIC_PR).
+    if pr_synth_active {
+        let synth = StepId::new("synthPr")?;
+        step = step.with_env(
+            "AW_SYNTHETIC_PR",
+            EnvValue::step_output(OutputRef::new(synth, "AW_SYNTHETIC_PR")),
+        );
+    }
+
+    let synth_id = StepId::new("synthPr")?;
+    for (env_var, ado_macro) in &exports {
+        let value = if pr_synth_active {
+            match *env_var {
+                // The three identifiers that change between real-PR and
+                // synth-PR builds: typed Concat of the real-PR macro
+                // and the synthPr step output (mutually empty at runtime).
+                "ADO_PR_ID" => EnvValue::concat(vec![
+                    EnvValue::ado_macro("System.PullRequest.PullRequestId")?,
+                    EnvValue::step_output(OutputRef::new(
+                        synth_id.clone(),
+                        "AW_SYNTHETIC_PR_ID",
+                    )),
+                ]),
+                "ADO_SOURCE_BRANCH" => EnvValue::concat(vec![
+                    EnvValue::ado_macro("System.PullRequest.SourceBranch")?,
+                    EnvValue::step_output(OutputRef::new(
+                        synth_id.clone(),
+                        "AW_SYNTHETIC_PR_SOURCEBRANCH",
+                    )),
+                ]),
+                "ADO_TARGET_BRANCH" => EnvValue::concat(vec![
+                    EnvValue::ado_macro("System.PullRequest.TargetBranch")?,
+                    EnvValue::step_output(OutputRef::new(
+                        synth_id.clone(),
+                        "AW_SYNTHETIC_PR_TARGETBRANCH",
+                    )),
+                ]),
+                _ => env_value_from_ado_macro(env_var, ado_macro)?,
+            }
+        } else {
+            env_value_from_ado_macro(env_var, ado_macro)?
+        };
+        step = step.with_env(*env_var, value);
+    }
+
+    Ok(step)
+}
+
+/// Map a legacy `(env_var, "$(Some.Macro)")` exports entry to a typed
+/// [`crate::compile::ir::env::EnvValue`]. Predefined-variable macros
+/// route through [`crate::compile::ir::env::EnvValue::ado_macro`] (so
+/// the allowlist enforces no typos); free-form user vars or things the
+/// allowlist doesn't yet cover fall through to
+/// [`crate::compile::ir::env::EnvValue::Literal`] preserving the raw
+/// scalar.
+fn env_value_from_ado_macro(
+    _name: &str,
+    ado_macro: &'static str,
+) -> anyhow::Result<crate::compile::ir::env::EnvValue> {
+    use crate::compile::ir::env::{ALLOWED_ADO_MACROS, EnvValue};
+
+    // Unwrap `$(X.Y)` → `X.Y` for the allowlist lookup.
+    let stripped = ado_macro
+        .strip_prefix("$(")
+        .and_then(|rest| rest.strip_suffix(')'));
+    if let Some(inner) = stripped
+        && ALLOWED_ADO_MACROS.contains(&inner)
+    {
+        // Promote the inner string to `&'static str` via the
+        // allowlist entry so EnvValue::AdoMacro's static-lifetime
+        // requirement is satisfied with the canonical reference.
+        for allowed in ALLOWED_ADO_MACROS {
+            if *allowed == inner {
+                return EnvValue::ado_macro(allowed);
+            }
+        }
+    }
+    // Fallback: keep the raw scalar verbatim (covers any
+    // not-yet-allowlisted predefined var so a new fact addition
+    // doesn't immediately break this codepath).
+    Ok(EnvValue::literal(ado_macro))
+}
+
 // ─── PR synthetic-from-ci spec (mode: synthetic) ────────────────────────────
 
 /// Base64-encoded JSON spec consumed by the `exec-context-pr-synth.js`

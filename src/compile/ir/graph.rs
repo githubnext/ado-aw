@@ -4,7 +4,8 @@
 //! ## What the graph captures
 //!
 //! Every [`super::env::EnvValue::StepOutput`],
-//! [`super::env::EnvValue::Coalesce`] child, and
+//! [`super::env::EnvValue::Coalesce`] / [`super::env::EnvValue::Concat`]
+//! child, and
 //! [`super::condition::Expr::StepOutput`] inside a step's `env` /
 //! `condition` is an edge from the **consumer** step (the one that
 //! reads the value) to the **producer** step (the one that names the
@@ -296,7 +297,7 @@ fn collect_env_refs_into<'a>(v: &'a EnvValue, out: &mut Vec<&'a OutputRef>) {
         | EnvValue::PipelineVar(_)
         | EnvValue::Secret(_) => {}
         EnvValue::StepOutput(r) => out.push(r),
-        EnvValue::Coalesce(children) => {
+        EnvValue::Coalesce(children) | EnvValue::Concat(children) => {
             for c in children {
                 collect_env_refs_into(c, out);
             }

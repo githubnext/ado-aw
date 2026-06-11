@@ -26,6 +26,16 @@
 //! - [`EnvValue::Coalesce`] — the typed form of
 //!   `$[ coalesce(a, b, …, '') ]`. Lowers to a single ADO runtime
 //!   expression. Nested `Coalesce` is flattened during lowering.
+//! - [`EnvValue::Concat`] — the **macro-form** sibling of `Coalesce`:
+//!   children are lowered individually and the results are joined
+//!   without a separator (`<a><b>…`). Used today for the
+//!   `$(System.PullRequest.X)$(synthPr.X)` exclusive-OR concat in
+//!   the `prGate` step — both halves are macros that are
+//!   mutually-empty at runtime, so concatenation yields the live
+//!   value with **no runtime-expression wrap**. This matters for
+//!   same-job consumers, where macro form is the only form that
+//!   resolves correctly (see `src/compile/filter_ir.rs` for the
+//!   underlying bug history).
 
 use super::output::OutputRef;
 
@@ -51,6 +61,17 @@ pub enum EnvValue {
     /// Nested `Coalesce` is flattened so the final form has at most
     /// one outer `$[ coalesce(...) ]` wrapper.
     Coalesce(Vec<EnvValue>),
+    /// Macro-form concatenation: lowers each child individually and
+    /// joins the results with no separator and no outer wrap.
+    ///
+    /// Use this when the result must remain a plain ADO scalar (not
+    /// a `$[ … ]` runtime expression), e.g. when the consumer is in
+    /// the same job as the producing step output and the macro form
+    /// `$(stepName.X)` is the only form that resolves correctly.
+    /// Typical pattern is two mutually-empty macros so concatenation
+    /// yields the live value — the `prGate` step's
+    /// `$(System.PullRequest.X)$(synthPr.X)` exclusive-OR.
+    Concat(Vec<EnvValue>),
 }
 
 /// Allowlist of ADO predefined-variable macros that may appear in
@@ -134,6 +155,13 @@ impl EnvValue {
     pub fn coalesce(values: Vec<EnvValue>) -> Self {
         EnvValue::Coalesce(values)
     }
+
+    /// Construct an [`EnvValue::Concat`] — macro-form concatenation
+    /// of children. Unlike `Coalesce`, no outer wrap is added; the
+    /// lowered children are joined verbatim.
+    pub fn concat(values: Vec<EnvValue>) -> Self {
+        EnvValue::Concat(values)
+    }
 }
 
 #[cfg(test)]
@@ -166,6 +194,19 @@ mod tests {
         match v {
             EnvValue::Coalesce(parts) => assert_eq!(parts.len(), 2),
             _ => panic!("expected Coalesce"),
+        }
+    }
+
+    #[test]
+    fn concat_carries_typed_children() {
+        let step = StepId::new("synthPr").unwrap();
+        let v = EnvValue::concat(vec![
+            EnvValue::ado_macro("System.PullRequest.PullRequestId").unwrap(),
+            EnvValue::step_output(OutputRef::new(step, "AW_SYNTHETIC_PR_ID")),
+        ]);
+        match v {
+            EnvValue::Concat(parts) => assert_eq!(parts.len(), 2),
+            _ => panic!("expected Concat"),
         }
     }
 }

@@ -208,7 +208,7 @@ fn lower_pool(pool: &Pool) -> Value {
     Value::Mapping(m)
 }
 
-fn lower_step(step: &Step, ctx: &LoweringContext<'_>) -> Result<Value> {
+pub(crate) fn lower_step(step: &Step, ctx: &LoweringContext<'_>) -> Result<Value> {
     match step {
         Step::Bash(b) => lower_bash(b, ctx),
         Step::Task(t) => lower_task(t, ctx),
@@ -385,6 +385,20 @@ fn lower_env_value(ctx: &LoweringContext<'_>, v: &EnvValue) -> Result<String> {
             parts.push("''".to_string());
             Ok(format!("$[ coalesce({}) ]", parts.join(", ")))
         }
+        EnvValue::Concat(children) => {
+            // Macro-form concatenation: lower each child in macro
+            // context (NOT expression-atom) and join verbatim. This
+            // keeps the resulting scalar a plain ADO macro string so
+            // same-job consumers see the macro form `$(stepName.X)`,
+            // which is the only form that resolves correctly inside
+            // the producing job. See `EnvValue::Concat` doc-comment
+            // for the bug history.
+            let mut out = String::new();
+            for c in children {
+                out.push_str(&lower_env_value(ctx, c)?);
+            }
+            Ok(out)
+        }
     }
 }
 
@@ -411,6 +425,21 @@ fn lower_env_value_as_expr_atom(ctx: &LoweringContext<'_>, v: &EnvValue) -> Resu
             }
             // Don't wrap in `$[ … ]` again — we are already inside one.
             Ok(format!("coalesce({})", parts.join(", ")))
+        }
+        EnvValue::Concat(_) => {
+            // `Concat` is a macro-form construct (no `$[ … ]` wrap).
+            // It does not have a natural lowering inside an
+            // expression-atom context — the macro syntax `$(…)` is
+            // not an ADO expression atom. If a future caller wants
+            // concat semantics inside an expression, they should
+            // express it with string concatenation operators that
+            // ADO expressions support. For now, this is an authoring
+            // error.
+            anyhow::bail!(
+                "ir::lower: EnvValue::Concat is not valid inside a Coalesce \
+                 (or other expression-atom context); use Concat at the top \
+                 level of an env value only"
+            )
         }
     }
 }
@@ -560,6 +589,94 @@ mod tests {
         assert_eq!(
             lower_env_value(&ctx, &v).unwrap(),
             "$[ coalesce(variables['System.PullRequest.PullRequestId'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_ID'], '') ]"
+        );
+    }
+
+    /// `EnvValue::Concat` lowers to the macro-form concatenation of
+    /// each child's lowered scalar — no `$[ … ]` wrap, no separator.
+    /// For a same-job consumer the StepOutput child resolves to the
+    /// macro form `$(stepName.X)`, so the final string is the
+    /// `$(System.PullRequest.X)$(synthPr.X)` exclusive-OR concat
+    /// used by the gate step today.
+    #[test]
+    fn lower_env_value_concat_produces_macro_form_for_same_job() {
+        let synth = StepId::new("synthPr").unwrap();
+        let producer = Step::Bash(
+            BashStep::new("synth", "echo s")
+                .with_id(synth.clone())
+                .with_output(OutputDecl::new("AW_SYNTHETIC_PR_ID")),
+        );
+        let consumer = Step::Bash(BashStep::new("gate", "node gate.js"));
+        let mut setup = Job::new(JobId::new("Setup").unwrap(), "Setup", Pool::VmImage("u".into()));
+        setup.push_step(producer);
+        setup.push_step(consumer);
+        let p = Pipeline {
+            name: "t".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers::default(),
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(vec![setup]),
+            shape: PipelineShape::Standalone,
+        };
+        let g = super::super::graph::build_graph(&p).unwrap();
+
+        let setup_id = JobId::new("Setup").unwrap();
+        let ctx = LoweringContext {
+            graph: &g,
+            stage: None,
+            job: &setup_id,
+        };
+
+        let v = EnvValue::concat(vec![
+            EnvValue::ado_macro("System.PullRequest.PullRequestId").unwrap(),
+            EnvValue::step_output(OutputRef::new(synth, "AW_SYNTHETIC_PR_ID")),
+        ]);
+        assert_eq!(
+            lower_env_value(&ctx, &v).unwrap(),
+            "$(System.PullRequest.PullRequestId)$(synthPr.AW_SYNTHETIC_PR_ID)"
+        );
+    }
+
+    /// `EnvValue::Concat` is not valid inside a Coalesce — the macro
+    /// form `$(…)` is not an ADO expression atom.
+    #[test]
+    fn lower_env_value_concat_inside_coalesce_errors() {
+        let synth = StepId::new("synthPr").unwrap();
+        let producer = Step::Bash(
+            BashStep::new("synth", "echo s")
+                .with_id(synth.clone())
+                .with_output(OutputDecl::new("X")),
+        );
+        let mut setup = Job::new(JobId::new("Setup").unwrap(), "Setup", Pool::VmImage("u".into()));
+        setup.push_step(producer);
+        let p = Pipeline {
+            name: "t".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers::default(),
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(vec![setup]),
+            shape: PipelineShape::Standalone,
+        };
+        let g = super::super::graph::build_graph(&p).unwrap();
+
+        let setup_id = JobId::new("Setup").unwrap();
+        let ctx = LoweringContext {
+            graph: &g,
+            stage: None,
+            job: &setup_id,
+        };
+
+        let v = EnvValue::coalesce(vec![EnvValue::concat(vec![
+            EnvValue::literal("a"),
+            EnvValue::literal("b"),
+        ])]);
+        let err = lower_env_value(&ctx, &v).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Concat is not valid inside a Coalesce"),
+            "expected Concat-in-Coalesce error, got: {msg}"
         );
     }
 
