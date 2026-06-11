@@ -295,7 +295,8 @@ fn collect_env_refs_into<'a>(v: &'a EnvValue, out: &mut Vec<&'a OutputRef>) {
         EnvValue::Literal(_)
         | EnvValue::AdoMacro(_)
         | EnvValue::PipelineVar(_)
-        | EnvValue::Secret(_) => {}
+        | EnvValue::Secret(_)
+        | EnvValue::RawYamlScalar(_) => {}
         EnvValue::StepOutput(r) => out.push(r),
         EnvValue::Coalesce(children) | EnvValue::Concat(children) => {
             for c in children {

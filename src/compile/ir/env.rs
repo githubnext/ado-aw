@@ -72,6 +72,14 @@ pub enum EnvValue {
     /// yields the live value — the `prGate` step's
     /// `$(System.PullRequest.X)$(synthPr.X)` exclusive-OR.
     Concat(Vec<EnvValue>),
+    /// Pre-built YAML scalar emitted verbatim into the value position.
+    ///
+    /// Used by [`crate::compile::standalone_ir`] when a legacy YAML
+    /// env-block carries a non-string scalar (integer / boolean) that
+    /// must round-trip unquoted (e.g. `GITHUB_READ_ONLY: 1` — not
+    /// `'1'`). Bypasses the string-formatting lowering so
+    /// serde_yaml's emitter sees the typed value directly.
+    RawYamlScalar(serde_yaml::Value),
 }
 
 /// Allowlist of ADO predefined-variable macros that may appear in

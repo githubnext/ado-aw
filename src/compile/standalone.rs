@@ -6,22 +6,13 @@
 //! - MCP firewall with tool-level filtering and custom MCP server support
 //! - Setup/teardown job support
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use log::info;
 use std::path::Path;
 
 use super::Compiler;
-use super::common::{
-    AWF_VERSION, MCPG_VERSION, MCPG_IMAGE, MCPG_PORT, MCPG_DOMAIN,
-    CompileConfig, compile_shared,
-    generate_allowed_domains,
-    generate_awf_mounts,
-    generate_awf_path_step,
-    collect_awf_path_prepends,
-    generate_enabled_tools_args,
-    generate_mcpg_config, generate_mcpg_docker_env, generate_mcpg_step_env,
-};
+use super::common;
 use super::types::FrontMatter;
 
 /// Standalone pipeline compiler.
@@ -42,57 +33,39 @@ impl Compiler for StandaloneCompiler {
         skip_integrity: bool,
         debug_pipeline: bool,
     ) -> Result<String> {
-        info!("Compiling for standalone target");
+        info!("Compiling for standalone target (typed IR)");
 
-        // Collect extensions (needed before compile_shared for MCPG config)
         let extensions = super::extensions::collect_extensions(front_matter);
-
-        // Build compile context for MCPG config generation
         let ctx = super::extensions::CompileContext::new(front_matter, input_path).await?;
 
-        // Standalone-specific values
-        let allowed_domains = generate_allowed_domains(front_matter, &extensions)?;
-        let awf_mounts = generate_awf_mounts(&extensions);
-        let awf_paths = collect_awf_path_prepends(&extensions);
-        let awf_path_step = generate_awf_path_step(&awf_paths);
-        let enabled_tools_args = generate_enabled_tools_args(front_matter);
-
-        let config_obj = generate_mcpg_config(front_matter, &ctx, &extensions)?;
-        let mcpg_config_json =
-            serde_json::to_string_pretty(&config_obj).context("Failed to serialize MCPG config")?;
-        let mcpg_docker_env = generate_mcpg_docker_env(front_matter, &extensions);
-        let mcpg_step_env = generate_mcpg_step_env(&extensions);
-
-        let config = CompileConfig {
-            template: include_str!("../data/base.yml").to_string(),
-            extra_replacements: vec![
-                ("{{ firewall_version }}".into(), AWF_VERSION.into()),
-                ("{{ mcpg_version }}".into(), MCPG_VERSION.into()),
-                ("{{ mcpg_image }}".into(), MCPG_IMAGE.into()),
-                ("{{ mcpg_port }}".into(), MCPG_PORT.to_string()),
-                ("{{ mcpg_domain }}".into(), MCPG_DOMAIN.into()),
-                ("{{ allowed_domains }}".into(), allowed_domains),
-                ("{{ awf_mounts }}".into(), awf_mounts),
-                ("{{ awf_path_step }}".into(), awf_path_step),
-                ("{{ enabled_tools_args }}".into(), enabled_tools_args),
-                ("{{ mcpg_config }}".into(), mcpg_config_json),
-                ("{{ mcpg_docker_env }}".into(), mcpg_docker_env),
-                ("{{ mcpg_step_env }}".into(), mcpg_step_env),
-            ],
+        let pipeline = super::standalone_ir::build_standalone_pipeline(
+            front_matter,
+            &extensions,
+            &ctx,
+            input_path,
+            output_path,
+            markdown_body,
             skip_integrity,
             debug_pipeline,
-            has_awf_paths: !awf_paths.is_empty(),
-            skip_header: false,
-        };
+        )?;
 
-        compile_shared(input_path, output_path, front_matter, markdown_body, &extensions, &ctx, config).await
+        let yaml = super::ir::emit::emit(&pipeline)?;
+        let yaml = common::normalize_yaml(&yaml)?;
+        let header = common::generate_header_comment(input_path);
+        // Legacy emitter inserts a blank line between the header
+        // comment block and the first `name:` key — preserve it so
+        // committed lock files stay byte-identical.
+        let full = format!("{}\n{}", header, yaml);
+
+        common::atomic_write(output_path, &full).await?;
+        Ok(full)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compile::common::parse_markdown;
+    use crate::compile::common::{generate_allowed_domains, parse_markdown};
 
     fn minimal_front_matter() -> FrontMatter {
         let (fm, _) = parse_markdown("---\nname: test-agent\ndescription: test\n---\n").unwrap();

@@ -196,9 +196,9 @@ jobs:
       cat "/tmp/awf-tools/agent-prompt.md"
     displayName: Prepare agent prompt
   - task: DockerInstaller@0
-    displayName: Install Docker
     inputs:
       dockerVersion: 26.1.4
+    displayName: Install Docker
   - bash: |
       set -eo pipefail
 
@@ -611,9 +611,9 @@ jobs:
       chmod +x ado-aw
     displayName: Download agentic pipeline compiler (v0.35.0)
   - task: DockerInstaller@0
-    displayName: Install Docker
     inputs:
       dockerVersion: 26.1.4
+    displayName: Install Docker
   - bash: |
       set -eo pipefail
 
@@ -779,8 +779,8 @@ jobs:
 
       echo "##vso[task.setvariable variable=SafeToProcess;isOutput=true]$SAFE_TO_PROCESS"
       echo "SafeToProcess set to: $SAFE_TO_PROCESS"
-    displayName: Evaluate threat analysis
     name: threatAnalysis
+    displayName: Evaluate threat analysis
     condition: always()
   - bash: |
       # Copy all logs to analyzed outputs for artifact upload

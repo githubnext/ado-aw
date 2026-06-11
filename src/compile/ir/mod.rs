@@ -122,6 +122,10 @@ pub struct Parameter {
     pub display_name: String,
     pub kind: ParameterKind,
     pub default: ParameterDefault,
+    /// Optional `values:` enumeration — restricts the parameter to a
+    /// finite set of strings/numbers; surfaced as a dropdown in the
+    /// ADO pipeline UI.
+    pub values: Vec<serde_yaml::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

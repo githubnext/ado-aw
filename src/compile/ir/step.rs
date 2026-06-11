@@ -13,7 +13,7 @@
 //! step graph (`ir-graph`), output-ref lowering (`ir-output-lowering`),
 //! and YAML emit (`ir-yaml-emit`) live in subsequent commits.
 
-use std::collections::BTreeMap;
+use indexmap::IndexMap;
 use std::time::Duration;
 
 use super::condition::Condition;
@@ -84,7 +84,7 @@ pub struct BashStep {
     /// The YAML emit pass handles literal-block wrapping.
     pub script: String,
     /// Environment-variable bindings.
-    pub env: BTreeMap<String, EnvValue>,
+    pub env: IndexMap<String, EnvValue>,
     /// Outputs declared by this step. The auto-`isOutput=true`
     /// promotion happens during lowering when at least one
     /// cross-step reader is found.
@@ -109,7 +109,7 @@ impl BashStep {
             id: None,
             display_name: display_name.into(),
             script: script.into(),
-            env: BTreeMap::new(),
+            env: IndexMap::new(),
             outputs: Vec::new(),
             condition: None,
             timeout: None,
@@ -151,8 +151,8 @@ pub struct TaskStep {
     /// The task identifier, e.g. `"NodeTool@0"` or `"UseNode@1"`.
     pub task: String,
     /// `inputs:` block — emitted in insertion order.
-    pub inputs: BTreeMap<String, String>,
-    pub env: BTreeMap<String, EnvValue>,
+    pub inputs: IndexMap<String, String>,
+    pub env: IndexMap<String, EnvValue>,
     pub condition: Option<Condition>,
     pub timeout: Option<Duration>,
     pub continue_on_error: bool,
@@ -164,8 +164,8 @@ impl TaskStep {
             id: None,
             display_name: display_name.into(),
             task: task.into(),
-            inputs: BTreeMap::new(),
-            env: BTreeMap::new(),
+            inputs: IndexMap::new(),
+            env: IndexMap::new(),
             condition: None,
             timeout: None,
             continue_on_error: false,

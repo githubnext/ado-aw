@@ -180,6 +180,9 @@ fn lower_parameters(params: &[Parameter]) -> Value {
             }
             ParameterDefault::None => {}
         }
+        if !p.values.is_empty() {
+            m.insert(s("values"), Value::Sequence(p.values.clone()));
+        }
         seq.push(Value::Mapping(m));
     }
     Value::Sequence(seq)
@@ -249,7 +252,7 @@ fn lower_pipeline_resource(p: &PipelineResource) -> Value {
     } else {
         let mut trigger_m = Mapping::new();
         let mut branches_m = Mapping::new();
-        let include: Vec<Value> = p.branches.iter().map(|b| s(b)).collect();
+        let include: Vec<Value> = p.branches.iter().map(s).collect();
         branches_m.insert(s("include"), Value::Sequence(include));
         trigger_m.insert(s("branches"), Value::Mapping(branches_m));
         m.insert(s("trigger"), Value::Mapping(trigger_m));
@@ -265,7 +268,7 @@ fn lower_schedules(schedules: &[Schedule]) -> Value {
         m.insert(s("displayName"), s(&sch.display_name));
         if !sch.branches_include.is_empty() {
             let mut branches_m = Mapping::new();
-            let include: Vec<Value> = sch.branches_include.iter().map(|b| s(b)).collect();
+            let include: Vec<Value> = sch.branches_include.iter().map(s).collect();
             branches_m.insert(s("include"), Value::Sequence(include));
             m.insert(s("branches"), Value::Mapping(branches_m));
         }
@@ -291,11 +294,11 @@ fn lower_pr_trigger(pr: Option<&PrTrigger>) -> Option<Value> {
     if !pr.branches_include.is_empty() || !pr.branches_exclude.is_empty() {
         let mut branches_m = Mapping::new();
         if !pr.branches_include.is_empty() {
-            let include: Vec<Value> = pr.branches_include.iter().map(|b| s(b)).collect();
+            let include: Vec<Value> = pr.branches_include.iter().map(s).collect();
             branches_m.insert(s("include"), Value::Sequence(include));
         }
         if !pr.branches_exclude.is_empty() {
-            let exclude: Vec<Value> = pr.branches_exclude.iter().map(|b| s(b)).collect();
+            let exclude: Vec<Value> = pr.branches_exclude.iter().map(s).collect();
             branches_m.insert(s("exclude"), Value::Sequence(exclude));
         }
         m.insert(s("branches"), Value::Mapping(branches_m));
@@ -303,11 +306,11 @@ fn lower_pr_trigger(pr: Option<&PrTrigger>) -> Option<Value> {
     if !pr.paths_include.is_empty() || !pr.paths_exclude.is_empty() {
         let mut paths_m = Mapping::new();
         if !pr.paths_include.is_empty() {
-            let include: Vec<Value> = pr.paths_include.iter().map(|p| s(p)).collect();
+            let include: Vec<Value> = pr.paths_include.iter().map(s).collect();
             paths_m.insert(s("include"), Value::Sequence(include));
         }
         if !pr.paths_exclude.is_empty() {
-            let exclude: Vec<Value> = pr.paths_exclude.iter().map(|p| s(p)).collect();
+            let exclude: Vec<Value> = pr.paths_exclude.iter().map(s).collect();
             paths_m.insert(s("exclude"), Value::Sequence(exclude));
         }
         m.insert(s("paths"), Value::Mapping(paths_m));
@@ -394,8 +397,14 @@ fn lower_job(job: &Job, stage: Option<&StageId>, graph: &Graph) -> Result<Value>
     m.insert(s("job"), s(job.id.as_str()));
     m.insert(s("displayName"), s(&job.display_name));
     if !job.depends_on.is_empty() {
-        let deps: Vec<Value> = job.depends_on.iter().map(|d| s(d.as_str())).collect();
-        m.insert(s("dependsOn"), Value::Sequence(deps));
+        // Single-dep emits as a scalar `dependsOn: <name>` (matching
+        // base.yml). Multi-dep emits as a sequence.
+        if job.depends_on.len() == 1 {
+            m.insert(s("dependsOn"), s(job.depends_on[0].as_str()));
+        } else {
+            let deps: Vec<Value> = job.depends_on.iter().map(|d| s(d.as_str())).collect();
+            m.insert(s("dependsOn"), Value::Sequence(deps));
+        }
     }
     if let Some(cond) = &job.condition {
         m.insert(s("condition"), s(&lower_condition(&ctx.cond_ctx(), cond)?));
@@ -473,28 +482,39 @@ fn lower_raw_yaml(raw: &str) -> Result<Value> {
 }
 
 fn lower_bash(b: &BashStep, ctx: &LoweringContext<'_>) -> Result<Value> {
+    // Field order matches the legacy YAML emitter for byte-equality:
+    // bash → name → displayName → workingDirectory → timeoutInMinutes →
+    // condition → continueOnError → env.
     let mut m = Mapping::new();
     m.insert(s("bash"), s(&b.script));
     if let Some(id) = &b.id {
         m.insert(s("name"), s(id.as_str()));
     }
     m.insert(s("displayName"), s(&b.display_name));
-    if let Some(cond) = &b.condition {
-        m.insert(s("condition"), s(&lower_condition(&ctx.cond_ctx(), cond)?));
+    if let Some(wd) = &b.working_directory {
+        m.insert(s("workingDirectory"), s(wd));
     }
     if let Some(t) = b.timeout {
         m.insert(s("timeoutInMinutes"), Value::from(minutes_ceil(t)));
     }
+    if let Some(cond) = &b.condition {
+        m.insert(s("condition"), s(&lower_condition(&ctx.cond_ctx(), cond)?));
+    }
     if b.continue_on_error {
         m.insert(s("continueOnError"), Value::Bool(true));
-    }
-    if let Some(wd) = &b.working_directory {
-        m.insert(s("workingDirectory"), s(wd));
     }
     if !b.env.is_empty() {
         let mut env_map = Mapping::new();
         for (k, v) in &b.env {
-            env_map.insert(s(k), s(&lower_env_value(ctx, v)?));
+            // RawYamlScalar bypasses string lowering — its inner value
+            // is inserted into the env mapping directly so serde_yaml's
+            // emitter sees the original scalar type (e.g. number vs
+            // quoted string).
+            let value = match v {
+                EnvValue::RawYamlScalar(raw) => raw.clone(),
+                other => s(&lower_env_value(ctx, other)?),
+            };
+            env_map.insert(s(k), value);
         }
         m.insert(s("env"), Value::Mapping(env_map));
     }
@@ -502,20 +522,13 @@ fn lower_bash(b: &BashStep, ctx: &LoweringContext<'_>) -> Result<Value> {
 }
 
 fn lower_task(t: &TaskStep, ctx: &LoweringContext<'_>) -> Result<Value> {
+    // Field order matches the legacy YAML emitter for byte-equality with
+    // committed lock files: task → name → inputs → displayName →
+    // timeoutInMinutes → condition → continueOnError → env.
     let mut m = Mapping::new();
     m.insert(s("task"), s(&t.task));
     if let Some(id) = &t.id {
         m.insert(s("name"), s(id.as_str()));
-    }
-    m.insert(s("displayName"), s(&t.display_name));
-    if let Some(cond) = &t.condition {
-        m.insert(s("condition"), s(&lower_condition(&ctx.cond_ctx(), cond)?));
-    }
-    if let Some(timeout) = t.timeout {
-        m.insert(s("timeoutInMinutes"), Value::from(minutes_ceil(timeout)));
-    }
-    if t.continue_on_error {
-        m.insert(s("continueOnError"), Value::Bool(true));
     }
     if !t.inputs.is_empty() {
         let mut inputs = Mapping::new();
@@ -524,10 +537,24 @@ fn lower_task(t: &TaskStep, ctx: &LoweringContext<'_>) -> Result<Value> {
         }
         m.insert(s("inputs"), Value::Mapping(inputs));
     }
+    m.insert(s("displayName"), s(&t.display_name));
+    if let Some(timeout) = t.timeout {
+        m.insert(s("timeoutInMinutes"), Value::from(minutes_ceil(timeout)));
+    }
+    if let Some(cond) = &t.condition {
+        m.insert(s("condition"), s(&lower_condition(&ctx.cond_ctx(), cond)?));
+    }
+    if t.continue_on_error {
+        m.insert(s("continueOnError"), Value::Bool(true));
+    }
     if !t.env.is_empty() {
         let mut env_map = Mapping::new();
         for (k, v) in &t.env {
-            env_map.insert(s(k), s(&lower_env_value(ctx, v)?));
+            let value = match v {
+                EnvValue::RawYamlScalar(raw) => raw.clone(),
+                other => s(&lower_env_value(ctx, other)?),
+            };
+            env_map.insert(s(k), value);
         }
         m.insert(s("env"), Value::Mapping(env_map));
     }
@@ -622,6 +649,23 @@ fn lower_env_value(ctx: &LoweringContext<'_>, v: &EnvValue) -> Result<String> {
             }
             Ok(out)
         }
+        EnvValue::RawYamlScalar(raw) => {
+            // String fallback for callers that still go through
+            // `lower_env_value`; the env-mapping insertion path in
+            // `lower_bash` / `lower_task` short-circuits this variant
+            // to preserve typed scalar identity.
+            Ok(yaml_value_to_scalar_string(raw))
+        }
+    }
+}
+
+fn yaml_value_to_scalar_string(v: &serde_yaml::Value) -> String {
+    match v {
+        serde_yaml::Value::String(s) => s.clone(),
+        serde_yaml::Value::Number(n) => n.to_string(),
+        serde_yaml::Value::Bool(b) => b.to_string(),
+        serde_yaml::Value::Null => String::new(),
+        other => serde_yaml::to_string(other).unwrap_or_default().trim().to_string(),
     }
 }
 
@@ -663,6 +707,17 @@ fn lower_env_value_as_expr_atom(ctx: &LoweringContext<'_>, v: &EnvValue) -> Resu
                  (or other expression-atom context); use Concat at the top \
                  level of an env value only"
             )
+        }
+        EnvValue::RawYamlScalar(raw) => {
+            // Inside an ADO expression, render the raw scalar as a
+            // single-quoted literal (numbers / booleans → literal
+            // text without quotes).
+            match raw {
+                serde_yaml::Value::String(s) => Ok(format!("'{}'", s.replace('\'', "''"))),
+                serde_yaml::Value::Number(n) => Ok(n.to_string()),
+                serde_yaml::Value::Bool(b) => Ok(b.to_string()),
+                other => Ok(yaml_value_to_scalar_string(other)),
+            }
         }
     }
 }
@@ -1023,6 +1078,7 @@ mod tests {
                 display_name: "Clear agent memory".into(),
                 kind: ParameterKind::Boolean,
                 default: ParameterDefault::Bool(false),
+                values: Vec::new(),
             }],
             resources: Resources::default(),
             triggers: Triggers::default(),

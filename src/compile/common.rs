@@ -1185,7 +1185,7 @@ pub fn sanitize_filename(name: &str) -> String {
 }
 
 const ADO_BUILD_NUMBER_MAX_LEN: usize = 255;
-const ADO_BUILD_ID_SUFFIX: &str = "-$(BuildID)";
+pub(crate) const ADO_BUILD_ID_SUFFIX: &str = "-$(BuildID)";
 
 /// Sanitize front-matter agent name for ADO build-number format strings.
 ///
@@ -1195,7 +1195,7 @@ const ADO_BUILD_ID_SUFFIX: &str = "-$(BuildID)";
 /// - Trim leading/trailing whitespace
 /// - Ensure the resulting build number format (`<name>-$(BuildID)`) fits in 255 chars
 /// - Ensure the name fragment does not end with `.`
-fn sanitize_pipeline_agent_name(name: &str) -> String {
+pub fn sanitize_pipeline_agent_name(name: &str) -> String {
     let mut sanitized = String::with_capacity(name.len());
     for ch in name.trim().chars() {
         if matches!(
@@ -1269,7 +1269,7 @@ pub const DEFAULT_VM_IMAGE_POOL: &str = "ubuntu-22.04";
 ///   `name: ...` or `vmImage: ...`.
 /// - For 1ES targets, this is two lines under `parameters.pool:`:
 ///   `name: ...` and `os: ...`.
-fn resolve_pool_block(target: CompileTarget, pool: Option<&PoolConfig>) -> Result<String> {
+pub fn resolve_pool_block(target: CompileTarget, pool: Option<&PoolConfig>) -> Result<String> {
     match target {
         CompileTarget::OneES => {
             let (name, os) = match pool {
@@ -1322,6 +1322,81 @@ fn resolve_pool_block(target: CompileTarget, pool: Option<&PoolConfig>) -> Resul
                     (None, None) => Ok(format!("vmImage: {}", DEFAULT_VM_IMAGE_POOL)),
                 },
             }
+        }
+    }
+}
+
+/// Typed-IR sibling of [`resolve_pool_block`]. Returns a typed
+/// [`crate::compile::ir::job::Pool`] for use by
+/// [`crate::compile::standalone_ir`]. The string version stays for
+/// the three other targets that still build YAML by template
+/// substitution.
+pub fn resolve_pool_typed(
+    target: CompileTarget,
+    pool: Option<&PoolConfig>,
+) -> Result<crate::compile::ir::job::Pool> {
+    use crate::compile::ir::job::Pool;
+    match target {
+        CompileTarget::OneES => {
+                    let (name, os) = match pool {
+                        None => (DEFAULT_ONEES_POOL.to_string(), "linux".to_string()),
+                        Some(PoolConfig::Name(name)) => (name.clone(), "linux".to_string()),
+                        Some(PoolConfig::Full(full)) => {
+                            if let (Some(name), Some(vm_image)) =
+                                (full.name.as_deref(), full.vm_image.as_deref())
+                            {
+                                anyhow::bail!(
+                                    "pool cannot specify both `name` and `vmImage` (got name='{}', vmImage='{}')",
+                                    name,
+                                    vm_image
+                                );
+                            }
+                            if let Some(vm_image) = full.vm_image.as_deref() {
+                                anyhow::bail!(
+                                    "target: 1es does not support `pool.vmImage` ('{}'); use `pool.name` for a 1ES pool",
+                                    vm_image
+                                );
+                            }
+                            (
+                                full.name
+                                    .as_deref()
+                                    .unwrap_or(DEFAULT_ONEES_POOL)
+                                    .to_string(),
+                                full.os.as_deref().unwrap_or("linux").to_string(),
+                            )
+                        }
+                    };
+                    Ok(Pool::Named {
+                        name,
+                        image: None,
+                        os: Some(os),
+                    })
+        }
+        _ => {
+                    let Some(pool) = pool else {
+                        return Ok(Pool::VmImage(DEFAULT_VM_IMAGE_POOL.to_string()));
+                    };
+                    match pool {
+                        PoolConfig::Name(name) => Ok(Pool::Named {
+                            name: name.clone(),
+                            image: None,
+                            os: None,
+                        }),
+                        PoolConfig::Full(full) => match (full.name.as_deref(), full.vm_image.as_deref()) {
+                            (Some(name), Some(vm_image)) => anyhow::bail!(
+                                "pool cannot specify both `name` and `vmImage` (got name='{}', vmImage='{}')",
+                                name,
+                                vm_image
+                            ),
+                            (Some(name), None) => Ok(Pool::Named {
+                                name: name.to_string(),
+                                image: None,
+                                os: None,
+                            }),
+                            (None, Some(vm_image)) => Ok(Pool::VmImage(vm_image.to_string())),
+                            (None, None) => Ok(Pool::VmImage(DEFAULT_VM_IMAGE_POOL.to_string())),
+                        },
+                    }
         }
     }
 }
@@ -1851,7 +1926,12 @@ pub fn generate_acquire_ado_token(service_connection: Option<&str>, variable_nam
             lines.push(format!(
                 "      echo \"##vso[task.setvariable variable={variable_name};issecret=true]$ADO_TOKEN\""
             ));
-            lines.join("\n")
+            // Trailing newline ensures the inlineScript block scalar value
+            // preserves its terminating newline through round-trip parse/emit;
+            // without it serde_yaml strips the newline and switches to the
+            // `|-` chomping indicator (semantically identical, but produces
+            // a textual diff against the committed lock files).
+            format!("{}\n", lines.join("\n"))
         }
         None => String::new(),
     }
