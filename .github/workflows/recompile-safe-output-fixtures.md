@@ -1,5 +1,6 @@
 ---
 on:
+  bots: ["github-actions[bot]"]
   release:
     types: [published]
   workflow_dispatch:

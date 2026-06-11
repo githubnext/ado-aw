@@ -88,3 +88,37 @@ When enabled, the compiler:
 - Adds ADO-specific hosts to the [network allowlist](/ado-aw/reference/network/)
 - Auto-infers org from the git remote URL at compile time (overridable via `org:` field)
 - Fails compilation if org cannot be determined (no explicit override and no ADO git remote)
+
+## Built-in CLIs
+
+Two CLI tools are always available inside the agent's bash environment without opting in — no `tools.bash:` entry required. This mirrors gh-aw's "the runner has `gh`" assumption: the host is presumed to have each binary pre-installed.
+
+### Azure CLI (`az`)
+
+Every compiled pipeline adds the Azure auth and management hosts (`login.microsoftonline.com`, `login.windows.net`, `management.azure.com`, `graph.microsoft.com`, `aka.ms`) to the AWF allowlist and emits a *Detect Azure CLI on host* step in the Agent job. The compiler does not install `az`.
+
+**Runtime detection and graceful degradation.** The detection step runs at pipeline run time and does two things:
+
+1. If `/usr/bin/az` (the launcher shim) and `/opt/az` (the Python venv that `az` runs in) both exist on the runner, it sets the pipeline variable `AW_AZ_MOUNTS` to the two `--mount` flags needed to expose them inside the AWF container.
+2. If either is missing, it emits a yellow ADO warning and sets `AW_AZ_MOUNTS` to the *empty string*. Leaving it undefined would make ADO render the literal `$(AW_AZ_MOUNTS)` in the AWF bash step, where bash would interpret it as command substitution and kill the step under `set -e`.
+
+The AWF invocation includes a `$(AW_AZ_MOUNTS) \` line in its `--mount` chain. ADO expands the variable at step start: when `az` is present the two mounts appear; when absent the line collapses to nothing. No static `--mount` is declared for `/opt/az` or `/usr/bin/az`, so the pipeline never crashes `docker run` with "bind source path does not exist" on runners without `az`.
+
+**Conditional agent prompt advisory.** When (and only when) `az` is detected, a follow-up *Append Azure CLI prompt* step appends an Azure CLI advisory to the agent prompt — explaining that `az` is on PATH, what it's good for, and the auth model. The step is gated by `condition: ne(variables['AW_AZ_MOUNTS'], '')`. On runners where `az` is absent the advisory is skipped entirely, preventing "told to use `az`, fails with command not found" loops.
+
+| Runner | `az` availability |
+|--------|-------------------|
+| Microsoft-hosted `ubuntu-latest` | Detected → mounted → available inside the AWF sandbox |
+| 1ES self-hosted pool with `azure-cli` | Same as above |
+| 1ES self-hosted pool *without* `az` | Pipeline runs; warning in ADO log; `az` is `command not found` inside the sandbox |
+
+:::caution[Auth scope]
+The compiler does not authenticate `az` for general use. Two paths work out of the box:
+
+- **`az devops *` subcommands** (work items, repos, pipelines) are automatically authenticated via `AZURE_DEVOPS_EXT_PAT` when [`permissions.read`](/ado-aw/reference/network/#permissions-ado-access-tokens) is configured. No extra steps needed.
+- **General ARM / Graph commands** (`az account get-access-token`, `az resource ...`, `az ad ...`, etc.) require their own authentication. The agent has no inherited cloud identity; you must `az login` explicitly (e.g. via a federated identity flow you provision yourself) before calling these commands.
+:::
+
+### GitHub CLI (`gh`)
+
+The host's `gh` binary is similarly assumed to be present. The agent's `GITHUB_TOKEN` (read-only) is wired in via the Copilot CLI's GitHub MCP integration; calling `gh` directly from bash uses the same token.
