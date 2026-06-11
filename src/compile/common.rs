@@ -1111,6 +1111,53 @@ pub fn generate_job_timeout(front_matter: &FrontMatter) -> String {
     }
 }
 
+/// Generate the Agent job's `variables:` block.
+///
+/// Currently emits content **only** when synthetic-PR-from-CI is active
+/// (`on.pr.mode == Synthetic`). In that mode we need to surface the
+/// `synthPr` Setup-job step outputs to consumers in the Agent job
+/// (today: the `Stage PR execution context` bash step in
+/// `exec_context/pr.rs`).
+///
+/// **Why job-level variables and not step-level env**: the canonical
+/// ADO pattern for forwarding a cross-job step output is to declare a
+/// job-level variable using a runtime expression `$[ ... ]`, then
+/// consume that variable from step `env:` blocks via the `$(name)`
+/// macro. Putting `$[ dependencies.<job>.outputs[...] ]` directly in
+/// step-level `env:` is technically documented as supported but has
+/// proven unreliable in practice — empirical evidence from
+/// msazuresphere/4x4 build #612290 showed
+/// `dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR']` resolving to
+/// the empty string when referenced from a step's `env:` even though
+/// the same expression worked in the Agent job's `condition:`. The
+/// job-level form is the documented safe location:
+/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/process/variables#use-outputs-in-the-same-pipeline>.
+///
+/// When this hoist is empty (the agent isn't using synthetic-PR-from-CI),
+/// the marker collapses cleanly: the surrounding template indents the
+/// marker on its own line and an empty replacement leaves no stray
+/// keys at job scope.
+pub fn generate_agent_job_variables(synthetic_pr_active: bool) -> String {
+    if !synthetic_pr_active {
+        return String::new();
+    }
+    // The base indent on these continuation lines is just 2 spaces —
+    // `replace_with_indent` prepends the marker line's own indent to
+    // each subsequent line, so the keys here only need 2 extra spaces
+    // to land as proper children of `variables:` (which itself lands
+    // at the marker's column, the same column as `dependsOn:` /
+    // `pool:` on the Agent job). The same offset works for every
+    // base template (base.yml, 1es-base.yml, job-base.yml, stage-base.yml)
+    // because YAML child-indent is measured relative to the parent
+    // mapping key, not absolutely.
+    //
+    // `coalesce(..., '')` ensures the variable is the empty string
+    // rather than the unresolved literal `$[ ... ]` form if the
+    // dependency cannot be resolved (e.g. Setup was skipped or the
+    // synthPr step did not run).
+    "variables:\n  AW_SYNTHETIC_PR: $[ coalesce(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], '') ]\n  AW_SYNTHETIC_PR_ID: $[ coalesce(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_ID'], '') ]\n  AW_SYNTHETIC_PR_TARGETBRANCH: $[ coalesce(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH'], '') ]\n  AW_SYNTHETIC_PR_SOURCEBRANCH: $[ coalesce(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_SOURCEBRANCH'], '') ]".to_string()
+}
+
 /// Format a single step's YAML string with proper indentation
 #[allow(dead_code)]
 pub fn format_step_yaml(step_yaml: &str) -> String {
@@ -3448,6 +3495,7 @@ pub async fn compile_shared(
         synthetic_pr_active,
     );
     let job_timeout = generate_job_timeout(front_matter);
+    let agent_job_variables = generate_agent_job_variables(synthetic_pr_active);
 
     // 9. Token acquisition and env vars
     let acquire_read_token = generate_acquire_ado_token(
@@ -3622,6 +3670,7 @@ pub async fn compile_shared(
         ("{{ finalize_steps }}", &finalize_steps),
         ("{{ agentic_depends_on }}", &agentic_depends_on),
         ("{{ job_timeout }}", &job_timeout),
+        ("{{ agent_job_variables }}", &agent_job_variables),
         ("{{ repositories }}", &repositories),
         ("{{ schedule }}", &schedule),
         ("{{ pipeline_resources }}", &pipeline_resources),
@@ -3772,6 +3821,44 @@ mod tests {
     fn minimal_front_matter() -> FrontMatter {
         let (fm, _) = parse_markdown("---\nname: test-agent\ndescription: test\n---\n").unwrap();
         fm
+    }
+
+    // ─── generate_agent_job_variables ─────────────────────────────────
+
+    #[test]
+    fn test_generate_agent_job_variables_empty_when_synth_inactive() {
+        assert_eq!(generate_agent_job_variables(false), "");
+    }
+
+    #[test]
+    fn test_generate_agent_job_variables_emits_hoisted_synth_outputs() {
+        let out = generate_agent_job_variables(true);
+        // The hoist must declare a `variables:` mapping at the Agent
+        // job level (the `{{ agent_job_variables }}` marker sits at the
+        // job-keys indent).
+        assert!(
+            out.starts_with("variables:"),
+            "must declare a `variables:` block: {out}"
+        );
+        // Each AW_SYNTHETIC_PR* output that downstream consumers need
+        // must be hoisted via `$[ coalesce(dependencies.Setup.outputs[...], '') ]`.
+        // The `coalesce(..., '')` guarantees the variable is the empty
+        // string (rather than the literal `$[ ... ]` form) when the
+        // dependency is unresolved (e.g. Setup skipped).
+        for name in &[
+            "AW_SYNTHETIC_PR",
+            "AW_SYNTHETIC_PR_ID",
+            "AW_SYNTHETIC_PR_TARGETBRANCH",
+            "AW_SYNTHETIC_PR_SOURCEBRANCH",
+        ] {
+            let needle = format!(
+                "{name}: $[ coalesce(dependencies.Setup.outputs['synthPr.{name}'], '') ]"
+            );
+            assert!(
+                out.contains(&needle),
+                "must hoist {name} from cross-job synth output: {out}"
+            );
+        }
     }
 
     // ─── normalize_yaml ───────────────────────────────────────────────────────

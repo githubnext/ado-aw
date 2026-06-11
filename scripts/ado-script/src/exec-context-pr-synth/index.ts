@@ -38,7 +38,7 @@ import {
   getPullRequestIterations,
   listActivePullRequestsBySourceRef,
 } from "../shared/ado-client.js";
-import { logError, logInfo, setOutput } from "../shared/vso-logger.js";
+import { logError, logInfo, setOutput, setVar } from "../shared/vso-logger.js";
 
 import { matchesIncludeExclude, normalisePath, pathMatchesIncludeExclude } from "./match.js";
 import { decodeSpec, type PrSynthSpec } from "./spec.js";
@@ -189,11 +189,29 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
   // promoted. (The unprefixed short form is `TargetBranchName` —
   // a separate predefined variable we deliberately do not use here.)
   // See <https://learn.microsoft.com/en-us/azure/devops/pipelines/build/variables>.
-  setOutput("AW_SYNTHETIC_PR", "true");
-  setOutput("AW_SYNTHETIC_PR_ID", String(prId));
-  setOutput("AW_SYNTHETIC_PR_TARGETBRANCH", pr.targetRefName ?? "");
-  setOutput("AW_SYNTHETIC_PR_SOURCEBRANCH", pr.sourceRefName ?? sourceBranch);
-  setOutput("AW_SYNTHETIC_PR_IS_DRAFT", pr.isDraft === true ? "true" : "false");
+  // Emit each AW_SYNTHETIC_PR* value TWICE: once as an output variable
+  // (visible cross-job via `dependencies.Setup.outputs['synthPr.X']` to
+  // the Agent job's condition + variables block) and once as a regular
+  // pipeline variable (visible same-job via `$(X)` macro and
+  // `$[ variables['X'] ]` runtime expression to the gate step that
+  // runs immediately after this one in the Setup job).
+  //
+  // The dual emission is required because `isOutput=true` alone does NOT
+  // register the variable in the producing job's regular variable
+  // namespace — same-job consumers (the `prGate` step in particular)
+  // would otherwise see empty values and the synth promotion would
+  // collapse silently. See `setVar` doc-comment in `shared/vso-logger.ts`
+  // for the underlying ADO contract.
+  const emitBoth = (name: string, value: string): void => {
+    setOutput(name, value);
+    setVar(name, value);
+  };
+
+  emitBoth("AW_SYNTHETIC_PR", "true");
+  emitBoth("AW_SYNTHETIC_PR_ID", String(prId));
+  emitBoth("AW_SYNTHETIC_PR_TARGETBRANCH", pr.targetRefName ?? "");
+  emitBoth("AW_SYNTHETIC_PR_SOURCEBRANCH", pr.sourceRefName ?? sourceBranch);
+  emitBoth("AW_SYNTHETIC_PR_IS_DRAFT", pr.isDraft === true ? "true" : "false");
 
   logInfo(
     `[synth-pr] matched PR #${prId} (source=${pr.sourceRefName} target=${pr.targetRefName})`,

@@ -138,11 +138,28 @@ describe("exec-context-pr-synth main", () => {
     const { code, output } = await runMain(makeEnv({ PR_SYNTH_SPEC: spec }));
     expect(code).toBe(0);
     expect(output).not.toContain("AW_SYNTHETIC_PR_SKIP");
+    // Each AW_SYNTHETIC_PR* variable is emitted TWICE: once as an
+    // output (cross-job, consumed by the Agent job condition + the
+    // Agent-job-level `variables:` hoist) and once as a regular
+    // variable (same-job, consumed by the prGate step's env block
+    // via `$[ coalesce(variables['AW_SYNTHETIC_PR_X'], ...) ]`).
+    // See `setVar` in `shared/vso-logger.ts` for the rationale.
     expect(output).toContain("AW_SYNTHETIC_PR;isOutput=true]true");
     expect(output).toContain("AW_SYNTHETIC_PR_ID;isOutput=true]1234");
     expect(output).toContain("AW_SYNTHETIC_PR_TARGETBRANCH;isOutput=true]refs/heads/main");
     expect(output).toContain("AW_SYNTHETIC_PR_SOURCEBRANCH;isOutput=true]refs/heads/feature/x");
     expect(output).toContain("AW_SYNTHETIC_PR_IS_DRAFT;isOutput=true]false");
+    // Regular-variable counterparts (no `isOutput`). Each line is a
+    // separate ##vso command terminated by `]value`.
+    expect(output).toContain("##vso[task.setvariable variable=AW_SYNTHETIC_PR]true");
+    expect(output).toContain("##vso[task.setvariable variable=AW_SYNTHETIC_PR_ID]1234");
+    expect(output).toContain(
+      "##vso[task.setvariable variable=AW_SYNTHETIC_PR_TARGETBRANCH]refs/heads/main",
+    );
+    expect(output).toContain(
+      "##vso[task.setvariable variable=AW_SYNTHETIC_PR_SOURCEBRANCH]refs/heads/feature/x",
+    );
+    expect(output).toContain("##vso[task.setvariable variable=AW_SYNTHETIC_PR_IS_DRAFT]false");
   });
 
   it("emits AW_SYNTHETIC_PR_IS_DRAFT=true when the PR is a draft", async () => {

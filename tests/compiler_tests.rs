@@ -4467,28 +4467,38 @@ fn test_pr_filter_synth_mode_gate_step_uses_same_job_synth_ref() {
     let compiled = compile_fixture("pr-filter-tier1-agent.md");
 
     assert!(
-        compiled.contains("AW_SYNTHETIC_PR: $(synthPr.AW_SYNTHETIC_PR)"),
-        "Gate step env must reference the same-job `synthPr` output via the macro \
-         `$(synthPr.AW_SYNTHETIC_PR)` — the `$[ variables['synthPr.X'] ]` runtime \
-         expression resolves to empty inside the producing Setup job"
+        compiled.contains(
+            "AW_SYNTHETIC_PR: $[ coalesce(variables['AW_SYNTHETIC_PR'], '') ]"
+        ),
+        "Gate step env must reference the same-job synthPr value via the runtime \
+         expression `$[ coalesce(variables['AW_SYNTHETIC_PR'], '') ]` — \
+         exec-context-pr-synth's `setVar` emits a regular pipeline variable \
+         alongside the `isOutput=true` form, and runtime expressions read the \
+         regular-variable namespace reliably (whereas `$(synthPr.X)` macros and \
+         `$[ variables['synthPr.X'] ]` runtime expressions over the step-output \
+         namespace are both unreliable inside the producing job)."
     );
     // The fixture exercises source-branch and target-branch filters,
     // so the synth treatment must appear on those env vars using the
-    // mutually-exclusive macro-concatenation form. (ADO_PR_ID is not
-    // exported by this fixture's filter set, so we don't assert it here.)
+    // runtime-expression `$[ coalesce(...) ]` form over the regular
+    // `AW_SYNTHETIC_PR_X` variables. (ADO_PR_ID is not exported by
+    // this fixture's filter set, so we don't assert it here.)
     assert!(
         compiled.contains(
-            "ADO_SOURCE_BRANCH: $(System.PullRequest.SourceBranch)$(synthPr.AW_SYNTHETIC_PR_SOURCEBRANCH)"
+            "ADO_SOURCE_BRANCH: $[ coalesce(variables['System.PullRequest.SourceBranch'], variables['AW_SYNTHETIC_PR_SOURCEBRANCH']) ]"
         ),
-        "ADO_SOURCE_BRANCH must concatenate the real `System.PullRequest.*` macro \
-         with the same-job `synthPr.*` macro"
+        "ADO_SOURCE_BRANCH must coalesce the real `System.PullRequest.SourceBranch` \
+         variable with the same-job regular variable `AW_SYNTHETIC_PR_SOURCEBRANCH` \
+         (emitted by exec-context-pr-synth via setVar). Macro concatenation \
+         `$(System.PullRequest.X)$(synthPr.X)` produced garbage on non-PR builds \
+         because ADO leaves undefined predefined macros as literal strings."
     );
     assert!(
         compiled.contains(
-            "ADO_TARGET_BRANCH: $(System.PullRequest.TargetBranch)$(synthPr.AW_SYNTHETIC_PR_TARGETBRANCH)"
+            "ADO_TARGET_BRANCH: $[ coalesce(variables['System.PullRequest.TargetBranch'], variables['AW_SYNTHETIC_PR_TARGETBRANCH']) ]"
         ),
-        "ADO_TARGET_BRANCH must concatenate the real `System.PullRequest.*` macro \
-         with the same-job `synthPr.*` macro"
+        "ADO_TARGET_BRANCH must coalesce the real `System.PullRequest.TargetBranch` \
+         variable with the same-job regular variable `AW_SYNTHETIC_PR_TARGETBRANCH`."
     );
 
     // The same-job gate step MUST NOT use the broken same-job runtime
@@ -5360,10 +5370,40 @@ fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
         "Prepare step must include the bash gate that replaces the (illegal) cross-job step condition (mode: synthetic is the default)"
     );
     assert!(
-        compiled.contains(
-            "AW_SYNTHETIC_PR: $[ coalesce(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], '') ]"
-        ),
-        "Prepare step must project the synth flag through env (coalesced to '' on real-PR builds) for the bash gate to read"
+        compiled.contains("AW_SYNTHETIC_PR: $(AW_SYNTHETIC_PR)"),
+        "Prepare step must pull the synth flag from the Agent-job-level hoisted \
+         variable via the $(AW_SYNTHETIC_PR) macro — NOT directly from \
+         `dependencies.Setup.outputs[...]` at step-env scope (that combination \
+         proved unreliable in msazuresphere/4x4 build #612290)"
+    );
+    // The Stage step's own env block must NOT contain a direct
+    // `dependencies.Setup.outputs[...]` reference. (The same expression
+    // IS expected at Agent-job-level `variables:` scope, the documented
+    // safe location — that hoist is asserted separately.) Scope this
+    // check by isolating the Stage step's bash + env body.
+    let stage_step = compiled
+        .split("Stage PR execution context")
+        .nth(1)
+        .map(|tail| {
+            // Stop at the next step (`- bash:` / `- task:` / `- script:`)
+            // or end of the job (a less-indented key).
+            let stop_at = ["\n      - bash:", "\n      - task:", "\n      - script:"];
+            let end = stop_at
+                .iter()
+                .filter_map(|needle| tail.find(needle))
+                .min()
+                .unwrap_or(tail.len());
+            &tail[..end]
+        })
+        .unwrap_or("");
+    assert!(
+        !stage_step.contains("dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR']"),
+        "Stage step's own env block must NOT reference \
+         `dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR']` — that combination \
+         (cross-job dep ref at step-env scope) proved unreliable. The cross-job \
+         output is hoisted into Agent-job-level `variables:` (see \
+         `generate_agent_job_variables`) and the Stage step reads it via the \
+         `$(AW_SYNTHETIC_PR)` macro. Stage step body: {stage_step}"
     );
     assert!(
         compiled.contains("BUILD_REASON: $(Build.Reason)"),
@@ -5405,16 +5445,21 @@ fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
 
     // v7 + mode: synthetic (the default): env passthrough — the bundle
     // reads ADO predefined vars from `process.env`. The compiler emits
-    // coalesced macros that prefer the real `System.PullRequest.*` vars
-    // (true PR builds) and fall back to the `synthPr` Setup-job outputs
-    // (CI builds promoted via exec-context-pr-synth.js).
+    // coalesced runtime expressions that prefer the real
+    // `System.PullRequest.*` vars (true PR builds) and fall back to the
+    // **hoisted Agent-job-level variables** populated from the synthPr
+    // Setup-job outputs (CI builds promoted via exec-context-pr-synth.js).
+    // The hoist (see `generate_agent_job_variables`) is required because
+    // `dependencies.<job>.outputs[...]` references in step-level `env:`
+    // proved unreliable in practice — they resolved to empty even when
+    // the same expression worked in the job's `condition:`.
     assert!(
-        compiled.contains("SYSTEM_PULLREQUEST_PULLREQUESTID: $[ coalesce(variables['System.PullRequest.PullRequestId'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_ID']) ]"),
-        "Prepare step must pass the PR id (coalesced with synthPr fallback) through to the bundle"
+        compiled.contains("SYSTEM_PULLREQUEST_PULLREQUESTID: $[ coalesce(variables['System.PullRequest.PullRequestId'], variables['AW_SYNTHETIC_PR_ID']) ]"),
+        "Prepare step must pass the PR id (coalesced with the hoisted AW_SYNTHETIC_PR_ID job-variable) through to the bundle"
     );
     assert!(
-        compiled.contains("SYSTEM_PULLREQUEST_TARGETBRANCH: $[ coalesce(variables['System.PullRequest.TargetBranch'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_TARGETBRANCH']) ]"),
-        "Prepare step must pass the PR target branch (coalesced with synthPr fallback) through to the bundle"
+        compiled.contains("SYSTEM_PULLREQUEST_TARGETBRANCH: $[ coalesce(variables['System.PullRequest.TargetBranch'], variables['AW_SYNTHETIC_PR_TARGETBRANCH']) ]"),
+        "Prepare step must pass the PR target branch (coalesced with the hoisted AW_SYNTHETIC_PR_TARGETBRANCH job-variable) through to the bundle"
     );
     assert!(
         compiled.contains("SYSTEM_TEAMPROJECT: $(System.TeamProject)"),
@@ -5971,10 +6016,20 @@ fn test_synthetic_pr_default_emits_full_synth_wiring() {
         "Fixture A must include the bash gate on exec-context-pr.js (accepts real-PR OR synth-promoted builds)"
     );
     assert!(
+        compiled.contains("AW_SYNTHETIC_PR: $(AW_SYNTHETIC_PR)"),
+        "Fixture A must read the synth flag from the hoisted Agent-job-level \
+         variable via the $(AW_SYNTHETIC_PR) macro (NOT directly from \
+         `dependencies.Setup.outputs[...]` at step-env scope, which proved \
+         unreliable in build #612290)"
+    );
+    // The Agent-job-level hoist itself must be present and pull from
+    // the cross-job synth output (legal scope for `dependencies.X.outputs[...]`).
+    assert!(
         compiled.contains(
             "AW_SYNTHETIC_PR: $[ coalesce(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], '') ]"
         ),
-        "Fixture A must project the synth flag into the exec-context-pr.js step env for the bash gate"
+        "Fixture A must hoist `synthPr.AW_SYNTHETIC_PR` into Agent-job-level \
+         `variables:` so step-env consumers can read `$(AW_SYNTHETIC_PR)` safely"
     );
 
     // Agent-job AW_SYNTHETIC_PR_SKIP guard.

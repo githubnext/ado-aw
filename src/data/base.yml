@@ -19,6 +19,7 @@ jobs:
     displayName: "Agent"
     {{ agentic_depends_on }}
     {{ job_timeout }}
+    {{ agent_job_variables }}
     pool:
       {{ pool }}
     steps:

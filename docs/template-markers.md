@@ -294,6 +294,19 @@ Generates a `timeoutInMinutes: <value>` job property for `Agent` when `engine.ti
 
 If `timeout-minutes` is not configured, this is replaced with an empty string.
 
+## {{ agent_job_variables }}
+
+Generates the Agent job's `variables:` block. Currently emits content **only** when synthetic-PR-from-CI is active (`on.pr.mode == Synthetic`); replaced with an empty string otherwise.
+
+When active, this hoists the relevant `synthPr` Setup-job step outputs into Agent-job-level variables using `$[ coalesce(dependencies.Setup.outputs['synthPr.X'], '') ]` runtime expressions:
+
+- `AW_SYNTHETIC_PR`
+- `AW_SYNTHETIC_PR_ID`
+- `AW_SYNTHETIC_PR_TARGETBRANCH`
+- `AW_SYNTHETIC_PR_SOURCEBRANCH`
+
+The hoist exists because `dependencies.<job>.outputs[...]` references at step-level `env:` scope proved unreliable in practice (empirically observed in `msazuresphere/4x4` build #612290: the same reference resolved correctly at job-condition scope but returned the empty string at step-env scope, causing the `Stage PR execution context` step's bash guard to misfire and the agent to emit `noop` on a synth-promoted build). Job-level `variables:` is the documented safe location for cross-job output references; subsequent step `env:` blocks then consume the hoisted values via the `$(name)` macro or a `$[ coalesce(variables['name'], ...) ]` runtime expression.
+
 ## {{ working_directory }}
 
 Should be replaced with the appropriate working directory based on the effective workspace setting.

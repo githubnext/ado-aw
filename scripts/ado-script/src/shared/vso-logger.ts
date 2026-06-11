@@ -51,6 +51,26 @@ export function setOutput(name: string, value: string): void {
   emit(`##vso[task.setvariable variable=${safeName};isOutput=true]${safeValue}`);
 }
 
+/**
+ * Set a regular (non-output) pipeline variable, visible to subsequent
+ * steps in the **same job** via `$(name)` macro or
+ * `$[ variables['name'] ]` runtime expression.
+ *
+ * `isOutput=true` (used by `setOutput`) makes a variable available to
+ * downstream JOBS via `dependencies.<job>.outputs['<step>.<name>']`,
+ * but does NOT register it in the job's regular variable namespace —
+ * so `$(name)` and `$[ variables['name'] ]` resolve to empty in
+ * same-job consumers. Callers that need both same-job AND cross-job
+ * access must call BOTH `setVar` (same-job) and `setOutput` (cross-job).
+ *
+ * See <https://learn.microsoft.com/en-us/azure/devops/pipelines/process/variables#use-output-variables-from-tasks>.
+ */
+export function setVar(name: string, value: string): void {
+  const safeName = escapeProperty(name);
+  const safeValue = escapeMessage(value);
+  emit(`##vso[task.setvariable variable=${safeName}]${safeValue}`);
+}
+
 export function addBuildTag(tag: string): void {
   emit(`##vso[build.addbuildtag]${escapeMessage(tag)}`);
 }

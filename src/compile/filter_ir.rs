@@ -1123,26 +1123,38 @@ pub fn build_gate_spec(ctx: GateContext, checks: &[FilterCheck]) -> anyhow::Resu
 /// PR-identifier env vars (`ADO_PR_ID`, `ADO_SOURCE_BRANCH`,
 /// `ADO_TARGET_BRANCH`) are emitted using `$[ coalesce(...) ]` so they
 /// pick up either the real `System.PullRequest.*` variables (on a true
-/// PR build) OR the `synthPr` Setup-job outputs (on a CI build promoted
-/// by `exec-context-pr-synth.js`). Also exports `AW_SYNTHETIC_PR` so
-/// `gate/bypass.ts` knows to skip the "not a PR build" bypass.
+/// PR build) OR the regular pipeline variables emitted by the `synthPr`
+/// Setup-job step on a CI build promoted by `exec-context-pr-synth.js`.
+/// Also exports `AW_SYNTHETIC_PR` so `gate/bypass.ts` knows to skip the
+/// "not a PR build" bypass.
 ///
-/// **Same-job vs cross-job reference**: this gate step lives in the
-/// **Setup job** (`AdoScriptExtension::setup_steps` returns it), the
-/// same job as `synthPr`. Within the producing job, the cross-job form
-/// `dependencies.Setup.outputs['synthPr.X']` is undefined (a job has no
-/// entry for itself in `dependencies`), and — critically — the same-job
-/// *runtime expression* form `$[ variables['synthPr.X'] ]` also resolves
-/// to **empty**: step output variables are NOT exposed to runtime
-/// expressions in the producing job. They are only reachable via the
-/// **macro** form `$(synthPr.X)`, which expands them from the job's
-/// output-variable namespace (empty when the producing step was skipped
-/// or never set the output). We therefore reference synth outputs with
-/// macros and rely on macro concatenation: real `System.PullRequest.*`
-/// and synth `synthPr.*` are mutually exclusive (synthPr only runs on
-/// non-PR builds; `System.PullRequest.*` is empty on non-PR builds), so
-/// `$(System.PullRequest.X)$(synthPr.X)` yields exactly one non-empty
-/// value. See
+/// **Same-job synth references**: this gate step lives in the **Setup
+/// job** (`AdoScriptExtension::setup_steps` returns it), the same job
+/// as `synthPr`. Three ADO behaviours interact here:
+///
+/// 1. The cross-job form `dependencies.Setup.outputs['synthPr.X']` is
+///    undefined inside the producing job (a job has no entry for itself
+///    in `dependencies`).
+/// 2. Step output variables marked `isOutput=true` are NOT added to the
+///    producing job's regular variable namespace, so `$(X)` and
+///    `$[ variables['X'] ]` resolve to empty unless the producer ALSO
+///    emits the same name as a regular (non-output) variable.
+/// 3. The same-job macro `$(synthPr.X)` can sometimes expand for a bare
+///    reference, but ADO leaves UNDEFINED predefined macros (e.g.
+///    `$(System.PullRequest.PullRequestId)` on a non-PR build) as the
+///    literal string `"$(System.PullRequest.PullRequestId)"`. Concatenating
+///    `$(System.PullRequest.X)$(synthPr.AW_SYNTHETIC_PR_X)` therefore
+///    yields `"$(System.PullRequest.X)<value>"` on non-PR builds — which
+///    `gate/facts.ts` then parses as `NaN` and fails with
+///    `Missing ADO env vars …`.
+///
+/// The fix is to emit the synth values as BOTH output variables (for
+/// cross-job consumers like the Agent job condition) AND regular
+/// variables (this happens in `exec-context-pr-synth/index.ts` via
+/// `setVar`), and then have THIS step coalesce in a runtime expression
+/// `$[ ... ]`, which silently substitutes empty for undefined predefined
+/// variables and produces a clean numeric/string result on either path.
+/// See
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/process/variables#use-output-variables-from-tasks>.
 pub fn compile_gate_step_external(
     ctx: GateContext,
@@ -1178,36 +1190,39 @@ pub fn compile_gate_step_external(
     // has been promoted to PR semantics, so the "not a PullRequest
     // build" bypass must not auto-pass. Always safe to emit (the gate
     // checks it strictly for the literal "true"), but only meaningful
-    // for PR gates. Same-job ref via the macro `$(synthPr.X)` — see
-    // function doc-comment for why this is NOT `variables['synthPr.X']`
-    // (resolves empty) nor `dependencies.Setup.outputs[...]` (undefined
-    // in the producing job).
+    // for PR gates. Same-job ref via the runtime expression
+    // `$[ coalesce(variables['AW_SYNTHETIC_PR'], '') ]` — this reads
+    // the **regular** (non-output) variable that `exec-context-pr-synth`
+    // emits via `setVar` in addition to its cross-job `setOutput`. The
+    // step output namespace `synthPr.X` is unreachable from runtime
+    // expressions in the producing job (see function doc-comment).
     let pr_synth_active = synthetic_pr_active && matches!(ctx, GateContext::PullRequest);
     if pr_synth_active {
-        // Macro form: `$(synthPr.AW_SYNTHETIC_PR)` expands to "true" when
-        // the same-job `synthPr` step matched a PR, and to empty when it
-        // was skipped (real PR build) or found no PR — never the literal
-        // "true", so `gate/bypass.ts`'s strict `=== "true"` check stays
-        // correct in every case.
-        step.push_str("    AW_SYNTHETIC_PR: \"$(synthPr.AW_SYNTHETIC_PR)\"\n");
+        step.push_str(
+            "    AW_SYNTHETIC_PR: \"$[ coalesce(variables['AW_SYNTHETIC_PR'], '') ]\"\n",
+        );
     }
 
     for (env_var, ado_macro) in &exports {
         let macro_str = if pr_synth_active {
-            // Mutually-exclusive macro concatenation: on a real PR build
-            // `System.PullRequest.*` holds the value and `synthPr.*` is
-            // empty (step skipped); on a synth-promoted CI build
-            // `System.PullRequest.*` is empty and `synthPr.*` holds the
-            // value. Exactly one side is ever non-empty.
+            // Mutually-exclusive runtime-expression coalesce: on a real
+            // PR build `System.PullRequest.X` is populated and the synth
+            // step is skipped (so `variables['AW_SYNTHETIC_PR_X']` is
+            // empty); on a synth-promoted CI build `System.PullRequest.X`
+            // is empty/undefined and `variables['AW_SYNTHETIC_PR_X']`
+            // holds the value. `coalesce(...)` returns the first
+            // non-empty argument as a clean string — undefined predefined
+            // variables substitute to empty rather than the literal
+            // `$(...)` form that macro concatenation would produce.
             match *env_var {
                 "ADO_PR_ID" => {
-                    "\"$(System.PullRequest.PullRequestId)$(synthPr.AW_SYNTHETIC_PR_ID)\""
+                    "\"$[ coalesce(variables['System.PullRequest.PullRequestId'], variables['AW_SYNTHETIC_PR_ID']) ]\""
                 }
                 "ADO_SOURCE_BRANCH" => {
-                    "\"$(System.PullRequest.SourceBranch)$(synthPr.AW_SYNTHETIC_PR_SOURCEBRANCH)\""
+                    "\"$[ coalesce(variables['System.PullRequest.SourceBranch'], variables['AW_SYNTHETIC_PR_SOURCEBRANCH']) ]\""
                 }
                 "ADO_TARGET_BRANCH" => {
-                    "\"$(System.PullRequest.TargetBranch)$(synthPr.AW_SYNTHETIC_PR_TARGETBRANCH)\""
+                    "\"$[ coalesce(variables['System.PullRequest.TargetBranch'], variables['AW_SYNTHETIC_PR_TARGETBRANCH']) ]\""
                 }
                 _ => ado_macro,
             }
