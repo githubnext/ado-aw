@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.35.1](https://github.com/githubnext/ado-aw/compare/v0.35.0...v0.35.1) (2026-06-11)
+
+
+### Bug Fixes
+
+* **compile:** repair synthetic-PR gate + Stage step env var plumbing ([#956](https://github.com/githubnext/ado-aw/issues/956)) ([79919bd](https://github.com/githubnext/ado-aw/commit/79919bd2280f0fb17a118df17f824a0e9e504691))
+* **workflows:** allow github-actions[bot] to trigger recompile-safe-output-fixtures ([#958](https://github.com/githubnext/ado-aw/issues/958)) ([5d36dfd](https://github.com/githubnext/ado-aw/commit/5d36dfdc4e214b7b056fa5f9c94586941ced7d8a))
+
 ## [0.35.0](https://github.com/githubnext/ado-aw/compare/v0.34.3...v0.35.0) (2026-06-10)
 
 
