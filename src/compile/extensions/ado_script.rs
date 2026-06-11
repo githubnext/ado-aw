@@ -173,14 +173,32 @@ fn resolver_step() -> String {
 }
 
 /// The synthetic-PR-context step that runs in the Setup job BEFORE
-/// `prGate`. Looks up the open PR for `Build.SourceBranch` via the
-/// ADO REST API and emits `AW_SYNTHETIC_PR*` outputs that downstream
-/// gate + exec-context-pr steps coalesce with the real
-/// `System.PullRequest.*` variables.
+/// `prGate`. Normalises PR-identifier variables under the canonical
+/// `AW_PR_*` names regardless of build reason:
 ///
-/// `condition: ne(Build.Reason, 'PullRequest')` short-circuits the
-/// bundle on real PR builds (the bundle would no-op anyway, but the
-/// step-level condition skips the env-block evaluation too).
+///  - **Real PR build** (`SYSTEM_PULLREQUEST_PULLREQUESTID` populated):
+///    copies the existing `SYSTEM_PULLREQUEST_*` env values into the
+///    `AW_PR_*` namespace. No API call.
+///  - **CI build on ADO repo**: looks up the open PR for
+///    `Build.SourceBranch` via the ADO REST API, applies the front-
+///    matter filters, and emits `AW_PR_*` plus `AW_SYNTHETIC_PR=true`
+///    on a match.
+///  - **CI build on GitHub-typed repo**: emits empty `AW_PR_*` +
+///    `AW_SYNTHETIC_PR_SKIP=true`.
+///
+/// Always runs (`condition: succeeded()`). The previous form gated on
+/// `ne(Build.Reason, 'PullRequest')`, which forced downstream consumers
+/// to coalesce `$(System.PullRequest.X)` with `$(AW_SYNTHETIC_PR_X)`
+/// inside step `env:` via `$[ ... ]` runtime expressions — but ADO
+/// only evaluates `$[ ... ]` inside `variables:` and `condition:`
+/// fields, NOT inside step `env:`. The literal expression string was
+/// passed verbatim to bash and downstream PR steps short-circuited
+/// (msazuresphere/4x4 build #612528). Doing the merge in the bundle
+/// eliminates the bug class — every downstream consumer just reads
+/// `$(AW_PR_*)` macros.
+///
+/// `SYSTEM_PULLREQUEST_*` env vars are passed in so the bundle can
+/// detect a real PR build and propagate the predefined values.
 fn synthetic_pr_step(spec_b64: &str) -> String {
     format!(
         r#"- bash: |
@@ -188,7 +206,7 @@ fn synthetic_pr_step(spec_b64: &str) -> String {
     node '{EXEC_CONTEXT_PR_SYNTH_PATH}'
   name: synthPr
   displayName: "Resolve synthetic PR context"
-  condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+  condition: succeeded()
   env:
     SYSTEM_ACCESSTOKEN: $(System.AccessToken)
     ADO_COLLECTION_URI: $(System.CollectionUri)
@@ -197,6 +215,10 @@ fn synthetic_pr_step(spec_b64: &str) -> String {
     BUILD_REASON: $(Build.Reason)
     BUILD_REPOSITORY_PROVIDER: $(Build.Repository.Provider)
     BUILD_SOURCEBRANCH: $(Build.SourceBranch)
+    SYSTEM_PULLREQUEST_PULLREQUESTID: $(System.PullRequest.PullRequestId)
+    SYSTEM_PULLREQUEST_TARGETBRANCH: $(System.PullRequest.TargetBranch)
+    SYSTEM_PULLREQUEST_SOURCEBRANCH: $(System.PullRequest.SourceBranch)
+    SYSTEM_PULLREQUEST_ISDRAFT: $(System.PullRequest.IsDraft)
     PR_SYNTH_SPEC: "{spec_b64}""#
     )
 }
@@ -558,7 +580,27 @@ mod tests {
         );
         assert!(steps[2].contains("exec-context-pr-synth.js"));
         assert!(steps[2].contains("PR_SYNTH_SPEC:"));
-        assert!(steps[2].contains("ne(variables['Build.Reason'], 'PullRequest')"));
+        // synthPr now runs unconditionally — it does the real-vs-synth
+        // merge internally, so downstream consumers always read
+        // `$(AW_PR_*)` macros regardless of build reason.
+        assert!(
+            steps[2].contains("condition: succeeded()"),
+            "synthPr must run unconditionally (not gated on Build.Reason): {}",
+            steps[2]
+        );
+        assert!(
+            !steps[2].contains("ne(variables['Build.Reason'], 'PullRequest')"),
+            "synthPr must NOT gate on Build.Reason — it propagates SYSTEM_PULLREQUEST_* into AW_PR_* on real PR builds: {}",
+            steps[2]
+        );
+        // Real-PR-detection requires the SYSTEM_PULLREQUEST_* env vars
+        // to be passed in so the bundle can short-circuit without the
+        // ADO REST API call.
+        assert!(
+            steps[2].contains("SYSTEM_PULLREQUEST_PULLREQUESTID: $(System.PullRequest.PullRequestId)"),
+            "synthPr must pass SYSTEM_PULLREQUEST_PULLREQUESTID so the bundle can detect a real PR build: {}",
+            steps[2]
+        );
     }
 
     #[test]

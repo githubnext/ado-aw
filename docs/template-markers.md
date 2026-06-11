@@ -300,12 +300,14 @@ Generates the Agent job's `variables:` block. Currently emits content **only** w
 
 When active, this hoists the relevant `synthPr` Setup-job step outputs into Agent-job-level variables using `$[ coalesce(dependencies.Setup.outputs['synthPr.X'], '') ]` runtime expressions:
 
-- `AW_SYNTHETIC_PR`
-- `AW_SYNTHETIC_PR_ID`
-- `AW_SYNTHETIC_PR_TARGETBRANCH`
-- `AW_SYNTHETIC_PR_SOURCEBRANCH`
+- `AW_PR_ID` — resolved PR id (real on PR builds, discovered on synth-promoted CI builds)
+- `AW_PR_TARGETBRANCH` — resolved PR target branch (`refs/heads/<name>`)
+- `AW_PR_SOURCEBRANCH` — resolved PR source branch
+- `AW_SYNTHETIC_PR` — `"true"` only when this build was synth-promoted from CI; empty on real PR builds
 
-The hoist exists because `dependencies.<job>.outputs[...]` references at step-level `env:` scope proved unreliable in practice (empirically observed in `msazuresphere/4x4` build #612290: the same reference resolved correctly at job-condition scope but returned the empty string at step-env scope, causing the `Stage PR execution context` step's bash guard to misfire and the agent to emit `noop` on a synth-promoted build). Job-level `variables:` is the documented safe location for cross-job output references; subsequent step `env:` blocks then consume the hoisted values via the `$(name)` macro or a `$[ coalesce(variables['name'], ...) ]` runtime expression.
+The hoist exists because ADO `$[ ... ]` runtime expressions are ONLY evaluated inside `variables:` mappings and `condition:` fields — putting them in step `env:` values passes the literal expression string verbatim to bash (empirically observed in `msazuresphere/4x4` build #612528: the `Stage PR execution context` step received `PR_ID='$[ coalesce(...)...` as a literal and PR-identifier validation rejected it). Job-level `variables:` is the documented safe location for cross-job output references; subsequent step `env:` blocks then consume the hoisted values via the plain `$(name)` macro (no `$[ ... ]` in step env, ever).
+
+The real-vs-synth merge happens inside `exec-context-pr-synth.js` so consumers read a single canonical name regardless of whether the build is a real PR or a synth-promoted CI build.
 
 ## {{ working_directory }}
 
