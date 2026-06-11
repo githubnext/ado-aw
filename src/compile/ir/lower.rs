@@ -34,7 +34,10 @@ use super::stage::Stage;
 use super::step::{
     BashStep, CheckoutRepo, CheckoutStep, DownloadStep, PublishStep, Step, SubmodulesOpt, TaskStep,
 };
-use super::{Pipeline, PipelineBody, PipelineShape};
+use super::{
+    CiTrigger, Parameter, ParameterDefault, ParameterKind, Pipeline, PipelineBody, PipelineResource,
+    PipelineShape, PipelineVar, PrTrigger, RepositoryResource, Resources, Schedule,
+};
 
 /// Per-step lowering context carried through the recursive helpers.
 ///
@@ -102,6 +105,31 @@ pub fn lower_with_graph(p: &Pipeline, graph: &Graph) -> Result<Value> {
         }
     }
 
+    // Top-level blocks, in the order the canonical lock files emit them:
+    //   parameters → resources → schedules → pr → trigger → variables →
+    //   (jobs|stages)
+    //
+    // Each helper inserts its block only when its source data is
+    // non-empty / configured, so an unused field produces no YAML key.
+    if !p.parameters.is_empty() {
+        root.insert(s("parameters"), lower_parameters(&p.parameters));
+    }
+    if let Some(resources) = lower_resources(&p.resources) {
+        root.insert(s("resources"), resources);
+    }
+    if !p.triggers.schedules.is_empty() {
+        root.insert(s("schedules"), lower_schedules(&p.triggers.schedules));
+    }
+    if let Some(pr) = lower_pr_trigger(p.triggers.pr.as_ref()) {
+        root.insert(s("pr"), pr);
+    }
+    if let Some(ci) = lower_ci_trigger(p.triggers.ci.as_ref()) {
+        root.insert(s("trigger"), ci);
+    }
+    if !p.variables.is_empty() {
+        root.insert(s("variables"), lower_variables(&p.variables));
+    }
+
     match &p.body {
         PipelineBody::Jobs(jobs) => {
             let mut seq = Vec::with_capacity(jobs.len());
@@ -120,6 +148,201 @@ pub fn lower_with_graph(p: &Pipeline, graph: &Graph) -> Result<Value> {
     }
 
     Ok(Value::Mapping(root))
+}
+
+/// Lower a `parameters:` block. Each entry becomes a mapping
+/// `{ name, displayName, type, default }` matching ADO's runtime-
+/// parameter schema. Defaults to the parameter's declared default
+/// (no synthesised defaults for parameters with `ParameterDefault::None`).
+fn lower_parameters(params: &[Parameter]) -> Value {
+    let mut seq = Vec::with_capacity(params.len());
+    for p in params {
+        let mut m = Mapping::new();
+        m.insert(s("name"), s(&p.name));
+        m.insert(s("displayName"), s(&p.display_name));
+        m.insert(
+            s("type"),
+            s(match p.kind {
+                ParameterKind::Boolean => "boolean",
+                ParameterKind::String => "string",
+                ParameterKind::Number => "number",
+            }),
+        );
+        match &p.default {
+            ParameterDefault::Bool(b) => {
+                m.insert(s("default"), Value::Bool(*b));
+            }
+            ParameterDefault::String(v) => {
+                m.insert(s("default"), s(v));
+            }
+            ParameterDefault::Number(n) => {
+                m.insert(s("default"), Value::from(*n));
+            }
+            ParameterDefault::None => {}
+        }
+        seq.push(Value::Mapping(m));
+    }
+    Value::Sequence(seq)
+}
+
+/// Lower a `resources:` block to a mapping with optional
+/// `repositories:` / `pipelines:` keys. Returns `None` when both
+/// lists are empty so the caller can elide the entire `resources:`
+/// key.
+fn lower_resources(r: &Resources) -> Option<Value> {
+    if r.repositories.is_empty() && r.pipelines.is_empty() {
+        return None;
+    }
+    let mut m = Mapping::new();
+    if !r.repositories.is_empty() {
+        let mut seq = Vec::with_capacity(r.repositories.len());
+        for repo in &r.repositories {
+            seq.push(lower_repository_resource(repo));
+        }
+        m.insert(s("repositories"), Value::Sequence(seq));
+    }
+    if !r.pipelines.is_empty() {
+        let mut seq = Vec::with_capacity(r.pipelines.len());
+        for pr in &r.pipelines {
+            seq.push(lower_pipeline_resource(pr));
+        }
+        m.insert(s("pipelines"), Value::Sequence(seq));
+    }
+    Some(Value::Mapping(m))
+}
+
+fn lower_repository_resource(r: &RepositoryResource) -> Value {
+    let mut m = Mapping::new();
+    match r {
+        RepositoryResource::SelfRepo { clean, submodules } => {
+            m.insert(s("repository"), s("self"));
+            m.insert(s("clean"), Value::Bool(*clean));
+            m.insert(s("submodules"), Value::Bool(*submodules));
+        }
+        RepositoryResource::Named {
+            identifier,
+            kind,
+            name,
+            r#ref,
+        } => {
+            m.insert(s("repository"), s(identifier));
+            m.insert(s("type"), s(kind));
+            m.insert(s("name"), s(name));
+            if let Some(r) = r#ref {
+                m.insert(s("ref"), s(r));
+            }
+        }
+    }
+    Value::Mapping(m)
+}
+
+fn lower_pipeline_resource(p: &PipelineResource) -> Value {
+    let mut m = Mapping::new();
+    m.insert(s("pipeline"), s(&p.identifier));
+    m.insert(s("source"), s(&p.source));
+    if let Some(project) = &p.project {
+        m.insert(s("project"), s(project));
+    }
+    if p.branches.is_empty() {
+        // `trigger: true` means "trigger on any branch"
+        m.insert(s("trigger"), Value::Bool(p.trigger));
+    } else {
+        let mut trigger_m = Mapping::new();
+        let mut branches_m = Mapping::new();
+        let include: Vec<Value> = p.branches.iter().map(|b| s(b)).collect();
+        branches_m.insert(s("include"), Value::Sequence(include));
+        trigger_m.insert(s("branches"), Value::Mapping(branches_m));
+        m.insert(s("trigger"), Value::Mapping(trigger_m));
+    }
+    Value::Mapping(m)
+}
+
+fn lower_schedules(schedules: &[Schedule]) -> Value {
+    let mut seq = Vec::with_capacity(schedules.len());
+    for sch in schedules {
+        let mut m = Mapping::new();
+        m.insert(s("cron"), s(&sch.cron));
+        m.insert(s("displayName"), s(&sch.display_name));
+        if !sch.branches_include.is_empty() {
+            let mut branches_m = Mapping::new();
+            let include: Vec<Value> = sch.branches_include.iter().map(|b| s(b)).collect();
+            branches_m.insert(s("include"), Value::Sequence(include));
+            m.insert(s("branches"), Value::Mapping(branches_m));
+        }
+        if sch.always {
+            m.insert(s("always"), Value::Bool(true));
+        }
+        seq.push(Value::Mapping(m));
+    }
+    Value::Sequence(seq)
+}
+
+/// Lower a `pr:` trigger. Returns `None` when no trigger is
+/// configured (caller elides the key entirely — that's the "ADO
+/// default" behaviour). Returns `Some(scalar "none")` for the
+/// disabled form. Returns `Some(mapping)` for a configured PR
+/// trigger with branch / path filters.
+fn lower_pr_trigger(pr: Option<&PrTrigger>) -> Option<Value> {
+    let pr = pr?;
+    if pr.disabled {
+        return Some(s("none"));
+    }
+    let mut m = Mapping::new();
+    if !pr.branches_include.is_empty() || !pr.branches_exclude.is_empty() {
+        let mut branches_m = Mapping::new();
+        if !pr.branches_include.is_empty() {
+            let include: Vec<Value> = pr.branches_include.iter().map(|b| s(b)).collect();
+            branches_m.insert(s("include"), Value::Sequence(include));
+        }
+        if !pr.branches_exclude.is_empty() {
+            let exclude: Vec<Value> = pr.branches_exclude.iter().map(|b| s(b)).collect();
+            branches_m.insert(s("exclude"), Value::Sequence(exclude));
+        }
+        m.insert(s("branches"), Value::Mapping(branches_m));
+    }
+    if !pr.paths_include.is_empty() || !pr.paths_exclude.is_empty() {
+        let mut paths_m = Mapping::new();
+        if !pr.paths_include.is_empty() {
+            let include: Vec<Value> = pr.paths_include.iter().map(|p| s(p)).collect();
+            paths_m.insert(s("include"), Value::Sequence(include));
+        }
+        if !pr.paths_exclude.is_empty() {
+            let exclude: Vec<Value> = pr.paths_exclude.iter().map(|p| s(p)).collect();
+            paths_m.insert(s("exclude"), Value::Sequence(exclude));
+        }
+        m.insert(s("paths"), Value::Mapping(paths_m));
+    }
+    Some(Value::Mapping(m))
+}
+
+/// Lower a `trigger:` (CI) field. Returns `None` for "ADO default"
+/// (no key emitted). Returns `Some(scalar "none")` for the disabled
+/// form, which is the only non-default shape standalone uses today.
+fn lower_ci_trigger(ci: Option<&CiTrigger>) -> Option<Value> {
+    let ci = ci?;
+    if ci.disabled {
+        Some(s("none"))
+    } else {
+        // A fully-typed `trigger:` block (branches/paths) would land
+        // here. Standalone agents today either use the ADO default
+        // (no key) or `trigger: none`; the mapping shape can be
+        // added when an emitter actually needs it.
+        None
+    }
+}
+
+fn lower_variables(vars: &[PipelineVar]) -> Value {
+    let mut seq = Vec::with_capacity(vars.len());
+    for v in vars {
+        let mut m = Mapping::new();
+        m.insert(s("name"), s(&v.name));
+        m.insert(s("value"), s(&v.value));
+        if v.is_secret {
+            m.insert(s("isSecret"), Value::Bool(true));
+        }
+        seq.push(Value::Mapping(m));
+    }
+    Value::Sequence(seq)
 }
 
 fn lower_stage(stage: &Stage, graph: &Graph) -> Result<Value> {
@@ -785,6 +1008,268 @@ mod tests {
         };
         let err = super::lower(&p).unwrap_err();
         assert!(format!("{err:#}").contains("Step::RawYaml"));
+    }
+
+    // ── Phase 0: top-level pipeline lowering tests ─────────────────
+
+    /// `parameters:` with a Boolean default round-trips through emit
+    /// to the canonical ADO runtime-parameter shape.
+    #[test]
+    fn lower_parameters_emits_typed_runtime_parameter() {
+        let p = Pipeline {
+            name: "P".into(),
+            parameters: vec![Parameter {
+                name: "clearMemory".into(),
+                display_name: "Clear agent memory".into(),
+                kind: ParameterKind::Boolean,
+                default: ParameterDefault::Bool(false),
+            }],
+            resources: Resources::default(),
+            triggers: Triggers::default(),
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(Vec::new()),
+            shape: PipelineShape::Standalone,
+        };
+        let g = Graph::default();
+        let v = lower_with_graph(&p, &g).unwrap();
+        let yaml = serde_yaml::to_string(&v).unwrap();
+        assert!(
+            yaml.contains("name: clearMemory"),
+            "parameters entry must include name; got: {yaml}"
+        );
+        assert!(yaml.contains("type: boolean"));
+        assert!(yaml.contains("default: false"));
+        assert!(yaml.contains("displayName: Clear agent memory"));
+    }
+
+    /// `resources.repositories` always emits the canonical `self`
+    /// entry with `clean: true` and `submodules: true`.
+    #[test]
+    fn lower_resources_emits_self_repository_with_clean_and_submodules() {
+        let p = Pipeline {
+            name: "P".into(),
+            parameters: Vec::new(),
+            resources: Resources {
+                repositories: vec![RepositoryResource::SelfRepo {
+                    clean: true,
+                    submodules: true,
+                }],
+                pipelines: Vec::new(),
+            },
+            triggers: Triggers::default(),
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(Vec::new()),
+            shape: PipelineShape::Standalone,
+        };
+        let g = Graph::default();
+        let v = lower_with_graph(&p, &g).unwrap();
+        let yaml = serde_yaml::to_string(&v).unwrap();
+        assert!(yaml.contains("repository: self"));
+        assert!(yaml.contains("clean: true"));
+        assert!(yaml.contains("submodules: true"));
+    }
+
+    /// `resources` with both repositories and pipelines emits both
+    /// sub-keys in canonical order.
+    #[test]
+    fn lower_resources_emits_pipelines_block_when_present() {
+        let p = Pipeline {
+            name: "P".into(),
+            parameters: Vec::new(),
+            resources: Resources {
+                repositories: vec![RepositoryResource::SelfRepo {
+                    clean: true,
+                    submodules: true,
+                }],
+                pipelines: vec![PipelineResource {
+                    identifier: "upstream_build".into(),
+                    source: "Upstream Build".into(),
+                    project: Some("OneBranch".into()),
+                    branches: vec!["main".into(), "release/*".into()],
+                    trigger: true,
+                }],
+            },
+            triggers: Triggers::default(),
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(Vec::new()),
+            shape: PipelineShape::Standalone,
+        };
+        let g = Graph::default();
+        let v = lower_with_graph(&p, &g).unwrap();
+        let yaml = serde_yaml::to_string(&v).unwrap();
+        assert!(yaml.contains("pipeline: upstream_build"));
+        assert!(yaml.contains("source: Upstream Build"));
+        assert!(yaml.contains("project: OneBranch"));
+        // With non-empty branches, trigger becomes a mapping with
+        // branches.include — not a bare `trigger: true`.
+        assert!(yaml.contains("trigger:"));
+        assert!(yaml.contains("include:"));
+        assert!(yaml.contains("- main"));
+        assert!(yaml.contains("- release/*"));
+    }
+
+    /// `schedules:` round-trips cron + displayName + branches.include
+    /// + always:true to the canonical lock-file shape.
+    #[test]
+    fn lower_schedules_emits_canonical_block() {
+        let p = Pipeline {
+            name: "P".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers {
+                schedules: vec![Schedule {
+                    cron: "44 2 * * 1".into(),
+                    display_name: "Scheduled run".into(),
+                    branches_include: vec!["main".into()],
+                    always: true,
+                }],
+                pr: None,
+                ci: None,
+            },
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(Vec::new()),
+            shape: PipelineShape::Standalone,
+        };
+        let g = Graph::default();
+        let v = lower_with_graph(&p, &g).unwrap();
+        let yaml = serde_yaml::to_string(&v).unwrap();
+        assert!(yaml.contains("cron: 44 2 * * 1"));
+        assert!(yaml.contains("displayName: Scheduled run"));
+        assert!(yaml.contains("always: true"));
+        assert!(yaml.contains("- main"));
+    }
+
+    /// `pr: none` and `trigger: none` round-trip as plain scalars.
+    /// This is the shape every standalone fixture uses today.
+    #[test]
+    fn lower_pr_and_trigger_none_emits_bare_scalars() {
+        let p = Pipeline {
+            name: "P".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers {
+                schedules: Vec::new(),
+                pr: Some(PrTrigger {
+                    branches_include: Vec::new(),
+                    branches_exclude: Vec::new(),
+                    paths_include: Vec::new(),
+                    paths_exclude: Vec::new(),
+                    disabled: true,
+                }),
+                ci: Some(CiTrigger { disabled: true }),
+            },
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(Vec::new()),
+            shape: PipelineShape::Standalone,
+        };
+        let g = Graph::default();
+        let v = lower_with_graph(&p, &g).unwrap();
+        let yaml = serde_yaml::to_string(&v).unwrap();
+        assert!(yaml.contains("pr: none"), "expected `pr: none`; got: {yaml}");
+        assert!(
+            yaml.contains("trigger: none"),
+            "expected `trigger: none`; got: {yaml}"
+        );
+    }
+
+    /// Configured `pr:` block with branch + path filters emits the
+    /// nested mapping shape ADO expects.
+    #[test]
+    fn lower_pr_trigger_with_filters_emits_branches_and_paths_blocks() {
+        let p = Pipeline {
+            name: "P".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers {
+                schedules: Vec::new(),
+                pr: Some(PrTrigger {
+                    branches_include: vec!["main".into()],
+                    branches_exclude: vec!["dev/*".into()],
+                    paths_include: vec!["src/**".into()],
+                    paths_exclude: vec!["docs/**".into()],
+                    disabled: false,
+                }),
+                ci: None,
+            },
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(Vec::new()),
+            shape: PipelineShape::Standalone,
+        };
+        let g = Graph::default();
+        let v = lower_with_graph(&p, &g).unwrap();
+        let yaml = serde_yaml::to_string(&v).unwrap();
+        // `pr:` mapping with branches + paths sub-mappings.
+        assert!(yaml.contains("pr:"));
+        assert!(yaml.contains("branches:"));
+        assert!(yaml.contains("paths:"));
+        assert!(yaml.contains("- main"));
+        assert!(yaml.contains("- dev/*"));
+        assert!(yaml.contains("src/**"));
+        assert!(yaml.contains("docs/**"));
+        // Defensive: must NOT collapse to `pr: none`.
+        assert!(!yaml.contains("pr: none"));
+    }
+
+    /// When `Triggers` defaults are used (no schedules, no pr, no
+    /// ci), `lower_with_graph` MUST emit no `pr:` / `trigger:` /
+    /// `schedules:` keys at all (so ADO falls back to "trigger on
+    /// any branch" defaults). The canonical lock files never use
+    /// this shape, but it's the correct ADO default and the
+    /// `compile-target-job` / `compile-target-stage` commits rely
+    /// on it.
+    #[test]
+    fn lower_with_default_triggers_emits_no_trigger_keys() {
+        let p = Pipeline {
+            name: "P".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers::default(),
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(Vec::new()),
+            shape: PipelineShape::Standalone,
+        };
+        let g = Graph::default();
+        let v = lower_with_graph(&p, &g).unwrap();
+        let yaml = serde_yaml::to_string(&v).unwrap();
+        assert!(!yaml.contains("pr:"));
+        assert!(!yaml.contains("trigger:"));
+        assert!(!yaml.contains("schedules:"));
+        assert!(!yaml.contains("parameters:"));
+        assert!(!yaml.contains("resources:"));
+        assert!(!yaml.contains("variables:"));
+    }
+
+    /// `variables:` lowers to a sequence of name/value mappings;
+    /// secrets carry the `isSecret: true` flag.
+    #[test]
+    fn lower_variables_emits_name_value_and_secret_flag() {
+        let p = Pipeline {
+            name: "P".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers::default(),
+            variables: vec![
+                PipelineVar {
+                    name: "PLAIN_VAR".into(),
+                    value: "hello".into(),
+                    is_secret: false,
+                },
+                PipelineVar {
+                    name: "SECRET_VAR".into(),
+                    value: "$(SC_TOKEN)".into(),
+                    is_secret: true,
+                },
+            ],
+            body: PipelineBody::Jobs(Vec::new()),
+            shape: PipelineShape::Standalone,
+        };
+        let g = Graph::default();
+        let v = lower_with_graph(&p, &g).unwrap();
+        let yaml = serde_yaml::to_string(&v).unwrap();
+        assert!(yaml.contains("name: PLAIN_VAR"));
+        assert!(yaml.contains("value: hello"));
+        assert!(yaml.contains("name: SECRET_VAR"));
+        assert!(yaml.contains("isSecret: true"));
     }
 }
 

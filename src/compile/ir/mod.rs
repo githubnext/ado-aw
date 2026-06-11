@@ -140,19 +140,33 @@ pub enum ParameterDefault {
 }
 
 /// `resources:` block — repositories, container images, pipelines.
-/// Placeholder shape — filled out by the target compiler commits.
 #[derive(Debug, Clone, Default)]
 pub struct Resources {
-    pub repositories: Vec<Repository>,
+    pub repositories: Vec<RepositoryResource>,
     pub pipelines: Vec<PipelineResource>,
 }
 
+/// A `resources.repositories[]` entry.
+///
+/// Two distinct shapes:
+///
+/// - `SelfRepo` — the canonical `- repository: self` block carrying
+///   `clean:` and `submodules:` flags. Standalone today always emits
+///   one of these at the top of every lock file.
+/// - `Named` — a user-declared external repository resource with
+///   `type` / `name` / `ref`.
 #[derive(Debug, Clone)]
-pub struct Repository {
-    pub identifier: String,
-    pub kind: String,
-    pub name: String,
-    pub r#ref: Option<String>,
+pub enum RepositoryResource {
+    SelfRepo {
+        clean: bool,
+        submodules: bool,
+    },
+    Named {
+        identifier: String,
+        kind: String,
+        name: String,
+        r#ref: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -165,15 +179,30 @@ pub struct PipelineResource {
 }
 
 /// `schedules:`, `trigger:`, `pr:`, plus the pipeline-trigger
-/// surface on resource pipelines. Placeholder shape — filled out by
-/// the target compiler commits.
+/// surface on resource pipelines.
 #[derive(Debug, Clone, Default)]
 pub struct Triggers {
-    pub schedule_cron: Option<String>,
+    pub schedules: Vec<Schedule>,
     pub pr: Option<PrTrigger>,
     pub ci: Option<CiTrigger>,
 }
 
+/// A single `schedules[]` entry (cron + branches + always).
+#[derive(Debug, Clone)]
+pub struct Schedule {
+    /// Cron expression in ADO's 5-field format
+    /// (`minute hour day-of-month month day-of-week`).
+    pub cron: String,
+    pub display_name: String,
+    pub branches_include: Vec<String>,
+    /// `always: true` — always run even if the source code hasn't
+    /// changed since the previous run. Defaults to true (matches the
+    /// legacy `fuzzy_schedule::generate_schedule_yaml` output, which
+    /// hard-codes `always: true`).
+    pub always: bool,
+}
+
+/// `pr:` trigger configuration.
 #[derive(Debug, Clone)]
 pub struct PrTrigger {
     /// Empty branch list means "default behaviour".
@@ -181,10 +210,16 @@ pub struct PrTrigger {
     pub branches_exclude: Vec<String>,
     pub paths_include: Vec<String>,
     pub paths_exclude: Vec<String>,
-    /// `none` short-circuits any branch / path filter.
+    /// `pr: none` short-circuits any branch / path filter and emits
+    /// the literal scalar `none` in place of the full block.
     pub disabled: bool,
 }
 
+/// `trigger:` (CI) configuration. Today standalone agents always
+/// emit `trigger: none` (CI is suppressed when schedules /
+/// pipeline-completion triggers are configured, and the default
+/// "trigger on any branch" case emits no `trigger:` key at all so
+/// callers can rely on ADO's implicit default).
 #[derive(Debug, Clone)]
 pub struct CiTrigger {
     pub disabled: bool,
