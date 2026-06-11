@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.35.3](https://github.com/githubnext/ado-aw/compare/v0.35.2...v0.35.3) (2026-06-11)
+
+
+### Bug Fixes
+
+* **ado-script:** treat unsubstituted ADO macros as empty in synthPr ([#975](https://github.com/githubnext/ado-aw/issues/975)) ([1164c5f](https://github.com/githubnext/ado-aw/commit/1164c5fefbd2d06d46d46e8c64d869f29a6452a2))
+
 ## [0.35.2](https://github.com/githubnext/ado-aw/compare/v0.35.1...v0.35.2) (2026-06-11)
 
 
