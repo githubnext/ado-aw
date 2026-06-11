@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.35.2](https://github.com/githubnext/ado-aw/compare/v0.35.1...v0.35.2) (2026-06-11)
+
+
+### Bug Fixes
+
+* **compile:** unify synthetic-PR variable namespace via ado-script ([#972](https://github.com/githubnext/ado-aw/issues/972)) ([0e05b3a](https://github.com/githubnext/ado-aw/commit/0e05b3a01975d23363d65122cd724174f5c1d329))
+
 ## [0.35.1](https://github.com/githubnext/ado-aw/compare/v0.35.0...v0.35.1) (2026-06-11)
 
 
