@@ -703,7 +703,7 @@ mod tests {
         ];
         derive_findings(&mut audit);
 
-        assert!(audit.key_findings.len() >= 5);
+        assert_eq!(audit.key_findings.len(), 5);
         assert!(
             audit
                 .key_findings
