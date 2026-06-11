@@ -200,11 +200,16 @@ impl AzureCliExtension {
     /// agent the subcommand is unauthenticated, so it doesn't burn turns on
     /// `az devops` calls that will fail.
     fn prompt_append_step(&self, has_read: bool) -> String {
-        let ado_bullet = if has_read {
-            "- **Azure DevOps management** — `az devops`, `az pipelines`, `az repos`, `az boards`. These are authenticated automatically from `$AZURE_DEVOPS_EXT_PAT` (minted from `permissions: read:`). List/inspect operations Just Work; write operations honour the token's scopes."
+        // Shared prefix + subcommand list, kept in one place so the two
+        // auth-state variants can never drift apart.
+        const ADO_BULLET_PREFIX: &str =
+            "- **Azure DevOps management** — `az devops`, `az pipelines`, `az repos`, `az boards`.";
+        let ado_auth = if has_read {
+            "These are authenticated automatically from `$AZURE_DEVOPS_EXT_PAT` (minted from `permissions: read:`). List/inspect operations Just Work; write operations honour the token's scopes."
         } else {
-            "- **Azure DevOps management** — `az devops`, `az pipelines`, `az repos`, `az boards`. These are NOT authenticated: this pipeline declares no `permissions: read:`, so `$AZURE_DEVOPS_EXT_PAT` is unset and these commands will fail to authenticate. Ask the operator to add `permissions: read: <arm-service-connection>` to enable them."
+            "These are NOT authenticated: this pipeline declares no `permissions: read:`, so `$AZURE_DEVOPS_EXT_PAT` is unset and these commands will fail to authenticate. Ask the operator to add `permissions: read: <arm-service-connection>` to enable them."
         };
+        let ado_bullet = format!("{ADO_BULLET_PREFIX} {ado_auth}");
         format!(
             r#"- bash: |
     cat >> "/tmp/awf-tools/agent-prompt.md" << 'AZURE_CLI_PROMPT_EOF'
