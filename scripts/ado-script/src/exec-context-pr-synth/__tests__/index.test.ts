@@ -80,6 +80,41 @@ describe("exec-context-pr-synth main", () => {
     expect(output).toContain("AW_PR_ID;isOutput=true]99");
   });
 
+  it("does NOT treat unsubstituted $(System.PullRequest.*) ADO macros as a real PR id", async () => {
+    // Regression: ADO leaves undefined predefined-variable macros as
+    // the literal string `$(name)` in step env (it does NOT substitute
+    // to empty). Without resolveAdoMacroEnv, the bundle would treat
+    // `SYSTEM_PULLREQUEST_PULLREQUESTID = "$(System.PullRequest.PullRequestId)"`
+    // (the value seen on every non-PR build) as a real PR id and
+    // mis-emit `AW_PR_ID = $(System.PullRequest.PullRequestId)` as a
+    // literal — observed by @jamesadevine on the first roll-out:
+    //   `[synth-pr] real PR build #$(System.PullRequest.PullRequestId);
+    //    propagating SYSTEM_PULLREQUEST_* to AW_PR_*`
+    // The bundle must instead fall through to the synth-discovery path.
+    mocked.listActivePullRequestsBySourceRef.mockResolvedValue([]);
+    const { code, output } = await runMain(
+      makeEnv({
+        BUILD_REASON: "IndividualCI",
+        SYSTEM_PULLREQUEST_PULLREQUESTID: "$(System.PullRequest.PullRequestId)",
+        SYSTEM_PULLREQUEST_TARGETBRANCH: "$(System.PullRequest.TargetBranch)",
+        SYSTEM_PULLREQUEST_SOURCEBRANCH: "$(System.PullRequest.SourceBranch)",
+        SYSTEM_PULLREQUEST_ISDRAFT: "$(System.PullRequest.IsDraft)",
+        PR_SYNTH_SPEC: build_pr_synth_spec(),
+      }),
+    );
+    expect(code).toBe(0);
+    // The "real PR build" log must NOT appear — the macro literals
+    // should have been resolved to empty and the bundle should have
+    // proceeded to the synth-discovery path (which then no-matched).
+    expect(output).not.toContain("real PR build");
+    // AW_PR_ID must NOT carry the literal macro string.
+    expect(output).not.toContain("AW_PR_ID;isOutput=true]$(");
+    expect(output).not.toContain("##vso[task.setvariable variable=AW_PR_ID]$(");
+    // Should hit the synth-discovery path and emit SKIP on no match.
+    expect(mocked.listActivePullRequestsBySourceRef).toHaveBeenCalledOnce();
+    expect(output).toContain("AW_SYNTHETIC_PR_SKIP;isOutput=true]true");
+  });
+
   // ── GitHub repo path ────────────────────────────────────────────
 
   it("skips with empty AW_PR_* on GitHub-typed repos (CI builds)", async () => {

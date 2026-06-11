@@ -72,6 +72,28 @@ import { decodeSpec, type PrSynthSpec } from "./spec.js";
 const SKIP_OUTPUT = "AW_SYNTHETIC_PR_SKIP";
 
 /**
+ * Resolve an ADO step-env value that may carry an unsubstituted
+ * `$(name)` macro. ADO leaves undefined predefined-variable macros as
+ * the literal string `$(Some.Variable.Name)` in step env — it does NOT
+ * substitute to empty. Without this guard, the bundle would read
+ * `SYSTEM_PULLREQUEST_PULLREQUESTID = "$(System.PullRequest.PullRequestId)"`
+ * on a non-PR build and treat it as a non-empty PR id (regression
+ * observed by @jamesadevine on the first roll-out:
+ * `[synth-pr] real PR build #$(System.PullRequest.PullRequestId);
+ * propagating SYSTEM_PULLREQUEST_* to AW_PR_*`).
+ *
+ * Returns the actual value when set, empty string when the value is
+ * absent, empty, or a literal `$(<anything>)` macro. The macro pattern
+ * uses balanced `$(` ... `)` with no nested parens (ADO macro
+ * names never contain parens).
+ */
+function resolveAdoMacroEnv(value: string | undefined): string {
+  if (!value) return "";
+  if (/^\$\([^()]+\)$/.test(value)) return "";
+  return value;
+}
+
+/**
  * Emit the canonical AW_PR_* identifier set as BOTH cross-job outputs
  * (consumed by the Agent job's `variables:` hoist via
  * `dependencies.Setup.outputs['synthPr.AW_PR_*']`) and same-job
@@ -111,18 +133,19 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
   // consumers can read a single name regardless of source. No API call
   // needed; ADO has already populated the values.
   //
-  // Detection: `SYSTEM_PULLREQUEST_PULLREQUESTID` is non-empty iff this
-  // is a real PR build. `BUILD_REASON=PullRequest` could also be used,
-  // but checking the actual id is more precise (it's the value we
-  // actually need to propagate, and it can't be set without the build
-  // really being a PR build).
-  const realPrId = env.SYSTEM_PULLREQUEST_PULLREQUESTID ?? "";
+  // Detection: `SYSTEM_PULLREQUEST_PULLREQUESTID` is non-empty (after
+  // `resolveAdoMacroEnv` strips unsubstituted `$(name)` literals) iff
+  // this is a real PR build. `BUILD_REASON=PullRequest` could also be
+  // used as a sanity check, but the resolved id is the actual value we
+  // need to propagate — and it can't be present without the build
+  // really being a PR build.
+  const realPrId = resolveAdoMacroEnv(env.SYSTEM_PULLREQUEST_PULLREQUESTID);
   if (realPrId.length > 0) {
     emitPrIdentifiers(
       realPrId,
-      env.SYSTEM_PULLREQUEST_TARGETBRANCH ?? "",
-      env.SYSTEM_PULLREQUEST_SOURCEBRANCH ?? "",
-      env.SYSTEM_PULLREQUEST_ISDRAFT ?? "",
+      resolveAdoMacroEnv(env.SYSTEM_PULLREQUEST_TARGETBRANCH),
+      resolveAdoMacroEnv(env.SYSTEM_PULLREQUEST_SOURCEBRANCH),
+      resolveAdoMacroEnv(env.SYSTEM_PULLREQUEST_ISDRAFT),
     );
     logInfo(
       `[synth-pr] real PR build #${realPrId}; propagating SYSTEM_PULLREQUEST_* to AW_PR_*`,
