@@ -1,7 +1,8 @@
 // ─── Azure DevOps MCP ────────────────────────────────────────────────
 
 use crate::compile::extensions::{
-    CompileContext, CompilerExtension, ExtensionPhase, McpgServerConfig, PipelineEnvMapping,
+    CompileContext, CompilerExtension, Declarations, ExtensionPhase, McpgServerConfig,
+    PipelineEnvMapping,
 };
 use crate::allowed_hosts::mcp_required_hosts;
 use crate::compile::{
@@ -159,5 +160,63 @@ impl CompilerExtension for AzureDevOpsExtension {
             container_var: "ADO_MCP_AUTH_TOKEN".to_string(),
             pipeline_var: "SC_READ_TOKEN".to_string(),
         }]
+    }
+
+    /// Typed-IR view. Azure DevOps MCP contributes only static
+    /// signals — no pipeline steps — so the override just routes the
+    /// legacy outputs through the typed [`Declarations`] bundle.
+    fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
+        Ok(Declarations {
+            network_hosts: self.required_hosts(),
+            mcpg_servers: self.mcpg_servers(ctx)?,
+            copilot_allow_tools: self.allowed_copilot_tools(),
+            pipeline_env: self.required_pipeline_vars(),
+            warnings: self.validate(ctx)?,
+            ..Declarations::default()
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compile::parse_markdown;
+
+    #[test]
+    fn declarations_returns_static_signals_only_no_steps() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\ntools:\n  azure-devops:\n    org: 'myorg'\n---\n",
+        )
+        .unwrap();
+        let cfg = fm
+            .tools
+            .as_ref()
+            .and_then(|t| t.azure_devops.as_ref())
+            .cloned()
+            .unwrap();
+        let ext = AzureDevOpsExtension::new(cfg);
+        let ctx = CompileContext::for_test(&fm);
+        let decl = ext.declarations(&ctx).unwrap();
+
+        // No steps - this extension only contributes MCPG + env wiring.
+        assert!(decl.agent_prepare_steps.is_empty());
+        assert!(decl.setup_steps.is_empty());
+
+        // copilot_allow_tools contains the ADO MCP server name.
+        assert_eq!(decl.copilot_allow_tools, vec![ADO_MCP_SERVER_NAME.to_string()]);
+
+        // mcpg_servers has one stdio entry for the ADO MCP container.
+        assert_eq!(decl.mcpg_servers.len(), 1);
+        let (name, config) = &decl.mcpg_servers[0];
+        assert_eq!(name, ADO_MCP_SERVER_NAME);
+        assert_eq!(config.server_type, "stdio");
+        assert_eq!(config.container.as_deref(), Some(ADO_MCP_IMAGE));
+
+        // pipeline_env exposes the ADO_MCP_AUTH_TOKEN passthrough.
+        assert_eq!(decl.pipeline_env.len(), 1);
+        assert_eq!(decl.pipeline_env[0].container_var, "ADO_MCP_AUTH_TOKEN");
+
+        // Network hosts include the dev.azure.com domains plus node.
+        assert!(decl.network_hosts.contains(&"node".to_string()));
     }
 }
