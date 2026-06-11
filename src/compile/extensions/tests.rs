@@ -52,24 +52,66 @@ fn test_awf_mount_parse_rw_mode() {
 /// The default `declarations()` impl on `CompilerExtension` must
 /// faithfully re-export every legacy per-method output, wrapping
 /// `prepare_steps` / `setup_steps` in `Step::RawYaml`. This smoke
-/// test locks the bridge contract end-to-end for one representative
-/// extension (LeanExtension, which exercises hosts, bash commands,
-/// prompt supplement, prepare steps, and validate warnings).
+/// test locks the bridge contract end-to-end against a synthetic
+/// in-test stub that exercises every legacy accessor without
+/// overriding `declarations()`.
 ///
-/// Removed by `delete-deprecated-trait-aliases` once every extension
-/// owns a real `declarations()` impl and the legacy methods are gone.
+/// We use a stub rather than a real extension because every real
+/// extension is being incrementally ported to a typed `declarations()`
+/// override (so anchoring this test on a real one would invalidate it
+/// the moment that extension lands a port). The stub survives until
+/// `delete-deprecated-trait-aliases` removes the bridge entirely.
 #[test]
-fn declarations_default_bridges_lean_extension_legacy_methods() {
+fn declarations_default_bridges_legacy_methods() {
     use crate::compile::ir::step::Step;
-    let ext = LeanExtension::new(LeanRuntimeConfig::Enabled(true));
+
+    struct StubLegacyExtension;
+    impl CompilerExtension for StubLegacyExtension {
+        fn name(&self) -> &str {
+            "stub-legacy"
+        }
+        fn phase(&self) -> ExtensionPhase {
+            ExtensionPhase::Tool
+        }
+        fn required_hosts(&self) -> Vec<String> {
+            vec!["example.com".to_string()]
+        }
+        fn required_bash_commands(&self) -> Vec<String> {
+            vec!["stub-cmd".to_string()]
+        }
+        fn prompt_supplement(&self) -> Option<String> {
+            Some("stub prompt".to_string())
+        }
+        fn prepare_steps(&self, _ctx: &CompileContext) -> Vec<String> {
+            vec![
+                "- bash: |\n    echo stub-prepare-1\n  displayName: \"stub 1\"".to_string(),
+                "- bash: |\n    echo stub-prepare-2\n  displayName: \"stub 2\"".to_string(),
+            ]
+        }
+        fn setup_steps(&self, _ctx: &CompileContext) -> anyhow::Result<Vec<String>> {
+            Ok(vec![
+                "- bash: |\n    echo stub-setup\n  displayName: \"stub setup\"".to_string(),
+            ])
+        }
+        fn allowed_copilot_tools(&self) -> Vec<String> {
+            vec!["stub-tool".to_string()]
+        }
+        fn validate(&self, _ctx: &CompileContext) -> anyhow::Result<Vec<String>> {
+            Ok(vec!["stub warning".to_string()])
+        }
+    }
+
+    let ext = StubLegacyExtension;
     let fm = minimal_front_matter();
     let ctx = ctx_from(&fm);
     let d = ext.declarations(&ctx).expect("declarations must succeed");
 
-    // Network hosts / bash commands / prompt round-trip verbatim.
+    // Static signals round-trip verbatim through the bridge.
     assert_eq!(d.network_hosts, ext.required_hosts());
     assert_eq!(d.bash_commands, ext.required_bash_commands());
     assert_eq!(d.prompt_supplement, ext.prompt_supplement());
+    assert_eq!(d.copilot_allow_tools, ext.allowed_copilot_tools());
+    assert_eq!(d.warnings, vec!["stub warning".to_string()]);
 
     // Prepare steps are wrapped as Step::RawYaml.
     let legacy_prepare = ext.prepare_steps(&ctx);
@@ -81,12 +123,26 @@ fn declarations_default_bridges_lean_extension_legacy_methods() {
         }
     }
 
-    // Other Declarations slots are empty when the legacy methods
-    // don't populate them.
-    assert!(d.setup_steps.is_empty());
+    // Setup steps are wrapped as Step::RawYaml too.
+    let legacy_setup = ext.setup_steps(&ctx).unwrap();
+    assert_eq!(d.setup_steps.len(), legacy_setup.len());
+    for (decl_step, legacy_str) in d.setup_steps.iter().zip(legacy_setup.iter()) {
+        match decl_step {
+            Step::RawYaml(s) => assert_eq!(s, legacy_str),
+            other => panic!("expected Step::RawYaml, got {other:?}"),
+        }
+    }
+
+    // Other Declarations slots are empty when the stub doesn't
+    // populate them.
     assert!(d.agent_finalize_steps.is_empty());
     assert!(d.detection_prepare_steps.is_empty());
     assert!(d.safe_outputs_steps.is_empty());
+    assert!(d.mcpg_servers.is_empty());
+    assert!(d.pipeline_env.is_empty());
+    assert!(d.awf_mounts.is_empty());
+    assert!(d.awf_path_prepends.is_empty());
+    assert!(d.agent_env_vars.is_empty());
 }
 
 #[test]

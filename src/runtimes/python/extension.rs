@@ -1,6 +1,9 @@
 // ─── Python ────────────────────────────────────────────────────────
 
-use crate::compile::extensions::{CompileContext, CompilerExtension, ExtensionPhase};
+use crate::compile::extensions::{
+    CompileContext, CompilerExtension, Declarations, ExtensionPhase,
+};
+use crate::compile::ir::step::{Step, TaskStep};
 use crate::validate;
 use super::{PYTHON_BASH_COMMANDS, PythonRuntimeConfig, generate_pip_authenticate, generate_python_install};
 use anyhow::Result;
@@ -123,6 +126,47 @@ management, install it first with `pip install uv`.\n"
 
         Ok(warnings)
     }
+
+    /// Typed-IR view. Returns:
+    ///
+    /// * a [`Step::Task`] for `UsePythonVersion@0`,
+    /// * an optional [`Step::Task`] for `PipAuthenticate@1` (only
+    ///   when `feed-url:` is set),
+    ///
+    /// alongside the static signals carried by the legacy accessors
+    /// (hosts, bash commands, prompt supplement, agent env vars).
+    fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
+        let mut agent_prepare_steps: Vec<Step> = Vec::with_capacity(2);
+        agent_prepare_steps.push(Step::Task(python_install_task_step(&self.config)));
+        if self.config.feed_url().is_some() {
+            agent_prepare_steps.push(Step::Task(pip_authenticate_task_step()));
+        }
+        Ok(Declarations {
+            agent_prepare_steps,
+            network_hosts: self.required_hosts(),
+            bash_commands: self.required_bash_commands(),
+            prompt_supplement: self.prompt_supplement(),
+            agent_env_vars: self.agent_env_vars(),
+            warnings: self.validate(ctx)?,
+            ..Declarations::default()
+        })
+    }
+}
+
+/// Typed [`TaskStep`] mirror of [`generate_python_install`].
+fn python_install_task_step(config: &PythonRuntimeConfig) -> TaskStep {
+    let version = config.version().unwrap_or("3.x");
+    TaskStep::new("UsePythonVersion@0", format!("Install Python {version}"))
+        .with_input("versionSpec", version)
+}
+
+/// Typed [`TaskStep`] mirror of [`generate_pip_authenticate`].
+fn pip_authenticate_task_step() -> TaskStep {
+    TaskStep::new(
+        "PipAuthenticate@1",
+        "Authenticate pip (build service identity)",
+    )
+    .with_input("artifactFeeds", "")
 }
 
 #[cfg(test)]
@@ -189,5 +233,57 @@ mod tests {
         let python = fm.runtimes.as_ref().unwrap().python.as_ref().unwrap();
         let ext = PythonExtension::new(python.clone());
         assert!(ext.validate(&ctx_from(&fm)).is_err());
+    }
+
+    /// Locks the `declarations()` override: must return a single
+    /// `Step::Task(UsePythonVersion@0)` install step (no
+    /// `Step::RawYaml`) when no feed-url is configured, plus the
+    /// static signals.
+    #[test]
+    fn declarations_returns_typed_task_for_default_python() {
+        let (fm, _) = parse_markdown("---\nname: t\ndescription: x\n---\n").unwrap();
+        let ext = PythonExtension::new(PythonRuntimeConfig::Enabled(true));
+        let decl = ext.declarations(&ctx_from(&fm)).unwrap();
+        assert_eq!(decl.agent_prepare_steps.len(), 1);
+        match &decl.agent_prepare_steps[0] {
+            Step::Task(t) => {
+                assert_eq!(t.task, "UsePythonVersion@0");
+                assert_eq!(t.display_name, "Install Python 3.x");
+                assert_eq!(t.inputs.get("versionSpec").map(String::as_str), Some("3.x"));
+            }
+            other => panic!("expected Step::Task, got {other:?}"),
+        }
+        assert_eq!(decl.network_hosts, vec!["python".to_string()]);
+        assert!(decl.bash_commands.contains(&"python".to_string()));
+        assert!(decl.prompt_supplement.is_some());
+        assert!(decl.agent_env_vars.is_empty());
+        assert!(decl.mcpg_servers.is_empty());
+    }
+
+    /// When `feed-url:` is set, a second `Step::Task(PipAuthenticate@1)`
+    /// is appended and `PIP_INDEX_URL` / `UV_DEFAULT_INDEX` env vars
+    /// surface on the declarations.
+    #[test]
+    fn declarations_adds_pip_authenticate_and_env_when_feed_url_set() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\nruntimes:\n  python:\n    feed-url: 'https://pkgs.dev.azure.com/org/_packaging/feed/pypi/simple/'\n---\n",
+        )
+        .unwrap();
+        let python = fm.runtimes.as_ref().unwrap().python.as_ref().unwrap();
+        let ext = PythonExtension::new(python.clone());
+        let decl = ext.declarations(&ctx_from(&fm)).unwrap();
+        assert_eq!(decl.agent_prepare_steps.len(), 2);
+        match &decl.agent_prepare_steps[1] {
+            Step::Task(t) => {
+                assert_eq!(t.task, "PipAuthenticate@1");
+                assert_eq!(t.display_name, "Authenticate pip (build service identity)");
+                assert_eq!(t.inputs.get("artifactFeeds").map(String::as_str), Some(""));
+            }
+            other => panic!("expected Step::Task, got {other:?}"),
+        }
+        // env vars must include both pip and uv index URLs.
+        let keys: Vec<&str> = decl.agent_env_vars.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(keys.contains(&"PIP_INDEX_URL"));
+        assert!(keys.contains(&"UV_DEFAULT_INDEX"));
     }
 }

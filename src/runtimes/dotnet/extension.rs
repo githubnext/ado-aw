@@ -1,6 +1,9 @@
 // ─── .NET ──────────────────────────────────────────────────────────
 
-use crate::compile::extensions::{CompileContext, CompilerExtension, ExtensionPhase};
+use crate::compile::extensions::{
+    CompileContext, CompilerExtension, Declarations, ExtensionPhase,
+};
+use crate::compile::ir::step::{BashStep, Step, TaskStep};
 use crate::validate;
 use super::{
     DOTNET_BASH_COMMANDS, DotnetRuntimeConfig, GLOBAL_JSON_SENTINEL, generate_dotnet_install,
@@ -145,6 +148,88 @@ in the repository.\n"
 
         Ok(warnings)
     }
+
+    /// Typed-IR view. Returns:
+    ///
+    /// * a [`Step::Task`] for `UseDotNet@2` (either `useGlobalJson` or
+    ///   an explicit version),
+    /// * a [`Step::Bash`] for `Ensure nuget.config exists` when a
+    ///   `feed-url:` is configured,
+    /// * a [`Step::Task`] for `NuGetAuthenticate@1` when either
+    ///   `feed-url:` or `config:` is configured.
+    ///
+    /// Hosts, bash commands, prompt supplement also flow through.
+    fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
+        let mut agent_prepare_steps: Vec<Step> = Vec::with_capacity(3);
+        agent_prepare_steps.push(Step::Task(dotnet_install_task_step(&self.config)));
+        if self.config.feed_url().is_some() {
+            agent_prepare_steps.push(Step::Bash(ensure_nuget_config_bash_step(&self.config)));
+            agent_prepare_steps.push(Step::Task(nuget_authenticate_task_step()));
+        } else if self.config.config().is_some() {
+            agent_prepare_steps.push(Step::Task(nuget_authenticate_task_step()));
+        }
+        Ok(Declarations {
+            agent_prepare_steps,
+            network_hosts: self.required_hosts(),
+            bash_commands: self.required_bash_commands(),
+            prompt_supplement: self.prompt_supplement(),
+            warnings: self.validate(ctx)?,
+            ..Declarations::default()
+        })
+    }
+}
+
+/// Typed [`TaskStep`] mirror of [`generate_dotnet_install`]. Three
+/// shapes, matching the legacy emitter:
+///
+/// * `version: "global.json"` → `useGlobalJson: true`,
+/// * explicit version → `version: '<v>'`,
+/// * no version → `version: '8.0.x'` (compiler default).
+fn dotnet_install_task_step(config: &DotnetRuntimeConfig) -> TaskStep {
+    if config.use_global_json() {
+        return TaskStep::new("UseDotNet@2", "Install .NET SDK (from global.json)")
+            .with_input("packageType", "sdk")
+            .with_input("useGlobalJson", "true");
+    }
+    let version = config.version().unwrap_or("8.0.x");
+    TaskStep::new("UseDotNet@2", format!("Install .NET SDK {version}"))
+        .with_input("packageType", "sdk")
+        .with_input("version", version)
+}
+
+/// Typed [`TaskStep`] mirror of [`generate_nuget_authenticate`].
+fn nuget_authenticate_task_step() -> TaskStep {
+    TaskStep::new(
+        "NuGetAuthenticate@1",
+        "Authenticate NuGet (build service identity)",
+    )
+}
+
+/// Typed [`BashStep`] mirror of [`generate_ensure_nuget_config`]. Same
+/// case-variation-aware existence check; same minimal `nuget.config`
+/// content when the file is missing.
+fn ensure_nuget_config_bash_step(config: &DotnetRuntimeConfig) -> BashStep {
+    let feed_url = config
+        .feed_url()
+        .unwrap_or("https://api.nuget.org/v3/index.json");
+    let script = format!(
+        "set -eo pipefail\n\
+         if [ ! -f nuget.config ] && [ ! -f NuGet.config ] && [ ! -f NuGet.Config ]; then\n  \
+           cat > nuget.config <<'EOF'\n\
+         <?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+         <configuration>\n  \
+           <packageSources>\n    \
+             <clear />\n    \
+             <add key=\"internal\" value=\"{feed_url}\" />\n  \
+           </packageSources>\n\
+         </configuration>\n\
+         EOF\n  \
+           echo 'Created nuget.config with source={feed_url}'\n\
+         else\n  \
+           echo 'nuget.config already exists, skipping creation'\n\
+         fi\n"
+    );
+    BashStep::new("Ensure nuget.config exists", script)
 }
 
 #[cfg(test)]
@@ -241,5 +326,92 @@ mod tests {
         let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
         let ext = DotnetExtension::new(dotnet.clone());
         assert!(ext.validate(&ctx_from(&fm)).is_err());
+    }
+
+    /// Default config — only `UseDotNet@2` with the compiler default
+    /// version surfaces. No nuget steps.
+    #[test]
+    fn declarations_returns_typed_task_for_default_dotnet() {
+        let (fm, _) = parse_markdown("---\nname: t\ndescription: x\n---\n").unwrap();
+        let ext = DotnetExtension::new(DotnetRuntimeConfig::Enabled(true));
+        let decl = ext.declarations(&ctx_from(&fm)).unwrap();
+        assert_eq!(decl.agent_prepare_steps.len(), 1);
+        match &decl.agent_prepare_steps[0] {
+            Step::Task(t) => {
+                assert_eq!(t.task, "UseDotNet@2");
+                assert_eq!(t.display_name, "Install .NET SDK 8.0.x");
+                assert_eq!(t.inputs.get("packageType").map(String::as_str), Some("sdk"));
+                assert_eq!(t.inputs.get("version").map(String::as_str), Some("8.0.x"));
+                assert!(!t.inputs.contains_key("useGlobalJson"));
+            }
+            other => panic!("expected Step::Task, got {other:?}"),
+        }
+    }
+
+    /// `version: "global.json"` → `useGlobalJson: true`; no explicit
+    /// version input on the task.
+    #[test]
+    fn declarations_with_global_json_sentinel_uses_use_global_json_input() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\nruntimes:\n  dotnet:\n    version: 'global.json'\n---\n",
+        )
+        .unwrap();
+        let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+        let ext = DotnetExtension::new(dotnet.clone());
+        let decl = ext.declarations(&ctx_from(&fm)).unwrap();
+        match &decl.agent_prepare_steps[0] {
+            Step::Task(t) => {
+                assert_eq!(t.display_name, "Install .NET SDK (from global.json)");
+                assert_eq!(
+                    t.inputs.get("useGlobalJson").map(String::as_str),
+                    Some("true")
+                );
+                assert!(!t.inputs.contains_key("version"));
+            }
+            other => panic!("expected Step::Task, got {other:?}"),
+        }
+    }
+
+    /// `feed-url:` triggers the ensure-nuget-config Bash step plus
+    /// `NuGetAuthenticate@1`. Three steps total, in that order.
+    #[test]
+    fn declarations_with_feed_url_adds_ensure_and_auth_steps() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\nruntimes:\n  dotnet:\n    feed-url: 'https://pkgs.dev.azure.com/myorg/_packaging/myfeed/nuget/v3/index.json'\n---\n",
+        )
+        .unwrap();
+        let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+        let ext = DotnetExtension::new(dotnet.clone());
+        let decl = ext.declarations(&ctx_from(&fm)).unwrap();
+        assert_eq!(decl.agent_prepare_steps.len(), 3);
+        match &decl.agent_prepare_steps[1] {
+            Step::Bash(b) => {
+                assert_eq!(b.display_name, "Ensure nuget.config exists");
+                assert!(b.script.contains("pkgs.dev.azure.com"));
+            }
+            other => panic!("expected Step::Bash for ensure-nuget, got {other:?}"),
+        }
+        match &decl.agent_prepare_steps[2] {
+            Step::Task(t) => assert_eq!(t.task, "NuGetAuthenticate@1"),
+            other => panic!("expected Step::Task for NuGetAuthenticate@1, got {other:?}"),
+        }
+    }
+
+    /// `config:` (without `feed-url:`) skips the ensure step but still
+    /// emits `NuGetAuthenticate@1`. Two steps total.
+    #[test]
+    fn declarations_with_config_only_skips_ensure_keeps_auth() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\nruntimes:\n  dotnet:\n    config: 'nuget.config'\n---\n",
+        )
+        .unwrap();
+        let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+        let ext = DotnetExtension::new(dotnet.clone());
+        let decl = ext.declarations(&ctx_from(&fm)).unwrap();
+        assert_eq!(decl.agent_prepare_steps.len(), 2);
+        match &decl.agent_prepare_steps[1] {
+            Step::Task(t) => assert_eq!(t.task, "NuGetAuthenticate@1"),
+            other => panic!("expected Step::Task, got {other:?}"),
+        }
     }
 }
