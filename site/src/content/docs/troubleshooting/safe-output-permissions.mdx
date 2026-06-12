@@ -1,0 +1,259 @@
+---
+title: Safe-output 401/403 errors
+description: Diagnose and fix Stage 3 SafeOutputs permission failures (TF401027, PullRequestContribute, build identity, job authorization scope)
+---
+
+The single most common runtime failure for an otherwise-working
+`ado-aw` pipeline is a 401/403 from the **Stage 3 SafeOutputs**
+executor when it tries to post a PR comment, open a PR, file a work
+item, etc. This page covers diagnosis and the three fix paths in
+order of how on-convention they are.
+
+## Failure signature
+
+Stage `SafeOutputs` is the failing job. The executor log (or
+`ado-aw audit <build-id>` → `safe_output_execution`) contains an
+HTTP 403 with a body that looks like this:
+
+```text
+TF401027: You need the Git 'PullRequestContribute' permission to
+perform this action. Details: identity 'Build\<guid>', scope 'repository'.
+```
+
+Two things to read out of that line:
+
+1. **`PullRequestContribute`** — the exact permission bit ADO
+   denied. The full set of permission bits and which Stage 3 tool
+   needs which is below.
+2. **`Build\<guid>`** — the *identity* the Stage 3 executor was
+   running as. It is not the user who triggered the build; it is one
+   of two ADO-minted build-service accounts.
+
+## Which identity Stage 3 runs as
+
+The Stage 3 executor uses `$(System.AccessToken)` by default — the
+short-lived OAuth token that Azure DevOps mints for every run. Which
+identity that token represents depends on a single setting: **"Limit
+job authorization scope to current project for non-release
+pipelines."**
+
+| Toggle | Identity | Display name | Guid in `Build\<guid>` |
+|---|---|---|---|
+| **OFF** (default) | Collection-scoped build service | `Project Collection Build Service (<org>)` | An ADO-internal random GUID |
+| **ON** | Project-scoped build service | `<ProjectName> Build Service (<org>)` | Your **project ID** |
+
+If the GUID in the error message matches your project's ID, Stage 3
+is already running as the project-scoped identity. If it does not,
+the toggle is OFF and Stage 3 is running as the collection-scoped
+one.
+
+The toggle exists in three places (most specific wins):
+
+- **Per-pipeline** — Pipeline → Edit → "…" → Triggers → "Limit job
+  authorization scope to current project".
+- **Project-level** — Project Settings → Pipelines → Settings.
+- **Organization-level** — Organization Settings → Pipelines →
+  Settings.
+
+If `permissions.write:` is set in the agent's front matter, Stage 3
+uses the **ARM service connection's identity** instead, and none of
+the above applies — see [Option 1](#option-1-wire-a-write-service-connection-recommended).
+
+## Decoding the permission bitmask
+
+When you inspect the repo's ACL directly (recipe below), ADO returns
+bitmask integers for `allow` / `deny` / `effectiveAllow` /
+`effectiveDeny`. Decode by bitwise-ORing the values from this table
+(Git Repositories namespace
+`2e9eb7ed-3c0a-47d4-87c1-0ffdd275fd87`):
+
+| Bit | Name | Display name |
+|---:|---|---|
+| 1 | `Administer` | Administer |
+| 2 | `GenericRead` | Read |
+| 4 | `GenericContribute` | Contribute |
+| 8 | `ForcePush` | Force push |
+| 16 | `CreateBranch` | Create branch |
+| 32 | `CreateTag` | Create tag |
+| 64 | `ManageNote` | Manage notes |
+| 128 | `PolicyExempt` | Bypass policies when pushing |
+| 256 | `CreateRepository` | Create repository |
+| 512 | `DeleteRepository` | Delete or disable repository |
+| 1024 | `RenameRepository` | Rename repository |
+| 2048 | `EditPolicies` | Edit policies |
+| 4096 | `RemoveOthersLocks` | Remove others' locks |
+| 8192 | `ManagePermissions` | Manage permissions |
+| **16384** | **`PullRequestContribute`** | **Contribute to pull requests** |
+| 32768 | `PullRequestBypassPolicy` | Bypass completion policies |
+| 65536 | `ViewAdvSecAlerts` | AdvSec: view alerts |
+| 131072 | `DismissAdvSecAlerts` | AdvSec: manage/dismiss alerts |
+| 262144 | `ManageAdvSecScanning` | AdvSec: manage settings |
+| 524288 | `ManageEnterpriseLiveMigrations` | Enterprise Live Migration |
+
+:::caution[Deny always wins]
+Any bit present in `effectiveDeny` overrides the same bit in
+`effectiveAllow`, regardless of group membership. If a repo has an
+explicit Deny on the build identity for a permission, granting that
+identity Allow via a group will not unblock it. You must either
+remove the Deny, switch to a different identity, or use a service
+connection.
+:::
+
+### Which Stage 3 tool needs which permission
+
+| Safe-output tool | Permission required (bit) |
+|---|---|
+| `add-pr-comment`, `submit-pr-review`, `reply-to-pr-comment`, `resolve-pr-thread`, `update-pr` | `PullRequestContribute` (16384) |
+| `create-pull-request` | `PullRequestContribute` (16384) + `CreateBranch` (16) + `GenericContribute` (4) |
+| `create-branch` | `CreateBranch` (16) + `GenericContribute` (4) |
+| `create-git-tag` | `CreateTag` (32) + `GenericContribute` (4) |
+| `create-work-item`, `update-work-item`, `comment-on-work-item`, `link-work-items`, `upload-workitem-attachment` | Work Items namespace — not Git Repositories |
+| `create-wiki-page`, `update-wiki-page` | Project-level Wiki permissions |
+| `queue-build` | Build namespace, `QueueBuilds` (32) on the target definition |
+| `add-build-tag`, `upload-build-attachment`, `upload-pipeline-artifact` | Current build only — never fail on perms |
+
+## Inspect the ACEs from the command line
+
+You do not need to wait for another failed run to confirm which
+identity has what. Authenticate with `az` and call the ADO
+[Security namespace REST API](https://learn.microsoft.com/rest/api/azure/devops/security/access-control-lists/query)
+directly.
+
+```bash
+TOKEN=$(az account get-access-token \
+  --resource 499b84ac-1321-427f-aa17-267ca6975798 \
+  --query accessToken -o tsv)
+
+NS=2e9eb7ed-3c0a-47d4-87c1-0ffdd275fd87           # Git Repositories
+ORG=<your-org>
+PROJ=<projectId>
+REPO=<repoId>
+DESC='Microsoft.TeamFoundation.ServiceIdentity;<host-guid>:Build:<build-guid>'
+
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "https://dev.azure.com/${ORG}/_apis/accesscontrollists/${NS}?token=repoV2/${PROJ}/${REPO}&descriptors=${DESC}&includeExtendedInfo=true&recurse=false&api-version=7.1" \
+  | jq '.value[].acesDictionary'
+```
+
+A response like:
+
+```json
+{
+  "Microsoft.TeamFoundation.ServiceIdentity;…:Build:…": {
+    "allow": 0,
+    "deny": 16404,
+    "extendedInfo": {
+      "inheritedAllow": 196608,
+      "effectiveAllow": 196608,
+      "effectiveDeny":  16404
+    }
+  }
+}
+```
+
+…decodes to `effectiveDeny = 16404 = 16384 + 16 + 4 =
+PullRequestContribute | CreateBranch | GenericContribute` — an
+explicit Deny on this repo. The `inheritedAllow` of 196608 only
+covers `ViewAdvSecAlerts | DismissAdvSecAlerts`, which is irrelevant
+to safe outputs.
+
+### Before flipping the auth-scope toggle, check the project-scoped identity
+
+If the failing identity is the collection-scoped one (toggle OFF),
+also pull the ACE for the project-scoped one — its build GUID is
+your project ID:
+
+```bash
+PROJ_DESC="Microsoft.TeamFoundation.ServiceIdentity;<host-guid>:Build:${PROJ}"
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "https://dev.azure.com/${ORG}/_apis/accesscontrollists/${NS}?token=repoV2/${PROJ}/${REPO}&descriptors=${PROJ_DESC}&includeExtendedInfo=true&recurse=false&api-version=7.1" \
+  | jq '.value[].acesDictionary'
+```
+
+If `effectiveDeny == 0` and `effectiveAllow` includes
+`PullRequestContribute` (16384) for that identity, the fastest fix
+is [Option 2](#option-2-flip-the-pipeline-to-the-project-scoped-build-service).
+
+## Fix options
+
+Pick exactly one — they are alternatives.
+
+### Option 1: Wire a write service connection (recommended)
+
+Add an ARM service connection whose backing identity has the
+required permission on the target repository, and reference it in
+the agent's front matter:
+
+```yaml
+permissions:
+  read:  ado-aw-read       # optional, used by Stage 1
+  write: ado-aw-write      # used by Stage 3
+```
+
+Stage 3 mints its token via the connection instead of using
+`$(System.AccessToken)`, so the build-service ACEs become
+irrelevant. Audit logs attribute every write to the named service
+principal; the least-privilege grant lives entirely on that
+principal. This is the only option that works for **cross-org**
+writes.
+
+See [Service Connections](/ado-aw/setup/service-connections/) for
+the full setup steps.
+
+### Option 2: Flip the pipeline to the project-scoped build service
+
+If the project-scoped Build Service already has the right
+permissions on the repo (verify with the recipe above), enable
+"Limit job authorization scope to current project" — start
+per-pipeline for the lowest blast radius:
+
+- **Per-pipeline** — Pipeline → Edit → "…" → Triggers → "Limit job
+  authorization scope to current project".
+- **Project-level** — Project Settings → Pipelines → Settings.
+- **Organization-level** — Organization Settings → Pipelines →
+  Settings.
+
+:::caution[Cross-project caveat]
+With this toggle ON, `$(System.AccessToken)` cannot reach resources
+in **other projects in the same organization**:
+`resources.repositories` pointing at sibling-project repos,
+`DownloadPipelineArtifact@2` with a `project:` parameter naming
+another project, secure files homed in another project, and
+template `extends:` from cross-project repos all stop working.
+Resources outside the org entirely (other ADO orgs, GitHub,
+external registries) are not affected — those use their own
+credentials.
+:::
+
+### Option 3: Lift the explicit Deny on the collection-scoped identity
+
+Only use this when you cannot use Options 1 or 2:
+
+1. Project Settings → Repositories → the affected repo → Security.
+2. Select `Project Collection Build Service (<org>)`.
+3. Reset the denied permission(s) (`Contribute to pull requests`,
+   `Contribute`, `Create branch`, …) from `Deny` to `Not set` or
+   `Allow`.
+
+This re-enables write capability for **every pipeline in the
+organization** that targets this repo. The Deny is usually
+deliberate; broadening it should be a conscious decision.
+
+## Common 401/403 signatures
+
+| HTTP | Body fragment | Most likely cause |
+|---|---|---|
+| 401 | `TF400813: ... is not authorized` | Token mint failed (check the AzureCLI@2 step), or token is malformed |
+| 403 | `TF401027: ... 'PullRequestContribute'` | This page |
+| 403 | `TF401027: ... 'GenericContribute'` | Same; need `Contribute` (e.g. `create-pull-request` / `create-branch`) |
+| 403 | `VS800075: The project ... does not exist` | Cross-project request blocked because the auth-scope toggle is ON. Use Option 1 with a cross-project-capable service connection |
+| 403 | `TF401019: ... repository is disabled` | Not a permissions issue — re-enable the repo |
+| 404 | (empty body on a PR / work-item URL) | Identity lacks `Read` — ADO returns 404 not 403 for non-readable resources |
+
+## See also
+
+- [Service Connections setup](/ado-aw/setup/service-connections/) — full steps for creating the write service connection used in Option 1
+- [Safe outputs reference](/ado-aw/reference/safe-outputs/) — the catalogue of Stage 3 tools and their per-tool configuration
+- [Audit](/ado-aw/reference/audit/) — `ado-aw audit <build-id> --json` exposes per-item Stage 3 execution outcomes under `safe_output_execution`
+- Microsoft Learn: [Job authorization scope](https://learn.microsoft.com/azure/devops/pipelines/process/access-tokens)
+- Microsoft Learn: [Default permissions and access](https://learn.microsoft.com/azure/devops/organizations/security/permissions)

@@ -250,6 +250,12 @@ index to jump to the right page.
 - [`docs/safe-outputs.md`](docs/safe-outputs.md) — full reference for every
   safe-output tool agents can use to propose actions (PRs, work items, wiki
   pages, comments, etc.) plus their per-agent configuration.
+- [`docs/safe-output-permissions.md`](docs/safe-output-permissions.md) —
+  diagnosis and fix reference for Stage 3 401/403 failures: the
+  default build identity (PCBS vs project-scoped Build Service),
+  `$(System.AccessToken)` semantics, the "Limit job authorization
+  scope to current project" toggle, permission-bitmask decoder,
+  REST recipe for inspecting ACEs, and the three fix paths.
 - [`docs/ado-aw-debug.md`](docs/ado-aw-debug.md) — debug-only `ado-aw-debug:`
   front-matter section (`skip-integrity`, `create-issue` for filing GitHub
   issues from dogfood pipelines). NOT a regular safe-output.
