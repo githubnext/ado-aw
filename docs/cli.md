@@ -151,13 +151,8 @@ These commands are not shown in `--help` but are available for contributors work
   - `--output, -o <path>` - Write the schema to a file instead of stdout. Parent directories are created automatically.
   - See [`docs/ado-script.md`](ado-script.md) for how this command fits into the ado-script build workflow (`cargo run -- export-gate-schema --output schema/gate-spec.schema.json`).
 
-## Template Markers Reference
+## Pipeline IR Reference
 
-The compiler uses Mustache-style markers in template files to inject configuration:
-- `base.yml` (standalone), `1es-base.yml` (1ES), `job-base.yml` (job template), `stage-base.yml` (stage template)
+The compiler builds typed Azure DevOps pipeline IR and lowers it through one YAML emitter. Target-specific builders (`standalone_ir.rs`, `onees_ir.rs`, `job_ir.rs`, and `stage_ir.rs`) own job/stage names, template parameters, triggers, resources, and 1ES wrapping.
 
-**Job/Stage Template Markers:**
-- `{{ stage_prefix }}` — Prefixes job names with sanitized agent name for uniqueness (e.g., `DailyReview_Agent`)
-- `{{ template_parameters }}` — Generates ADO template `parameters:` block (not pipeline parameters)
-
-See [`docs/template-markers.md`](template-markers.md) for the complete marker reference.
+See [`docs/ir.md`](ir.md) for the complete IR reference.

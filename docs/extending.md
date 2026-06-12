@@ -2,133 +2,277 @@
 
 _Part of the [ado-aw documentation](../AGENTS.md)._
 
+ado-aw compiles agent markdown into Azure DevOps YAML through the typed pipeline IR in `src/compile/ir/`. New features should add typed declarations and IR nodes, not YAML string fragments.
+
 ## Adding New Features
 
 When extending the compiler:
 
-1. **New CLI commands**: Add variants to the `Commands` enum in `main.rs`
-2. **New compile targets**: Implement the `Compiler` trait in a new file under `src/compile/`
-3. **New front matter fields**: Add fields to `FrontMatter` in `src/compile/types.rs`
-   - **Breaking changes** (renames, removals, type changes, added required fields)
-     require adding a codemod under `src/compile/codemods/` in the same PR.
-     See [`docs/codemods.md`](codemods.md).
-4. **New template markers**: Handle replacements in the target-specific compiler (e.g., `standalone.rs` or `onees.rs`)
-5. **New safe-output tools**: Add to `src/safeoutputs/` — implement `ToolResult`, `Executor`, register in `mod.rs`, `mcp.rs`, `execute.rs`
-6. **New first-class tools**: Create `src/tools/<name>/` with `mod.rs` and `extension.rs` (CompilerExtension impl). Add `execute.rs` if the tool has Stage 3 runtime logic. Extend `ToolsConfig` in `types.rs`, add collection in `collect_extensions()`
-7. **New runtimes**: Create `src/runtimes/<name>/` with `mod.rs` (config types) and `extension.rs` (CompilerExtension impl). Extend `RuntimesConfig` in `types.rs`, add collection in `collect_extensions()`
-8. **Validation**: Add compile-time validation for safe outputs and permissions
+1. **New CLI commands**: add variants to the `Commands` enum in `src/main.rs`, implement dispatch, and add parsing/behavior tests.
+2. **New compile targets**: build a typed `Pipeline` IR in a target module under `src/compile/`; use existing `standalone_ir.rs`, `onees_ir.rs`, `job_ir.rs`, and `stage_ir.rs` as references.
+3. **New front matter fields**: add fields to `FrontMatter` or nested config types in `src/compile/types.rs`. Breaking changes require a codemod under `src/compile/codemods/`; see [`docs/codemods.md`](codemods.md).
+4. **New compiler extensions**: implement the `CompilerExtension` `name` / `phase` / `declarations` trio and return typed `Declarations`.
+5. **New safe-output tools**: add to `src/safeoutputs/`, implement the safe-output data model and executor, and register it in MCP and Stage 3 execution wiring.
+6. **New first-class tools**: create `src/tools/<name>/` with `mod.rs` and `extension.rs` (`CompilerExtension` impl). Add `execute.rs` if the tool has Stage 3 runtime logic. Extend `ToolsConfig` in `types.rs` and collection in `collect_extensions()`.
+7. **New runtimes**: create `src/runtimes/<name>/` with `mod.rs` (config types/helpers) and `extension.rs` (`CompilerExtension` impl). Extend `RuntimesConfig` in `types.rs` and collection in `collect_extensions()`.
+8. **Validation**: add compile-time validation for front matter, safe outputs, permissions, and any IR invariants your feature introduces.
 
-### Code Organization Principles
+## Code organization principles
 
-The codebase follows a **colocation** principle for tools and runtimes:
+The codebase follows a colocation principle:
 
-- **Tools** (`tools:` front matter) live in `src/tools/<name>/` — one directory per tool, containing both compile-time (`extension.rs`) and runtime (`execute.rs`) code. This means you can look at a single directory to understand everything a tool does.
-- **Runtimes** (`runtimes:` front matter) live in `src/runtimes/<name>/` — one directory per runtime, with config types in `mod.rs` and the `CompilerExtension` impl in `extension.rs`.
-- **Infrastructure extensions** (GitHub MCP, SafeOutputs MCP) that are always-on and not user-configured stay in `src/compile/extensions/`. These are internal plumbing, not user-facing tools.
-- **Safe outputs** (`safe-outputs:` front matter) stay in `src/safeoutputs/` — they follow a different lifecycle (Stage 1 NDJSON → Stage 3 execution) and are not `CompilerExtension` implementations.
+- **Tools** (`tools:` front matter) live in `src/tools/<name>/` — one directory per tool, containing compile-time (`extension.rs`) and optional runtime (`execute.rs`) code.
+- **Runtimes** (`runtimes:` front matter) live in `src/runtimes/<name>/` — config and helpers in `mod.rs`, compiler integration in `extension.rs`.
+- **Infrastructure extensions** live in `src/compile/extensions/`. These are always-on compiler plumbing, not user-facing tools.
+- **Safe outputs** (`safe-outputs:` front matter) live in `src/safeoutputs/`. They follow the Stage 1 NDJSON proposal → Detection → Stage 3 execution lifecycle and are not `CompilerExtension` implementations.
 
-The `src/compile/extensions/mod.rs` file owns the `CompilerExtension` trait, the `Extension` enum, and `collect_extensions()`. It re-exports tool/runtime extension types from their colocated homes so the rest of the compiler can import them from a single path.
+`src/compile/extensions/mod.rs` owns the `CompilerExtension` trait, the `Extension` enum, `Declarations`, and `collect_extensions()`. It re-exports runtime/tool extension types from their colocated modules so target compilers can import extension machinery from one place.
 
-### `CompilerExtension` Trait
+## `CompilerExtension` trait
 
-Runtimes and first-party tools declare their compilation requirements via the `CompilerExtension` trait (`src/compile/extensions/mod.rs`). Instead of scattering special-case `if` blocks across the compiler, each runtime/tool implements this trait and the compiler collects requirements generically:
+Runtimes, first-class tools, and always-on compiler infrastructure declare compile-time contributions through `CompilerExtension`:
 
 ```rust
 pub trait CompilerExtension {
-    fn name(&self) -> &str;                                    // Display name
-    fn phase(&self) -> ExtensionPhase;                         // Runtime (0) < Tool (1)
-    fn required_hosts(&self) -> Vec<String>;                   // AWF network allowlist
-    fn required_bash_commands(&self) -> Vec<String>;           // Agent bash allow-list
-    fn prompt_supplement(&self) -> Option<String>;              // Agent prompt markdown
-    fn prepare_steps(&self, ctx: &CompileContext) -> Vec<String>; // Agent job steps (install, etc.)
-    fn setup_steps(&self, ctx: &CompileContext) -> Result<Vec<String>>; // Setup job steps (gates, pre-checks)
-    fn mcpg_servers(&self, ctx: &CompileContext) -> Result<Vec<(String, McpgServerConfig)>>; // MCPG entries
-    fn allowed_copilot_tools(&self) -> Vec<String>;            // --allow-tool values
-    fn validate(&self, ctx: &CompileContext) -> Result<Vec<String>>; // Compile-time warnings/errors
-    fn required_pipeline_vars(&self) -> Vec<PipelineEnvMapping>; // Container env var mappings
-    fn required_awf_mounts(&self) -> Vec<AwfMount>;            // AWF Docker volume mounts
-    fn awf_path_prepends(&self) -> Vec<String>;                // Directories to add to chroot PATH
-    fn agent_env_vars(&self) -> Vec<(String, String)>;         // Agent env vars (e.g., PIP_INDEX_URL)
+    fn name(&self) -> &str;
+    fn phase(&self) -> ExtensionPhase;
+    fn declarations(&self, ctx: &CompileContext) -> Result<Declarations>;
 }
 ```
 
-**`prepare_steps()` vs `setup_steps()`**: `prepare_steps()` injects into the
-Agent job (before the agent runs). `setup_steps()` injects into the Setup
-job (before the Agent job starts). Use `setup_steps()` for pre-activation
-gates or checks that must complete before the agent is launched.
+`name()` is for diagnostics. `phase()` controls ordering. `declarations()` returns a typed aggregate of everything the extension contributes.
 
-**Phase ordering**: Extensions are sorted by phase — runtimes
-(`ExtensionPhase::Runtime`) execute before tools (`ExtensionPhase::Tool`).
-This guarantees runtime install steps run before tool steps that may depend
-on them.
+### Phase ordering
 
-To add a new runtime or tool: (1) create a directory under `src/tools/` or `src/runtimes/`, (2) implement `CompilerExtension` in `extension.rs`, (3) add a variant to the `Extension` enum and a collection check in `collect_extensions()` in `src/compile/extensions/mod.rs`.
+Extensions are sorted by `ExtensionPhase` before the compiler merges declarations:
 
-### Filter IR (`src/compile/filter_ir.rs`)
+- `System` — compiler-internal infrastructure that later phases depend on (for example `AdoScriptExtension`).
+- `Runtime` — language/toolchain installation (`LeanExtension`, `PythonExtension`, `NodeExtension`, `DotnetExtension`).
+- `Tool` — first-party tools (`AzureDevOpsExtension`, `CacheMemoryExtension`, `AzureCliExtension`).
 
-Trigger filter expressions (PR filters, pipeline filters) are compiled to bash
-gate steps via a three-pass IR pipeline:
+System extensions run first, runtimes run before tools, and definition order is preserved within each phase.
 
-1. **Lower** — `PrFilters` / `PipelineFilters` → `Vec<FilterCheck>` (typed
-   predicates over typed facts)
-2. **Validate** — detect conflicts at compile time (impossible combinations,
-   redundant checks)
-3. **Codegen** — dependency-ordered fact acquisition + predicate evaluation →
-   bash gate step
+### Always-on extensions
+
+`collect_extensions()` always includes:
+
+- `AdoAwMarkerExtension` — embeds ado-aw metadata in compiled YAML.
+- `GitHubExtension` — GitHub MCP plumbing.
+- `SafeOutputsExtension` — SafeOutputs MCP plumbing.
+- `AdoScriptExtension` — gate evaluator, runtime-import resolver, and synthetic PR helpers.
+- `ExecContextExtension` — `aw-context/` precompute contributors.
+- `AzureCliExtension` — Azure CLI mounts, allowlist entries, and PATH setup.
+
+User-configured runtimes and tools are appended after those always-on extensions, then sorted by phase.
+
+### Declarations
+
+`Declarations` contains typed IR steps plus non-step signals:
+
+```rust
+pub struct Declarations {
+    pub agent_prepare_steps: Vec<Step>,
+    pub setup_steps: Vec<Step>,
+    pub agent_finalize_steps: Vec<Step>,
+    pub detection_prepare_steps: Vec<Step>,
+    pub safe_outputs_steps: Vec<Step>,
+    pub network_hosts: Vec<String>,
+    pub bash_commands: Vec<String>,
+    pub prompt_supplement: Option<String>,
+    pub mcpg_servers: Vec<(String, McpgServerConfig)>,
+    pub copilot_allow_tools: Vec<String>,
+    pub pipeline_env: Vec<PipelineEnvMapping>,
+    pub awf_mounts: Vec<AwfMount>,
+    pub awf_path_prepends: Vec<String>,
+    pub agent_env_vars: Vec<(String, String)>,
+    pub warnings: Vec<String>,
+}
+```
+
+Return `Declarations::default()` and fill only the fields your feature owns. Do not add target-specific special cases when the same information can be declared here.
+
+## Building typed steps
+
+Compiler-owned steps should be `Step` variants from `src/compile/ir/step.rs`.
+
+### Bash steps
+
+```rust
+use crate::compile::ir::env::EnvValue;
+use crate::compile::ir::ids::StepId;
+use crate::compile::ir::output::OutputDecl;
+use crate::compile::ir::step::{BashStep, Step};
+
+let step = Step::Bash(
+    BashStep::new("Prepare tool", "echo preparing")
+        .with_id(StepId::new("prepareTool")?)
+        .with_env("BUILD_REASON", EnvValue::ado_macro("Build.Reason")?)
+        .with_output(OutputDecl::new("TOOL_READY")),
+);
+```
+
+`BashStep::script` is the raw bash body. Do not include `- bash: |` or YAML indentation; the lowerer and serializer own YAML formatting.
+
+### Task steps
+
+```rust
+use crate::compile::ir::step::{Step, TaskStep};
+
+let step = Step::Task(
+    TaskStep::new("NodeTool@0", "Install Node.js")
+        .with_input("versionSpec", "20.x"),
+);
+```
+
+Use `TaskStep` for Azure DevOps built-in tasks such as `NodeTool@0`, `UsePythonVersion@0`, and `UseDotNet@2`.
+
+### Download and publish steps
+
+```rust
+use crate::compile::ir::step::{DownloadStep, PublishStep, Step};
+
+let download = Step::Download(DownloadStep {
+    source: "current".into(),
+    artifact: "agent_outputs_$(Build.BuildId)".into(),
+    condition: None,
+});
+
+let publish = Step::Publish(PublishStep {
+    path: "$(Agent.TempDirectory)/agent_outputs".into(),
+    artifact: "agent_outputs_$(Build.BuildId)".into(),
+    condition: Some(Condition::Always),
+});
+```
+
+`Step::Publish` lowers differently for 1ES: the 1ES shape collects publishes into `templateContext.outputs` and removes the inline publish step.
+
+### Raw YAML
+
+`Step::RawYaml` is an escape hatch for user-authored setup/teardown YAML that the IR does not model. Prefer typed steps for generated compiler behavior, especially when a step needs env values, conditions, outputs, or graph-derived dependencies.
+
+## Declaring and consuming outputs
+
+A producer declares outputs on `BashStep`:
+
+```rust
+let producer = BashStep::new("Resolve PR", script)
+    .with_id(StepId::new("synthPr")?)
+    .with_output(OutputDecl::new("AW_SYNTHETIC_PR_ID"));
+```
+
+A consumer references an output through `OutputRef`:
+
+```rust
+let pr_id = OutputRef::new(StepId::new("synthPr")?, "AW_SYNTHETIC_PR_ID");
+let step = BashStep::new("Use PR", "echo using PR")
+    .with_env("PR_ID", EnvValue::step_output(pr_id));
+```
+
+The graph and lowering passes choose the correct Azure DevOps syntax for same-job, cross-job, or cross-stage consumers. Do not hand-code `$(step.var)`, `dependencies.*`, or `stageDependencies.*` unless you are adding a new lowering rule.
+
+The graph pass also derives `dependsOn` edges from these refs, validates that producers and output names exist, detects cycles, and marks producer declarations that need `isOutput=true`.
+
+## Conditions
+
+Use `Condition` and `Expr` from `src/compile/ir/condition.rs`:
+
+```rust
+use crate::compile::ir::condition::{Condition, Expr};
+
+let only_pr = Condition::Eq(
+    Expr::Variable("Build.Reason".into()),
+    Expr::Literal("PullRequest".into()),
+);
+
+let condition = Condition::and([
+    Condition::Succeeded,
+    only_pr,
+]);
+```
+
+Available forms include `Succeeded`, `Always`, `Failed`, `SucceededOrFailed`, `And`, `Or`, `Not`, `Eq`, `Ne`, and `Custom`. Prefer the AST. Use `Condition::Custom` only for ADO expressions the AST cannot yet model; codegen rejects embedded newlines and pipeline-command markers before emitting custom strings.
+
+`Expr::StepOutput(OutputRef)` participates in the same graph and output-ref lowering path as `EnvValue::StepOutput`.
+
+## Adding a compile target
+
+A compile target should build a complete typed `Pipeline` and then use the shared IR emit path. Follow the existing target builders:
+
+- `src/compile/standalone_ir.rs`
+- `src/compile/onees_ir.rs`
+- `src/compile/job_ir.rs`
+- `src/compile/stage_ir.rs`
+
+Recommended workflow:
+
+1. Parse and validate front matter in `src/compile/types.rs`.
+2. Build `CompileContext` and call `collect_extensions()`.
+3. Merge extension `Declarations` in phase order.
+4. Construct typed `Job`s, `Stage`s, and `Step`s.
+5. Choose `PipelineBody::Jobs` or `PipelineBody::Stages`.
+6. Choose the appropriate `PipelineShape` or add a new shape if the output wrapper is structurally new.
+7. Let `ir::emit` lower through `serde_yaml::Value` and serialize.
+8. Add fixture tests for the target's emitted YAML.
+
+Do not create new template files or marker replacement systems for new targets.
+
+## Adding a safe-output tool
+
+Safe-output tools live in `src/safeoutputs/`. Use them when the agent should propose a write action that Detection can inspect and Stage 3 can apply with a write-capable token.
+
+Typical steps:
+
+1. Add `src/safeoutputs/<tool>.rs` with the tool input type, sanitization/validation, `ToolResult`, and `Executor` implementation.
+2. Register the module in `src/safeoutputs/mod.rs`.
+3. Expose the MCP tool in `src/mcp.rs`.
+4. Wire Stage 3 execution in `src/execute.rs` if the executor dispatch table needs an update.
+5. Add front-matter configuration if the tool is configurable under `safe-outputs:`.
+6. Add tests for validation, NDJSON parsing, MCP handling, and executor behavior.
+
+Safe-output tools are not `CompilerExtension`s. If a safe output also needs compile-time MCP configuration, add that through the always-on `SafeOutputsExtension` declarations.
+
+## Adding a runtime
+
+Runtimes live under `src/runtimes/<name>/`.
+
+1. Add config types and helpers in `mod.rs`.
+2. Implement `CompilerExtension` in `extension.rs`.
+3. Return installation steps as typed `Step::Task` or `Step::Bash` in `Declarations::agent_prepare_steps`.
+4. Return network hosts, bash commands, prompt supplements, env vars, mounts, and warnings through `Declarations` as needed.
+5. Extend `RuntimesConfig` in `src/compile/types.rs`.
+6. Re-export and collect the extension in `src/compile/extensions/mod.rs`.
+7. Add tests for front-matter parsing and generated pipeline IR/YAML.
+
+## Adding a first-class tool
+
+First-class tools live under `src/tools/<name>/`.
+
+1. Add config and helper code in `mod.rs`.
+2. Implement `CompilerExtension` in `extension.rs`.
+3. Return typed setup, prepare, finalize, detection, or SafeOutputs steps through `Declarations`.
+4. Return MCPG servers, allowed Copilot tools, pipeline env mappings, AWF mounts/PATH entries, network hosts, and prompt supplements through the corresponding declaration fields.
+5. Add `execute.rs` if the tool also runs in Stage 3.
+6. Extend `ToolsConfig` in `src/compile/types.rs` and `collect_extensions()`.
+7. Add tests for config parsing, declarations, and emitted pipeline behavior.
+
+## Filter IR (`src/compile/filter_ir.rs`)
+
+Trigger filter expressions still use the separate filter IR. It lowers `PrFilters` / `PipelineFilters` into typed checks, validates conflicts, and emits bash consumed by `AdoScriptExtension` declarations. The generated gate steps are now returned as typed IR steps instead of being spliced into YAML templates.
 
 To add a new filter type:
 
-1. **Add a `Fact` variant** (if the filter needs a new data source) — implement
-   `dependencies()`, `kind()`, `ado_exports()`, and
-   `failure_policy()` on the new variant
-2. **Add a `Predicate` variant** (if the filter needs a new test shape) —
-   implement the codegen match arm in `emit_predicate_check()`
-3. **Extend lowering** — add the filter field to `PrFilters` or
-   `PipelineFilters` in `types.rs`, then add the lowering logic in
-   `lower_pr_filters()` or `lower_pipeline_filters()` in `filter_ir.rs`
-4. **Add validation rules** — check for conflicts with other filters in
-   `validate_pr_filters()` or `validate_pipeline_filters()`
-5. **Write tests** — lowering test, validation test, and codegen test in
-   `filter_ir.rs`
+1. Add a `Fact` variant if the filter needs a new data source.
+2. Add a `Predicate` variant if it needs a new test shape.
+3. Extend lowering from `PrFilters` or `PipelineFilters` in `filter_ir.rs`.
+4. Add validation rules for impossible or redundant combinations.
+5. Add lowering, validation, and codegen tests.
 
-## Bash steps in pipeline templates
+## Bash step linting
 
-Pipeline templates and Rust step generators emit dozens of multi-line `bash:`
-steps. ADO bash steps fail only on the *last* command's exit status by
-default, so a chain like `mkdir … && curl … && cd … && cmd` can silently
-swallow earlier failures.
+`tests/bash_lint_tests.rs` compiles representative fixtures and runs `shellcheck` against every literal `bash:` body in generated YAML. When adding or modifying bash:
 
-Rather than spread `set -eo pipefail` boilerplate across every step, the
-project enforces hygiene via `tests/bash_lint_tests.rs`, which compiles a set
-of fixtures and runs `shellcheck` against every literal `bash:` body in the
-generated YAML. The lint catches:
+1. Run `cargo test --test bash_lint_tests` if `shellcheck` is available locally.
+2. Fix findings such as unquoted variables, `cd` without failure handling, masked exit codes, and tilde-in-double-quotes.
+3. If a finding is intentional, add a `# shellcheck disable=SCxxxx` comment immediately above the line in the bash body.
 
-- **SC2164** — `cd $X` without `|| exit` (the canonical silent-failure)
-- **SC2155** — `local var=$(cmd)` masking the inner exit code
-- **SC2086 / SC2046** — unquoted variables / command substitutions
-- **SC2154** — variables referenced but never assigned
-- **SC2088** — tilde inside double quotes (does not expand at all)
-
-When you add or modify a bash step:
-
-1. Run `cargo test --test bash_lint_tests` (locally requires `shellcheck` on
-   PATH; install with `brew install shellcheck` or
-   `apt-get install -y shellcheck`). CI sets `ENFORCE_BASH_LINT=1` so a
-   missing shellcheck becomes a hard failure rather than a silent skip.
-2. Fix any finding by adjusting the bash. Common fixes: `cd "$X" || exit 1`,
-   `exit "$CODE"`, `"$HOME/.foo"` instead of `"~/.foo"`, quoting variable
-   expansions.
-3. If a finding is genuinely intentional, add a
-   `# shellcheck disable=SCxxxx` comment immediately above the line in the
-   bash body. Such directives are bash comments and have no runtime effect.
-
-Do **not** sprinkle `set -eo pipefail` into every step to silence the lint —
-that approach was tried (PR #492) and was rejected because it adds noise,
-drifts as new steps are added, and doesn't address the actual silent-failure
-patterns that the lint surfaces. Use targeted `set -eo pipefail` only when a
-step has a real fail-fast requirement that the lint cannot express (the
-current uses are on AWF/MCPG download and the `tee`-piped agent run).
-
-The exclude list (`SC1090`, `SC1091`, `SC2034`, `SC2016`) is documented in
-`tests/bash_lint_tests.rs`. Each entry has a justification — do not extend
-without one.
+Do not add blanket `set -eo pipefail` to every step just to satisfy lint. Use targeted fail-fast behavior only when the step requires it.

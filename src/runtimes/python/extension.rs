@@ -121,14 +121,14 @@ management, install it first with `pip install uv`.\n"
     }
 }
 
-/// Typed [`TaskStep`] mirror of [`generate_python_install`].
+/// Build the typed [`TaskStep`] for installing Python.
 fn python_install_task_step(config: &PythonRuntimeConfig) -> TaskStep {
     let version = config.version().unwrap_or("3.x");
     TaskStep::new("UsePythonVersion@0", format!("Install Python {version}"))
         .with_input("versionSpec", version)
 }
 
-/// Typed [`TaskStep`] mirror of [`generate_pip_authenticate`].
+/// Build the typed [`TaskStep`] for pip authentication.
 fn pip_authenticate_task_step() -> TaskStep {
     TaskStep::new(
         "PipAuthenticate@1",

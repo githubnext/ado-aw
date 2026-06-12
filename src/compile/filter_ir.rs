@@ -1220,7 +1220,7 @@ pub fn compile_gate_step_external(
 
 // ─── Typed-IR gate step (port-ado-script) ───────────────────────────────
 
-/// Typed-IR sibling of [`compile_gate_step_external`]. Constructs a
+/// Constructs a typed IR gate step as a
 /// [`crate::compile::ir::step::BashStep`] with `id` set to the
 /// canonical gate step name (`prGate` / `pipelineGate`), typed
 /// [`crate::compile::ir::condition::Condition::Succeeded`], and a

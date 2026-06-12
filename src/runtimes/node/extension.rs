@@ -121,7 +121,7 @@ Node.js is installed and available. Use `node` to run scripts, \
     }
 }
 
-/// Typed [`TaskStep`] mirror of [`generate_node_install`]. The version
+/// Build the typed [`TaskStep`] for installing Node.js. The version
 /// default ("22.x") matches the legacy emitter.
 fn node_install_task_step(config: &NodeRuntimeConfig) -> TaskStep {
     let version = config.version().unwrap_or("22.x");
@@ -129,7 +129,7 @@ fn node_install_task_step(config: &NodeRuntimeConfig) -> TaskStep {
         .with_input("versionSpec", version)
 }
 
-/// Typed [`TaskStep`] mirror of [`generate_npm_authenticate`].
+/// Build the typed [`TaskStep`] for npm authentication.
 fn npm_authenticate_task_step() -> TaskStep {
     TaskStep::new(
         "npmAuthenticate@0",
@@ -138,7 +138,7 @@ fn npm_authenticate_task_step() -> TaskStep {
     .with_input("workingFile", ".npmrc")
 }
 
-/// Typed [`BashStep`] mirror of [`generate_ensure_npmrc`]. The script
+/// Build the typed [`BashStep`] that ensures `.npmrc`. The script
 /// preserves the legacy semantics: leave any repo-checked-in `.npmrc`
 /// untouched; otherwise create a minimal one pointing at the
 /// configured feed (or the default npmjs registry).

@@ -144,7 +144,7 @@ in the repository.\n"
     }
 }
 
-/// Typed [`TaskStep`] mirror of [`generate_dotnet_install`]. Three
+/// Build the typed [`TaskStep`] for installing .NET. Three
 /// shapes, matching the legacy emitter:
 ///
 /// * `version: "global.json"` → `useGlobalJson: true`,
@@ -162,7 +162,7 @@ fn dotnet_install_task_step(config: &DotnetRuntimeConfig) -> TaskStep {
         .with_input("version", version)
 }
 
-/// Typed [`TaskStep`] mirror of [`generate_nuget_authenticate`].
+/// Build the typed [`TaskStep`] for NuGet authentication.
 fn nuget_authenticate_task_step() -> TaskStep {
     TaskStep::new(
         "NuGetAuthenticate@1",
@@ -170,7 +170,7 @@ fn nuget_authenticate_task_step() -> TaskStep {
     )
 }
 
-/// Typed [`BashStep`] mirror of [`generate_ensure_nuget_config`]. Same
+/// Build the typed [`BashStep`] that ensures `nuget.config`. Same
 /// case-variation-aware existence check; same minimal `nuget.config`
 /// content when the file is missing.
 fn ensure_nuget_config_bash_step(config: &DotnetRuntimeConfig) -> BashStep {

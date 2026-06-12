@@ -13,7 +13,7 @@
 //!   `CheckoutStep`, `DownloadStep`, `PublishStep`).
 //! - [`job`] — `Job` and `Pool`.
 //! - [`stage`] — `Stage`.
-//! - [`env`] — typed `EnvValue` (incl. `Coalesce` and `StepOutput`).
+//! - [`mod@env`] — typed `EnvValue` (incl. `Coalesce` and `StepOutput`).
 //! - [`condition`] — typed ADO condition AST (`Condition` + `Expr`).
 //! - [`output`] — `OutputDecl` / `OutputRef`.
 //! - [`Pipeline`] / [`PipelineBody`] / [`PipelineShape`] — the root

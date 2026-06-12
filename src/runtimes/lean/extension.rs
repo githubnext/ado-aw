@@ -81,9 +81,8 @@ the toolchain. Lean files use the `.lean` extension.\n"
     }
 }
 
-/// Typed [`BashStep`] mirror of [`generate_lean_install`]. The script
-/// body matches the legacy YAML body line-for-line so lowering through
-/// `ir::emit` produces equivalent YAML.
+/// Build the typed [`BashStep`] for installing Lean. The script body
+/// lowers through `ir::emit` to the canonical pipeline YAML.
 fn lean_install_bash_step(config: &LeanRuntimeConfig) -> BashStep {
     let toolchain = config.toolchain().unwrap_or("stable");
     let script = format!(

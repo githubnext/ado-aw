@@ -1,7 +1,7 @@
 //! Execution-context compiler extension.
 //!
 //! Always-on extension that owns the `aw-context/` precompute pipeline:
-//! a fan-out over per-trigger [`ContextContributor`](contributor::ContextContributor)s
+//! a fan-out over per-trigger [`ContextContributor`]s
 //! that materialise context (changed-files, diffs, snapshots, metadata)
 //! on disk + supplement the agent prompt so the agent can read it
 //! without rolling its own git plumbing.

@@ -311,8 +311,8 @@ bundle**:
 
 ### Setup job (gate evaluator)
 
-When `filters:` lowers to non-empty checks, `setup_steps()` returns
-three step strings into the Setup job:
+When `filters:` lowers to non-empty checks, `AdoScriptExtension::declarations()`
+returns three typed `Declarations::setup_steps` entries for the Setup job:
 
 1. **`NodeTool@0`** — installs Node 20.x LTS, capped at
    `timeoutInMinutes: 5`.
@@ -327,9 +327,9 @@ three step strings into the Setup job:
 
 ### Agent job (runtime-import resolver and PR context)
 
-The Agent job's `prepare_steps()` fires when **either** `import.js` or
-`exec-context-pr.js` is active. It always returns install + download first, then
-appends the relevant invocation steps.
+`AdoScriptExtension::declarations()` contributes Agent-job prepare steps when
+**either** `import.js` or `exec-context-pr.js` is active. It returns install +
+download first, then appends the relevant invocation steps.
 
 **`import.js` invocation** — active when `inlined-imports: false` (the default):
 

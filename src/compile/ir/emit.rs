@@ -1,4 +1,4 @@
-//! Emit a [`Pipeline`](super::Pipeline) as a YAML string.
+//! Emit a [`Pipeline`] as a YAML string.
 //!
 //! The emit pass is intentionally thin: it composes the lowering
 //! pass ([`super::lower::lower`]) with `serde_yaml::to_string`. The
