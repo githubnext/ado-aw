@@ -45,12 +45,10 @@ use anyhow::Result;
 use std::path::Path;
 
 use super::common::{
-    self, AWF_VERSION, ADO_BUILD_ID_SUFFIX, HEADER_MARKER, MCPG_DOMAIN, MCPG_IMAGE, MCPG_PORT,
+    self, ADO_BUILD_ID_SUFFIX, AWF_VERSION, HEADER_MARKER, MCPG_DOMAIN, MCPG_IMAGE, MCPG_PORT,
     MCPG_VERSION,
 };
-use super::extensions::{
-    CompileContext, CompilerExtension, Declarations, Extension, McpgConfig,
-};
+use super::extensions::{CompileContext, CompilerExtension, Declarations, Extension, McpgConfig};
 use super::ir::condition::{Condition, Expr};
 use super::ir::ids::{JobId, StepId};
 use super::ir::job::{Job, Pool};
@@ -159,11 +157,13 @@ pub(crate) fn build_pipeline_context(
     common::validate_resolve_pr_thread_statuses(front_matter)?;
     common::validate_ado_aw_debug_config(front_matter)?;
 
-    // Surface extension warnings via stderr (same channel as legacy).
+    let mut extension_declarations = Vec::with_capacity(extensions.len());
     for ext in extensions {
-        for warning in ext.validate(ctx)? {
+        let decl = ext.declarations(ctx)?;
+        for warning in &decl.warnings {
             eprintln!("Warning: {}", warning);
         }
+        extension_declarations.push(decl);
     }
 
     // ─── Scalars ──────────────────────────────────────────────────
@@ -186,53 +186,55 @@ pub(crate) fn build_pipeline_context(
 
     let engine_run = ctx.engine.invocation(
         ctx.front_matter,
-        extensions,
+        &extension_declarations,
         "/tmp/awf-tools/agent-prompt.md",
         Some("/tmp/awf-tools/mcp-config.json"),
     )?;
     let engine_run_detection = ctx.engine.invocation(
         ctx.front_matter,
-        extensions,
+        &extension_declarations,
         "/tmp/awf-tools/threat-analysis-prompt.md",
         None,
     )?;
-    let engine_install_steps_yaml = ctx
-        .engine
-        .install_steps(&front_matter.engine, &front_matter.target, ctx.ado_org())?;
+    let engine_install_steps_yaml =
+        ctx.engine
+            .install_steps(&front_matter.engine, &front_matter.target, ctx.ado_org())?;
     let engine_log_dir = ctx.engine.log_dir().to_string();
 
     let mut engine_env = ctx.engine.env(&front_matter.engine)?;
     // AWF path env (when extensions declare path prepends)
-    let awf_paths = common::collect_awf_path_prepends(extensions);
+    let awf_paths = common::collect_awf_path_prepends(&extension_declarations);
     let has_awf_paths = !awf_paths.is_empty();
     let awf_path_env = common::generate_awf_path_env(has_awf_paths);
     if !awf_path_env.is_empty() {
         engine_env = format!("{engine_env}\n{awf_path_env}");
     }
-    let agent_env = common::collect_agent_env_vars(extensions)?;
+    let agent_env = common::collect_agent_env_vars(extensions, &extension_declarations)?;
     if !agent_env.is_empty() {
         engine_env = format!("{engine_env}\n{agent_env}");
     }
 
     // AWF mounts + allowlist
-    let allowed_domains = common::generate_allowed_domains(front_matter, extensions)?;
-    let awf_mounts = common::generate_awf_mounts(extensions);
+    let allowed_domains =
+        common::generate_allowed_domains(front_matter, extensions, &extension_declarations)?;
+    let awf_mounts = common::generate_awf_mounts(extensions, &extension_declarations);
     let awf_path_step_yaml = common::generate_awf_path_step(&awf_paths);
     let enabled_tools_args = common::generate_enabled_tools_args(front_matter);
 
     // MCPG config
-    let mcpg_config_obj = common::generate_mcpg_config(front_matter, ctx, extensions)?;
+    let mcpg_config_obj = common::generate_mcpg_config(front_matter, &extension_declarations)?;
     let mcpg_config_json = serde_json::to_string_pretty(&mcpg_config_obj)
         .map_err(|e| anyhow::anyhow!("Failed to serialize MCPG config: {e}"))?;
-    let mcpg_docker_env = common::generate_mcpg_docker_env(front_matter, extensions);
-    let mcpg_step_env = common::generate_mcpg_step_env(extensions);
+    let mcpg_docker_env = common::generate_mcpg_docker_env(front_matter, &extension_declarations);
+    let mcpg_step_env = common::generate_mcpg_step_env(&extension_declarations);
 
     // Source / pipeline paths (for integrity check + metadata).
     // `source_path` embeds `{{ trigger_repo_directory }}` which the
     // legacy template fold substitutes — do the same eagerly so step
     // bodies receive a fully-resolved scalar.
     let source_path_raw = common::generate_source_path(input_path);
-    let source_path = source_path_raw.replace("{{ trigger_repo_directory }}", &trigger_repo_directory);
+    let source_path =
+        source_path_raw.replace("{{ trigger_repo_directory }}", &trigger_repo_directory);
     let pipeline_path = common::generate_pipeline_path(output_path);
 
     // Read / write tokens
@@ -268,7 +270,13 @@ pub(crate) fn build_pipeline_context(
     let integrity_check_yaml = common::generate_integrity_check(skip_integrity);
 
     // Agent prompt content
-    let agent_content_value = build_agent_content(front_matter, input_path, markdown_body, &source_path, &trigger_repo_directory)?;
+    let agent_content_value = build_agent_content(
+        front_matter,
+        input_path,
+        markdown_body,
+        &source_path,
+        &trigger_repo_directory,
+    )?;
 
     // ─── Top-level pipeline fields ────────────────────────────────
     let parameters = build_parameters(front_matter)?;
@@ -278,13 +286,12 @@ pub(crate) fn build_pipeline_context(
     // ─── Extension declaration fanout ─────────────────────────────
     let mut ext_setup_steps: Vec<Step> = Vec::new();
     let mut ext_agent_prepare: Vec<Step> = Vec::new();
-    for ext in extensions {
-        let decl = ext.declarations(ctx)?;
+    for (ext, decl) in extensions.iter().zip(extension_declarations) {
         ext_setup_steps.extend(decl.setup_steps);
         ext_agent_prepare.extend(decl.agent_prepare_steps);
         // Prompt supplements append after the per-extension prepare
         // steps (matches `generate_prepare_steps` ordering).
-        if let Some(prompt) = ext.prompt_supplement() {
+        if let Some(prompt) = decl.prompt_supplement {
             ext_agent_prepare.push(Step::RawYaml(
                 crate::compile::extensions::wrap_prompt_append(&prompt, ext.name())?,
             ));
@@ -524,7 +531,10 @@ fn yaml_value_as_string(v: &serde_yaml::Value) -> String {
         serde_yaml::Value::String(s) => s.clone(),
         serde_yaml::Value::Number(n) => n.to_string(),
         serde_yaml::Value::Bool(b) => b.to_string(),
-        _ => serde_yaml::to_string(v).unwrap_or_default().trim().to_string(),
+        _ => serde_yaml::to_string(v)
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
     }
 }
 
@@ -545,25 +555,26 @@ fn build_resources(repos: &[RepoCfg], on: &Option<OnConfig>) -> Resources {
     // Mirrors legacy `generate_pipeline_resources`.
     let mut pipelines: Vec<PipelineResource> = Vec::new();
     if let Some(trigger_config) = on
-        && let Some(pipeline) = &trigger_config.pipeline {
-            // Snake-case identifier from the pipeline display name
-            let identifier: String = pipeline
-                .name
-                .to_lowercase()
-                .chars()
-                .map(|c| if c.is_alphanumeric() { c } else { '_' })
-                .collect();
-            pipelines.push(PipelineResource {
-                identifier,
-                source: pipeline.name.clone(),
-                project: pipeline.project.clone(),
-                branches: pipeline.branches.clone(),
-                // legacy emits `trigger: true` when branches is empty.
-                // The lower_pipeline_resource codegen handles the
-                // branches.include vs scalar shape.
-                trigger: true,
-            });
-        }
+        && let Some(pipeline) = &trigger_config.pipeline
+    {
+        // Snake-case identifier from the pipeline display name
+        let identifier: String = pipeline
+            .name
+            .to_lowercase()
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '_' })
+            .collect();
+        pipelines.push(PipelineResource {
+            identifier,
+            source: pipeline.name.clone(),
+            project: pipeline.project.clone(),
+            branches: pipeline.branches.clone(),
+            // legacy emits `trigger: true` when branches is empty.
+            // The lower_pipeline_resource codegen handles the
+            // branches.include vs scalar shape.
+            trigger: true,
+        });
+    }
     Resources {
         repositories,
         pipelines,
@@ -627,11 +638,7 @@ fn build_triggers(on: &Option<OnConfig>, front_matter: &FrontMatter) -> Result<T
 
     // Pipeline resources — none for standalone today (handled via legacy
     // generate_pipeline_resources but standalone fixtures don't exercise it).
-    Ok(Triggers {
-        schedules,
-        pr,
-        ci,
-    })
+    Ok(Triggers { schedules, pr, ci })
 }
 
 fn build_pr_trigger_from_config(pr: &crate::compile::types::PrTriggerConfig) -> PrTrigger {
@@ -761,7 +768,11 @@ fn build_agent_job(
     // 6. Integrity check (when not skipped)
     push_raw_yaml_if_nonempty(
         &mut steps,
-        &substitute_integrity_check(&cfg.integrity_check_yaml, &cfg.pipeline_path, &cfg.trigger_repo_directory),
+        &substitute_integrity_check(
+            &cfg.integrity_check_yaml,
+            &cfg.pipeline_path,
+            &cfg.trigger_repo_directory,
+        ),
     );
 
     // 7. Prepare tooling (generates MCPG API key, writes MCPG config to staging)
@@ -771,12 +782,13 @@ fn build_agent_job(
     steps.push(Step::Bash(prepare_tooling_step()));
 
     // 9. Prepare agent prompt (heredoc)
-    steps.push(Step::Bash(prepare_agent_prompt_step(&cfg.agent_content_value)));
+    steps.push(Step::Bash(prepare_agent_prompt_step(
+        &cfg.agent_content_value,
+    )));
 
     // 10. DockerInstaller@0
     steps.push(Step::Task(
-        TaskStep::new("DockerInstaller@0", "Install Docker")
-            .with_input("dockerVersion", "26.1.4"),
+        TaskStep::new("DockerInstaller@0", "Install Docker").with_input("dockerVersion", "26.1.4"),
     ));
 
     // 11. Download AWF
@@ -877,7 +889,9 @@ fn build_agent_job(
 /// empirically broken in msazuresphere/4x4 build #612290 / #612528).
 /// Step env then reads the hoisted value via the same-job `$(name)`
 /// macro form (see `exec_context/pr.rs::prepare_step_typed`).
-fn agent_job_variables_hoist(front_matter: &FrontMatter) -> Result<Vec<crate::compile::ir::job::JobVariable>> {
+fn agent_job_variables_hoist(
+    front_matter: &FrontMatter,
+) -> Result<Vec<crate::compile::ir::job::JobVariable>> {
     use crate::compile::ir::env::EnvValue;
     use crate::compile::ir::job::JobVariable;
     use crate::compile::ir::output::OutputRef;
@@ -947,8 +961,7 @@ fn build_agentic_condition(front_matter: &FrontMatter) -> Option<Condition> {
     if synthetic_pr_active {
         // ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_SKIP'], 'true')
         parts.push(Condition::Custom(
-            "ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_SKIP'], 'true')"
-                .to_string(),
+            "ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_SKIP'], 'true')".to_string(),
         ));
     }
 
@@ -1010,15 +1023,16 @@ fn build_detection_job(
     steps.push(Step::Bash(download_compiler_step(&cfg.compiler_version)));
     // DockerInstaller
     steps.push(Step::Task(
-        TaskStep::new("DockerInstaller@0", "Install Docker")
-            .with_input("dockerVersion", "26.1.4"),
+        TaskStep::new("DockerInstaller@0", "Install Docker").with_input("dockerVersion", "26.1.4"),
     ));
     // Download AWF
     steps.push(Step::Bash(download_awf_step()));
     // Pre-pull AWF (no MCPG image for detection)
     steps.push(Step::Bash(prepull_images_step(false)));
     // Prepare safe outputs for analysis
-    steps.push(Step::Bash(prepare_safe_outputs_for_analysis(&cfg.working_directory)));
+    steps.push(Step::Bash(prepare_safe_outputs_for_analysis(
+        &cfg.working_directory,
+    )));
     // Prepare threat analysis prompt
     // include_str! may carry CRLF line endings on Windows; normalise to LF
     // so the resulting block scalar emits cleanly. Then substitute the
@@ -1032,7 +1046,9 @@ fn build_detection_job(
         .replace("{{ agent_name }}", &cfg.agent_display_name)
         .replace("{{ agent_description }}", &front_matter.description)
         .replace("{{ working_directory }}", &cfg.working_directory);
-    steps.push(Step::Bash(prepare_threat_analysis_prompt_step(&threat_prompt)));
+    steps.push(Step::Bash(prepare_threat_analysis_prompt_step(
+        &threat_prompt,
+    )));
     // Setup compiler
     steps.push(Step::Bash(setup_compiler_step()));
     // Run threat analysis
@@ -1324,9 +1340,7 @@ fn prepull_images_step(include_mcpg: bool) -> BashStep {
          docker tag ghcr.io/github/gh-aw-firewall/agent:{AWF_VERSION} ghcr.io/github/gh-aw-firewall/agent:latest\n"
     );
     if include_mcpg {
-        script.push_str(&format!(
-            "docker pull {MCPG_IMAGE}:v{MCPG_VERSION}\n"
-        ));
+        script.push_str(&format!("docker pull {MCPG_IMAGE}:v{MCPG_VERSION}\n"));
         bash(
             format!("Pre-pull AWF and MCPG container images (v{AWF_VERSION})"),
             script,
@@ -1402,19 +1416,18 @@ fn start_mcpg_step(mcpg_docker_env: &str, mcpg_step_env: &str, debug_pipeline: b
     // `generate_mcpg_docker_env` returns a single `\` byte when no
     // extensions contribute, so check for that sentinel as well as a
     // literal empty string.
-    let docker_env_lines: String = if mcpg_docker_env.trim().is_empty()
-        || mcpg_docker_env.trim() == "\\"
-    {
-        // Two empty continuation lines mirror the legacy template's
-        // two-marker layout.
-        "\\\n  \\".to_string()
-    } else {
-        mcpg_docker_env
-            .lines()
-            .map(|l| format!("{l} \\"))
-            .collect::<Vec<_>>()
-            .join("\n  ")
-    };
+    let docker_env_lines: String =
+        if mcpg_docker_env.trim().is_empty() || mcpg_docker_env.trim() == "\\" {
+            // Two empty continuation lines mirror the legacy template's
+            // two-marker layout.
+            "\\\n  \\".to_string()
+        } else {
+            mcpg_docker_env
+                .lines()
+                .map(|l| format!("{l} \\"))
+                .collect::<Vec<_>>()
+                .join("\n  ")
+        };
     // `--debug-pipeline` injects an extra `-e DEBUG="*" \` continuation
     // line into the `docker run …` invocation so MCPG (and the stdio
     // backends it spawns) emit verbose logs to the gateway stderr stream.
@@ -1598,7 +1611,14 @@ fn run_agent_step(
     step.working_directory = Some(working_directory.to_string());
     // Engine env comes as a multi-line YAML env block — `KEY: VALUE` lines
     // joined by `\n`, no `env:` prefix (it's the value side of an env: mapping).
-    let synthetic_block = format!("env:\n{}", engine_env.lines().map(|l| format!("  {l}")).collect::<Vec<_>>().join("\n"));
+    let synthetic_block = format!(
+        "env:\n{}",
+        engine_env
+            .lines()
+            .map(|l| format!("  {l}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
     for (k, v) in parse_env_block(&synthetic_block) {
         step = step.with_env(k, v);
     }
@@ -1633,8 +1653,7 @@ fn collect_safe_outputs_step() -> BashStep {
                   cp -r /tmp/awf-tools/staging/* \"$(Agent.TempDirectory)/staging/\" 2>/dev/null || true\n\
                   echo \"Safe outputs copied to $(Agent.TempDirectory)/staging\"\n\
                   ls -la \"$(Agent.TempDirectory)/staging\" 2>/dev/null || echo \"No safe outputs found\"\n";
-    bash("Collect safe outputs from AWF container", script)
-        .with_condition(Condition::Always)
+    bash("Collect safe outputs from AWF container", script).with_condition(Condition::Always)
 }
 
 fn stop_mcpg_step() -> BashStep {
@@ -1909,11 +1928,10 @@ if [ \"$PROBE_FAILED\" = \"true\" ]; then\n  \
 fi\n"
     );
     use super::ir::env::EnvValue;
-    bash("Verify MCP backends", script)
-        .with_env(
-            "MCPG_API_KEY",
-            EnvValue::pipeline_var("MCP_GATEWAY_API_KEY"),
-        )
+    bash("Verify MCP backends", script).with_env(
+        "MCPG_API_KEY",
+        EnvValue::pipeline_var("MCP_GATEWAY_API_KEY"),
+    )
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -2005,7 +2023,9 @@ fn parse_env_block(yaml_block: &str) -> Vec<(String, super::ir::env::EnvValue)> 
             // lowering preserves the `$(X)` form unquoted; everything
             // else lands as a Literal.
             serde_yaml::Value::String(raw_value) => {
-                if let Some(inner) = raw_value.strip_prefix("$(").and_then(|s| s.strip_suffix(')'))
+                if let Some(inner) = raw_value
+                    .strip_prefix("$(")
+                    .and_then(|s| s.strip_suffix(')'))
                     && !inner.contains('$')
                     && !inner.contains('(')
                 {

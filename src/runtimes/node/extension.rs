@@ -31,39 +31,16 @@ impl CompilerExtension for NodeExtension {
         ExtensionPhase::Runtime
     }
 
-    fn required_hosts(&self) -> Vec<String> {
-        vec!["node".to_string()]
-    }
-
-    fn required_bash_commands(&self) -> Vec<String> {
-        NODE_BASH_COMMANDS
-            .iter()
-            .map(|c| (*c).to_string())
-            .collect()
-    }
-
-    fn prompt_supplement(&self) -> Option<String> {
-        Some(
-            "\n\
----\n\
-\n\
-## Node.js\n\
-\n\
-Node.js is installed and available. Use `node` to run scripts, \
-`npm` to manage packages, and `npx` to run package binaries.\n"
-                .to_string(),
-        )
-    }
-
-    fn agent_env_vars(&self) -> Vec<(String, String)> {
-        let mut vars = Vec::new();
-        if let Some(feed_url) = self.config.feed_url() {
-            vars.push(("NPM_CONFIG_REGISTRY".to_string(), feed_url.to_string()));
-        }
-        vars
-    }
-
-    fn validate(&self, ctx: &CompileContext) -> Result<Vec<String>> {
+    /// Typed-IR view. Returns:
+    ///
+    /// * a [`Step::Task`] for `NodeTool@0`,
+    /// * (optionally, when `feed-url:` or `config:` is set):
+    ///   a [`Step::Bash`] that creates a minimal `.npmrc` if missing,
+    ///   then a [`Step::Task`] for `npmAuthenticate@0`.
+    ///
+    /// All other declarations (hosts, bash commands, env vars, prompt
+    /// supplement) flow through the typed bundle as well.
+    fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
         let mut warnings = Vec::new();
 
         // Warn if bash is disabled
@@ -110,32 +87,35 @@ Node.js is installed and available. Use `node` to run scripts, \
             validate::reject_pipeline_injection(version, "runtimes.node.version")?;
         }
 
-        Ok(warnings)
-    }
-
-    /// Typed-IR view. Returns:
-    ///
-    /// * a [`Step::Task`] for `NodeTool@0`,
-    /// * (optionally, when `feed-url:` or `config:` is set):
-    ///   a [`Step::Bash`] that creates a minimal `.npmrc` if missing,
-    ///   then a [`Step::Task`] for `npmAuthenticate@0`.
-    ///
-    /// All other declarations (hosts, bash commands, env vars, prompt
-    /// supplement) flow through the typed bundle as well.
-    fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
         let mut agent_prepare_steps: Vec<Step> = Vec::with_capacity(3);
         agent_prepare_steps.push(Step::Task(node_install_task_step(&self.config)));
         if self.config.feed_url().is_some() || self.config.config().is_some() {
             agent_prepare_steps.push(Step::Bash(ensure_npmrc_bash_step(&self.config)));
             agent_prepare_steps.push(Step::Task(npm_authenticate_task_step()));
         }
+        let mut agent_env_vars = Vec::new();
+        if let Some(feed_url) = self.config.feed_url() {
+            agent_env_vars.push(("NPM_CONFIG_REGISTRY".to_string(), feed_url.to_string()));
+        }
         Ok(Declarations {
             agent_prepare_steps,
-            network_hosts: self.required_hosts(),
-            bash_commands: self.required_bash_commands(),
-            prompt_supplement: self.prompt_supplement(),
-            agent_env_vars: self.agent_env_vars(),
-            warnings: self.validate(ctx)?,
+            network_hosts: vec!["node".to_string()],
+            bash_commands: NODE_BASH_COMMANDS
+                .iter()
+                .map(|c| (*c).to_string())
+                .collect(),
+            prompt_supplement: Some(
+                "\n\
+---\n\
+\n\
+## Node.js\n\
+\n\
+Node.js is installed and available. Use `node` to run scripts, \
+`npm` to manage packages, and `npx` to run package binaries.\n"
+                    .to_string(),
+            ),
+            agent_env_vars,
+            warnings,
             ..Declarations::default()
         })
     }
@@ -191,7 +171,7 @@ mod tests {
             parse_markdown("---\nname: test\ndescription: test\ntools:\n  bash: []\n---\n")
                 .unwrap();
         let ext = NodeExtension::new(NodeRuntimeConfig::Enabled(true));
-        let warnings = ext.validate(&ctx_from(&fm)).unwrap();
+        let warnings = ext.declarations(&ctx_from(&fm)).unwrap().warnings;
         assert!(!warnings.is_empty());
         assert!(warnings[0].contains("tools.bash is empty"));
     }
@@ -204,7 +184,7 @@ mod tests {
         .unwrap();
         let node = fm.runtimes.as_ref().unwrap().node.as_ref().unwrap();
         let ext = NodeExtension::new(node.clone());
-        let err = ext.validate(&ctx_from(&fm)).unwrap_err();
+        let err = ext.declarations(&ctx_from(&fm)).unwrap_err();
         assert!(err.to_string().contains("mutually exclusive"));
     }
 
@@ -216,7 +196,7 @@ mod tests {
         .unwrap();
         let node = fm.runtimes.as_ref().unwrap().node.as_ref().unwrap();
         let ext = NodeExtension::new(node.clone());
-        let warnings = ext.validate(&ctx_from(&fm)).unwrap();
+        let warnings = ext.declarations(&ctx_from(&fm)).unwrap().warnings;
         assert!(warnings.iter().any(|w| w.contains("will not be available")));
     }
 
@@ -228,7 +208,7 @@ mod tests {
         .unwrap();
         let node = fm.runtimes.as_ref().unwrap().node.as_ref().unwrap();
         let ext = NodeExtension::new(node.clone());
-        assert!(ext.validate(&ctx_from(&fm)).is_err());
+        assert!(ext.declarations(&ctx_from(&fm)).is_err());
     }
 
     #[test]
@@ -239,7 +219,7 @@ mod tests {
         .unwrap();
         let node = fm.runtimes.as_ref().unwrap().node.as_ref().unwrap();
         let ext = NodeExtension::new(node.clone());
-        assert!(ext.validate(&ctx_from(&fm)).is_err());
+        assert!(ext.declarations(&ctx_from(&fm)).is_err());
     }
 
     /// Default Node install: only a single `Step::Task(NodeTool@0)`

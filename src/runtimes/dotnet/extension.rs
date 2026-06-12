@@ -34,33 +34,17 @@ impl CompilerExtension for DotnetExtension {
         ExtensionPhase::Runtime
     }
 
-    fn required_hosts(&self) -> Vec<String> {
-        vec!["dotnet".to_string()]
-    }
-
-    fn required_bash_commands(&self) -> Vec<String> {
-        DOTNET_BASH_COMMANDS
-            .iter()
-            .map(|c| (*c).to_string())
-            .collect()
-    }
-
-    fn prompt_supplement(&self) -> Option<String> {
-        Some(
-            "\n\
----\n\
-\n\
-## .NET\n\
-\n\
-The .NET SDK is installed and available. Use `dotnet` to build, test, run, \
-and manage projects (e.g., `dotnet build`, `dotnet test`, `dotnet restore`, \
-`dotnet run`). NuGet package sources are configured via `nuget.config` files \
-in the repository.\n"
-                .to_string(),
-        )
-    }
-
-    fn validate(&self, ctx: &CompileContext) -> Result<Vec<String>> {
+    /// Typed-IR view. Returns:
+    ///
+    /// * a [`Step::Task`] for `UseDotNet@2` (either `useGlobalJson` or
+    ///   an explicit version),
+    /// * a [`Step::Bash`] for `Ensure nuget.config exists` when a
+    ///   `feed-url:` is configured,
+    /// * a [`Step::Task`] for `NuGetAuthenticate@1` when either
+    ///   `feed-url:` or `config:` is configured.
+    ///
+    /// Hosts, bash commands, prompt supplement also flow through.
+    fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
         let mut warnings = Vec::new();
 
         // Warn if bash is disabled
@@ -127,20 +111,6 @@ in the repository.\n"
             validate::reject_pipeline_injection(config, "runtimes.dotnet.config")?;
         }
 
-        Ok(warnings)
-    }
-
-    /// Typed-IR view. Returns:
-    ///
-    /// * a [`Step::Task`] for `UseDotNet@2` (either `useGlobalJson` or
-    ///   an explicit version),
-    /// * a [`Step::Bash`] for `Ensure nuget.config exists` when a
-    ///   `feed-url:` is configured,
-    /// * a [`Step::Task`] for `NuGetAuthenticate@1` when either
-    ///   `feed-url:` or `config:` is configured.
-    ///
-    /// Hosts, bash commands, prompt supplement also flow through.
-    fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
         let mut agent_prepare_steps: Vec<Step> = Vec::with_capacity(3);
         agent_prepare_steps.push(Step::Task(dotnet_install_task_step(&self.config)));
         if self.config.feed_url().is_some() {
@@ -151,10 +121,24 @@ in the repository.\n"
         }
         Ok(Declarations {
             agent_prepare_steps,
-            network_hosts: self.required_hosts(),
-            bash_commands: self.required_bash_commands(),
-            prompt_supplement: self.prompt_supplement(),
-            warnings: self.validate(ctx)?,
+            network_hosts: vec!["dotnet".to_string()],
+            bash_commands: DOTNET_BASH_COMMANDS
+                .iter()
+                .map(|c| (*c).to_string())
+                .collect(),
+            prompt_supplement: Some(
+                "\n\
+---\n\
+\n\
+## .NET\n\
+\n\
+The .NET SDK is installed and available. Use `dotnet` to build, test, run, \
+and manage projects (e.g., `dotnet build`, `dotnet test`, `dotnet restore`, \
+`dotnet run`). NuGet package sources are configured via `nuget.config` files \
+in the repository.\n"
+                    .to_string(),
+            ),
+            warnings,
             ..Declarations::default()
         })
     }
@@ -228,7 +212,7 @@ mod tests {
             parse_markdown("---\nname: test\ndescription: test\ntools:\n  bash: []\n---\n")
                 .unwrap();
         let ext = DotnetExtension::new(DotnetRuntimeConfig::Enabled(true));
-        let warnings = ext.validate(&ctx_from(&fm)).unwrap();
+        let warnings = ext.declarations(&ctx_from(&fm)).unwrap().warnings;
         assert!(!warnings.is_empty());
         assert!(warnings[0].contains("tools.bash is empty"));
     }
@@ -241,7 +225,7 @@ mod tests {
         .unwrap();
         let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
         let ext = DotnetExtension::new(dotnet.clone());
-        let err = ext.validate(&ctx_from(&fm)).unwrap_err();
+        let err = ext.declarations(&ctx_from(&fm)).unwrap_err();
         assert!(err.to_string().contains("mutually exclusive"));
     }
 
@@ -253,7 +237,7 @@ mod tests {
         .unwrap();
         let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
         let ext = DotnetExtension::new(dotnet.clone());
-        assert!(ext.validate(&ctx_from(&fm)).is_err());
+        assert!(ext.declarations(&ctx_from(&fm)).is_err());
     }
 
     #[test]
@@ -264,7 +248,7 @@ mod tests {
         .unwrap();
         let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
         let ext = DotnetExtension::new(dotnet.clone());
-        assert!(ext.validate(&ctx_from(&fm)).is_err());
+        assert!(ext.declarations(&ctx_from(&fm)).is_err());
     }
 
     #[test]
@@ -283,7 +267,7 @@ mod tests {
         let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
         let ext = DotnetExtension::new(dotnet.clone());
         let ctx = CompileContext::for_test_with_compile_dir(&fm, tmp.path());
-        let err = ext.validate(&ctx).unwrap_err();
+        let err = ext.declarations(&ctx).unwrap_err();
         assert!(err.to_string().contains("global.json"));
     }
 
@@ -303,7 +287,7 @@ mod tests {
         let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
         let ext = DotnetExtension::new(dotnet.clone());
         let ctx = CompileContext::for_test_with_compile_dir(&fm, tmp.path());
-        assert!(ext.validate(&ctx).is_ok());
+        assert!(ext.declarations(&ctx).is_ok());
     }
 
     #[test]
@@ -314,7 +298,7 @@ mod tests {
         .unwrap();
         let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
         let ext = DotnetExtension::new(dotnet.clone());
-        assert!(ext.validate(&ctx_from(&fm)).is_err());
+        assert!(ext.declarations(&ctx_from(&fm)).is_err());
     }
 
     /// Default config — only `UseDotNet@2` with the compiler default

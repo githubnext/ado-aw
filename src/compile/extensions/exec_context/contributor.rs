@@ -52,22 +52,12 @@ pub(super) trait ContextContributor {
         ctx: &CompileContext,
     ) -> anyhow::Result<Option<crate::compile::ir::step::Step>>;
 
-    /// Agent env vars this contributor exposes. Defaults to none —
-    /// the ado-aw env-var channel rejects ADO `$(...)` expressions, so
-    /// all per-trigger metadata currently flows through files. Kept
-    /// on the trait so a future contributor that only needs literal
-    /// values can opt in without changing the wiring.
-    #[allow(dead_code)]
-    fn agent_env_vars(&self) -> Vec<(String, String)> {
-        Vec::new()
-    }
-
     /// Bash commands the agent must have on its allow-list to inspect
     /// the staged context (e.g. `git diff`, `git show`). Aggregated by
-    /// `ExecContextExtension::required_bash_commands` and forwarded
+    /// `ExecContextExtension` and forwarded
     /// through `src/engine.rs::args` to the agent's `shell(...)`
     /// allow-list.
-    fn required_bash_commands(&self) -> Vec<String>;
+    fn bash_commands(&self) -> Vec<String>;
 }
 
 /// Static-dispatch enum over all known contributors.
@@ -98,14 +88,9 @@ impl ContextContributor for Contributor {
             Contributor::Pr(c) => c.prepare_step_typed(ctx),
         }
     }
-    fn agent_env_vars(&self) -> Vec<(String, String)> {
+    fn bash_commands(&self) -> Vec<String> {
         match self {
-            Contributor::Pr(c) => c.agent_env_vars(),
-        }
-    }
-    fn required_bash_commands(&self) -> Vec<String> {
-        match self {
-            Contributor::Pr(c) => c.required_bash_commands(),
+            Contributor::Pr(c) => c.bash_commands(),
         }
     }
 }

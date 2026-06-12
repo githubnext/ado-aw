@@ -109,10 +109,6 @@ impl ContextContributor for PrContextContributor {
         }
     }
 
-    fn agent_env_vars(&self) -> Vec<(String, String)> {
-        vec![]
-    }
-
     fn prepare_step_typed(&self, _ctx: &CompileContext) -> anyhow::Result<Option<Step>> {
         // Synth-active path reads the Agent-job-level hoisted
         // variables `AW_PR_ID` / `AW_PR_TARGETBRANCH` (populated by
@@ -175,7 +171,7 @@ impl ContextContributor for PrContextContributor {
         Ok(Some(Step::Bash(step)))
     }
 
-    fn required_bash_commands(&self) -> Vec<String> {
+    fn bash_commands(&self) -> Vec<String> {
         // Read-only git commands the agent needs to inspect the PR diff
         // locally. Added unconditionally when this contributor activates
         // (matches the runtime-extension pattern in

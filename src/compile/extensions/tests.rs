@@ -13,6 +13,17 @@ fn ctx_from(fm: &FrontMatter) -> CompileContext<'_> {
     CompileContext::for_test(fm)
 }
 
+fn default_declarations<E: CompilerExtension>(ext: &E) -> Declarations {
+    let fm = minimal_front_matter();
+    let ctx = ctx_from(&fm);
+    ext.declarations(&ctx).unwrap()
+}
+
+fn declarations_with_org<E: CompilerExtension>(ext: &E, fm: &FrontMatter) -> Declarations {
+    let ctx = CompileContext::for_test_with_org(fm, "myorg");
+    ext.declarations(&ctx).unwrap()
+}
+
 // ── AwfMount ────────────────────────────────────────────────────
 
 #[test]
@@ -201,7 +212,7 @@ fn test_collect_extensions_runtimes_always_before_tools() {
 #[test]
 fn test_lean_required_hosts() {
     let ext = LeanExtension::new(LeanRuntimeConfig::Enabled(true));
-    let hosts = ext.required_hosts();
+    let hosts = default_declarations(&ext).network_hosts;
     // Lean extension returns the ecosystem identifier; domain expansion
     // happens in generate_allowed_domains().
     assert_eq!(hosts, vec!["lean".to_string()]);
@@ -210,7 +221,7 @@ fn test_lean_required_hosts() {
 #[test]
 fn test_lean_required_bash_commands() {
     let ext = LeanExtension::new(LeanRuntimeConfig::Enabled(true));
-    let cmds = ext.required_bash_commands();
+    let cmds = default_declarations(&ext).bash_commands;
     assert!(cmds.contains(&"lean".to_string()));
     assert!(cmds.contains(&"lake".to_string()));
     assert!(cmds.contains(&"elan".to_string()));
@@ -219,7 +230,7 @@ fn test_lean_required_bash_commands() {
 #[test]
 fn test_lean_prompt_supplement() {
     let ext = LeanExtension::new(LeanRuntimeConfig::Enabled(true));
-    let prompt = ext.prompt_supplement().unwrap();
+    let prompt = default_declarations(&ext).prompt_supplement.unwrap();
     assert!(prompt.contains("Lean 4"));
     assert!(prompt.contains("lake build"));
 }
@@ -237,7 +248,7 @@ fn test_lean_declarations_prepare_steps() {
 #[test]
 fn test_lean_required_awf_mounts() {
     let ext = LeanExtension::new(LeanRuntimeConfig::Enabled(true));
-    let mounts = ext.required_awf_mounts();
+    let mounts = default_declarations(&ext).awf_mounts;
     assert_eq!(mounts.len(), 1);
     assert_eq!(mounts[0].host_path, "$HOME/.elan");
     assert_eq!(mounts[0].container_path, "$HOME/.elan");
@@ -249,13 +260,13 @@ fn test_lean_required_awf_mounts() {
 #[test]
 fn test_default_required_awf_mounts_empty() {
     let ext = GitHubExtension;
-    assert!(ext.required_awf_mounts().is_empty());
+    assert!(default_declarations(&ext).awf_mounts.is_empty());
 }
 
 #[test]
 fn test_lean_awf_path_prepends() {
     let ext = LeanExtension::new(LeanRuntimeConfig::Enabled(true));
-    let paths = ext.awf_path_prepends();
+    let paths = default_declarations(&ext).awf_path_prepends;
     assert_eq!(paths.len(), 1);
     assert_eq!(paths[0], "$HOME/.elan/bin");
 }
@@ -263,7 +274,7 @@ fn test_lean_awf_path_prepends() {
 #[test]
 fn test_default_awf_path_prepends_empty() {
     let ext = GitHubExtension;
-    assert!(ext.awf_path_prepends().is_empty());
+    assert!(default_declarations(&ext).awf_path_prepends.is_empty());
 }
 
 #[test]
@@ -272,7 +283,7 @@ fn test_lean_validate_bash_disabled_warning() {
         parse_markdown("---\nname: test\ndescription: test\ntools:\n  bash: []\n---\n").unwrap();
     let ext = LeanExtension::new(LeanRuntimeConfig::Enabled(true));
     let ctx = ctx_from(&fm);
-    let warnings = ext.validate(&ctx).unwrap();
+    let warnings = ext.declarations(&ctx).unwrap().warnings;
     assert_eq!(warnings.len(), 1);
     assert!(warnings[0].contains("tools.bash is empty"));
 }
@@ -282,7 +293,7 @@ fn test_lean_validate_bash_not_disabled_no_warning() {
     let fm = minimal_front_matter();
     let ext = LeanExtension::new(LeanRuntimeConfig::Enabled(true));
     let ctx = ctx_from(&fm);
-    let warnings = ext.validate(&ctx).unwrap();
+    let warnings = ext.declarations(&ctx).unwrap().warnings;
     assert!(warnings.is_empty());
 }
 
@@ -291,7 +302,8 @@ fn test_lean_validate_bash_not_disabled_no_warning() {
 #[test]
 fn test_ado_required_hosts() {
     let ext = AzureDevOpsExtension::new(AzureDevOpsToolConfig::Enabled(true));
-    let hosts = ext.required_hosts();
+    let fm = minimal_front_matter();
+    let hosts = declarations_with_org(&ext, &fm).network_hosts;
     assert!(hosts.contains(&"dev.azure.com".to_string()));
     // Node ecosystem is required for npx to resolve @azure-devops/mcp
     assert!(hosts.contains(&"node".to_string()));
@@ -302,7 +314,7 @@ fn test_ado_mcpg_servers_with_inferred_org() {
     let fm = minimal_front_matter();
     let ctx = CompileContext::for_test_with_org(&fm, "myorg");
     let ext = AzureDevOpsExtension::new(AzureDevOpsToolConfig::Enabled(true));
-    let servers = ext.mcpg_servers(&ctx).unwrap();
+    let servers = ext.declarations(&ctx).unwrap().mcpg_servers;
     assert_eq!(servers.len(), 1);
     assert_eq!(servers[0].0, ADO_MCP_SERVER_NAME);
     assert_eq!(servers[0].1.server_type, "stdio");
@@ -324,7 +336,7 @@ fn test_ado_mcpg_servers_no_org_fails() {
     let fm = minimal_front_matter();
     let ctx = CompileContext::for_test(&fm);
     let ext = AzureDevOpsExtension::new(AzureDevOpsToolConfig::Enabled(true));
-    assert!(ext.mcpg_servers(&ctx).is_err());
+    assert!(ext.declarations(&ctx).is_err());
 }
 
 #[test]
@@ -334,9 +346,9 @@ fn test_ado_validate_duplicate_mcp_warning() {
         ADO_MCP_SERVER_NAME.to_string(),
         crate::compile::types::McpConfig::Enabled(true),
     );
-    let ctx = ctx_from(&fm);
     let ext = AzureDevOpsExtension::new(AzureDevOpsToolConfig::Enabled(true));
-    let warnings = ext.validate(&ctx).unwrap();
+    let ctx = CompileContext::for_test_with_org(&fm, "myorg");
+    let warnings = ext.declarations(&ctx).unwrap().warnings;
     assert_eq!(warnings.len(), 1);
     assert!(warnings[0].contains("both tools.azure-devops and mcp-servers"));
 }
@@ -356,7 +368,7 @@ fn test_cache_memory_declarations_prepare_steps() {
 #[test]
 fn test_cache_memory_prompt_supplement() {
     let ext = CacheMemoryExtension::new(CacheMemoryToolConfig::Enabled(true));
-    let prompt = ext.prompt_supplement().unwrap();
+    let prompt = default_declarations(&ext).prompt_supplement.unwrap();
     assert!(prompt.contains("Agent Memory"));
     assert!(prompt.contains("/tmp/awf-tools/staging/agent_memory/"));
 }
@@ -417,7 +429,7 @@ fn test_python_required_hosts() {
     let ext = crate::runtimes::python::PythonExtension::new(
         crate::runtimes::python::PythonRuntimeConfig::Enabled(true),
     );
-    let hosts = ext.required_hosts();
+    let hosts = default_declarations(&ext).network_hosts;
     assert_eq!(hosts, vec!["python".to_string()]);
 }
 
@@ -453,7 +465,7 @@ fn test_python_agent_env_vars_no_feed() {
     let ext = crate::runtimes::python::PythonExtension::new(
         crate::runtimes::python::PythonRuntimeConfig::Enabled(true),
     );
-    assert!(ext.agent_env_vars().is_empty());
+    assert!(default_declarations(&ext).agent_env_vars.is_empty());
 }
 
 #[test]
@@ -463,7 +475,7 @@ fn test_python_agent_env_vars_with_feed() {
     ).unwrap();
     let python = fm.runtimes.as_ref().unwrap().python.as_ref().unwrap();
     let ext = crate::runtimes::python::PythonExtension::new(python.clone());
-    let vars = ext.agent_env_vars();
+    let vars = default_declarations(&ext).agent_env_vars;
     assert_eq!(vars.len(), 2);
     assert_eq!(vars[0].0, "PIP_INDEX_URL");
     assert_eq!(vars[1].0, "UV_DEFAULT_INDEX");
@@ -477,12 +489,12 @@ fn test_python_config_warns_not_functional() {
     let python = fm.runtimes.as_ref().unwrap().python.as_ref().unwrap();
     let ext = crate::runtimes::python::PythonExtension::new(python.clone());
     let ctx = ctx_from(&fm);
-    let result = ext.validate(&ctx);
+    let result = ext.declarations(&ctx);
     assert!(
         result.is_ok(),
         "config: should be accepted (warning, not error)"
     );
-    let warnings = result.unwrap();
+    let warnings = result.unwrap().warnings;
     assert!(warnings.iter().any(|w| w.contains("will not be available")));
 }
 
@@ -494,7 +506,7 @@ fn test_python_validate_bash_disabled_warning() {
         crate::runtimes::python::PythonRuntimeConfig::Enabled(true),
     );
     let ctx = ctx_from(&fm);
-    let warnings = ext.validate(&ctx).unwrap();
+    let warnings = ext.declarations(&ctx).unwrap().warnings;
     assert!(!warnings.is_empty());
     assert!(warnings[0].contains("tools.bash is empty"));
 }
@@ -506,7 +518,7 @@ fn test_python_validate_bash_not_disabled_no_warning() {
         crate::runtimes::python::PythonRuntimeConfig::Enabled(true),
     );
     let ctx = ctx_from(&fm);
-    let warnings = ext.validate(&ctx).unwrap();
+    let warnings = ext.declarations(&ctx).unwrap().warnings;
     assert!(warnings.is_empty());
 }
 
@@ -518,7 +530,7 @@ fn test_python_invalid_feed_url_rejected() {
     let python = fm.runtimes.as_ref().unwrap().python.as_ref().unwrap();
     let ext = crate::runtimes::python::PythonExtension::new(python.clone());
     let ctx = ctx_from(&fm);
-    assert!(ext.validate(&ctx).is_err());
+    assert!(ext.declarations(&ctx).is_err());
 }
 
 #[test]
@@ -530,7 +542,7 @@ fn test_python_validate_version_injection_rejected() {
     let python = fm.runtimes.as_ref().unwrap().python.as_ref().unwrap();
     let ext = crate::runtimes::python::PythonExtension::new(python.clone());
     let ctx = ctx_from(&fm);
-    assert!(ext.validate(&ctx).is_err());
+    assert!(ext.declarations(&ctx).is_err());
 }
 
 // ── NodeExtension ──────────────────────────────────────────────
@@ -568,7 +580,7 @@ fn test_node_required_hosts() {
     let ext = crate::runtimes::node::NodeExtension::new(
         crate::runtimes::node::NodeRuntimeConfig::Enabled(true),
     );
-    let hosts = ext.required_hosts();
+    let hosts = default_declarations(&ext).network_hosts;
     assert_eq!(hosts, vec!["node".to_string()]);
 }
 
@@ -605,7 +617,7 @@ fn test_node_agent_env_vars_no_feed() {
     let ext = crate::runtimes::node::NodeExtension::new(
         crate::runtimes::node::NodeRuntimeConfig::Enabled(true),
     );
-    assert!(ext.agent_env_vars().is_empty());
+    assert!(default_declarations(&ext).agent_env_vars.is_empty());
 }
 
 #[test]
@@ -615,7 +627,7 @@ fn test_node_agent_env_vars_with_feed() {
     ).unwrap();
     let node = fm.runtimes.as_ref().unwrap().node.as_ref().unwrap();
     let ext = crate::runtimes::node::NodeExtension::new(node.clone());
-    let vars = ext.agent_env_vars();
+    let vars = default_declarations(&ext).agent_env_vars;
     assert_eq!(vars.len(), 1);
     assert_eq!(vars[0].0, "NPM_CONFIG_REGISTRY");
 }
@@ -628,12 +640,12 @@ fn test_node_config_warns_not_functional() {
     let node = fm.runtimes.as_ref().unwrap().node.as_ref().unwrap();
     let ext = crate::runtimes::node::NodeExtension::new(node.clone());
     let ctx = ctx_from(&fm);
-    let result = ext.validate(&ctx);
+    let result = ext.declarations(&ctx);
     assert!(
         result.is_ok(),
         "config: should be accepted (warning, not error)"
     );
-    let warnings = result.unwrap();
+    let warnings = result.unwrap().warnings;
     assert!(warnings.iter().any(|w| w.contains("will not be available")));
 }
 
@@ -645,7 +657,7 @@ fn test_node_config_and_feed_url_mutually_exclusive() {
     let node = fm.runtimes.as_ref().unwrap().node.as_ref().unwrap();
     let ext = crate::runtimes::node::NodeExtension::new(node.clone());
     let ctx = ctx_from(&fm);
-    let result = ext.validate(&ctx);
+    let result = ext.declarations(&ctx);
     assert!(result.is_err());
     assert!(
         result
@@ -663,7 +675,7 @@ fn test_node_validate_bash_disabled_warning() {
         crate::runtimes::node::NodeRuntimeConfig::Enabled(true),
     );
     let ctx = ctx_from(&fm);
-    let warnings = ext.validate(&ctx).unwrap();
+    let warnings = ext.declarations(&ctx).unwrap().warnings;
     assert!(!warnings.is_empty());
     assert!(warnings[0].contains("tools.bash is empty"));
 }
@@ -676,7 +688,7 @@ fn test_node_invalid_feed_url_rejected() {
     let node = fm.runtimes.as_ref().unwrap().node.as_ref().unwrap();
     let ext = crate::runtimes::node::NodeExtension::new(node.clone());
     let ctx = ctx_from(&fm);
-    assert!(ext.validate(&ctx).is_err());
+    assert!(ext.declarations(&ctx).is_err());
 }
 
 #[test]
@@ -688,7 +700,7 @@ fn test_node_validate_version_injection_rejected() {
     let node = fm.runtimes.as_ref().unwrap().node.as_ref().unwrap();
     let ext = crate::runtimes::node::NodeExtension::new(node.clone());
     let ctx = ctx_from(&fm);
-    assert!(ext.validate(&ctx).is_err());
+    assert!(ext.declarations(&ctx).is_err());
 }
 
 #[test]
@@ -699,7 +711,7 @@ fn test_python_config_and_feed_url_mutually_exclusive() {
     let python = fm.runtimes.as_ref().unwrap().python.as_ref().unwrap();
     let ext = crate::runtimes::python::PythonExtension::new(python.clone());
     let ctx = ctx_from(&fm);
-    let result = ext.validate(&ctx);
+    let result = ext.declarations(&ctx);
     assert!(result.is_err());
     assert!(
         result
@@ -744,7 +756,7 @@ fn test_dotnet_required_hosts() {
     let ext = crate::runtimes::dotnet::DotnetExtension::new(
         crate::runtimes::dotnet::DotnetRuntimeConfig::Enabled(true),
     );
-    let hosts = ext.required_hosts();
+    let hosts = default_declarations(&ext).network_hosts;
     assert_eq!(hosts, vec!["dotnet".to_string()]);
 }
 
@@ -753,7 +765,10 @@ fn test_dotnet_required_bash_commands() {
     let ext = crate::runtimes::dotnet::DotnetExtension::new(
         crate::runtimes::dotnet::DotnetRuntimeConfig::Enabled(true),
     );
-    assert_eq!(ext.required_bash_commands(), vec!["dotnet".to_string()]);
+    assert_eq!(
+        default_declarations(&ext).bash_commands,
+        vec!["dotnet".to_string()]
+    );
 }
 
 #[test]
@@ -808,7 +823,7 @@ fn test_dotnet_agent_env_vars_no_feed() {
     let ext = crate::runtimes::dotnet::DotnetExtension::new(
         crate::runtimes::dotnet::DotnetRuntimeConfig::Enabled(true),
     );
-    assert!(ext.agent_env_vars().is_empty());
+    assert!(default_declarations(&ext).agent_env_vars.is_empty());
 }
 
 #[test]
@@ -821,7 +836,7 @@ fn test_dotnet_agent_env_vars_with_feed() {
     ).unwrap();
     let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
     let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
-    assert!(ext.agent_env_vars().is_empty());
+    assert!(default_declarations(&ext).agent_env_vars.is_empty());
 }
 
 #[test]
@@ -832,7 +847,7 @@ fn test_dotnet_config_and_feed_url_mutually_exclusive() {
     let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
     let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
     let ctx = ctx_from(&fm);
-    let result = ext.validate(&ctx);
+    let result = ext.declarations(&ctx);
     assert!(result.is_err());
     assert!(
         result
@@ -850,7 +865,7 @@ fn test_dotnet_invalid_feed_url_rejected() {
     let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
     let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
     let ctx = ctx_from(&fm);
-    assert!(ext.validate(&ctx).is_err());
+    assert!(ext.declarations(&ctx).is_err());
 }
 
 #[test]
@@ -899,7 +914,7 @@ fn test_dotnet_global_json_sentinel_skips_injection_check() {
     let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
     let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
     let ctx = ctx_from(&fm);
-    assert!(ext.validate(&ctx).is_ok());
+    assert!(ext.declarations(&ctx).is_ok());
 }
 
 #[test]
@@ -916,7 +931,7 @@ fn test_dotnet_version_with_global_json_present_errors() {
     let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
     let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
     let ctx = CompileContext::for_test_with_compile_dir(&fm, tmp.path());
-    let result = ext.validate(&ctx);
+    let result = ext.declarations(&ctx);
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(
@@ -946,7 +961,7 @@ fn test_dotnet_global_json_sentinel_with_global_json_present_ok() {
     let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
     let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
     let ctx = CompileContext::for_test_with_compile_dir(&fm, tmp.path());
-    assert!(ext.validate(&ctx).is_ok());
+    assert!(ext.declarations(&ctx).is_ok());
 }
 
 #[test]
@@ -967,7 +982,7 @@ fn test_dotnet_no_version_with_global_json_present_ok() {
     let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
     let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
     let ctx = CompileContext::for_test_with_compile_dir(&fm, tmp.path());
-    assert!(ext.validate(&ctx).is_ok());
+    assert!(ext.declarations(&ctx).is_ok());
 }
 
 #[test]
@@ -978,7 +993,7 @@ fn test_dotnet_validate_bash_disabled_warning() {
         crate::runtimes::dotnet::DotnetRuntimeConfig::Enabled(true),
     );
     let ctx = ctx_from(&fm);
-    let warnings = ext.validate(&ctx).unwrap();
+    let warnings = ext.declarations(&ctx).unwrap().warnings;
     assert!(!warnings.is_empty());
     assert!(warnings[0].contains("tools.bash is empty"));
 }
@@ -992,7 +1007,7 @@ fn test_dotnet_validate_version_injection_rejected() {
     let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
     let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
     let ctx = ctx_from(&fm);
-    assert!(ext.validate(&ctx).is_err());
+    assert!(ext.declarations(&ctx).is_err());
 }
 
 #[test]
@@ -1003,7 +1018,7 @@ fn test_dotnet_validate_config_injection_rejected() {
     let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
     let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
     let ctx = ctx_from(&fm);
-    assert!(ext.validate(&ctx).is_err());
+    assert!(ext.declarations(&ctx).is_err());
 }
 
 // ── Multiple runtimes ──────────────────────────────────────────

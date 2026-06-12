@@ -18,19 +18,12 @@ impl CompilerExtension for GitHubExtension {
         ExtensionPhase::Tool
     }
 
-    fn allowed_copilot_tools(&self) -> Vec<String> {
-        vec!["github".to_string()]
-    }
-
     /// Typed-IR view. The GitHub extension only contributes a single
     /// `--allow-tool github` flag — no steps, hosts, or env vars —
-    /// so the override is essentially the same shape as the
-    /// `allowed_copilot_tools` legacy method but routed through the
-    /// `Declarations` bundle. Keeps the IR migration self-contained
-    /// once the legacy method is removed.
+    /// routed through the `Declarations` bundle.
     fn declarations(&self, _ctx: &CompileContext) -> anyhow::Result<Declarations> {
         Ok(Declarations {
-            copilot_allow_tools: self.allowed_copilot_tools(),
+            copilot_allow_tools: vec!["github".to_string()],
             ..Declarations::default()
         })
     }

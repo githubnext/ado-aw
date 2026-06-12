@@ -1,4 +1,4 @@
-use super::{AwfMount, CompileContext, CompilerExtension, Declarations, ExtensionPhase};
+use super::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 use crate::compile::ir::condition::{Condition, Expr};
 use crate::compile::ir::step::{BashStep, Step};
 
@@ -68,36 +68,6 @@ impl CompilerExtension for AzureCliExtension {
         ExtensionPhase::Tool
     }
 
-    fn required_hosts(&self) -> Vec<String> {
-        vec![
-            // OAuth + sign-in
-            "login.microsoftonline.com".to_string(),
-            "login.windows.net".to_string(),
-            // ARM (resource management)
-            "management.azure.com".to_string(),
-            // Microsoft Graph
-            "graph.microsoft.com".to_string(),
-            // Microsoft's link shortener used by az subcommand help / metadata
-            "aka.ms".to_string(),
-        ]
-    }
-
-    fn required_bash_commands(&self) -> Vec<String> {
-        vec!["az".to_string()]
-    }
-
-    fn required_awf_mounts(&self) -> Vec<AwfMount> {
-        // Intentionally empty — declaring static mounts here would cause
-        // `docker run` to fail with "bind source path does not exist" on
-        // runners that don't have azure-cli pre-installed (e.g. some 1ES
-        // self-hosted pools). The mounts are decided at pipeline time
-        // by the typed prepare declaration below, which sets the `AW_AZ_MOUNTS`
-        // pipeline variable; `generate_awf_mounts` then injects a
-        // `$(AW_AZ_MOUNTS) \` line into the AWF invocation that expands
-        // to the mounts when az is present and to nothing when it isn't.
-        vec![]
-    }
-
     /// The two Agent-job prepare steps. The
     /// detection step exports `AW_AZ_MOUNTS` via
     /// `##vso[task.setvariable]` (a *pipeline variable*, not a step
@@ -108,8 +78,18 @@ impl CompilerExtension for AzureCliExtension {
     /// `condition: ne(variables['AW_AZ_MOUNTS'], '')`.
     fn declarations(&self, _ctx: &CompileContext) -> anyhow::Result<Declarations> {
         Ok(Declarations {
-            network_hosts: self.required_hosts(),
-            bash_commands: self.required_bash_commands(),
+            network_hosts: vec![
+                // OAuth + sign-in
+                "login.microsoftonline.com".to_string(),
+                "login.windows.net".to_string(),
+                // ARM (resource management)
+                "management.azure.com".to_string(),
+                // Microsoft Graph
+                "graph.microsoft.com".to_string(),
+                // Microsoft's link shortener used by az subcommand help / metadata
+                "aka.ms".to_string(),
+            ],
+            bash_commands: vec!["az".to_string()],
             agent_prepare_steps: vec![
                 Step::Bash(detection_bash_step()),
                 Step::Bash(prompt_append_bash_step()),
@@ -181,7 +161,9 @@ mod tests {
     #[test]
     fn test_azure_cli_required_hosts_includes_login_microsoft() {
         let ext = AzureCliExtension;
-        let hosts = ext.required_hosts();
+        let fm = fm();
+        let ctx = CompileContext::for_test(&fm);
+        let hosts = ext.declarations(&ctx).unwrap().network_hosts;
         assert!(
             hosts.iter().any(|h| h == "login.microsoftonline.com"),
             "required_hosts must include login.microsoftonline.com so the agent can OAuth: {hosts:?}"
@@ -204,8 +186,10 @@ mod tests {
         // `AW_AZ_MOUNTS` set by the typed prepare declaration and injected into
         // the AWF chain by `generate_awf_mounts`.
         let ext = AzureCliExtension;
+        let fm = fm();
+        let ctx = CompileContext::for_test(&fm);
         assert!(
-            ext.required_awf_mounts().is_empty(),
+            ext.declarations(&ctx).unwrap().awf_mounts.is_empty(),
             "AzureCli must not contribute STATIC AWF mounts — the runner may not have az installed"
         );
     }
@@ -473,7 +457,9 @@ mod tests {
     #[test]
     fn test_azure_cli_required_bash_commands_includes_az() {
         let ext = AzureCliExtension;
-        let cmds = ext.required_bash_commands();
+        let fm = fm();
+        let ctx = CompileContext::for_test(&fm);
+        let cmds = ext.declarations(&ctx).unwrap().bash_commands;
         assert!(
             cmds.iter().any(|c| c == "az"),
             "required_bash_commands must include `az`: {cmds:?}"
@@ -495,8 +481,10 @@ mod tests {
         // Sanity check that the install-free posture isn't accidentally
         // regressed by a future edit that adds a PATH munge.
         let ext = AzureCliExtension;
+        let fm = fm();
+        let ctx = CompileContext::for_test(&fm);
         assert!(
-            ext.awf_path_prepends().is_empty(),
+            ext.declarations(&ctx).unwrap().awf_path_prepends.is_empty(),
             "must not prepend any PATH entry — /usr/bin is already on PATH inside AWF"
         );
     }

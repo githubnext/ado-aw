@@ -31,24 +31,6 @@ impl CompilerExtension for CacheMemoryExtension {
         ExtensionPhase::Tool
     }
 
-    fn prompt_supplement(&self) -> Option<String> {
-        Some(
-            "\n\
----\n\
-\n\
-## Agent Memory\n\
-\n\
-You have persistent memory across runs. Your memory directory is located at `/tmp/awf-tools/staging/agent_memory/`.\n\
-\n\
-- **Read** previous memory files from this directory to recall context from prior runs.\n\
-- **Write** new files or update existing ones in this directory to persist knowledge for future runs.\n\
-- Use this memory to track patterns, accumulate findings, remember decisions, and improve over time.\n\
-- The memory directory is yours to organize as you see fit (files, subdirectories, any structure).\n\
-- Memory files are sanitized between runs for security; avoid including pipeline commands or secrets.\n"
-                .to_string(),
-        )
-    }
-
     /// Typed-IR view. Returns three typed prepare steps in order:
     ///
     /// 1. [`Step::Task`] `DownloadPipelineArtifact@2` — fetches the
@@ -70,7 +52,21 @@ You have persistent memory across runs. Your memory directory is located at `/tm
                 Step::Bash(restore_previous_memory_bash_step()),
                 Step::Bash(initialize_empty_memory_bash_step()),
             ],
-            prompt_supplement: self.prompt_supplement(),
+            prompt_supplement: Some(
+                "\n\
+---\n\
+\n\
+## Agent Memory\n\
+\n\
+You have persistent memory across runs. Your memory directory is located at `/tmp/awf-tools/staging/agent_memory/`.\n\
+\n\
+- **Read** previous memory files from this directory to recall context from prior runs.\n\
+- **Write** new files or update existing ones in this directory to persist knowledge for future runs.\n\
+- Use this memory to track patterns, accumulate findings, remember decisions, and improve over time.\n\
+- The memory directory is yours to organize as you see fit (files, subdirectories, any structure).\n\
+- Memory files are sanitized between runs for security; avoid including pipeline commands or secrets.\n"
+                    .to_string(),
+            ),
             ..Declarations::default()
         })
     }

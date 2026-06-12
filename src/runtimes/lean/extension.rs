@@ -30,44 +30,10 @@ impl CompilerExtension for LeanExtension {
         ExtensionPhase::Runtime
     }
 
-    fn required_hosts(&self) -> Vec<String> {
-        vec!["lean".to_string()]
-    }
-
-    fn required_bash_commands(&self) -> Vec<String> {
-        LEAN_BASH_COMMANDS
-            .iter()
-            .map(|c| (*c).to_string())
-            .collect()
-    }
-
-    fn prompt_supplement(&self) -> Option<String> {
-        Some(
-            "\n\
----\n\
-\n\
-## Lean 4 Formal Verification\n\
-\n\
-Lean 4 is installed and available. Use `lean` to typecheck `.lean` files, \
-`lake build` to build Lake projects, and `lake env printPaths` to inspect \
-the toolchain. Lean files use the `.lean` extension.\n"
-                .to_string(),
-        )
-    }
-
-    fn required_awf_mounts(&self) -> Vec<AwfMount> {
-        vec![AwfMount::new(
-            "$HOME/.elan",
-            "$HOME/.elan",
-            AwfMountMode::ReadOnly,
-        )]
-    }
-
-    fn awf_path_prepends(&self) -> Vec<String> {
-        vec!["$HOME/.elan/bin".to_string()]
-    }
-
-    fn validate(&self, ctx: &CompileContext) -> Result<Vec<String>> {
+    /// Returns the single elan install step as a [`Step::Bash`]
+    /// alongside all the static signals (hosts, bash commands, prompt
+    /// supplement, AWF mounts, PATH prepends).
+    fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
         let mut warnings = Vec::new();
 
         let is_bash_disabled = ctx
@@ -85,21 +51,31 @@ the toolchain. Lean files use the `.lean` extension.\n"
             ));
         }
 
-        Ok(warnings)
-    }
-
-    /// Returns the single elan install step as a [`Step::Bash`]
-    /// alongside all the static signals (hosts, bash commands, prompt
-    /// supplement, AWF mounts, PATH prepends).
-    fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
         Ok(Declarations {
             agent_prepare_steps: vec![Step::Bash(lean_install_bash_step(&self.config))],
-            network_hosts: self.required_hosts(),
-            bash_commands: self.required_bash_commands(),
-            prompt_supplement: self.prompt_supplement(),
-            awf_mounts: self.required_awf_mounts(),
-            awf_path_prepends: self.awf_path_prepends(),
-            warnings: self.validate(ctx)?,
+            network_hosts: vec!["lean".to_string()],
+            bash_commands: LEAN_BASH_COMMANDS
+                .iter()
+                .map(|c| (*c).to_string())
+                .collect(),
+            prompt_supplement: Some(
+                "\n\
+---\n\
+\n\
+## Lean 4 Formal Verification\n\
+\n\
+Lean 4 is installed and available. Use `lean` to typecheck `.lean` files, \
+`lake build` to build Lake projects, and `lake env printPaths` to inspect \
+the toolchain. Lean files use the `.lean` extension.\n"
+                    .to_string(),
+            ),
+            awf_mounts: vec![AwfMount::new(
+                "$HOME/.elan",
+                "$HOME/.elan",
+                AwfMountMode::ReadOnly,
+            )],
+            awf_path_prepends: vec!["$HOME/.elan/bin".to_string()],
+            warnings,
             ..Declarations::default()
         })
     }
@@ -133,7 +109,7 @@ mod tests {
                 .unwrap();
         let ext = LeanExtension::new(LeanRuntimeConfig::Enabled(true));
         let ctx = CompileContext::for_test(&fm);
-        let warnings = ext.validate(&ctx).unwrap();
+        let warnings = ext.declarations(&ctx).unwrap().warnings;
         assert!(!warnings.is_empty());
         assert!(warnings[0].contains("tools.bash is empty"));
     }

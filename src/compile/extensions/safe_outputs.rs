@@ -19,34 +19,32 @@ impl CompilerExtension for SafeOutputsExtension {
         ExtensionPhase::Tool
     }
 
-    fn allowed_copilot_tools(&self) -> Vec<String> {
-        vec!["safeoutputs".to_string()]
-    }
-
-    fn mcpg_servers(&self, _ctx: &CompileContext) -> Result<Vec<(String, McpgServerConfig)>> {
-        Ok(vec![(
-            "safeoutputs".to_string(),
-            McpgServerConfig {
-                server_type: "http".to_string(),
-                container: None,
-                entrypoint: None,
-                entrypoint_args: None,
-                mounts: None,
-                args: None,
-                url: Some("http://localhost:${SAFE_OUTPUTS_PORT}/mcp".to_string()),
-                headers: Some(BTreeMap::from([(
-                    "Authorization".to_string(),
-                    "Bearer ${SAFE_OUTPUTS_API_KEY}".to_string(),
-                )])),
-                env: None,
-                tools: None,
-            },
-        )])
-    }
-
-    fn prompt_supplement(&self) -> Option<String> {
-        Some(
-            r#"
+    /// Typed-IR view. SafeOutputs contributes only static
+    /// signals — an MCPG HTTP backend, a prompt supplement, and a
+    /// single `--allow-tool safeoutputs` flag.
+    fn declarations(&self, _ctx: &CompileContext) -> Result<Declarations> {
+        Ok(Declarations {
+            mcpg_servers: vec![(
+                "safeoutputs".to_string(),
+                McpgServerConfig {
+                    server_type: "http".to_string(),
+                    container: None,
+                    entrypoint: None,
+                    entrypoint_args: None,
+                    mounts: None,
+                    args: None,
+                    url: Some("http://localhost:${SAFE_OUTPUTS_PORT}/mcp".to_string()),
+                    headers: Some(BTreeMap::from([(
+                        "Authorization".to_string(),
+                        "Bearer ${SAFE_OUTPUTS_API_KEY}".to_string(),
+                    )])),
+                    env: None,
+                    tools: None,
+                },
+            )],
+            copilot_allow_tools: vec!["safeoutputs".to_string()],
+            prompt_supplement: Some(
+                r#"
 ---
 
 ## Important: Safe Outputs
@@ -55,18 +53,8 @@ You have access to the `safeoutputs` MCP server which provides tools for creatin
 
 These tools generate safe outputs that will be reviewed and executed in a separate pipeline stage, ensuring proper validation and security controls.
 "#
-            .to_string(),
-        )
-    }
-
-    /// Typed-IR view. SafeOutputs contributes only static
-    /// signals — an MCPG HTTP backend, a prompt supplement, and a
-    /// single `--allow-tool safeoutputs` flag.
-    fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
-        Ok(Declarations {
-            mcpg_servers: self.mcpg_servers(ctx)?,
-            copilot_allow_tools: self.allowed_copilot_tools(),
-            prompt_supplement: self.prompt_supplement(),
+                .to_string(),
+            ),
             ..Declarations::default()
         })
     }

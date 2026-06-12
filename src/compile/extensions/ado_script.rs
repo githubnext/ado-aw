@@ -274,7 +274,19 @@ impl CompilerExtension for AdoScriptExtension {
         ExtensionPhase::System
     }
 
-    fn validate(&self, _ctx: &CompileContext) -> Result<Vec<String>> {
+    /// Typed-IR view. The marquee port: every step ado-script
+    /// contributes is rebuilt as a typed `Step`, with explicit
+    /// [`StepId`] / [`OutputDecl`] on the `synthPr` producer and
+    /// typed [`crate::compile::ir::env::EnvValue::StepOutput`]
+    /// references on the gate consumer. This is the commit that
+    /// locks declarative synth-PR propagation — the lowering pass
+    /// (not the extension) now decides whether each consumer sees
+    /// the same-job macro form `$(synthPr.X)` or the cross-job
+    /// `dependencies.Setup.outputs['synthPr.X']` form.
+    ///
+    /// Setup-job steps land in [`Declarations::setup_steps`]; Agent-
+    /// job steps in [`Declarations::agent_prepare_steps`].
+    fn declarations(&self, _ctx: &CompileContext) -> Result<Declarations> {
         let mut warnings = Vec::new();
         if let Some(f) = &self.pr_filters {
             for diag in validate_pr_filters(f) {
@@ -296,44 +308,7 @@ impl CompilerExtension for AdoScriptExtension {
                 }
             }
         }
-        Ok(warnings)
-    }
 
-    fn required_hosts(&self) -> Vec<String> {
-        // ado-script contributes NO hosts to the agent's AWF allowlist.
-        //
-        // `required_hosts()` feeds the AWF sandbox's `--allow-domains`
-        // list — the network policy applied to the agent container.
-        // The `ado-script.zip` bundle is downloaded at the pipeline-
-        // host level (a plain `curl` in a bash step that runs BEFORE
-        // the AWF sandbox starts; see `install_and_download_steps`)
-        // and is then on disk for both the Setup-job gate evaluator
-        // and the Agent-job import resolver / exec-context-pr step.
-        // The agent itself never reaches out to github.com because of
-        // ado-script, so widening the AWF allowlist would be wrong
-        // (a security hole — broader agent network reach without a
-        // legitimate consumer).
-        //
-        // If a future bundle is added that needs network access from
-        // *inside* the AWF sandbox, that bundle's host needs would
-        // belong on the *consumer* extension's `required_hosts()`,
-        // not here.
-        vec![]
-    }
-
-    /// Typed-IR view. The marquee port: every step ado-script
-    /// contributes is rebuilt as a typed `Step`, with explicit
-    /// [`StepId`] / [`OutputDecl`] on the `synthPr` producer and
-    /// typed [`crate::compile::ir::env::EnvValue::StepOutput`]
-    /// references on the gate consumer. This is the commit that
-    /// locks declarative synth-PR propagation — the lowering pass
-    /// (not the extension) now decides whether each consumer sees
-    /// the same-job macro form `$(synthPr.X)` or the cross-job
-    /// `dependencies.Setup.outputs['synthPr.X']` form.
-    ///
-    /// Setup-job steps land in [`Declarations::setup_steps`]; Agent-
-    /// job steps in [`Declarations::agent_prepare_steps`].
-    fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
         let (pr_checks, pipeline_checks) = self.lowered_checks();
 
         // ─── Setup job ─────────────────────────────────────────
@@ -377,7 +352,7 @@ impl CompilerExtension for AdoScriptExtension {
         Ok(Declarations {
             setup_steps,
             agent_prepare_steps,
-            warnings: self.validate(ctx)?,
+            warnings,
             ..Declarations::default()
         })
     }
@@ -778,7 +753,7 @@ mod tests {
         let ext = ext_with(Some(filters), None, true);
         let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
         let ctx = CompileContext::for_test(&fm);
-        assert!(ext.validate(&ctx).is_err());
+        assert!(ext.declarations(&ctx).is_err());
     }
 
     #[test]
@@ -797,7 +772,9 @@ mod tests {
             ..Default::default()
         };
         let ext = ext_with(Some(filters), None, true);
-        assert!(ext.required_hosts().is_empty());
+        let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
+        let ctx = CompileContext::for_test(&fm);
+        assert!(ext.declarations(&ctx).unwrap().network_hosts.is_empty());
     }
 
     // ── resolve_imports_inline ─────────────────────────────────────────

@@ -31,41 +31,15 @@ impl CompilerExtension for PythonExtension {
         ExtensionPhase::Runtime
     }
 
-    fn required_hosts(&self) -> Vec<String> {
-        vec!["python".to_string()]
-    }
-
-    fn required_bash_commands(&self) -> Vec<String> {
-        PYTHON_BASH_COMMANDS
-            .iter()
-            .map(|c| (*c).to_string())
-            .collect()
-    }
-
-    fn prompt_supplement(&self) -> Option<String> {
-        Some(
-            "\n\
----\n\
-\n\
-## Python\n\
-\n\
-Python is installed and available. Use `python3` or `python` to run scripts, \
-`pip` or `pip3` to install packages. If you need `uv` for fast package \
-management, install it first with `pip install uv`.\n"
-                .to_string(),
-        )
-    }
-
-    fn agent_env_vars(&self) -> Vec<(String, String)> {
-        let mut vars = Vec::new();
-        if let Some(feed_url) = self.config.feed_url() {
-            vars.push(("PIP_INDEX_URL".to_string(), feed_url.to_string()));
-            vars.push(("UV_DEFAULT_INDEX".to_string(), feed_url.to_string()));
-        }
-        vars
-    }
-
-    fn validate(&self, ctx: &CompileContext) -> Result<Vec<String>> {
+    /// Typed-IR view. Returns:
+    ///
+    /// * a [`Step::Task`] for `UsePythonVersion@0`,
+    /// * an optional [`Step::Task`] for `PipAuthenticate@1` (only
+    ///   when `feed-url:` is set),
+    ///
+    /// alongside the static signals (hosts, bash commands, prompt
+    /// supplement, agent env vars).
+    fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
         let mut warnings = Vec::new();
 
         // Warn if bash is disabled
@@ -112,30 +86,36 @@ management, install it first with `pip install uv`.\n"
             validate::reject_pipeline_injection(version, "runtimes.python.version")?;
         }
 
-        Ok(warnings)
-    }
-
-    /// Typed-IR view. Returns:
-    ///
-    /// * a [`Step::Task`] for `UsePythonVersion@0`,
-    /// * an optional [`Step::Task`] for `PipAuthenticate@1` (only
-    ///   when `feed-url:` is set),
-    ///
-    /// alongside the static signals (hosts, bash commands, prompt
-    /// supplement, agent env vars).
-    fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
         let mut agent_prepare_steps: Vec<Step> = Vec::with_capacity(2);
         agent_prepare_steps.push(Step::Task(python_install_task_step(&self.config)));
         if self.config.feed_url().is_some() {
             agent_prepare_steps.push(Step::Task(pip_authenticate_task_step()));
         }
+        let mut agent_env_vars = Vec::new();
+        if let Some(feed_url) = self.config.feed_url() {
+            agent_env_vars.push(("PIP_INDEX_URL".to_string(), feed_url.to_string()));
+            agent_env_vars.push(("UV_DEFAULT_INDEX".to_string(), feed_url.to_string()));
+        }
         Ok(Declarations {
             agent_prepare_steps,
-            network_hosts: self.required_hosts(),
-            bash_commands: self.required_bash_commands(),
-            prompt_supplement: self.prompt_supplement(),
-            agent_env_vars: self.agent_env_vars(),
-            warnings: self.validate(ctx)?,
+            network_hosts: vec!["python".to_string()],
+            bash_commands: PYTHON_BASH_COMMANDS
+                .iter()
+                .map(|c| (*c).to_string())
+                .collect(),
+            prompt_supplement: Some(
+                "\n\
+---\n\
+\n\
+## Python\n\
+\n\
+Python is installed and available. Use `python3` or `python` to run scripts, \
+`pip` or `pip3` to install packages. If you need `uv` for fast package \
+management, install it first with `pip install uv`.\n"
+                    .to_string(),
+            ),
+            agent_env_vars,
+            warnings,
             ..Declarations::default()
         })
     }
@@ -172,7 +152,7 @@ mod tests {
             parse_markdown("---\nname: test\ndescription: test\ntools:\n  bash: []\n---\n")
                 .unwrap();
         let ext = PythonExtension::new(PythonRuntimeConfig::Enabled(true));
-        let warnings = ext.validate(&ctx_from(&fm)).unwrap();
+        let warnings = ext.declarations(&ctx_from(&fm)).unwrap().warnings;
         assert!(!warnings.is_empty());
         assert!(warnings[0].contains("tools.bash is empty"));
     }
@@ -185,7 +165,7 @@ mod tests {
         .unwrap();
         let python = fm.runtimes.as_ref().unwrap().python.as_ref().unwrap();
         let ext = PythonExtension::new(python.clone());
-        let err = ext.validate(&ctx_from(&fm)).unwrap_err();
+        let err = ext.declarations(&ctx_from(&fm)).unwrap_err();
         assert!(err.to_string().contains("mutually exclusive"));
     }
 
@@ -197,7 +177,7 @@ mod tests {
         .unwrap();
         let python = fm.runtimes.as_ref().unwrap().python.as_ref().unwrap();
         let ext = PythonExtension::new(python.clone());
-        let warnings = ext.validate(&ctx_from(&fm)).unwrap();
+        let warnings = ext.declarations(&ctx_from(&fm)).unwrap().warnings;
         assert!(warnings.iter().any(|w| w.contains("will not be available")));
     }
 
@@ -209,7 +189,7 @@ mod tests {
         .unwrap();
         let python = fm.runtimes.as_ref().unwrap().python.as_ref().unwrap();
         let ext = PythonExtension::new(python.clone());
-        assert!(ext.validate(&ctx_from(&fm)).is_err());
+        assert!(ext.declarations(&ctx_from(&fm)).is_err());
     }
 
     #[test]
@@ -220,7 +200,7 @@ mod tests {
         .unwrap();
         let python = fm.runtimes.as_ref().unwrap().python.as_ref().unwrap();
         let ext = PythonExtension::new(python.clone());
-        assert!(ext.validate(&ctx_from(&fm)).is_err());
+        assert!(ext.declarations(&ctx_from(&fm)).is_err());
     }
 
     /// Locks the `declarations()` override: must return a single

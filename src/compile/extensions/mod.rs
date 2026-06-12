@@ -283,124 +283,10 @@ pub trait CompilerExtension {
     /// The execution phase of this extension, controlling ordering.
     fn phase(&self) -> ExtensionPhase;
 
-    /// Network hosts this extension requires (added to AWF allowlist).
-    fn required_hosts(&self) -> Vec<String> {
-        vec![]
-    }
-
-    /// Bash commands this extension needs in the agent's allow-list.
-    fn required_bash_commands(&self) -> Vec<String> {
-        vec![]
-    }
-
-    /// Markdown prompt content to append to the agent prompt.
-    ///
-    /// The compiler wraps the returned content in a `cat >>` pipeline
-    /// step so it is appended to the agent prompt file.
-    fn prompt_supplement(&self) -> Option<String> {
-        None
-    }
-
-    /// MCPG server entries this extension contributes.
-    ///
-    /// Returns `(server_name, config)` pairs inserted into the MCPG
-    /// JSON configuration. Only consumed by the standalone compiler.
-    fn mcpg_servers(&self, _ctx: &CompileContext) -> Result<Vec<(String, McpgServerConfig)>> {
-        Ok(vec![])
-    }
-
-    /// Copilot CLI `--allow-tool` values this extension requires.
-    ///
-    /// Returns tool names (e.g., `"github"`, `"safeoutputs"`, `"azure-devops"`)
-    /// that are emitted as `--allow-tool <name>` in the Copilot CLI invocation.
-    fn allowed_copilot_tools(&self) -> Vec<String> {
-        vec![]
-    }
-
-    /// Compile-time warnings to emit. Errors in the `Result` abort
-    /// compilation; the inner `Vec<String>` contains non-fatal warnings
-    /// printed to stderr.
-    fn validate(&self, _ctx: &CompileContext) -> Result<Vec<String>> {
-        Ok(vec![])
-    }
-
-    /// Pipeline variable mappings needed by this extension's MCP containers.
-    ///
-    /// Each mapping declares that a container env var (e.g., `AZURE_DEVOPS_EXT_PAT`)
-    /// should be populated from a pipeline variable (e.g., `SC_READ_TOKEN`).
-    /// The compiler uses these to generate:
-    /// 1. `env:` block on the MCPG step (maps ADO secret → bash var)
-    /// 2. `-e` flags on the MCPG docker run (passes bash var → MCPG process)
-    /// 3. MCPG config keeps `""` (MCPG passthrough from its env → child container)
-    fn required_pipeline_vars(&self) -> Vec<PipelineEnvMapping> {
-        vec![]
-    }
-
-    /// AWF volume mounts this extension requires inside the chroot.
-    ///
-    /// AWF replaces `$HOME` with an empty directory overlay for security,
-    /// only mounting specific known subdirectories. Extensions that install
-    /// toolchains under `$HOME` (e.g., elan for Lean 4) must declare mounts
-    /// here so the toolchain is accessible inside the chroot.
-    ///
-    /// Shell variables like `$HOME` are expanded at runtime by bash, not at
-    /// compile time. AWF auto-adjusts container paths for chroot by prefixing
-    /// `/host`.
-    fn required_awf_mounts(&self) -> Vec<AwfMount> {
-        vec![]
-    }
-
-    /// Directories to prepend to `PATH` inside the AWF chroot.
-    ///
-    /// Extensions that install toolchains outside standard system paths
-    /// (e.g., elan installs Lean to `$HOME/.elan/bin`) should declare their
-    /// bin directories here. The compiler collects these and generates a
-    /// `GITHUB_PATH` file that AWF reads at startup to merge into the chroot
-    /// PATH — bypassing the `sudo` PATH reset.
-    ///
-    /// Shell variables like `$HOME` are expanded at runtime by bash, not at
-    /// compile time.
-    fn awf_path_prepends(&self) -> Vec<String> {
-        vec![]
-    }
-
-    /// Environment variables to inject into the agent execution environment.
-    ///
-    /// Returns `(key, value)` pairs that are emitted as `KEY: "value"` in
-    /// the `{{ engine_env }}` YAML block. Used by runtimes to configure
-    /// package managers via env vars (e.g., `PIP_INDEX_URL`, `NPM_CONFIG_REGISTRY`).
-    ///
-    /// Keys are validated against `BLOCKED_ENV_KEYS` at collection time.
-    fn agent_env_vars(&self) -> Vec<(String, String)> {
-        vec![]
-    }
-
-    /// Aggregate every other accessor on this trait into a single
-    /// typed [`Declarations`] bundle.
-    ///
-    /// **Default impl** — returns no typed steps and copies the
-    /// surviving accessor outputs through verbatim. Real extensions
-    /// override this method when they contribute pipeline steps.
+    /// Return every compile-time signal this extension contributes.
     fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
-        let declarations = Declarations {
-            agent_prepare_steps: Vec::new(),
-            setup_steps: Vec::new(),
-            agent_finalize_steps: Vec::new(),
-            detection_prepare_steps: Vec::new(),
-            safe_outputs_steps: Vec::new(),
-            network_hosts: self.required_hosts(),
-            bash_commands: self.required_bash_commands(),
-            prompt_supplement: self.prompt_supplement(),
-            mcpg_servers: self.mcpg_servers(ctx)?,
-            copilot_allow_tools: self.allowed_copilot_tools(),
-            pipeline_env: self.required_pipeline_vars(),
-            awf_mounts: self.required_awf_mounts(),
-            awf_path_prepends: self.awf_path_prepends(),
-            agent_env_vars: self.agent_env_vars(),
-            warnings: self.validate(ctx)?,
-        };
-        declarations.touch_non_step_fields();
-        Ok(declarations)
+        let _ = ctx;
+        Ok(Declarations::default())
     }
 }
 
@@ -409,6 +295,7 @@ pub trait CompilerExtension {
 /// Returned by [`CompilerExtension::declarations`]. Extensions that
 /// contribute pipeline steps return typed
 /// [`crate::compile::ir::step::Step`] values directly.
+#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct Declarations {
     /// Steps injected into the Agent job's `prepare` phase
@@ -444,26 +331,6 @@ pub struct Declarations {
     pub agent_env_vars: Vec<(String, String)>,
     /// Non-fatal warnings to print at compile time.
     pub warnings: Vec<String>,
-}
-
-impl Declarations {
-    fn touch_non_step_fields(&self) {
-        let _ = (
-            &self.agent_finalize_steps,
-            &self.detection_prepare_steps,
-            &self.safe_outputs_steps,
-            &self.network_hosts,
-            &self.bash_commands,
-            &self.prompt_supplement,
-            &self.mcpg_servers,
-            &self.copilot_allow_tools,
-            &self.pipeline_env,
-            &self.awf_mounts,
-            &self.awf_path_prepends,
-            &self.agent_env_vars,
-            &self.warnings,
-        );
-    }
 }
 
 /// Mount access mode for an AWF bind mount.
@@ -651,36 +518,6 @@ macro_rules! extension_enum {
             }
             fn phase(&self) -> ExtensionPhase {
                 match self { $( $Enum::$Variant(e) => e.phase(), )+ }
-            }
-            fn required_hosts(&self) -> Vec<String> {
-                match self { $( $Enum::$Variant(e) => e.required_hosts(), )+ }
-            }
-            fn required_bash_commands(&self) -> Vec<String> {
-                match self { $( $Enum::$Variant(e) => e.required_bash_commands(), )+ }
-            }
-            fn prompt_supplement(&self) -> Option<String> {
-                match self { $( $Enum::$Variant(e) => e.prompt_supplement(), )+ }
-            }
-            fn mcpg_servers(&self, ctx: &CompileContext) -> Result<Vec<(String, McpgServerConfig)>> {
-                match self { $( $Enum::$Variant(e) => e.mcpg_servers(ctx), )+ }
-            }
-            fn allowed_copilot_tools(&self) -> Vec<String> {
-                match self { $( $Enum::$Variant(e) => e.allowed_copilot_tools(), )+ }
-            }
-            fn validate(&self, ctx: &CompileContext) -> Result<Vec<String>> {
-                match self { $( $Enum::$Variant(e) => e.validate(ctx), )+ }
-            }
-            fn required_pipeline_vars(&self) -> Vec<PipelineEnvMapping> {
-                match self { $( $Enum::$Variant(e) => e.required_pipeline_vars(), )+ }
-            }
-            fn required_awf_mounts(&self) -> Vec<AwfMount> {
-                match self { $( $Enum::$Variant(e) => e.required_awf_mounts(), )+ }
-            }
-            fn awf_path_prepends(&self) -> Vec<String> {
-                match self { $( $Enum::$Variant(e) => e.awf_path_prepends(), )+ }
-            }
-            fn agent_env_vars(&self) -> Vec<(String, String)> {
-                match self { $( $Enum::$Variant(e) => e.agent_env_vars(), )+ }
             }
             fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
                 match self { $( $Enum::$Variant(e) => e.declarations(ctx), )+ }

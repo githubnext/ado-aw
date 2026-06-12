@@ -5,9 +5,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use super::extensions::{
-    CompileContext, CompilerExtension, McpgConfig, McpgGatewayConfig, McpgServerConfig,
+    CompilerExtension, Declarations, McpgConfig, McpgGatewayConfig, McpgServerConfig,
 };
-use super::types::{CompileTarget, FrontMatter, PipelineParameter, PoolConfig, ReposItem, Repository};
+use super::types::{
+    CompileTarget, FrontMatter, PipelineParameter, PoolConfig, ReposItem, Repository,
+};
 use crate::allowed_hosts::{CORE_ALLOWED_HOSTS, mcp_required_hosts};
 use crate::compile::types::McpConfig;
 use crate::ecosystem_domains::{
@@ -487,7 +489,6 @@ pub fn build_parameters(
     Ok(params)
 }
 
-
 // ──────────────────────────────────────────────────────────────────────────────
 // Compact `repos:` lowering
 // ──────────────────────────────────────────────────────────────────────────────
@@ -888,65 +889,65 @@ pub fn resolve_pool_typed(
     use crate::compile::ir::job::Pool;
     match target {
         CompileTarget::OneES => {
-                    let (name, os) = match pool {
-                        None => (DEFAULT_ONEES_POOL.to_string(), "linux".to_string()),
-                        Some(PoolConfig::Name(name)) => (name.clone(), "linux".to_string()),
-                        Some(PoolConfig::Full(full)) => {
-                            if let (Some(name), Some(vm_image)) =
-                                (full.name.as_deref(), full.vm_image.as_deref())
-                            {
-                                anyhow::bail!(
-                                    "pool cannot specify both `name` and `vmImage` (got name='{}', vmImage='{}')",
-                                    name,
-                                    vm_image
-                                );
-                            }
-                            if let Some(vm_image) = full.vm_image.as_deref() {
-                                anyhow::bail!(
-                                    "target: 1es does not support `pool.vmImage` ('{}'); use `pool.name` for a 1ES pool",
-                                    vm_image
-                                );
-                            }
-                            (
-                                full.name
-                                    .as_deref()
-                                    .unwrap_or(DEFAULT_ONEES_POOL)
-                                    .to_string(),
-                                full.os.as_deref().unwrap_or("linux").to_string(),
-                            )
-                        }
-                    };
-                    Ok(Pool::Named {
-                        name,
-                        image: None,
-                        os: Some(os),
-                    })
+            let (name, os) = match pool {
+                None => (DEFAULT_ONEES_POOL.to_string(), "linux".to_string()),
+                Some(PoolConfig::Name(name)) => (name.clone(), "linux".to_string()),
+                Some(PoolConfig::Full(full)) => {
+                    if let (Some(name), Some(vm_image)) =
+                        (full.name.as_deref(), full.vm_image.as_deref())
+                    {
+                        anyhow::bail!(
+                            "pool cannot specify both `name` and `vmImage` (got name='{}', vmImage='{}')",
+                            name,
+                            vm_image
+                        );
+                    }
+                    if let Some(vm_image) = full.vm_image.as_deref() {
+                        anyhow::bail!(
+                            "target: 1es does not support `pool.vmImage` ('{}'); use `pool.name` for a 1ES pool",
+                            vm_image
+                        );
+                    }
+                    (
+                        full.name
+                            .as_deref()
+                            .unwrap_or(DEFAULT_ONEES_POOL)
+                            .to_string(),
+                        full.os.as_deref().unwrap_or("linux").to_string(),
+                    )
+                }
+            };
+            Ok(Pool::Named {
+                name,
+                image: None,
+                os: Some(os),
+            })
         }
         _ => {
-                    let Some(pool) = pool else {
-                        return Ok(Pool::VmImage(DEFAULT_VM_IMAGE_POOL.to_string()));
-                    };
-                    match pool {
-                        PoolConfig::Name(name) => Ok(Pool::Named {
-                            name: name.clone(),
-                            image: None,
-                            os: None,
-                        }),
-                        PoolConfig::Full(full) => match (full.name.as_deref(), full.vm_image.as_deref()) {
-                            (Some(name), Some(vm_image)) => anyhow::bail!(
-                                "pool cannot specify both `name` and `vmImage` (got name='{}', vmImage='{}')",
-                                name,
-                                vm_image
-                            ),
-                            (Some(name), None) => Ok(Pool::Named {
-                                name: name.to_string(),
-                                image: None,
-                                os: None,
-                            }),
-                            (None, Some(vm_image)) => Ok(Pool::VmImage(vm_image.to_string())),
-                            (None, None) => Ok(Pool::VmImage(DEFAULT_VM_IMAGE_POOL.to_string())),
-                        },
-                    }
+            let Some(pool) = pool else {
+                return Ok(Pool::VmImage(DEFAULT_VM_IMAGE_POOL.to_string()));
+            };
+            match pool {
+                PoolConfig::Name(name) => Ok(Pool::Named {
+                    name: name.clone(),
+                    image: None,
+                    os: None,
+                }),
+                PoolConfig::Full(full) => match (full.name.as_deref(), full.vm_image.as_deref()) {
+                    (Some(name), Some(vm_image)) => anyhow::bail!(
+                        "pool cannot specify both `name` and `vmImage` (got name='{}', vmImage='{}')",
+                        name,
+                        vm_image
+                    ),
+                    (Some(name), None) => Ok(Pool::Named {
+                        name: name.to_string(),
+                        image: None,
+                        os: None,
+                    }),
+                    (None, Some(vm_image)) => Ok(Pool::VmImage(vm_image.to_string())),
+                    (None, None) => Ok(Pool::VmImage(DEFAULT_VM_IMAGE_POOL.to_string())),
+                },
+            }
         }
     }
 }
@@ -1956,15 +1957,14 @@ fn try_add_user_mcp(
 /// entries (e.g., azure-devops) are included via the `extensions` parameter.
 pub fn generate_mcpg_config(
     front_matter: &FrontMatter,
-    ctx: &CompileContext,
-    extensions: &[super::extensions::Extension],
+    extension_declarations: &[Declarations],
 ) -> Result<McpgConfig> {
     let mut mcp_servers = std::collections::BTreeMap::new();
 
     // Add extension-contributed MCPG server entries (safeoutputs, azure-devops, etc.)
-    for ext in extensions {
-        for (name, config) in ext.mcpg_servers(ctx)? {
-            mcp_servers.insert(name, config);
+    for decl in extension_declarations {
+        for (name, config) in &decl.mcpg_servers {
+            mcp_servers.insert(name.clone(), config.clone());
         }
     }
 
@@ -1996,14 +1996,14 @@ pub fn generate_mcpg_config(
 /// Returns flags formatted for inline insertion in the `docker run` command.
 pub fn generate_mcpg_docker_env(
     front_matter: &FrontMatter,
-    extensions: &[super::extensions::Extension],
+    extension_declarations: &[Declarations],
 ) -> String {
     let mut env_flags: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
     // 1. Extension pipeline var mappings (e.g., AZURE_DEVOPS_EXT_PAT -> SC_READ_TOKEN)
-    for ext in extensions {
-        for mapping in ext.required_pipeline_vars() {
+    for decl in extension_declarations {
+        for mapping in &decl.pipeline_env {
             if seen.contains(&mapping.container_var) {
                 continue;
             }
@@ -2063,12 +2063,12 @@ pub fn generate_mcpg_docker_env(
 ///
 /// Returns YAML `env:` entries (e.g., `SC_READ_TOKEN: $(SC_READ_TOKEN)`),
 /// or an empty string if no mappings are needed.
-pub fn generate_mcpg_step_env(extensions: &[super::extensions::Extension]) -> String {
+pub fn generate_mcpg_step_env(extension_declarations: &[Declarations]) -> String {
     let mut entries: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
-    for ext in extensions {
-        for mapping in ext.required_pipeline_vars() {
+    for decl in extension_declarations {
+        for mapping in &decl.pipeline_env {
             if seen.contains(&mapping.pipeline_var) {
                 continue;
             }
@@ -2105,6 +2105,7 @@ pub fn generate_mcpg_step_env(extensions: &[super::extensions::Extension]) -> St
 pub fn generate_allowed_domains(
     front_matter: &FrontMatter,
     extensions: &[super::extensions::Extension],
+    extension_declarations: &[Declarations],
 ) -> Result<String> {
     // Collect enabled MCP names (user-defined MCPs, not first-party tools)
     let enabled_mcps: Vec<String> = front_matter
@@ -2148,10 +2149,10 @@ pub fn generate_allowed_domains(
     // Add extension-declared hosts (runtimes + first-party tools).
     // Extensions may return ecosystem identifiers (e.g., "lean") which are
     // expanded to their domain lists, or raw domain names.
-    for ext in extensions {
-        for host in ext.required_hosts() {
-            if is_ecosystem_identifier(&host) {
-                let domains = get_ecosystem_domains(&host);
+    for (ext, decl) in extensions.iter().zip(extension_declarations.iter()) {
+        for host in &decl.network_hosts {
+            if is_ecosystem_identifier(host) {
+                let domains = get_ecosystem_domains(host);
                 if domains.is_empty() {
                     eprintln!(
                         "warning: extension '{}' requires unknown ecosystem '{}'; \
@@ -2164,7 +2165,7 @@ pub fn generate_allowed_domains(
                     hosts.insert(domain);
                 }
             } else {
-                hosts.insert(host);
+                hosts.insert(host.clone());
             }
         }
     }
@@ -2236,10 +2237,14 @@ pub fn generate_allowed_domains(
 /// preserved.  When mounts are present, each flag occupies its own line
 /// (`--mount "spec" \`); indentation is handled by [`replace_with_indent`]
 /// at the call site.
-pub fn generate_awf_mounts(extensions: &[super::extensions::Extension]) -> String {
+pub fn generate_awf_mounts(
+    extensions: &[super::extensions::Extension],
+    extension_declarations: &[Declarations],
+) -> String {
     let mounts: Vec<super::extensions::AwfMount> = extensions
         .iter()
-        .flat_map(|ext| ext.required_awf_mounts())
+        .zip(extension_declarations.iter())
+        .flat_map(|(_ext, decl)| decl.awf_mounts.clone())
         .collect();
 
     // When the always-on AzureCli extension is enabled, append a
@@ -2272,7 +2277,7 @@ pub fn generate_awf_mounts(extensions: &[super::extensions::Extension]) -> Strin
 }
 
 /// Generates a dedicated pipeline step that writes a `GITHUB_PATH` file
-/// containing directories collected from `CompilerExtension::awf_path_prepends()`.
+/// containing directories collected from extension declarations.
 ///
 /// AWF reads the `$GITHUB_PATH` environment variable (a path to a file) at
 /// startup and merges its entries into the chroot PATH. This mechanism was
@@ -2325,21 +2330,22 @@ pub fn generate_awf_path_env(has_awf_paths: bool) -> String {
     "GITHUB_PATH: $(GITHUB_PATH)".to_string()
 }
 
-/// Collects `awf_path_prepends()` from all extensions into a single `Vec`.
-pub fn collect_awf_path_prepends(extensions: &[super::extensions::Extension]) -> Vec<String> {
-    extensions
+/// Collects path prepends from all extension declarations into a single `Vec`.
+pub fn collect_awf_path_prepends(extension_declarations: &[Declarations]) -> Vec<String> {
+    extension_declarations
         .iter()
-        .flat_map(|ext| ext.awf_path_prepends())
+        .flat_map(|decl| decl.awf_path_prepends.clone())
         .collect()
 }
 
-/// Collects `agent_env_vars()` from all extensions, validates keys against
+/// Collects agent env vars from all extension declarations, validates keys against
 /// `BLOCKED_ENV_KEYS`, deduplicates (bails on collision), and formats them
 /// as YAML `KEY: "value"` lines for injection into the `{{ engine_env }}` block.
 ///
 /// Returns an empty string if no extensions declare env vars.
 pub fn collect_agent_env_vars(
     extensions: &[super::extensions::Extension],
+    extension_declarations: &[Declarations],
 ) -> anyhow::Result<String> {
     use crate::engine::BLOCKED_ENV_KEYS;
     use crate::validate;
@@ -2348,8 +2354,8 @@ pub fn collect_agent_env_vars(
     let mut lines = Vec::new();
     let mut seen_keys = HashSet::new();
 
-    for ext in extensions {
-        for (key, value) in ext.agent_env_vars() {
+    for (ext, decl) in extensions.iter().zip(extension_declarations.iter()) {
+        for (key, value) in &decl.agent_env_vars {
             // Deduplicate: bail on collision
             if !seen_keys.insert(key.clone()) {
                 anyhow::bail!(
@@ -2374,7 +2380,7 @@ pub fn collect_agent_env_vars(
             }
 
             // Validate key format
-            if !validate::is_valid_env_var_name(&key) {
+            if !validate::is_valid_env_var_name(key) {
                 anyhow::bail!(
                     "Extension '{}' declares agent env var '{}' with invalid key format. \
                      Keys must contain only ASCII alphanumerics and underscores.",
@@ -2385,7 +2391,7 @@ pub fn collect_agent_env_vars(
 
             // Validate value for injection (defence in depth — covers ADO expressions,
             // pipeline commands, template markers, and newlines)
-            validate::reject_pipeline_injection(&value, &format!("agent env var '{key}'"))?;
+            validate::reject_pipeline_injection(value, &format!("agent env var '{key}'"))?;
 
             if value.contains('"') || value.contains('\'') {
                 anyhow::bail!(
@@ -2406,7 +2412,9 @@ pub fn collect_agent_env_vars(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compile::extensions::{CompileContext, collect_extensions};
+    use crate::compile::extensions::{
+        CompileContext, CompilerExtension, Declarations, Extension, collect_extensions,
+    };
     use crate::compile::types::{McpConfig, McpOptions, OnConfig, Repository};
     use std::collections::HashMap;
 
@@ -2414,6 +2422,46 @@ mod tests {
     fn minimal_front_matter() -> FrontMatter {
         let (fm, _) = parse_markdown("---\nname: test-agent\ndescription: test\n---\n").unwrap();
         fm
+    }
+
+    fn extension_declarations(extensions: &[Extension], fm: &FrontMatter) -> Vec<Declarations> {
+        let ctx = CompileContext::for_test(fm);
+        extension_declarations_with_ctx(extensions, &ctx)
+    }
+
+    fn extension_declarations_with_ctx(
+        extensions: &[Extension],
+        ctx: &CompileContext,
+    ) -> Vec<Declarations> {
+        try_extension_declarations_with_ctx(extensions, ctx).unwrap()
+    }
+
+    fn try_extension_declarations_with_ctx(
+        extensions: &[Extension],
+        ctx: &CompileContext,
+    ) -> Result<Vec<Declarations>> {
+        extensions.iter().map(|ext| ext.declarations(ctx)).collect()
+    }
+
+    fn collect_exts_and_decls(fm: &FrontMatter) -> (Vec<Extension>, Vec<Declarations>) {
+        let extensions = collect_extensions(fm);
+        let declarations = extension_declarations(&extensions, fm);
+        (extensions, declarations)
+    }
+
+    fn collect_exts_and_decls_with_org(
+        fm: &FrontMatter,
+        org: &str,
+    ) -> (Vec<Extension>, Vec<Declarations>) {
+        let extensions = collect_extensions(fm);
+        let ctx = CompileContext::for_test_with_org(fm, org);
+        let declarations = extension_declarations_with_ctx(&extensions, &ctx);
+        (extensions, declarations)
+    }
+
+    fn engine_args_for(fm: &FrontMatter) -> Result<String> {
+        let (_extensions, declarations) = collect_exts_and_decls(fm);
+        CompileContext::for_test(fm).engine.args(fm, &declarations)
     }
 
     // ─── generate_agent_job_variables ─────────────────────────────────
@@ -2966,10 +3014,7 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             params.contains("--allow-all-tools"),
             "wildcard bash should emit --allow-all-tools"
@@ -2989,10 +3034,7 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             params.contains("--allow-all-tools"),
             "\"*\" should behave same as \":*\""
@@ -3012,10 +3054,7 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         // User-disabled bash must not produce a general bash allow-tool
         // (shell(:*) / shell(*) / shell(bash)). Always-on extensions
         // (e.g. Azure CLI) legitimately inject their own narrow
@@ -3037,10 +3076,7 @@ mod tests {
     #[test]
     fn test_engine_args_allow_all_paths_when_edit_enabled() {
         let fm = minimal_front_matter(); // edit defaults to true, bash defaults to wildcard
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             params.contains("--allow-all-paths"),
             "edit enabled (default) should emit --allow-all-paths"
@@ -3064,10 +3100,7 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             !params.contains("--allow-all-paths"),
             "edit disabled should NOT emit --allow-all-paths"
@@ -3087,10 +3120,7 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             params.contains("--allow-all-tools"),
             "wildcard bash should emit --allow-all-tools"
@@ -3120,10 +3150,7 @@ mod tests {
             node: None,
             dotnet: None,
         });
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             params.contains("shell(lean)"),
             "lean command should be allowed"
@@ -3158,10 +3185,7 @@ mod tests {
             node: None,
             dotnet: None,
         });
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             params.contains("--allow-all-tools"),
             "wildcard should use --allow-all-tools"
@@ -3183,10 +3207,7 @@ mod tests {
                 ..Default::default()
             })),
         );
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             !params.contains("--allow-tool my-tool"),
             "default (all-tools) mode should not emit individual --allow-tool for MCPs"
@@ -3209,10 +3230,7 @@ mod tests {
                 ..Default::default()
             })),
         );
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             params.contains("--allow-tool my-tool"),
             "container MCP should get --allow-tool"
@@ -3235,10 +3253,7 @@ mod tests {
                 ..Default::default()
             })),
         );
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             params.contains("--allow-tool remote-ado"),
             "URL MCP should get --allow-tool"
@@ -3250,10 +3265,7 @@ mod tests {
         let mut fm = minimal_front_matter();
         fm.mcp_servers
             .insert("my-tool".to_string(), McpConfig::Enabled(true));
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             !params.contains("--allow-tool my-tool"),
             "Enabled(true) with no container/url should not get --allow-tool"
@@ -3283,10 +3295,7 @@ mod tests {
                 ..Default::default()
             })),
         );
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         let a_pos = params
             .find("--allow-tool a-tool")
             .expect("a-tool should be present");
@@ -3304,10 +3313,7 @@ mod tests {
         let mut fm = minimal_front_matter();
         fm.mcp_servers
             .insert("ado".to_string(), McpConfig::Enabled(true));
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         // Copilot CLI has no built-in MCPs — all MCPs are handled via the MCP firewall
         assert!(!params.contains("--mcp ado"));
     }
@@ -3318,10 +3324,7 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  timeout-minutes: 30\n---\n",
         )
         .unwrap();
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             !params.contains("--max-timeout"),
             "timeout-minutes should not be emitted as a CLI arg"
@@ -3331,10 +3334,7 @@ mod tests {
     #[test]
     fn test_engine_args_no_max_timeout_when_simple_engine() {
         let fm = minimal_front_matter();
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         assert!(!params.contains("--max-timeout"));
     }
 
@@ -3344,10 +3344,7 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  timeout-minutes: 0\n---\n",
         )
         .unwrap();
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             !params.contains("--max-timeout"),
             "timeout-minutes should not be emitted as a CLI arg"
@@ -4583,9 +4580,7 @@ safe-outputs:
                 command: None,
                 timeout_minutes: None,
             });
-        let result = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm));
+        let result = engine_args_for(&fm);
         assert!(result.is_err());
         assert!(
             result
@@ -4610,9 +4605,7 @@ safe-outputs:
                 command: None,
                 timeout_minutes: None,
             });
-        let result = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm));
+        let result = engine_args_for(&fm);
         assert!(result.is_err());
     }
 
@@ -4637,9 +4630,7 @@ safe-outputs:
                     command: None,
                     timeout_minutes: None,
                 });
-            let result = CompileContext::for_test(&fm)
-                .engine
-                .args(&fm, &crate::compile::extensions::collect_extensions(&fm));
+            let result = engine_args_for(&fm);
             assert!(result.is_ok(), "Model name '{}' should be valid", name);
         }
     }
@@ -4653,9 +4644,7 @@ safe-outputs:
             cache_memory: None,
             azure_devops: None,
         });
-        let result = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm));
+        let result = engine_args_for(&fm);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("single quote"));
     }
@@ -5021,7 +5010,8 @@ safe-outputs:
         let fm = minimal_front_matter();
         let exts = crate::compile::extensions::collect_extensions(&fm);
         let _ctx = crate::compile::extensions::CompileContext::for_test(&fm);
-        let result = generate_awf_mounts(&exts);
+        let declarations = extension_declarations(&exts, &fm);
+        let result = generate_awf_mounts(&exts, &declarations);
         assert!(
             result.contains("$(AW_AZ_MOUNTS) \\"),
             "always-on Azure CLI injection line $(AW_AZ_MOUNTS) \\ should be present \
@@ -5051,11 +5041,11 @@ safe-outputs:
 
     #[test]
     fn test_generate_awf_path_step_with_lean() {
-        let paths = collect_awf_path_prepends(&crate::compile::extensions::collect_extensions(
-            &parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  lean: true\n---\n")
-                .unwrap()
-                .0,
-        ));
+        let (fm, _) =
+            parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  lean: true\n---\n")
+                .unwrap();
+        let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
+        let paths = collect_awf_path_prepends(&declarations);
         let result = generate_awf_path_step(&paths);
         assert!(
             result.contains("ado-path-entries"),
@@ -5126,12 +5116,7 @@ safe-outputs:
                 ..Default::default()
             })),
         );
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         let server = config.mcp_servers.get("my-tool").unwrap();
         assert_eq!(server.server_type, "stdio");
         assert_eq!(server.container.as_ref().unwrap(), "node:20-slim");
@@ -5149,12 +5134,7 @@ safe-outputs:
         // An MCP with no container or url should be skipped
         fm.mcp_servers
             .insert("phantom".to_string(), McpConfig::Enabled(true));
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         assert!(!config.mcp_servers.contains_key("phantom"));
         // safeoutputs is always present
         assert!(config.mcp_servers.contains_key("safeoutputs"));
@@ -5165,24 +5145,14 @@ safe-outputs:
         let mut fm = minimal_front_matter();
         fm.mcp_servers
             .insert("my-tool".to_string(), McpConfig::Enabled(false));
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         assert!(!config.mcp_servers.contains_key("my-tool"));
     }
 
     #[test]
     fn test_generate_mcpg_config_empty_mcp_servers() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         // Only safeoutputs should be present
         assert_eq!(config.mcp_servers.len(), 1);
         assert!(config.mcp_servers.contains_key("safeoutputs"));
@@ -5191,12 +5161,7 @@ safe-outputs:
     #[test]
     fn test_generate_mcpg_config_gateway_defaults() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         assert_eq!(config.gateway.port, 80);
         assert_eq!(config.gateway.domain, "host.docker.internal");
         assert_eq!(config.gateway.api_key, "${MCP_GATEWAY_API_KEY}");
@@ -5216,12 +5181,7 @@ safe-outputs:
                 ..Default::default()
             })),
         );
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         let json = serde_json::to_string_pretty(&config).expect("Config should serialize to JSON");
         let parsed: serde_json::Value =
             serde_json::from_str(&json).expect("Serialized JSON should parse back");
@@ -5246,12 +5206,7 @@ safe-outputs:
     #[test]
     fn test_generate_mcpg_config_safeoutputs_variable_placeholders() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         let so = config.mcp_servers.get("safeoutputs").unwrap();
 
         // URL should reference the runtime-substituted port
@@ -5273,12 +5228,7 @@ safe-outputs:
     #[test]
     fn test_generate_mcpg_config_safeoutputs_is_http_type() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         let so = config.mcp_servers.get("safeoutputs").unwrap();
         assert_eq!(so.server_type, "http");
         assert!(
@@ -5302,12 +5252,7 @@ safe-outputs:
                 ..Default::default()
             })),
         );
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         let srv = config.mcp_servers.get("runner").unwrap();
         assert_eq!(srv.server_type, "stdio");
         assert!(
@@ -5330,12 +5275,7 @@ safe-outputs:
                 ..Default::default()
             })),
         );
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         let srv = config.mcp_servers.get("with-env").unwrap();
         let e = srv.env.as_ref().unwrap();
         assert_eq!(e.get("TOKEN").unwrap(), "secret");
@@ -5351,12 +5291,7 @@ safe-outputs:
                 ..Default::default()
             })),
         );
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         // The reserved entry should still be the HTTP backend, not the user's container
         let so = config.mcp_servers.get("safeoutputs").unwrap();
         assert_eq!(
@@ -5382,12 +5317,7 @@ safe-outputs:
                 ..Default::default()
             })),
         );
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         // The user-defined "SafeOutputs" must not overwrite the built-in entry
         let so = config.mcp_servers.get("safeoutputs").unwrap();
         assert_eq!(so.server_type, "http");
@@ -5412,12 +5342,7 @@ safe-outputs:
                 ..Default::default()
             })),
         );
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         let srv = config.mcp_servers.get("remote").unwrap();
         assert_eq!(srv.server_type, "http");
         assert_eq!(srv.url.as_ref().unwrap(), "https://mcp.example.com/api");
@@ -5443,12 +5368,7 @@ safe-outputs:
                 ..Default::default()
             })),
         );
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         let srv = config.mcp_servers.get("ado").unwrap();
         assert_eq!(srv.server_type, "stdio");
         assert_eq!(srv.container.as_ref().unwrap(), "node:20-slim");
@@ -5470,12 +5390,7 @@ safe-outputs:
                 ..Default::default()
             })),
         );
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         let srv = config.mcp_servers.get("data-tool").unwrap();
         assert_eq!(
             srv.mounts.as_ref().unwrap(),
@@ -5494,12 +5409,7 @@ safe-outputs:
                 ..Default::default()
             })),
         );
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         assert!(!config.mcp_servers.contains_key("no-transport"));
     }
 
@@ -5510,8 +5420,8 @@ safe-outputs:
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\npermissions:\n  read: my-read-sc\n---\n",
         ).unwrap();
-        let extensions = collect_extensions(&fm);
-        let env = generate_mcpg_docker_env(&fm, &extensions);
+        let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
+        let env = generate_mcpg_docker_env(&fm, &declarations);
         assert!(
             env.contains("-e ADO_MCP_AUTH_TOKEN=\"$SC_READ_TOKEN\""),
             "Should map ADO token via extension pipeline var"
@@ -5522,8 +5432,8 @@ safe-outputs:
     fn test_generate_mcpg_docker_env_no_extensions() {
         // No tools enabled — no extension pipeline vars — only user MCP passthrough
         let fm = minimal_front_matter();
-        let extensions = collect_extensions(&fm);
-        let env = generate_mcpg_docker_env(&fm, &extensions);
+        let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
+        let env = generate_mcpg_docker_env(&fm, &declarations);
         assert!(
             !env.contains("ADO_MCP_AUTH_TOKEN"),
             "Should not have ADO token when no extension needs it"
@@ -5549,8 +5459,8 @@ safe-outputs:
                 ..Default::default()
             })),
         );
-        let extensions = collect_extensions(&fm);
-        let env = generate_mcpg_docker_env(&fm, &extensions);
+        let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
+        let env = generate_mcpg_docker_env(&fm, &declarations);
         let count = env.matches("ADO_MCP_AUTH_TOKEN").count();
         assert_eq!(
             count, 1,
@@ -5575,8 +5485,8 @@ safe-outputs:
                 ..Default::default()
             })),
         );
-        let extensions = collect_extensions(&fm);
-        let env = generate_mcpg_docker_env(&fm, &extensions);
+        let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
+        let env = generate_mcpg_docker_env(&fm, &declarations);
         assert!(
             env.contains("-e PASS_THROUGH"),
             "Should include passthrough var"
@@ -5600,8 +5510,8 @@ safe-outputs:
                 ..Default::default()
             })),
         );
-        let extensions = collect_extensions(&fm);
-        let env = generate_mcpg_docker_env(&fm, &extensions);
+        let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
+        let env = generate_mcpg_docker_env(&fm, &declarations);
         assert!(
             !env.contains("--privileged"),
             "Should reject invalid env var name with Docker flag injection"
@@ -5617,8 +5527,8 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\n---\n",
         )
         .unwrap();
-        let extensions = collect_extensions(&fm);
-        let env = generate_mcpg_step_env(&extensions);
+        let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
+        let env = generate_mcpg_step_env(&declarations);
         assert!(
             env.starts_with("env:\n"),
             "Should emit full env: block header"
@@ -5632,8 +5542,8 @@ safe-outputs:
     #[test]
     fn test_generate_mcpg_step_env_no_extensions() {
         let fm = minimal_front_matter();
-        let extensions = collect_extensions(&fm);
-        let env = generate_mcpg_step_env(&extensions);
+        let (_extensions, declarations) = collect_exts_and_decls(&fm);
+        let env = generate_mcpg_step_env(&declarations);
         assert!(
             env.is_empty(),
             "Should be empty when no extensions need pipeline vars"
@@ -5658,11 +5568,7 @@ safe-outputs:
     fn test_generate_mcpg_config_rejects_invalid_server_name() {
         let yaml = "---\nname: test-agent\ndescription: test\nmcp-servers:\n  bad/name:\n    container: python:3\n    entrypoint: python\n---\n";
         let (fm, _) = parse_markdown(yaml).unwrap();
-        let result = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        );
+        let result = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1);
         assert!(result.is_err(), "Should reject server name with /");
     }
 
@@ -5671,11 +5577,7 @@ safe-outputs:
         // ".." would resolve to /mcp via path normalization, bypassing routing
         let yaml = "---\nname: test-agent\ndescription: test\nmcp-servers:\n  ..:\n    container: python:3\n    entrypoint: python\n---\n";
         let (fm, _) = parse_markdown(yaml).unwrap();
-        let result = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        );
+        let result = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1);
         assert!(
             result.is_err(),
             "Should reject server name starting with dot"
@@ -5684,11 +5586,7 @@ safe-outputs:
         // ".hidden" would produce /mcp/.hidden
         let yaml2 = "---\nname: test-agent\ndescription: test\nmcp-servers:\n  .hidden:\n    container: python:3\n    entrypoint: python\n---\n";
         let (fm2, _) = parse_markdown(yaml2).unwrap();
-        let result2 = generate_mcpg_config(
-            &fm2,
-            &CompileContext::for_test(&fm2),
-            &collect_extensions(&fm2),
-        );
+        let result2 = generate_mcpg_config(&fm2, &collect_exts_and_decls(&fm2).1);
         assert!(
             result2.is_err(),
             "Should reject server name starting with dot"
@@ -5704,12 +5602,10 @@ safe-outputs:
         )
         .unwrap();
         // Pass inferred org since no explicit org is set
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test_with_org(&fm, "inferred-org"),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let extensions = collect_extensions(&fm);
+        let ctx = CompileContext::for_test_with_org(&fm, "inferred-org");
+        let declarations = extension_declarations_with_ctx(&extensions, &ctx);
+        let config = generate_mcpg_config(&fm, &declarations).unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         assert_eq!(ado.server_type, "stdio");
         assert_eq!(ado.container.as_deref(), Some(ADO_MCP_IMAGE));
@@ -5729,12 +5625,10 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    toolsets: [repos, wit, core]\n---\n",
         )
         .unwrap();
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test_with_org(&fm, "myorg"),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let extensions = collect_extensions(&fm);
+        let ctx = CompileContext::for_test_with_org(&fm, "myorg");
+        let declarations = extension_declarations_with_ctx(&extensions, &ctx);
+        let config = generate_mcpg_config(&fm, &declarations).unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         let args = ado.entrypoint_args.as_ref().unwrap();
         assert!(args.contains(&"-d".to_string()));
@@ -5750,12 +5644,7 @@ safe-outputs:
         )
         .unwrap();
         // Explicit org should be used even when inferred_org is None
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         let args = ado.entrypoint_args.as_ref().unwrap();
         assert!(args.contains(&"myorg".to_string()));
@@ -5767,12 +5656,10 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: explicit-org\n---\n",
         )
         .unwrap();
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test_with_org(&fm, "inferred-org"),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let extensions = collect_extensions(&fm);
+        let ctx = CompileContext::for_test_with_org(&fm, "inferred-org");
+        let declarations = extension_declarations_with_ctx(&extensions, &ctx);
+        let config = generate_mcpg_config(&fm, &declarations).unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         let args = ado.entrypoint_args.as_ref().unwrap();
         assert!(args.contains(&"explicit-org".to_string()));
@@ -5786,11 +5673,9 @@ safe-outputs:
         )
         .unwrap();
         // No explicit org and no inferred org — should fail
-        let result = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        );
+        let extensions = collect_extensions(&fm);
+        let ctx = CompileContext::for_test(&fm);
+        let result = try_extension_declarations_with_ctx(&extensions, &ctx);
         assert!(result.is_err());
         assert!(
             result
@@ -5807,11 +5692,9 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: \"my org/bad\"\n---\n",
         )
         .unwrap();
-        let result = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        );
+        let extensions = collect_extensions(&fm);
+        let ctx = CompileContext::for_test(&fm);
+        let result = try_extension_declarations_with_ctx(&extensions, &ctx);
         assert!(result.is_err());
         assert!(
             result
@@ -5828,11 +5711,9 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: myorg\n    toolsets: [\"repos\", \"bad toolset\"]\n---\n",
         )
         .unwrap();
-        let result = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        );
+        let extensions = collect_extensions(&fm);
+        let ctx = CompileContext::for_test(&fm);
+        let result = try_extension_declarations_with_ctx(&extensions, &ctx);
         assert!(result.is_err());
         assert!(
             result
@@ -5849,12 +5730,7 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: myorg\n    allowed:\n      - wit_get_work_item\n      - core_list_projects\n---\n",
         )
         .unwrap();
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         let tools = ado.tools.as_ref().unwrap();
         assert_eq!(tools, &["wit_get_work_item", "core_list_projects"]);
@@ -5866,24 +5742,14 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  azure-devops: false\n---\n",
         )
         .unwrap();
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         assert!(!config.mcp_servers.contains_key("azure-devops"));
     }
 
     #[test]
     fn test_ado_tool_not_set_not_generated() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         assert!(!config.mcp_servers.contains_key("azure-devops"));
     }
 
@@ -5895,12 +5761,7 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: auto-org\nmcp-servers:\n  azure-devops:\n    container: \"node:20-slim\"\n    entrypoint: \"npx\"\n    entrypoint-args: [\"-y\", \"@azure-devops/mcp\", \"manual-org\"]\n---\n",
         )
         .unwrap();
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         // Should use the auto-configured org, not the manual one
         let args = ado.entrypoint_args.as_ref().unwrap();
@@ -5914,8 +5775,8 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\npermissions:\n  read: my-read-sc\n---\n",
         )
         .unwrap();
-        let extensions = collect_extensions(&fm);
-        let env = generate_mcpg_docker_env(&fm, &extensions);
+        let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
+        let env = generate_mcpg_docker_env(&fm, &declarations);
         assert!(
             env.contains("ADO_MCP_AUTH_TOKEN"),
             "Should include ADO token passthrough when permissions.read is set"

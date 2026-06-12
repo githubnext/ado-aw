@@ -95,7 +95,7 @@ pub struct ExecContextExtension {
     config: ExecutionContextConfig,
     /// Whether the front matter configures any trigger that a context
     /// contributor activates on. Captured at construction time so
-    /// `required_bash_commands()` (which receives no `CompileContext`)
+    /// the compile-time bash-command declaration
     /// can suppress the contributor's bash allow-list contributions on
     /// agents whose triggers no contributor cares about. Today that
     /// means "is `on.pr` configured" — future trigger contributors
@@ -149,21 +149,8 @@ impl ExecContextExtension {
             synthetic_pr_active,
         ))]
     }
-}
 
-impl CompilerExtension for ExecContextExtension {
-    fn name(&self) -> &str {
-        "Execution Context"
-    }
-
-    fn phase(&self) -> ExtensionPhase {
-        // Tool phase: runs after Runtime so any runtime-installed git
-        // (none today, but defensive) is on PATH; before user `steps:`
-        // so they can read `aw-context/`.
-        ExtensionPhase::Tool
-    }
-
-    fn required_bash_commands(&self) -> Vec<String> {
+    fn bash_commands(&self) -> Vec<String> {
         // No bash contributions when the extension is off or when no
         // contributor will activate (avoids quietly widening the agent
         // bash allow-list on agents with no PR trigger configured).
@@ -180,11 +167,24 @@ impl CompilerExtension for ExecContextExtension {
         let mut out: Vec<String> = self
             .contributors()
             .into_iter()
-            .flat_map(|c| c.required_bash_commands())
+            .flat_map(|c| c.bash_commands())
             .collect();
         out.sort();
         out.dedup();
         out
+    }
+}
+
+impl CompilerExtension for ExecContextExtension {
+    fn name(&self) -> &str {
+        "Execution Context"
+    }
+
+    fn phase(&self) -> ExtensionPhase {
+        // Tool phase: runs after Runtime so any runtime-installed git
+        // (none today, but defensive) is on PATH; before user `steps:`
+        // so they can read `aw-context/`.
+        ExtensionPhase::Tool
     }
 
     /// For each active contributor, emit the typed `Step` from its
@@ -210,7 +210,7 @@ impl CompilerExtension for ExecContextExtension {
         }
         Ok(Declarations {
             agent_prepare_steps,
-            bash_commands: self.required_bash_commands(),
+            bash_commands: self.bash_commands(),
             ..Declarations::default()
         })
     }
@@ -254,17 +254,20 @@ mod tests {
         parse_fm("---\nname: test\ndescription: test\n---\n")
     }
 
+    fn declared_bash_commands(ext: &ExecContextExtension, fm: &FrontMatter) -> Vec<String> {
+        let ctx = CompileContext::for_test(fm);
+        ext.declarations(&ctx).unwrap().bash_commands
+    }
+
     /// When `on.pr` is configured (default `pr.enabled`),
     /// `required_bash_commands` MUST yield the PR contributor's
     /// git commands. If a future contributor diverges this from
     /// `should_activate`, this assertion trips.
     #[test]
     fn required_bash_commands_matches_pr_contributor_active_default() {
-        let ext = ExecContextExtension::new(
-            ExecutionContextConfig::default(),
-            &pr_triggered_front_matter(),
-        );
-        let cmds = ext.required_bash_commands();
+        let fm = pr_triggered_front_matter();
+        let ext = ExecContextExtension::new(ExecutionContextConfig::default(), &fm);
+        let cmds = declared_bash_commands(&ext, &fm);
         assert!(
             !cmds.is_empty(),
             "PR contributor is active (on.pr configured, default pr.enabled) \
@@ -287,9 +290,10 @@ mod tests {
                 enabled: Some(true),
             }),
         };
-        let ext = ExecContextExtension::new(cfg, &pr_triggered_front_matter());
+        let fm = pr_triggered_front_matter();
+        let ext = ExecContextExtension::new(cfg, &fm);
         assert!(
-            !ext.required_bash_commands().is_empty(),
+            !declared_bash_commands(&ext, &fm).is_empty(),
             "explicit pr.enabled: true + on.pr configured must yield bash commands"
         );
     }
@@ -305,9 +309,10 @@ mod tests {
                 enabled: Some(false),
             }),
         };
-        let ext = ExecContextExtension::new(cfg, &pr_triggered_front_matter());
+        let fm = pr_triggered_front_matter();
+        let ext = ExecContextExtension::new(cfg, &fm);
         assert!(
-            ext.required_bash_commands().is_empty(),
+            declared_bash_commands(&ext, &fm).is_empty(),
             "pr.enabled: false must suppress required_bash_commands"
         );
     }
@@ -316,12 +321,10 @@ mod tests {
     /// no commands. Mirrors `should_activate`'s `on.pr` gate.
     #[test]
     fn required_bash_commands_suppressed_without_on_pr() {
-        let ext = ExecContextExtension::new(
-            ExecutionContextConfig::default(),
-            &no_trigger_front_matter(),
-        );
+        let fm = no_trigger_front_matter();
+        let ext = ExecContextExtension::new(ExecutionContextConfig::default(), &fm);
         assert!(
-            ext.required_bash_commands().is_empty(),
+            declared_bash_commands(&ext, &fm).is_empty(),
             "without on.pr configured, required_bash_commands must be empty"
         );
     }
@@ -337,9 +340,10 @@ mod tests {
                 enabled: Some(true),
             }),
         };
-        let ext = ExecContextExtension::new(cfg, &no_trigger_front_matter());
+        let fm = no_trigger_front_matter();
+        let ext = ExecContextExtension::new(cfg, &fm);
         assert!(
-            ext.required_bash_commands().is_empty(),
+            declared_bash_commands(&ext, &fm).is_empty(),
             "pr.enabled: true without on.pr must NOT widen the agent bash allow-list"
         );
     }
@@ -352,9 +356,10 @@ mod tests {
             enabled: Some(false),
             pr: None,
         };
-        let ext = ExecContextExtension::new(cfg, &pr_triggered_front_matter());
+        let fm = pr_triggered_front_matter();
+        let ext = ExecContextExtension::new(cfg, &fm);
         assert!(
-            ext.required_bash_commands().is_empty(),
+            declared_bash_commands(&ext, &fm).is_empty(),
             "execution-context.enabled: false must suppress required_bash_commands"
         );
     }
