@@ -16,6 +16,7 @@ pub(crate) mod filter_ir;
 mod gitattributes;
 pub(crate) mod ir;
 mod job;
+mod job_ir;
 mod onees;
 pub(crate) mod pr_filters;
 mod stage;

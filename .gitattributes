@@ -1,5 +1,15 @@
 .github/workflows/*.lock.yml linguist-generated=true merge=ours
+
+# Install scripts must always be LF (executed on Linux/macOS via curl|sh).
+scripts/install/*.sh text eol=lf
+scripts/install/*.ps1 text eol=lf
 # BEGIN ado-aw managed (do not edit)
+tests/fixtures/job-agent.lock.yml linguist-generated=true merge=ours text eol=lf
+tests/fixtures/runtime_imports_author_marker_job.lock.yml linguist-generated=true merge=ours text eol=lf
+tests/fixtures/runtime_imports_author_marker_stage.lock.yml linguist-generated=true merge=ours text eol=lf
+tests/fixtures/runtime_imports_job.lock.yml linguist-generated=true merge=ours text eol=lf
+tests/fixtures/runtime_imports_stage.lock.yml linguist-generated=true merge=ours text eol=lf
+tests/fixtures/stage-agent.lock.yml linguist-generated=true merge=ours text eol=lf
 tests/safe-outputs/add-build-tag.lock.yml linguist-generated=true merge=ours text eol=lf
 tests/safe-outputs/add-pr-comment.lock.yml linguist-generated=true merge=ours text eol=lf
 tests/safe-outputs/azure-cli.lock.yml linguist-generated=true merge=ours text eol=lf
@@ -28,7 +38,3 @@ tests/safe-outputs/upload-build-attachment.lock.yml linguist-generated=true merg
 tests/safe-outputs/upload-pipeline-artifact.lock.yml linguist-generated=true merge=ours text eol=lf
 tests/safe-outputs/upload-workitem-attachment.lock.yml linguist-generated=true merge=ours text eol=lf
 # END ado-aw managed
-
-# Install scripts must always be LF (executed on Linux/macOS via curl|sh).
-scripts/install/*.sh text eol=lf
-scripts/install/*.ps1 text eol=lf

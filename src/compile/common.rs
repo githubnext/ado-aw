@@ -1518,6 +1518,13 @@ pub fn generate_stage_prefix(name: &str) -> String {
 /// Includes clearMemory (if cache-memory enabled) and user-defined
 /// parameters from front matter. Returns empty string if no parameters
 /// are needed.
+///
+/// **Dead code as of the stage/job IR migration** — `target: stage|job`
+/// now build their parameters list via the typed IR
+/// (`standalone_ir::build_parameters`). Kept around for the legacy
+/// `compile_template_target` path; both will be removed when 1ES
+/// migrates to the IR.
+#[allow(dead_code)]
 pub fn generate_template_parameters(front_matter: &FrontMatter) -> Result<String> {
     let has_memory = front_matter
         .tools
@@ -3377,6 +3384,10 @@ pub struct CompileConfig {
 ///
 /// Groups the template-specific settings so that the function stays within
 /// the seven-argument limit while remaining easy to extend.
+///
+/// **Dead code as of the stage/job IR migration** — kept until 1ES
+/// migrates to the IR.
+#[allow(dead_code)]
 pub struct TemplateTargetConfig<'a> {
     /// Raw YAML template string (e.g. `job-base.yml` or `stage-base.yml`).
     pub template: &'a str,
@@ -3833,6 +3844,10 @@ pub async fn compile_shared(
 ///   all of the boilerplate setup.
 ///
 /// Returns the final YAML string with the header prepended.
+///
+/// **Dead code as of the stage/job IR migration** — kept until 1ES
+/// migrates to the IR.
+#[allow(dead_code)]
 pub async fn compile_template_target(
     input_path: &Path,
     output_path: &Path,
