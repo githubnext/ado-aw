@@ -75,6 +75,12 @@ use super::common::{generate_acquire_ado_token, generate_executor_ado_env};
 /// instead of templating a YAML string. Callers thread the result
 /// through [`crate::compile::ir::emit::emit`] to produce the final
 /// YAML.
+/// Build the typed [`Pipeline`] for the standalone target.
+///
+/// Mirrors the flow of `compile_shared` but composes a typed IR
+/// instead of templating a YAML string. Callers thread the result
+/// through [`crate::compile::ir::emit::emit`] to produce the final
+/// YAML.
 #[allow(clippy::too_many_arguments)]
 pub fn build_standalone_pipeline(
     front_matter: &FrontMatter,
@@ -86,6 +92,58 @@ pub fn build_standalone_pipeline(
     skip_integrity: bool,
     debug_pipeline: bool,
 ) -> Result<Pipeline> {
+    let built = build_pipeline_context(
+        front_matter,
+        extensions,
+        ctx,
+        input_path,
+        output_path,
+        markdown_body,
+        skip_integrity,
+        debug_pipeline,
+        None,
+    )?;
+    Ok(Pipeline {
+        name: built.pipeline_name,
+        parameters: built.parameters,
+        resources: built.resources,
+        triggers: built.triggers,
+        variables: Vec::new(),
+        body: PipelineBody::Jobs(built.jobs),
+        shape: PipelineShape::Standalone,
+    })
+}
+
+/// Built pipeline context — the result of running every validation,
+/// scalar computation, extension declaration fanout, and canonical-
+/// job construction once. Callers wrap the contained data into the
+/// per-target [`Pipeline`] shape (`Standalone`, `JobTemplate`, or
+/// `StageTemplate`).
+pub(crate) struct BuiltPipelineContext {
+    pub(crate) pipeline_name: String,
+    pub(crate) parameters: Vec<Parameter>,
+    pub(crate) resources: super::ir::Resources,
+    pub(crate) triggers: super::ir::Triggers,
+    pub(crate) jobs: Vec<Job>,
+}
+
+/// Shared back-end for the three IR-driven target compilers
+/// (standalone / stage / job). Performs all the heavy lifting:
+/// validates the front matter, computes every scalar, fans out
+/// extension declarations, builds the canonical 5-job graph with the
+/// optional `prefix`, and returns the per-target wrap inputs.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_pipeline_context(
+    front_matter: &FrontMatter,
+    extensions: &[Extension],
+    ctx: &CompileContext<'_>,
+    input_path: &Path,
+    output_path: &Path,
+    markdown_body: &str,
+    skip_integrity: bool,
+    debug_pipeline: bool,
+    prefix: Option<&str>,
+) -> Result<BuiltPipelineContext> {
     // ─── Validations (reuse all shared validators) ────────────────
     common::validate_front_matter_identity(front_matter)?;
     common::validate_checkout_self_collision(
@@ -263,82 +321,130 @@ pub fn build_standalone_pipeline(
     };
 
     // ─── Build jobs ───────────────────────────────────────────────
+    let jobs = build_canonical_jobs(
+        front_matter,
+        extensions,
+        &cfg,
+        &ext_setup_steps,
+        &ext_agent_prepare,
+        prefix,
+    )?;
+
+    Ok(BuiltPipelineContext {
+        pipeline_name,
+        parameters,
+        resources,
+        triggers,
+        jobs,
+    })
+}
+
+/// Build the canonical 5-job graph (Setup?, Agent, Detection,
+/// SafeOutputs, Teardown?) used by every target. The optional
+/// `prefix` is applied to Agent / Detection / SafeOutputs job IDs
+/// (matches the legacy template behaviour: Setup and Teardown stay
+/// unprefixed even in `target: job|stage`, see `src/data/job-base.yml`
+/// where `{{ setup_job }}` substitutes a literal `- job: Setup`).
+///
+/// Returns jobs with their cross-job `depends_on` edges wired to the
+/// correct (possibly prefixed) names.
+pub(crate) fn build_canonical_jobs(
+    front_matter: &FrontMatter,
+    extensions: &[Extension],
+    cfg: &StandaloneCtx,
+    ext_setup_steps: &[Step],
+    ext_agent_prepare: &[Step],
+    prefix: Option<&str>,
+) -> Result<Vec<Job>> {
+    let p = JobPrefix(prefix);
     let mut jobs = Vec::new();
-    if let Some(setup) = build_setup_job(front_matter, extensions, &ext_setup_steps, &cfg)? {
+    if let Some(setup) = build_setup_job(front_matter, extensions, ext_setup_steps, cfg, &p)? {
         jobs.push(setup);
     }
     jobs.push(build_agent_job(
         front_matter,
         extensions,
-        &ext_agent_prepare,
-        &cfg,
+        ext_agent_prepare,
+        cfg,
+        &p,
     )?);
-    jobs.push(build_detection_job(front_matter, &cfg)?);
-    jobs.push(build_safeoutputs_job(front_matter, &cfg)?);
-    if let Some(teardown) = build_teardown_job(front_matter, &cfg)? {
+    jobs.push(build_detection_job(front_matter, cfg, &p)?);
+    jobs.push(build_safeoutputs_job(front_matter, cfg, &p)?);
+    if let Some(teardown) = build_teardown_job(front_matter, cfg, &p)? {
         jobs.push(teardown);
     }
 
     // Wire dependsOn between jobs (graph pass also derives but
     // explicit edges make the YAML match committed lock files).
-    wire_explicit_dependencies(&mut jobs);
+    wire_explicit_dependencies(&mut jobs, &p);
+    Ok(jobs)
+}
 
-    Ok(Pipeline {
-        name: pipeline_name,
-        parameters,
-        resources,
-        triggers,
-        variables: Vec::new(),
-        body: PipelineBody::Jobs(jobs),
-        shape: PipelineShape::Standalone,
-    })
+/// Job-id prefix helper. Encapsulates the legacy-template quirk that
+/// Setup and Teardown jobs stay unprefixed even when other jobs in
+/// the same target are prefixed by `generate_stage_prefix`.
+pub(crate) struct JobPrefix<'a>(pub Option<&'a str>);
+
+impl<'a> JobPrefix<'a> {
+    /// Produce the `JobId` for a canonical job (`Setup` / `Agent` /
+    /// `Detection` / `SafeOutputs` / `Teardown`). Setup and Teardown
+    /// are always unprefixed; the other three are prefixed when a
+    /// prefix is provided.
+    pub(crate) fn id(&self, base: &str) -> Result<JobId> {
+        match (self.0, base) {
+            (Some(prefix), "Agent" | "Detection" | "SafeOutputs") => {
+                JobId::new(format!("{prefix}_{base}"))
+            }
+            _ => JobId::new(base),
+        }
+    }
 }
 
 /// Aggregates the precomputed scalars + YAML fragments threaded into
 /// every per-job builder. Lives only inside this module; passed by
 /// reference so builders don't take 20+ args each.
-struct StandaloneCtx {
-    pool: Pool,
-    agent_display_name: String,
-    working_directory: String,
-    trigger_repo_directory: String,
-    compiler_version: String,
+pub(crate) struct StandaloneCtx {
+    pub(crate) pool: Pool,
+    pub(crate) agent_display_name: String,
+    pub(crate) working_directory: String,
+    pub(crate) trigger_repo_directory: String,
+    pub(crate) compiler_version: String,
     /// Engine install steps as a YAML string (currently `Engine::install_steps`
     /// returns YAML). Carried through as `Step::RawYaml` until
     /// `Engine::install_steps_typed` lands (separate commit).
-    engine_install_steps_yaml: String,
-    engine_run: String,
-    engine_run_detection: String,
+    pub(crate) engine_install_steps_yaml: String,
+    pub(crate) engine_run: String,
+    pub(crate) engine_run_detection: String,
     /// Composed engine env block — `KEY: VALUE` lines, one per line.
     /// Carried as a string and re-parsed during step emission.
-    engine_env: String,
-    engine_log_dir: String,
-    allowed_domains: String,
+    pub(crate) engine_env: String,
+    pub(crate) engine_log_dir: String,
+    pub(crate) allowed_domains: String,
     /// `--mount` flags for AWF (or `\` placeholder when no mounts).
-    awf_mounts: String,
+    pub(crate) awf_mounts: String,
     /// `awf_path_step` YAML body (or empty when no path prepends).
-    awf_path_step_yaml: String,
+    pub(crate) awf_path_step_yaml: String,
     /// `--enabled-tools` args for SafeOutputs HTTP server (with trailing space).
-    enabled_tools_args: String,
-    mcpg_config_json: String,
+    pub(crate) enabled_tools_args: String,
+    pub(crate) mcpg_config_json: String,
     /// `-e KEY=...` docker flags for MCPG.
-    mcpg_docker_env: String,
+    pub(crate) mcpg_docker_env: String,
     /// `env:` block for the MCPG step (`env:\n  KEY: ...`).
-    mcpg_step_env: String,
-    source_path: String,
-    pipeline_path: String,
+    pub(crate) mcpg_step_env: String,
+    pub(crate) source_path: String,
+    pub(crate) pipeline_path: String,
     /// `AzureCLI@2` task YAML body (or empty when no read service connection).
-    acquire_read_token: String,
-    acquire_write_token: String,
+    pub(crate) acquire_read_token: String,
+    pub(crate) acquire_write_token: String,
     /// `env:` block for executor step (always non-empty — has
     /// SYSTEM_ACCESSTOKEN at minimum).
-    executor_ado_env: String,
+    pub(crate) executor_ado_env: String,
     /// `Verify pipeline integrity` step YAML (or empty when skipped).
-    integrity_check_yaml: String,
+    pub(crate) integrity_check_yaml: String,
     /// Agent prompt body (either inlined imports or
     /// `{{#runtime-import ...}}` marker).
-    agent_content_value: String,
-    debug_pipeline: bool,
+    pub(crate) agent_content_value: String,
+    pub(crate) debug_pipeline: bool,
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -375,6 +481,7 @@ fn build_parameters(front_matter: &FrontMatter) -> Result<Vec<Parameter>> {
         let kind = match p.param_type.as_deref() {
             Some("boolean") => ParameterKind::Boolean,
             Some("number") => ParameterKind::Number,
+            Some("object") => ParameterKind::Object,
             _ => ParameterKind::String,
         };
         let default = match (&kind, &p.default) {
@@ -395,11 +502,15 @@ fn build_parameters(front_matter: &FrontMatter) -> Result<Vec<Parameter>> {
                     None => ParameterDefault::String(yaml_value_as_string(v)),
                 },
             },
+            (ParameterKind::Object, Some(v)) => match v {
+                serde_yaml::Value::Sequence(items) => ParameterDefault::Sequence(items.clone()),
+                _ => ParameterDefault::String(yaml_value_as_string(v)),
+            },
             (ParameterKind::String, Some(v)) => ParameterDefault::String(yaml_value_as_string(v)),
         };
         out.push(Parameter {
             name: p.name.clone(),
-            display_name: p.display_name.clone().unwrap_or_else(|| p.name.clone()),
+            display_name: p.display_name.clone(),
             kind,
             default,
             values: p.values.clone().unwrap_or_default(),
@@ -547,11 +658,18 @@ fn build_pr_trigger_from_config(pr: &crate::compile::types::PrTriggerConfig) -> 
 
 /// Build the optional Setup job. Returns `None` when nothing requires
 /// a Setup job (no user setup, no extension setup, no filters).
+///
+/// **Setup is always unprefixed** even when other jobs in the same
+/// target are prefixed by `generate_stage_prefix`. This matches the
+/// legacy `generate_setup_job` behaviour (which always emits
+/// `- job: Setup` literally) — so the `prefix.id("Setup")` call below
+/// returns `JobId::new("Setup")` regardless of prefix state.
 fn build_setup_job(
     front_matter: &FrontMatter,
     _extensions: &[Extension],
     ext_setup_steps: &[Step],
     cfg: &StandaloneCtx,
+    prefix: &JobPrefix<'_>,
 ) -> Result<Option<Job>> {
     let has_user_setup = !front_matter.setup.is_empty();
     let has_ext_setup = !ext_setup_steps.is_empty();
@@ -602,7 +720,7 @@ fn build_setup_job(
         steps.push(Step::RawYaml(yaml));
     }
 
-    let mut job = Job::new(JobId::new("Setup")?, "Setup", cfg.pool.clone());
+    let mut job = Job::new(prefix.id("Setup")?, "Setup", cfg.pool.clone());
     job.steps = steps;
     Ok(Some(job))
 }
@@ -612,6 +730,7 @@ fn build_agent_job(
     extensions: &[Extension],
     ext_agent_prepare: &[Step],
     cfg: &StandaloneCtx,
+    prefix: &JobPrefix<'_>,
 ) -> Result<Job> {
     let mut steps: Vec<Step> = Vec::new();
 
@@ -725,7 +844,7 @@ fn build_agent_job(
 
     let _ = extensions; // currently unused after typed declarations gather
     let _ = &cfg.agent_display_name; // friendly name is the pipeline `name:`, not the job displayName
-    let mut job = Job::new(JobId::new("Agent")?, "Agent", cfg.pool.clone());
+    let mut job = Job::new(prefix.id("Agent")?, "Agent", cfg.pool.clone());
     if let Some(minutes) = front_matter.engine.timeout_minutes() {
         job.timeout = Some(std::time::Duration::from_secs(60 * (minutes as u64)));
     }
@@ -821,7 +940,11 @@ fn build_agentic_condition(front_matter: &FrontMatter) -> Option<Condition> {
     Some(Condition::And(parts))
 }
 
-fn build_detection_job(front_matter: &FrontMatter, cfg: &StandaloneCtx) -> Result<Job> {
+fn build_detection_job(
+    front_matter: &FrontMatter,
+    cfg: &StandaloneCtx,
+    prefix: &JobPrefix<'_>,
+) -> Result<Job> {
     let mut steps: Vec<Step> = Vec::new();
     steps.push(checkout_self_step());
     // Detection job pulls the Agent's output artifact via cross-job download
@@ -881,12 +1004,16 @@ fn build_detection_job(front_matter: &FrontMatter, cfg: &StandaloneCtx) -> Resul
         condition: Some(Condition::Always),
     }));
 
-    let mut job = Job::new(JobId::new("Detection")?, "Detection", cfg.pool.clone());
+    let mut job = Job::new(prefix.id("Detection")?, "Detection", cfg.pool.clone());
     job.steps = steps;
     Ok(job)
 }
 
-fn build_safeoutputs_job(_front_matter: &FrontMatter, cfg: &StandaloneCtx) -> Result<Job> {
+fn build_safeoutputs_job(
+    _front_matter: &FrontMatter,
+    cfg: &StandaloneCtx,
+    prefix: &JobPrefix<'_>,
+) -> Result<Job> {
     let mut steps: Vec<Step> = Vec::new();
     steps.push(checkout_self_step());
     // Acquire write token (when configured)
@@ -926,11 +1053,12 @@ fn build_safeoutputs_job(_front_matter: &FrontMatter, cfg: &StandaloneCtx) -> Re
         condition: Some(Condition::Always),
     }));
 
-    let mut job = Job::new(JobId::new("SafeOutputs")?, "SafeOutputs", cfg.pool.clone());
+    let mut job = Job::new(prefix.id("SafeOutputs")?, "SafeOutputs", cfg.pool.clone());
     job.steps = steps;
     // **Marquee**: condition uses typed Expr::StepOutput on Detection's
     // threatAnalysis.SafeToProcess output. Lowering picks the cross-job
-    // `dependencies.Detection.outputs[...]` form.
+    // `dependencies.Detection.outputs[...]` form (and automatically
+    // uses the prefixed Detection job ID when `prefix` is `Some`).
     job.condition = Some(Condition::And(vec![
         Condition::Succeeded,
         Condition::Eq(
@@ -944,7 +1072,11 @@ fn build_safeoutputs_job(_front_matter: &FrontMatter, cfg: &StandaloneCtx) -> Re
     Ok(job)
 }
 
-fn build_teardown_job(front_matter: &FrontMatter, cfg: &StandaloneCtx) -> Result<Option<Job>> {
+fn build_teardown_job(
+    front_matter: &FrontMatter,
+    cfg: &StandaloneCtx,
+    prefix: &JobPrefix<'_>,
+) -> Result<Option<Job>> {
     if front_matter.teardown.is_empty() {
         return Ok(None);
     }
@@ -953,7 +1085,7 @@ fn build_teardown_job(front_matter: &FrontMatter, cfg: &StandaloneCtx) -> Result
     for user_step_val in &front_matter.teardown {
         steps.push(Step::RawYaml(step_to_raw_yaml_string(user_step_val)?));
     }
-    let mut job = Job::new(JobId::new("Teardown")?, "Teardown", cfg.pool.clone());
+    let mut job = Job::new(prefix.id("Teardown")?, "Teardown", cfg.pool.clone());
     job.steps = steps;
     Ok(Some(job))
 }
@@ -961,24 +1093,24 @@ fn build_teardown_job(front_matter: &FrontMatter, cfg: &StandaloneCtx) -> Result
 /// Wire explicit `depends_on` between the canonical jobs. The graph
 /// pass also derives these from OutputRefs but explicit edges make
 /// the emitted YAML match committed lock-file shapes exactly.
-fn wire_explicit_dependencies(jobs: &mut [Job]) {
-    let names: Vec<String> = jobs.iter().map(|j| j.id.as_str().to_string()).collect();
-    let has_setup = names.iter().any(|n| n == "Setup");
+///
+/// The `prefix` is threaded through so dependency edges use the
+/// correct (possibly prefixed) target job IDs for `target: job|stage`.
+fn wire_explicit_dependencies(jobs: &mut [Job], prefix: &JobPrefix<'_>) {
+    let setup_id = prefix.id("Setup").expect("Setup ID");
+    let agent_id = prefix.id("Agent").expect("Agent ID");
+    let detection_id = prefix.id("Detection").expect("Detection ID");
+    let safeoutputs_id = prefix.id("SafeOutputs").expect("SafeOutputs ID");
+    let has_setup = jobs.iter().any(|j| j.id == setup_id);
     for j in jobs.iter_mut() {
-        match j.id.as_str() {
-            "Agent" if has_setup => {
-                j.depends_on = vec![JobId::new("Setup").unwrap()];
-            }
-            "Detection" => {
-                j.depends_on = vec![JobId::new("Agent").unwrap()];
-            }
-            "SafeOutputs" => {
-                j.depends_on = vec![JobId::new("Agent").unwrap(), JobId::new("Detection").unwrap()];
-            }
-            "Teardown" => {
-                j.depends_on = vec![JobId::new("SafeOutputs").unwrap()];
-            }
-            _ => {}
+        if j.id == agent_id && has_setup {
+            j.depends_on = vec![setup_id.clone()];
+        } else if j.id == detection_id {
+            j.depends_on = vec![agent_id.clone()];
+        } else if j.id == safeoutputs_id {
+            j.depends_on = vec![agent_id.clone(), detection_id.clone()];
+        } else if j.id.as_str() == "Teardown" {
+            j.depends_on = vec![safeoutputs_id.clone()];
         }
     }
 }

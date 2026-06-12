@@ -21,6 +21,33 @@ pub struct Stage {
     /// the contained jobs' [`super::output::OutputRef`]s.
     pub depends_on: Vec<StageId>,
     pub condition: Option<Condition>,
+    /// When set, the lowering pass emits caller-facing
+    /// `${{ if ne(length(parameters.<name>), 0) }}: dependsOn:` and
+    /// `${{ if ne(parameters.<name>, '') }}: condition:` blocks
+    /// instead of the typed `dependsOn:` / `condition:` keys. Used
+    /// by `target: stage` so callers can pass stage ordering at the
+    /// template-invocation site (ADO disallows `dependsOn:` /
+    /// `condition:` as bare keys at a `- template:` call site — only
+    /// `template:` and `parameters:` are valid per the
+    /// `stages.template` schema).
+    ///
+    /// When `external_params_wrap` is `Some`, the typed
+    /// `depends_on` / `condition` fields should be empty (the wrap
+    /// expects an empty internal stage; this is enforced by the
+    /// validation pass).
+    pub external_params_wrap: Option<StageExternalParamsWrap>,
+}
+
+/// External-parameter wrap for a [`Stage`]. See
+/// [`Stage::external_params_wrap`].
+#[derive(Debug, Clone)]
+pub struct StageExternalParamsWrap {
+    /// Name of the template parameter carrying the external
+    /// `dependsOn` value (always `"dependsOn"` today).
+    pub depends_on_param: String,
+    /// Name of the template parameter carrying the external
+    /// `condition` value (always `"condition"` today).
+    pub condition_param: String,
 }
 
 impl Stage {
@@ -31,6 +58,7 @@ impl Stage {
             jobs: Vec::new(),
             depends_on: Vec::new(),
             condition: None,
+            external_params_wrap: None,
         }
     }
 
@@ -51,6 +79,7 @@ mod tests {
         assert!(s.jobs.is_empty());
         assert!(s.depends_on.is_empty());
         assert!(s.condition.is_none());
+        assert!(s.external_params_wrap.is_none());
     }
 
     #[test]

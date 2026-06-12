@@ -28,9 +28,9 @@ use super::condition::codegen::{CondCodegenCtx, lower_condition};
 use super::env::EnvValue;
 use super::graph::Graph;
 use super::ids::{JobId, StageId};
-use super::job::{Job, Pool};
+use super::job::{Job, Pool, TemplateDependsOnWrap};
 use super::output::{ConsumerLocation, OutputRef, ProducerLocation, lower_outputref};
-use super::stage::Stage;
+use super::stage::{Stage, StageExternalParamsWrap};
 use super::step::{
     BashStep, CheckoutRepo, CheckoutStep, DownloadStep, PublishStep, Step, SubmodulesOpt, TaskStep,
 };
@@ -87,20 +87,26 @@ pub fn lower(p: &Pipeline) -> Result<Value> {
 /// the producer locations recorded there.
 pub fn lower_with_graph(p: &Pipeline, graph: &Graph) -> Result<Value> {
     let mut root = Mapping::new();
-    root.insert(s("name"), s(&p.name));
 
-    // For the `ir-yaml-emit`/`ir-output-lowering` commits we only
-    // model the canonical standalone shape end-to-end. OneEs /
-    // JobTemplate / StageTemplate wrap the same body in different
-    // outer scaffolding; their wrapping is added in the
-    // target-compiler commits.
+    // PipelineShape determines the top-level wrapping. The two
+    // template shapes (`target: job` / `target: stage`) suppress
+    // `name:`, `resources:`, and triggers — the parent pipeline owns
+    // those concerns.
+    let is_template = matches!(
+        &p.shape,
+        PipelineShape::JobTemplate { .. } | PipelineShape::StageTemplate { .. }
+    );
+
     match &p.shape {
-        PipelineShape::Standalone => {}
-        PipelineShape::OneEs { .. }
-        | PipelineShape::JobTemplate { .. }
-        | PipelineShape::StageTemplate { .. } => {
+        PipelineShape::Standalone => {
+            root.insert(s("name"), s(&p.name));
+        }
+        PipelineShape::JobTemplate { .. } | PipelineShape::StageTemplate { .. } => {
+            // No top-level `name:` — the parent pipeline supplies one.
+        }
+        PipelineShape::OneEs { .. } => {
             unimplemented!(
-                "PipelineShape wrapping is introduced by the compile-target-* commits"
+                "PipelineShape::OneEs wrapping is introduced by the compile-target-1es commit"
             );
         }
     }
@@ -109,22 +115,27 @@ pub fn lower_with_graph(p: &Pipeline, graph: &Graph) -> Result<Value> {
     //   parameters → resources → schedules → pr → trigger → variables →
     //   (jobs|stages)
     //
+    // Template shapes (`target: job` / `target: stage`) skip
+    // `resources:` and triggers — the parent pipeline owns those.
+    //
     // Each helper inserts its block only when its source data is
     // non-empty / configured, so an unused field produces no YAML key.
     if !p.parameters.is_empty() {
         root.insert(s("parameters"), lower_parameters(&p.parameters));
     }
-    if let Some(resources) = lower_resources(&p.resources) {
-        root.insert(s("resources"), resources);
-    }
-    if !p.triggers.schedules.is_empty() {
-        root.insert(s("schedules"), lower_schedules(&p.triggers.schedules));
-    }
-    if let Some(pr) = lower_pr_trigger(p.triggers.pr.as_ref()) {
-        root.insert(s("pr"), pr);
-    }
-    if let Some(ci) = lower_ci_trigger(p.triggers.ci.as_ref()) {
-        root.insert(s("trigger"), ci);
+    if !is_template {
+        if let Some(resources) = lower_resources(&p.resources) {
+            root.insert(s("resources"), resources);
+        }
+        if !p.triggers.schedules.is_empty() {
+            root.insert(s("schedules"), lower_schedules(&p.triggers.schedules));
+        }
+        if let Some(pr) = lower_pr_trigger(p.triggers.pr.as_ref()) {
+            root.insert(s("pr"), pr);
+        }
+        if let Some(ci) = lower_ci_trigger(p.triggers.ci.as_ref()) {
+            root.insert(s("trigger"), ci);
+        }
     }
     if !p.variables.is_empty() {
         root.insert(s("variables"), lower_variables(&p.variables));
@@ -151,21 +162,27 @@ pub fn lower_with_graph(p: &Pipeline, graph: &Graph) -> Result<Value> {
 }
 
 /// Lower a `parameters:` block. Each entry becomes a mapping
-/// `{ name, displayName, type, default }` matching ADO's runtime-
-/// parameter schema. Defaults to the parameter's declared default
-/// (no synthesised defaults for parameters with `ParameterDefault::None`).
+/// `{ name, displayName?, type, default }` matching ADO's runtime-
+/// parameter schema. `displayName:` is omitted for parameters with
+/// `display_name == None` (used by auto-injected template parameters
+/// `dependsOn` / `condition`). Defaults to the parameter's declared
+/// default (no synthesised defaults for parameters with
+/// `ParameterDefault::None`).
 fn lower_parameters(params: &[Parameter]) -> Value {
     let mut seq = Vec::with_capacity(params.len());
     for p in params {
         let mut m = Mapping::new();
         m.insert(s("name"), s(&p.name));
-        m.insert(s("displayName"), s(&p.display_name));
+        if let Some(dn) = &p.display_name {
+            m.insert(s("displayName"), s(dn));
+        }
         m.insert(
             s("type"),
             s(match p.kind {
                 ParameterKind::Boolean => "boolean",
                 ParameterKind::String => "string",
                 ParameterKind::Number => "number",
+                ParameterKind::Object => "object",
             }),
         );
         match &p.default {
@@ -177,6 +194,9 @@ fn lower_parameters(params: &[Parameter]) -> Value {
             }
             ParameterDefault::Number(n) => {
                 m.insert(s("default"), Value::from(*n));
+            }
+            ParameterDefault::Sequence(items) => {
+                m.insert(s("default"), Value::Sequence(items.clone()));
             }
             ParameterDefault::None => {}
         }
@@ -352,32 +372,47 @@ fn lower_stage(stage: &Stage, graph: &Graph) -> Result<Value> {
     let mut m = Mapping::new();
     m.insert(s("stage"), s(stage.id.as_str()));
     m.insert(s("displayName"), s(&stage.display_name));
-    if !stage.depends_on.is_empty() {
-        let deps: Vec<Value> = stage.depends_on.iter().map(|d| s(d.as_str())).collect();
-        m.insert(s("dependsOn"), Value::Sequence(deps));
-    }
-    if let Some(cond) = &stage.condition {
-        let ctx = LoweringContext {
-            graph,
-            stage: Some(&stage.id),
-            // Stage-level conditions can reference cross-stage outputs;
-            // there is no "consumer job" in that context. Use the
-            // first job's id as a placeholder — the lowering only
-            // distinguishes job identity for SAME-stage references,
-            // and a cross-stage ref always picks the
-            // `stageDependencies.*` syntax regardless of consumer job.
-            job: stage
-                .jobs
-                .first()
-                .map(|j| &j.id)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "ir::lower: stage '{}' has a condition but no jobs",
-                        stage.id
-                    )
-                })?,
-        };
-        m.insert(s("condition"), s(&lower_condition(&ctx.cond_ctx(), cond)?));
+    if let Some(wrap) = &stage.external_params_wrap {
+        // External-param wrap rule: when set, the stage carries no
+        // typed `depends_on` / `condition` of its own (the caller
+        // owns these via the template parameters). Surfacing both
+        // simultaneously would produce two `dependsOn:` keys in the
+        // emitted YAML.
+        if !stage.depends_on.is_empty() || stage.condition.is_some() {
+            return Err(anyhow::anyhow!(
+                "ir::lower: stage '{}' has both external_params_wrap and typed depends_on/condition — these are mutually exclusive",
+                stage.id
+            ));
+        }
+        lower_stage_external_wrap(&mut m, wrap);
+    } else {
+        if !stage.depends_on.is_empty() {
+            let deps: Vec<Value> = stage.depends_on.iter().map(|d| s(d.as_str())).collect();
+            m.insert(s("dependsOn"), Value::Sequence(deps));
+        }
+        if let Some(cond) = &stage.condition {
+            let ctx = LoweringContext {
+                graph,
+                stage: Some(&stage.id),
+                // Stage-level conditions can reference cross-stage outputs;
+                // there is no "consumer job" in that context. Use the
+                // first job's id as a placeholder — the lowering only
+                // distinguishes job identity for SAME-stage references,
+                // and a cross-stage ref always picks the
+                // `stageDependencies.*` syntax regardless of consumer job.
+                job: stage
+                    .jobs
+                    .first()
+                    .map(|j| &j.id)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "ir::lower: stage '{}' has a condition but no jobs",
+                            stage.id
+                        )
+                    })?,
+            };
+            m.insert(s("condition"), s(&lower_condition(&ctx.cond_ctx(), cond)?));
+        }
     }
     let mut jobs = Vec::with_capacity(stage.jobs.len());
     for job in &stage.jobs {
@@ -385,6 +420,41 @@ fn lower_stage(stage: &Stage, graph: &Graph) -> Result<Value> {
     }
     m.insert(s("jobs"), Value::Sequence(jobs));
     Ok(Value::Mapping(m))
+}
+
+/// Emit the `${{ if ne(length(parameters.<X>), 0) }}: dependsOn:` and
+/// `${{ if ne(parameters.<Y>, '') }}: condition:` keys for a stage
+/// whose external ordering is supplied at the template-invocation
+/// site. The emitted YAML matches `src/data/stage-base.yml` (the
+/// template the `target: stage` compiler used before the IR
+/// migration).
+fn lower_stage_external_wrap(m: &mut Mapping, wrap: &StageExternalParamsWrap) {
+    // dependsOn branch (ne-only — no caller-omitted default emission)
+    let mut dep_body = Mapping::new();
+    dep_body.insert(
+        s("dependsOn"),
+        s(format!("${{{{ parameters.{} }}}}", wrap.depends_on_param)),
+    );
+    m.insert(
+        s(format!(
+            "${{{{ if ne(length(parameters.{}), 0) }}}}",
+            wrap.depends_on_param
+        )),
+        Value::Mapping(dep_body),
+    );
+    // condition branch (ne-only)
+    let mut cond_body = Mapping::new();
+    cond_body.insert(
+        s("condition"),
+        s(format!("${{{{ parameters.{} }}}}", wrap.condition_param)),
+    );
+    m.insert(
+        s(format!(
+            "${{{{ if ne(parameters.{}, '') }}}}",
+            wrap.condition_param
+        )),
+        Value::Mapping(cond_body),
+    );
 }
 
 fn lower_job(job: &Job, stage: Option<&StageId>, graph: &Graph) -> Result<Value> {
@@ -396,18 +466,22 @@ fn lower_job(job: &Job, stage: Option<&StageId>, graph: &Graph) -> Result<Value>
     let mut m = Mapping::new();
     m.insert(s("job"), s(job.id.as_str()));
     m.insert(s("displayName"), s(&job.display_name));
-    if !job.depends_on.is_empty() {
-        // Single-dep emits as a scalar `dependsOn: <name>` (matching
-        // base.yml). Multi-dep emits as a sequence.
-        if job.depends_on.len() == 1 {
-            m.insert(s("dependsOn"), s(job.depends_on[0].as_str()));
-        } else {
-            let deps: Vec<Value> = job.depends_on.iter().map(|d| s(d.as_str())).collect();
-            m.insert(s("dependsOn"), Value::Sequence(deps));
+    if let Some(wrap) = &job.template_dependson_wrap {
+        lower_job_template_wrap(&mut m, job, wrap, &ctx)?;
+    } else {
+        if !job.depends_on.is_empty() {
+            // Single-dep emits as a scalar `dependsOn: <name>` (matching
+            // base.yml). Multi-dep emits as a sequence.
+            if job.depends_on.len() == 1 {
+                m.insert(s("dependsOn"), s(job.depends_on[0].as_str()));
+            } else {
+                let deps: Vec<Value> = job.depends_on.iter().map(|d| s(d.as_str())).collect();
+                m.insert(s("dependsOn"), Value::Sequence(deps));
+            }
         }
-    }
-    if let Some(cond) = &job.condition {
-        m.insert(s("condition"), s(&lower_condition(&ctx.cond_ctx(), cond)?));
+        if let Some(cond) = &job.condition {
+            m.insert(s("condition"), s(&lower_condition(&ctx.cond_ctx(), cond)?));
+        }
     }
     if let Some(t) = job.timeout {
         m.insert(s("timeoutInMinutes"), Value::from(minutes_ceil(t)));
@@ -419,6 +493,157 @@ fn lower_job(job: &Job, stage: Option<&StageId>, graph: &Graph) -> Result<Value>
     }
     m.insert(s("steps"), Value::Sequence(steps));
     Ok(Value::Mapping(m))
+}
+
+/// Emit dual-branch `${{ if eq/ne(length(parameters.<X>), 0) }}` for
+/// `dependsOn:` and `${{ if eq/ne(parameters.<Y>, '') }}` for
+/// `condition:` to merge external template-parameter values with the
+/// job's internal `depends_on` / `condition`.
+///
+/// Layout matches `common::generate_agentic_depends_on` for the
+/// `target: job` branch (see `src/data/job-base.yml`):
+///
+/// - When internal `depends_on` is non-empty:
+///   - `eq` branch → `dependsOn: <single>` (scalar) or
+///     `dependsOn: [<list>]` (sequence).
+///   - `ne` branch → list starting with internal deps, then
+///     `${{ each d in parameters.<X> }}: - ${{ d }}`.
+/// - When internal `depends_on` is empty:
+///   - `ne`-only branch → `dependsOn: ${{ parameters.<X> }}`.
+///
+/// Condition mirrors: when internal is set, the eq-branch is the
+/// internal body verbatim and the ne-branch appends
+/// `${{ parameters.<Y> }}` into the same `and(…)`. When internal is
+/// unset, only the ne-branch emits `condition: ${{ parameters.<Y> }}`.
+fn lower_job_template_wrap(
+    m: &mut Mapping,
+    job: &Job,
+    wrap: &TemplateDependsOnWrap,
+    ctx: &LoweringContext<'_>,
+) -> Result<()> {
+    // ─── dependsOn ────────────────────────────────────────────────
+    if !job.depends_on.is_empty() {
+        // eq branch — internal only
+        let mut eq_body = Mapping::new();
+        if job.depends_on.len() == 1 {
+            eq_body.insert(s("dependsOn"), s(job.depends_on[0].as_str()));
+        } else {
+            let deps: Vec<Value> = job.depends_on.iter().map(|d| s(d.as_str())).collect();
+            eq_body.insert(s("dependsOn"), Value::Sequence(deps));
+        }
+        m.insert(
+            s(format!(
+                "${{{{ if eq(length(parameters.{}), 0) }}}}",
+                wrap.depends_on_param
+            )),
+            Value::Mapping(eq_body),
+        );
+        // ne branch — list with internal deps then each external d
+        let mut ne_body = Mapping::new();
+        let mut seq: Vec<Value> =
+            job.depends_on.iter().map(|d| s(d.as_str())).collect();
+        // The `${{ each d in parameters.X }}: - ${{ d }}` pattern is a
+        // template-expression nested mapping. We encode it as a
+        // mapping whose key is the `${{ each ... }}` expression and
+        // value is a one-element sequence `[${{ d }}]`.
+        let mut each_inner = Mapping::new();
+        each_inner.insert(
+            s(format!(
+                "${{{{ each d in parameters.{} }}}}",
+                wrap.depends_on_param
+            )),
+            Value::Sequence(vec![s("${{ d }}")]),
+        );
+        seq.push(Value::Mapping(each_inner));
+        ne_body.insert(s("dependsOn"), Value::Sequence(seq));
+        m.insert(
+            s(format!(
+                "${{{{ if ne(length(parameters.{}), 0) }}}}",
+                wrap.depends_on_param
+            )),
+            Value::Mapping(ne_body),
+        );
+    } else {
+        // ne-only branch — caller value used as the entire dependsOn.
+        let mut ne_body = Mapping::new();
+        ne_body.insert(
+            s("dependsOn"),
+            s(format!("${{{{ parameters.{} }}}}", wrap.depends_on_param)),
+        );
+        m.insert(
+            s(format!(
+                "${{{{ if ne(length(parameters.{}), 0) }}}}",
+                wrap.depends_on_param
+            )),
+            Value::Mapping(ne_body),
+        );
+    }
+
+    // ─── condition ────────────────────────────────────────────────
+    if let Some(internal_cond) = &job.condition {
+        let internal_str = lower_condition(&ctx.cond_ctx(), internal_cond)?;
+        // eq branch — internal condition verbatim.
+        let mut eq_body = Mapping::new();
+        eq_body.insert(s("condition"), s(&internal_str));
+        m.insert(
+            s(format!(
+                "${{{{ if eq(parameters.{}, '') }}}}",
+                wrap.condition_param
+            )),
+            Value::Mapping(eq_body),
+        );
+        // ne branch — internal condition with caller condition
+        // appended into the same `and(…)` body. We extract the body
+        // of the internal `and(...)` if present, otherwise wrap it.
+        let merged = merge_condition_with_template_param(
+            &internal_str,
+            &wrap.condition_param,
+        );
+        let mut ne_body = Mapping::new();
+        ne_body.insert(s("condition"), s(&merged));
+        m.insert(
+            s(format!(
+                "${{{{ if ne(parameters.{}, '') }}}}",
+                wrap.condition_param
+            )),
+            Value::Mapping(ne_body),
+        );
+    } else {
+        // ne-only branch — caller value used as the entire condition.
+        let mut ne_body = Mapping::new();
+        ne_body.insert(
+            s("condition"),
+            s(format!("${{{{ parameters.{} }}}}", wrap.condition_param)),
+        );
+        m.insert(
+            s(format!(
+                "${{{{ if ne(parameters.{}, '') }}}}",
+                wrap.condition_param
+            )),
+            Value::Mapping(ne_body),
+        );
+    }
+    Ok(())
+}
+
+/// Append a `${{ parameters.<name> }}` clause into an existing ADO
+/// condition string. When the input is already an `and(<args>)`
+/// expression, the parameter is appended as an additional arg
+/// (`and(<args>, ${{ parameters.<name> }})`). Otherwise the input is
+/// wrapped: `and(<expr>, ${{ parameters.<name> }})`.
+///
+/// Mirrors the merge logic in
+/// `common::generate_agentic_depends_on`'s condition body.
+fn merge_condition_with_template_param(internal: &str, param_name: &str) -> String {
+    let trimmed = internal.trim();
+    let template_ref = format!("${{{{ parameters.{} }}}}", param_name);
+    if let Some(rest) = trimmed.strip_prefix("and(")
+        && let Some(inner) = rest.strip_suffix(')')
+    {
+        format!("and({}, {})", inner, template_ref)
+    } else {
+        format!("and({}, {})", trimmed, template_ref)
+    }
 }
 
 fn lower_pool(pool: &Pool) -> Value {
@@ -1075,7 +1300,7 @@ mod tests {
             name: "P".into(),
             parameters: vec![Parameter {
                 name: "clearMemory".into(),
-                display_name: "Clear agent memory".into(),
+                display_name: Some("Clear agent memory".into()),
                 kind: ParameterKind::Boolean,
                 default: ParameterDefault::Bool(false),
                 values: Vec::new(),
@@ -1326,6 +1551,252 @@ mod tests {
         assert!(yaml.contains("value: hello"));
         assert!(yaml.contains("name: SECRET_VAR"));
         assert!(yaml.contains("isSecret: true"));
+    }
+
+    // ─── Template shape wrapping ──────────────────────────────────
+
+    /// `PipelineShape::StageTemplate` skips `name:`, `resources:`,
+    /// and triggers; the body emits as a single `stages:` block.
+    #[test]
+    fn lower_stage_template_omits_name_resources_triggers() {
+        use crate::compile::ir::stage::Stage;
+        use crate::compile::ir::{
+            CiTrigger, PrTrigger, RepositoryResource, Schedule, TemplateParams,
+        };
+        let stage = Stage::new(
+            crate::compile::ir::ids::StageId::new("Main").unwrap(),
+            "Main",
+        );
+        let p = Pipeline {
+            // Even though name/resources/triggers are populated, the
+            // template shape suppresses them.
+            name: "should-not-appear".into(),
+            parameters: Vec::new(),
+            resources: Resources {
+                repositories: vec![RepositoryResource::SelfRepo {
+                    clean: true,
+                    submodules: false,
+                }],
+                pipelines: Vec::new(),
+            },
+            triggers: Triggers {
+                schedules: vec![Schedule {
+                    cron: "0 0 * * *".into(),
+                    display_name: "Daily".into(),
+                    branches_include: vec!["main".into()],
+                    always: true,
+                }],
+                pr: Some(PrTrigger {
+                    branches_include: Vec::new(),
+                    branches_exclude: Vec::new(),
+                    paths_include: Vec::new(),
+                    paths_exclude: Vec::new(),
+                    disabled: true,
+                }),
+                ci: Some(CiTrigger { disabled: true }),
+            },
+            variables: Vec::new(),
+            body: PipelineBody::Stages(vec![stage]),
+            shape: PipelineShape::StageTemplate {
+                external_params: TemplateParams::default(),
+            },
+        };
+        let g = Graph::default();
+        let yaml = serde_yaml::to_string(&lower_with_graph(&p, &g).unwrap()).unwrap();
+        assert!(
+            !yaml.contains("name:") || !yaml.contains("should-not-appear"),
+            "template shape must not emit top-level `name:`, got: {yaml}"
+        );
+        assert!(!yaml.contains("resources:"), "template shape skips resources, got: {yaml}");
+        assert!(!yaml.contains("schedules:"), "template shape skips schedules, got: {yaml}");
+        assert!(!yaml.contains("pr:"), "template shape skips pr, got: {yaml}");
+        assert!(!yaml.contains("trigger:"), "template shape skips trigger, got: {yaml}");
+        assert!(yaml.contains("stages:"), "must emit `stages:`, got: {yaml}");
+    }
+
+    /// `PipelineShape::JobTemplate` skips the same fields and emits
+    /// the body as a flat top-level `jobs:` list.
+    #[test]
+    fn lower_job_template_omits_name_resources_triggers() {
+        use crate::compile::ir::TemplateParams;
+        let job_ = Job::new(JobId::new("Agent").unwrap(), "Agent", Pool::VmImage("u".into()));
+        let p = Pipeline {
+            name: "x".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers::default(),
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(vec![job_]),
+            shape: PipelineShape::JobTemplate {
+                external_params: TemplateParams::default(),
+            },
+        };
+        let g = Graph::default();
+        let yaml = serde_yaml::to_string(&lower_with_graph(&p, &g).unwrap()).unwrap();
+        assert!(!yaml.starts_with("name:"), "must skip top-level name, got: {yaml}");
+        assert!(yaml.contains("jobs:"), "must emit jobs:, got: {yaml}");
+    }
+
+    /// `Stage::external_params_wrap` emits the `${{ if ne(... }}:`
+    /// keys for caller-supplied `dependsOn` / `condition`.
+    #[test]
+    fn lower_stage_emits_external_params_wrap_keys() {
+        use crate::compile::ir::stage::{Stage, StageExternalParamsWrap};
+        let mut stage = Stage::new(
+            crate::compile::ir::ids::StageId::new("Main").unwrap(),
+            "Main Stage",
+        );
+        stage.external_params_wrap = Some(StageExternalParamsWrap {
+            depends_on_param: "dependsOn".into(),
+            condition_param: "condition".into(),
+        });
+        let g = Graph::default();
+        let v = lower_stage(&stage, &g).unwrap();
+        let yaml = serde_yaml::to_string(&v).unwrap();
+        assert!(
+            yaml.contains("${{ if ne(length(parameters.dependsOn), 0) }}:"),
+            "must emit dependsOn ne-branch key, got: {yaml}"
+        );
+        assert!(
+            yaml.contains("dependsOn: ${{ parameters.dependsOn }}"),
+            "must emit caller-deferred dependsOn value, got: {yaml}"
+        );
+        assert!(
+            yaml.contains("${{ if ne(parameters.condition, '') }}:"),
+            "must emit condition ne-branch key, got: {yaml}"
+        );
+        assert!(
+            yaml.contains("condition: ${{ parameters.condition }}"),
+            "must emit caller-deferred condition value, got: {yaml}"
+        );
+    }
+
+    /// `Job::template_dependson_wrap` with internal `Setup` dep emits
+    /// the dual-branch `${{ if eq(length(parameters.dependsOn), 0) }}`
+    /// blocks merging internal + caller deps.
+    #[test]
+    fn lower_job_emits_template_wrap_dual_branch_with_internal_setup() {
+        use crate::compile::ir::job::TemplateDependsOnWrap;
+        let setup = JobId::new("Setup").unwrap();
+        let mut agent = Job::new(JobId::new("Agent").unwrap(), "Agent", Pool::VmImage("u".into()));
+        agent.depends_on = vec![setup.clone()];
+        agent.template_dependson_wrap = Some(TemplateDependsOnWrap {
+            depends_on_param: "dependsOn".into(),
+            condition_param: "condition".into(),
+        });
+        let g = Graph::default();
+        let v = lower_job(&agent, None, &g).unwrap();
+        let yaml = serde_yaml::to_string(&v).unwrap();
+        // eq-branch: scalar `dependsOn: Setup`
+        assert!(
+            yaml.contains("${{ if eq(length(parameters.dependsOn), 0) }}:"),
+            "must emit eq-branch key, got: {yaml}"
+        );
+        assert!(
+            yaml.contains("dependsOn: Setup"),
+            "eq-branch must contain `dependsOn: Setup`, got: {yaml}"
+        );
+        // ne-branch: list with Setup then each external d
+        assert!(
+            yaml.contains("${{ if ne(length(parameters.dependsOn), 0) }}:"),
+            "must emit ne-branch key, got: {yaml}"
+        );
+        assert!(
+            yaml.contains("${{ each d in parameters.dependsOn }}:"),
+            "ne-branch must contain `each d in parameters.dependsOn`, got: {yaml}"
+        );
+        assert!(
+            yaml.contains("${{ d }}"),
+            "ne-branch must contain `${{{{ d }}}}`, got: {yaml}"
+        );
+        // condition: no internal cond → ne-only branch with caller value
+        assert!(
+            yaml.contains("${{ if ne(parameters.condition, '') }}:"),
+            "must emit condition ne-branch, got: {yaml}"
+        );
+        assert!(
+            yaml.contains("condition: ${{ parameters.condition }}"),
+            "must emit caller condition, got: {yaml}"
+        );
+    }
+
+    /// `Job::template_dependson_wrap` with no internal depends_on
+    /// emits only the `ne` branch with `dependsOn: ${{ parameters.X }}`.
+    #[test]
+    fn lower_job_template_wrap_no_internal_dep_emits_ne_only() {
+        use crate::compile::ir::job::TemplateDependsOnWrap;
+        let mut agent = Job::new(JobId::new("Agent").unwrap(), "Agent", Pool::VmImage("u".into()));
+        agent.template_dependson_wrap = Some(TemplateDependsOnWrap {
+            depends_on_param: "dependsOn".into(),
+            condition_param: "condition".into(),
+        });
+        let g = Graph::default();
+        let v = lower_job(&agent, None, &g).unwrap();
+        let yaml = serde_yaml::to_string(&v).unwrap();
+        assert!(
+            !yaml.contains("${{ if eq(length(parameters.dependsOn), 0) }}:"),
+            "must NOT emit eq-branch when no internal dep, got: {yaml}"
+        );
+        assert!(
+            yaml.contains("${{ if ne(length(parameters.dependsOn), 0) }}:"),
+            "must emit ne-branch key, got: {yaml}"
+        );
+        assert!(
+            yaml.contains("dependsOn: ${{ parameters.dependsOn }}"),
+            "must emit caller-deferred dependsOn value, got: {yaml}"
+        );
+    }
+
+    /// `Job::template_dependson_wrap` with internal `and(...)` condition
+    /// merges the caller's `${{ parameters.condition }}` into the same
+    /// `and(...)` body.
+    #[test]
+    fn lower_job_template_wrap_merges_internal_and_condition_with_caller() {
+        use crate::compile::ir::condition::Condition;
+        use crate::compile::ir::job::TemplateDependsOnWrap;
+        let mut agent = Job::new(JobId::new("Agent").unwrap(), "Agent", Pool::VmImage("u".into()));
+        agent.condition = Some(Condition::And(vec![
+            Condition::Succeeded,
+            Condition::Custom("eq(variables['x'], 'y')".into()),
+        ]));
+        agent.template_dependson_wrap = Some(TemplateDependsOnWrap {
+            depends_on_param: "dependsOn".into(),
+            condition_param: "condition".into(),
+        });
+        let g = Graph::default();
+        let v = lower_job(&agent, None, &g).unwrap();
+        let yaml = serde_yaml::to_string(&v).unwrap();
+        // eq-branch: internal verbatim
+        assert!(
+            yaml.contains("${{ if eq(parameters.condition, '') }}:"),
+            "must emit condition eq-branch, got: {yaml}"
+        );
+        // ne-branch: internal + caller appended inside `and(...)`
+        assert!(
+            yaml.contains("${{ if ne(parameters.condition, '') }}:"),
+            "must emit condition ne-branch, got: {yaml}"
+        );
+        assert!(
+            yaml.contains("${{ parameters.condition }}"),
+            "ne-branch must contain caller condition ref, got: {yaml}"
+        );
+        // The merged ne-branch must keep the internal succeeded() / x=y.
+        assert!(
+            yaml.contains("succeeded()") && yaml.contains("eq(variables['x'], 'y')"),
+            "merged condition must keep internal parts, got: {yaml}"
+        );
+    }
+
+    #[test]
+    fn merge_condition_handles_and_wrapping() {
+        assert_eq!(
+            merge_condition_with_template_param("and(succeeded(), eq(a, b))", "condition"),
+            "and(succeeded(), eq(a, b), ${{ parameters.condition }})"
+        );
+        assert_eq!(
+            merge_condition_with_template_param("succeeded()", "condition"),
+            "and(succeeded(), ${{ parameters.condition }})"
+        );
     }
 }
 

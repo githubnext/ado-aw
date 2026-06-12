@@ -25,6 +25,33 @@ pub struct Job {
     /// value as a manual override.
     pub depends_on: Vec<JobId>,
     pub condition: Option<Condition>,
+    /// When set, the lowering pass emits dual-branch
+    /// `${{ if eq(length(parameters.<X>), 0) }}` /
+    /// `${{ if ne(length(parameters.<X>), 0) }}` blocks for both
+    /// `dependsOn:` and `condition:` so callers can pass external
+    /// values at the template-invocation site that merge with the
+    /// job's internal `depends_on` / `condition`. Used by the Agent
+    /// job in `target: job`.
+    ///
+    /// The internal `depends_on` list is emitted as the "caller-
+    /// omitted" branch and prefixed onto the caller-supplied list in
+    /// the "caller-provided" branch. The internal `condition` is
+    /// emitted as the "caller-omitted" branch body; the caller's
+    /// condition is appended into the same `and(…)` body in the
+    /// "caller-provided" branch.
+    pub template_dependson_wrap: Option<TemplateDependsOnWrap>,
+}
+
+/// Template-parameter wrap for a [`Job`]. See
+/// [`Job::template_dependson_wrap`].
+#[derive(Debug, Clone)]
+pub struct TemplateDependsOnWrap {
+    /// Name of the template parameter carrying the external
+    /// `dependsOn` value (always `"dependsOn"` today).
+    pub depends_on_param: String,
+    /// Name of the template parameter carrying the external
+    /// `condition` value (always `"condition"` today).
+    pub condition_param: String,
 }
 
 /// ADO job pool. Captures the two shapes ado-aw uses today
@@ -56,6 +83,7 @@ impl Job {
             steps: Vec::new(),
             depends_on: Vec::new(),
             condition: None,
+            template_dependson_wrap: None,
         }
     }
 

@@ -119,7 +119,11 @@ pub struct TemplateParams {
 #[derive(Debug, Clone)]
 pub struct Parameter {
     pub name: String,
-    pub display_name: String,
+    /// When `None`, the parameter is emitted without a `displayName:`
+    /// key. Used for auto-injected template parameters (`dependsOn`,
+    /// `condition`) that surface only as plumbing — they don't appear
+    /// in the ADO UI parameter dropdown.
+    pub display_name: Option<String>,
     pub kind: ParameterKind,
     pub default: ParameterDefault,
     /// Optional `values:` enumeration — restricts the parameter to a
@@ -133,6 +137,10 @@ pub enum ParameterKind {
     Boolean,
     String,
     Number,
+    /// ADO `object` type — accepts arbitrary YAML structures (lists,
+    /// mappings, scalars). Used by template targets for
+    /// `parameters.dependsOn` which defaults to `[]`.
+    Object,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,6 +148,10 @@ pub enum ParameterDefault {
     Bool(bool),
     String(String),
     Number(i64),
+    /// YAML sequence default (e.g. the empty list `[]` for
+    /// `parameters.dependsOn`). Emitted as a flow / block sequence
+    /// by the lowering pass.
+    Sequence(Vec<serde_yaml::Value>),
     None,
 }
 
