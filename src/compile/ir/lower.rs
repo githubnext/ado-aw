@@ -1005,15 +1005,7 @@ fn lower_env_value(ctx: &LoweringContext<'_>, v: &EnvValue) -> Result<String> {
         EnvValue::StepOutput(r) => Ok(lower_outputref_for(ctx, r)?),
         EnvValue::Coalesce(children) => {
             let mut parts: Vec<String> = Vec::with_capacity(children.len() + 1);
-            for c in children {
-                // Inside Coalesce, AdoMacro / PipelineVar / Secret /
-                // StepOutput lower to ADO **expression** atoms (not
-                // macro-form $()). Variables: `variables['Name']`;
-                // step outputs: same reference syntax as outside,
-                // but without the `$()` wrap because we're already
-                // inside `$[ … ]`.
-                parts.push(lower_env_value_as_expr_atom(ctx, c)?);
-            }
+            flatten_coalesce_into(ctx, children, &mut parts)?;
             parts.push("''".to_string());
             Ok(format!("$[ coalesce({}) ]", parts.join(", ")))
         }
@@ -1041,6 +1033,29 @@ fn lower_env_value(ctx: &LoweringContext<'_>, v: &EnvValue) -> Result<String> {
     }
 }
 
+/// Flatten a [`EnvValue::Coalesce`]'s children into a flat list of
+/// lowered atom strings. Nested `Coalesce` values are spliced inline
+/// (recursively) rather than emitted as nested `coalesce(...)` calls.
+///
+/// Inside Coalesce, `AdoMacro` / `PipelineVar` / `Secret` / `StepOutput`
+/// lower to ADO **expression** atoms (not macro-form `$()`).
+/// Variables: `variables['Name']`; step outputs: the same reference
+/// syntax as outside, but without the `$()` wrap because we're already
+/// inside a `$[ … ]` runtime expression.
+fn flatten_coalesce_into(
+    ctx: &LoweringContext<'_>,
+    children: &[EnvValue],
+    out: &mut Vec<String>,
+) -> Result<()> {
+    for c in children {
+        match c {
+            EnvValue::Coalesce(inner) => flatten_coalesce_into(ctx, inner, out)?,
+            other => out.push(lower_env_value_as_expr_atom(ctx, other)?),
+        }
+    }
+    Ok(())
+}
+
 fn yaml_value_to_scalar_string(v: &serde_yaml::Value) -> String {
     match v {
         serde_yaml::Value::String(s) => s.clone(),
@@ -1065,13 +1080,13 @@ fn lower_env_value_as_expr_atom(ctx: &LoweringContext<'_>, v: &EnvValue) -> Resu
         EnvValue::Secret(name) => Ok(format!("variables['{name}']")),
         EnvValue::StepOutput(r) => Ok(lower_outputref_for_expr(ctx, r)?),
         EnvValue::Coalesce(children) => {
-            // Flatten nested Coalesce: their children appear inline
-            // in the enclosing one's argument list. This matches the
-            // documented behaviour in `EnvValue` doc-comments.
+            // Flatten nested Coalesce so the emitted form is a single
+            // flat `coalesce(...)` call, matching the documented
+            // behaviour in `EnvValue::Coalesce`'s doc-comment. ADO
+            // would accept the nested form too, but flattening keeps
+            // the lowered string canonical.
             let mut parts: Vec<String> = Vec::with_capacity(children.len());
-            for c in children {
-                parts.push(lower_env_value_as_expr_atom(ctx, c)?);
-            }
+            flatten_coalesce_into(ctx, children, &mut parts)?;
             // Don't wrap in `$[ … ]` again — we are already inside one.
             Ok(format!("coalesce({})", parts.join(", ")))
         }
@@ -1249,6 +1264,60 @@ mod tests {
         assert_eq!(
             lower_env_value(&ctx, &v).unwrap(),
             "$[ coalesce(variables['System.PullRequest.PullRequestId'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_ID'], '') ]"
+        );
+    }
+
+    /// Nested `EnvValue::Coalesce` values flatten into a single outer
+    /// `coalesce(...)` call rather than emitting nested calls. ADO
+    /// accepts either form, but the IR's documented contract is that
+    /// the lowered form is flat.
+    #[test]
+    fn lower_env_value_coalesce_flattens_nested_children() {
+        let synth = StepId::new("synthPr").unwrap();
+        let producer = Step::Bash(
+            BashStep::new("Setup", "echo s")
+                .with_id(synth.clone())
+                .with_output(OutputDecl::new("AW_SYNTHETIC_PR_ID")),
+        );
+        let mut setup = Job::new(JobId::new("Setup").unwrap(), "Setup", Pool::VmImage("u".into()));
+        setup.push_step(producer);
+        let agent_job = Job::new(JobId::new("Agent").unwrap(), "Agent", Pool::VmImage("u".into()));
+        let p = Pipeline {
+            name: "t".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers::default(),
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(vec![setup, agent_job]),
+            shape: PipelineShape::Standalone,
+        };
+        let g = super::super::graph::build_graph(&p).unwrap();
+        let agent_id = JobId::new("Agent").unwrap();
+        let ctx = LoweringContext {
+            graph: &g,
+            stage: None,
+            job: &agent_id,
+        };
+
+        // Outer Coalesce wrapping an inner Coalesce — the inner
+        // children must be spliced into the outer argument list, not
+        // emitted as a nested `coalesce(...)` call.
+        let v = EnvValue::coalesce(vec![
+            EnvValue::ado_macro("System.PullRequest.PullRequestId").unwrap(),
+            EnvValue::coalesce(vec![
+                EnvValue::step_output(OutputRef::new(synth.clone(), "AW_SYNTHETIC_PR_ID")),
+                EnvValue::literal("fallback"),
+            ]),
+        ]);
+        let lowered = lower_env_value(&ctx, &v).unwrap();
+        assert_eq!(
+            lowered,
+            "$[ coalesce(variables['System.PullRequest.PullRequestId'], dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_ID'], 'fallback', '') ]",
+            "nested Coalesce must flatten; got: {lowered}"
+        );
+        assert!(
+            !lowered.contains("coalesce(coalesce("),
+            "flattened form must not contain a nested coalesce(...) call"
         );
     }
 

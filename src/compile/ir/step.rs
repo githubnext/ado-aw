@@ -83,9 +83,11 @@ pub struct BashStep {
     pub script: String,
     /// Environment-variable bindings.
     pub env: IndexMap<String, EnvValue>,
-    /// Outputs declared by this step. The auto-`isOutput=true`
-    /// promotion happens during lowering when at least one
-    /// cross-step reader is found.
+    /// Outputs declared by this step. See [`OutputDecl`] for the
+    /// `isOutput=true` contract: the graph pass marks each decl with
+    /// at least one cross-step reader via `auto_is_output`, but the
+    /// producer's bash body is responsible for emitting the
+    /// `##vso[task.setvariable …;isOutput=true]` directive itself.
     pub outputs: Vec<OutputDecl>,
     /// ADO `condition:`. `None` means "no explicit condition";
     /// ADO defaults to `succeeded()`.

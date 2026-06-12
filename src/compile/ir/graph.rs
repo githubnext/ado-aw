@@ -78,9 +78,12 @@ pub struct Graph {
     /// `(consumer_stage, producer_stage)` edges.
     pub stage_edges: BTreeSet<(StageId, StageId)>,
     /// For each producer step, the set of declared outputs that have
-    /// at least one cross-step reader. Producers should auto-emit
-    /// `isOutput=true` on the matching `##vso[task.setvariable]`
-    /// lines.
+    /// at least one cross-step reader. ADO requires `isOutput=true`
+    /// on the matching `##vso[task.setvariable]` directive for the
+    /// output to be visible to **any** cross-step consumer; producers
+    /// are responsible for emitting that flag — the IR does not
+    /// rewrite step bodies. See [`super::output::OutputDecl`] for the
+    /// full contract.
     ///
     /// Populated by [`build_graph`] as a side-effect of walking
     /// every consumer's `OutputRef`s. Same-job references DO count

@@ -220,20 +220,10 @@ pub fn synthetic_pr_step_typed(spec_b64: &str) -> Result<BashStep> {
 /// contributor) use the same OutputRef and the lowering pass
 /// resolves the correct ADO reference syntax based on consumer
 /// location.
-/// Outputs declared by the `synthPr` step. Consumers in the same
-/// job (e.g. `prGate`) reference these via `OutputRef::new(StepId::new("synthPr")?, NAME)`;
-/// cross-job consumers (e.g. the Agent-job `exec-context-pr`
-/// contributor) use the same OutputRef and the lowering pass
-/// resolves the correct ADO reference syntax based on consumer
-/// location.
 ///
 /// The list reflects every `setOutput` the runtime
 /// `exec-context-pr-synth.js` bundle emits (see that file's "Variables
-/// emitted" docblock). The `AW_SYNTHETIC_PR_*` names below the unified
-/// `AW_PR_*` block are legacy aliases retained for back-compat with
-/// the typed gate-step emitter (`build_gate_step_typed` in
-/// `filter_ir.rs`) until those references migrate to the unified
-/// namespace.
+/// emitted" docblock).
 pub const SYNTH_PR_OUTPUT_NAMES: &[&str] = &[
     // Unified `AW_PR_*` namespace introduced in PR #972 — the
     // runtime bundle emits these via both `setOutput` (cross-job
@@ -247,14 +237,6 @@ pub const SYNTH_PR_OUTPUT_NAMES: &[&str] = &[
     // Always-emitted control flags.
     "AW_SYNTHETIC_PR",
     "AW_SYNTHETIC_PR_SKIP",
-    // Legacy `AW_SYNTHETIC_PR_*` identifier names. The runtime no
-    // longer emits these (see PR #972) but the typed gate-step
-    // emitter in `filter_ir.rs::build_gate_step_typed` still
-    // references them via OutputRef. Keep them declared so graph
-    // validation passes; emitted values are always empty at runtime.
-    "AW_SYNTHETIC_PR_ID",
-    "AW_SYNTHETIC_PR_SOURCEBRANCH",
-    "AW_SYNTHETIC_PR_TARGETBRANCH",
 ];
 
 impl CompilerExtension for AdoScriptExtension {
@@ -1122,9 +1104,6 @@ mod tests {
                         "AW_PR_IS_DRAFT",
                         "AW_SYNTHETIC_PR",
                         "AW_SYNTHETIC_PR_SKIP",
-                        "AW_SYNTHETIC_PR_ID",
-                        "AW_SYNTHETIC_PR_SOURCEBRANCH",
-                        "AW_SYNTHETIC_PR_TARGETBRANCH",
                     ]
                 );
                 // Condition is a typed And(Succeeded, Ne(BuildReason, "PullRequest")).

@@ -26,13 +26,28 @@ use super::ids::{JobId, StageId, StepId};
 
 /// A named output exported by a step.
 ///
-/// The compiler auto-emits `isOutput=true` on the underlying
-/// `##vso[task.setvariable]` line iff at least one cross-step
-/// consumer references this name via [`OutputRef`]. The graph pass
-/// (see [`super::graph`]) populates
-/// [`OutputDecl::auto_is_output`] so emitters can consult it; the
-/// actual bash rewrite is performed at emit time by the producer's
-/// extension.
+/// ADO requires `isOutput=true` on the underlying
+/// `##vso[task.setvariable]` line for an output to be visible to
+/// **any** cross-step consumer — same-job (`$(stepName.X)`),
+/// cross-job (`dependencies.<job>.outputs[...]`), or cross-stage
+/// (`stageDependencies.<stage>.<job>.outputs[...]`). The graph pass
+/// (see [`super::graph`]) detects which declared outputs have at
+/// least one cross-step reader and sets
+/// [`OutputDecl::auto_is_output`] to `true` on those decls.
+///
+/// **`auto_is_output` is an informational signal, not an emit-time
+/// rewrite.** The IR does **not** introspect or rewrite the producer's
+/// bash body — extension authors are responsible for ensuring the
+/// emitted `##vso[task.setvariable variable=NAME …]` line includes
+/// `isOutput=true` whenever the output is consumed cross-step.
+/// Producers that emit outputs out of band (e.g. by invoking a JS
+/// bundle that calls the ADO REST API or shells the directive
+/// itself) are responsible for the same guarantee.
+///
+/// Forgetting `isOutput=true` is a silent-failure mode at runtime
+/// (all cross-step consumers read empty values). See the synthPr
+/// regression history (memory: `azure devops`, PR #956, PR #975)
+/// for the empirical cost of getting this wrong.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputDecl {
     /// The output variable name (the `variable=` value in
@@ -41,12 +56,14 @@ pub struct OutputDecl {
     /// Whether the producing step also marks the variable as a secret
     /// (`issecret=true`). Independent of cross-step visibility.
     pub is_secret: bool,
-    /// Set by the graph pass to `true` when at least one cross-step
-    /// consumer references this output. Producers should emit
-    /// `isOutput=true` on the corresponding `##vso[task.setvariable]`
-    /// line iff this flag is set. Defaults to `false` because newly
-    /// constructed `OutputDecl`s have not yet been seen by the graph
-    /// pass.
+    /// Set by the graph pass (see
+    /// [`super::graph::Graph::outputs_needing_is_output`]) to `true`
+    /// when at least one cross-step consumer references this output.
+    /// Informational signal only — the IR does not introspect or
+    /// rewrite the producer's step body, so extension authors must
+    /// ensure `isOutput=true` is present in the emitted
+    /// `##vso[task.setvariable]` directive (or in the equivalent
+    /// out-of-band emit path).
     pub auto_is_output: bool,
 }
 
