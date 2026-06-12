@@ -270,10 +270,9 @@ fn add_edges_from_job(
                     }
                 }
             }
-            // `RawYaml` carries opaque pre-formatted YAML; the graph
-            // pass cannot introspect it. Per-extension `port-*`
-            // commits replace `RawYaml` with typed Bash/Task variants
-            // before any cross-step ref needs to flow through.
+            // `RawYaml` carries opaque user-authored YAML; the graph
+            // pass cannot introspect it. Producers that need
+            // cross-step refs must use a typed Bash/Task variant.
             Step::RawYaml(_) => {}
         }
     }

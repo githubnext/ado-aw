@@ -211,7 +211,7 @@ mod tests {
         )
     }
 
-    // ── Typed-IR `prepare_step_typed` shape tests (port-exec-context) ──
+    // ── Typed-IR `prepare_step_typed` shape tests ──
 
     /// Synth-active: the typed prepare step's env block must carry
     /// typed `Coalesce(AdoMacro, StepOutput)` for `SYSTEM_PULLREQUEST_*`

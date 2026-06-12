@@ -21,8 +21,8 @@
 //! model arbitrary user-authored ADO step shapes.
 //!
 //! Extension contributions arrive via
-//! [`crate::compile::extensions::Declarations`] and are typed by
-//! their per-extension `port-*` commits.
+//! [`crate::compile::extensions::Declarations`] already as typed
+//! [`Step`] values.
 //!
 //! ## Job graph
 //!
@@ -290,7 +290,10 @@ pub(crate) fn build_pipeline_context(
         ext_setup_steps.extend(decl.setup_steps);
         ext_agent_prepare.extend(decl.agent_prepare_steps);
         // Prompt supplements append after the per-extension prepare
-        // steps (matches `generate_prepare_steps` ordering).
+        // steps. `wrap_prompt_append` returns a YAML string for a
+        // `bash: cat >> prompt …` step; emit as `Step::RawYaml`
+        // (typing it would mean recreating the wrap helper as a typed
+        // builder for no concrete benefit — the bash body is fixed).
         if let Some(prompt) = decl.prompt_supplement {
             ext_agent_prepare.push(Step::RawYaml(
                 crate::compile::extensions::wrap_prompt_append(&prompt, ext.name())?,
@@ -416,9 +419,11 @@ pub(crate) struct StandaloneCtx {
     pub(crate) working_directory: String,
     pub(crate) trigger_repo_directory: String,
     pub(crate) compiler_version: String,
-    /// Engine install steps as a YAML string (currently `Engine::install_steps`
-    /// returns YAML). Carried through as `Step::RawYaml` until
-    /// `Engine::install_steps_typed` lands (separate commit).
+    /// Engine install steps as a YAML string (`Engine::install_steps`
+    /// returns YAML today). Lowered through `Step::RawYaml` because
+    /// it is opaque user-authored-shaped content from the engine
+    /// impl. A future `Engine::install_steps_typed` would lift this
+    /// to typed steps.
     pub(crate) engine_install_steps_yaml: String,
     pub(crate) engine_run: String,
     pub(crate) engine_run_detection: String,
@@ -688,10 +693,10 @@ fn build_setup_job(
     steps.push(checkout_self_step());
     steps.extend(ext_setup_steps.iter().cloned());
 
-    // User setup steps as RawYaml — they're arbitrary user-authored ADO YAML.
-    // When filter gates are active, the legacy `compile_shared` flow wraps
-    // these in a condition. We replicate by setting a `condition:` key on
-    // each step's RawYaml body.
+    // User setup steps as RawYaml — they're arbitrary user-authored ADO YAML
+    // that the IR does not model. When filter gates are active, gate the user
+    // steps by setting a `condition:` key on each step's mapping before lowering
+    // to RawYaml.
     let pr_filters = front_matter.pr_filters();
     let pipeline_filters = front_matter.pipeline_filters();
     let has_pr_gate = pr_filters
@@ -758,8 +763,8 @@ fn build_agent_job(
     push_raw_yaml_if_nonempty(&mut steps, &cfg.acquire_read_token);
 
     // 4. engine install steps (Copilot CLI install). YAML string from
-    //    `Engine::install_steps`; carried as RawYaml until a typed
-    //    `Engine::install_steps_typed` lands (follow-up commit).
+    //    `Engine::install_steps`; lowered through `Step::RawYaml`
+    //    until a typed `Engine::install_steps_typed` lands.
     push_raw_yaml_if_nonempty(&mut steps, &cfg.engine_install_steps_yaml);
 
     // 5. Download agentic pipeline compiler

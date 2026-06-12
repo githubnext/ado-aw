@@ -29,17 +29,16 @@ pub enum Step {
     Checkout(CheckoutStep),
     Download(DownloadStep),
     Publish(PublishStep),
-    /// Migration bridge: a pre-formatted YAML string that is emitted
-    /// verbatim into the surrounding `steps:` sequence.
-    ///
-    /// Introduced by the `extension-trait-port` commit so the new
-    /// [`super::super::extensions::Declarations`] surface can carry
-    /// today's raw `Vec<String>` step outputs through the IR
-    /// unchanged. Per-extension `port-*` commits replace `RawYaml`
-    /// instances with typed [`BashStep`] / [`TaskStep`] / etc. one
-    /// extension at a time. Removed entirely by the
-    /// `delete-deprecated-trait-aliases` commit once no
-    /// `RawYaml` instances remain.
+    /// Escape hatch for **user-authored** YAML that the IR does not
+    /// model: arbitrary `setup_steps:` / `teardown_steps:` /
+    /// `prepare_steps:` / engine `install_steps` content lifted
+    /// verbatim from the agent's front matter or from
+    /// [`crate::engine::Engine::install_steps`]. Producers live in
+    /// [`crate::compile::standalone_ir`] (search there for
+    /// `Step::RawYaml`); compiler-generated steps must use the typed
+    /// variants instead — see the header comment of
+    /// [`crate::compile::standalone_ir`] for the "no `Step::RawYaml`
+    /// from generated code" rule.
     ///
     /// The string is expected to be a complete YAML mapping (e.g.
     /// `"- bash: |\n    echo hi\n  displayName: …"`); the lowering
@@ -63,10 +62,9 @@ impl Step {
             Step::Checkout(_) => None,
             Step::Download(_) => None,
             Step::Publish(_) => None,
-            // `RawYaml` is a pre-formatted string; the IR cannot
+            // `RawYaml` is opaque user-authored YAML; the IR cannot
             // introspect any embedded `name:` key. Producers that
-            // need cross-step refs should migrate to a typed variant
-            // before that need arises.
+            // need cross-step refs must use a typed variant.
             Step::RawYaml(_) => None,
         }
     }
