@@ -19,6 +19,7 @@ mod job;
 mod onees;
 pub(crate) mod pr_filters;
 mod stage;
+mod stage_ir;
 mod standalone;
 mod standalone_ir;
 pub mod types;
