@@ -1129,7 +1129,7 @@ pub fn build_gate_spec(ctx: GateContext, checks: &[FilterCheck]) -> anyhow::Resu
 /// "not a PR build" bypass on synth-promoted builds.
 ///
 /// **Same-job synth references**: this gate step lives in the **Setup
-/// job** (`AdoScriptExtension::setup_steps` returns it), the same job
+/// job** (`AdoScriptExtension::declarations` returns it), the same job
 /// as `synthPr`. Three ADO behaviours interact here:
 ///
 /// 1. The cross-job form `dependencies.Setup.outputs['synthPr.X']` is
@@ -1152,6 +1152,7 @@ pub fn build_gate_spec(ctx: GateContext, checks: &[FilterCheck]) -> anyhow::Resu
 /// and have this step consume them via plain `$(AW_PR_*)` macros —
 /// reading the same-job regular variable that `setVar` registered.
 /// See <https://learn.microsoft.com/en-us/azure/devops/pipelines/process/variables#use-output-variables-from-tasks>.
+#[cfg(test)]
 pub fn compile_gate_step_external(
     ctx: GateContext,
     checks: &[FilterCheck],

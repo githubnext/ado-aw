@@ -1374,10 +1374,10 @@ mod tests {
 
     #[test]
     fn raw_yaml_step_round_trips_into_steps_sequence() {
-        // The RawYaml migration bridge must carry pre-formatted step
-        // YAML through the canonical normalisation: parse the body
-        // into a serde_yaml::Value, re-emit it as part of the
-        // surrounding sequence.
+        // RawYaml must carry pre-formatted step YAML through the
+        // canonical normalisation: parse the body into a
+        // serde_yaml::Value, re-emit it as part of the surrounding
+        // sequence.
         let raw = "bash: |\n  echo legacy\ndisplayName: Legacy step\n";
         let mut job = Job::new(
             JobId::new("Agent").unwrap(),
@@ -1956,4 +1956,3 @@ mod tests {
         );
     }
 }
-

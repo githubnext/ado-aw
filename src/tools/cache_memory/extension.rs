@@ -1,6 +1,4 @@
-use crate::compile::extensions::{
-    CompileContext, CompilerExtension, Declarations, ExtensionPhase,
-};
+use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 use crate::compile::ir::condition::Condition;
 use crate::compile::ir::step::{BashStep, Step, TaskStep};
 use crate::compile::types::CacheMemoryToolConfig;
@@ -31,10 +29,6 @@ impl CompilerExtension for CacheMemoryExtension {
 
     fn phase(&self) -> ExtensionPhase {
         ExtensionPhase::Tool
-    }
-
-    fn prepare_steps(&self, _ctx: &CompileContext) -> Vec<String> {
-        vec![generate_memory_download()]
     }
 
     fn prompt_supplement(&self) -> Option<String> {
@@ -86,15 +80,18 @@ You have persistent memory across runs. Your memory directory is located at `/tm
 /// safe_outputs artifact for the same pipeline+branch when
 /// `clearMemory=false`.
 fn download_previous_memory_task_step() -> TaskStep {
-    let mut t = TaskStep::new("DownloadPipelineArtifact@2", "Download previous agent memory")
-        .with_input("source", "specific")
-        .with_input("project", "$(System.TeamProject)")
-        .with_input("pipeline", "$(System.DefinitionId)")
-        .with_input("runVersion", "latestFromBranch")
-        .with_input("branchName", "$(Build.SourceBranch)")
-        .with_input("artifact", "safe_outputs")
-        .with_input("targetPath", "$(Agent.TempDirectory)/previous_memory")
-        .with_input("allowPartiallySucceededBuilds", "true");
+    let mut t = TaskStep::new(
+        "DownloadPipelineArtifact@2",
+        "Download previous agent memory",
+    )
+    .with_input("source", "specific")
+    .with_input("project", "$(System.TeamProject)")
+    .with_input("pipeline", "$(System.DefinitionId)")
+    .with_input("runVersion", "latestFromBranch")
+    .with_input("branchName", "$(Build.SourceBranch)")
+    .with_input("artifact", "safe_outputs")
+    .with_input("targetPath", "$(Agent.TempDirectory)/previous_memory")
+    .with_input("allowPartiallySucceededBuilds", "true");
     t.condition = Some(Condition::Custom(
         "eq(${{ parameters.clearMemory }}, false)".to_string(),
     ));
@@ -126,51 +123,9 @@ fn restore_previous_memory_bash_step() -> BashStep {
 fn initialize_empty_memory_bash_step() -> BashStep {
     let script = "mkdir -p /tmp/awf-tools/staging/agent_memory\n\
                   echo \"Memory cleared by pipeline parameter - starting fresh\"\n";
-    BashStep::new(
-        "Initialize empty agent memory (clearMemory=true)",
-        script,
+    BashStep::new("Initialize empty agent memory (clearMemory=true)", script).with_condition(
+        Condition::Custom("eq(${{ parameters.clearMemory }}, true)".to_string()),
     )
-    .with_condition(Condition::Custom(
-        "eq(${{ parameters.clearMemory }}, true)".to_string(),
-    ))
-}
-
-/// Generate the steps to download agent memory from the previous successful run
-/// and restore it to the staging directory.
-fn generate_memory_download() -> String {
-    r#"- task: DownloadPipelineArtifact@2
-  displayName: "Download previous agent memory"
-  condition: eq(${{ parameters.clearMemory }}, false)
-  continueOnError: true
-  inputs:
-    source: "specific"
-    project: "$(System.TeamProject)"
-    pipeline: "$(System.DefinitionId)"
-    runVersion: "latestFromBranch"
-    branchName: "$(Build.SourceBranch)"
-    artifact: "safe_outputs"
-    targetPath: "$(Agent.TempDirectory)/previous_memory"
-    allowPartiallySucceededBuilds: true
-
-- bash: |
-    mkdir -p /tmp/awf-tools/staging/agent_memory
-    if [ -d "$(Agent.TempDirectory)/previous_memory/agent_memory" ]; then
-      cp -a "$(Agent.TempDirectory)/previous_memory/agent_memory/." /tmp/awf-tools/staging/agent_memory/ 2>/dev/null || true
-      echo "Previous agent memory restored to /tmp/awf-tools/staging/agent_memory"
-      ls -laR /tmp/awf-tools/staging/agent_memory
-    else
-      echo "No previous agent memory found - empty memory directory created"
-    fi
-  displayName: "Restore previous agent memory"
-  condition: eq(${{ parameters.clearMemory }}, false)
-  continueOnError: true
-
-- bash: |
-    mkdir -p /tmp/awf-tools/staging/agent_memory
-    echo "Memory cleared by pipeline parameter - starting fresh"
-  displayName: "Initialize empty agent memory (clearMemory=true)"
-  condition: eq(${{ parameters.clearMemory }}, true)"#
-        .to_string()
 }
 
 #[cfg(test)]
@@ -184,8 +139,7 @@ mod tests {
 
     /// Locks the `declarations()` override: must return exactly three
     /// typed steps (Task + two Bash) in the documented order, with
-    /// the right conditions on each. Crucially, no `Step::RawYaml`
-    /// migration-bridge value — every step is typed.
+    /// the right conditions on each. Every step is typed.
     #[test]
     fn declarations_returns_three_typed_steps_with_clear_memory_conditions() {
         let (fm, _) = parse_markdown("---\nname: t\ndescription: x\n---\n").unwrap();
@@ -198,7 +152,10 @@ mod tests {
             Step::Task(t) => {
                 assert_eq!(t.task, "DownloadPipelineArtifact@2");
                 assert_eq!(t.display_name, "Download previous agent memory");
-                assert_eq!(t.inputs.get("artifact").map(String::as_str), Some("safe_outputs"));
+                assert_eq!(
+                    t.inputs.get("artifact").map(String::as_str),
+                    Some("safe_outputs")
+                );
                 assert!(t.continue_on_error);
                 match t.condition.as_ref().expect("condition required") {
                     Condition::Custom(s) => {
@@ -227,7 +184,10 @@ mod tests {
 
         match &decl.agent_prepare_steps[2] {
             Step::Bash(b) => {
-                assert_eq!(b.display_name, "Initialize empty agent memory (clearMemory=true)");
+                assert_eq!(
+                    b.display_name,
+                    "Initialize empty agent memory (clearMemory=true)"
+                );
                 assert!(b.script.contains("Memory cleared by pipeline parameter"));
                 match b.condition.as_ref().expect("condition required") {
                     Condition::Custom(s) => {

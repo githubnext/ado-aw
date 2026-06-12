@@ -2247,7 +2247,7 @@ pub fn generate_awf_mounts(extensions: &[super::extensions::Extension]) -> Strin
     // either `--mount /opt/az:/opt/az:ro --mount /usr/bin/az:/usr/bin/az:ro`
     // (when the runner has azure-cli installed) or to nothing (when it
     // doesn't). The detection + setvariable happens in
-    // `AzureCliExtension::prepare_steps`. This avoids static bind-mounts
+    // `AzureCliExtension::declarations`. This avoids static bind-mounts
     // that would crash `docker run` on 1ES self-hosted runners without
     // azure-cli pre-installed.
     let inject_az_var = extensions

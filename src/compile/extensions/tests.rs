@@ -1,6 +1,7 @@
 use super::*;
-use crate::compile::{ADO_MCP_SERVER_NAME, parse_markdown};
+use crate::compile::ir::step::Step;
 use crate::compile::types::{AzureDevOpsToolConfig, CacheMemoryToolConfig};
+use crate::compile::{ADO_MCP_SERVER_NAME, parse_markdown};
 use crate::runtimes::lean::LeanRuntimeConfig;
 
 fn minimal_front_matter() -> FrontMatter {
@@ -22,8 +23,14 @@ fn test_awf_mount_mode_display() {
 
 #[test]
 fn test_awf_mount_mode_parse() {
-    assert_eq!("ro".parse::<AwfMountMode>().unwrap(), AwfMountMode::ReadOnly);
-    assert_eq!("rw".parse::<AwfMountMode>().unwrap(), AwfMountMode::ReadWrite);
+    assert_eq!(
+        "ro".parse::<AwfMountMode>().unwrap(),
+        AwfMountMode::ReadOnly
+    );
+    assert_eq!(
+        "rw".parse::<AwfMountMode>().unwrap(),
+        AwfMountMode::ReadWrite
+    );
     assert!("invalid".parse::<AwfMountMode>().is_err());
 }
 
@@ -45,104 +52,6 @@ fn test_awf_mount_parse_with_mode() {
 fn test_awf_mount_parse_rw_mode() {
     let m: AwfMount = "/tmp/work:/tmp/work:rw".parse().unwrap();
     assert_eq!(m.mode, AwfMountMode::ReadWrite);
-}
-
-// ── Declarations bridge (migration scaffold) ─────────────────────
-
-/// The default `declarations()` impl on `CompilerExtension` must
-/// faithfully re-export every legacy per-method output, wrapping
-/// `prepare_steps` / `setup_steps` in `Step::RawYaml`. This smoke
-/// test locks the bridge contract end-to-end against a synthetic
-/// in-test stub that exercises every legacy accessor without
-/// overriding `declarations()`.
-///
-/// We use a stub rather than a real extension because every real
-/// extension is being incrementally ported to a typed `declarations()`
-/// override (so anchoring this test on a real one would invalidate it
-/// the moment that extension lands a port). The stub survives until
-/// `delete-deprecated-trait-aliases` removes the bridge entirely.
-#[test]
-fn declarations_default_bridges_legacy_methods() {
-    use crate::compile::ir::step::Step;
-
-    struct StubLegacyExtension;
-    impl CompilerExtension for StubLegacyExtension {
-        fn name(&self) -> &str {
-            "stub-legacy"
-        }
-        fn phase(&self) -> ExtensionPhase {
-            ExtensionPhase::Tool
-        }
-        fn required_hosts(&self) -> Vec<String> {
-            vec!["example.com".to_string()]
-        }
-        fn required_bash_commands(&self) -> Vec<String> {
-            vec!["stub-cmd".to_string()]
-        }
-        fn prompt_supplement(&self) -> Option<String> {
-            Some("stub prompt".to_string())
-        }
-        fn prepare_steps(&self, _ctx: &CompileContext) -> Vec<String> {
-            vec![
-                "- bash: |\n    echo stub-prepare-1\n  displayName: \"stub 1\"".to_string(),
-                "- bash: |\n    echo stub-prepare-2\n  displayName: \"stub 2\"".to_string(),
-            ]
-        }
-        fn setup_steps(&self, _ctx: &CompileContext) -> anyhow::Result<Vec<String>> {
-            Ok(vec![
-                "- bash: |\n    echo stub-setup\n  displayName: \"stub setup\"".to_string(),
-            ])
-        }
-        fn allowed_copilot_tools(&self) -> Vec<String> {
-            vec!["stub-tool".to_string()]
-        }
-        fn validate(&self, _ctx: &CompileContext) -> anyhow::Result<Vec<String>> {
-            Ok(vec!["stub warning".to_string()])
-        }
-    }
-
-    let ext = StubLegacyExtension;
-    let fm = minimal_front_matter();
-    let ctx = ctx_from(&fm);
-    let d = ext.declarations(&ctx).expect("declarations must succeed");
-
-    // Static signals round-trip verbatim through the bridge.
-    assert_eq!(d.network_hosts, ext.required_hosts());
-    assert_eq!(d.bash_commands, ext.required_bash_commands());
-    assert_eq!(d.prompt_supplement, ext.prompt_supplement());
-    assert_eq!(d.copilot_allow_tools, ext.allowed_copilot_tools());
-    assert_eq!(d.warnings, vec!["stub warning".to_string()]);
-
-    // Prepare steps are wrapped as Step::RawYaml.
-    let legacy_prepare = ext.prepare_steps(&ctx);
-    assert_eq!(d.agent_prepare_steps.len(), legacy_prepare.len());
-    for (decl_step, legacy_str) in d.agent_prepare_steps.iter().zip(legacy_prepare.iter()) {
-        match decl_step {
-            Step::RawYaml(s) => assert_eq!(s, legacy_str),
-            other => panic!("expected Step::RawYaml, got {other:?}"),
-        }
-    }
-
-    // Setup steps are wrapped as Step::RawYaml too.
-    let legacy_setup = ext.setup_steps(&ctx).unwrap();
-    assert_eq!(d.setup_steps.len(), legacy_setup.len());
-    for (decl_step, legacy_str) in d.setup_steps.iter().zip(legacy_setup.iter()) {
-        match decl_step {
-            Step::RawYaml(s) => assert_eq!(s, legacy_str),
-            other => panic!("expected Step::RawYaml, got {other:?}"),
-        }
-    }
-
-    // Other Declarations slots are empty when the stub doesn't
-    // populate them.
-    assert!(d.agent_finalize_steps.is_empty());
-    assert!(d.detection_prepare_steps.is_empty());
-    assert!(d.safe_outputs_steps.is_empty());
-    assert!(d.mcpg_servers.is_empty());
-    assert!(d.pipeline_env.is_empty());
-    assert!(d.awf_mounts.is_empty());
-    assert!(d.awf_path_prepends.is_empty());
-    assert!(d.agent_env_vars.is_empty());
 }
 
 #[test]
@@ -316,13 +225,13 @@ fn test_lean_prompt_supplement() {
 }
 
 #[test]
-fn test_lean_prepare_steps() {
+fn test_lean_declarations_prepare_steps() {
     let ext = LeanExtension::new(LeanRuntimeConfig::Enabled(true));
     let fm = minimal_front_matter();
     let ctx = ctx_from(&fm);
-    let steps = ext.prepare_steps(&ctx);
+    let steps = ext.declarations(&ctx).unwrap().agent_prepare_steps;
     assert_eq!(steps.len(), 1);
-    assert!(steps[0].contains("elan-init.sh"));
+    assert!(matches!(&steps[0], Step::Bash(b) if b.script.contains("elan-init.sh")));
 }
 
 #[test]
@@ -435,13 +344,13 @@ fn test_ado_validate_duplicate_mcp_warning() {
 // ── CacheMemoryExtension ───────────────────────────────────────
 
 #[test]
-fn test_cache_memory_prepare_steps() {
+fn test_cache_memory_declarations_prepare_steps() {
     let ext = CacheMemoryExtension::new(CacheMemoryToolConfig::Enabled(true));
     let fm = minimal_front_matter();
     let ctx = ctx_from(&fm);
-    let steps = ext.prepare_steps(&ctx);
-    assert_eq!(steps.len(), 1);
-    assert!(steps[0].contains("DownloadPipelineArtifact"));
+    let steps = ext.declarations(&ctx).unwrap().agent_prepare_steps;
+    assert_eq!(steps.len(), 3);
+    assert!(matches!(&steps[0], Step::Task(t) if t.task == "DownloadPipelineArtifact@2"));
 }
 
 #[test]
@@ -495,9 +404,10 @@ fn test_collect_extensions_python_disabled() {
 
 #[test]
 fn test_collect_extensions_python_with_version() {
-    let (fm, _) =
-        parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  python:\n    version: '3.12'\n---\n")
-            .unwrap();
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  python:\n    version: '3.12'\n---\n",
+    )
+    .unwrap();
     let exts = collect_extensions(&fm);
     assert!(exts.iter().any(|e| e.name() == "Python"));
 }
@@ -512,19 +422,19 @@ fn test_python_required_hosts() {
 }
 
 #[test]
-fn test_python_prepare_steps() {
+fn test_python_declarations_prepare_steps() {
     let ext = crate::runtimes::python::PythonExtension::new(
         crate::runtimes::python::PythonRuntimeConfig::Enabled(true),
     );
     let fm = minimal_front_matter();
     let ctx = ctx_from(&fm);
-    let steps = ext.prepare_steps(&ctx);
+    let steps = ext.declarations(&ctx).unwrap().agent_prepare_steps;
     assert_eq!(steps.len(), 1, "no auth step without feed-url/config");
-    assert!(steps[0].contains("UsePythonVersion@0"));
+    assert!(matches!(&steps[0], Step::Task(t) if t.task == "UsePythonVersion@0"));
 }
 
 #[test]
-fn test_python_prepare_steps_with_feed_url() {
+fn test_python_declarations_prepare_steps_with_feed_url() {
     let (fm, _) = parse_markdown(
         "---\nname: test\ndescription: test\nruntimes:\n  python:\n    feed-url: 'https://pkgs.dev.azure.com/org/_packaging/feed/pypi/simple/'\n---\n",
     ).unwrap();
@@ -532,10 +442,10 @@ fn test_python_prepare_steps_with_feed_url() {
     let ext = crate::runtimes::python::PythonExtension::new(python.clone());
     let fm = minimal_front_matter();
     let ctx = ctx_from(&fm);
-    let steps = ext.prepare_steps(&ctx);
+    let steps = ext.declarations(&ctx).unwrap().agent_prepare_steps;
     assert_eq!(steps.len(), 2);
-    assert!(steps[0].contains("UsePythonVersion@0"));
-    assert!(steps[1].contains("PipAuthenticate@1"));
+    assert!(matches!(&steps[0], Step::Task(t) if t.task == "UsePythonVersion@0"));
+    assert!(matches!(&steps[1], Step::Task(t) if t.task == "PipAuthenticate@1"));
 }
 
 #[test]
@@ -568,7 +478,10 @@ fn test_python_config_warns_not_functional() {
     let ext = crate::runtimes::python::PythonExtension::new(python.clone());
     let ctx = ctx_from(&fm);
     let result = ext.validate(&ctx);
-    assert!(result.is_ok(), "config: should be accepted (warning, not error)");
+    assert!(
+        result.is_ok(),
+        "config: should be accepted (warning, not error)"
+    );
     let warnings = result.unwrap();
     assert!(warnings.iter().any(|w| w.contains("will not be available")));
 }
@@ -612,7 +525,8 @@ fn test_python_invalid_feed_url_rejected() {
 fn test_python_validate_version_injection_rejected() {
     let (fm, _) = parse_markdown(
         "---\nname: test\ndescription: test\nruntimes:\n  python:\n    version: '$(SECRET)'\n---\n",
-    ).unwrap();
+    )
+    .unwrap();
     let python = fm.runtimes.as_ref().unwrap().python.as_ref().unwrap();
     let ext = crate::runtimes::python::PythonExtension::new(python.clone());
     let ctx = ctx_from(&fm);
@@ -641,9 +555,10 @@ fn test_collect_extensions_node_disabled() {
 
 #[test]
 fn test_collect_extensions_node_with_version() {
-    let (fm, _) =
-        parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  node:\n    version: '22.x'\n---\n")
-            .unwrap();
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  node:\n    version: '22.x'\n---\n",
+    )
+    .unwrap();
     let exts = collect_extensions(&fm);
     assert!(exts.iter().any(|e| e.name() == "Node"));
 }
@@ -658,19 +573,19 @@ fn test_node_required_hosts() {
 }
 
 #[test]
-fn test_node_prepare_steps() {
+fn test_node_declarations_prepare_steps() {
     let ext = crate::runtimes::node::NodeExtension::new(
         crate::runtimes::node::NodeRuntimeConfig::Enabled(true),
     );
     let fm = minimal_front_matter();
     let ctx = ctx_from(&fm);
-    let steps = ext.prepare_steps(&ctx);
+    let steps = ext.declarations(&ctx).unwrap().agent_prepare_steps;
     assert_eq!(steps.len(), 1, "no auth steps without feed-url/config");
-    assert!(steps[0].contains("NodeTool@0"));
+    assert!(matches!(&steps[0], Step::Task(t) if t.task == "NodeTool@0"));
 }
 
 #[test]
-fn test_node_prepare_steps_with_feed_url() {
+fn test_node_declarations_prepare_steps_with_feed_url() {
     let (fm, _) = parse_markdown(
         "---\nname: test\ndescription: test\nruntimes:\n  node:\n    feed-url: 'https://pkgs.dev.azure.com/ORG/PROJECT/_packaging/FEED/npm/registry/'\n---\n",
     ).unwrap();
@@ -678,11 +593,11 @@ fn test_node_prepare_steps_with_feed_url() {
     let ext = crate::runtimes::node::NodeExtension::new(node.clone());
     let fm = minimal_front_matter();
     let ctx = ctx_from(&fm);
-    let steps = ext.prepare_steps(&ctx);
+    let steps = ext.declarations(&ctx).unwrap().agent_prepare_steps;
     assert_eq!(steps.len(), 3);
-    assert!(steps[0].contains("NodeTool@0"));
-    assert!(steps[1].contains("Ensure .npmrc"));
-    assert!(steps[2].contains("npmAuthenticate@0"));
+    assert!(matches!(&steps[0], Step::Task(t) if t.task == "NodeTool@0"));
+    assert!(matches!(&steps[1], Step::Bash(b) if b.display_name.contains("Ensure .npmrc")));
+    assert!(matches!(&steps[2], Step::Task(t) if t.task == "npmAuthenticate@0"));
 }
 
 #[test]
@@ -714,7 +629,10 @@ fn test_node_config_warns_not_functional() {
     let ext = crate::runtimes::node::NodeExtension::new(node.clone());
     let ctx = ctx_from(&fm);
     let result = ext.validate(&ctx);
-    assert!(result.is_ok(), "config: should be accepted (warning, not error)");
+    assert!(
+        result.is_ok(),
+        "config: should be accepted (warning, not error)"
+    );
     let warnings = result.unwrap();
     assert!(warnings.iter().any(|w| w.contains("will not be available")));
 }
@@ -729,7 +647,12 @@ fn test_node_config_and_feed_url_mutually_exclusive() {
     let ctx = ctx_from(&fm);
     let result = ext.validate(&ctx);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("mutually exclusive"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("mutually exclusive")
+    );
 }
 
 #[test]
@@ -760,7 +683,8 @@ fn test_node_invalid_feed_url_rejected() {
 fn test_node_validate_version_injection_rejected() {
     let (fm, _) = parse_markdown(
         "---\nname: test\ndescription: test\nruntimes:\n  node:\n    version: '$(SECRET)'\n---\n",
-    ).unwrap();
+    )
+    .unwrap();
     let node = fm.runtimes.as_ref().unwrap().node.as_ref().unwrap();
     let ext = crate::runtimes::node::NodeExtension::new(node.clone());
     let ctx = ctx_from(&fm);
@@ -777,7 +701,12 @@ fn test_python_config_and_feed_url_mutually_exclusive() {
     let ctx = ctx_from(&fm);
     let result = ext.validate(&ctx);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("mutually exclusive"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("mutually exclusive")
+    );
 }
 
 // ── DotnetExtension ────────────────────────────────────────────
@@ -802,9 +731,10 @@ fn test_collect_extensions_dotnet_disabled() {
 
 #[test]
 fn test_collect_extensions_dotnet_with_version() {
-    let (fm, _) =
-        parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: '8.0.x'\n---\n")
-            .unwrap();
+    let (fm, _) = parse_markdown(
+        "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: '8.0.x'\n---\n",
+    )
+    .unwrap();
     let exts = collect_extensions(&fm);
     assert!(exts.iter().any(|e| e.name() == "dotnet"));
 }
@@ -827,20 +757,21 @@ fn test_dotnet_required_bash_commands() {
 }
 
 #[test]
-fn test_dotnet_prepare_steps() {
+fn test_dotnet_declarations_prepare_steps() {
     let ext = crate::runtimes::dotnet::DotnetExtension::new(
         crate::runtimes::dotnet::DotnetRuntimeConfig::Enabled(true),
     );
     let fm = minimal_front_matter();
     let ctx = ctx_from(&fm);
-    let steps = ext.prepare_steps(&ctx);
+    let steps = ext.declarations(&ctx).unwrap().agent_prepare_steps;
     assert_eq!(steps.len(), 1, "no auth steps without feed-url/config");
-    assert!(steps[0].contains("UseDotNet@2"));
-    assert!(steps[0].contains("packageType: 'sdk'"));
+    assert!(
+        matches!(&steps[0], Step::Task(t) if t.task == "UseDotNet@2" && t.inputs.get("packageType").map(String::as_str) == Some("sdk"))
+    );
 }
 
 #[test]
-fn test_dotnet_prepare_steps_with_feed_url() {
+fn test_dotnet_declarations_prepare_steps_with_feed_url() {
     let (fm, _) = parse_markdown(
         "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    feed-url: 'https://pkgs.dev.azure.com/myorg/_packaging/myfeed/nuget/v3/index.json'\n---\n",
     ).unwrap();
@@ -848,15 +779,15 @@ fn test_dotnet_prepare_steps_with_feed_url() {
     let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
     let fm = minimal_front_matter();
     let ctx = ctx_from(&fm);
-    let steps = ext.prepare_steps(&ctx);
+    let steps = ext.declarations(&ctx).unwrap().agent_prepare_steps;
     assert_eq!(steps.len(), 3);
-    assert!(steps[0].contains("UseDotNet@2"));
-    assert!(steps[1].contains("Ensure nuget.config"));
-    assert!(steps[2].contains("NuGetAuthenticate@1"));
+    assert!(matches!(&steps[0], Step::Task(t) if t.task == "UseDotNet@2"));
+    assert!(matches!(&steps[1], Step::Bash(b) if b.display_name.contains("Ensure nuget.config")));
+    assert!(matches!(&steps[2], Step::Task(t) if t.task == "NuGetAuthenticate@1"));
 }
 
 #[test]
-fn test_dotnet_prepare_steps_with_config_only() {
+fn test_dotnet_declarations_prepare_steps_with_config_only() {
     let (fm, _) = parse_markdown(
         "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    config: 'nuget.config'\n---\n",
     ).unwrap();
@@ -864,12 +795,12 @@ fn test_dotnet_prepare_steps_with_config_only() {
     let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
     let fm = minimal_front_matter();
     let ctx = ctx_from(&fm);
-    let steps = ext.prepare_steps(&ctx);
+    let steps = ext.declarations(&ctx).unwrap().agent_prepare_steps;
     // config: alone trusts the user-checked-in nuget.config — no shim,
     // just the auth step.
     assert_eq!(steps.len(), 2);
-    assert!(steps[0].contains("UseDotNet@2"));
-    assert!(steps[1].contains("NuGetAuthenticate@1"));
+    assert!(matches!(&steps[0], Step::Task(t) if t.task == "UseDotNet@2"));
+    assert!(matches!(&steps[1], Step::Task(t) if t.task == "NuGetAuthenticate@1"));
 }
 
 #[test]
@@ -903,7 +834,12 @@ fn test_dotnet_config_and_feed_url_mutually_exclusive() {
     let ctx = ctx_from(&fm);
     let result = ext.validate(&ctx);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("mutually exclusive"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("mutually exclusive")
+    );
 }
 
 #[test]
@@ -927,10 +863,21 @@ fn test_dotnet_global_json_sentinel_emits_use_global_json() {
     let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
     let fm = minimal_front_matter();
     let ctx = ctx_from(&fm);
-    let steps = ext.prepare_steps(&ctx);
-    assert!(steps[0].contains("useGlobalJson: true"));
-    assert!(!steps[0].contains("version:"), "explicit version must be omitted in global.json mode");
-    assert!(steps[0].contains("from global.json"));
+    let steps = ext.declarations(&ctx).unwrap().agent_prepare_steps;
+    match &steps[0] {
+        Step::Task(t) => {
+            assert_eq!(
+                t.inputs.get("useGlobalJson").map(String::as_str),
+                Some("true")
+            );
+            assert!(
+                !t.inputs.contains_key("version"),
+                "explicit version must be omitted in global.json mode"
+            );
+            assert!(t.display_name.contains("from global.json"));
+        }
+        other => panic!("expected UseDotNet task, got {other:?}"),
+    }
 }
 
 #[test]
@@ -964,15 +911,22 @@ fn test_dotnet_version_with_global_json_present_errors() {
 
     let (fm, _) = parse_markdown(
         "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: '9.0.x'\n---\n",
-    ).unwrap();
+    )
+    .unwrap();
     let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
     let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
     let ctx = CompileContext::for_test_with_compile_dir(&fm, tmp.path());
     let result = ext.validate(&ctx);
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
-    assert!(msg.contains("global.json"), "error must mention global.json: {msg}");
-    assert!(msg.contains("useGlobalJson") || msg.contains("'global.json'"), "error must hint at the sentinel: {msg}");
+    assert!(
+        msg.contains("global.json"),
+        "error must mention global.json: {msg}"
+    );
+    assert!(
+        msg.contains("useGlobalJson") || msg.contains("'global.json'"),
+        "error must hint at the sentinel: {msg}"
+    );
 }
 
 #[test]
@@ -980,7 +934,11 @@ fn test_dotnet_global_json_sentinel_with_global_json_present_ok() {
     // Using the sentinel alongside an on-disk global.json is the intended
     // happy path — no error.
     let tmp = tempfile::tempdir().unwrap();
-    std::fs::write(tmp.path().join("global.json"), r#"{"sdk":{"version":"8.0.100"}}"#).unwrap();
+    std::fs::write(
+        tmp.path().join("global.json"),
+        r#"{"sdk":{"version":"8.0.100"}}"#,
+    )
+    .unwrap();
 
     let (fm, _) = parse_markdown(
         "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: 'global.json'\n---\n",
@@ -997,7 +955,11 @@ fn test_dotnet_no_version_with_global_json_present_ok() {
     // compiler default. This intentionally does not auto-promote to
     // useGlobalJson; users opt in with the sentinel.
     let tmp = tempfile::tempdir().unwrap();
-    std::fs::write(tmp.path().join("global.json"), r#"{"sdk":{"version":"8.0.100"}}"#).unwrap();
+    std::fs::write(
+        tmp.path().join("global.json"),
+        r#"{"sdk":{"version":"8.0.100"}}"#,
+    )
+    .unwrap();
 
     let (fm, _) =
         parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  dotnet: true\n---\n")
@@ -1025,7 +987,8 @@ fn test_dotnet_validate_bash_disabled_warning() {
 fn test_dotnet_validate_version_injection_rejected() {
     let (fm, _) = parse_markdown(
         "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: '$(SECRET)'\n---\n",
-    ).unwrap();
+    )
+    .unwrap();
     let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
     let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
     let ctx = ctx_from(&fm);
@@ -1056,6 +1019,9 @@ fn test_collect_extensions_all_runtimes_enabled() {
     assert!(exts.iter().any(|e| e.name() == "Node"));
     assert!(exts.iter().any(|e| e.name() == "dotnet"));
     // All are Runtime phase
-    let runtime_exts: Vec<_> = exts.iter().filter(|e| e.phase() == ExtensionPhase::Runtime).collect();
+    let runtime_exts: Vec<_> = exts
+        .iter()
+        .filter(|e| e.phase() == ExtensionPhase::Runtime)
+        .collect();
     assert_eq!(runtime_exts.len(), 4);
 }

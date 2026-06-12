@@ -1,11 +1,9 @@
 // ─── Python ────────────────────────────────────────────────────────
 
-use crate::compile::extensions::{
-    CompileContext, CompilerExtension, Declarations, ExtensionPhase,
-};
+use super::{PYTHON_BASH_COMMANDS, PythonRuntimeConfig};
+use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 use crate::compile::ir::step::{Step, TaskStep};
 use crate::validate;
-use super::{PYTHON_BASH_COMMANDS, PythonRuntimeConfig, generate_pip_authenticate, generate_python_install};
 use anyhow::Result;
 
 /// Python runtime extension.
@@ -56,16 +54,6 @@ Python is installed and available. Use `python3` or `python` to run scripts, \
 management, install it first with `pip install uv`.\n"
                 .to_string(),
         )
-    }
-
-    fn prepare_steps(&self, _ctx: &CompileContext) -> Vec<String> {
-        let mut steps = vec![generate_python_install(&self.config)];
-        // Emit PipAuthenticate only when feed-url is set (config alone is not
-        // sufficient — PipAuthenticate needs a feed to authenticate against)
-        if self.config.feed_url().is_some() {
-            steps.push(generate_pip_authenticate());
-        }
-        steps
     }
 
     fn agent_env_vars(&self) -> Vec<(String, String)> {
@@ -133,8 +121,8 @@ management, install it first with `pip install uv`.\n"
     /// * an optional [`Step::Task`] for `PipAuthenticate@1` (only
     ///   when `feed-url:` is set),
     ///
-    /// alongside the static signals carried by the legacy accessors
-    /// (hosts, bash commands, prompt supplement, agent env vars).
+    /// alongside the static signals (hosts, bash commands, prompt
+    /// supplement, agent env vars).
     fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
         let mut agent_prepare_steps: Vec<Step> = Vec::with_capacity(2);
         agent_prepare_steps.push(Step::Task(python_install_task_step(&self.config)));
@@ -282,7 +270,11 @@ mod tests {
             other => panic!("expected Step::Task, got {other:?}"),
         }
         // env vars must include both pip and uv index URLs.
-        let keys: Vec<&str> = decl.agent_env_vars.iter().map(|(k, _)| k.as_str()).collect();
+        let keys: Vec<&str> = decl
+            .agent_env_vars
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .collect();
         assert!(keys.contains(&"PIP_INDEX_URL"));
         assert!(keys.contains(&"UV_DEFAULT_INDEX"));
     }

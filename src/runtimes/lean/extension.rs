@@ -1,10 +1,10 @@
 // ─── Lean 4 ──────────────────────────────────────────────────────────
 
+use super::{LEAN_BASH_COMMANDS, LeanRuntimeConfig};
 use crate::compile::extensions::{
     AwfMount, AwfMountMode, CompileContext, CompilerExtension, Declarations, ExtensionPhase,
 };
 use crate::compile::ir::step::{BashStep, Step};
-use super::{LEAN_BASH_COMMANDS, LeanRuntimeConfig, generate_lean_install};
 use anyhow::Result;
 
 /// Lean 4 runtime extension.
@@ -55,12 +55,12 @@ the toolchain. Lean files use the `.lean` extension.\n"
         )
     }
 
-    fn prepare_steps(&self, _ctx: &CompileContext) -> Vec<String> {
-        vec![generate_lean_install(&self.config)]
-    }
-
     fn required_awf_mounts(&self) -> Vec<AwfMount> {
-        vec![AwfMount::new("$HOME/.elan", "$HOME/.elan", AwfMountMode::ReadOnly)]
+        vec![AwfMount::new(
+            "$HOME/.elan",
+            "$HOME/.elan",
+            AwfMountMode::ReadOnly,
+        )]
     }
 
     fn awf_path_prepends(&self) -> Vec<String> {
@@ -88,14 +88,9 @@ the toolchain. Lean files use the `.lean` extension.\n"
         Ok(warnings)
     }
 
-    /// Typed-IR view. Returns the single elan install step as a
-    /// [`Step::Bash`] alongside all the static signals carried by the
-    /// legacy accessors (hosts, bash commands, prompt supplement,
-    /// AWF mounts, PATH prepends).
-    ///
-    /// Coexists with `prepare_steps` until the
-    /// `compile-target-standalone` commit switches production
-    /// consumption to `declarations`.
+    /// Returns the single elan install step as a [`Step::Bash`]
+    /// alongside all the static signals (hosts, bash commands, prompt
+    /// supplement, AWF mounts, PATH prepends).
     fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
         Ok(Declarations {
             agent_prepare_steps: vec![Step::Bash(lean_install_bash_step(&self.config))],
@@ -144,8 +139,7 @@ mod tests {
     }
 
     /// Locks the `declarations()` override against silent drift: must
-    /// return a single typed `Step::Bash` install step (no
-    /// `Step::RawYaml` migration bridge), and the static signals
+    /// return a single typed `Step::Bash` install step, and the static signals
     /// (hosts, mounts, PATH prepends, prompt) must all flow through.
     #[test]
     fn declarations_returns_typed_bash_step_and_static_signals() {
@@ -185,7 +179,8 @@ mod tests {
         let decl = ext.declarations(&ctx).unwrap();
         match &decl.agent_prepare_steps[0] {
             Step::Bash(b) => assert!(
-                b.script.contains("--default-toolchain leanprover/lean4:v4.29.1"),
+                b.script
+                    .contains("--default-toolchain leanprover/lean4:v4.29.1"),
                 "expected pinned toolchain in script: {}",
                 b.script
             ),

@@ -1,14 +1,9 @@
 // ─── .NET ──────────────────────────────────────────────────────────
 
-use crate::compile::extensions::{
-    CompileContext, CompilerExtension, Declarations, ExtensionPhase,
-};
+use super::{DOTNET_BASH_COMMANDS, DotnetRuntimeConfig, GLOBAL_JSON_SENTINEL};
+use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 use crate::compile::ir::step::{BashStep, Step, TaskStep};
 use crate::validate;
-use super::{
-    DOTNET_BASH_COMMANDS, DotnetRuntimeConfig, GLOBAL_JSON_SENTINEL, generate_dotnet_install,
-    generate_ensure_nuget_config, generate_nuget_authenticate,
-};
 use anyhow::Result;
 
 /// .NET runtime extension.
@@ -63,20 +58,6 @@ and manage projects (e.g., `dotnet build`, `dotnet test`, `dotnet restore`, \
 in the repository.\n"
                 .to_string(),
         )
-    }
-
-    fn prepare_steps(&self, _ctx: &CompileContext) -> Vec<String> {
-        let mut steps = vec![generate_dotnet_install(&self.config)];
-        // Emit ensure-nuget.config + NuGetAuthenticate when an internal feed
-        // is configured. When only `config:` is set, the user-checked-in
-        // nuget.config is assumed to exist — emit only the auth step.
-        if self.config.feed_url().is_some() {
-            steps.push(generate_ensure_nuget_config(&self.config));
-            steps.push(generate_nuget_authenticate());
-        } else if self.config.config().is_some() {
-            steps.push(generate_nuget_authenticate());
-        }
-        steps
     }
 
     fn validate(&self, ctx: &CompileContext) -> Result<Vec<String>> {
@@ -289,7 +270,11 @@ mod tests {
     #[test]
     fn test_validate_global_json_conflict_bails() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("global.json"), r#"{"sdk":{"version":"8.0.100"}}"#).unwrap();
+        std::fs::write(
+            tmp.path().join("global.json"),
+            r#"{"sdk":{"version":"8.0.100"}}"#,
+        )
+        .unwrap();
 
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: '9.0.x'\n---\n",
@@ -305,7 +290,11 @@ mod tests {
     #[test]
     fn test_validate_global_json_sentinel_accepted_with_file_present() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("global.json"), r#"{"sdk":{"version":"8.0.100"}}"#).unwrap();
+        std::fs::write(
+            tmp.path().join("global.json"),
+            r#"{"sdk":{"version":"8.0.100"}}"#,
+        )
+        .unwrap();
 
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: 'global.json'\n---\n",

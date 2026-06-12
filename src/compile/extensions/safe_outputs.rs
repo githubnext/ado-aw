@@ -61,9 +61,7 @@ These tools generate safe outputs that will be reviewed and executed in a separa
 
     /// Typed-IR view. SafeOutputs contributes only static
     /// signals — an MCPG HTTP backend, a prompt supplement, and a
-    /// single `--allow-tool safeoutputs` flag. Routed through
-    /// `Declarations` so the legacy methods can be removed once
-    /// every other extension is ported.
+    /// single `--allow-tool safeoutputs` flag.
     fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
         Ok(Declarations {
             mcpg_servers: self.mcpg_servers(ctx)?,
@@ -95,4 +93,3 @@ mod tests {
         assert!(decl.agent_prepare_steps.is_empty());
     }
 }
-

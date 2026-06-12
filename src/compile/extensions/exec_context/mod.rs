@@ -35,9 +35,7 @@
 mod contributor;
 mod pr;
 
-use crate::compile::extensions::{
-    CompileContext, CompilerExtension, Declarations, ExtensionPhase,
-};
+use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 use crate::compile::types::{ExecutionContextConfig, FrontMatter};
 
 use contributor::{ContextContributor, Contributor};
@@ -165,19 +163,6 @@ impl CompilerExtension for ExecContextExtension {
         ExtensionPhase::Tool
     }
 
-    fn prepare_steps(&self, ctx: &CompileContext) -> Vec<String> {
-        // Master switch off → no steps, no `aw-context/`.
-        if !self.config.is_enabled() {
-            return vec![];
-        }
-        self.contributors()
-            .into_iter()
-            .filter(|c| c.should_activate(ctx))
-            .map(|c| c.prepare_step(ctx))
-            .filter(|s| !s.is_empty())
-            .collect()
-    }
-
     fn required_bash_commands(&self) -> Vec<String> {
         // No bash contributions when the extension is off or when no
         // contributor will activate (avoids quietly widening the agent
@@ -202,8 +187,7 @@ impl CompilerExtension for ExecContextExtension {
         out
     }
 
-    /// Typed-IR view. Returns the typed equivalent of `prepare_steps`:
-    /// for each active contributor, emit the typed `Step` from its
+    /// For each active contributor, emit the typed `Step` from its
     /// `prepare_step_typed`. The PR contributor's synth-active path
     /// now uses typed [`crate::compile::ir::env::EnvValue::Coalesce`]
     /// plus [`crate::compile::ir::env::EnvValue::StepOutput`]
@@ -245,7 +229,7 @@ mod tests {
     //! contributions.
     //!
     //! These tests exercise the `new()` → `required_bash_commands()`
-    //! path independently (no fixture-compile, no `prepare_steps`,
+    //! path independently (no fixture-compile, no step declarations,
     //! no `CompileContext`) so a future divergence trips here at
     //! unit-test time rather than at E2E time.
 
@@ -400,10 +384,7 @@ mod tests {
         let fm = pr_triggered_front_matter();
         let ctx = CompileContext::for_test(&fm);
 
-        let ext = ExecContextExtension::new(
-            ExecutionContextConfig::default(),
-            &fm,
-        );
+        let ext = ExecContextExtension::new(ExecutionContextConfig::default(), &fm);
         // Force synthetic_pr_active so the unified `AW_PR_*` macros
         // are emitted in the prepare step's env (the path that needs
         // the Agent-job-level hoist to resolve at runtime).

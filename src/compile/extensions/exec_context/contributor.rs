@@ -45,24 +45,8 @@ pub(super) trait ContextContributor {
     /// Whether this contributor activates for the given compile context.
     fn should_activate(&self, ctx: &CompileContext) -> bool;
 
-    /// Generate the prepare-step YAML (a single `- bash:` block or
-    /// equivalent). Must include its own ADO `condition:` so the step
-    /// no-ops on non-matching trigger types. Empty string = no step.
-    ///
-    /// Contributors that want to surface a prompt fragment to the
-    /// agent append it directly to `/tmp/awf-tools/agent-prompt.md`
-    /// from this step's bash (the file is created by base.yml's
-    /// "Prepare agent prompt" step before any prepare_steps run).
-    fn prepare_step(&self, ctx: &CompileContext) -> String;
-
-    /// Typed-IR sibling of [`prepare_step`] returning a
-    /// [`crate::compile::ir::step::Step`] instead of a hand-formatted
-    /// YAML string. Coexists with `prepare_step` while
-    /// `ExecContextExtension::declarations` is exercised only by
-    /// tests; both paths are required to produce semantically
-    /// equivalent steps. The legacy method is removed when
-    /// `compile-target-standalone` switches production callers and
-    /// `delete-deprecated-trait-aliases` finalises the migration.
+    /// Generate the prepare step as a typed
+    /// [`crate::compile::ir::step::Step`].
     fn prepare_step_typed(
         &self,
         ctx: &CompileContext,
@@ -104,11 +88,6 @@ impl ContextContributor for Contributor {
     fn should_activate(&self, ctx: &CompileContext) -> bool {
         match self {
             Contributor::Pr(c) => c.should_activate(ctx),
-        }
-    }
-    fn prepare_step(&self, ctx: &CompileContext) -> String {
-        match self {
-            Contributor::Pr(c) => c.prepare_step(ctx),
         }
     }
     fn prepare_step_typed(

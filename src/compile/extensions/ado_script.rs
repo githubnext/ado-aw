@@ -5,12 +5,9 @@
 //! bundle:
 //!
 //! - **Gate evaluator (`gate.js`)** — runs in the **Setup job** when
-//!   `filters:` lowers to non-empty checks. Emitted via
-//!   [`AdoScriptExtension::setup_steps`].
+//!   `filters:` lowers to non-empty checks.
 //! - **Runtime-import resolver (`import.js`)** — runs in the **Agent
-//!   job** when `inlined-imports: false`. Emitted via
-//!   [`AdoScriptExtension::prepare_steps`], which the compiler lands
-//!   in the existing `{{ prepare_steps }}` block.
+//!   job** when `inlined-imports: false`.
 //!
 //! ## Why per-job emission
 //!
@@ -24,8 +21,8 @@ use anyhow::Result;
 
 use super::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 use crate::compile::filter_ir::{
-    GateContext, Severity, build_gate_step_typed, compile_gate_step_external,
-    lower_pipeline_filters, lower_pr_filters, validate_pipeline_filters, validate_pr_filters,
+    GateContext, Severity, build_gate_step_typed, lower_pipeline_filters, lower_pr_filters,
+    validate_pipeline_filters, validate_pr_filters,
 };
 use crate::compile::ir::condition::{Condition, Expr};
 use crate::compile::ir::env::EnvValue;
@@ -42,7 +39,7 @@ pub(crate) const IMPORT_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/import
 pub(crate) const EXEC_CONTEXT_PR_PATH: &str = "/tmp/ado-aw-scripts/ado-script/exec-context-pr.js";
 /// Path to the synthetic-PR-context bundle inside the unpacked
 /// `ado-script.zip`. Runs in the Setup job before `prGate`; consumed
-/// by [`AdoScriptExtension::setup_steps`].
+/// by [`AdoScriptExtension::declarations`].
 pub(crate) const EXEC_CONTEXT_PR_SYNTH_PATH: &str =
     "/tmp/ado-aw-scripts/ado-script/exec-context-pr-synth.js";
 const RELEASE_BASE_URL: &str = "https://github.com/githubnext/ado-aw/releases/download";
@@ -121,132 +118,14 @@ impl AdoScriptExtension {
     }
 }
 
-/// Returns the two-step bundle: NodeTool@0 install + checksumed unzip of
-/// `ado-script.zip`. Shared between [`AdoScriptExtension::setup_steps`]
-/// and [`AdoScriptExtension::prepare_steps`] — emitted twice in the YAML
-/// when both consumers are active, once per consuming job's VM.
-fn install_and_download_steps() -> Vec<String> {
-    let version = env!("CARGO_PKG_VERSION");
-    vec![
-        // NodeTool@0 — install Node 20.x. Pinned LTS major; any patch
-        // release is fine for this use. The display name no longer
-        // mentions the gate evaluator because import.js uses Node too.
-        // A 5-minute timeout caps the worst-case cold-image install.
-        r#"- task: NodeTool@0
-  inputs:
-    versionSpec: "20.x"
-  displayName: "Install Node.js 20.x"
-  timeoutInMinutes: 5
-  condition: succeeded()"#
-            .to_string(),
-        // curl + sha256 + unzip pipeline. Same 5-minute bound so a
-        // stalled CDN response doesn't tie up the whole pipeline. The
-        // explicit `-d` on unzip is belt-and-suspenders zip-slip
-        // hardening on top of the sha256 verification.
-        format!(
-            r#"- bash: |
-    set -eo pipefail
-    mkdir -p /tmp/ado-aw-scripts
-    curl -fsSL "{RELEASE_BASE_URL}/v{version}/checksums.txt" -o /tmp/ado-aw-scripts/checksums.txt
-    curl -fsSL "{RELEASE_BASE_URL}/v{version}/ado-script.zip" -o /tmp/ado-aw-scripts/ado-script.zip
-    cd /tmp/ado-aw-scripts && grep "ado-script.zip" checksums.txt | sha256sum -c -
-    unzip -o /tmp/ado-aw-scripts/ado-script.zip -d /tmp/ado-aw-scripts/
-  displayName: "Download ado-aw scripts (v{version})"
-  timeoutInMinutes: 5
-  condition: succeeded()"#,
-        ),
-    ]
-}
-
-/// The resolver step that runs in the Agent job to expand
-/// `{{#runtime-import …}}` markers in the agent prompt file in place.
-///
-/// Passes `--base "$(Build.SourcesDirectory)"` so that `import.js`
-/// resolves the compiler-emitted trigger-repo-relative marker against
-/// the trigger-repo checkout root. `import.js` rejects absolute marker
-/// paths (matching the compile-time `resolve_imports_inline` policy)
-/// so the relative-form marker is the only form that ever needs to
-/// resolve at runtime.
-fn resolver_step() -> String {
-    format!(
-        r#"- bash: |
-    set -eo pipefail
-    node '{IMPORT_EVAL_PATH}' /tmp/awf-tools/agent-prompt.md --base "$(Build.SourcesDirectory)"
-  displayName: "Resolve runtime imports (agent prompt)"
-  condition: succeeded()"#
-    )
-}
-
-/// The synthetic-PR-context step that runs in the Setup job BEFORE
-/// `prGate`. Normalises PR-identifier variables under the canonical
-/// `AW_PR_*` names regardless of build reason:
-///
-///  - **Real PR build** (`SYSTEM_PULLREQUEST_PULLREQUESTID` populated):
-///    copies the existing `SYSTEM_PULLREQUEST_*` env values into the
-///    `AW_PR_*` namespace. No API call.
-///  - **CI build on ADO repo**: looks up the open PR for
-///    `Build.SourceBranch` via the ADO REST API, applies the front-
-///    matter filters, and emits `AW_PR_*` plus `AW_SYNTHETIC_PR=true`
-///    on a match.
-///  - **CI build on GitHub-typed repo**: emits empty `AW_PR_*` +
-///    `AW_SYNTHETIC_PR_SKIP=true`.
-///
-/// Always runs (`condition: succeeded()`). The previous form gated on
-/// `ne(Build.Reason, 'PullRequest')`, which forced downstream consumers
-/// to coalesce `$(System.PullRequest.X)` with `$(AW_SYNTHETIC_PR_X)`
-/// inside step `env:` via `$[ ... ]` runtime expressions — but ADO
-/// only evaluates `$[ ... ]` inside `variables:` and `condition:`
-/// fields, NOT inside step `env:`. The literal expression string was
-/// passed verbatim to bash and downstream PR steps short-circuited
-/// (msazuresphere/4x4 build #612528). Doing the merge in the bundle
-/// eliminates the bug class — every downstream consumer just reads
-/// `$(AW_PR_*)` macros.
-///
-/// `SYSTEM_PULLREQUEST_*` env vars are passed in so the bundle can
-/// detect a real PR build and propagate the predefined values.
-fn synthetic_pr_step(spec_b64: &str) -> String {
-    format!(
-        r#"- bash: |
-    set -euo pipefail
-    node '{EXEC_CONTEXT_PR_SYNTH_PATH}'
-  name: synthPr
-  displayName: "Resolve synthetic PR context"
-  condition: succeeded()
-  env:
-    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
-    ADO_COLLECTION_URI: $(System.CollectionUri)
-    ADO_PROJECT: $(System.TeamProject)
-    ADO_REPO_ID: $(Build.Repository.ID)
-    BUILD_REASON: $(Build.Reason)
-    BUILD_REPOSITORY_PROVIDER: $(Build.Repository.Provider)
-    BUILD_SOURCEBRANCH: $(Build.SourceBranch)
-    SYSTEM_PULLREQUEST_PULLREQUESTID: $(System.PullRequest.PullRequestId)
-    SYSTEM_PULLREQUEST_TARGETBRANCH: $(System.PullRequest.TargetBranch)
-    SYSTEM_PULLREQUEST_SOURCEBRANCH: $(System.PullRequest.SourceBranch)
-    SYSTEM_PULLREQUEST_ISDRAFT: $(System.PullRequest.IsDraft)
-    PR_SYNTH_SPEC: "{spec_b64}""#
-    )
-}
-
-// ─── Typed-IR mirrors of the legacy emitters ──────────────────────────
-//
-// One typed helper per legacy YAML emitter above. The bodies are the
-// canonical typed representation of the same bash/task content, so
-// lowering the typed `Step` produces YAML equivalent to the legacy
-// string. The two paths coexist (legacy is still consumed by
-// production `setup_steps` / `prepare_steps`; typed is exercised by
-// `declarations()` and its tests) until `compile-target-standalone`
-// switches production callers — at which point the legacy YAML
-// emitters above are deleted in `retire-agentic-depends-on`.
-
-/// Typed mirror of [`install_and_download_steps`]. Returns the same
-/// two-step bundle as typed `Step`s: a `Step::Task(NodeTool@0)` plus
-/// a `Step::Bash` for the curl + sha256 + unzip pipeline.
+/// Returns the two-step bundle as typed `Step`s: a
+/// `Step::Task(NodeTool@0)` plus a `Step::Bash` for the curl + sha256
+/// + unzip pipeline.
 fn install_and_download_steps_typed() -> Vec<Step> {
     let version = env!("CARGO_PKG_VERSION");
     let install = {
-        let mut t = TaskStep::new("NodeTool@0", "Install Node.js 20.x")
-            .with_input("versionSpec", "20.x");
+        let mut t =
+            TaskStep::new("NodeTool@0", "Install Node.js 20.x").with_input("versionSpec", "20.x");
         t.timeout = Some(std::time::Duration::from_secs(300));
         t.condition = Some(Condition::Succeeded);
         t
@@ -268,7 +147,7 @@ fn install_and_download_steps_typed() -> Vec<Step> {
     vec![Step::Task(install), Step::Bash(download)]
 }
 
-/// Typed mirror of [`resolver_step`].
+/// The resolver step that expands runtime import markers in the agent prompt.
 fn resolver_step_typed() -> Step {
     let script = format!(
         "set -eo pipefail\n\
@@ -280,9 +159,8 @@ fn resolver_step_typed() -> Step {
     )
 }
 
-/// Typed mirror of [`synthetic_pr_step`]. Declares the five
-/// `AW_SYNTHETIC_PR*` outputs (`AW_SYNTHETIC_PR`, `_SKIP`, `_ID`,
-/// `_SOURCEBRANCH`, `_TARGETBRANCH`) so downstream consumers can
+/// The synthetic-PR-context step that runs in the Setup job before
+/// `prGate`. Declares the PR outputs so downstream consumers can
 /// reference them via [`crate::compile::ir::output::OutputRef`].
 /// The graph's auto-`isOutput=true` promotion kicks in for any
 /// output that picks up a cross-step reader.
@@ -394,66 +272,6 @@ impl CompilerExtension for AdoScriptExtension {
         // brief window before the user's Runtime install, and the
         // resolver step inside that window picks up our Node 20.
         ExtensionPhase::System
-    }
-
-    fn setup_steps(&self, _ctx: &CompileContext) -> Result<Vec<String>> {
-        let (pr_checks, pipeline_checks) = self.lowered_checks();
-        if pr_checks.is_empty() && pipeline_checks.is_empty() && !self.synthetic_pr_active() {
-            return Ok(vec![]);
-        }
-        let mut steps = install_and_download_steps();
-        // `pr_trigger_for_synth.is_some()` is the type-level encoding
-        // of "synth path is active for this agent" — no separate flag
-        // to keep in lock-step. If `Some(_)`, the spec is guaranteed
-        // available.
-        if let Some(pr) = self.pr_trigger_for_synth.as_ref() {
-            let spec_b64 = crate::compile::filter_ir::build_pr_synth_spec(pr)?;
-            steps.push(synthetic_pr_step(&spec_b64));
-        }
-        if !pr_checks.is_empty() {
-            steps.push(compile_gate_step_external(
-                GateContext::PullRequest,
-                &pr_checks,
-                GATE_EVAL_PATH,
-                self.synthetic_pr_active(),
-            )?);
-        }
-        if !pipeline_checks.is_empty() {
-            steps.push(compile_gate_step_external(
-                GateContext::PipelineCompletion,
-                &pipeline_checks,
-                GATE_EVAL_PATH,
-                // Pipeline-completion gates never observe synthetic PR
-                // semantics; the coalesce wiring only applies to
-                // PullRequest gates.
-                false,
-            )?);
-        }
-        Ok(steps)
-    }
-
-    fn prepare_steps(&self, _ctx: &CompileContext) -> Vec<String> {
-        // The Agent-job install/download must fire when ANY downstream
-        // consumer is active. Today there are two:
-        //  - `import.js` (runtime-import resolver) — runs when
-        //    `inlined-imports: false`.
-        //  - `exec-context-pr.js` (PR-context precompute) — runs when
-        //    the PR contributor activates (`on.pr` configured AND
-        //    `execution-context.pr.enabled != false`).
-        //
-        // The exec-context-pr invocation itself is emitted by
-        // `ExecContextExtension::prepare_steps` (Tool phase, runs
-        // after this System-phase install/download), not here, so the
-        // two extensions stay loosely coupled.
-        let import_active = self.runtime_imports_active();
-        if !import_active && !self.exec_context_pr_active {
-            return vec![];
-        }
-        let mut steps = install_and_download_steps();
-        if import_active {
-            steps.push(resolver_step());
-        }
-        steps
     }
 
     fn validate(&self, _ctx: &CompileContext) -> Result<Vec<String>> {
@@ -738,15 +556,15 @@ mod tests {
     }
 
     #[test]
-    fn setup_steps_empty_without_gate() {
+    fn declarations_setup_steps_empty_without_gate() {
         let ext = ext_with(None, None, true);
         let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
         let ctx = CompileContext::for_test(&fm);
-        assert!(ext.setup_steps(&ctx).unwrap().is_empty());
+        assert!(ext.declarations(&ctx).unwrap().setup_steps.is_empty());
     }
 
     #[test]
-    fn setup_steps_emits_install_download_and_gate_when_gate_active() {
+    fn declarations_setup_steps_emits_install_download_and_gate_when_gate_active() {
         let filters = PrFilters {
             labels: Some(LabelFilter {
                 any_of: vec!["run-agent".into()],
@@ -757,18 +575,34 @@ mod tests {
         let ext = ext_with(Some(filters), None, true);
         let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
         let ctx = CompileContext::for_test(&fm);
-        let steps = ext.setup_steps(&ctx).unwrap();
+        let steps = ext.declarations(&ctx).unwrap().setup_steps;
         assert_eq!(steps.len(), 3, "install + download + gate");
-        assert!(steps[0].contains("NodeTool@0"));
-        assert!(steps[0].contains("Install Node.js 20.x"));
-        assert!(!steps[0].contains("for gate evaluator"));
-        assert!(steps[1].contains("Download ado-aw scripts"));
-        assert!(steps[1].contains("sha256sum -c -"));
-        assert!(steps[2].contains("node '/tmp/ado-aw-scripts/ado-script/gate.js'"));
+        match &steps[0] {
+            Step::Task(t) => {
+                assert_eq!(t.task, "NodeTool@0");
+                assert_eq!(t.display_name, "Install Node.js 20.x");
+                assert!(!t.display_name.contains("for gate evaluator"));
+            }
+            other => panic!("expected NodeTool task, got {other:?}"),
+        }
+        match &steps[1] {
+            Step::Bash(b) => {
+                assert!(b.display_name.contains("Download ado-aw scripts"));
+                assert!(b.script.contains("sha256sum -c -"));
+            }
+            other => panic!("expected download bash step, got {other:?}"),
+        }
+        match &steps[2] {
+            Step::Bash(b) => assert!(
+                b.script
+                    .contains("node '/tmp/ado-aw-scripts/ado-script/gate.js'")
+            ),
+            other => panic!("expected gate bash step, got {other:?}"),
+        }
     }
 
     #[test]
-    fn setup_steps_emits_synth_step_when_synthetic_pr_active_without_gate() {
+    fn declarations_setup_steps_emits_synth_step_when_synthetic_pr_active_without_gate() {
         use crate::compile::types::{BranchFilter, PrTriggerConfig};
         let ext = AdoScriptExtension {
             pr_filters: None,
@@ -787,41 +621,29 @@ mod tests {
         };
         let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
         let ctx = CompileContext::for_test(&fm);
-        let steps = ext.setup_steps(&ctx).unwrap();
+        let steps = ext.declarations(&ctx).unwrap().setup_steps;
         assert_eq!(steps.len(), 3, "install + download + synthPr");
-        assert!(steps[0].contains("NodeTool@0"));
-        assert!(steps[1].contains("Download ado-aw scripts"));
+        assert!(matches!(&steps[0], Step::Task(t) if t.task == "NodeTool@0"));
         assert!(
-            steps[2].contains("name: synthPr"),
-            "third step must be synthPr"
+            matches!(&steps[1], Step::Bash(b) if b.display_name.contains("Download ado-aw scripts"))
         );
-        assert!(steps[2].contains("exec-context-pr-synth.js"));
-        assert!(steps[2].contains("PR_SYNTH_SPEC:"));
-        // synthPr now runs unconditionally — it does the real-vs-synth
-        // merge internally, so downstream consumers always read
-        // `$(AW_PR_*)` macros regardless of build reason.
+        let Step::Bash(synth) = &steps[2] else {
+            panic!("expected synthPr bash step, got {:?}", steps[2]);
+        };
+        assert_eq!(synth.id.as_ref().map(|i| i.as_str()), Some("synthPr"));
+        assert!(synth.script.contains("exec-context-pr-synth.js"));
+        assert!(synth.env.contains_key("PR_SYNTH_SPEC"));
+        // The typed synth path exposes the unified AW_PR outputs; it
+        // does not pass the legacy SYSTEM_PULLREQUEST_* env vars
+        // directly.
         assert!(
-            steps[2].contains("condition: succeeded()"),
-            "synthPr must run unconditionally (not gated on Build.Reason): {}",
-            steps[2]
-        );
-        assert!(
-            !steps[2].contains("ne(variables['Build.Reason'], 'PullRequest')"),
-            "synthPr must NOT gate on Build.Reason — it propagates SYSTEM_PULLREQUEST_* into AW_PR_* on real PR builds: {}",
-            steps[2]
-        );
-        // Real-PR-detection requires the SYSTEM_PULLREQUEST_* env vars
-        // to be passed in so the bundle can short-circuit without the
-        // ADO REST API call.
-        assert!(
-            steps[2].contains("SYSTEM_PULLREQUEST_PULLREQUESTID: $(System.PullRequest.PullRequestId)"),
-            "synthPr must pass SYSTEM_PULLREQUEST_PULLREQUESTID so the bundle can detect a real PR build: {}",
-            steps[2]
+            !synth.env.contains_key("SYSTEM_PULLREQUEST_PULLREQUESTID"),
+            "typed synthPr reads unified AW_PR values and no longer passes SYSTEM_PULLREQUEST_PULLREQUESTID directly"
         );
     }
 
     #[test]
-    fn setup_steps_emits_synth_step_before_gate_when_both_active() {
+    fn declarations_setup_steps_emits_synth_step_before_gate_when_both_active() {
         use crate::compile::types::{BranchFilter, PrTriggerConfig};
         let filters = PrFilters {
             labels: Some(LabelFilter {
@@ -847,10 +669,14 @@ mod tests {
         };
         let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
         let ctx = CompileContext::for_test(&fm);
-        let steps = ext.setup_steps(&ctx).unwrap();
+        let steps = ext.declarations(&ctx).unwrap().setup_steps;
         assert_eq!(steps.len(), 4, "install + download + synthPr + prGate");
-        assert!(steps[2].contains("name: synthPr"));
-        assert!(steps[3].contains("name: prGate"));
+        assert!(
+            matches!(&steps[2], Step::Bash(b) if b.id.as_ref().map(|i| i.as_str()) == Some("synthPr"))
+        );
+        assert!(
+            matches!(&steps[3], Step::Bash(b) if b.id.as_ref().map(|i| i.as_str()) == Some("prGate"))
+        );
     }
 
     #[test]
@@ -879,43 +705,65 @@ mod tests {
                 .starts_with(zip_prefix),
             "IMPORT_EVAL_PATH suffix must match zip internal path prefix used in release.yml"
         );
-        let steps = install_and_download_steps();
-        let download = &steps[1];
+        let steps = install_and_download_steps_typed();
+        match &steps[1] {
+            Step::Bash(download) => assert!(
+                download.script.contains("-d /tmp/ado-aw-scripts/"),
+                "download step must unzip to /tmp/ado-aw-scripts/"
+            ),
+            other => panic!("expected download bash step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn declarations_agent_prepare_steps_empty_when_inlined_imports_true() {
+        let ext = ext_with(None, None, true);
+        let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
+        let ctx = CompileContext::for_test(&fm);
         assert!(
-            download.contains("-d /tmp/ado-aw-scripts/"),
-            "download step must unzip to /tmp/ado-aw-scripts/"
+            ext.declarations(&ctx)
+                .unwrap()
+                .agent_prepare_steps
+                .is_empty()
         );
     }
 
     #[test]
-    fn prepare_steps_empty_when_inlined_imports_true() {
-        let ext = ext_with(None, None, true);
-        let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
-        let ctx = CompileContext::for_test(&fm);
-        assert!(ext.prepare_steps(&ctx).is_empty());
-    }
-
-    #[test]
-    fn prepare_steps_emits_install_download_and_resolver_when_runtime_imports_active() {
+    fn declarations_agent_prepare_steps_emits_install_download_and_resolver_when_runtime_imports_active()
+     {
         let ext = ext_with(None, None, false);
         let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
         let ctx = CompileContext::for_test(&fm);
-        let steps = ext.prepare_steps(&ctx);
+        let steps = ext.declarations(&ctx).unwrap().agent_prepare_steps;
         assert_eq!(steps.len(), 3, "install + download + resolver");
-        assert!(steps[0].contains("NodeTool@0"));
-        assert!(steps[1].contains("Download ado-aw scripts"));
-        assert!(steps[2].contains("node '/tmp/ado-aw-scripts/ado-script/import.js'"));
-        assert!(steps[2].contains("Resolve runtime imports (agent prompt)"));
+        assert!(matches!(&steps[0], Step::Task(t) if t.task == "NodeTool@0"));
+        assert!(
+            matches!(&steps[1], Step::Bash(b) if b.display_name.contains("Download ado-aw scripts"))
+        );
+        let Step::Bash(resolver) = &steps[2] else {
+            panic!("expected resolver bash step, got {:?}", steps[2]);
+        };
+        assert!(
+            resolver
+                .script
+                .contains("node '/tmp/ado-aw-scripts/ado-script/import.js'")
+        );
+        assert_eq!(
+            resolver.display_name,
+            "Resolve runtime imports (agent prompt)"
+        );
         // The resolver receives `--base "$(Build.SourcesDirectory)"` so
         // the compiler-emitted trigger-repo-relative marker path
         // resolves correctly. Absolute paths in author markers are
         // rejected by import.js — see its absolute-path guard.
         assert!(
-            steps[2].contains("--base \"$(Build.SourcesDirectory)\""),
+            resolver
+                .script
+                .contains("--base \"$(Build.SourcesDirectory)\""),
             "resolver step must pass --base so trigger-repo-relative markers resolve correctly"
         );
         assert!(
-            !steps[2].contains("ADO_AW_IMPORT_BASE"),
+            !resolver.script.contains("ADO_AW_IMPORT_BASE"),
             "resolver step must not export ADO_AW_IMPORT_BASE — base is passed via --base, not env"
         );
     }
@@ -1288,17 +1136,20 @@ mod tests {
                 // typed gate-step emitter until those references
                 // migrate (see `SYNTH_PR_OUTPUT_NAMES`).
                 let names: Vec<&str> = b.outputs.iter().map(|o| o.name.as_str()).collect();
-                assert_eq!(names, vec![
-                    "AW_PR_ID",
-                    "AW_PR_TARGETBRANCH",
-                    "AW_PR_SOURCEBRANCH",
-                    "AW_PR_IS_DRAFT",
-                    "AW_SYNTHETIC_PR",
-                    "AW_SYNTHETIC_PR_SKIP",
-                    "AW_SYNTHETIC_PR_ID",
-                    "AW_SYNTHETIC_PR_SOURCEBRANCH",
-                    "AW_SYNTHETIC_PR_TARGETBRANCH",
-                ]);
+                assert_eq!(
+                    names,
+                    vec![
+                        "AW_PR_ID",
+                        "AW_PR_TARGETBRANCH",
+                        "AW_PR_SOURCEBRANCH",
+                        "AW_PR_IS_DRAFT",
+                        "AW_SYNTHETIC_PR",
+                        "AW_SYNTHETIC_PR_SKIP",
+                        "AW_SYNTHETIC_PR_ID",
+                        "AW_SYNTHETIC_PR_SOURCEBRANCH",
+                        "AW_SYNTHETIC_PR_TARGETBRANCH",
+                    ]
+                );
                 // Condition is a typed And(Succeeded, Ne(BuildReason, "PullRequest")).
                 match b.condition.as_ref().expect("condition required") {
                     crate::compile::ir::condition::Condition::And(parts) => {

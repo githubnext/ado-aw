@@ -5,11 +5,11 @@
 //! `# ado-aw-metadata:` discovery marker, and the other writes a
 //! machine-readable `staging/aw_info.json` runtime artifact for audit.
 //!
-//! Why `prepare_steps` (Agent job) and not `setup_steps` (Setup job):
+//! Why Agent-job prepare steps and not Setup-job steps:
 //! a Setup-job injection would force every compiled pipeline to spin
 //! up a dedicated pool agent just to emit a metadata comment, even for
 //! pipelines that have no other reason to need a Setup job. The Agent
-//! job is always present, so `prepare_steps` is free.
+//! job is always present, so Agent-job prepare is free.
 //!
 //! Why a step (and not a top-of-file comment): ADO's Pipeline Preview
 //! API strips top-of-document leading comments during YAML expansion
@@ -51,92 +51,8 @@ impl CompilerExtension for AdoAwMarkerExtension {
         ExtensionPhase::Tool
     }
 
-    fn prepare_steps(&self, ctx: &CompileContext) -> Vec<String> {
-        // Inject the marker steps into the Agent job's prepare phase
-        // (NOT a separate Setup job). Setup-job injection would force
-        // every compiled pipeline to spin up an extra agent pool job
-        // just to emit metadata — wasteful for pipelines that have no
-        // other reason to need a Setup job. prepare_steps lands inside
-        // the always-present Agent job's `{{ prepare_steps }}` block,
-        // so it costs zero extra jobs/agents/pool time.
-        let Some(metadata) = CompileMetadata::from_ctx(ctx) else {
-            return vec![];
-        };
-
-        // The `# ado-aw-metadata:` line is the parse target for
-        // discovery. The `echo` makes the same information visible in
-        // the build log at runtime, which is a free human-discoverability
-        // bonus and costs nothing because the step runs in milliseconds.
-        //
-        // The echo's user-controlled values go through two sanitisations:
-        //
-        //  1. `crate::sanitize::neutralize_pipeline_commands` neutralises
-        //     `##vso[` and `##[` prefixes by wrapping them in backticks.
-        //     The ADO build agent scans stdout for those sequences and
-        //     treats them as logging commands (e.g. `task.setvariable`).
-        //     An attacker who controls a markdown filename could
-        //     otherwise inject a logging command into the build log via
-        //     the echoed source path. Reusing the canonical helper keeps
-        //     this in sync with the rest of the sanitisation surfaces.
-        //
-        //  2. `bash_single_quote_escape` applies the `\''` idiom so a
-        //     filename containing `'` (e.g. `agents/foo's.md`) doesn't
-        //     produce syntactically broken bash. `version` and `target`
-        //     are controlled inputs and can't contain either.
-        //
-        // `org` and `repo` are derived from ADO remote parsing, which
-        // already restricts them to a safe character set, but we apply
-        // the same defence-in-depth pattern for consistency.
-        let echo_source = bash_single_quote_escape(&crate::sanitize::neutralize_pipeline_commands(
-            &metadata.source,
-        ));
-        let echo_org = bash_single_quote_escape(&crate::sanitize::neutralize_pipeline_commands(
-            &metadata.org,
-        ));
-        let echo_repo = bash_single_quote_escape(&crate::sanitize::neutralize_pipeline_commands(
-            &metadata.repo,
-        ));
-
-        let marker_step = format!(
-            r#"- bash: |
-    # ado-aw-metadata: {metadata_json}
-    echo 'ado-aw metadata: source={echo_source} org={echo_org} repo={echo_repo} version={version} target={target}'
-  displayName: "ado-aw"
-"#,
-            metadata_json = metadata.marker_json(),
-            echo_source = echo_source,
-            echo_org = echo_org,
-            echo_repo = echo_repo,
-            version = metadata.compiler_version.as_str(),
-            target = metadata.target.as_str(),
-        );
-
-        let aw_info_step = format!(
-            r#"- bash: |
-    set -eo pipefail
-
-    mkdir -p "$(Agent.TempDirectory)/staging"
-    cat >"$(Agent.TempDirectory)/staging/aw_info.json" <<'AW_INFO_EOF'
-    {aw_info_json}
-    AW_INFO_EOF
-  displayName: "Emit aw_info.json"
-  condition: always()
-"#,
-            aw_info_json = metadata.aw_info_json(),
-        );
-
-        vec![marker_step, aw_info_step]
-    }
-
-    /// Typed-IR view of the two prepare steps emitted by
-    /// [`Self::prepare_steps`]. Returns the same two bash steps as
-    /// `Step::Bash(BashStep)` values — the bash bodies are
-    /// byte-identical so lowering through `ir::emit` produces the
-    /// same YAML as today.
-    ///
-    /// Coexists with `prepare_steps` until the
-    /// `compile-target-standalone` commit switches production
-    /// consumption to `declarations`.
+    /// Returns the two Agent-job prepare steps as typed
+    /// `Step::Bash(BashStep)` values.
     fn declarations(&self, ctx: &CompileContext) -> anyhow::Result<Declarations> {
         let Some(metadata) = CompileMetadata::from_ctx(ctx) else {
             return Ok(Declarations::default());
@@ -153,9 +69,7 @@ impl CompilerExtension for AdoAwMarkerExtension {
 }
 
 /// Build the typed [`BashStep`] form of the `# ado-aw-metadata: …`
-/// marker step. The script body is byte-identical to the YAML
-/// embedded by [`AdoAwMarkerExtension::prepare_steps`] so the two
-/// emission paths produce equivalent pipelines.
+/// marker step.
 fn marker_bash_step(metadata: &CompileMetadata) -> BashStep {
     let echo_source = bash_single_quote_escape(&crate::sanitize::neutralize_pipeline_commands(
         &metadata.source,
@@ -283,11 +197,25 @@ mod tests {
         serde_yaml::from_str(yaml).expect("front matter parses")
     }
 
+    fn agent_prepare_steps(ctx: &CompileContext<'_>) -> Vec<Step> {
+        AdoAwMarkerExtension
+            .declarations(ctx)
+            .unwrap()
+            .agent_prepare_steps
+    }
+
+    fn bash_step(step: &Step) -> &BashStep {
+        match step {
+            Step::Bash(b) => b,
+            other => panic!("expected Step::Bash, got {other:?}"),
+        }
+    }
+
     #[test]
     fn returns_no_step_when_input_path_absent() {
         let fm = parse_fm("name: t\ndescription: x\n");
         let ctx = CompileContext::for_test(&fm);
-        let steps = AdoAwMarkerExtension.prepare_steps(&ctx);
+        let steps = agent_prepare_steps(&ctx);
         assert!(
             steps.is_empty(),
             "expected no marker when input_path is None"
@@ -308,37 +236,40 @@ mod tests {
             compile_dir: None,
             input_path: Some(input_path),
         };
-        let steps = AdoAwMarkerExtension.prepare_steps(&ctx);
+        let steps = agent_prepare_steps(&ctx);
         assert_eq!(steps.len(), 2);
-        let step = &steps[0];
+        let step = bash_step(&steps[0]);
+        assert_eq!(step.display_name, "ado-aw");
         assert!(
-            step.contains("displayName: \"ado-aw\""),
-            "step missing displayName:\n{step}"
+            step.script.contains("# ado-aw-metadata:"),
+            "step missing JSON marker line:\n{}",
+            step.script
         );
         assert!(
-            step.contains("# ado-aw-metadata:"),
-            "step missing JSON marker line:\n{step}"
+            step.script.contains("\"source\":\"agents/foo.md\""),
+            "step missing source field:\n{}",
+            step.script
         );
         assert!(
-            step.contains("\"source\":\"agents/foo.md\""),
-            "step missing source field:\n{step}"
+            step.script.contains("\"target\":\"standalone\""),
+            "step missing target field:\n{}",
+            step.script
         );
         assert!(
-            step.contains("\"target\":\"standalone\""),
-            "step missing target field:\n{step}"
-        );
-        assert!(
-            step.contains("\"schema\":1"),
-            "step missing schema field:\n{step}"
+            step.script.contains("\"schema\":1"),
+            "step missing schema field:\n{}",
+            step.script
         );
         // No ado_context => org/repo emit as empty strings.
         assert!(
-            step.contains("\"org\":\"\""),
-            "step missing org field:\n{step}"
+            step.script.contains("\"org\":\"\""),
+            "step missing org field:\n{}",
+            step.script
         );
         assert!(
-            step.contains("\"repo\":\"\""),
-            "step missing repo field:\n{step}"
+            step.script.contains("\"repo\":\"\""),
+            "step missing repo field:\n{}",
+            step.script
         );
     }
 
@@ -354,63 +285,72 @@ mod tests {
             compile_dir: None,
             input_path: Some(input_path),
         };
-        let steps = AdoAwMarkerExtension.prepare_steps(&ctx);
+        let steps = agent_prepare_steps(&ctx);
         assert_eq!(steps.len(), 2);
-        let step = &steps[1];
+        let step = bash_step(&steps[1]);
+        assert_eq!(step.display_name, "Emit aw_info.json");
+        assert!(matches!(step.condition, Some(Condition::Always)));
         assert!(
-            step.contains("displayName: \"Emit aw_info.json\""),
-            "step missing aw_info displayName:\n{step}"
+            step.script
+                .contains("cat >\"$(Agent.TempDirectory)/staging/aw_info.json\" <<'AW_INFO_EOF'"),
+            "step missing quoted heredoc write:\n{}",
+            step.script
         );
         assert!(
-            step.contains("condition: always()"),
-            "step missing always() condition:\n{step}"
+            step.script.contains("\"schema\":\"ado-aw/aw_info/1\""),
+            "step missing aw_info schema:\n{}",
+            step.script
         );
         assert!(
-            step.contains("cat >\"$(Agent.TempDirectory)/staging/aw_info.json\" <<'AW_INFO_EOF'"),
-            "step missing quoted heredoc write:\n{step}"
+            step.script.contains("\"source\":\"agents/foo.md\""),
+            "step missing source field:\n{}",
+            step.script
         );
         assert!(
-            step.contains("\"schema\":\"ado-aw/aw_info/1\""),
-            "step missing aw_info schema:\n{step}"
+            step.script.contains("\"target\":\"standalone\""),
+            "step missing target field:\n{}",
+            step.script
         );
         assert!(
-            step.contains("\"source\":\"agents/foo.md\""),
-            "step missing source field:\n{step}"
+            step.script.contains("\"engine\":\"copilot\""),
+            "step missing engine field:\n{}",
+            step.script
         );
         assert!(
-            step.contains("\"target\":\"standalone\""),
-            "step missing target field:\n{step}"
-        );
-        assert!(
-            step.contains("\"engine\":\"copilot\""),
-            "step missing engine field:\n{step}"
-        );
-        assert!(
-            step.contains(&format!(
+            step.script.contains(&format!(
                 "\"model\":\"{}\"",
                 crate::engine::DEFAULT_COPILOT_MODEL
             )),
-            "step missing default model field:\n{step}"
+            "step missing default model field:\n{}",
+            step.script
         );
         assert!(
-            step.contains("\"agent_name\":\"t\""),
-            "step missing agent_name field:\n{step}"
+            step.script.contains("\"agent_name\":\"t\""),
+            "step missing agent_name field:\n{}",
+            step.script
         );
         assert!(
-            step.contains("\"build_id\":\"$(Build.BuildId)\""),
-            "step missing build_id macro:\n{step}"
+            step.script.contains("\"build_id\":\"$(Build.BuildId)\""),
+            "step missing build_id macro:\n{}",
+            step.script
         );
         assert!(
-            step.contains("\"source_version\":\"$(Build.SourceVersion)\""),
-            "step missing source_version macro:\n{step}"
+            step.script
+                .contains("\"source_version\":\"$(Build.SourceVersion)\""),
+            "step missing source_version macro:\n{}",
+            step.script
         );
         assert!(
-            step.contains("\"source_branch\":\"$(Build.SourceBranch)\""),
-            "step missing source_branch macro:\n{step}"
+            step.script
+                .contains("\"source_branch\":\"$(Build.SourceBranch)\""),
+            "step missing source_branch macro:\n{}",
+            step.script
         );
         assert!(
-            step.contains("\"build_definition_id\":\"$(System.DefinitionId)\""),
-            "step missing build_definition_id macro:\n{step}"
+            step.script
+                .contains("\"build_definition_id\":\"$(System.DefinitionId)\""),
+            "step missing build_definition_id macro:\n{}",
+            step.script
         );
     }
 
@@ -434,23 +374,26 @@ mod tests {
             compile_dir: None,
             input_path: Some(input_path),
         };
-        let steps = AdoAwMarkerExtension.prepare_steps(&ctx);
+        let steps = agent_prepare_steps(&ctx);
         assert_eq!(steps.len(), 2);
-        let step = &steps[0];
+        let step = bash_step(&steps[0]);
         // ADO identifiers are case-insensitive; lowercase to make
         // comparisons in discovery deterministic.
         assert!(
-            step.contains("\"org\":\"myorg\""),
-            "expected lowercased org field:\n{step}"
+            step.script.contains("\"org\":\"myorg\""),
+            "expected lowercased org field:\n{}",
+            step.script
         );
         assert!(
-            step.contains("\"repo\":\"templates-a\""),
-            "expected lowercased repo field:\n{step}"
+            step.script.contains("\"repo\":\"templates-a\""),
+            "expected lowercased repo field:\n{}",
+            step.script
         );
         // The echo line surfaces them too for build-log readability.
         assert!(
-            step.contains("org=myorg repo=templates-a"),
-            "expected echo to include org/repo:\n{step}"
+            step.script.contains("org=myorg repo=templates-a"),
+            "expected echo to include org/repo:\n{}",
+            step.script
         );
     }
 
@@ -473,12 +416,15 @@ mod tests {
                 compile_dir: None,
                 input_path: Some(input_path),
             };
-            let steps = AdoAwMarkerExtension.prepare_steps(&ctx);
+            let steps = agent_prepare_steps(&ctx);
             assert_eq!(steps.len(), 2, "target={raw_target}");
+            let marker = bash_step(&steps[0]);
             assert!(
-                steps[0].contains(&format!("\"target\":\"{expected}\"")),
+                marker
+                    .script
+                    .contains(&format!("\"target\":\"{expected}\"")),
                 "expected target={expected} in step (raw input {raw_target}):\n{}",
-                steps[0]
+                marker.script
             );
         }
     }
@@ -492,12 +438,9 @@ mod tests {
         assert_eq!(bash_single_quote_escape(""), "");
     }
 
-    /// Typed-IR view of the same two steps. Locks the
-    /// `declarations()` override against silent drift: must return
-    /// exactly two `Step::Bash` values (no `Step::RawYaml` migration
-    /// bridge) with the canonical display names. Detailed bash-body
-    /// assertions still live in the legacy-form tests above; this
-    /// test enforces shape, not content.
+    /// Locks the `declarations()` override against silent drift: must
+    /// return exactly two `Step::Bash` values with the canonical
+    /// display names.
     #[test]
     fn declarations_returns_typed_bash_steps_not_raw_yaml() {
         use crate::compile::ir::step::Step;
@@ -547,18 +490,21 @@ mod tests {
             compile_dir: None,
             input_path: Some(input_path),
         };
-        let steps = AdoAwMarkerExtension.prepare_steps(&ctx);
+        let steps = agent_prepare_steps(&ctx);
         assert_eq!(steps.len(), 2);
-        let step = &steps[0];
+        let step = bash_step(&steps[0]);
         assert!(
-            step.contains("echo 'ado-aw metadata: source=agents/foo'\\''s-agent.md "),
-            "single-quote in source should be escaped via the '\\'' idiom; got:\n{step}",
+            step.script
+                .contains("echo 'ado-aw metadata: source=agents/foo'\\''s-agent.md "),
+            "single-quote in source should be escaped via the '\\'' idiom; got:\n{}",
+            step.script,
         );
         // The JSON marker line should still carry the raw (un-bash-escaped)
         // source — JSON has no quoting concern with `'`.
         assert!(
-            step.contains("\"source\":\"agents/foo's-agent.md\""),
-            "JSON marker should carry raw source unchanged:\n{step}",
+            step.script.contains("\"source\":\"agents/foo's-agent.md\""),
+            "JSON marker should carry raw source unchanged:\n{}",
+            step.script,
         );
     }
 
@@ -584,9 +530,9 @@ mod tests {
             compile_dir: None,
             input_path: Some(input_path),
         };
-        let steps = AdoAwMarkerExtension.prepare_steps(&ctx);
+        let steps = agent_prepare_steps(&ctx);
         assert_eq!(steps.len(), 2);
-        let step = &steps[0];
+        let step = bash_step(&steps[0]);
 
         // Find the `echo` line specifically — the `# ado-aw-metadata`
         // JSON line is allowed to carry the raw source (it's not echoed
@@ -596,6 +542,7 @@ mod tests {
         // comments inside the rendered yaml; those don't trip the
         // logging-command scanner.
         let echo_line = step
+            .script
             .lines()
             .find(|l| l.trim_start().starts_with("echo 'ado-aw metadata:"))
             .expect("must have echo line");
@@ -633,13 +580,14 @@ mod tests {
             compile_dir: None,
             input_path: Some(input_path),
         };
-        let steps = AdoAwMarkerExtension.prepare_steps(&ctx);
+        let steps = agent_prepare_steps(&ctx);
         assert_eq!(steps.len(), 2);
+        let marker = bash_step(&steps[0]);
 
         // Parse the marker step back via the canonical discovery parser
         // and confirm the source field reconstructs to the original
         // path (forward-slash-normalised, no spurious backslashes).
-        let parsed = crate::detect::parse_marker_step(&steps[0]);
+        let parsed = crate::detect::parse_marker_step(&marker.script);
         assert_eq!(parsed.len(), 1, "expected exactly one marker in step");
         assert_eq!(
             parsed[0].source, r#"agents/foo"bar.md"#,

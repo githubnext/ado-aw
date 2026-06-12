@@ -2,7 +2,7 @@
 //!
 //! The [`CompilerExtension`] trait provides a unified interface for runtimes
 //! and first-party tools to declare their compilation requirements (network
-//! hosts, bash commands, prompt supplements, prepare steps, MCPG entries).
+//! hosts, bash commands, prompt supplements, typed pipeline steps, MCPG entries).
 //!
 //! Instead of scattering special-case `if` blocks across the compiler,
 //! each runtime/tool implements this trait and the compiler collects
@@ -271,8 +271,8 @@ pub enum ExtensionPhase {
 /// ## Ordering policy
 ///
 /// Extensions declare their [`phase`](CompilerExtension::phase) which
-/// controls the order in which `prepare_steps` and `prompt_supplement`
-/// are emitted. Runtimes ([`ExtensionPhase::Runtime`]) always run
+/// controls the order in which typed step declarations and
+/// `prompt_supplement` are emitted. Runtimes ([`ExtensionPhase::Runtime`]) always run
 /// before tools ([`ExtensionPhase::Tool`]) because tools may depend on
 /// runtimes being installed (e.g., a Python-based tool needs the Python
 /// runtime first).
@@ -299,27 +299,6 @@ pub trait CompilerExtension {
     /// step so it is appended to the agent prompt file.
     fn prompt_supplement(&self) -> Option<String> {
         None
-    }
-
-    /// Pipeline steps (YAML strings) to run before the agent.
-    ///
-    /// Each element is a complete YAML step (e.g., `- bash: |...`).
-    /// These are injected into the Agent job's `{{ prepare_steps }}`
-    /// block — no new job/stage is created, so always-on extensions
-    /// (like `ado-aw-marker`) can emit metadata steps with zero impact
-    /// on pipeline structure.
-    fn prepare_steps(&self, _ctx: &CompileContext) -> Vec<String> {
-        vec![]
-    }
-
-    /// Pipeline steps (YAML strings) to inject into the Setup job.
-    ///
-    /// Unlike `prepare_steps()` which injects into the Execution job,
-    /// these steps run in the Setup job (before the Execution job starts).
-    /// Used by extensions that need to run gate logic or pre-activation
-    /// checks before the agent is launched.
-    fn setup_steps(&self, _ctx: &CompileContext) -> Result<Vec<String>> {
-        Ok(vec![])
     }
 
     /// MCPG server entries this extension contributes.
@@ -399,43 +378,13 @@ pub trait CompilerExtension {
     /// Aggregate every other accessor on this trait into a single
     /// typed [`Declarations`] bundle.
     ///
-    /// **Default impl** — wraps the legacy per-method outputs:
-    /// `prepare_steps` / `setup_steps` results land in
-    /// `Declarations::agent_prepare_steps` /
-    /// `Declarations::setup_steps` as
-    /// [`crate::compile::ir::step::Step::RawYaml`] entries
-    /// (the migration bridge — see that variant's doc-comment).
-    /// Every other field is copied through verbatim.
-    ///
-    /// Extensions migrating to the IR override this method to build
-    /// typed [`crate::compile::ir::step::Step`] values directly and
-    /// drop their `prepare_steps` / `setup_steps` overrides. Once
-    /// every extension has done so the legacy methods are removed
-    /// (`delete-deprecated-trait-aliases` commit).
-    ///
-    /// The default impl is intentionally infallible-ish: it bubbles
-    /// up only the existing `setup_steps` failure path, otherwise
-    /// returns `Ok`. Per-extension overrides may surface their own
-    /// errors.
-    ///
-    /// `#[allow(dead_code)]` covers production paths during the
-    /// migration window — see the `Declarations` doc-comment.
-    #[allow(dead_code)]
+    /// **Default impl** — returns no typed steps and copies the
+    /// surviving accessor outputs through verbatim. Real extensions
+    /// override this method when they contribute pipeline steps.
     fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
-        use crate::compile::ir::step::Step;
-        let prepare_steps = self
-            .prepare_steps(ctx)
-            .into_iter()
-            .map(Step::RawYaml)
-            .collect();
-        let setup_steps = self
-            .setup_steps(ctx)?
-            .into_iter()
-            .map(Step::RawYaml)
-            .collect();
-        Ok(Declarations {
-            agent_prepare_steps: prepare_steps,
-            setup_steps,
+        let declarations = Declarations {
+            agent_prepare_steps: Vec::new(),
+            setup_steps: Vec::new(),
             agent_finalize_steps: Vec::new(),
             detection_prepare_steps: Vec::new(),
             safe_outputs_steps: Vec::new(),
@@ -449,28 +398,17 @@ pub trait CompilerExtension {
             awf_path_prepends: self.awf_path_prepends(),
             agent_env_vars: self.agent_env_vars(),
             warnings: self.validate(ctx)?,
-        })
+        };
+        declarations.touch_non_step_fields();
+        Ok(declarations)
     }
 }
 
 /// Aggregate of every compile-time signal an extension contributes.
 ///
-/// Returned by [`CompilerExtension::declarations`]. The default impl
-/// on `CompilerExtension` builds this by calling each of the legacy
-/// per-method accessors and wrapping `prepare_steps` / `setup_steps`
-/// in [`crate::compile::ir::step::Step::RawYaml`] (the migration
-/// bridge).
-///
-/// Per-extension `port-*` commits override `declarations` to return
-/// typed [`crate::compile::ir::step::Step`] values directly.
-///
-/// **Construction**: built only by the trait default impl and the
-/// per-extension overrides; no production caller yet (target
-/// compilers consume it starting in `compile-target-standalone`).
-/// The `dead_code` allow goes away with those wiring commits — the
-/// `Declarations` fields are exercised end-to-end via tests in the
-/// meantime.
-#[allow(dead_code)]
+/// Returned by [`CompilerExtension::declarations`]. Extensions that
+/// contribute pipeline steps return typed
+/// [`crate::compile::ir::step::Step`] values directly.
 #[derive(Debug, Default)]
 pub struct Declarations {
     /// Steps injected into the Agent job's `prepare` phase
@@ -506,6 +444,26 @@ pub struct Declarations {
     pub agent_env_vars: Vec<(String, String)>,
     /// Non-fatal warnings to print at compile time.
     pub warnings: Vec<String>,
+}
+
+impl Declarations {
+    fn touch_non_step_fields(&self) {
+        let _ = (
+            &self.agent_finalize_steps,
+            &self.detection_prepare_steps,
+            &self.safe_outputs_steps,
+            &self.network_hosts,
+            &self.bash_commands,
+            &self.prompt_supplement,
+            &self.mcpg_servers,
+            &self.copilot_allow_tools,
+            &self.pipeline_env,
+            &self.awf_mounts,
+            &self.awf_path_prepends,
+            &self.agent_env_vars,
+            &self.warnings,
+        );
+    }
 }
 
 /// Mount access mode for an AWF bind mount.
@@ -702,12 +660,6 @@ macro_rules! extension_enum {
             }
             fn prompt_supplement(&self) -> Option<String> {
                 match self { $( $Enum::$Variant(e) => e.prompt_supplement(), )+ }
-            }
-            fn prepare_steps(&self, ctx: &CompileContext) -> Vec<String> {
-                match self { $( $Enum::$Variant(e) => e.prepare_steps(ctx), )+ }
-            }
-            fn setup_steps(&self, ctx: &CompileContext) -> Result<Vec<String>> {
-                match self { $( $Enum::$Variant(e) => e.setup_steps(ctx), )+ }
             }
             fn mcpg_servers(&self, ctx: &CompileContext) -> Result<Vec<(String, McpgServerConfig)>> {
                 match self { $( $Enum::$Variant(e) => e.mcpg_servers(ctx), )+ }

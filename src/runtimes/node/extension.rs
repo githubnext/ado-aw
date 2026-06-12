@@ -1,11 +1,9 @@
 // ─── Node.js ───────────────────────────────────────────────────────
 
-use crate::compile::extensions::{
-    CompileContext, CompilerExtension, Declarations, ExtensionPhase,
-};
+use super::{NODE_BASH_COMMANDS, NodeRuntimeConfig};
+use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 use crate::compile::ir::step::{BashStep, Step, TaskStep};
 use crate::validate;
-use super::{NODE_BASH_COMMANDS, NodeRuntimeConfig, generate_ensure_npmrc, generate_node_install, generate_npm_authenticate};
 use anyhow::Result;
 
 /// Node.js runtime extension.
@@ -55,16 +53,6 @@ Node.js is installed and available. Use `node` to run scripts, \
 `npm` to manage packages, and `npx` to run package binaries.\n"
                 .to_string(),
         )
-    }
-
-    fn prepare_steps(&self, _ctx: &CompileContext) -> Vec<String> {
-        let mut steps = vec![generate_node_install(&self.config)];
-        // Emit ensure-npmrc + npmAuthenticate only when an internal feed is configured
-        if self.config.feed_url().is_some() || self.config.config().is_some() {
-            steps.push(generate_ensure_npmrc(&self.config));
-            steps.push(generate_npm_authenticate());
-        }
-        steps
     }
 
     fn agent_env_vars(&self) -> Vec<(String, String)> {
@@ -175,9 +163,7 @@ fn npm_authenticate_task_step() -> TaskStep {
 /// untouched; otherwise create a minimal one pointing at the
 /// configured feed (or the default npmjs registry).
 fn ensure_npmrc_bash_step(config: &NodeRuntimeConfig) -> BashStep {
-    let registry = config
-        .feed_url()
-        .unwrap_or("https://registry.npmjs.org/");
+    let registry = config.feed_url().unwrap_or("https://registry.npmjs.org/");
     let script = format!(
         "set -eo pipefail\n\
          if [ ! -f .npmrc ]; then\n  \
@@ -268,7 +254,10 @@ mod tests {
             Step::Task(t) => {
                 assert_eq!(t.task, "NodeTool@0");
                 assert_eq!(t.display_name, "Install Node.js 22.x");
-                assert_eq!(t.inputs.get("versionSpec").map(String::as_str), Some("22.x"));
+                assert_eq!(
+                    t.inputs.get("versionSpec").map(String::as_str),
+                    Some("22.x")
+                );
             }
             other => panic!("expected Step::Task, got {other:?}"),
         }
@@ -302,11 +291,18 @@ mod tests {
         match &decl.agent_prepare_steps[2] {
             Step::Task(t) => {
                 assert_eq!(t.task, "npmAuthenticate@0");
-                assert_eq!(t.inputs.get("workingFile").map(String::as_str), Some(".npmrc"));
+                assert_eq!(
+                    t.inputs.get("workingFile").map(String::as_str),
+                    Some(".npmrc")
+                );
             }
             other => panic!("expected Step::Task for npmAuthenticate@0, got {other:?}"),
         }
-        let keys: Vec<&str> = decl.agent_env_vars.iter().map(|(k, _)| k.as_str()).collect();
+        let keys: Vec<&str> = decl
+            .agent_env_vars
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .collect();
         assert!(keys.contains(&"NPM_CONFIG_REGISTRY"));
     }
 }
