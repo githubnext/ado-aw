@@ -342,9 +342,38 @@ pub fn synthetic_pr_step_typed(spec_b64: &str) -> Result<BashStep> {
 /// contributor) use the same OutputRef and the lowering pass
 /// resolves the correct ADO reference syntax based on consumer
 /// location.
+/// Outputs declared by the `synthPr` step. Consumers in the same
+/// job (e.g. `prGate`) reference these via `OutputRef::new(StepId::new("synthPr")?, NAME)`;
+/// cross-job consumers (e.g. the Agent-job `exec-context-pr`
+/// contributor) use the same OutputRef and the lowering pass
+/// resolves the correct ADO reference syntax based on consumer
+/// location.
+///
+/// The list reflects every `setOutput` the runtime
+/// `exec-context-pr-synth.js` bundle emits (see that file's "Variables
+/// emitted" docblock). The `AW_SYNTHETIC_PR_*` names below the unified
+/// `AW_PR_*` block are legacy aliases retained for back-compat with
+/// the typed gate-step emitter (`build_gate_step_typed` in
+/// `filter_ir.rs`) until those references migrate to the unified
+/// namespace.
 pub const SYNTH_PR_OUTPUT_NAMES: &[&str] = &[
+    // Unified `AW_PR_*` namespace introduced in PR #972 — the
+    // runtime bundle emits these via both `setOutput` (cross-job
+    // OutputRef consumers) and `setVar` (same-job `$(name)` macro
+    // consumers). The Agent-job-level `variables:` hoist consumes
+    // these via cross-job OutputRef.
+    "AW_PR_ID",
+    "AW_PR_TARGETBRANCH",
+    "AW_PR_SOURCEBRANCH",
+    "AW_PR_IS_DRAFT",
+    // Always-emitted control flags.
     "AW_SYNTHETIC_PR",
     "AW_SYNTHETIC_PR_SKIP",
+    // Legacy `AW_SYNTHETIC_PR_*` identifier names. The runtime no
+    // longer emits these (see PR #972) but the typed gate-step
+    // emitter in `filter_ir.rs::build_gate_step_typed` still
+    // references them via OutputRef. Keep them declared so graph
+    // validation passes; emitted values are always empty at runtime.
     "AW_SYNTHETIC_PR_ID",
     "AW_SYNTHETIC_PR_SOURCEBRANCH",
     "AW_SYNTHETIC_PR_TARGETBRANCH",
@@ -1252,9 +1281,18 @@ mod tests {
             Step::Bash(b) => {
                 assert_eq!(b.id.as_ref().map(|i| i.as_str()), Some("synthPr"));
                 assert_eq!(b.display_name, "Resolve synthetic PR context");
-                // Five outputs declared, in canonical order.
+                // Outputs declared, in canonical order. The unified
+                // `AW_PR_*` namespace (PR #972) is the primary
+                // surface; the legacy `AW_SYNTHETIC_PR_*` identifier
+                // names remain declared for back-compat with the
+                // typed gate-step emitter until those references
+                // migrate (see `SYNTH_PR_OUTPUT_NAMES`).
                 let names: Vec<&str> = b.outputs.iter().map(|o| o.name.as_str()).collect();
                 assert_eq!(names, vec![
+                    "AW_PR_ID",
+                    "AW_PR_TARGETBRANCH",
+                    "AW_PR_SOURCEBRANCH",
+                    "AW_PR_IS_DRAFT",
                     "AW_SYNTHETIC_PR",
                     "AW_SYNTHETIC_PR_SKIP",
                     "AW_SYNTHETIC_PR_ID",
@@ -1300,13 +1338,13 @@ mod tests {
         }
     }
 
-    /// **Marquee regression test**: the typed gate step's `ADO_PR_ID`
-    /// env value lowers to the macro-form concatenation
-    /// `$(System.PullRequest.PullRequestId)$(synthPr.AW_SYNTHETIC_PR_ID)`
-    /// — same-job consumer must NOT see runtime-expression form
-    /// (`$[ variables['synthPr.X'] ]` resolves to empty in the
-    /// producing job; see filter_ir.rs doc-comment). Locks the
-    /// declarative synth-PR propagation goal.
+    /// **Marquee regression test**: the typed gate step's PR-related
+    /// env values read the unified `AW_PR_*` Setup-job-level
+    /// variables that the `synthPr` step's `setVar` calls register
+    /// in the regular variable namespace. Same-job consumer; reads
+    /// must use the `$(name)` macro form (NOT `$[ variables['…'] ]`
+    /// — runtime expressions are not evaluated inside step `env:`
+    /// values, see PR #956).
     #[test]
     fn typed_gate_pr_id_lowers_to_macro_concat_in_same_job() {
         use crate::compile::filter_ir::{
@@ -1318,8 +1356,8 @@ mod tests {
         use crate::compile::ir::lower::{LoweringContext, lower_step};
         use crate::compile::ir::{Pipeline, PipelineBody, PipelineShape, Resources, Triggers};
 
-        // Three checks together cover the three identifiers that get
-        // the synth-aware macro-concat treatment:
+        // Three checks together cover the three identifiers that
+        // read from the synth-emitted `AW_PR_*` variables:
         //   - LabelSetMatch (PrLabels → PrMetadata) → ADO_PR_ID
         //   - SourceBranch fact → ADO_SOURCE_BRANCH
         //   - TargetBranch fact → ADO_TARGET_BRANCH
@@ -1377,9 +1415,8 @@ mod tests {
             shape: PipelineShape::Standalone,
         };
 
-        // Walk the IR; lower the gate step; assert its env block has the
-        // macro-form concatenation for ADO_PR_ID, ADO_SOURCE_BRANCH,
-        // ADO_TARGET_BRANCH.
+        // Walk the IR; lower the gate step; assert its env block reads
+        // the unified AW_PR_* setVar variables via plain $(name) macros.
         let g = build_graph(&p).unwrap();
         let setup_id = JobId::new("Setup").unwrap();
         let ctx = LoweringContext {
@@ -1395,24 +1432,23 @@ mod tests {
         let lowered = lower_step(gate_step, &ctx).unwrap();
         let env_yaml = serde_yaml::to_string(&lowered).unwrap();
         assert!(
-            env_yaml.contains("$(System.PullRequest.PullRequestId)$(synthPr.AW_SYNTHETIC_PR_ID)"),
-            "ADO_PR_ID must use macro-form concat; got:\n{env_yaml}"
+            env_yaml.contains("ADO_PR_ID: $(AW_PR_ID)"),
+            "ADO_PR_ID must read unified AW_PR_ID var via $() macro; got:\n{env_yaml}"
         );
         assert!(
-            env_yaml
-                .contains("$(System.PullRequest.SourceBranch)$(synthPr.AW_SYNTHETIC_PR_SOURCEBRANCH)"),
-            "ADO_SOURCE_BRANCH must use macro-form concat; got:\n{env_yaml}"
+            env_yaml.contains("ADO_SOURCE_BRANCH: $(AW_PR_SOURCEBRANCH)"),
+            "ADO_SOURCE_BRANCH must read AW_PR_SOURCEBRANCH var; got:\n{env_yaml}"
         );
         assert!(
-            env_yaml
-                .contains("$(System.PullRequest.TargetBranch)$(synthPr.AW_SYNTHETIC_PR_TARGETBRANCH)"),
-            "ADO_TARGET_BRANCH must use macro-form concat; got:\n{env_yaml}"
+            env_yaml.contains("ADO_TARGET_BRANCH: $(AW_PR_TARGETBRANCH)"),
+            "ADO_TARGET_BRANCH must read AW_PR_TARGETBRANCH var; got:\n{env_yaml}"
         );
-        // The synth-active flag is lowered as the macro form too —
-        // NOT $[ variables['synthPr.AW_SYNTHETIC_PR'] ].
+        // AW_SYNTHETIC_PR uses the same setVar form, NOT
+        // $(synthPr.AW_SYNTHETIC_PR) — both work at runtime but the
+        // legacy emitter pinned the setVar wire form.
         assert!(
-            env_yaml.contains("AW_SYNTHETIC_PR: $(synthPr.AW_SYNTHETIC_PR)"),
-            "AW_SYNTHETIC_PR must use same-job macro form; got:\n{env_yaml}"
+            env_yaml.contains("AW_SYNTHETIC_PR: $(AW_SYNTHETIC_PR)"),
+            "AW_SYNTHETIC_PR must use same-job setVar macro; got:\n{env_yaml}"
         );
         assert!(
             !env_yaml.contains("variables['synthPr."),

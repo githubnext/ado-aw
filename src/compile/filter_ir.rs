@@ -1246,7 +1246,6 @@ pub fn build_gate_step_typed(
     use crate::compile::ir::condition::Condition;
     use crate::compile::ir::env::EnvValue;
     use crate::compile::ir::ids::StepId;
-    use crate::compile::ir::output::OutputRef;
     use crate::compile::ir::step::BashStep;
     use base64::{Engine as _, engine::general_purpose::STANDARD};
 
@@ -1274,44 +1273,31 @@ pub fn build_gate_step_typed(
         )
         .with_env("GATE_SPEC", EnvValue::literal(spec_b64));
 
-    // AW_SYNTHETIC_PR (same-job consumer of the synthPr step) flows
-    // through as a typed StepOutput → macro form $(synthPr.AW_SYNTHETIC_PR).
+    // AW_SYNTHETIC_PR (same-job consumer of the synthPr step) reads
+    // the setVar-registered variable via plain `$(name)` macro. The
+    // `synthPr` step emits both `setOutput` (cross-job) and `setVar`
+    // (same-job) for every value, so this is functionally equivalent
+    // to `$(synthPr.AW_SYNTHETIC_PR)` at runtime but matches the
+    // legacy emitter's wire form (which the regression test in
+    // `tests/compiler_tests.rs::test_pr_filter_synth_mode_gate_step_uses_same_job_synth_ref`
+    // pins).
     if pr_synth_active {
-        let synth = StepId::new("synthPr")?;
-        step = step.with_env(
-            "AW_SYNTHETIC_PR",
-            EnvValue::step_output(OutputRef::new(synth, "AW_SYNTHETIC_PR")),
-        );
+        step = step.with_env("AW_SYNTHETIC_PR", EnvValue::pipeline_var("AW_SYNTHETIC_PR"));
     }
 
-    let synth_id = StepId::new("synthPr")?;
     for (env_var, ado_macro) in &exports {
         let value = if pr_synth_active {
             match *env_var {
-                // The three identifiers that change between real-PR and
-                // synth-PR builds: typed Concat of the real-PR macro
-                // and the synthPr step output (mutually empty at runtime).
-                "ADO_PR_ID" => EnvValue::concat(vec![
-                    EnvValue::ado_macro("System.PullRequest.PullRequestId")?,
-                    EnvValue::step_output(OutputRef::new(
-                        synth_id.clone(),
-                        "AW_SYNTHETIC_PR_ID",
-                    )),
-                ]),
-                "ADO_SOURCE_BRANCH" => EnvValue::concat(vec![
-                    EnvValue::ado_macro("System.PullRequest.SourceBranch")?,
-                    EnvValue::step_output(OutputRef::new(
-                        synth_id.clone(),
-                        "AW_SYNTHETIC_PR_SOURCEBRANCH",
-                    )),
-                ]),
-                "ADO_TARGET_BRANCH" => EnvValue::concat(vec![
-                    EnvValue::ado_macro("System.PullRequest.TargetBranch")?,
-                    EnvValue::step_output(OutputRef::new(
-                        synth_id.clone(),
-                        "AW_SYNTHETIC_PR_TARGETBRANCH",
-                    )),
-                ]),
+                // The three identifiers that change between real-PR
+                // and synth-PR builds: read the unified `AW_PR_*`
+                // job variable that `synthPr` always emits via
+                // `setVar` (real on PR builds, discovered on
+                // synth-promoted CI builds). The merge happens
+                // inside the bundle, so this step reads a single
+                // name regardless of source.
+                "ADO_PR_ID" => EnvValue::pipeline_var("AW_PR_ID"),
+                "ADO_SOURCE_BRANCH" => EnvValue::pipeline_var("AW_PR_SOURCEBRANCH"),
+                "ADO_TARGET_BRANCH" => EnvValue::pipeline_var("AW_PR_TARGETBRANCH"),
                 _ => env_value_from_ado_macro(env_var, ado_macro)?,
             }
         } else {

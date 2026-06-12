@@ -62,8 +62,6 @@ use crate::compile::extensions::CompileContext;
 use crate::compile::extensions::ado_script::EXEC_CONTEXT_PR_PATH;
 use crate::compile::ir::condition::{Condition, Expr};
 use crate::compile::ir::env::EnvValue;
-use crate::compile::ir::ids::StepId;
-use crate::compile::ir::output::OutputRef;
 use crate::compile::ir::step::{BashStep, Step};
 use crate::compile::types::PrContextConfig;
 
@@ -211,54 +209,34 @@ impl ContextContributor for PrContextContributor {
         &self,
         _ctx: &CompileContext,
     ) -> anyhow::Result<Option<Step>> {
-        // Typed-IR sibling of [`Self::prepare_step`]. The synth-active
-        // path uses the typed [`EnvValue::Coalesce`] / [`EnvValue::StepOutput`]
-        // pair instead of hand-written `$[ coalesce(...) ]` strings;
-        // the lowering pass picks the cross-job
-        // `dependencies.Setup.outputs[...]` form for the synthPr ref
-        // (the consumer is in the Agent job, the producer in Setup).
+        // Typed-IR sibling of [`Self::prepare_step`].
+        //
+        // Synth-active path reads the Agent-job-level hoisted
+        // variables `AW_PR_ID` / `AW_PR_TARGETBRANCH` (populated by
+        // `standalone_ir::agent_job_variables_hoist` from the
+        // `synthPr` Setup-job step outputs) via the same-job `$(name)`
+        // macro form. Step-level `env:` does NOT reliably evaluate
+        // cross-job `$[ dependencies.<Job>.outputs[...] ]` runtime
+        // expressions (see PR #956 — empirically broken in
+        // msazuresphere/4x4 build #612528); the job-level
+        // `variables:` mapping is the only safe location for those
+        // refs.
+        //
+        // The bash gate collapses to a single `[ -z "$AW_PR_ID" ]`
+        // check: `synthPr` always runs and unifies real-PR
+        // `SYSTEM_PULLREQUEST_*` and synth-discovered PR identifiers
+        // into the `AW_PR_*` namespace, so an empty `AW_PR_ID` means
+        // "neither a real PR build nor a synth-promoted CI build" —
+        // which is exactly when this step should skip.
         //
         // Coexists with `prepare_step` until production callers switch.
-        let synth_id = StepId::new("synthPr")?;
-        let (pr_id, target_branch, prelude, condition, synth_extras) = if self.synthetic_pr_active
+        let (pr_id, target_branch, prelude, condition) = if self.synthetic_pr_active
         {
-            let pr_id = EnvValue::coalesce(vec![
-                EnvValue::ado_macro("System.PullRequest.PullRequestId")?,
-                EnvValue::step_output(OutputRef::new(synth_id.clone(), "AW_SYNTHETIC_PR_ID")),
-            ]);
-            let target_branch = EnvValue::coalesce(vec![
-                EnvValue::ado_macro("System.PullRequest.TargetBranch")?,
-                EnvValue::step_output(OutputRef::new(
-                    synth_id.clone(),
-                    "AW_SYNTHETIC_PR_TARGETBRANCH",
-                )),
-            ]);
-            // Same bash gate as the legacy emitter — the typed Step
-            // models the same scalar bash body verbatim.
-            let prelude = "    if [ \"$BUILD_REASON\" != \"PullRequest\" ] && [ \"$AW_SYNTHETIC_PR\" != \"true\" ]; then\n      echo \"[aw-context] Not a PR build and not synth-promoted; skipping exec-context-pr.\"\n      exit 0\n    fi\n";
-            // BUILD_REASON + AW_SYNTHETIC_PR projected through env so
-            // the bash gate has plain `$BUILD_REASON` / `$AW_SYNTHETIC_PR`
-            // to read (cross-job refs are illegal in step `condition:`
-            // but legal in step `env:` values).
-            let synth_extras: Vec<(&'static str, EnvValue)> = vec![
-                ("BUILD_REASON", EnvValue::ado_macro("Build.Reason")?),
-                (
-                    "AW_SYNTHETIC_PR",
-                    // Single-child Coalesce lowers to
-                    // `coalesce(<child>, '')` — same shape as the
-                    // legacy emitter's hand-written
-                    // `$[ coalesce(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], '') ]`.
-                    EnvValue::coalesce(vec![EnvValue::step_output(OutputRef::new(
-                        synth_id, "AW_SYNTHETIC_PR",
-                    ))]),
-                ),
-            ];
             (
-                pr_id,
-                target_branch,
-                prelude,
+                EnvValue::pipeline_var("AW_PR_ID"),
+                EnvValue::pipeline_var("AW_PR_TARGETBRANCH"),
+                "    if [ -z \"$AW_PR_ID\" ]; then\n      echo \"[aw-context] No PR identifier resolved (not a PR build and not synth-promoted); skipping exec-context-pr.\"\n      exit 0\n    fi\n",
                 Condition::Succeeded,
-                synth_extras,
             )
         } else {
             (
@@ -269,13 +247,12 @@ impl ContextContributor for PrContextContributor {
                     Expr::Variable("Build.Reason".to_string()),
                     Expr::Literal("PullRequest".to_string()),
                 ),
-                vec![],
             )
         };
         let script = format!(
             "set -euo pipefail\n{prelude}node '{EXEC_CONTEXT_PR_PATH}'\n"
         );
-        let mut step = BashStep::new(
+        let step = BashStep::new(
             "Stage PR execution context (aw-context/pr/*)",
             script,
         )
@@ -298,9 +275,6 @@ impl ContextContributor for PrContextContributor {
             "BUILD_SOURCESDIRECTORY",
             EnvValue::ado_macro("Build.SourcesDirectory")?,
         );
-        for (k, v) in synth_extras {
-            step = step.with_env(k, v);
-        }
         Ok(Some(Step::Bash(step)))
     }
 
@@ -486,76 +460,35 @@ mod tests {
             bash.condition
         );
 
-        // PR id env: typed Coalesce[AdoMacro, StepOutput].
-        let pr_id = bash
-            .env
-            .get("SYSTEM_PULLREQUEST_PULLREQUESTID")
-            .expect("PR id env present");
-        match pr_id {
-            EnvValue::Coalesce(parts) => {
-                assert_eq!(parts.len(), 2);
-                assert!(matches!(
-                    parts[0],
-                    EnvValue::AdoMacro("System.PullRequest.PullRequestId")
-                ));
-                match &parts[1] {
-                    EnvValue::StepOutput(r) => {
-                        assert_eq!(r.step.as_str(), "synthPr");
-                        assert_eq!(r.name, "AW_SYNTHETIC_PR_ID");
-                    }
-                    other => panic!("expected StepOutput, got {other:?}"),
-                }
-            }
-            other => panic!("expected Coalesce, got {other:?}"),
+        // PR id env: PipelineVar reading the Agent-job-level hoisted
+        // `AW_PR_ID` variable (populated from synthPr Setup-job step
+        // output by `standalone_ir::agent_job_variables_hoist`). The
+        // step env reads the resolved variable via the same-job
+        // `$(name)` macro form — runtime `$[ ... ]` expressions are
+        // NOT evaluated inside step env (PR #956).
+        match bash.env.get("SYSTEM_PULLREQUEST_PULLREQUESTID") {
+            Some(EnvValue::PipelineVar(name)) => assert_eq!(name, "AW_PR_ID"),
+            other => panic!("expected PipelineVar(AW_PR_ID), got {other:?}"),
         }
 
-        // Target branch env: same shape with the target-branch macro
-        // + the synth target-branch output.
-        let target_branch = bash
-            .env
-            .get("SYSTEM_PULLREQUEST_TARGETBRANCH")
-            .expect("target branch env present");
-        match target_branch {
-            EnvValue::Coalesce(parts) => {
-                assert!(matches!(
-                    parts[0],
-                    EnvValue::AdoMacro("System.PullRequest.TargetBranch")
-                ));
-                match &parts[1] {
-                    EnvValue::StepOutput(r) => {
-                        assert_eq!(r.name, "AW_SYNTHETIC_PR_TARGETBRANCH");
-                    }
-                    other => panic!("expected StepOutput, got {other:?}"),
-                }
-            }
-            other => panic!("expected Coalesce, got {other:?}"),
+        // Target branch env: same shape reading AW_PR_TARGETBRANCH.
+        match bash.env.get("SYSTEM_PULLREQUEST_TARGETBRANCH") {
+            Some(EnvValue::PipelineVar(name)) => assert_eq!(name, "AW_PR_TARGETBRANCH"),
+            other => panic!("expected PipelineVar(AW_PR_TARGETBRANCH), got {other:?}"),
         }
 
-        // AW_SYNTHETIC_PR projected with a single-child Coalesce —
-        // lowering adds the trailing `''` automatically so the wire
-        // form matches `coalesce(<ref>, '')`.
-        let synth_flag = bash
-            .env
-            .get("AW_SYNTHETIC_PR")
-            .expect("AW_SYNTHETIC_PR env present");
-        match synth_flag {
-            EnvValue::Coalesce(parts) => {
-                assert_eq!(parts.len(), 1);
-                match &parts[0] {
-                    EnvValue::StepOutput(r) => {
-                        assert_eq!(r.name, "AW_SYNTHETIC_PR");
-                    }
-                    other => panic!("expected StepOutput, got {other:?}"),
-                }
-            }
-            other => panic!("expected Coalesce, got {other:?}"),
-        }
-
-        // BUILD_REASON projected through env as a typed AdoMacro.
-        assert!(matches!(
-            bash.env.get("BUILD_REASON"),
-            Some(EnvValue::AdoMacro("Build.Reason"))
-        ));
+        // The synth-active path no longer projects AW_SYNTHETIC_PR
+        // or BUILD_REASON through the step env — the bash gate
+        // checks `[ -z "$AW_PR_ID" ]` instead (single empty-check
+        // that covers both "not a PR build" AND "not synth-promoted").
+        assert!(
+            !bash.env.contains_key("AW_SYNTHETIC_PR"),
+            "synth-active prepare step must not project AW_SYNTHETIC_PR (new gate uses AW_PR_ID empty-check)"
+        );
+        assert!(
+            !bash.env.contains_key("BUILD_REASON"),
+            "synth-active prepare step must not project BUILD_REASON (new gate uses AW_PR_ID empty-check)"
+        );
 
         // SYSTEM_ACCESSTOKEN must still be in the step's env (the
         // trust boundary that the bundle relies on).

@@ -486,6 +486,13 @@ fn lower_job(job: &Job, stage: Option<&StageId>, graph: &Graph) -> Result<Value>
     if let Some(t) = job.timeout {
         m.insert(s("timeoutInMinutes"), Value::from(minutes_ceil(t)));
     }
+    if !job.variables.is_empty() {
+        let mut vars = Mapping::new();
+        for v in &job.variables {
+            vars.insert(s(&v.name), s(&lower_env_value(&ctx, &v.value)?));
+        }
+        m.insert(s("variables"), Value::Mapping(vars));
+    }
     m.insert(s("pool"), lower_pool(&job.pool));
     let mut steps = Vec::with_capacity(job.steps.len());
     for step in &job.steps {

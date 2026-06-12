@@ -9,6 +9,7 @@
 use std::time::Duration;
 
 use super::condition::Condition;
+use super::env::EnvValue;
 use super::ids::JobId;
 use super::step::Step;
 
@@ -25,6 +26,13 @@ pub struct Job {
     /// value as a manual override.
     pub depends_on: Vec<JobId>,
     pub condition: Option<Condition>,
+    /// Job-level `variables:` block. ADO's documented safe location
+    /// for cross-job step-output references (`dependencies.<Job>.outputs[...]`)
+    /// — step-level `env:` does not reliably evaluate those runtime
+    /// expressions (see PR #956 — empirically verified against
+    /// msazuresphere/4x4 build #612290 / #612528). Step env then
+    /// reads the hoisted value via the same-job `$(name)` macro.
+    pub variables: Vec<JobVariable>,
     /// When set, the lowering pass emits dual-branch
     /// `${{ if eq(length(parameters.<X>), 0) }}` /
     /// `${{ if ne(length(parameters.<X>), 0) }}` blocks for both
@@ -40,6 +48,17 @@ pub struct Job {
     /// condition is appended into the same `and(…)` body in the
     /// "caller-provided" branch.
     pub template_dependson_wrap: Option<TemplateDependsOnWrap>,
+}
+
+/// A single Agent-job-level `variables:` entry. The `value` is a
+/// typed [`EnvValue`] so cross-job [`super::output::OutputRef`]
+/// references in the value lower to the correct ADO reference
+/// syntax (`$[ coalesce(dependencies.<Job>.outputs['<step>.<X>'], '') ]`
+/// for cross-job consumers in the same stage).
+#[derive(Debug, Clone)]
+pub struct JobVariable {
+    pub name: String,
+    pub value: EnvValue,
 }
 
 /// Template-parameter wrap for a [`Job`]. See
@@ -83,6 +102,7 @@ impl Job {
             steps: Vec::new(),
             depends_on: Vec::new(),
             condition: None,
+            variables: Vec::new(),
             template_dependson_wrap: None,
         }
     }

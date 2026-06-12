@@ -849,6 +849,7 @@ fn build_agent_job(
         job.timeout = Some(std::time::Duration::from_secs(60 * (minutes as u64)));
     }
     job.steps = steps;
+    job.variables = agent_job_variables_hoist(front_matter)?;
 
     // Agent-job condition: when PR/pipeline filters or synthetic-PR
     // are active, the agent must wait on Setup-job gate outputs.
@@ -857,6 +858,55 @@ fn build_agent_job(
         job.condition = Some(cond);
     }
     Ok(job)
+}
+
+/// Build the Agent-job-level `variables:` block. Typed sibling of
+/// `common::generate_agent_job_variables`. Currently emits content
+/// **only** when synthetic-PR-from-CI is active.
+///
+/// Each variable hoists a `synthPr` Setup-job step output to the
+/// Agent-job scope via a typed
+/// [`EnvValue::Coalesce`]([`EnvValue::StepOutput`]) — the lowering
+/// picks the cross-job
+/// `$[ coalesce(dependencies.Setup.outputs['synthPr.<name>'], '') ]`
+/// form for the cross-job consumer (Agent reading from Setup), which
+/// is the only form ADO reliably evaluates at the `variables:` scope.
+///
+/// Why job-level and not step-level env: ADO step `env:` does NOT
+/// evaluate `$[ ... ]` runtime expressions reliably (see PR #956 —
+/// empirically broken in msazuresphere/4x4 build #612290 / #612528).
+/// Step env then reads the hoisted value via the same-job `$(name)`
+/// macro form (see `exec_context/pr.rs::prepare_step_typed`).
+fn agent_job_variables_hoist(front_matter: &FrontMatter) -> Result<Vec<crate::compile::ir::job::JobVariable>> {
+    use crate::compile::ir::env::EnvValue;
+    use crate::compile::ir::job::JobVariable;
+    use crate::compile::ir::output::OutputRef;
+
+    if !front_matter.is_synthetic_pr() {
+        return Ok(Vec::new());
+    }
+    let synth = StepId::new("synthPr")?;
+    let mut out: Vec<JobVariable> = Vec::new();
+    for name in &[
+        "AW_PR_ID",
+        "AW_PR_TARGETBRANCH",
+        "AW_PR_SOURCEBRANCH",
+        "AW_SYNTHETIC_PR",
+    ] {
+        // Single-child `Coalesce` lowers to
+        // `coalesce(<child>, '')` so the variable is empty rather
+        // than the unresolved literal `$[ ... ]` when the dependency
+        // can't be resolved (e.g. Setup was skipped or synthPr did
+        // not emit the output).
+        out.push(JobVariable {
+            name: (*name).to_string(),
+            value: EnvValue::coalesce(vec![EnvValue::step_output(OutputRef::new(
+                synth.clone(),
+                *name,
+            ))]),
+        });
+    }
+    Ok(out)
 }
 
 /// Build the typed Agent-job condition mirroring
