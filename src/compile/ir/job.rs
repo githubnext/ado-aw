@@ -48,6 +48,59 @@ pub struct Job {
     /// condition is appended into the same `and(…)` body in the
     /// "caller-provided" branch.
     pub template_dependson_wrap: Option<TemplateDependsOnWrap>,
+    /// 1ES `templateContext:` wrap. When `Some`, the lowering pass:
+    ///
+    /// - Suppresses the per-job `pool:` key (1ES jobs inherit the
+    ///   pool from `extends.parameters.pool`).
+    /// - Wraps the job's `steps:` under a `templateContext:` block:
+    ///   ```yaml
+    ///   templateContext:
+    ///     type: buildJob
+    ///     outputs: …    # collected from Step::Publish entries
+    ///     steps: …      # remaining steps (publishes filtered out)
+    ///   ```
+    /// - Collects every `Step::Publish` in the job's `steps:` list
+    ///   into a `templateContext.outputs[]` entry of shape
+    ///   `{ output: pipelineArtifact, path: …, artifact: …,
+    ///   condition: always() }`. The `Step::Publish` entries are
+    ///   *removed* from the emitted `steps:` so the artifact is
+    ///   published once (by the 1ES template machinery), not twice.
+    ///
+    /// `None` (the default) preserves today's standalone behaviour:
+    /// per-job `pool:` is emitted and `Step::Publish` lowers as an
+    /// inline step.
+    pub template_context: Option<JobTemplateContext>,
+}
+
+/// Per-job `templateContext:` configuration. See
+/// [`Job::template_context`].
+#[derive(Debug, Clone)]
+pub struct JobTemplateContext {
+    /// `type:` field. Today only `"buildJob"` is used.
+    pub kind: TemplateContextKind,
+}
+
+impl Default for JobTemplateContext {
+    fn default() -> Self {
+        Self {
+            kind: TemplateContextKind::BuildJob,
+        }
+    }
+}
+
+/// `templateContext.type:` enumeration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemplateContextKind {
+    /// `type: buildJob` — the standard 1ES build-job template.
+    BuildJob,
+}
+
+impl TemplateContextKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TemplateContextKind::BuildJob => "buildJob",
+        }
+    }
 }
 
 /// A single Agent-job-level `variables:` entry. The `value` is a
@@ -104,6 +157,7 @@ impl Job {
             condition: None,
             variables: Vec::new(),
             template_dependson_wrap: None,
+            template_context: None,
         }
     }
 

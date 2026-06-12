@@ -105,9 +105,10 @@ pub fn lower_with_graph(p: &Pipeline, graph: &Graph) -> Result<Value> {
             // No top-level `name:` — the parent pipeline supplies one.
         }
         PipelineShape::OneEs { .. } => {
-            unimplemented!(
-                "PipelineShape::OneEs wrapping is introduced by the compile-target-1es commit"
-            );
+            // 1ES carries the same top-level `name:` as standalone —
+            // it's the build-number format string, not part of the
+            // wrapped template.
+            root.insert(s("name"), s(&p.name));
         }
     }
 
@@ -141,24 +142,139 @@ pub fn lower_with_graph(p: &Pipeline, graph: &Graph) -> Result<Value> {
         root.insert(s("variables"), lower_variables(&p.variables));
     }
 
-    match &p.body {
-        PipelineBody::Jobs(jobs) => {
-            let mut seq = Vec::with_capacity(jobs.len());
+    match &p.shape {
+        PipelineShape::OneEs {
+            sdl,
+            top_level_pool,
+            stage_id,
+            stage_display_name,
+        } => {
+            // 1ES wrapping: jobs nest inside
+            // `extends.parameters.stages[0].jobs`. The body must be
+            // `PipelineBody::Jobs(_)` — Stage-based bodies are not
+            // supported under OneEs today.
+            let jobs = match &p.body {
+                PipelineBody::Jobs(js) => js,
+                PipelineBody::Stages(_) => {
+                    return Err(anyhow::anyhow!(
+                        "ir::lower: PipelineShape::OneEs requires PipelineBody::Jobs (jobs are wrapped in the 1ES template's single AgentStage; the IR builder owns the stage)"
+                    ));
+                }
+            };
+            // Pass `None` as the consumer stage so cross-job
+            // references resolve as same-stage (`dependencies.<job>.
+            // outputs[…]`) instead of cross-stage. The graph records
+            // every job with `stage: None` since the body is
+            // `PipelineBody::Jobs`; mirroring that here keeps consumer
+            // and producer locations consistent. The single
+            // `AgentStage` is purely an emission-time wrap, not a
+            // graph-level concept.
+            let mut job_seq = Vec::with_capacity(jobs.len());
             for job in jobs {
-                seq.push(lower_job(job, None, graph)?);
+                job_seq.push(lower_job(job, None, graph)?);
             }
-            root.insert(s("jobs"), Value::Sequence(seq));
+            root.insert(
+                s("extends"),
+                lower_onees_extends(
+                    sdl,
+                    top_level_pool,
+                    stage_id,
+                    stage_display_name,
+                    job_seq,
+                ),
+            );
         }
-        PipelineBody::Stages(stages) => {
-            let mut seq = Vec::with_capacity(stages.len());
-            for stage in stages {
-                seq.push(lower_stage(stage, graph)?);
+        _ => match &p.body {
+            PipelineBody::Jobs(jobs) => {
+                let mut seq = Vec::with_capacity(jobs.len());
+                for job in jobs {
+                    seq.push(lower_job(job, None, graph)?);
+                }
+                root.insert(s("jobs"), Value::Sequence(seq));
             }
-            root.insert(s("stages"), Value::Sequence(seq));
-        }
+            PipelineBody::Stages(stages) => {
+                let mut seq = Vec::with_capacity(stages.len());
+                for stage in stages {
+                    seq.push(lower_stage(stage, graph)?);
+                }
+                root.insert(s("stages"), Value::Sequence(seq));
+            }
+        },
     }
 
     Ok(Value::Mapping(root))
+}
+
+/// Build the top-level `extends:` mapping for `PipelineShape::OneEs`.
+///
+/// Mirrors the static structure that lived in `src/data/1es-base.yml`
+/// before the IR migration:
+///
+/// ```yaml
+/// extends:
+///   template: v1/1ES.Unofficial.PipelineTemplate.yml@1ESPipelineTemplates
+///   parameters:
+///     pool: <top_level_pool>
+///     sdl:
+///       sourceAnalysisPool:
+///         name: <sdl.source_analysis_pool.name>
+///         os: <sdl.source_analysis_pool.os>
+///     featureFlags:
+///       disableNetworkIsolation: <sdl.feature_flags.disable_network_isolation>
+///       runPrerequisitesOnImage: <sdl.feature_flags.run_prerequisites_on_image>
+///     stages:
+///       - stage: <stage_id>
+///         displayName: <stage_display_name>
+///         jobs: <jobs>
+/// ```
+fn lower_onees_extends(
+    sdl: &super::OneEsSdlConfig,
+    top_level_pool: &Pool,
+    stage_id: &StageId,
+    stage_display_name: &str,
+    jobs: Vec<Value>,
+) -> Value {
+    let mut extends = Mapping::new();
+    extends.insert(
+        s("template"),
+        s("v1/1ES.Unofficial.PipelineTemplate.yml@1ESPipelineTemplates"),
+    );
+
+    let mut params = Mapping::new();
+    params.insert(s("pool"), lower_pool(top_level_pool));
+
+    // sdl block
+    let mut sdl_m = Mapping::new();
+    let mut sap = Mapping::new();
+    sap.insert(s("name"), s(&sdl.source_analysis_pool.name));
+    sap.insert(s("os"), s(&sdl.source_analysis_pool.os));
+    sdl_m.insert(s("sourceAnalysisPool"), Value::Mapping(sap));
+    params.insert(s("sdl"), Value::Mapping(sdl_m));
+
+    // featureFlags block
+    let mut ff = Mapping::new();
+    ff.insert(
+        s("disableNetworkIsolation"),
+        Value::Bool(sdl.feature_flags.disable_network_isolation),
+    );
+    ff.insert(
+        s("runPrerequisitesOnImage"),
+        Value::Bool(sdl.feature_flags.run_prerequisites_on_image),
+    );
+    params.insert(s("featureFlags"), Value::Mapping(ff));
+
+    // stages: one AgentStage that wraps the canonical 5-job graph
+    let mut stage_m = Mapping::new();
+    stage_m.insert(s("stage"), s(stage_id.as_str()));
+    stage_m.insert(s("displayName"), s(stage_display_name));
+    stage_m.insert(s("jobs"), Value::Sequence(jobs));
+    params.insert(
+        s("stages"),
+        Value::Sequence(vec![Value::Mapping(stage_m)]),
+    );
+
+    extends.insert(s("parameters"), Value::Mapping(params));
+    Value::Mapping(extends)
 }
 
 /// Lower a `parameters:` block. Each entry becomes a mapping
@@ -493,12 +609,46 @@ fn lower_job(job: &Job, stage: Option<&StageId>, graph: &Graph) -> Result<Value>
         }
         m.insert(s("variables"), Value::Mapping(vars));
     }
-    m.insert(s("pool"), lower_pool(&job.pool));
-    let mut steps = Vec::with_capacity(job.steps.len());
-    for step in &job.steps {
-        steps.push(lower_step(step, &ctx)?);
+
+    if let Some(tc) = &job.template_context {
+        // 1ES jobs inherit the pool from `extends.parameters.pool` —
+        // suppress the per-job `pool:` key. Wrap `steps:` under
+        // `templateContext:` and lift any `Step::Publish` entries into
+        // `templateContext.outputs[]` so the 1ES template publishes
+        // the artifact (rather than the step emitting an inline
+        // `- publish:`).
+        let mut tc_map = Mapping::new();
+        tc_map.insert(s("type"), s(tc.kind.as_str()));
+
+        let mut outputs: Vec<Value> = Vec::new();
+        let mut wrapped_steps: Vec<Value> = Vec::with_capacity(job.steps.len());
+        for step in &job.steps {
+            if let Step::Publish(p) = step {
+                let mut out = Mapping::new();
+                out.insert(s("output"), s("pipelineArtifact"));
+                out.insert(s("path"), s(&p.path));
+                out.insert(s("artifact"), s(&p.artifact));
+                if let Some(cond) = &p.condition {
+                    out.insert(s("condition"), s(&lower_condition(&ctx.cond_ctx(), cond)?));
+                }
+                outputs.push(Value::Mapping(out));
+                continue;
+            }
+            wrapped_steps.push(lower_step(step, &ctx)?);
+        }
+        if !outputs.is_empty() {
+            tc_map.insert(s("outputs"), Value::Sequence(outputs));
+        }
+        tc_map.insert(s("steps"), Value::Sequence(wrapped_steps));
+        m.insert(s("templateContext"), Value::Mapping(tc_map));
+    } else {
+        m.insert(s("pool"), lower_pool(&job.pool));
+        let mut steps = Vec::with_capacity(job.steps.len());
+        for step in &job.steps {
+            steps.push(lower_step(step, &ctx)?);
+        }
+        m.insert(s("steps"), Value::Sequence(steps));
     }
-    m.insert(s("steps"), Value::Sequence(steps));
     Ok(Value::Mapping(m))
 }
 

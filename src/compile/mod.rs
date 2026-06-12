@@ -18,6 +18,7 @@ pub(crate) mod ir;
 mod job;
 mod job_ir;
 mod onees;
+mod onees_ir;
 pub(crate) mod pr_filters;
 mod stage;
 mod stage_ir;

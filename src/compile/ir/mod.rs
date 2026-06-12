@@ -44,7 +44,8 @@ pub mod output;
 pub mod stage;
 pub mod step;
 
-use job::Job;
+use ids::StageId;
+use job::{Job, Pool};
 use stage::Stage;
 
 /// Top-level pipeline IR.
@@ -83,8 +84,22 @@ pub enum PipelineShape {
     /// Plain pipeline emitted directly.
     Standalone,
     /// 1ES Pipeline Templates wrapping: top-level `extends:` block
-    /// over `1es-pipelines.yaml@1esPipelines`.
-    OneEs { sdl: OneEsSdlConfig },
+    /// over `v1/1ES.Unofficial.PipelineTemplate.yml@1ESPipelineTemplates`.
+    ///
+    /// `top_level_pool` is hoisted to `extends.parameters.pool` (no
+    /// per-job pool is emitted; the contained [`Job`]s carry
+    /// `template_context = Some(_)` so the lowering pass suppresses
+    /// `pool:` and wraps `steps:` under `templateContext:`).
+    ///
+    /// `stage_id` / `stage_display_name` name the single `AgentStage`
+    /// that wraps the canonical 5-job graph under
+    /// `extends.parameters.stages[0]`.
+    OneEs {
+        sdl: OneEsSdlConfig,
+        top_level_pool: Pool,
+        stage_id: StageId,
+        stage_display_name: String,
+    },
     /// `target: job` — emits a jobs-template with external
     /// `parameters: dependsOn / condition` template params.
     JobTemplate { external_params: TemplateParams },
@@ -92,14 +107,64 @@ pub enum PipelineShape {
     StageTemplate { external_params: TemplateParams },
 }
 
-/// 1ES SDL configuration. Placeholder shape — filled out by the
-/// `compile-target-1es` commit when the actual 1ES wrapping is
-/// ported.
+/// 1ES SDL configuration.
+///
+/// `source_analysis_pool` populates `sdl.sourceAnalysisPool` (the
+/// pool that hosts the SDL credential/secret scan stage). The 1ES
+/// template requires a Windows pool here; today we hard-code
+/// `AZS-1ES-W-MMS2022` to match the legacy `1es-base.yml` output.
+///
+/// `feature_flags` populates `sdl.featureFlags` —
+/// `disableNetworkIsolation` is `true` because AWF handles isolation
+/// at the application layer, and `runPrerequisitesOnImage` is `false`
+/// because the agent pool image already has 1ES prerequisites
+/// preinstalled.
 #[derive(Debug, Clone, Default)]
 pub struct OneEsSdlConfig {
-    /// Reserved for future fields (credscan / antimalware / etc.).
-    #[allow(dead_code)]
-    pub reserved: (),
+    pub source_analysis_pool: OneEsSourceAnalysisPool,
+    pub feature_flags: OneEsFeatureFlags,
+}
+
+/// `extends.parameters.sdl.sourceAnalysisPool` — the pool that hosts
+/// the 1ES SDL credential / secret scan stage. Must be a Windows pool
+/// per 1ES template requirements.
+#[derive(Debug, Clone)]
+pub struct OneEsSourceAnalysisPool {
+    pub name: String,
+    pub os: String,
+}
+
+impl Default for OneEsSourceAnalysisPool {
+    fn default() -> Self {
+        Self {
+            name: "AZS-1ES-W-MMS2022".to_string(),
+            os: "windows".to_string(),
+        }
+    }
+}
+
+/// `extends.parameters.sdl.featureFlags` — toggles that we set
+/// uniformly today; carried as a struct so the shape stays open for
+/// future per-agent customisation.
+#[derive(Debug, Clone)]
+pub struct OneEsFeatureFlags {
+    /// AWF handles network isolation at the application layer; the
+    /// 1ES template-level isolation is mutually exclusive with the
+    /// Docker-based AWF launch.
+    pub disable_network_isolation: bool,
+    /// The agent pool image already has 1ES prerequisites
+    /// preinstalled, so re-running them during the buildJob is wasted
+    /// time.
+    pub run_prerequisites_on_image: bool,
+}
+
+impl Default for OneEsFeatureFlags {
+    fn default() -> Self {
+        Self {
+            disable_network_isolation: true,
+            run_prerequisites_on_image: false,
+        }
+    }
 }
 
 /// External template parameters injected by callers of a
@@ -298,6 +363,13 @@ mod tests {
         let standalone = PipelineShape::Standalone;
         let onees = PipelineShape::OneEs {
             sdl: OneEsSdlConfig::default(),
+            top_level_pool: Pool::Named {
+                name: "AzurePipelines-EO".into(),
+                image: None,
+                os: Some("linux".into()),
+            },
+            stage_id: StageId::new("AgentStage").unwrap(),
+            stage_display_name: "Agent".into(),
         };
         // Tag-only equality (no derived PartialEq on PipelineShape
         // because OneEsSdlConfig is not yet PartialEq).
