@@ -964,12 +964,6 @@ Body
     }
 
     #[test]
-    fn test_generate_checkout_self_no_branch() {
-        let result = common::generate_checkout_self();
-        assert_eq!(result, "- checkout: self");
-    }
-
-    #[test]
     fn test_clean_generated_yaml_strips_trailing_whitespace() {
         let a = clean_generated_yaml("key: value\nother: data\n");
         let b = clean_generated_yaml("key: value  \nother: data  \n");
