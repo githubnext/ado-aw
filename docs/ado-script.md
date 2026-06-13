@@ -3,7 +3,7 @@
 `ado-script` is the umbrella name for the TypeScript workspace at
 [`scripts/ado-script/`](../scripts/ado-script/). It produces small,
 ncc-bundled Node programs that the **compiler injects into every emitted
-pipeline** as runtime helpers. Today it produces three bundles:
+pipeline** as runtime helpers. Today it produces four bundles:
 
 - `gate.js` — trigger-filter gate evaluator (Setup job).
 - `import.js` — runtime prompt resolver described in
@@ -12,6 +12,10 @@ pipeline** as runtime helpers. Today it produces three bundles:
   merge-base, writes `aw-context/pr/{base,head}.sha`, and appends a
   prompt fragment to the agent prompt (Agent job, before the agent
   runs). See [`execution-context.md`](execution-context.md).
+- `exec-context-pr-synth.js` — Setup-job precompute that normalises
+  PR-identifier variables into the stable `AW_PR_*` namespace,
+  promoting CI builds with an open PR to PR semantics (Setup job,
+  before any gate step).
 
 > **Internal-only.** `ado-script` is not a user-facing front-matter
 > feature. Authors never write an `ado-script:` block in their agent
@@ -58,8 +62,9 @@ because the compiler always embeds an absolute marker path and
 not re-expanded).
 
 The bundle lives at `import.js` and ships in the same
-`ado-script.zip` release asset as `gate.js` and `exec-context-pr.js`,
-so pipelines download it through the same Agent-job asset flow.
+`ado-script.zip` release asset as `gate.js`, `exec-context-pr.js`,
+and `exec-context-pr-synth.js`, so pipelines download it through the
+same Agent-job asset flow.
 `import.js` uses only the Node standard library, so the ncc bundle is
 small (~1.5 KB) and carries no SDK dependency.
 
@@ -127,6 +132,101 @@ test walks the emitted YAML and asserts this scoping.
 
 The bundle uses only `node:child_process` / `node:fs` / `node:path`
 — no `azure-devops-node-api`, no `fetch`. The ncc'd bundle is ~8 KB.
+
+## What `exec-context-pr-synth.js` does
+
+`exec-context-pr-synth.js` is a single-shot Node program that runs as
+the first step of the pipeline's **Setup** job, *before* any gate
+step. It normalises the PR-identifier variables into the stable
+`AW_PR_*` namespace so that every downstream consumer (the gate step
+in the same job and the Agent job) can read a single set of names
+regardless of whether the build is a real PR build or a CI build that
+was *synth-promoted* to PR semantics.
+
+### Why it exists
+
+Azure DevOps Services ignores the YAML `pr:` block unless a
+per-branch Build Validation policy is registered server-side. Without
+that policy, a push to a feature branch fires the pipeline as
+`Build.Reason = IndividualCI` even when an open PR exists. The synth
+path closes that gap: it looks up the active PR for the build's source
+branch and, if exactly one matches the agent's `on.pr` branch/path
+filters, promotes the CI build to PR semantics.
+
+Doing the real-vs-synth merge here (in TypeScript) — rather than
+coalescing `$(System.PullRequest.X)` with `$(AW_SYNTHETIC_PR_X)` inside
+step `env:` — is deliberate: ADO only evaluates `$[ ... ]` runtime
+expressions inside the `variables:` block and `condition:` fields, NOT
+inside step `env:` values, so the coalesce form silently passed the
+literal expression string to downstream steps. Every consumer now reads
+plain `$(AW_PR_*)` macros instead.
+
+### Variables emitted
+
+Each variable is emitted as **both** a `setOutput` (`isOutput=true`,
+for cross-job consumption via
+`dependencies.Setup.outputs['synthPr.<NAME>']`) and a regular `setVar`
+(for same-job consumption via `$(<NAME>)` macros). Both forms are
+required because `isOutput=true` does not register the variable in the
+producing job's regular namespace — see the `setVar` doc-comment in
+`scripts/ado-script/src/shared/vso-logger.ts`.
+
+| Variable | Meaning |
+|---|---|
+| `AW_PR_ID` | Resolved PR id (real or synth); empty if not a PR build |
+| `AW_PR_TARGETBRANCH` | Resolved target ref (`refs/heads/<name>`) |
+| `AW_PR_SOURCEBRANCH` | Resolved source ref |
+| `AW_PR_IS_DRAFT` | `"true"` / `"false"` / `""` (only meaningful on the synth path) |
+| `AW_SYNTHETIC_PR` | `"true"` iff this build was synth-promoted (CI build + matched open PR); empty on real PR builds and non-promoted CI |
+| `AW_SYNTHETIC_PR_SKIP` | `"true"` iff synth was attempted but no match was found (gates the Agent job to skip) |
+
+### Runtime logic
+
+All soft skips exit 0; only spec-decode and infrastructure errors exit
+non-zero:
+
+1. **Real PR build** — if `SYSTEM_PULLREQUEST_PULLREQUESTID` is
+   non-empty (after stripping unsubstituted `$(name)` macro literals),
+   copy the `SYSTEM_PULLREQUEST_*` env into `AW_PR_*` and return. No
+   API call needed.
+2. **GitHub-typed repo** — if `BUILD_REPOSITORY_PROVIDER` is `GitHub`,
+   emit empty `AW_PR_*` plus `AW_SYNTHETIC_PR_SKIP=true` (ADO routes
+   GitHub PR webhooks natively, so a CI build on a GitHub repo has no
+   associated PR).
+3. **Decode `PR_SYNTH_SPEC`** — base64-decode the compiler-emitted
+   filter spec (`build_pr_synth_spec` in `src/compile/filter_ir.rs`).
+   Corruption is a hard failure (exit 1).
+4. **Fetch active PRs** whose `sourceRefName == BUILD_SOURCEBRANCH`.
+5. **Branch filter** — keep PRs whose `targetRefName` matches
+   `spec.branches.include` / `spec.branches.exclude`.
+6. **Exactly-one rule** — a count other than 1 emits empty `AW_PR_*` +
+   skip.
+7. **Path filter** — if the agent declared `on.pr.paths`, fetch the
+   latest PR iteration's changed files and skip unless at least one
+   matches.
+8. **Match** — emit the resolved `AW_PR_*` plus `AW_SYNTHETIC_PR=true`.
+
+### Env-var contract
+
+The compiler injects these on the `node exec-context-pr-synth.js`
+step; the predefined `SYSTEM_PULLREQUEST_*` variables are auto-mapped
+into the process env by ADO at runtime:
+
+| Env var | Source | Purpose |
+|---|---|---|
+| `PR_SYNTH_SPEC` | compiled inline (base64) | The branch/path filter spec |
+| `SYSTEM_ACCESSTOKEN` | `$(System.AccessToken)` | ADO REST auth |
+| `ADO_COLLECTION_URI` | `$(System.CollectionUri)` | ADO org base URL |
+| `ADO_PROJECT` | `$(System.TeamProject)` | ADO project for the PR lookup |
+| `ADO_REPO_ID` | `$(Build.Repository.ID)` | Repository id for the PR lookup |
+| `BUILD_REASON` | `$(Build.Reason)` | Distinguishes CI from PR builds |
+| `BUILD_REPOSITORY_PROVIDER` | `$(Build.Repository.Provider)` | Detects GitHub-typed repos |
+| `BUILD_SOURCEBRANCH` | `$(Build.SourceBranch)` | Source ref matched against active PRs |
+| `SYSTEM_PULLREQUEST_*` | ADO-injected | Real-PR identifiers propagated verbatim |
+
+The bundle lazy-imports `azure-devops-node-api` only when it needs to
+call the PR REST endpoints (steps 4 and 7); real PR builds and
+GitHub-typed repos return before any SDK load.
 
 ## End-to-end data flow
 
@@ -251,26 +351,33 @@ scripts/ado-script/
 │   ├── import/                  # import.js entry point + runtime prompt resolver
 │   │   ├── index.ts             # main(): expand runtime-import markers in place
 │   │   └── __tests__/           # marker, path-resolution, and single-pass coverage
-│   └── exec-context-pr/         # exec-context-pr.js entry point + PR precompute
-│       ├── index.ts             # main(): validate → resolve merge-base → stage SHAs → append prompt
-│       ├── validate.ts          # identifier regex guards
-│       ├── git.ts               # execFile wrappers + bearerEnv helper
-│       ├── merge-base.ts        # synthetic-merge detection + progressive-deepening fetch
-│       ├── prompt.ts            # success / failure prompt-fragment writers
-│       └── __tests__/           # 32 unit tests across the four modules
+│   ├── exec-context-pr/         # exec-context-pr.js entry point + PR precompute
+│   │   ├── index.ts             # main(): validate → resolve merge-base → stage SHAs → append prompt
+│   │   ├── validate.ts          # identifier regex guards
+│   │   ├── git.ts               # execFile wrappers + bearerEnv helper
+│   │   ├── merge-base.ts        # synthetic-merge detection + progressive-deepening fetch
+│   │   ├── prompt.ts            # success / failure prompt-fragment writers
+│   │   └── __tests__/           # 32 unit tests across the four modules
+│   └── exec-context-pr-synth/   # exec-context-pr-synth.js entry point + synthetic-PR resolver
+│       ├── index.ts             # main(): real-PR / GitHub / synth-promote branch resolution → emit AW_PR_*
+│       ├── match.ts             # branch/path include-exclude glob matching
+│       ├── spec.ts              # PR_SYNTH_SPEC base64 decode + validation
+│       └── __tests__/           # unit tests across the three modules
 ├── test/                        # End-to-end smoke tests (gate, import, exec-context-pr)
 ├── gate.js                      # ncc bundle output (gitignored)
 ├── import.js                    # ncc bundle output (gitignored)
-└── exec-context-pr.js           # ncc bundle output (gitignored)
+├── exec-context-pr.js           # ncc bundle output (gitignored)
+└── exec-context-pr-synth.js     # ncc bundle output (gitignored)
 ```
 
 The release workflow (`.github/workflows/release.yml`) runs
 `npm ci && npm run build`, then zips `scripts/ado-script/gate.js`,
-`scripts/ado-script/import.js`, and
-`scripts/ado-script/exec-context-pr.js` into the `ado-script.zip`
-release asset. Pipelines download that asset at runtime by URL pinned
-to the compiler's `CARGO_PKG_VERSION`, verify its SHA-256 against the
-`checksums.txt` asset, then extract.
+`scripts/ado-script/import.js`,
+`scripts/ado-script/exec-context-pr.js`, and
+`scripts/ado-script/exec-context-pr-synth.js` into the
+`ado-script.zip` release asset. Pipelines download that asset at
+runtime by URL pinned to the compiler's `CARGO_PKG_VERSION`, verify
+its SHA-256 against the `checksums.txt` asset, then extract.
 
 ## Schema codegen
 
@@ -361,6 +468,9 @@ ADO's topology, not waste.
 
 ### What gets emitted, by case
 
+The rows below assume the synthetic-PR resolver is **not** active
+(`pr_trigger_for_synth = None`):
+
 | Setup consumer | Agent consumer | Setup-job steps | Agent-job extra steps |
 |---|---|---|---|
 | no gate    | none                                   | (none)                              | (none)                              |
@@ -370,10 +480,22 @@ ADO's topology, not waste.
 | gate       | none                                   | install + download + gate           | (none)                              |
 | gate       | any combination of resolver / exec-pr  | install + download + gate           | install + download + (resolver?) + (exec-context-pr?) |
 
+When the synthetic-PR resolver **is** active
+(`pr_trigger_for_synth = Some(_)`, i.e. `synthetic_pr_active()` is
+true) the Setup job gains the `synthPr` step (`node
+exec-context-pr-synth.js`) before any gate step — and the Setup job is
+emitted even with no gate:
+
+| Setup consumer | Setup-job steps | Agent-job extra steps |
+|---|---|---|
+| synth-PR (no gate) | install + download + synth-PR | (per Agent consumer above) |
+| gate (no synth-PR) | install + download + gate | (per Agent consumer above) |
+| synth-PR + gate    | install + download + synth-PR + gate | (per Agent consumer above) |
+
 The "Setup consumer" column is gated on `filters:` lowering to non-empty
-checks. The "Agent consumer" columns are gated on
-`inlined-imports: false` (resolver) and the PR contributor's
-activation predicate (exec-context-pr; see
+checks **or** `synthetic_pr_active()` being true. The "Agent consumer"
+columns are gated on `inlined-imports: false` (resolver) and the PR
+contributor's activation predicate (exec-context-pr; see
 `pr_contributor_will_activate` in
 `src/compile/extensions/exec_context/mod.rs`).
 
