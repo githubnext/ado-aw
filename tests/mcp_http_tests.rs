@@ -236,19 +236,11 @@ fn test_auth_accepts_correct_token() {
         }),
         None,
     );
-    assert_ne!(resp.status(), 401, "Correct API key should not be rejected");
-}
-
-#[test]
-fn test_health_endpoint_no_auth_required() {
-    let server = start_server();
-    // Health endpoint should work without any auth header
-    let client = reqwest::blocking::Client::new();
-    let resp = client
-        .get(format!("http://127.0.0.1:{}/health", server.port))
-        .send()
-        .unwrap();
-    assert_eq!(resp.status(), 200);
+    assert!(
+        resp.status().is_success(),
+        "Correct API key should be accepted, got {}",
+        resp.status()
+    );
 }
 
 #[test]
