@@ -14,11 +14,16 @@ pub(crate) mod codemods;
 pub mod extensions;
 pub(crate) mod filter_ir;
 mod gitattributes;
+pub(crate) mod ir;
 mod job;
+mod job_ir;
 mod onees;
+mod onees_ir;
 pub(crate) mod pr_filters;
 mod stage;
+mod stage_ir;
 mod standalone;
+mod standalone_ir;
 pub mod types;
 
 use anyhow::{Context, Result};
@@ -956,12 +961,6 @@ Body
         let schedule = fm.schedule().unwrap();
         assert_eq!(schedule.expression(), "daily around 10:00");
         assert!(schedule.branches().is_empty());
-    }
-
-    #[test]
-    fn test_generate_checkout_self_no_branch() {
-        let result = common::generate_checkout_self();
-        assert_eq!(result, "- checkout: self");
     }
 
     #[test]

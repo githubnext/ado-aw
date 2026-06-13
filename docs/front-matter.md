@@ -330,7 +330,7 @@ The `expression` field on `pr.filters` and `pipeline.filters` is an
 **advanced, unsafe escape hatch**. Its value is inserted verbatim into
 the Agent job's ADO `condition:` field. It can reference any ADO
 pipeline variable, including secrets. The compiler validates against
-`##vso[` injection and `${{` template markers, but otherwise trusts the
+`##vso[` injection and ADO compile-time template expressions (`${{`), but otherwise trusts the
 value. Only use this if the built-in filters are insufficient.
 
 ### Pipeline Requirements

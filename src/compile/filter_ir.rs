@@ -1129,7 +1129,7 @@ pub fn build_gate_spec(ctx: GateContext, checks: &[FilterCheck]) -> anyhow::Resu
 /// "not a PR build" bypass on synth-promoted builds.
 ///
 /// **Same-job synth references**: this gate step lives in the **Setup
-/// job** (`AdoScriptExtension::setup_steps` returns it), the same job
+/// job** (`AdoScriptExtension::declarations` returns it), the same job
 /// as `synthPr`. Three ADO behaviours interact here:
 ///
 /// 1. The cross-job form `dependencies.Setup.outputs['synthPr.X']` is
@@ -1152,6 +1152,7 @@ pub fn build_gate_spec(ctx: GateContext, checks: &[FilterCheck]) -> anyhow::Resu
 /// and have this step consume them via plain `$(AW_PR_*)` macros —
 /// reading the same-job regular variable that `setVar` registered.
 /// See <https://learn.microsoft.com/en-us/azure/devops/pipelines/process/variables#use-output-variables-from-tasks>.
+#[cfg(test)]
 pub fn compile_gate_step_external(
     ctx: GateContext,
     checks: &[FilterCheck],
@@ -1215,6 +1216,150 @@ pub fn compile_gate_step_external(
     }
 
     Ok(step)
+}
+
+// ─── Typed-IR gate step (port-ado-script) ───────────────────────────────
+
+/// Constructs a typed IR gate step as a
+/// [`crate::compile::ir::step::BashStep`] with `id` set to the
+/// canonical gate step name (`prGate` / `pipelineGate`), typed
+/// [`crate::compile::ir::condition::Condition::Succeeded`], and a
+/// typed env block that uses
+/// [`crate::compile::ir::env::EnvValue::StepOutput`] for cross-step
+/// references and
+/// [`crate::compile::ir::env::EnvValue::Concat`] for the
+/// `$(System.PullRequest.X)$(synthPr.X)` mutually-empty macro-concat
+/// pattern.
+///
+/// Lowering picks the right reference syntax per consumer location:
+/// when the consumer is in the same job as `synthPr` (today's
+/// production layout — gate + synthPr both live in Setup), the
+/// `StepOutput` lowers to the macro form `$(synthPr.X)`. If a future
+/// caller moves the gate to a different job, lowering would
+/// auto-switch to `dependencies.Setup.outputs['synthPr.X']` without
+/// any change to this builder — that is the whole point of the IR.
+pub fn build_gate_step_typed(
+    ctx: GateContext,
+    checks: &[FilterCheck],
+    evaluator_path: &str,
+    synthetic_pr_active: bool,
+) -> anyhow::Result<crate::compile::ir::step::BashStep> {
+    use crate::compile::ir::condition::Condition;
+    use crate::compile::ir::env::EnvValue;
+    use crate::compile::ir::ids::StepId;
+    use crate::compile::ir::step::BashStep;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    if checks.is_empty() {
+        anyhow::bail!(
+            "build_gate_step_typed called with empty checks — caller must \
+             guard with !checks.is_empty() (matches compile_gate_step_external)"
+        );
+    }
+
+    let spec = build_gate_spec(ctx, checks)?;
+    let spec_json = serde_json::to_string(&spec)?;
+    let spec_b64 = STANDARD.encode(spec_json.as_bytes());
+
+    let exports = collect_ado_exports(checks)?;
+    let pr_synth_active = synthetic_pr_active && matches!(ctx, GateContext::PullRequest);
+
+    let script = format!("node '{evaluator_path}'\n");
+    let mut step = BashStep::new(ctx.display_name(), script)
+        .with_id(StepId::new(ctx.step_name())?)
+        .with_condition(Condition::Succeeded)
+        // The gate evaluator JS bundle emits `##vso[task.setvariable
+        // variable=SHOULD_RUN;isOutput=true]` at runtime — declare it
+        // here so cross-job consumers (e.g. the Agent-job condition's
+        // typed `Condition::Eq(Expr::StepOutput(..., "SHOULD_RUN"))`)
+        // pass graph validation. See `src/compile/ir/output.rs` for
+        // the `OutputDecl` contract.
+        .with_output(crate::compile::ir::output::OutputDecl::new("SHOULD_RUN"))
+        .with_env(
+            "SYSTEM_ACCESSTOKEN",
+            EnvValue::ado_macro("System.AccessToken")?,
+        )
+        .with_env("GATE_SPEC", EnvValue::literal(spec_b64));
+
+    // AW_SYNTHETIC_PR (same-job consumer of the synthPr step) reads
+    // the setVar-registered variable via plain `$(name)` macro. The
+    // `synthPr` step emits both `setOutput` (cross-job) and `setVar`
+    // (same-job) for every value, so this is functionally equivalent
+    // to `$(synthPr.AW_SYNTHETIC_PR)` at runtime but matches the
+    // legacy emitter's wire form (which the regression test in
+    // `tests/compiler_tests.rs::test_pr_filter_synth_mode_gate_step_uses_same_job_synth_ref`
+    // pins).
+    if pr_synth_active {
+        step = step.with_env("AW_SYNTHETIC_PR", EnvValue::pipeline_var("AW_SYNTHETIC_PR"));
+    }
+
+    for (env_var, ado_macro) in &exports {
+        let value = if pr_synth_active {
+            match *env_var {
+                // The three identifiers that change between real-PR
+                // and synth-PR builds: read the unified `AW_PR_*`
+                // job variable that `synthPr` always emits via
+                // `setVar` (real on PR builds, discovered on
+                // synth-promoted CI builds). The merge happens
+                // inside the bundle, so this step reads a single
+                // name regardless of source.
+                "ADO_PR_ID" => EnvValue::pipeline_var("AW_PR_ID"),
+                "ADO_SOURCE_BRANCH" => EnvValue::pipeline_var("AW_PR_SOURCEBRANCH"),
+                "ADO_TARGET_BRANCH" => EnvValue::pipeline_var("AW_PR_TARGETBRANCH"),
+                _ => env_value_from_ado_macro(env_var, ado_macro)?,
+            }
+        } else {
+            env_value_from_ado_macro(env_var, ado_macro)?
+        };
+        step = step.with_env(*env_var, value);
+    }
+
+    Ok(step)
+}
+
+/// Map a legacy `(env_var, "$(Some.Macro)")` exports entry to a typed
+/// [`crate::compile::ir::env::EnvValue`]. Predefined-variable macros
+/// route through [`crate::compile::ir::env::EnvValue::ado_macro`] (so
+/// the allowlist enforces no typos).
+///
+/// Anything that does not match the allowlist falls through to
+/// [`crate::compile::ir::env::EnvValue::Literal`] with the raw
+/// `$(X.Y)` string preserved. ADO substitutes the macro at runtime
+/// either way, so emitted YAML is byte-identical to the allowlisted
+/// path, but the fallback emits a compile-time `log::warn!` so a
+/// new predefined-variable use site doesn't quietly accrete here —
+/// extend [`crate::compile::ir::env::ALLOWED_ADO_MACROS`] when you
+/// see this warning.
+fn env_value_from_ado_macro(
+    name: &str,
+    ado_macro: &'static str,
+) -> anyhow::Result<crate::compile::ir::env::EnvValue> {
+    use crate::compile::ir::env::{ALLOWED_ADO_MACROS, EnvValue};
+
+    // Unwrap `$(X.Y)` → `X.Y` for the allowlist lookup.
+    let stripped = ado_macro
+        .strip_prefix("$(")
+        .and_then(|rest| rest.strip_suffix(')'));
+    if let Some(inner) = stripped
+        && ALLOWED_ADO_MACROS.contains(&inner)
+    {
+        // Promote the inner string to `&'static str` via the
+        // allowlist entry so EnvValue::AdoMacro's static-lifetime
+        // requirement is satisfied with the canonical reference.
+        for allowed in ALLOWED_ADO_MACROS {
+            if *allowed == inner {
+                return EnvValue::ado_macro(allowed);
+            }
+        }
+    }
+    // Fallback: keep the raw scalar verbatim and surface the bypass
+    // so it doesn't silently accrete.
+    log::warn!(
+        "filter_ir: env var {name:?} maps to ADO macro {ado_macro:?} which is not in \
+         ALLOWED_ADO_MACROS. Emitting as a literal; consider adding it to the allowlist \
+         in src/compile/ir/env.rs so EnvValue::AdoMacro can carry it typed."
+    );
+    Ok(EnvValue::literal(ado_macro))
 }
 
 // ─── PR synthetic-from-ci spec (mode: synthetic) ────────────────────────────

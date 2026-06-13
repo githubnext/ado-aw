@@ -1,7 +1,7 @@
 //! Execution-context compiler extension.
 //!
 //! Always-on extension that owns the `aw-context/` precompute pipeline:
-//! a fan-out over per-trigger [`ContextContributor`](contributor::ContextContributor)s
+//! a fan-out over per-trigger [`ContextContributor`]s
 //! that materialise context (changed-files, diffs, snapshots, metadata)
 //! on disk + supplement the agent prompt so the agent can read it
 //! without rolling its own git plumbing.
@@ -35,7 +35,7 @@
 mod contributor;
 mod pr;
 
-use crate::compile::extensions::{CompileContext, CompilerExtension, ExtensionPhase};
+use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 use crate::compile::types::{ExecutionContextConfig, FrontMatter};
 
 use contributor::{ContextContributor, Contributor};
@@ -95,7 +95,7 @@ pub struct ExecContextExtension {
     config: ExecutionContextConfig,
     /// Whether the front matter configures any trigger that a context
     /// contributor activates on. Captured at construction time so
-    /// `required_bash_commands()` (which receives no `CompileContext`)
+    /// the compile-time bash-command declaration
     /// can suppress the contributor's bash allow-list contributions on
     /// agents whose triggers no contributor cares about. Today that
     /// means "is `on.pr` configured" — future trigger contributors
@@ -149,34 +149,8 @@ impl ExecContextExtension {
             synthetic_pr_active,
         ))]
     }
-}
 
-impl CompilerExtension for ExecContextExtension {
-    fn name(&self) -> &str {
-        "Execution Context"
-    }
-
-    fn phase(&self) -> ExtensionPhase {
-        // Tool phase: runs after Runtime so any runtime-installed git
-        // (none today, but defensive) is on PATH; before user `steps:`
-        // so they can read `aw-context/`.
-        ExtensionPhase::Tool
-    }
-
-    fn prepare_steps(&self, ctx: &CompileContext) -> Vec<String> {
-        // Master switch off → no steps, no `aw-context/`.
-        if !self.config.is_enabled() {
-            return vec![];
-        }
-        self.contributors()
-            .into_iter()
-            .filter(|c| c.should_activate(ctx))
-            .map(|c| c.prepare_step(ctx))
-            .filter(|s| !s.is_empty())
-            .collect()
-    }
-
-    fn required_bash_commands(&self) -> Vec<String> {
+    fn bash_commands(&self) -> Vec<String> {
         // No bash contributions when the extension is off or when no
         // contributor will activate (avoids quietly widening the agent
         // bash allow-list on agents with no PR trigger configured).
@@ -193,11 +167,52 @@ impl CompilerExtension for ExecContextExtension {
         let mut out: Vec<String> = self
             .contributors()
             .into_iter()
-            .flat_map(|c| c.required_bash_commands())
+            .flat_map(|c| c.bash_commands())
             .collect();
         out.sort();
         out.dedup();
         out
+    }
+}
+
+impl CompilerExtension for ExecContextExtension {
+    fn name(&self) -> &str {
+        "Execution Context"
+    }
+
+    fn phase(&self) -> ExtensionPhase {
+        // Tool phase: runs after Runtime so any runtime-installed git
+        // (none today, but defensive) is on PATH; before user `steps:`
+        // so they can read `aw-context/`.
+        ExtensionPhase::Tool
+    }
+
+    /// For each active contributor, emit the typed `Step` from its
+    /// `prepare_step_typed`. The PR contributor's synth-active path
+    /// now uses typed [`crate::compile::ir::env::EnvValue::Coalesce`]
+    /// plus [`crate::compile::ir::env::EnvValue::StepOutput`]
+    /// references instead of hand-written `$[ coalesce(...) ]`
+    /// strings — the lowering pass selects the cross-job
+    /// `dependencies.Setup.outputs[...]` form since the Agent-job
+    /// consumer is in a different job from the Setup-job `synthPr`
+    /// producer.
+    fn declarations(&self, ctx: &CompileContext) -> anyhow::Result<Declarations> {
+        let mut agent_prepare_steps = Vec::new();
+        if self.config.is_enabled() {
+            for c in self.contributors() {
+                if !c.should_activate(ctx) {
+                    continue;
+                }
+                if let Some(step) = c.prepare_step_typed(ctx)? {
+                    agent_prepare_steps.push(step);
+                }
+            }
+        }
+        Ok(Declarations {
+            agent_prepare_steps,
+            bash_commands: self.bash_commands(),
+            ..Declarations::default()
+        })
     }
 }
 
@@ -214,7 +229,7 @@ mod tests {
     //! contributions.
     //!
     //! These tests exercise the `new()` → `required_bash_commands()`
-    //! path independently (no fixture-compile, no `prepare_steps`,
+    //! path independently (no fixture-compile, no step declarations,
     //! no `CompileContext`) so a future divergence trips here at
     //! unit-test time rather than at E2E time.
 
@@ -239,17 +254,20 @@ mod tests {
         parse_fm("---\nname: test\ndescription: test\n---\n")
     }
 
+    fn declared_bash_commands(ext: &ExecContextExtension, fm: &FrontMatter) -> Vec<String> {
+        let ctx = CompileContext::for_test(fm);
+        ext.declarations(&ctx).unwrap().bash_commands
+    }
+
     /// When `on.pr` is configured (default `pr.enabled`),
     /// `required_bash_commands` MUST yield the PR contributor's
     /// git commands. If a future contributor diverges this from
     /// `should_activate`, this assertion trips.
     #[test]
     fn required_bash_commands_matches_pr_contributor_active_default() {
-        let ext = ExecContextExtension::new(
-            ExecutionContextConfig::default(),
-            &pr_triggered_front_matter(),
-        );
-        let cmds = ext.required_bash_commands();
+        let fm = pr_triggered_front_matter();
+        let ext = ExecContextExtension::new(ExecutionContextConfig::default(), &fm);
+        let cmds = declared_bash_commands(&ext, &fm);
         assert!(
             !cmds.is_empty(),
             "PR contributor is active (on.pr configured, default pr.enabled) \
@@ -272,9 +290,10 @@ mod tests {
                 enabled: Some(true),
             }),
         };
-        let ext = ExecContextExtension::new(cfg, &pr_triggered_front_matter());
+        let fm = pr_triggered_front_matter();
+        let ext = ExecContextExtension::new(cfg, &fm);
         assert!(
-            !ext.required_bash_commands().is_empty(),
+            !declared_bash_commands(&ext, &fm).is_empty(),
             "explicit pr.enabled: true + on.pr configured must yield bash commands"
         );
     }
@@ -290,9 +309,10 @@ mod tests {
                 enabled: Some(false),
             }),
         };
-        let ext = ExecContextExtension::new(cfg, &pr_triggered_front_matter());
+        let fm = pr_triggered_front_matter();
+        let ext = ExecContextExtension::new(cfg, &fm);
         assert!(
-            ext.required_bash_commands().is_empty(),
+            declared_bash_commands(&ext, &fm).is_empty(),
             "pr.enabled: false must suppress required_bash_commands"
         );
     }
@@ -301,12 +321,10 @@ mod tests {
     /// no commands. Mirrors `should_activate`'s `on.pr` gate.
     #[test]
     fn required_bash_commands_suppressed_without_on_pr() {
-        let ext = ExecContextExtension::new(
-            ExecutionContextConfig::default(),
-            &no_trigger_front_matter(),
-        );
+        let fm = no_trigger_front_matter();
+        let ext = ExecContextExtension::new(ExecutionContextConfig::default(), &fm);
         assert!(
-            ext.required_bash_commands().is_empty(),
+            declared_bash_commands(&ext, &fm).is_empty(),
             "without on.pr configured, required_bash_commands must be empty"
         );
     }
@@ -322,9 +340,10 @@ mod tests {
                 enabled: Some(true),
             }),
         };
-        let ext = ExecContextExtension::new(cfg, &no_trigger_front_matter());
+        let fm = no_trigger_front_matter();
+        let ext = ExecContextExtension::new(cfg, &fm);
         assert!(
-            ext.required_bash_commands().is_empty(),
+            declared_bash_commands(&ext, &fm).is_empty(),
             "pr.enabled: true without on.pr must NOT widen the agent bash allow-list"
         );
     }
@@ -337,10 +356,132 @@ mod tests {
             enabled: Some(false),
             pr: None,
         };
-        let ext = ExecContextExtension::new(cfg, &pr_triggered_front_matter());
+        let fm = pr_triggered_front_matter();
+        let ext = ExecContextExtension::new(cfg, &fm);
         assert!(
-            ext.required_bash_commands().is_empty(),
+            declared_bash_commands(&ext, &fm).is_empty(),
             "execution-context.enabled: false must suppress required_bash_commands"
+        );
+    }
+
+    /// **Marquee end-to-end test (post-merge update)**: assemble a
+    /// real Pipeline with `synthPr` in Setup, the Agent job carrying
+    /// the typed `agent_job_variables_hoist` (cross-job
+    /// `dependencies.Setup.outputs['synthPr.AW_PR_*']`
+    /// references lifted to job-level variables), and the typed
+    /// exec-context-pr step reading those variables via the
+    /// same-job `$(name)` macro form. Locks the post-PR-#956
+    /// architecture: cross-job refs live in `variables:` (the only
+    /// scope ADO reliably evaluates `$[ ... ]` runtime expressions),
+    /// and step env reads them via `$(AW_PR_*)`.
+    #[test]
+    fn exec_context_pr_step_lowers_to_cross_job_dep_form_in_agent_job() {
+        use crate::compile::extensions::ado_script::synthetic_pr_step_typed;
+        use crate::compile::ir::env::EnvValue;
+        use crate::compile::ir::graph::build_graph;
+        use crate::compile::ir::ids::{JobId, StepId};
+        use crate::compile::ir::job::{Job, JobVariable, Pool};
+        use crate::compile::ir::lower::{LoweringContext, lower_step};
+        use crate::compile::ir::output::OutputRef;
+        use crate::compile::ir::step::Step;
+        use crate::compile::ir::{Pipeline, PipelineBody, PipelineShape, Resources, Triggers};
+
+        let fm = pr_triggered_front_matter();
+        let ctx = CompileContext::for_test(&fm);
+
+        let ext = ExecContextExtension::new(ExecutionContextConfig::default(), &fm);
+        // Force synthetic_pr_active so the unified `AW_PR_*` macros
+        // are emitted in the prepare step's env (the path that needs
+        // the Agent-job-level hoist to resolve at runtime).
+        let ext = ExecContextExtension {
+            synthetic_pr_active: true,
+            ..ext
+        };
+
+        let decl = ext.declarations(&ctx).unwrap();
+        assert_eq!(decl.agent_prepare_steps.len(), 1);
+        let pr_step = decl.agent_prepare_steps.into_iter().next().unwrap();
+
+        // Pair the Agent step with a Setup-job `synthPr` producer so
+        // the graph can resolve the OutputRef inside the Agent-job
+        // variables hoist. The Pipeline only needs to be a valid
+        // skeleton for lowering — no SafeOutputs / Detection jobs
+        // required.
+        let synth = synthetic_pr_step_typed("AAAA").unwrap();
+        let mut setup_job = Job::new(
+            JobId::new("Setup").unwrap(),
+            "Setup",
+            Pool::VmImage("u".into()),
+        );
+        setup_job.push_step(Step::Bash(synth));
+
+        let mut agent_job = Job::new(
+            JobId::new("Agent").unwrap(),
+            "Agent",
+            Pool::VmImage("u".into()),
+        );
+        // The Agent job hoists the synthPr step outputs to
+        // job-level variables — this is what
+        // `standalone_ir::agent_job_variables_hoist` populates in
+        // production builds. Reproduce a minimal subset here.
+        let synth_id = StepId::new("synthPr").unwrap();
+        for name in &["AW_PR_ID", "AW_PR_TARGETBRANCH", "AW_SYNTHETIC_PR"] {
+            agent_job.variables.push(JobVariable {
+                name: (*name).into(),
+                value: EnvValue::coalesce(vec![EnvValue::step_output(OutputRef::new(
+                    synth_id.clone(),
+                    *name,
+                ))]),
+            });
+        }
+        agent_job.push_step(pr_step);
+
+        let p = Pipeline {
+            name: "t".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers::default(),
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(vec![setup_job, agent_job]),
+            shape: PipelineShape::Standalone,
+        };
+
+        let g = build_graph(&p).unwrap();
+        let agent_id = JobId::new("Agent").unwrap();
+        let ctx = LoweringContext {
+            graph: &g,
+            stage: None,
+            job: &agent_id,
+        };
+        let jobs = match &p.body {
+            PipelineBody::Jobs(j) => j,
+            _ => unreachable!(),
+        };
+        let lowered = lower_step(&jobs[1].steps[0], &ctx).unwrap();
+        let yaml = serde_yaml::to_string(&lowered).unwrap();
+
+        // The Agent step's env reads the hoisted `AW_PR_*`
+        // variables via the same-job `$(name)` macro form.
+        assert!(
+            yaml.contains("SYSTEM_PULLREQUEST_PULLREQUESTID: $(AW_PR_ID)"),
+            "PR id env must read hoisted AW_PR_ID via $(...) macro; got:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("SYSTEM_PULLREQUEST_TARGETBRANCH: $(AW_PR_TARGETBRANCH)"),
+            "target branch env must read hoisted AW_PR_TARGETBRANCH; got:\n{yaml}"
+        );
+        // Negative assertion: no cross-job `dependencies.<Job>.outputs[...]`
+        // ref must appear in the step's env block — that runtime
+        // expression form is illegal at step-env scope (PR #956). The
+        // hoist lives in the Agent job's `variables:` mapping, NOT
+        // in this step's env.
+        assert!(
+            !yaml.contains("dependencies.Setup.outputs"),
+            "Agent-job step env must NOT contain cross-job dep refs (use the job-variable hoist); got:\n{yaml}"
+        );
+        assert!(
+            !yaml.contains("$["),
+            "Agent-job step env must NOT contain $[ ... ] runtime expressions (ADO doesn't evaluate them at step env scope); got:\n{yaml}"
         );
     }
 }

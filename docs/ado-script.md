@@ -314,8 +314,8 @@ bundle**:
 
 ### Setup job (gate evaluator)
 
-When `filters:` lowers to non-empty checks, `setup_steps()` returns
-three step strings into the Setup job:
+When `filters:` lowers to non-empty checks, `AdoScriptExtension::declarations()`
+returns three typed `Declarations::setup_steps` entries for the Setup job:
 
 1. **`NodeTool@0`** — installs Node 20.x LTS, capped at
    `timeoutInMinutes: 5`.
@@ -332,8 +332,8 @@ three step strings into the Setup job:
 
 When `inlined-imports: false` (the default) OR the execution-context
 PR contributor activates (`on.pr` configured and not disabled),
-`prepare_steps()` returns the install + download pair into the Agent
-job's existing `{{ prepare_steps }}` block:
+`AdoScriptExtension::declarations()` returns the install + download pair in
+`Declarations::agent_prepare_steps` for the Agent job:
 
 1. **`NodeTool@0`** — same shape as above.
 2. **`curl` download + verify + extract** — same artefact, same
@@ -345,8 +345,8 @@ job's existing `{{ prepare_steps }}` block:
    **Only emitted when `inlined-imports: false`.**
 
 The PR-context precompute step (`node exec-context-pr.js`) is owned
-by `ExecContextExtension` (not `AdoScriptExtension`) and emitted in
-its own `Tool`-phase `prepare_steps()`. Phase ordering
+by `ExecContextExtension` (not `AdoScriptExtension`) and emitted through
+its own Tool-phase `Declarations::agent_prepare_steps`. Phase ordering
 (`AdoScriptExtension::phase() == System` < `ExecContextExtension::phase() == Tool`)
 guarantees the bundle is installed and on disk before the
 exec-context invocation runs.

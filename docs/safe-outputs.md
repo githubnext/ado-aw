@@ -47,7 +47,7 @@ pipeline's built-in OAuth token running as the *Project Collection Build
 Service* identity. Set `permissions.write` to override this with an
 ARM-minted token, e.g. for cross-org writes or named-identity attribution.
 See [`docs/network.md`](network.md) and
-[`docs/template-markers.md`](template-markers.md) for details.
+[`docs/ir.md`](ir.md) for the typed SafeOutputs job wiring.
 
 ## Available Safe Output Tools
 

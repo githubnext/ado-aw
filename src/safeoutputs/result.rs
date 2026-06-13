@@ -45,7 +45,7 @@ pub trait Validate {
 /// Context provided to executors during Stage 3 execution
 #[derive(Debug, Clone)]
 pub struct ExecutionContext {
-    /// Azure DevOps organization URL (e.g., "https://dev.azure.com/myorg")
+    /// Azure DevOps organization URL (e.g., `<https://dev.azure.com/myorg>`).
     pub ado_org_url: Option<String>,
     /// Azure DevOps organization name (extracted from ado_org_url, e.g., "myorg")
     pub ado_organization: Option<String>,
@@ -428,7 +428,7 @@ pub fn anyhow_to_mcp_error(err: anyhow::Error) -> McpError {
     }
 }
 
-/// Macro to generate a tool result struct with automatic `name` field and TryFrom<Params> conversion
+/// Macro to generate a tool result struct with automatic `name` field and `TryFrom<Params>` conversion
 ///
 /// The generated struct derives `Serialize`, `Deserialize`, and `JsonSchema`, making it suitable
 /// for both Stage 1 (serialization to safe outputs) and Stage 3 (deserialization for execution).

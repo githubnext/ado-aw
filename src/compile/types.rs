@@ -734,11 +734,6 @@ impl FrontMatter {
         self.on_config.as_ref().and_then(|o| o.schedule.as_ref())
     }
 
-    /// Check if a schedule is configured.
-    pub fn has_schedule(&self) -> bool {
-        self.schedule().is_some()
-    }
-
     /// Get the pipeline trigger configuration (if any).
     pub fn pipeline_trigger(&self) -> Option<&PipelineTrigger> {
         self.on_config.as_ref().and_then(|o| o.pipeline.as_ref())

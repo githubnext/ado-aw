@@ -123,9 +123,9 @@ commands.
 ## Agent prompt fragment
 
 The precompute step appends one of two fragments directly to
-`/tmp/awf-tools/agent-prompt.md` (the file built by the
-"Prepare agent prompt" step in `base.yml`). This mirrors how gh-aw
-injects its own built-in prompt sections.
+`/tmp/awf-tools/agent-prompt.md` (the file built by the Agent job's
+"Prepare agent prompt" step). This mirrors how gh-aw injects its own
+built-in prompt sections.
 
 ### Success fragment
 
@@ -287,8 +287,8 @@ your own markdown body.
   alias, `aw-context/` is still relative to `$(Build.SourcesDirectory)`
   — i.e. the pipeline's working directory, not the workspace alias's
   directory.
-- **Ordering.** The precompute step runs after `{{ checkout_self }}`
-  in the Agent job's prepare phase, after the "Prepare agent prompt"
+- **Ordering.** The precompute step runs after the typed `checkout: self`
+  step in the Agent job's prepare phase, after the "Prepare agent prompt"
   step (so it can append) and before the agent runs (so the agent
   sees the appended prompt).
 

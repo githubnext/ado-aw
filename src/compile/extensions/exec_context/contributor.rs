@@ -45,32 +45,19 @@ pub(super) trait ContextContributor {
     /// Whether this contributor activates for the given compile context.
     fn should_activate(&self, ctx: &CompileContext) -> bool;
 
-    /// Generate the prepare-step YAML (a single `- bash:` block or
-    /// equivalent). Must include its own ADO `condition:` so the step
-    /// no-ops on non-matching trigger types. Empty string = no step.
-    ///
-    /// Contributors that want to surface a prompt fragment to the
-    /// agent append it directly to `/tmp/awf-tools/agent-prompt.md`
-    /// from this step's bash (the file is created by base.yml's
-    /// "Prepare agent prompt" step before any prepare_steps run).
-    fn prepare_step(&self, ctx: &CompileContext) -> String;
-
-    /// Agent env vars this contributor exposes. Defaults to none —
-    /// the ado-aw env-var channel rejects ADO `$(...)` expressions, so
-    /// all per-trigger metadata currently flows through files. Kept
-    /// on the trait so a future contributor that only needs literal
-    /// values can opt in without changing the wiring.
-    #[allow(dead_code)]
-    fn agent_env_vars(&self) -> Vec<(String, String)> {
-        Vec::new()
-    }
+    /// Generate the prepare step as a typed
+    /// [`crate::compile::ir::step::Step`].
+    fn prepare_step_typed(
+        &self,
+        ctx: &CompileContext,
+    ) -> anyhow::Result<Option<crate::compile::ir::step::Step>>;
 
     /// Bash commands the agent must have on its allow-list to inspect
     /// the staged context (e.g. `git diff`, `git show`). Aggregated by
-    /// `ExecContextExtension::required_bash_commands` and forwarded
+    /// `ExecContextExtension` and forwarded
     /// through `src/engine.rs::args` to the agent's `shell(...)`
     /// allow-list.
-    fn required_bash_commands(&self) -> Vec<String>;
+    fn bash_commands(&self) -> Vec<String>;
 }
 
 /// Static-dispatch enum over all known contributors.
@@ -93,19 +80,17 @@ impl ContextContributor for Contributor {
             Contributor::Pr(c) => c.should_activate(ctx),
         }
     }
-    fn prepare_step(&self, ctx: &CompileContext) -> String {
+    fn prepare_step_typed(
+        &self,
+        ctx: &CompileContext,
+    ) -> anyhow::Result<Option<crate::compile::ir::step::Step>> {
         match self {
-            Contributor::Pr(c) => c.prepare_step(ctx),
+            Contributor::Pr(c) => c.prepare_step_typed(ctx),
         }
     }
-    fn agent_env_vars(&self) -> Vec<(String, String)> {
+    fn bash_commands(&self) -> Vec<String> {
         match self {
-            Contributor::Pr(c) => c.agent_env_vars(),
-        }
-    }
-    fn required_bash_commands(&self) -> Vec<String> {
-        match self {
-            Contributor::Pr(c) => c.required_bash_commands(),
+            Contributor::Pr(c) => c.bash_commands(),
         }
     }
 }

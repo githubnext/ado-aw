@@ -1,131 +1,14 @@
 use std::fs;
 use std::path::PathBuf;
 
-/// Asserts that all required `{{ marker }}` placeholders are present in the template.
-fn assert_required_markers(content: &str) {
-    let required = [
-        "{{ repositories }}",
-        "{{ schedule }}",
-        "{{ checkout_self }}",
-        "{{ checkout_repositories }}",
-        "{{ allowed_domains }}",
-        "{{ source_path }}",
-        "{{ pipeline_agent_name }}",
-        "{{ engine_run }}",
-        "{{ compiler_version }}",
-        "{{ integrity_check }}",
-        "{{ firewall_version }}",
-        "{{ mcpg_config }}",
-        "{{ mcpg_version }}",
-    ];
-    for marker in &required {
-        assert!(
-            content.contains(marker),
-            "Template should contain marker: {marker}"
-        );
-    }
-    // Sanity-check that at least 6 replacement markers exist in total.
-    // (${{ }} is valid ADO pipeline syntax and must be preserved.)
-    let marker_count = content.matches("{{ ").count();
-    assert!(
-        marker_count >= 6,
-        "Template should have at least 6 replacement markers"
-    );
-}
-
-/// Asserts that the pool configuration uses the `{{ pool }}` marker everywhere
-/// and that no hardcoded pool name leaks into the template.
-fn assert_pool_config(content: &str) {
-    // Must appear once per job: Agent, Detection, SafeOutputs.
-    let pool_marker_count = content.matches("{{ pool }}").count();
-    assert_eq!(
-        pool_marker_count, 3,
-        "Template should use '{{ pool }}' marker exactly three times (once for each job)"
-    );
-    assert!(
-        !content.contains("name: AZS-1ES-L-MMS-ubuntu-22.04"),
-        "Template should not contain hardcoded pool name 'AZS-1ES-L-MMS-ubuntu-22.04'"
-    );
-}
-
-/// Asserts that the `ado-aw` compiler binary is fetched from GitHub Releases
-/// with a correct, targeted checksum verification.
-fn assert_compiler_download(content: &str) {
-    assert!(
-        !content.contains("pipeline: 2437"),
-        "Template should not reference ADO pipeline 2437 for the compiler"
-    );
-    assert!(
-        content.contains("github.com/githubnext/ado-aw/releases"),
-        "Template should download the compiler from GitHub Releases"
-    );
-    // --ignore-missing silently passes when the binary is absent from checksums.txt.
-    assert!(
-        !content.contains("sha256sum -c checksums.txt --ignore-missing"),
-        "Template should not use --ignore-missing in checksum verification"
-    );
-    assert!(
-        content.contains(r#"grep "ado-aw-linux-x64" checksums.txt | sha256sum -c -"#),
-        "Template should verify ado-aw checksum using targeted grep to ensure binary entry exists"
-    );
-    assert!(
-        !content.contains("grep -q"),
-        "Checksum verification should not pipe through grep -q"
-    );
-}
-
-/// Asserts that the AWF binary is fetched from GitHub Releases, not ADO
-/// pipeline artifacts, and that no legacy artifact tasks remain.
-fn assert_awf_download(content: &str) {
-    assert!(
-        !content.contains("pipeline: 2450"),
-        "Template should not reference ADO pipeline 2450 for the firewall"
-    );
-    assert!(
-        !content.contains("DownloadPipelineArtifact"),
-        "Template should not use DownloadPipelineArtifact task"
-    );
-    assert!(
-        content.contains("github.com/github/gh-aw-firewall/releases"),
-        "Template should download AWF from GitHub Releases"
-    );
-}
-
-/// Asserts that MCPG is integrated correctly and that no legacy mcp-firewall
-/// artefacts remain in the template.
-fn assert_mcpg_integration(content: &str) {
-    assert!(
-        content.contains("--enable-host-access"),
-        "Template should include --enable-host-access for MCPG"
-    );
-    assert!(
-        !content.contains("mcp-firewall-config"),
-        "Template should not reference legacy mcp-firewall config"
-    );
-    assert!(
-        !content.contains("MCP_FIREWALL_EOF"),
-        "Template should not contain legacy firewall heredoc"
-    );
-}
-
-/// Test that verifies the expected structure of the compiled YAML output
-#[test]
-fn test_compiled_yaml_structure() {
-    let template_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("data")
-        .join("base.yml");
-
-    assert!(template_path.exists(), "Base template should exist");
-
-    let content = fs::read_to_string(&template_path).expect("Should be able to read base template");
-
-    assert_required_markers(&content);
-    assert_pool_config(&content);
-    assert_compiler_download(&content);
-    assert_awf_download(&content);
-    assert_mcpg_integration(&content);
-}
+// `assert_required_markers`, `assert_pool_config`, `assert_compiler_download`,
+// `assert_awf_download`, `assert_mcpg_integration`, and `test_compiled_yaml_structure`
+// validated the legacy `src/data/base.yml` template. The standalone target
+// now builds its YAML programmatically via `src/compile/standalone_ir.rs`
+// (see `feat(compile): standalone target builds Pipeline IR; delete base.yml`);
+// the template is gone, so these template-shape assertions no longer apply.
+// The shape tests in `src/compile/standalone_ir.rs` and the bash-lint suite
+// take over coverage.
 
 /// Test that the example file is valid and can be parsed
 #[test]
@@ -4487,30 +4370,32 @@ fn test_pr_filter_synth_mode_agent_condition_enforces_gate() {
     // target only that section (the same strings can appear elsewhere —
     // e.g. the exec-context-pr.js step's condition — and would create
     // false positives if we matched the whole compiled output).
+    //
+    // Supports both legacy multi-line `condition: |\n  and(...)` form
+    // and the newer single-line `condition: and(...)` form emitted by
+    // the typed-IR pipeline builder.
     let agent_block = extract_job_block(&compiled, "Agent").expect("Agent job present");
-    let condition_section = agent_block
-        .split("condition: |")
-        .nth(1)
-        .map(|tail| {
-            // Stop at the next top-level Agent-job field. `steps:` always
-            // exists; `pool:` / `variables:` / `workspace:` may exist
-            // before it. The first one we hit terminates the condition
-            // body. Using exact field names avoids matching inner
-            // condition lines that start with 4+ spaces.
-            let stop_at = [
-                "\n    pool:",
-                "\n    steps:",
-                "\n    variables:",
-                "\n    workspace:",
-            ];
-            let end = stop_at
-                .iter()
-                .filter_map(|needle| tail.find(needle))
-                .min()
-                .unwrap_or(tail.len());
-            &tail[..end]
-        })
-        .unwrap_or("");
+    let condition_section: String = if let Some(tail) = agent_block.split("condition: |").nth(1) {
+        // Multi-line block scalar — stop at the next top-level field.
+        let stop_at = [
+            "\n    pool:",
+            "\n    steps:",
+            "\n    variables:",
+            "\n    workspace:",
+        ];
+        let end = stop_at
+            .iter()
+            .filter_map(|needle| tail.find(needle))
+            .min()
+            .unwrap_or(tail.len());
+        tail[..end].to_string()
+    } else if let Some(tail) = agent_block.split("condition: ").nth(1) {
+        // Single-line — terminate at the next newline.
+        tail.split_once('\n').map(|(line, _)| line.to_string()).unwrap_or_else(|| tail.to_string())
+    } else {
+        String::new()
+    };
+    let condition_section = condition_section.as_str();
 
     // Correct shape: the AND-NOT clause requiring (not real PR) AND
     // (not synth PR) before the unconditional-run branch is taken.
@@ -5066,89 +4951,6 @@ fn test_example_dogfood_failure_reporter_structure() {
         content.contains("target-repo: githubnext/ado-aw"),
         "Example should target githubnext/ado-aw"
     );
-}
-
-/// Test that every `{{ marker }}` used in `src/data/*.yml` has a corresponding
-/// `## {{ marker }}` heading in `docs/template-markers.md`.
-///
-/// This is the CI/docs marker-drift guard: if a marker is added to a template
-/// without updating the docs, this test fails.
-#[test]
-fn test_template_marker_docs_coverage() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let data_dir = manifest_dir.join("src").join("data");
-    let docs_file = manifest_dir.join("docs").join("template-markers.md");
-
-    // --- collect markers from src/data/*.yml ---
-    let yml_entries = fs::read_dir(&data_dir)
-        .unwrap_or_else(|e| panic!("Cannot read {}: {e}", data_dir.display()));
-
-    let mut yml_markers: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for entry in yml_entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("yml") {
-            continue;
-        }
-        let content = fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("Cannot read {}: {e}", path.display()));
-        for cap in regex_captures_markers(&content) {
-            yml_markers.insert(cap);
-        }
-    }
-
-    // --- collect documented marker headings from docs/template-markers.md ---
-    let docs = fs::read_to_string(&docs_file)
-        .unwrap_or_else(|e| panic!("Cannot read {}: {e}", docs_file.display()));
-
-    let mut documented: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for line in docs.lines() {
-        // Match lines like: ## {{ marker_name }}
-        if let Some(rest) = line.strip_prefix("## {{ ")
-            && let Some(name) = rest.split("}}").next()
-        {
-            documented.insert(name.trim().to_string());
-        }
-    }
-
-    // Every marker that appears in the yml files must have a docs heading.
-    let mut missing: Vec<String> = Vec::new();
-    for marker in &yml_markers {
-        if !documented.contains(marker.as_str()) {
-            missing.push(format!("{{{{ {marker} }}}}"));
-        }
-    }
-
-    assert!(
-        missing.is_empty(),
-        "The following template markers appear in src/data/*.yml but have no \
-         '## {{{{ marker }}}}' heading in docs/template-markers.md — add docs or \
-         update the marker name:\n  {}",
-        missing.join("\n  ")
-    );
-}
-
-/// Extract all `{{ name }}` marker names from `content` (excluding `${{ }}` ADO expressions).
-fn regex_captures_markers(content: &str) -> Vec<String> {
-    let mut results = Vec::new();
-    let mut s: &str = content;
-    while let Some(start) = s.find("{{ ") {
-        // Skip ADO ${{ }} expressions
-        if start > 0 && s.as_bytes().get(start - 1) == Some(&b'$') {
-            s = &s[start + 3..];
-            continue;
-        }
-        let after = &s[start + 3..];
-        if let Some(end) = after.find("}}") {
-            let name = after[..end].trim().to_string();
-            if !name.is_empty() {
-                results.push(name);
-            }
-            s = &after[end + 2..];
-        } else {
-            break;
-        }
-    }
-    results
 }
 
 // =====================================================================

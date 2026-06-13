@@ -5,17 +5,16 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use super::extensions::{
-    CompileContext, CompilerExtension, Extension, McpgConfig, McpgGatewayConfig, McpgServerConfig,
+    CompilerExtension, Declarations, McpgConfig, McpgGatewayConfig, McpgServerConfig,
 };
 use super::types::{
-    CompileTarget, FrontMatter, OnConfig, PipelineParameter, PoolConfig, ReposItem, Repository,
+    CompileTarget, FrontMatter, PipelineParameter, PoolConfig, ReposItem, Repository,
 };
 use crate::allowed_hosts::{CORE_ALLOWED_HOSTS, mcp_required_hosts};
 use crate::compile::types::McpConfig;
 use crate::ecosystem_domains::{
     get_ecosystem_domains, is_ecosystem_identifier, is_known_ecosystem,
 };
-use crate::fuzzy_schedule;
 use crate::validate;
 
 /// Atomically write `contents` to `path`.
@@ -280,48 +279,43 @@ pub fn parse_markdown(content: &str) -> Result<(FrontMatter, String)> {
     Ok((parsed.front_matter, parsed.markdown_body))
 }
 
-/// Replace a placeholder in the template, preserving the indentation for multi-line content.
-pub fn replace_with_indent(template: &str, placeholder: &str, replacement: &str) -> String {
-    let mut result = String::new();
-    let mut remaining = template;
-
-    while let Some(pos) = remaining.find(placeholder) {
-        // Find the start of the current line to determine indentation
-        let line_start = remaining[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
-        let indent = &remaining[line_start..pos];
-
-        // Only use indent if it's all whitespace
-        let indent = if indent.chars().all(|c| c.is_whitespace()) {
-            indent
-        } else {
-            ""
-        };
-
-        // Add everything before the placeholder
-        result.push_str(&remaining[..pos]);
-
-        // Add the replacement with proper indentation for each line
-        let mut first_line = true;
-        for line in replacement.lines() {
-            if first_line {
-                result.push_str(line);
-                first_line = false;
-            } else {
-                result.push('\n');
-                result.push_str(indent);
-                result.push_str(line);
-            }
-        }
-        // Handle case where replacement ends with newline
-        if replacement.ends_with('\n') {
-            result.push('\n');
-        }
-
-        remaining = &remaining[pos + placeholder.len()..];
+/// Construct a guaranteed-unique heredoc sentinel for shell content.
+///
+/// Returns `<base>_<12-hex-chars-of-sha256(content)>`. The SHA suffix
+/// makes the sentinel deterministic per content (so lock files stay
+/// stable across recompiles) and astronomically unlikely to appear
+/// inside the content (a random 48-bit prefix collision has ~2^-48
+/// probability).
+///
+/// As defense in depth, validates that the content does not contain
+/// the resulting sentinel as a standalone line and returns `Err` if
+/// it does — converting a worst-case bash-injection silent failure
+/// into a typed compile error. In practice the error branch is
+/// unreachable without a deliberate SHA-256 prefix-collision attack
+/// on the content body.
+///
+/// # Why
+///
+/// Bash heredocs (`cat > file <<'EOF' ... EOF`) are terminated by a
+/// line whose entire content equals the sentinel. If `content`
+/// contains such a line, everything after it executes as bash
+/// instead of being captured into the file. With user-controlled
+/// content (e.g. resolved agent markdown, front-matter description),
+/// a fixed sentinel like `EOF` or `AGENT_PROMPT_EOF` is a latent
+/// shell-injection vector: a malicious agent file can break out of
+/// the heredoc and execute arbitrary commands in the Detection /
+/// Agent jobs.
+pub(crate) fn heredoc_sentinel(base: &str, content: &str) -> Result<String> {
+    let hash = crate::hash::sha256_hex(content.as_bytes());
+    let sentinel = format!("{base}_{}", &hash[..12]);
+    if content.lines().any(|line| line == sentinel) {
+        anyhow::bail!(
+            "heredoc sentinel '{sentinel}' would terminate the heredoc early — \
+             the content contains the sentinel as a standalone line. This requires \
+             a SHA-256 prefix collision on the content body; investigate if seen."
+        );
     }
-
-    result.push_str(remaining);
-    result
+    Ok(sentinel)
 }
 
 /// Round-trip a YAML body through `serde_yaml::from_str` ➜ `to_string` to
@@ -343,15 +337,14 @@ pub fn replace_with_indent(template: &str, placeholder: &str, replacement: &str)
 ///   `# This file is auto-generated …` / `# @ado-aw …` header intact while
 ///   normalising everything below it.
 /// - YAML comments *between* mapping keys (e.g. the `# Disable PR triggers`
-///   line emitted by [`generate_pr_trigger`]) are dropped — serde_yaml does
+///   line emitted by the PR trigger builder) are dropped — serde_yaml does
 ///   not preserve them. This is intentional and accepted as part of the
 ///   canonical-form definition.
 /// - Comments *inside* literal block scalars (e.g. bash `#` comments inside
 ///   `script: |` blocks) are not affected, because they are string content
 ///   from the YAML parser's perspective.
 ///
-/// Used in [`compile_shared`] and [`compile_template_target`] just before
-/// the leading header comment is prepended.
+/// Used by IR emitters just before the leading header comment is prepended.
 pub fn normalize_yaml(input: &str) -> Result<String> {
     // Split off any leading comment / blank lines and preserve them
     // verbatim. The first non-comment, non-blank line marks the start of
@@ -384,61 +377,6 @@ pub fn normalize_yaml(input: &str) -> Result<String> {
     }
 
     Ok(format!("{header}{normalised}"))
-}
-
-/// Generate a schedule YAML block from a ScheduleConfig.
-/// Generate the top-level `parameters:` YAML block from front matter parameters.
-///
-/// Returns a YAML block like:
-/// ```yaml
-/// parameters:
-///   - name: clearMemory
-///     displayName: "Clear agent memory"
-///     type: boolean
-///     default: false
-/// ```
-///
-/// Returns an empty string if the parameters list is empty.
-/// Returns an error if any parameter name is not a valid ADO identifier.
-pub fn generate_parameters(parameters: &[PipelineParameter]) -> Result<String> {
-    if parameters.is_empty() {
-        return Ok(String::new());
-    }
-
-    // Validate parameter names — must be valid ADO identifiers to prevent
-    // YAML injection or template expression injection.
-    for p in parameters {
-        if !validate::is_valid_parameter_name(&p.name) {
-            anyhow::bail!(
-                "Invalid parameter name '{}': must match [A-Za-z_][A-Za-z0-9_]* (ADO identifier)",
-                p.name
-            );
-        }
-        // Reject ADO expressions in string fields to prevent template expression injection.
-        // Parameter definitions should only contain literal values.
-        if let Some(ref display_name) = p.display_name {
-            validate::reject_ado_expressions(display_name, &p.name, "displayName")?;
-        }
-        if let Some(ref default) = p.default {
-            validate::reject_ado_expressions_in_value(default, &p.name, "default")?;
-        }
-        if let Some(ref values) = p.values {
-            for v in values {
-                validate::reject_ado_expressions_in_value(v, &p.name, "values")?;
-            }
-        }
-    }
-
-    let yaml = serde_yaml::to_string(&serde_yaml::Value::Sequence(
-        parameters
-            .iter()
-            .map(|p| serde_yaml::to_value(p).context("Failed to serialize pipeline parameter"))
-            .collect::<Result<Vec<_>>>()?,
-    ))
-    .context("Failed to serialize parameters to YAML")?;
-
-    // serde_yaml outputs the sequence without a key; we need to wrap it under `parameters:`
-    Ok(format!("parameters:\n{}", yaml))
 }
 
 /// Validate front matter `name` and `description` fields.
@@ -587,173 +525,6 @@ pub fn build_parameters(
     }
 
     Ok(params)
-}
-
-/// Generate a schedule YAML block from a fuzzy schedule expression.
-pub fn generate_schedule(name: &str, config: &super::types::ScheduleConfig) -> Result<String> {
-    let branches = config.branches();
-    let fallback;
-    let effective_branches = if branches.is_empty() {
-        fallback = vec!["main".to_string()];
-        &fallback
-    } else {
-        branches
-    };
-    fuzzy_schedule::generate_schedule_yaml(config.expression(), name, effective_branches)
-}
-
-/// Generate PR trigger configuration.
-///
-/// When `triggers.pr` is explicitly configured, PR triggers stay enabled regardless
-/// of schedule or pipeline triggers (overrides suppression). Native ADO branch/path
-/// filters are emitted if configured.
-pub fn generate_pr_trigger(on_config: &Option<OnConfig>, has_schedule: bool) -> String {
-    let has_pipeline_trigger = on_config
-        .as_ref()
-        .and_then(|t| t.pipeline.as_ref())
-        .is_some();
-
-    // Explicit triggers.pr overrides schedule/pipeline suppression
-    if let Some(pr) = on_config.as_ref().and_then(|o| o.pr.as_ref()) {
-        return super::pr_filters::generate_native_pr_trigger(pr);
-    }
-
-    match (has_pipeline_trigger, has_schedule) {
-        (true, true) => "# Disable PR triggers - only run on schedule or when upstream pipeline completes\npr: none".to_string(),
-        (true, false) => "# Disable PR triggers - only run when upstream pipeline completes\npr: none".to_string(),
-        (false, true) => "# Disable PR triggers - only run on schedule\npr: none".to_string(),
-        (false, false) => String::new(),
-    }
-}
-
-/// Generate CI trigger configuration.
-///
-/// Three branches, in priority order:
-///  1. **Suppression by pipeline / schedule** — when a
-///     pipeline-completion trigger or a schedule is configured,
-///     `trigger: none` is emitted so unrelated commits do not also
-///     queue a build (existing behaviour).
-///  2. **`on.pr.mode: policy`** — the operator has installed a Build
-///     Validation branch policy and the agent author has declared
-///     intent to rely on it. Emit `trigger: none` so feature-branch
-///     pushes do not queue duplicate CI builds alongside the real
-///     PR-typed build the policy fires.
-///  3. **Default** — otherwise emit the empty string (ADO's "trigger
-///     on every branch" default). This is the `on.pr.mode: synthetic`
-///     path: the synthPr Setup step will promote CI builds to PR
-///     semantics, and the synthPr step's fast-exit (`AW_SYNTHETIC_PR_SKIP`)
-///     handles wasted CI builds on branches without a matching PR.
-///
-/// Note: synth mode must NOT narrow the CI trigger to
-/// `pr.branches.include` — those are PR **target** branches, but ADO
-/// `trigger:` fires on pushes **to** the listed branches. Narrowing
-/// would suppress CI on the feature branches synthPr needs to react
-/// to.
-pub fn generate_ci_trigger(on_config: &Option<OnConfig>, has_schedule: bool) -> String {
-    let has_pipeline_trigger = on_config
-        .as_ref()
-        .and_then(|t| t.pipeline.as_ref())
-        .is_some();
-
-    if has_pipeline_trigger || has_schedule {
-        return "trigger: none".to_string();
-    }
-
-    // Branch 2 — `on.pr.mode: policy`. The operator owns trigger semantics
-    // via a Build Validation branch policy, so the YAML CI trigger must be
-    // silenced to avoid duplicate builds. We still emit the `pr:` block
-    // (the policy uses the YAML `paths:` filter to refine queueing).
-    if let Some(pr) = on_config.as_ref().and_then(|o| o.pr.as_ref())
-        && matches!(pr.mode, crate::compile::types::PrMode::Policy)
-    {
-        return "trigger: none".to_string();
-    }
-
-    String::new()
-}
-
-/// Generate pipeline resource YAML for pipeline completion triggers
-pub fn generate_pipeline_resources(on_config: &Option<OnConfig>) -> Result<String> {
-    let Some(trigger_config) = on_config else {
-        return Ok(String::new());
-    };
-
-    let Some(pipeline) = &trigger_config.pipeline else {
-        return Ok(String::new());
-    };
-
-    // Generate a valid resource identifier (snake_case) from the pipeline name
-    let resource_id: String = pipeline
-        .name
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '_' })
-        .collect();
-
-    let mut yaml = String::from("pipelines:\n");
-
-    yaml.push_str(&format!("    - pipeline: {}\n", resource_id));
-    yaml.push_str(&format!(
-        "      source: '{}'\n",
-        pipeline.name.replace('\'', "''")
-    ));
-
-    if let Some(project) = &pipeline.project {
-        yaml.push_str(&format!(
-            "      project: '{}'\n",
-            project.replace('\'', "''")
-        ));
-    }
-
-    // If no branches specified, trigger on any branch
-    if pipeline.branches.is_empty() {
-        yaml.push_str("      trigger: true\n");
-    } else {
-        yaml.push_str("      trigger:\n");
-        yaml.push_str("        branches:\n");
-        yaml.push_str("          include:\n");
-        for branch in &pipeline.branches {
-            yaml.push_str(&format!("            - '{}'\n", branch.replace('\'', "''")));
-        }
-    }
-
-    Ok(yaml)
-}
-
-/// Generate repository resources YAML
-pub fn generate_repositories(repositories: &[Repository]) -> String {
-    if repositories.is_empty() {
-        return String::new();
-    }
-
-    repositories
-        .iter()
-        .map(|repo| {
-            format!(
-                "- repository: {}\n  type: {}\n  name: {}\n  ref: {}",
-                repo.repository, repo.repo_type, repo.name, repo.repo_ref
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Generate checkout steps YAML
-pub fn generate_checkout_steps(checkout: &[String]) -> String {
-    if checkout.is_empty() {
-        return String::new();
-    }
-
-    checkout
-        .iter()
-        .map(|name| format!("- checkout: {}", name))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Generate `checkout: self` step.
-pub fn generate_checkout_self() -> String {
-    "- checkout: self".to_string()
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1102,150 +873,8 @@ pub fn generate_working_directory(effective_workspace: &str) -> String {
     }
 }
 
-/// Generate `timeoutInMinutes` job property from `engine.timeout-minutes`.
-/// Returns an empty string when timeout is not configured.
-pub fn generate_job_timeout(front_matter: &FrontMatter) -> String {
-    match front_matter.engine.timeout_minutes() {
-        Some(minutes) => format!("timeoutInMinutes: {}", minutes),
-        None => String::new(),
-    }
-}
-
-/// Generate the Agent job's `variables:` block.
-///
-/// Currently emits content **only** when synthetic-PR-from-CI is active
-/// (`on.pr.mode == Synthetic`). In that mode we need to surface the
-/// `synthPr` Setup-job step outputs to consumers in the Agent job
-/// (today: the `Stage PR execution context` bash step in
-/// `exec_context/pr.rs`).
-///
-/// Hoist the synthPr Setup-job outputs into the Agent job's `variables:`
-/// block so step-level `env:` mappings can consume them via the
-/// `$(name)` macro form. Emitted only when the synth path is active.
-///
-/// **Why job-level variables and not step-level env**: ADO `$[ ... ]`
-/// runtime expressions only evaluate inside `variables:` blocks and
-/// `condition:` fields — NOT inside step `env:` values. Putting
-/// `$[ dependencies.<job>.outputs[...] ]` directly in step-level `env:`
-/// fails: the literal expression string is passed verbatim to the step
-/// (msazuresphere/4x4 build #612528 — `[aw-context] pr context
-/// preparation failed: PR identifier validation failed (PR_ID='$[
-/// coalesce(variables['System.PullRequest.PullRequestId'],
-/// variables['AW_SYNTHET…' is not a positive integer)`). The job-level
-/// hoist is the only documented safe location:
-/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/process/variables#use-outputs-in-the-same-pipeline>.
-///
-/// **Variable namespace**:
-///
-///  - `AW_PR_ID` / `AW_PR_TARGETBRANCH` / `AW_PR_SOURCEBRANCH` —
-///    resolved PR identifiers (real on PR builds, discovered on synth
-///    builds). The merge happens inside `exec-context-pr-synth.js` so
-///    every consumer can read a single name regardless of source.
-///  - `AW_SYNTHETIC_PR` — boolean flag set to "true" only when the
-///    build was synth-promoted from CI; empty on real PR builds.
-///    Consumed by the Agent's bash exec-context-pr gate and by gate
-///    bypass logic that needs to distinguish "real PR" from "synth".
-///
-/// When this hoist is empty (the agent isn't using synthetic-PR-from-CI),
-/// the marker collapses cleanly: the surrounding template indents the
-/// marker on its own line and an empty replacement leaves no stray
-/// keys at job scope.
-pub fn generate_agent_job_variables(synthetic_pr_active: bool) -> String {
-    if !synthetic_pr_active {
-        return String::new();
-    }
-    // The base indent on these continuation lines is just 2 spaces —
-    // `replace_with_indent` prepends the marker line's own indent to
-    // each subsequent line, so the keys here only need 2 extra spaces
-    // to land as proper children of `variables:` (which itself lands
-    // at the marker's column, the same column as `dependsOn:` /
-    // `pool:` on the Agent job). The same offset works for every
-    // base template (base.yml, 1es-base.yml, job-base.yml, stage-base.yml)
-    // because YAML child-indent is measured relative to the parent
-    // mapping key, not absolutely.
-    //
-    // `coalesce(..., '')` ensures the variable is the empty string
-    // rather than the unresolved literal `$[ ... ]` form if the
-    // dependency cannot be resolved (e.g. Setup was skipped or the
-    // synthPr step did not run).
-    "variables:\n  AW_PR_ID: $[ coalesce(dependencies.Setup.outputs['synthPr.AW_PR_ID'], '') ]\n  AW_PR_TARGETBRANCH: $[ coalesce(dependencies.Setup.outputs['synthPr.AW_PR_TARGETBRANCH'], '') ]\n  AW_PR_SOURCEBRANCH: $[ coalesce(dependencies.Setup.outputs['synthPr.AW_PR_SOURCEBRANCH'], '') ]\n  AW_SYNTHETIC_PR: $[ coalesce(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], '') ]".to_string()
-}
-
-/// Format a single step's YAML string with proper indentation
-#[allow(dead_code)]
-pub fn format_step_yaml(step_yaml: &str) -> String {
-    let trimmed = step_yaml.trim();
-    trimmed
-        .lines()
-        .enumerate()
-        .map(|(i, line)| {
-            if i == 0 {
-                format!("  - {}", line.trim_start_matches("---").trim())
-            } else {
-                format!("        {}", line)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Format a single step's YAML string with custom base indentation
-pub fn format_step_yaml_indented(step_yaml: &str, base_indent: usize) -> String {
-    let trimmed = step_yaml.trim();
-    let indent = " ".repeat(base_indent);
-    let cont_indent = " ".repeat(base_indent + 2);
-    trimmed
-        .lines()
-        .enumerate()
-        .map(|(i, line)| {
-            if i == 0 {
-                format!("{}- {}", indent, line.trim_start_matches("---").trim())
-            } else {
-                format!("{}{}", cont_indent, line)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Format multiple steps to YAML with proper indentation for jobs
-#[allow(dead_code)]
-pub fn format_steps_yaml(steps: &[serde_yaml::Value]) -> String {
-    steps
-        .iter()
-        .filter_map(|step| serde_yaml::to_string(step).ok())
-        .map(|s| format_step_yaml(&s))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Format multiple steps to YAML with custom base indentation
-pub fn format_steps_yaml_indented(steps: &[serde_yaml::Value], base_indent: usize) -> String {
-    steps
-        .iter()
-        .filter_map(|step| serde_yaml::to_string(step).ok())
-        .map(|s| format_step_yaml_indented(&s, base_indent))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Sanitize a string to be used as a filename.
-///
-/// Converts to lowercase, replaces non-alphanumeric characters with dashes,
-/// and collapses consecutive dashes into a single dash.
-pub fn sanitize_filename(name: &str) -> String {
-    name.to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect::<String>()
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("-")
-}
-
 const ADO_BUILD_NUMBER_MAX_LEN: usize = 255;
-const ADO_BUILD_ID_SUFFIX: &str = "-$(BuildID)";
+pub(crate) const ADO_BUILD_ID_SUFFIX: &str = "-$(BuildID)";
 
 /// Sanitize front-matter agent name for ADO build-number format strings.
 ///
@@ -1255,7 +884,7 @@ const ADO_BUILD_ID_SUFFIX: &str = "-$(BuildID)";
 /// - Trim leading/trailing whitespace
 /// - Ensure the resulting build number format (`<name>-$(BuildID)`) fits in 255 chars
 /// - Ensure the name fragment does not end with `.`
-fn sanitize_pipeline_agent_name(name: &str) -> String {
+pub fn sanitize_pipeline_agent_name(name: &str) -> String {
     let mut sanitized = String::with_capacity(name.len());
     for ch in name.trim().chars() {
         if matches!(
@@ -1281,55 +910,17 @@ fn sanitize_pipeline_agent_name(name: &str) -> String {
     }
 }
 
-/// Emit `s` as a YAML double-quoted scalar (always quoted, never plain).
-///
-/// We always quote because the value is substituted into YAML positions
-/// where colons and other plain-scalar-unsafe characters are common in
-/// agent names (e.g. `"Daily safe-output smoke: noop"`). A bare scalar
-/// like `name: Daily safe-output smoke: noop-$(BuildID)` is invalid YAML
-/// because the second colon is interpreted as a mapping indicator.
-///
-/// `$(...)` ADO macros pass through untouched — `$` has no special meaning
-/// inside a YAML double-quoted scalar and ADO expands the macro at queue
-/// time after YAML parsing.
-///
-/// `reject_pipeline_injection` already strips newlines and template /
-/// pipeline-command sequences from front-matter `name` values, so the
-/// escape table only has to cover `\` and `"`. Tabs and ASCII control
-/// characters are escaped too as a belt-and-braces measure.
-pub fn yaml_double_quoted(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{0085}' => out.push_str("\\x85"),
-            '\u{2028}' => out.push_str("\\u2028"),
-            '\u{2029}' => out.push_str("\\u2029"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:02x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
 /// Default self-hosted pool for 1ES templates.
 pub const DEFAULT_ONEES_POOL: &str = "AZS-1ES-L-MMS-ubuntu-22.04";
 /// Default Microsoft-hosted VM image for non-1ES templates.
 pub const DEFAULT_VM_IMAGE_POOL: &str = "ubuntu-22.04";
 
-/// Resolve the `{{ pool }}` replacement block.
-///
-/// - For non-1ES targets, this is a single line under `pool:`:
-///   `name: ...` or `vmImage: ...`.
-/// - For 1ES targets, this is two lines under `parameters.pool:`:
-///   `name: ...` and `os: ...`.
-fn resolve_pool_block(target: CompileTarget, pool: Option<&PoolConfig>) -> Result<String> {
+/// Resolve a typed [`crate::compile::ir::job::Pool`] for IR target builders.
+pub fn resolve_pool_typed(
+    target: CompileTarget,
+    pool: Option<&PoolConfig>,
+) -> Result<crate::compile::ir::job::Pool> {
+    use crate::compile::ir::job::Pool;
     match target {
         CompileTarget::OneES => {
             let (name, os) = match pool {
@@ -1360,26 +951,35 @@ fn resolve_pool_block(target: CompileTarget, pool: Option<&PoolConfig>) -> Resul
                     )
                 }
             };
-            Ok(format!("name: {name}\nos: {os}"))
+            Ok(Pool::Named {
+                name,
+                image: None,
+                os: Some(os),
+            })
         }
         _ => {
             let Some(pool) = pool else {
-                return Ok(format!("vmImage: {}", DEFAULT_VM_IMAGE_POOL));
+                return Ok(Pool::VmImage(DEFAULT_VM_IMAGE_POOL.to_string()));
             };
-
             match pool {
-                PoolConfig::Name(name) => Ok(format!("name: {}", name)),
+                PoolConfig::Name(name) => Ok(Pool::Named {
+                    name: name.clone(),
+                    image: None,
+                    os: None,
+                }),
                 PoolConfig::Full(full) => match (full.name.as_deref(), full.vm_image.as_deref()) {
                     (Some(name), Some(vm_image)) => anyhow::bail!(
                         "pool cannot specify both `name` and `vmImage` (got name='{}', vmImage='{}')",
                         name,
                         vm_image
                     ),
-                    (Some(name), None) => Ok(format!("name: {}", name)),
-                    (None, Some(vm_image)) => Ok(format!("vmImage: {}", vm_image)),
-                    // `pool: {}` (empty object) — fall back to the
-                    // Microsoft-hosted default, same as omitting pool.
-                    (None, None) => Ok(format!("vmImage: {}", DEFAULT_VM_IMAGE_POOL)),
+                    (Some(name), None) => Ok(Pool::Named {
+                        name: name.to_string(),
+                        image: None,
+                        os: None,
+                    }),
+                    (None, Some(vm_image)) => Ok(Pool::VmImage(vm_image.to_string())),
+                    (None, None) => Ok(Pool::VmImage(DEFAULT_VM_IMAGE_POOL.to_string())),
                 },
             }
         }
@@ -1437,32 +1037,9 @@ pub fn generate_stage_prefix(name: &str) -> String {
     }
 }
 
-/// Generate the template-level `parameters:` YAML block for job/stage
-/// template targets.
-///
-/// Includes clearMemory (if cache-memory enabled) and user-defined
-/// parameters from front matter. Returns empty string if no parameters
-/// are needed.
-pub fn generate_template_parameters(front_matter: &FrontMatter) -> Result<String> {
-    let has_memory = front_matter
-        .tools
-        .as_ref()
-        .and_then(|t| t.cache_memory.as_ref())
-        .is_some_and(|cm| cm.is_enabled());
-    let is_template_target = matches!(
-        front_matter.target,
-        crate::compile::types::CompileTarget::Job | crate::compile::types::CompileTarget::Stage
-    );
-    let params = build_parameters(&front_matter.parameters, has_memory, is_template_target)?;
-    if params.is_empty() {
-        return Ok(String::new());
-    }
-    generate_parameters(&params)
-}
-
 /// Version of the AWF (Agentic Workflow Firewall) binary to download from GitHub Releases.
 /// Update this when upgrading to a new AWF release.
-/// See: https://github.com/github/gh-aw-firewall/releases
+/// See: <https://github.com/github/gh-aw-firewall/releases>
 pub const AWF_VERSION: &str = "0.25.65";
 
 /// Prefix used to identify agentic pipeline YAML files generated by ado-aw.
@@ -1544,7 +1121,7 @@ pub fn generate_header_comment(input_path: &std::path::Path) -> String {
 
 /// Docker image and version for the MCP Gateway (gh-aw-mcpg).
 /// Update this when upgrading to a new MCPG release.
-/// See: https://github.com/github/gh-aw-mcpg/releases
+/// See: <https://github.com/github/gh-aw-mcpg/releases>
 pub const MCPG_VERSION: &str = "0.3.23";
 
 /// Docker image for the MCPG container.
@@ -1706,95 +1283,6 @@ pub fn validate_ado_aw_debug_config(front_matter: &FrontMatter) -> Result<()> {
     Ok(())
 }
 
-/// Generate debug pipeline replacement values for template markers.
-///
-/// When `debug` is `true`, returns content for MCPG debug diagnostics:
-/// - `{{ mcpg_debug_flags }}`: `-e DEBUG="*"` env, stderr tee redirect, and
-///   stderr dump on health-check failure
-/// - `{{ verify_mcp_backends }}`: full pipeline step that probes each MCPG
-///   backend with MCP initialize + tools/list
-///
-/// When `debug` is `false`, debug markers resolve to empty strings.
-pub fn generate_debug_pipeline_replacements(debug: bool) -> Vec<(String, String)> {
-    if !debug {
-        return vec![
-            // Emit `\` to maintain bash line continuation (same pattern as
-            // generate_mcpg_docker_env when no env flags are needed).
-            ("{{ mcpg_debug_flags }}".into(), "\\".into()),
-            ("{{ verify_mcp_backends }}".into(), String::new()),
-        ];
-    }
-
-    let mcpg_debug_flags = r##"-e DEBUG="*" \"##.to_string();
-
-    let verify_mcp_backends = r###"# Probe all MCPG backends to force eager launch and surface failures.
-# MCPG lazily starts stdio backends on first tool call — without this
-# step, a broken backend (e.g., npx timeout) only surfaces as a silent
-# missing-tool error during the agent run.
-- bash: |
-    echo "=== Probing MCP backends ==="
-    PROBE_FAILED=false
-    for server in $(jq -r '.mcpServers | keys[]' /tmp/awf-tools/mcp-config.json); do
-      echo ""
-      echo "--- Probing: $server ---"
-      # MCP requires initialize handshake before tools/list.
-      # Send initialize first, then tools/list in a second request
-      # using the session ID from the initialize response.
-      INIT_RESPONSE=$(curl -s -D /tmp/probe-headers.txt -o /tmp/probe-init.json -w "%{http_code}" --max-time 120 -X POST \
-        -H "Authorization: $MCPG_API_KEY" \
-        -H "Content-Type: application/json" \
-        -H "Accept: application/json, text/event-stream" \
-        -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ado-aw-probe","version":"1.0"}}}' \
-        "http://localhost:{{ mcpg_port }}/mcp/$server" 2>&1)
-      SESSION_ID=$(grep -i "mcp-session-id" /tmp/probe-headers.txt 2>/dev/null | tr -d '\r' | awk '{print $2}')
-      echo "Initialize: HTTP $INIT_RESPONSE, session=$SESSION_ID"
-
-      if [ -z "$SESSION_ID" ]; then
-        echo "##vso[task.logissue type=warning]MCP backend '$server' did not return a session ID"
-        cat /tmp/probe-init.json 2>/dev/null || true
-        PROBE_FAILED=true
-        continue
-      fi
-
-      # Now send tools/list with the session
-      HTTP_CODE=$(curl -s -o /tmp/probe-response.json -w "%{http_code}" --max-time 120 -X POST \
-        -H "Authorization: $MCPG_API_KEY" \
-        -H "Content-Type: application/json" \
-        -H "Accept: application/json, text/event-stream" \
-        -H "Mcp-Session-Id: $SESSION_ID" \
-        -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-        "http://localhost:{{ mcpg_port }}/mcp/$server" 2>&1)
-      BODY=$(cat /tmp/probe-response.json 2>/dev/null || echo "(empty)")
-      # Extract tool count from SSE data line
-      TOOL_COUNT=$(echo "$BODY" | grep '^data:' | sed 's/^data: //' | jq -r '.result.tools | length' 2>/dev/null || echo "?")
-      echo "tools/list: HTTP $HTTP_CODE"
-      if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ] && [ "$TOOL_COUNT" != "?" ]; then
-        echo "✓ $server: $TOOL_COUNT tools available"
-      else
-        echo "##vso[task.logissue type=warning]MCP backend '$server' tools/list returned HTTP $HTTP_CODE"
-        echo "Response: $BODY"
-        PROBE_FAILED=true
-      fi
-    done
-
-    echo ""
-    echo "=== MCPG health after probes ==="
-    curl -sf "http://localhost:{{ mcpg_port }}/health" | jq . || true
-
-    if [ "$PROBE_FAILED" = "true" ]; then
-      echo "##vso[task.logissue type=warning]One or more MCP backends failed to initialize — check logs above"
-    fi
-  displayName: "Verify MCP backends"
-  env:
-    MCPG_API_KEY: $(MCP_GATEWAY_API_KEY)"###
-        .to_string();
-
-    vec![
-        ("{{ mcpg_debug_flags }}".into(), mcpg_debug_flags),
-        ("{{ verify_mcp_backends }}".into(), verify_mcp_backends),
-    ]
-}
-
 /// Generate the pipeline YAML path for integrity checking at ADO runtime.
 ///
 /// Returns the path **relative** to the trigger repository root. The integrity
@@ -1911,7 +1399,12 @@ pub fn generate_acquire_ado_token(service_connection: Option<&str>, variable_nam
             lines.push(format!(
                 "      echo \"##vso[task.setvariable variable={variable_name};issecret=true]$ADO_TOKEN\""
             ));
-            lines.join("\n")
+            // Trailing newline ensures the inlineScript block scalar value
+            // preserves its terminating newline through round-trip parse/emit;
+            // without it serde_yaml strips the newline and switches to the
+            // `|-` chomping indicator (semantically identical, but produces
+            // a textual diff against the committed lock files).
+            format!("{}\n", lines.join("\n"))
         }
         None => String::new(),
     }
@@ -2333,325 +1826,6 @@ fn related_safe_output_names(key: &str) -> Vec<&'static str> {
     matches
 }
 
-/// Generate the setup job YAML.
-///
-/// Extension `setup_steps()` are injected first (download + gate steps for
-/// Tier 2/3 filters). For Tier-1-only filters (no extension activated), the
-/// inline gate step is generated directly. User `setup_steps` are appended
-/// last, conditioned on the gate if filters are active.
-pub fn generate_setup_job(
-    setup_steps: &[serde_yaml::Value],
-    pool: &str,
-    pr_filters: Option<&super::types::PrFilters>,
-    pipeline_filters: Option<&super::types::PipelineFilters>,
-    extensions: &[super::extensions::Extension],
-    ctx: &super::extensions::CompileContext,
-) -> anyhow::Result<String> {
-    use super::extensions::CompilerExtension;
-
-    let has_pr_gate = pr_filters
-        .map(|f| !super::filter_ir::lower_pr_filters(f).is_empty())
-        .unwrap_or(false);
-    let has_pipeline_gate = pipeline_filters
-        .map(|f| !super::filter_ir::lower_pipeline_filters(f).is_empty())
-        .unwrap_or(false);
-    let has_gate = has_pr_gate || has_pipeline_gate;
-
-    // Collect setup_steps from ALL extensions. Each extension that needs
-    // the ado-script bundle in the Setup job returns its own install +
-    // download steps inline (see `AdoScriptExtension::setup_steps`) — no
-    // separate shared-asset prepend is needed.
-    let mut ext_setup_steps: Vec<String> = Vec::new();
-    for ext in extensions {
-        ext_setup_steps.extend(ext.setup_steps(ctx)?);
-    }
-    let has_ext_setup = !ext_setup_steps.is_empty();
-
-    if setup_steps.is_empty() && !has_gate && !has_ext_setup {
-        return Ok(String::new());
-    }
-
-    let mut steps_parts = Vec::new();
-
-    // Extension setup steps go via marker replacement for correct indentation
-    let ext_steps_combined = ext_setup_steps.join("\n\n");
-
-    // User setup steps (conditioned on gate passing when filters are active)
-    if !setup_steps.is_empty() {
-        if has_gate {
-            let condition = match (has_pr_gate, has_pipeline_gate) {
-                (true, true) => {
-                    "and(eq(variables['prGate.SHOULD_RUN'], 'true'), eq(variables['pipelineGate.SHOULD_RUN'], 'true'))".to_string()
-                }
-                (true, false) => "eq(variables['prGate.SHOULD_RUN'], 'true')".to_string(),
-                (false, true) => "eq(variables['pipelineGate.SHOULD_RUN'], 'true')".to_string(),
-                (false, false) => unreachable!(),
-            };
-            let conditioned = super::pr_filters::add_condition_to_steps(setup_steps, &condition);
-            steps_parts.push(format_steps_yaml_indented(&conditioned, 0));
-        } else {
-            steps_parts.push(format_steps_yaml_indented(setup_steps, 0));
-        }
-    }
-
-    if steps_parts.is_empty() && ext_steps_combined.is_empty() {
-        return Ok(String::new());
-    }
-
-    let user_steps = steps_parts.join("\n\n");
-
-    // Build the job YAML with markers for proper indentation
-    let mut template = r#"- job: Setup
-  displayName: "Setup"
-  pool:
-    {{ pool }}
-  steps:
-    - checkout: self
-"#
-    .to_string();
-
-    if !ext_steps_combined.is_empty() {
-        template.push_str("    {{ ext_setup_steps }}\n");
-    }
-    if !user_steps.is_empty() {
-        template.push_str("    {{ user_setup_steps }}\n");
-    }
-
-    let yaml = replace_with_indent(&template, "{{ pool }}", pool);
-    let yaml = replace_with_indent(&yaml, "{{ ext_setup_steps }}", &ext_steps_combined);
-    let yaml = replace_with_indent(&yaml, "{{ user_setup_steps }}", &user_steps);
-
-    Ok(yaml)
-}
-
-/// Generate the teardown job YAML
-pub fn generate_teardown_job(teardown_steps: &[serde_yaml::Value], pool: &str) -> String {
-    if teardown_steps.is_empty() {
-        return String::new();
-    }
-
-    let steps_yaml = format_steps_yaml_indented(teardown_steps, 4);
-
-    let template = format!(
-        r#"- job: Teardown
-  displayName: "Teardown"
-  dependsOn: SafeOutputs
-  pool:
-    {{{{ pool }}}}
-  steps:
-    - checkout: self
-{}
-"#,
-        steps_yaml
-    );
-
-    replace_with_indent(&template, "{{ pool }}", pool)
-}
-
-/// Generate prepare steps (inline), including extension steps and user-defined steps.
-pub fn generate_prepare_steps(
-    prepare_steps: &[serde_yaml::Value],
-    extensions: &[super::extensions::Extension],
-    ctx: &CompileContext,
-) -> Result<String> {
-    let mut parts = Vec::new();
-
-    // Extension prepare steps and prompt supplements (runtimes + first-party tools)
-    for ext in extensions {
-        for step in ext.prepare_steps(ctx) {
-            parts.push(step);
-        }
-        if let Some(prompt) = ext.prompt_supplement() {
-            parts.push(super::extensions::wrap_prompt_append(&prompt, ext.name())?);
-        }
-    }
-
-    if !prepare_steps.is_empty() {
-        parts.push(format_steps_yaml_indented(prepare_steps, 0));
-    }
-
-    Ok(parts.join("\n\n"))
-}
-
-/// Generate finalize steps (inline)
-pub fn generate_finalize_steps(finalize_steps: &[serde_yaml::Value]) -> String {
-    if finalize_steps.is_empty() {
-        return String::new();
-    }
-
-    format_steps_yaml_indented(finalize_steps, 0)
-}
-
-/// Generate dependsOn clause and condition for setup/gate dependencies.
-///
-/// When PR or pipeline filters are active, adds a condition that allows
-/// non-matching trigger types to proceed unconditionally, while matching
-/// builds require the gate to pass.
-/// When `expression` is provided, it's ANDed into the condition as an escape hatch.
-///
-/// When `is_jobs_template_target` is true (i.e. compiling for `target: job`),
-/// the output is wrapped in mutually-exclusive `${{ if }}` ADO template
-/// expressions so that external `dependsOn` and `condition` template
-/// parameters supplied at the template call site merge with the internal
-/// Setup/gate behaviour. ADO permits only one `dependsOn:` / `condition:`
-/// key per job, so we emit each as a dual-branch block keyed on whether the
-/// caller passed a non-default value.
-///
-/// For `target: stage`, the external params apply to the inner stage block
-/// (handled directly in `stage-base.yml`) rather than the Agent job, so this
-/// flag is **false** for stage targets.
-///
-/// Note: when `is_jobs_template_target` is true and `has_setup` is true,
-/// callers MUST pass `parameters.dependsOn` as a YAML list (the default `[]`
-/// works). A bare string is not supported in the merge branch because
-/// `${{ each }}` iterates objects and arrays, not scalars. For `target: job`
-/// agents without any Setup/gate, the simpler `dependsOn: ${{ parameters.dependsOn }}`
-/// form is emitted, which does accept either a string or a list.
-pub fn generate_agentic_depends_on(
-    setup_steps: &[serde_yaml::Value],
-    has_pr_filters: bool,
-    has_pipeline_filters: bool,
-    expressions: &[&str],
-    is_jobs_template_target: bool,
-    synthetic_pr_active: bool,
-) -> String {
-    let has_gate = has_pr_filters || has_pipeline_filters;
-    let has_setup = !setup_steps.is_empty() || has_gate || synthetic_pr_active;
-    let has_internal_condition = has_gate || !expressions.is_empty() || synthetic_pr_active;
-
-    // Build the shared condition body once. Reused across the internal-only
-    // (standalone/1es/stage) path and the dual-branch jobs-template path.
-    let condition_body: Option<String> = if has_internal_condition {
-        let mut parts = vec!["succeeded()".to_string()];
-        // `mode: synthetic` (default): the synthPr Setup-job step may have
-        // decided this build should self-skip (no matching PR, wrong target
-        // branch, no matching changed files). Always honour that flag —
-        // it must trump every other reason to run.
-        if synthetic_pr_active {
-            parts.push(
-                r"ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_SKIP'], 'true')"
-                    .to_string(),
-            );
-        }
-        if has_pr_filters {
-            // With `mode: synthetic`, the agent should run when EITHER
-            // (a) the build is neither a real PR build NOR a synth-promoted
-            //     CI build — in that case the gate doesn't apply (bypass.ts
-            //     auto-passes) and the agent runs unconditionally, OR
-            // (b) the gate evaluator passed (`prGate.SHOULD_RUN=true`),
-            //     covering both the real-PR-with-filter-match path and the
-            //     synth-PR-with-filter-match path.
-            //
-            // CRITICAL: do NOT emit `eq(Build.Reason, 'PullRequest')` or
-            // `eq(synthPr.AW_SYNTHETIC_PR, 'true')` as standalone OR
-            // arms — that would let a real PR or synth-promoted build run
-            // the agent EVEN WHEN `pr.filters` failed (i.e. silently
-            // bypass the gate for the very builds it's meant to filter).
-            //
-            // With `mode: policy` (synth not active), the original
-            // two-arm condition is preserved verbatim.
-            if synthetic_pr_active {
-                parts.push(
-                    r"or(
-         and(
-           ne(variables['Build.Reason'], 'PullRequest'),
-           ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true')
-         ),
-         eq(dependencies.Setup.outputs['prGate.SHOULD_RUN'], 'true')
-       )"
-                    .to_string(),
-                );
-            } else {
-                parts.push(
-                    r"or(
-         ne(variables['Build.Reason'], 'PullRequest'),
-         eq(dependencies.Setup.outputs['prGate.SHOULD_RUN'], 'true')
-       )"
-                    .to_string(),
-                );
-            }
-        }
-        if has_pipeline_filters {
-            parts.push(
-                r"or(
-         ne(variables['Build.Reason'], 'ResourceTrigger'),
-         eq(dependencies.Setup.outputs['pipelineGate.SHOULD_RUN'], 'true')
-       )"
-                .to_string(),
-            );
-        }
-        for expr in expressions {
-            parts.push(expr.to_string());
-        }
-        Some(parts.join(",\n       "))
-    } else {
-        None
-    };
-
-    if !is_jobs_template_target {
-        // Standalone / 1ES / stage path: inline single dependsOn:/condition:
-        // (preserved verbatim — no behavioural change for non-job-template
-        // targets).
-        if !has_setup && expressions.is_empty() {
-            return String::new();
-        }
-        let depends = if has_setup { "dependsOn: Setup\n" } else { "" };
-        return if let Some(body) = condition_body {
-            format!("{depends}condition: |\n and(\n   {body}\n )")
-        } else {
-            "dependsOn: Setup".to_string()
-        };
-    }
-
-    // target: job: emit dual-branch ADO template expressions so external
-    // dependsOn/condition template parameters merge with the internal
-    // Setup/gate behaviour.
-    let mut out = String::new();
-
-    // ---------- dependsOn block ----------
-    if has_setup {
-        // Internal Setup dependency exists. Branch on whether caller passed
-        // an external dependsOn.
-        out.push_str("${{ if eq(length(parameters.dependsOn), 0) }}:\n");
-        out.push_str("  dependsOn: Setup\n");
-        out.push_str("${{ if ne(length(parameters.dependsOn), 0) }}:\n");
-        out.push_str("  dependsOn:\n");
-        out.push_str("  - Setup\n");
-        out.push_str("  - ${{ each d in parameters.dependsOn }}:\n");
-        out.push_str("    - ${{ d }}\n");
-    } else {
-        // No internal Setup dependency. Emit dependsOn only when caller
-        // passes a non-empty external value; otherwise omit the key
-        // entirely (ADO will use implicit "depends on previous job"
-        // behaviour or none if this is the first job).
-        out.push_str("${{ if ne(length(parameters.dependsOn), 0) }}:\n");
-        out.push_str("  dependsOn: ${{ parameters.dependsOn }}\n");
-    }
-
-    // ---------- condition block ----------
-    if let Some(body) = &condition_body {
-        // Internal condition exists. Dual-branch: caller-omitted emits the
-        // internal expression verbatim (no behavioural change today);
-        // caller-provided ANDs the external clause into the body.
-        out.push_str("${{ if eq(parameters.condition, '') }}:\n");
-        out.push_str(&format!("  condition: |\n   and(\n     {body}\n   )\n"));
-        let body_with_external = format!("{body},\n       ${{{{ parameters.condition }}}}");
-        out.push_str("${{ if ne(parameters.condition, '') }}:\n");
-        out.push_str(&format!(
-            "  condition: |\n   and(\n     {body_with_external}\n   )\n"
-        ));
-    } else {
-        // No internal condition; only emit when caller passes external.
-        out.push_str("${{ if ne(parameters.condition, '') }}:\n");
-        out.push_str("  condition: ${{ parameters.condition }}\n");
-    }
-
-    // Trim trailing newline — replace_with_indent's first-line handling
-    // expects content to not end with a blank line.
-    out.trim_end_matches('\n').to_string()
-}
-
-/// Returns `Some(v.to_vec())` when `v` is non-empty, otherwise `None`.
 fn nonempty_vec<T: Clone>(v: &[T]) -> Option<Vec<T>> {
     if v.is_empty() { None } else { Some(v.to_vec()) }
 }
@@ -2817,15 +1991,14 @@ fn try_add_user_mcp(
 /// entries (e.g., azure-devops) are included via the `extensions` parameter.
 pub fn generate_mcpg_config(
     front_matter: &FrontMatter,
-    ctx: &CompileContext,
-    extensions: &[super::extensions::Extension],
+    extension_declarations: &[Declarations],
 ) -> Result<McpgConfig> {
     let mut mcp_servers = std::collections::BTreeMap::new();
 
     // Add extension-contributed MCPG server entries (safeoutputs, azure-devops, etc.)
-    for ext in extensions {
-        for (name, config) in ext.mcpg_servers(ctx)? {
-            mcp_servers.insert(name, config);
+    for decl in extension_declarations {
+        for (name, config) in &decl.mcpg_servers {
+            mcp_servers.insert(name.clone(), config.clone());
         }
     }
 
@@ -2857,14 +2030,14 @@ pub fn generate_mcpg_config(
 /// Returns flags formatted for inline insertion in the `docker run` command.
 pub fn generate_mcpg_docker_env(
     front_matter: &FrontMatter,
-    extensions: &[super::extensions::Extension],
+    extension_declarations: &[Declarations],
 ) -> String {
     let mut env_flags: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
     // 1. Extension pipeline var mappings (e.g., AZURE_DEVOPS_EXT_PAT -> SC_READ_TOKEN)
-    for ext in extensions {
-        for mapping in ext.required_pipeline_vars() {
+    for decl in extension_declarations {
+        for mapping in &decl.pipeline_env {
             if seen.contains(&mapping.container_var) {
                 continue;
             }
@@ -2924,12 +2097,12 @@ pub fn generate_mcpg_docker_env(
 ///
 /// Returns YAML `env:` entries (e.g., `SC_READ_TOKEN: $(SC_READ_TOKEN)`),
 /// or an empty string if no mappings are needed.
-pub fn generate_mcpg_step_env(extensions: &[super::extensions::Extension]) -> String {
+pub fn generate_mcpg_step_env(extension_declarations: &[Declarations]) -> String {
     let mut entries: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
-    for ext in extensions {
-        for mapping in ext.required_pipeline_vars() {
+    for decl in extension_declarations {
+        for mapping in &decl.pipeline_env {
             if seen.contains(&mapping.pipeline_var) {
                 continue;
             }
@@ -2966,6 +2139,7 @@ pub fn generate_mcpg_step_env(extensions: &[super::extensions::Extension]) -> St
 pub fn generate_allowed_domains(
     front_matter: &FrontMatter,
     extensions: &[super::extensions::Extension],
+    extension_declarations: &[Declarations],
 ) -> Result<String> {
     // Collect enabled MCP names (user-defined MCPs, not first-party tools)
     let enabled_mcps: Vec<String> = front_matter
@@ -3009,10 +2183,10 @@ pub fn generate_allowed_domains(
     // Add extension-declared hosts (runtimes + first-party tools).
     // Extensions may return ecosystem identifiers (e.g., "lean") which are
     // expanded to their domain lists, or raw domain names.
-    for ext in extensions {
-        for host in ext.required_hosts() {
-            if is_ecosystem_identifier(&host) {
-                let domains = get_ecosystem_domains(&host);
+    for (ext, decl) in extensions.iter().zip(extension_declarations.iter()) {
+        for host in &decl.network_hosts {
+            if is_ecosystem_identifier(host) {
+                let domains = get_ecosystem_domains(host);
                 if domains.is_empty() {
                     eprintln!(
                         "warning: extension '{}' requires unknown ecosystem '{}'; \
@@ -3025,7 +2199,7 @@ pub fn generate_allowed_domains(
                     hosts.insert(domain);
                 }
             } else {
-                hosts.insert(host);
+                hosts.insert(host.clone());
             }
         }
     }
@@ -3093,14 +2267,17 @@ pub fn generate_allowed_domains(
 /// (Docker bind-mount format: `host_path:container_path[:mode]`).
 ///
 /// When no extensions require mounts, returns `\` (a bare bash continuation
-/// marker) so the surrounding `\`-continuation chain in the template is
-/// preserved.  When mounts are present, each flag occupies its own line
-/// (`--mount "spec" \`); indentation is handled by [`replace_with_indent`]
-/// at the call site.
-pub fn generate_awf_mounts(extensions: &[super::extensions::Extension]) -> String {
+/// marker) so the surrounding `\`-continuation chain is preserved. When
+/// mounts are present, each flag occupies its own line
+/// (`--mount "spec" \`).
+pub fn generate_awf_mounts(
+    extensions: &[super::extensions::Extension],
+    extension_declarations: &[Declarations],
+) -> String {
     let mounts: Vec<super::extensions::AwfMount> = extensions
         .iter()
-        .flat_map(|ext| ext.required_awf_mounts())
+        .zip(extension_declarations.iter())
+        .flat_map(|(_ext, decl)| decl.awf_mounts.clone())
         .collect();
 
     // When the always-on AzureCli extension is enabled, append a
@@ -3108,7 +2285,7 @@ pub fn generate_awf_mounts(extensions: &[super::extensions::Extension]) -> Strin
     // either `--mount /opt/az:/opt/az:ro --mount /usr/bin/az:/usr/bin/az:ro`
     // (when the runner has azure-cli installed) or to nothing (when it
     // doesn't). The detection + setvariable happens in
-    // `AzureCliExtension::prepare_steps`. This avoids static bind-mounts
+    // `AzureCliExtension::declarations`. This avoids static bind-mounts
     // that would crash `docker run` on 1ES self-hosted runners without
     // azure-cli pre-installed.
     let inject_az_var = extensions
@@ -3133,7 +2310,7 @@ pub fn generate_awf_mounts(extensions: &[super::extensions::Extension]) -> Strin
 }
 
 /// Generates a dedicated pipeline step that writes a `GITHUB_PATH` file
-/// containing directories collected from `CompilerExtension::awf_path_prepends()`.
+/// containing directories collected from extension declarations.
 ///
 /// AWF reads the `$GITHUB_PATH` environment variable (a path to a file) at
 /// startup and merges its entries into the chroot PATH. This mechanism was
@@ -3186,21 +2363,22 @@ pub fn generate_awf_path_env(has_awf_paths: bool) -> String {
     "GITHUB_PATH: $(GITHUB_PATH)".to_string()
 }
 
-/// Collects `awf_path_prepends()` from all extensions into a single `Vec`.
-pub fn collect_awf_path_prepends(extensions: &[super::extensions::Extension]) -> Vec<String> {
-    extensions
+/// Collects path prepends from all extension declarations into a single `Vec`.
+pub fn collect_awf_path_prepends(extension_declarations: &[Declarations]) -> Vec<String> {
+    extension_declarations
         .iter()
-        .flat_map(|ext| ext.awf_path_prepends())
+        .flat_map(|decl| decl.awf_path_prepends.clone())
         .collect()
 }
 
-/// Collects `agent_env_vars()` from all extensions, validates keys against
+/// Collects agent env vars from all extension declarations, validates keys against
 /// `BLOCKED_ENV_KEYS`, deduplicates (bails on collision), and formats them
 /// as YAML `KEY: "value"` lines for injection into the `{{ engine_env }}` block.
 ///
 /// Returns an empty string if no extensions declare env vars.
 pub fn collect_agent_env_vars(
     extensions: &[super::extensions::Extension],
+    extension_declarations: &[Declarations],
 ) -> anyhow::Result<String> {
     use crate::engine::BLOCKED_ENV_KEYS;
     use crate::validate;
@@ -3209,8 +2387,8 @@ pub fn collect_agent_env_vars(
     let mut lines = Vec::new();
     let mut seen_keys = HashSet::new();
 
-    for ext in extensions {
-        for (key, value) in ext.agent_env_vars() {
+    for (ext, decl) in extensions.iter().zip(extension_declarations.iter()) {
+        for (key, value) in &decl.agent_env_vars {
             // Deduplicate: bail on collision
             if !seen_keys.insert(key.clone()) {
                 anyhow::bail!(
@@ -3235,7 +2413,7 @@ pub fn collect_agent_env_vars(
             }
 
             // Validate key format
-            if !validate::is_valid_env_var_name(&key) {
+            if !validate::is_valid_env_var_name(key) {
                 anyhow::bail!(
                     "Extension '{}' declares agent env var '{}' with invalid key format. \
                      Keys must contain only ASCII alphanumerics and underscores.",
@@ -3246,7 +2424,7 @@ pub fn collect_agent_env_vars(
 
             // Validate value for injection (defence in depth — covers ADO expressions,
             // pipeline commands, template markers, and newlines)
-            validate::reject_pipeline_injection(&value, &format!("agent env var '{key}'"))?;
+            validate::reject_pipeline_injection(value, &format!("agent env var '{key}'"))?;
 
             if value.contains('"') || value.contains('\'') {
                 anyhow::bail!(
@@ -3264,570 +2442,13 @@ pub fn collect_agent_env_vars(
     Ok(lines.join("\n"))
 }
 
-// ==================== Shared compile flow ====================
-
-/// Target-specific overrides for the shared compile flow.
-pub struct CompileConfig {
-    /// The base YAML template content (the template string itself).
-    pub template: String,
-    /// Additional placeholder→value replacements beyond the shared set.
-    /// These are applied **before** the shared replacements, allowing
-    /// target-specific overrides of shared markers (e.g., 1ES-specific
-    /// setup/teardown jobs that differ from the standalone defaults).
-    pub extra_replacements: Vec<(String, String)>,
-    /// When true, the "Verify pipeline integrity" step is omitted from the
-    /// generated pipeline. This is a developer-only option gated behind
-    /// `cfg(debug_assertions)` at the CLI level.
-    pub skip_integrity: bool,
-    /// When true, MCPG debug diagnostics (debug logging, stderr streaming,
-    /// backend probe step) are included in the generated pipeline.
-    /// Gated behind `cfg(debug_assertions)` at the CLI level.
-    pub debug_pipeline: bool,
-    /// Whether any extension declared AWF path prepends. Used by `compile_shared`
-    /// to append `GITHUB_PATH: $(GITHUB_PATH)` to the engine env block without
-    /// re-collecting path prepends from extensions.
-    pub has_awf_paths: bool,
-    /// When true, `compile_shared` omits the standard `# @ado-aw` header.
-    /// Template-producing compilers (Job, Stage) set this to prepend their
-    /// own custom header with usage instructions.
-    pub skip_header: bool,
-}
-
-/// Input configuration for [`compile_template_target`].
-///
-/// Groups the template-specific settings so that the function stays within
-/// the seven-argument limit while remaining easy to extend.
-pub struct TemplateTargetConfig<'a> {
-    /// Raw YAML template string (e.g. `job-base.yml` or `stage-base.yml`).
-    pub template: &'a str,
-    /// When true, the "Verify pipeline integrity" step is omitted.
-    pub skip_integrity: bool,
-    /// When true, MCPG debug diagnostics are included in the generated pipeline.
-    pub debug_pipeline: bool,
-}
-
-/// Shared compilation flow used by both standalone and 1ES compilers.
-///
-/// This function handles the common pipeline compilation steps:
-/// 1. Validates front matter
-/// 2. Generates all shared placeholder values
-/// 3. Runs extension validations
-/// 4. Applies replacements to the template
-/// 5. Prepends the header comment
-///
-/// Target-specific values are provided via `CompileConfig.extra_replacements`,
-/// which are applied before the shared replacements so that targets can
-/// override shared markers (e.g., `{{ setup_job }}`, `{{ teardown_job }}`).
-pub async fn compile_shared(
-    input_path: &Path,
-    output_path: &Path,
-    front_matter: &FrontMatter,
-    markdown_body: &str,
-    extensions: &[Extension],
-    ctx: &CompileContext<'_>,
-    config: CompileConfig,
-) -> Result<String> {
-    // 1. Validate
-    validate_front_matter_identity(front_matter)?;
-
-    // Detect workspace/self checkout collisions now that we have ado_context
-    // (which provides the trigger repo's name). Skipped when no remote is
-    // available — see `validate_checkout_self_collision` for details.
-    validate_checkout_self_collision(
-        &front_matter.repositories,
-        &front_matter.checkout,
-        ctx.ado_context.as_ref().map(|c| c.repo_name.as_str()),
-    )?;
-
-    // 2. Generate schedule
-    let schedule = match front_matter.schedule() {
-        Some(s) => generate_schedule(&front_matter.name, s)
-            .with_context(|| format!("Failed to parse schedule '{}'", s.expression()))?,
-        None => String::new(),
-    };
-
-    let repositories = generate_repositories(&front_matter.repositories);
-    let checkout_steps = generate_checkout_steps(&front_matter.checkout);
-    let checkout_self = generate_checkout_self();
-    let agent_name = sanitize_filename(&front_matter.name);
-    // Top-level pipeline `name:` value (the ADO build-number format).
-    // We sanitize invalid build-number characters from the agent name and
-    // always quote the final scalar for YAML safety. Includes `-$(BuildID)`
-    // because ADO needs a varying token in the build-number format —
-    // without one, every run shows the same name in the runs view.
-    let pipeline_name = yaml_double_quoted(&format!(
-        "{}{}",
-        sanitize_pipeline_agent_name(&front_matter.name),
-        ADO_BUILD_ID_SUFFIX
-    ));
-    // Stage / job `displayName:` value. Always quoted (same escaping
-    // rationale as `pipeline_name`) but with NO BuildID suffix — stage
-    // labels are static and shouldn't carry per-run uniqueness suffixes.
-    let agent_display_name = yaml_double_quoted(&front_matter.name);
-
-    // 3. Run extension validations
-    for ext in extensions {
-        for warning in ext.validate(ctx)? {
-            eprintln!("Warning: {}", warning);
-        }
-    }
-
-    // 4. Generate engine invocations and install steps
-    let engine_run = ctx.engine.invocation(
-        ctx.front_matter,
-        extensions,
-        "/tmp/awf-tools/agent-prompt.md",
-        Some("/tmp/awf-tools/mcp-config.json"),
-    )?;
-    let engine_run_detection = ctx.engine.invocation(
-        ctx.front_matter,
-        extensions,
-        "/tmp/awf-tools/threat-analysis-prompt.md",
-        None,
-    )?;
-    let engine_install_steps =
-        ctx.engine
-            .install_steps(&front_matter.engine, &front_matter.target, ctx.ado_org())?;
-
-    // 5. Compute workspace, working directory, triggers
-    let effective_workspace = compute_effective_workspace(
-        &front_matter.workspace,
-        &front_matter.checkout,
-        &front_matter.name,
-    )?;
-    let working_directory = generate_working_directory(&effective_workspace);
-    let trigger_repo_directory = generate_trigger_repo_directory(&front_matter.checkout);
-    let pipeline_resources = generate_pipeline_resources(&front_matter.on_config)?;
-    let has_schedule = front_matter.has_schedule();
-    let pr_trigger = generate_pr_trigger(&front_matter.on_config, has_schedule);
-    let ci_trigger = generate_ci_trigger(&front_matter.on_config, has_schedule);
-
-    // 6. Generate source path and pipeline path
-    let source_path = generate_source_path(input_path);
-    let pipeline_path = generate_pipeline_path(output_path);
-
-    // 7. Pool settings
-    let pool = resolve_pool_block(front_matter.target.clone(), front_matter.pool.as_ref())?;
-
-    // 8. Setup/teardown jobs, parameters, prepare/finalize steps
-    let pr_filters = front_matter.pr_filters();
-    let pipeline_filters = front_matter.pipeline_filters();
-    // Base has_*_filters on whether lowering produces actual checks, not just
-    // struct presence. Empty `filters: {}` must not generate a dangling
-    // dependsOn: Setup reference pointing to a job that was never emitted.
-    let has_pr_filters = pr_filters
-        .map(|f| !super::filter_ir::lower_pr_filters(f).is_empty())
-        .unwrap_or(false);
-    let has_pipeline_filters = pipeline_filters
-        .map(|f| !super::filter_ir::lower_pipeline_filters(f).is_empty())
-        .unwrap_or(false);
-    // Skip generating the shared setup_job when the caller has already
-    // bound `{{ setup_job }}` via `extra_replacements` (1ES does this so
-    // it can emit a 1ES-shaped Setup job). This avoids invoking every
-    // extension's `setup_steps()` twice when the result would be
-    // discarded anyway.
-    let setup_job_already_bound = config
-        .extra_replacements
-        .iter()
-        .any(|(k, _)| k == "{{ setup_job }}");
-    let setup_job = if setup_job_already_bound {
-        String::new()
-    } else {
-        generate_setup_job(
-            &front_matter.setup,
-            &pool,
-            pr_filters,
-            pipeline_filters,
-            extensions,
-            ctx,
-        )?
-    };
-    let teardown_job = generate_teardown_job(&front_matter.teardown, &pool);
-    let has_memory = front_matter
-        .tools
-        .as_ref()
-        .and_then(|t| t.cache_memory.as_ref())
-        .is_some_and(|cm| cm.is_enabled());
-    let is_template_target = matches!(
-        front_matter.target,
-        crate::compile::types::CompileTarget::Job | crate::compile::types::CompileTarget::Stage
-    );
-    let parameters = build_parameters(&front_matter.parameters, has_memory, is_template_target)?;
-    let parameters_yaml = generate_parameters(&parameters)?;
-    let prepare_steps = generate_prepare_steps(&front_matter.steps, extensions, ctx)?;
-    let finalize_steps = generate_finalize_steps(&front_matter.post_steps);
-    let pr_expression = pr_filters.and_then(|f| f.expression.as_deref());
-    let pipeline_expression = pipeline_filters.and_then(|f| f.expression.as_deref());
-    let mut expressions: Vec<&str> = Vec::new();
-    if let Some(e) = pr_expression {
-        expressions.push(e);
-    }
-    if let Some(e) = pipeline_expression {
-        expressions.push(e);
-    }
-
-    // Validate expression escape hatches against injection
-    for expr in &expressions {
-        if crate::validate::contains_newline(expr) {
-            anyhow::bail!(
-                "Filter expression contains newline characters which could inject YAML keys. Found: '{}'",
-                expr.replace('\n', "\\n").replace('\r', "\\r")
-            );
-        }
-        if crate::validate::contains_ado_expression(expr) {
-            anyhow::bail!(
-                "Filter expression contains ADO expression ('${{{{', '$(', or '$[') which could \
-                 exfiltrate secrets or escalate permissions. Found: '{}'",
-                expr
-            );
-        }
-        if crate::validate::contains_template_marker(expr) {
-            anyhow::bail!(
-                "Filter expression contains template marker '{{{{' which could cause injection. Found: '{}'",
-                expr
-            );
-        }
-        if crate::validate::contains_pipeline_command(expr) {
-            anyhow::bail!(
-                "Filter expression contains pipeline command ('##vso[' or '##[') which is not allowed. Found: '{}'",
-                expr
-            );
-        }
-    }
-
-    let synthetic_pr_active = front_matter.is_synthetic_pr();
-    let agentic_depends_on = generate_agentic_depends_on(
-        &front_matter.setup,
-        has_pr_filters,
-        has_pipeline_filters,
-        &expressions,
-        matches!(
-            front_matter.target,
-            crate::compile::types::CompileTarget::Job
-        ),
-        synthetic_pr_active,
-    );
-    let job_timeout = generate_job_timeout(front_matter);
-    let agent_job_variables = generate_agent_job_variables(synthetic_pr_active);
-
-    // 9. Token acquisition and env vars
-    let acquire_read_token = generate_acquire_ado_token(
-        front_matter
-            .permissions
-            .as_ref()
-            .and_then(|p| p.read.as_deref()),
-        "SC_READ_TOKEN",
-    );
-    let mut engine_env = ctx.engine.env(&front_matter.engine)?;
-
-    // Append GITHUB_PATH env mapping when extensions declare path prepends
-    let awf_path_env = generate_awf_path_env(config.has_awf_paths);
-    if !awf_path_env.is_empty() {
-        engine_env = format!("{engine_env}\n{awf_path_env}");
-    }
-
-    // Append extension-declared agent env vars (e.g., PIP_INDEX_URL, NPM_CONFIG_REGISTRY)
-    let agent_env = collect_agent_env_vars(extensions)?;
-    if !agent_env.is_empty() {
-        engine_env = format!("{engine_env}\n{agent_env}");
-    }
-    let engine_log_dir = ctx.engine.log_dir();
-    let acquire_write_token = generate_acquire_ado_token(
-        front_matter
-            .permissions
-            .as_ref()
-            .and_then(|p| p.write.as_deref()),
-        "SC_WRITE_TOKEN",
-    );
-    let executor_ado_env = generate_executor_ado_env(
-        front_matter
-            .permissions
-            .as_ref()
-            .and_then(|p| p.write.as_deref()),
-        debug_create_issue_enabled(front_matter),
-    );
-
-    // 10. Validations
-    validate_safe_outputs_keys(front_matter)?;
-    validate_comment_target(front_matter)?;
-    validate_update_work_item_target(front_matter)?;
-    validate_submit_pr_review_events(front_matter)?;
-    validate_update_pr_votes(front_matter)?;
-    validate_resolve_pr_thread_statuses(front_matter)?;
-    validate_ado_aw_debug_config(front_matter)?;
-
-    // 11. Threat analysis prompt
-    //
-    // The threat-analysis prompt is tooling-shipped (compiled into the
-    // ado-aw binary via `include_str!`), so it's always inlined into the
-    // emitted YAML regardless of `inlined-imports`. The runtime-import
-    // mechanism is reserved for the agent body, where edit-without-
-    // recompile is the actual motivating UX win. This mirrors gh-aw's
-    // model, where `threat_detection.md` ships with the setup action and
-    // is read directly from disk by `setup_threat_detection.cjs` — no
-    // runtime-import marker is involved.
-    let threat_analysis_prompt = include_str!("../data/threat-analysis.md");
-    // The agent body uses runtime imports when `inlined-imports: false`
-    // (the default): the heredoc writes a literal `{{#runtime-import …}}`
-    // marker, and `AdoScriptExtension::prepare_steps()` injects the
-    // resolver step into the existing `{{ prepare_steps }}` block in the
-    // Agent job (same VM as the heredoc, so /tmp is shared).
-    let agent_content_value: String = if front_matter.inlined_imports {
-        let base_dir = input_path
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."));
-        crate::compile::extensions::ado_script::resolve_imports_inline(markdown_body, base_dir)?
-    } else {
-        // Build the trigger-repo-relative marker path (i.e. relative to
-        // `$(Build.SourcesDirectory)`). For the default no-checkout
-        // case the relative form is `agents/foo.md`; for multi-repo
-        // checkout it is `$(Build.Repository.Name)/agents/foo.md`
-        // (the ADO variable substitutes to a directory name at runtime,
-        // so the final string is still a relative path with no leading
-        // `/`). The resolver step passes `--base "$(Build.SourcesDirectory)"`
-        // to `import.js`, which rejects absolute paths — see
-        // `AdoScriptExtension::resolver_step` and `import.js`. This
-        // mirrors the compile-time `resolve_imports_inline` policy
-        // (relative-only) and matches the same defence-in-depth
-        // posture on the runtime side.
-        let absolute_marker_path =
-            source_path.replace("{{ trigger_repo_directory }}", &trigger_repo_directory);
-        let agent_marker_path = absolute_marker_path
-            .strip_prefix("$(Build.SourcesDirectory)/")
-            .unwrap_or(&absolute_marker_path)
-            .to_string();
-        // The runtime resolver (`scripts/ado-script/src/import/index.ts`)
-        // matches marker bodies with `[^\s}]+`, which truncates at the
-        // first whitespace or `}` character. Reject both at compile
-        // time so a malformed marker can never reach the runtime:
-        //
-        //   * Whitespace (e.g. `my agents/pipeline.md`) → the regex
-        //     truncates at the space, fails the existence check, and
-        //     surfaces a misleading error (or, worse, leaves an
-        //     optional marker unexpanded).
-        //   * `}` in the path (e.g. `agents/fo}o.md`) → the regex
-        //     stops at `}`, then expects `\s*\}\}` to follow but
-        //     finds `}o.md}}` — the regex fails to match entirely
-        //     and the marker survives as literal text in the
-        //     agent's prompt.
-        //
-        // Both guards mirror the same checks in `resolve_imports_inline`
-        // (the `inlined-imports: true` path), so authoring the same
-        // path triggers the same compile-time error in either mode.
-        anyhow::ensure!(
-            !agent_marker_path.chars().any(char::is_whitespace),
-            "runtime-import: agent source path '{}' contains whitespace, which is not supported by the runtime resolver (rename the path to remove spaces, or set `inlined-imports: true`)",
-            agent_marker_path
-        );
-        anyhow::ensure!(
-            !agent_marker_path.contains('}'),
-            "runtime-import: agent source path '{}' contains '}}', which is not supported by the runtime resolver (rename the path to remove '}}' characters, or set `inlined-imports: true`)",
-            agent_marker_path
-        );
-        format!("{{{{#runtime-import {}}}}}", agent_marker_path)
-    };
-
-    let CompileConfig {
-        mut template,
-        extra_replacements,
-        skip_integrity: config_skip_integrity,
-        debug_pipeline,
-        skip_header,
-        ..
-    } = config;
-
-    // 11.5 Inline the threat-analysis prompt FIRST, before the shared
-    //      replacement fold. The threat prompt content itself contains
-    //      `{{ source_path }}` and other markers that the fold below
-    //      resolves — so the prompt must be inlined here, before that
-    //      fold runs, otherwise `{{ source_path }}` inside the prompt
-    //      survives into the emitted YAML.
-    template = replace_with_indent(
-        &template,
-        "{{ threat_analysis_prompt }}",
-        threat_analysis_prompt,
-    );
-
-    // 12. Debug pipeline replacements (MUST run before extra_replacements
-    //     because the probe step content contains {{ mcpg_port }} which is
-    //     resolved by extra_replacements).
-    let debug_replacements = generate_debug_pipeline_replacements(debug_pipeline);
-    for (placeholder, replacement) in &debug_replacements {
-        template = replace_with_indent(&template, placeholder, replacement);
-    }
-
-    // 13. Apply extra replacements (target-specific overrides like {{ mcpg_port }})
-    // These run before shared replacements so targets can override shared
-    // markers like {{ setup_job }} and {{ teardown_job }}.
-    for (placeholder, replacement) in &extra_replacements {
-        template = replace_with_indent(&template, placeholder, replacement);
-    }
-
-    // 14. Shared replacements
-    let compiler_version = env!("CARGO_PKG_VERSION");
-    let skip_integrity = config_skip_integrity
-        || front_matter
-            .ado_aw_debug
-            .as_ref()
-            .map(|d| d.skip_integrity)
-            .unwrap_or(false);
-    let integrity_check = generate_integrity_check(skip_integrity);
-    let replacements: Vec<(&str, &str)> = vec![
-        ("{{ parameters }}", &parameters_yaml),
-        ("{{ compiler_version }}", compiler_version),
-        ("{{ engine_install_steps }}", &engine_install_steps),
-        ("{{ pool }}", &pool),
-        ("{{ setup_job }}", &setup_job),
-        ("{{ teardown_job }}", &teardown_job),
-        ("{{ prepare_steps }}", &prepare_steps),
-        ("{{ finalize_steps }}", &finalize_steps),
-        ("{{ agentic_depends_on }}", &agentic_depends_on),
-        ("{{ job_timeout }}", &job_timeout),
-        ("{{ agent_job_variables }}", &agent_job_variables),
-        ("{{ repositories }}", &repositories),
-        ("{{ schedule }}", &schedule),
-        ("{{ pipeline_resources }}", &pipeline_resources),
-        ("{{ pr_trigger }}", &pr_trigger),
-        ("{{ ci_trigger }}", &ci_trigger),
-        ("{{ checkout_self }}", &checkout_self),
-        ("{{ checkout_repositories }}", &checkout_steps),
-        ("{{ agent }}", &agent_name),
-        ("{{ agent_name }}", &front_matter.name),
-        ("{{ agent_display_name }}", &agent_display_name),
-        ("{{ pipeline_agent_name }}", &pipeline_name),
-        // Backward-compatible alias for templates that still reference the
-        // older marker name.
-        ("{{ pipeline_name }}", &pipeline_name),
-        ("{{ agent_description }}", &front_matter.description),
-        ("{{ engine_run }}", &engine_run),
-        ("{{ engine_run_detection }}", &engine_run_detection),
-        ("{{ source_path }}", &source_path),
-        // integrity_check must come before pipeline_path because the
-        // integrity step content itself contains {{ pipeline_path }}.
-        ("{{ integrity_check }}", &integrity_check),
-        ("{{ pipeline_path }}", &pipeline_path),
-        // trigger_repo_directory must come after source_path / pipeline_path
-        // because those expansions embed the placeholder.
-        ("{{ trigger_repo_directory }}", &trigger_repo_directory),
-        ("{{ working_directory }}", &working_directory),
-        ("{{ workspace }}", &working_directory),
-        ("{{ agent_content }}", &agent_content_value),
-        ("{{ acquire_ado_token }}", &acquire_read_token),
-        ("{{ engine_env }}", &engine_env),
-        ("{{ engine_log_dir }}", engine_log_dir),
-        ("{{ acquire_write_token }}", &acquire_write_token),
-        ("{{ executor_ado_env }}", &executor_ado_env),
-    ];
-
-    let pipeline_yaml = replacements
-        .into_iter()
-        .fold(template, |yaml, (placeholder, replacement)| {
-            replace_with_indent(&yaml, placeholder, replacement)
-        });
-
-    // Canonical normalisation pass: round-trip the assembled YAML through
-    // serde_yaml so committed lock files share a single deterministic
-    // formatting baseline. See `normalize_yaml` for the precise contract.
-    let pipeline_yaml = normalize_yaml(&pipeline_yaml)?;
-
-    // 15. Prepend header (unless the caller will prepend its own)
-    if skip_header {
-        Ok(pipeline_yaml)
-    } else {
-        let header = generate_header_comment(input_path);
-        Ok(format!("{}{}", header, pipeline_yaml))
-    }
-}
-
-/// Shared compilation flow for template-producing compilers (`target: job` and
-/// `target: stage`).
-///
-/// Handles the full setup — collecting extensions, building the compile context,
-/// generating the stage prefix and template parameters, computing AWF/MCPG
-/// values — and delegates to [`compile_shared`]. The caller supplies:
-///
-/// - `cfg`: target-specific settings (template string, integrity / debug flags).
-/// - `header_fn`: a function that generates the leading comment block prepended
-///   to the compiled YAML. The two template compilers use different header
-///   layouts, so this lets each compiler keep its own generator while sharing
-///   all of the boilerplate setup.
-///
-/// Returns the final YAML string with the header prepended.
-pub async fn compile_template_target(
-    input_path: &Path,
-    output_path: &Path,
-    front_matter: &FrontMatter,
-    markdown_body: &str,
-    cfg: TemplateTargetConfig<'_>,
-    header_fn: impl FnOnce(&Path, &Path, &FrontMatter) -> String,
-) -> Result<String> {
-    // Collect extensions (needed before compile_shared for MCPG config)
-    let extensions = super::extensions::collect_extensions(front_matter);
-
-    // Build compile context for MCPG config generation
-    let ctx = CompileContext::new(front_matter, input_path).await?;
-
-    // Generate stage prefix for job-name uniqueness and template parameters
-    let stage_prefix = generate_stage_prefix(&front_matter.name);
-    let template_params = generate_template_parameters(front_matter)?;
-
-    // AWF / MCPG values (same as standalone)
-    let allowed_domains = generate_allowed_domains(front_matter, &extensions)?;
-    let awf_mounts = generate_awf_mounts(&extensions);
-    let awf_paths = collect_awf_path_prepends(&extensions);
-    let awf_path_step = generate_awf_path_step(&awf_paths);
-    let enabled_tools_args = generate_enabled_tools_args(front_matter);
-
-    let config_obj = generate_mcpg_config(front_matter, &ctx, &extensions)?;
-    let mcpg_config_json =
-        serde_json::to_string_pretty(&config_obj).context("Failed to serialize MCPG config")?;
-    let mcpg_docker_env = generate_mcpg_docker_env(front_matter, &extensions);
-    let mcpg_step_env = generate_mcpg_step_env(&extensions);
-
-    let config = CompileConfig {
-        template: cfg.template.to_string(),
-        extra_replacements: vec![
-            ("{{ stage_prefix }}".into(), stage_prefix),
-            ("{{ template_parameters }}".into(), template_params),
-            ("{{ firewall_version }}".into(), AWF_VERSION.into()),
-            ("{{ mcpg_version }}".into(), MCPG_VERSION.into()),
-            ("{{ mcpg_image }}".into(), MCPG_IMAGE.into()),
-            ("{{ mcpg_port }}".into(), MCPG_PORT.to_string()),
-            ("{{ mcpg_domain }}".into(), MCPG_DOMAIN.into()),
-            ("{{ allowed_domains }}".into(), allowed_domains),
-            ("{{ awf_mounts }}".into(), awf_mounts),
-            ("{{ awf_path_step }}".into(), awf_path_step),
-            ("{{ enabled_tools_args }}".into(), enabled_tools_args),
-            ("{{ mcpg_config }}".into(), mcpg_config_json),
-            ("{{ mcpg_docker_env }}".into(), mcpg_docker_env),
-            ("{{ mcpg_step_env }}".into(), mcpg_step_env),
-        ],
-        skip_integrity: cfg.skip_integrity,
-        debug_pipeline: cfg.debug_pipeline,
-        has_awf_paths: !awf_paths.is_empty(),
-        skip_header: true,
-    };
-
-    let yaml = compile_shared(
-        input_path,
-        output_path,
-        front_matter,
-        markdown_body,
-        &extensions,
-        &ctx,
-        config,
-    )
-    .await?;
-
-    let header = header_fn(input_path, output_path, front_matter);
-    Ok(format!("{}{}", header, yaml))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compile::extensions::{CompileContext, collect_extensions};
-    use crate::compile::types::{McpConfig, McpOptions, PoolConfigFull, Repository};
+    use crate::compile::extensions::{
+        CompileContext, CompilerExtension, Declarations, Extension, collect_extensions,
+    };
+    use crate::compile::types::{McpConfig, McpOptions, OnConfig, Repository};
     use std::collections::HashMap;
 
     /// Helper: create a minimal FrontMatter by parsing YAML
@@ -3836,63 +2457,47 @@ mod tests {
         fm
     }
 
+    fn extension_declarations(extensions: &[Extension], fm: &FrontMatter) -> Vec<Declarations> {
+        let ctx = CompileContext::for_test(fm);
+        extension_declarations_with_ctx(extensions, &ctx)
+    }
+
+    fn extension_declarations_with_ctx(
+        extensions: &[Extension],
+        ctx: &CompileContext,
+    ) -> Vec<Declarations> {
+        try_extension_declarations_with_ctx(extensions, ctx).unwrap()
+    }
+
+    fn try_extension_declarations_with_ctx(
+        extensions: &[Extension],
+        ctx: &CompileContext,
+    ) -> Result<Vec<Declarations>> {
+        extensions.iter().map(|ext| ext.declarations(ctx)).collect()
+    }
+
+    fn collect_exts_and_decls(fm: &FrontMatter) -> (Vec<Extension>, Vec<Declarations>) {
+        let extensions = collect_extensions(fm);
+        let declarations = extension_declarations(&extensions, fm);
+        (extensions, declarations)
+    }
+
+    fn collect_exts_and_decls_with_org(
+        fm: &FrontMatter,
+        org: &str,
+    ) -> (Vec<Extension>, Vec<Declarations>) {
+        let extensions = collect_extensions(fm);
+        let ctx = CompileContext::for_test_with_org(fm, org);
+        let declarations = extension_declarations_with_ctx(&extensions, &ctx);
+        (extensions, declarations)
+    }
+
+    fn engine_args_for(fm: &FrontMatter) -> Result<String> {
+        let (_extensions, declarations) = collect_exts_and_decls(fm);
+        CompileContext::for_test(fm).engine.args(fm, &declarations)
+    }
+
     // ─── generate_agent_job_variables ─────────────────────────────────
-
-    #[test]
-    fn test_generate_agent_job_variables_empty_when_synth_inactive() {
-        assert_eq!(generate_agent_job_variables(false), "");
-    }
-
-    #[test]
-    fn test_generate_agent_job_variables_emits_hoisted_synth_outputs() {
-        let out = generate_agent_job_variables(true);
-        // The hoist must declare a `variables:` mapping at the Agent
-        // job level (the `{{ agent_job_variables }}` marker sits at the
-        // job-keys indent).
-        assert!(
-            out.starts_with("variables:"),
-            "must declare a `variables:` block: {out}"
-        );
-        // Each AW_PR_* identifier + the AW_SYNTHETIC_PR flag is hoisted
-        // via `$[ coalesce(dependencies.Setup.outputs[...], '') ]`. The
-        // `coalesce(..., '')` guarantees the variable is the empty
-        // string (rather than the literal `$[ ... ]` form) when the
-        // dependency is unresolved (e.g. Setup skipped). `synthPr` now
-        // always emits the canonical `AW_PR_*` names regardless of
-        // build reason (copying from `SYSTEM_PULLREQUEST_*` on real PR
-        // builds, discovered values on synth-promoted CI builds), so
-        // downstream consumers read a single uniform namespace via
-        // `$(AW_PR_*)` macros — no `$[ ... ]` in step `env:`.
-        for name in &[
-            "AW_PR_ID",
-            "AW_PR_TARGETBRANCH",
-            "AW_PR_SOURCEBRANCH",
-            "AW_SYNTHETIC_PR",
-        ] {
-            let needle = format!(
-                "{name}: $[ coalesce(dependencies.Setup.outputs['synthPr.{name}'], '') ]"
-            );
-            assert!(
-                out.contains(&needle),
-                "must hoist {name} from cross-job synth output: {out}"
-            );
-        }
-        // Regression guard: the old AW_SYNTHETIC_PR_* names must not
-        // leak back — they were renamed to AW_PR_* when the bundle
-        // started normalising the real-vs-synth merge internally.
-        assert!(
-            !out.contains("AW_SYNTHETIC_PR_ID"),
-            "must not hoist legacy AW_SYNTHETIC_PR_ID — use AW_PR_ID: {out}"
-        );
-        assert!(
-            !out.contains("AW_SYNTHETIC_PR_TARGETBRANCH"),
-            "must not hoist legacy AW_SYNTHETIC_PR_TARGETBRANCH — use AW_PR_TARGETBRANCH: {out}"
-        );
-        assert!(
-            !out.contains("AW_SYNTHETIC_PR_SOURCEBRANCH"),
-            "must not hoist legacy AW_SYNTHETIC_PR_SOURCEBRANCH — use AW_PR_SOURCEBRANCH: {out}"
-        );
-    }
 
     // ─── normalize_yaml ───────────────────────────────────────────────────────
 
@@ -4442,10 +3047,7 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             params.contains("--allow-all-tools"),
             "wildcard bash should emit --allow-all-tools"
@@ -4465,10 +3067,7 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             params.contains("--allow-all-tools"),
             "\"*\" should behave same as \":*\""
@@ -4488,10 +3087,7 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         // User-disabled bash must not produce a general bash allow-tool
         // (shell(:*) / shell(*) / shell(bash)). Always-on extensions
         // (e.g. Azure CLI) legitimately inject their own narrow
@@ -4513,10 +3109,7 @@ mod tests {
     #[test]
     fn test_engine_args_allow_all_paths_when_edit_enabled() {
         let fm = minimal_front_matter(); // edit defaults to true, bash defaults to wildcard
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             params.contains("--allow-all-paths"),
             "edit enabled (default) should emit --allow-all-paths"
@@ -4540,10 +3133,7 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             !params.contains("--allow-all-paths"),
             "edit disabled should NOT emit --allow-all-paths"
@@ -4563,10 +3153,7 @@ mod tests {
             cache_memory: None,
             azure_devops: None,
         });
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             params.contains("--allow-all-tools"),
             "wildcard bash should emit --allow-all-tools"
@@ -4596,10 +3183,7 @@ mod tests {
             node: None,
             dotnet: None,
         });
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             params.contains("shell(lean)"),
             "lean command should be allowed"
@@ -4634,10 +3218,7 @@ mod tests {
             node: None,
             dotnet: None,
         });
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             params.contains("--allow-all-tools"),
             "wildcard should use --allow-all-tools"
@@ -4659,10 +3240,7 @@ mod tests {
                 ..Default::default()
             })),
         );
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             !params.contains("--allow-tool my-tool"),
             "default (all-tools) mode should not emit individual --allow-tool for MCPs"
@@ -4685,10 +3263,7 @@ mod tests {
                 ..Default::default()
             })),
         );
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             params.contains("--allow-tool my-tool"),
             "container MCP should get --allow-tool"
@@ -4711,10 +3286,7 @@ mod tests {
                 ..Default::default()
             })),
         );
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             params.contains("--allow-tool remote-ado"),
             "URL MCP should get --allow-tool"
@@ -4726,10 +3298,7 @@ mod tests {
         let mut fm = minimal_front_matter();
         fm.mcp_servers
             .insert("my-tool".to_string(), McpConfig::Enabled(true));
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             !params.contains("--allow-tool my-tool"),
             "Enabled(true) with no container/url should not get --allow-tool"
@@ -4759,10 +3328,7 @@ mod tests {
                 ..Default::default()
             })),
         );
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         let a_pos = params
             .find("--allow-tool a-tool")
             .expect("a-tool should be present");
@@ -4780,10 +3346,7 @@ mod tests {
         let mut fm = minimal_front_matter();
         fm.mcp_servers
             .insert("ado".to_string(), McpConfig::Enabled(true));
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         // Copilot CLI has no built-in MCPs — all MCPs are handled via the MCP firewall
         assert!(!params.contains("--mcp ado"));
     }
@@ -4794,10 +3357,7 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  timeout-minutes: 30\n---\n",
         )
         .unwrap();
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             !params.contains("--max-timeout"),
             "timeout-minutes should not be emitted as a CLI arg"
@@ -4807,10 +3367,7 @@ mod tests {
     #[test]
     fn test_engine_args_no_max_timeout_when_simple_engine() {
         let fm = minimal_front_matter();
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         assert!(!params.contains("--max-timeout"));
     }
 
@@ -4820,69 +3377,14 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  timeout-minutes: 0\n---\n",
         )
         .unwrap();
-        let params = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm))
-            .unwrap();
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             !params.contains("--max-timeout"),
             "timeout-minutes should not be emitted as a CLI arg"
         );
     }
 
-    #[test]
-    fn test_job_timeout_with_value() {
-        let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  timeout-minutes: 30\n---\n",
-        )
-        .unwrap();
-        assert_eq!(generate_job_timeout(&fm), "timeoutInMinutes: 30");
-    }
-
-    #[test]
-    fn test_job_timeout_without_value() {
-        let fm = minimal_front_matter();
-        assert_eq!(generate_job_timeout(&fm), "");
-    }
-
-    #[test]
-    fn test_job_timeout_zero() {
-        let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  timeout-minutes: 0\n---\n",
-        )
-        .unwrap();
-        assert_eq!(generate_job_timeout(&fm), "timeoutInMinutes: 0");
-    }
-
     // ─── sanitize_filename ────────────────────────────────────────────────────
-
-    #[test]
-    fn test_sanitize_filename_basic() {
-        assert_eq!(sanitize_filename("Daily Code Review"), "daily-code-review");
-        assert_eq!(sanitize_filename("My Agent!"), "my-agent");
-    }
-
-    #[test]
-    fn test_sanitize_filename_collapses_dashes() {
-        assert_eq!(
-            sanitize_filename("Test  Multiple   Spaces"),
-            "test-multiple-spaces"
-        );
-        assert_eq!(sanitize_filename("a---b"), "a-b");
-    }
-
-    #[test]
-    fn test_sanitize_filename_trims_dashes() {
-        assert_eq!(sanitize_filename("--leading"), "leading");
-        assert_eq!(sanitize_filename("trailing--"), "trailing");
-        assert_eq!(sanitize_filename("--both--"), "both");
-    }
-
-    #[test]
-    fn test_sanitize_filename_special_chars() {
-        assert_eq!(sanitize_filename("agent@v1.0"), "agent-v1-0");
-        assert_eq!(sanitize_filename("test_case"), "test-case");
-    }
 
     // ─── sanitize_pipeline_agent_name ───────────────────────────────────────
 
@@ -4916,179 +3418,9 @@ mod tests {
 
     // ─── yaml_double_quoted ──────────────────────────────────────────────────
 
-    #[test]
-    fn test_yaml_double_quoted_plain_string() {
-        assert_eq!(yaml_double_quoted("hello"), r#""hello""#);
-    }
-
-    #[test]
-    fn test_yaml_double_quoted_string_with_colon_is_safe() {
-        // The bug this helper exists to fix: an agent name like
-        // "Daily safe-output smoke: noop" must not be emitted bare in the
-        // top-level pipeline `name:` line, where the second colon would
-        // be parsed as a YAML mapping indicator.
-        assert_eq!(
-            yaml_double_quoted("Daily safe-output smoke: noop-$(BuildID)"),
-            r#""Daily safe-output smoke: noop-$(BuildID)""#
-        );
-    }
-
-    #[test]
-    fn test_yaml_double_quoted_escapes_backslash() {
-        assert_eq!(yaml_double_quoted(r"a\b"), r#""a\\b""#);
-    }
-
-    #[test]
-    fn test_yaml_double_quoted_escapes_double_quote() {
-        assert_eq!(yaml_double_quoted(r#"say "hi""#), r#""say \"hi\"""#);
-    }
-
-    #[test]
-    fn test_yaml_double_quoted_escapes_whitespace_controls() {
-        assert_eq!(yaml_double_quoted("a\nb"), r#""a\nb""#);
-        assert_eq!(yaml_double_quoted("a\rb"), r#""a\rb""#);
-        assert_eq!(yaml_double_quoted("a\tb"), r#""a\tb""#);
-    }
-
-    #[test]
-    fn test_yaml_double_quoted_escapes_yaml_line_separators() {
-        assert_eq!(yaml_double_quoted("a\u{0085}b"), r#""a\x85b""#);
-        assert_eq!(yaml_double_quoted("a\u{2028}b"), r#""a\u2028b""#);
-        assert_eq!(yaml_double_quoted("a\u{2029}b"), r#""a\u2029b""#);
-    }
-
-    #[test]
-    fn test_yaml_double_quoted_escapes_other_control_chars() {
-        // Bell (0x07) is a low ASCII control char — should escape as \x07.
-        assert_eq!(yaml_double_quoted("a\u{0007}b"), r#""a\x07b""#);
-    }
-
-    #[test]
-    fn test_yaml_double_quoted_passes_through_ado_macros() {
-        // $(BuildID), $(Build.SourcesDirectory) etc. have no special meaning
-        // inside a YAML double-quoted scalar; ADO expands them at queue time
-        // after YAML parsing.
-        assert_eq!(
-            yaml_double_quoted("$(Build.BuildId)/$(System.JobId)"),
-            r#""$(Build.BuildId)/$(System.JobId)""#
-        );
-    }
-
-    #[test]
-    fn test_yaml_double_quoted_passes_through_unicode() {
-        // Non-ASCII characters pass through as-is — YAML 1.2 supports UTF-8
-        // in double-quoted scalars natively.
-        assert_eq!(yaml_double_quoted("résumé — 你好"), r#""résumé — 你好""#);
-    }
-
     // ─── generate_pr_trigger ─────────────────────────────────────────────────
 
-    #[test]
-    fn test_generate_pr_trigger_no_triggers_no_schedule() {
-        let result = generate_pr_trigger(&None, false);
-        assert!(
-            result.is_empty(),
-            "Should be empty when no triggers configured"
-        );
-    }
-
-    #[test]
-    fn test_generate_pr_trigger_schedule_only() {
-        let result = generate_pr_trigger(&None, true);
-        assert!(result.contains("pr: none"));
-        assert!(result.contains("only run on schedule"));
-    }
-
-    #[test]
-    fn test_generate_pr_trigger_pipeline_only() {
-        let triggers = Some(crate::compile::types::OnConfig {
-            pipeline: Some(crate::compile::types::PipelineTrigger {
-                name: "Build".into(),
-                project: None,
-                branches: vec![],
-                filters: None,
-            }),
-            pr: None,
-            schedule: None,
-        });
-        let result = generate_pr_trigger(&triggers, false);
-        assert!(result.contains("pr: none"));
-        assert!(result.contains("upstream pipeline"));
-    }
-
-    #[test]
-    fn test_generate_pr_trigger_both_pipeline_and_schedule() {
-        let triggers = Some(crate::compile::types::OnConfig {
-            pipeline: Some(crate::compile::types::PipelineTrigger {
-                name: "Build".into(),
-                project: None,
-                branches: vec![],
-                filters: None,
-            }),
-            pr: None,
-            schedule: None,
-        });
-        let result = generate_pr_trigger(&triggers, true);
-        assert!(result.contains("pr: none"));
-        // When both pipeline and schedule are active, the comment must mention both reasons.
-        assert!(
-            result.contains("schedule"),
-            "should mention schedule: {result}"
-        );
-        assert!(
-            result.contains("upstream pipeline"),
-            "should mention upstream pipeline: {result}"
-        );
-    }
-
     // ─── generate_ci_trigger ─────────────────────────────────────────────────
-
-    #[test]
-    fn test_generate_ci_trigger_no_triggers_no_schedule() {
-        let result = generate_ci_trigger(&None, false);
-        assert!(
-            result.is_empty(),
-            "Should be empty when no triggers configured"
-        );
-    }
-
-    #[test]
-    fn test_generate_ci_trigger_schedule_only() {
-        let result = generate_ci_trigger(&None, true);
-        assert_eq!(result, "trigger: none");
-    }
-
-    #[test]
-    fn test_generate_ci_trigger_pipeline_only() {
-        let triggers = Some(crate::compile::types::OnConfig {
-            pipeline: Some(crate::compile::types::PipelineTrigger {
-                name: "Build".into(),
-                project: None,
-                branches: vec![],
-                filters: None,
-            }),
-            pr: None,
-            schedule: None,
-        });
-        let result = generate_ci_trigger(&triggers, false);
-        assert_eq!(result, "trigger: none");
-    }
-
-    #[test]
-    fn test_generate_ci_trigger_both_pipeline_and_schedule() {
-        let triggers = Some(crate::compile::types::OnConfig {
-            pipeline: Some(crate::compile::types::PipelineTrigger {
-                name: "Build".into(),
-                project: None,
-                branches: vec![],
-                filters: None,
-            }),
-            pr: None,
-            schedule: None,
-        });
-        let result = generate_ci_trigger(&triggers, true);
-        assert_eq!(result, "trigger: none");
-    }
 
     // ─── generate_ci_trigger: on.pr.mode behaviour (issue #916) ──────────────
     //
@@ -5098,161 +3430,7 @@ mod tests {
     // emits `trigger: none` so the operator-installed Build Validation
     // policy is the sole source of pipeline runs — no duplicate builds.
 
-    #[test]
-    fn test_generate_ci_trigger_pr_mode_synthetic_keeps_default() {
-        let triggers = Some(crate::compile::types::OnConfig {
-            pipeline: None,
-            pr: Some(crate::compile::types::PrTriggerConfig {
-                branches: Some(crate::compile::types::BranchFilter {
-                    include: vec!["main".into(), "release/*".into()],
-                    exclude: vec!["users/*".into()],
-                }),
-                paths: None,
-                filters: None,
-                ..Default::default() // mode defaults to Synthetic
-            }),
-            schedule: None,
-        });
-        let result = generate_ci_trigger(&triggers, false);
-        assert!(
-            result.is_empty(),
-            "mode: synthetic must leave the CI trigger at ADO default — \
-             pr.branches.include lists PR TARGET branches, but ADO trigger: \
-             fires on pushes TO listed branches, so narrowing would suppress \
-             CI on the feature branches synthPr needs. Got: {result}"
-        );
-    }
-
-    #[test]
-    fn test_generate_ci_trigger_pr_mode_policy_emits_trigger_none() {
-        let triggers = Some(crate::compile::types::OnConfig {
-            pipeline: None,
-            pr: Some(crate::compile::types::PrTriggerConfig {
-                branches: Some(crate::compile::types::BranchFilter {
-                    include: vec!["main".into()],
-                    exclude: vec![],
-                }),
-                paths: None,
-                filters: None,
-                mode: crate::compile::types::PrMode::Policy,
-            }),
-            schedule: None,
-        });
-        let result = generate_ci_trigger(&triggers, false);
-        assert_eq!(
-            result, "trigger: none",
-            "mode: policy must suppress the CI trigger so the operator-installed \
-             branch policy is the sole source of pipeline runs (no duplicate builds)"
-        );
-    }
-
-    #[test]
-    fn test_generate_ci_trigger_pipeline_trigger_still_suppresses() {
-        // Pipeline-completion trigger continues to emit `trigger: none`
-        // regardless of any `on.pr` configuration; this branch is the
-        // long-standing rule that upstream-pipeline triggers exclude
-        // commit-driven CI.
-        let triggers = Some(crate::compile::types::OnConfig {
-            pipeline: Some(crate::compile::types::PipelineTrigger {
-                name: "Build".into(),
-                project: None,
-                branches: vec![],
-                filters: None,
-            }),
-            pr: Some(crate::compile::types::PrTriggerConfig {
-                branches: Some(crate::compile::types::BranchFilter {
-                    include: vec!["main".into()],
-                    exclude: vec![],
-                }),
-                paths: None,
-                filters: None,
-                ..Default::default()
-            }),
-            schedule: None,
-        });
-        let result = generate_ci_trigger(&triggers, false);
-        assert_eq!(
-            result, "trigger: none",
-            "pipeline-completion trigger must continue to emit `trigger: none`"
-        );
-    }
-
     // ─── generate_pipeline_resources ─────────────────────────────────────────
-
-    #[test]
-    fn test_generate_pipeline_resources_no_triggers() {
-        let result = generate_pipeline_resources(&None).unwrap();
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_generate_pipeline_resources_empty_trigger_config() {
-        let triggers = Some(crate::compile::types::OnConfig {
-            schedule: None,
-            pipeline: None,
-            pr: None,
-        });
-        let result = generate_pipeline_resources(&triggers).unwrap();
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_generate_pipeline_resources_with_branches() {
-        let triggers = Some(crate::compile::types::OnConfig {
-            pipeline: Some(crate::compile::types::PipelineTrigger {
-                name: "Build Pipeline".into(),
-                project: Some("OtherProject".into()),
-                branches: vec!["main".into(), "release/*".into()],
-                filters: None,
-            }),
-            pr: None,
-            schedule: None,
-        });
-        let result = generate_pipeline_resources(&triggers).unwrap();
-        assert!(result.contains("source: 'Build Pipeline'"));
-        assert!(result.contains("OtherProject"));
-        assert!(result.contains("main"));
-        assert!(result.contains("release/*"));
-        // Should use branch include list, not `trigger: true`
-        assert!(result.contains("branches:"));
-        assert!(!result.contains("trigger: true"));
-    }
-
-    #[test]
-    fn test_generate_pipeline_resources_without_branches_triggers_on_any() {
-        let triggers = Some(crate::compile::types::OnConfig {
-            pipeline: Some(crate::compile::types::PipelineTrigger {
-                name: "My Pipeline".into(),
-                project: None,
-                branches: vec![],
-                filters: None,
-            }),
-            pr: None,
-            schedule: None,
-        });
-        let result = generate_pipeline_resources(&triggers).unwrap();
-        assert!(result.contains("source: 'My Pipeline'"));
-        assert!(result.contains("trigger: true"));
-        // No project when not specified
-        assert!(!result.contains("project:"));
-    }
-
-    #[test]
-    fn test_generate_pipeline_resources_resource_id_is_snake_case() {
-        let triggers = Some(crate::compile::types::OnConfig {
-            pipeline: Some(crate::compile::types::PipelineTrigger {
-                name: "My Build Pipeline".into(),
-                project: None,
-                branches: vec![],
-                filters: None,
-            }),
-            pr: None,
-            schedule: None,
-        });
-        let result = generate_pipeline_resources(&triggers).unwrap();
-        // The pipeline resource ID should be snake_case derived from the name
-        assert!(result.contains("pipeline: my_build_pipeline"));
-    }
 
     // ─── generate_header_comment ────────────────────────────────────────────
 
@@ -5555,68 +3733,6 @@ ado-aw-debug:
     }
 
     // ─── generate_debug_pipeline_replacements ────────────────────────────────
-
-    #[test]
-    fn test_debug_pipeline_replacements_disabled() {
-        let replacements = generate_debug_pipeline_replacements(false);
-        assert_eq!(replacements.len(), 2);
-        // mcpg_debug_flags returns `\` for bash line continuation
-        let flags = replacements
-            .iter()
-            .find(|(m, _)| m == "{{ mcpg_debug_flags }}")
-            .unwrap();
-        assert_eq!(
-            flags.1, "\\",
-            "mcpg_debug_flags should be a bare backslash when disabled"
-        );
-        // verify_mcp_backends should be empty
-        let probe = replacements
-            .iter()
-            .find(|(m, _)| m == "{{ verify_mcp_backends }}")
-            .unwrap();
-        assert!(
-            probe.1.is_empty(),
-            "verify_mcp_backends should be empty when disabled"
-        );
-    }
-
-    #[test]
-    fn test_debug_pipeline_replacements_enabled() {
-        let replacements = generate_debug_pipeline_replacements(true);
-        assert_eq!(replacements.len(), 2);
-
-        let flags = replacements
-            .iter()
-            .find(|(m, _)| m == "{{ mcpg_debug_flags }}");
-        assert!(flags.is_some(), "Should have mcpg_debug_flags marker");
-        let flags_value = &flags.unwrap().1;
-        assert!(
-            flags_value.contains("DEBUG"),
-            "Should contain DEBUG env var"
-        );
-
-        let probe = replacements
-            .iter()
-            .find(|(m, _)| m == "{{ verify_mcp_backends }}");
-        assert!(probe.is_some(), "Should have verify_mcp_backends marker");
-        let probe_value = &probe.unwrap().1;
-        assert!(
-            probe_value.contains("Verify MCP backends"),
-            "Should contain displayName"
-        );
-        assert!(
-            probe_value.contains("tools/list"),
-            "Should contain tools/list probe"
-        );
-        assert!(
-            probe_value.contains("initialize"),
-            "Should contain initialize handshake"
-        );
-        assert!(
-            probe_value.contains("MCPG_API_KEY"),
-            "Should contain API key env mapping"
-        );
-    }
 
     // ─── validate_submit_pr_review_events ────────────────────────────────────
 
@@ -6222,26 +4338,6 @@ safe-outputs:
     }
 
     #[test]
-    fn test_generate_parameters_rejects_invalid_name() {
-        let params = vec![PipelineParameter {
-            name: "${{evil}}".to_string(),
-            display_name: None,
-            param_type: None,
-            default: None,
-            values: None,
-        }];
-        let result = generate_parameters(&params);
-        assert!(result.is_err(), "Should reject invalid parameter name");
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Invalid parameter name"),
-            "Error should mention invalid parameter name"
-        );
-    }
-
-    #[test]
     fn test_build_parameters_auto_injects_clear_memory() {
         let params = build_parameters(&[], true, false).unwrap();
         assert_eq!(params.len(), 1);
@@ -6367,145 +4463,9 @@ safe-outputs:
         assert_eq!(params.len(), 2);
     }
 
-    #[test]
-    fn test_generate_parameters_rejects_expression_in_display_name() {
-        let params = vec![PipelineParameter {
-            name: "myParam".to_string(),
-            display_name: Some("Test ${{ variables.evil }}".to_string()),
-            param_type: None,
-            default: None,
-            values: None,
-        }];
-        let result = generate_parameters(&params);
-        assert!(
-            result.is_err(),
-            "Should reject ADO expression in displayName"
-        );
-    }
-
-    #[test]
-    fn test_generate_parameters_rejects_expression_in_default() {
-        let params = vec![PipelineParameter {
-            name: "myParam".to_string(),
-            display_name: None,
-            param_type: None,
-            default: Some(serde_yaml::Value::String("$(secretVar)".to_string())),
-            values: None,
-        }];
-        let result = generate_parameters(&params);
-        assert!(
-            result.is_err(),
-            "Should reject ADO macro expression in default"
-        );
-    }
-
-    #[test]
-    fn test_generate_parameters_rejects_expression_in_values() {
-        let params = vec![PipelineParameter {
-            name: "myParam".to_string(),
-            display_name: None,
-            param_type: None,
-            default: None,
-            values: Some(vec![
-                serde_yaml::Value::String("safe".to_string()),
-                serde_yaml::Value::String("${{ parameters.inject }}".to_string()),
-            ]),
-        }];
-        let result = generate_parameters(&params);
-        assert!(result.is_err(), "Should reject ADO expression in values");
-    }
-
-    #[test]
-    fn test_generate_parameters_allows_literal_values() {
-        let params = vec![PipelineParameter {
-            name: "region".to_string(),
-            display_name: Some("Target Region".to_string()),
-            param_type: Some("string".to_string()),
-            default: Some(serde_yaml::Value::String("us-east".to_string())),
-            values: Some(vec![
-                serde_yaml::Value::String("us-east".to_string()),
-                serde_yaml::Value::String("eu-west".to_string()),
-            ]),
-        }];
-        let result = generate_parameters(&params);
-        assert!(result.is_ok(), "Should accept literal values");
-    }
-
     // ─── replace_with_indent ─────────────────────────────────────────────────
 
-    #[test]
-    fn test_replace_with_indent_multiline_replacement() {
-        let template = "steps:\n    {{ my_marker }}\n";
-        let replacement = "- bash: echo hello\n  displayName: Hello";
-        let result = replace_with_indent(template, "{{ my_marker }}", replacement);
-        // The 4-space indent on the placeholder line is inherited by continuation lines
-        assert_eq!(
-            result,
-            "steps:\n    - bash: echo hello\n      displayName: Hello\n"
-        );
-    }
-
-    #[test]
-    fn test_replace_with_indent_not_at_line_start_no_indent() {
-        // When the placeholder is not at the start of a line (preceded by non-whitespace),
-        // no extra indentation is added to continuation lines.
-        let template = "prefix {{ marker }} suffix";
-        let result = replace_with_indent(template, "{{ marker }}", "VALUE");
-        assert_eq!(result, "prefix VALUE suffix");
-    }
-
-    #[test]
-    fn test_replace_with_indent_single_line_replacement_preserves_trailing_newline() {
-        let template = "    {{ placeholder }}\n";
-        let result = replace_with_indent(template, "{{ placeholder }}", "value");
-        assert_eq!(result, "    value\n");
-    }
-
-    #[test]
-    fn test_replace_with_indent_replacement_ending_with_newline() {
-        let template = "    {{ placeholder }}\n";
-        let result = replace_with_indent(template, "{{ placeholder }}", "line1\nline2\n");
-        // The trailing \n in the replacement should be preserved
-        assert!(result.contains("line1"));
-        assert!(result.contains("line2"));
-        assert!(result.ends_with('\n'));
-    }
-
     // ─── format_step_yaml / format_step_yaml_indented ────────────────────────
-
-    #[test]
-    fn test_format_step_yaml_single_line() {
-        let result = format_step_yaml("bash: echo hi");
-        assert_eq!(result, "  - bash: echo hi");
-    }
-
-    #[test]
-    fn test_format_step_yaml_multiline() {
-        let result = format_step_yaml("bash: |\n  echo hi\n  echo bye");
-        let lines: Vec<&str> = result.lines().collect();
-        assert_eq!(lines[0], "  - bash: |");
-        // Continuation lines get 8 spaces prepended (existing indent is preserved)
-        assert_eq!(lines[1], "          echo hi");
-        assert_eq!(lines[2], "          echo bye");
-    }
-
-    #[test]
-    fn test_format_step_yaml_strips_yaml_document_separator() {
-        let result = format_step_yaml("--- bash: echo hi");
-        assert_eq!(result, "  - bash: echo hi");
-    }
-
-    #[test]
-    fn test_format_step_yaml_indented_custom_base() {
-        let result = format_step_yaml_indented("bash: echo hi", 6);
-        assert_eq!(result, "      - bash: echo hi");
-    }
-
-    #[test]
-    fn test_format_step_yaml_indented_zero_base() {
-        let result = format_step_yaml_indented("bash: echo hi", 0);
-        assert_eq!(result, "- bash: echo hi");
-    }
 
     // ─── generate_acquire_ado_token ──────────────────────────────────────────
 
@@ -6653,9 +4613,7 @@ safe-outputs:
                 command: None,
                 timeout_minutes: None,
             });
-        let result = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm));
+        let result = engine_args_for(&fm);
         assert!(result.is_err());
         assert!(
             result
@@ -6680,9 +4638,7 @@ safe-outputs:
                 command: None,
                 timeout_minutes: None,
             });
-        let result = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm));
+        let result = engine_args_for(&fm);
         assert!(result.is_err());
     }
 
@@ -6707,9 +4663,7 @@ safe-outputs:
                     command: None,
                     timeout_minutes: None,
                 });
-            let result = CompileContext::for_test(&fm)
-                .engine
-                .args(&fm, &crate::compile::extensions::collect_extensions(&fm));
+            let result = engine_args_for(&fm);
             assert!(result.is_ok(), "Model name '{}' should be valid", name);
         }
     }
@@ -6723,9 +4677,7 @@ safe-outputs:
             cache_memory: None,
             azure_devops: None,
         });
-        let result = CompileContext::for_test(&fm)
-            .engine
-            .args(&fm, &crate::compile::extensions::collect_extensions(&fm));
+        let result = engine_args_for(&fm);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("single quote"));
     }
@@ -7076,162 +5028,7 @@ safe-outputs:
         assert!(result.unwrap_err().to_string().contains("ADO expression"));
     }
 
-    #[test]
-    fn test_pipeline_resources_escapes_single_quotes() {
-        let triggers = Some(OnConfig {
-            pipeline: Some(crate::compile::types::PipelineTrigger {
-                name: "Build's Pipeline".to_string(),
-                project: Some("My'Project".to_string()),
-                branches: vec!["main".to_string(), "it's-branch".to_string()],
-                filters: None,
-            }),
-            pr: None,
-            schedule: None,
-        });
-        let result = generate_pipeline_resources(&triggers).unwrap();
-        assert!(result.contains("source: 'Build''s Pipeline'"));
-        assert!(result.contains("project: 'My''Project'"));
-        assert!(result.contains("- 'it''s-branch'"));
-    }
-
     // ─── generate_prepare_steps ──────────────────────────────────────────────
-
-    #[test]
-    fn test_generate_prepare_steps_with_memory_includes_memory_preamble() {
-        let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\ntools:\n  cache-memory: true\n---\n",
-        )
-        .unwrap();
-        let exts = crate::compile::extensions::collect_extensions(&fm);
-        let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
-        let result = generate_prepare_steps(&[], &exts, &ctx).unwrap();
-        assert!(
-            !result.is_empty(),
-            "memory steps must be emitted when cache-memory enabled"
-        );
-        assert!(
-            result.contains("agent_memory"),
-            "should reference memory directory"
-        );
-    }
-
-    #[test]
-    fn test_generate_prepare_steps_without_memory_and_no_steps_has_safeoutputs_prompt() {
-        let fm = minimal_front_matter();
-        let exts = crate::compile::extensions::collect_extensions(&fm);
-        let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
-        let result = generate_prepare_steps(&[], &exts, &ctx).unwrap();
-        // SafeOutputs always contributes a prompt supplement
-        assert!(
-            result.contains("Safe Outputs"),
-            "should include SafeOutputs prompt supplement"
-        );
-    }
-
-    #[test]
-    fn test_generate_prepare_steps_with_memory_includes_download_and_prompt() {
-        let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\ntools:\n  cache-memory: true\n---\n",
-        )
-        .unwrap();
-        let exts = crate::compile::extensions::collect_extensions(&fm);
-        let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
-        let result = generate_prepare_steps(&[], &exts, &ctx).unwrap();
-        assert!(
-            result.contains("DownloadPipelineArtifact"),
-            "memory steps must include the artifact download task"
-        );
-        assert!(
-            result.contains("Agent Memory"),
-            "memory steps must include the memory prompt"
-        );
-    }
-
-    #[test]
-    fn test_generate_prepare_steps_without_memory_with_user_steps() {
-        let fm = minimal_front_matter();
-        let exts = crate::compile::extensions::collect_extensions(&fm);
-        let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
-        let step: serde_yaml::Value =
-            serde_yaml::from_str("bash: echo hello\ndisplayName: greet").unwrap();
-        let result = generate_prepare_steps(&[step], &exts, &ctx).unwrap();
-        assert!(!result.is_empty(), "user steps should be present");
-        assert!(
-            !result.contains("agent_memory"),
-            "no memory reference when cache-memory not enabled"
-        );
-    }
-
-    #[test]
-    fn test_generate_prepare_steps_with_memory_and_user_steps() {
-        let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\ntools:\n  cache-memory: true\n---\n",
-        )
-        .unwrap();
-        let exts = crate::compile::extensions::collect_extensions(&fm);
-        let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
-        let step: serde_yaml::Value =
-            serde_yaml::from_str("bash: echo hello\ndisplayName: greet").unwrap();
-        let result = generate_prepare_steps(&[step], &exts, &ctx).unwrap();
-        assert!(
-            result.contains("agent_memory"),
-            "memory reference must be present"
-        );
-        assert!(
-            result.contains("echo hello"),
-            "user step must also be present"
-        );
-    }
-
-    #[test]
-    fn test_generate_prepare_steps_with_lean() {
-        let (fm, _) =
-            parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  lean: true\n---\n")
-                .unwrap();
-        let exts = crate::compile::extensions::collect_extensions(&fm);
-        let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
-        let result = generate_prepare_steps(&[], &exts, &ctx).unwrap();
-        assert!(
-            result.contains("elan-init.sh"),
-            "should include elan installer"
-        );
-        assert!(result.contains("Lean 4"), "should include Lean prompt");
-        assert!(
-            result.contains("--default-toolchain stable"),
-            "should default to stable"
-        );
-        assert!(
-            result.contains("/tmp/awf-tools/"),
-            "should symlink into awf-tools for AWF chroot"
-        );
-    }
-
-    #[test]
-    fn test_generate_prepare_steps_with_lean_custom_toolchain() {
-        let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nruntimes:\n  lean:\n    toolchain: \"leanprover/lean4:v4.29.1\"\n---\n",
-        ).unwrap();
-        let exts = crate::compile::extensions::collect_extensions(&fm);
-        let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
-        let result = generate_prepare_steps(&[], &exts, &ctx).unwrap();
-        assert!(
-            result.contains("--default-toolchain leanprover/lean4:v4.29.1"),
-            "should use specified toolchain"
-        );
-    }
-
-    #[test]
-    fn test_generate_prepare_steps_with_lean_and_memory() {
-        let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nruntimes:\n  lean: true\ntools:\n  cache-memory: true\n---\n",
-        ).unwrap();
-        let exts = crate::compile::extensions::collect_extensions(&fm);
-        let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
-        let result = generate_prepare_steps(&[], &exts, &ctx).unwrap();
-        assert!(result.contains("agent_memory"), "memory steps present");
-        assert!(result.contains("elan-init.sh"), "lean install present");
-        assert!(result.contains("Lean 4"), "lean prompt present");
-    }
 
     // ─── generate_awf_mounts ──────────────────────────────────────────────
 
@@ -7246,7 +5043,8 @@ safe-outputs:
         let fm = minimal_front_matter();
         let exts = crate::compile::extensions::collect_extensions(&fm);
         let _ctx = crate::compile::extensions::CompileContext::for_test(&fm);
-        let result = generate_awf_mounts(&exts);
+        let declarations = extension_declarations(&exts, &fm);
+        let result = generate_awf_mounts(&exts, &declarations);
         assert!(
             result.contains("$(AW_AZ_MOUNTS) \\"),
             "always-on Azure CLI injection line $(AW_AZ_MOUNTS) \\ should be present \
@@ -7263,29 +5061,6 @@ safe-outputs:
         );
     }
 
-    #[test]
-    fn test_generate_awf_mounts_with_lean() {
-        let (fm, _) =
-            parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  lean: true\n---\n")
-                .unwrap();
-        let exts = crate::compile::extensions::collect_extensions(&fm);
-        let _ctx = crate::compile::extensions::CompileContext::for_test(&fm);
-        let result = generate_awf_mounts(&exts);
-        assert!(result.contains("--mount"), "should contain --mount flag");
-        assert!(result.contains(".elan"), "should reference .elan directory");
-        assert!(result.contains(":ro"), "should be read-only");
-        // Each mount line ends with ` \` continuation
-        assert!(
-            result.ends_with(" \\"),
-            "last mount should end with continuation"
-        );
-        // No embedded indent — replace_with_indent handles indentation
-        assert!(
-            !result.contains("            "),
-            "should not contain hard-coded indent"
-        );
-    }
-
     // ─── generate_awf_path_step ──────────────────────────────────────────────
 
     #[test]
@@ -7299,11 +5074,11 @@ safe-outputs:
 
     #[test]
     fn test_generate_awf_path_step_with_lean() {
-        let paths = collect_awf_path_prepends(&crate::compile::extensions::collect_extensions(
-            &parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  lean: true\n---\n")
-                .unwrap()
-                .0,
-        ));
+        let (fm, _) =
+            parse_markdown("---\nname: test\ndescription: test\nruntimes:\n  lean: true\n---\n")
+                .unwrap();
+        let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
+        let paths = collect_awf_path_prepends(&declarations);
         let result = generate_awf_path_step(&paths);
         assert!(
             result.contains("ado-path-entries"),
@@ -7374,12 +5149,7 @@ safe-outputs:
                 ..Default::default()
             })),
         );
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         let server = config.mcp_servers.get("my-tool").unwrap();
         assert_eq!(server.server_type, "stdio");
         assert_eq!(server.container.as_ref().unwrap(), "node:20-slim");
@@ -7397,12 +5167,7 @@ safe-outputs:
         // An MCP with no container or url should be skipped
         fm.mcp_servers
             .insert("phantom".to_string(), McpConfig::Enabled(true));
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         assert!(!config.mcp_servers.contains_key("phantom"));
         // safeoutputs is always present
         assert!(config.mcp_servers.contains_key("safeoutputs"));
@@ -7413,24 +5178,14 @@ safe-outputs:
         let mut fm = minimal_front_matter();
         fm.mcp_servers
             .insert("my-tool".to_string(), McpConfig::Enabled(false));
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         assert!(!config.mcp_servers.contains_key("my-tool"));
     }
 
     #[test]
     fn test_generate_mcpg_config_empty_mcp_servers() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         // Only safeoutputs should be present
         assert_eq!(config.mcp_servers.len(), 1);
         assert!(config.mcp_servers.contains_key("safeoutputs"));
@@ -7439,12 +5194,7 @@ safe-outputs:
     #[test]
     fn test_generate_mcpg_config_gateway_defaults() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         assert_eq!(config.gateway.port, 80);
         assert_eq!(config.gateway.domain, "host.docker.internal");
         assert_eq!(config.gateway.api_key, "${MCP_GATEWAY_API_KEY}");
@@ -7464,12 +5214,7 @@ safe-outputs:
                 ..Default::default()
             })),
         );
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         let json = serde_json::to_string_pretty(&config).expect("Config should serialize to JSON");
         let parsed: serde_json::Value =
             serde_json::from_str(&json).expect("Serialized JSON should parse back");
@@ -7494,12 +5239,7 @@ safe-outputs:
     #[test]
     fn test_generate_mcpg_config_safeoutputs_variable_placeholders() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         let so = config.mcp_servers.get("safeoutputs").unwrap();
 
         // URL should reference the runtime-substituted port
@@ -7521,12 +5261,7 @@ safe-outputs:
     #[test]
     fn test_generate_mcpg_config_safeoutputs_is_http_type() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         let so = config.mcp_servers.get("safeoutputs").unwrap();
         assert_eq!(so.server_type, "http");
         assert!(
@@ -7550,12 +5285,7 @@ safe-outputs:
                 ..Default::default()
             })),
         );
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         let srv = config.mcp_servers.get("runner").unwrap();
         assert_eq!(srv.server_type, "stdio");
         assert!(
@@ -7578,12 +5308,7 @@ safe-outputs:
                 ..Default::default()
             })),
         );
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         let srv = config.mcp_servers.get("with-env").unwrap();
         let e = srv.env.as_ref().unwrap();
         assert_eq!(e.get("TOKEN").unwrap(), "secret");
@@ -7599,12 +5324,7 @@ safe-outputs:
                 ..Default::default()
             })),
         );
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         // The reserved entry should still be the HTTP backend, not the user's container
         let so = config.mcp_servers.get("safeoutputs").unwrap();
         assert_eq!(
@@ -7630,12 +5350,7 @@ safe-outputs:
                 ..Default::default()
             })),
         );
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         // The user-defined "SafeOutputs" must not overwrite the built-in entry
         let so = config.mcp_servers.get("safeoutputs").unwrap();
         assert_eq!(so.server_type, "http");
@@ -7660,12 +5375,7 @@ safe-outputs:
                 ..Default::default()
             })),
         );
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         let srv = config.mcp_servers.get("remote").unwrap();
         assert_eq!(srv.server_type, "http");
         assert_eq!(srv.url.as_ref().unwrap(), "https://mcp.example.com/api");
@@ -7691,12 +5401,7 @@ safe-outputs:
                 ..Default::default()
             })),
         );
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         let srv = config.mcp_servers.get("ado").unwrap();
         assert_eq!(srv.server_type, "stdio");
         assert_eq!(srv.container.as_ref().unwrap(), "node:20-slim");
@@ -7718,12 +5423,7 @@ safe-outputs:
                 ..Default::default()
             })),
         );
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         let srv = config.mcp_servers.get("data-tool").unwrap();
         assert_eq!(
             srv.mounts.as_ref().unwrap(),
@@ -7742,12 +5442,7 @@ safe-outputs:
                 ..Default::default()
             })),
         );
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         assert!(!config.mcp_servers.contains_key("no-transport"));
     }
 
@@ -7758,8 +5453,8 @@ safe-outputs:
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\npermissions:\n  read: my-read-sc\n---\n",
         ).unwrap();
-        let extensions = collect_extensions(&fm);
-        let env = generate_mcpg_docker_env(&fm, &extensions);
+        let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
+        let env = generate_mcpg_docker_env(&fm, &declarations);
         assert!(
             env.contains("-e ADO_MCP_AUTH_TOKEN=\"$SC_READ_TOKEN\""),
             "Should map ADO token via extension pipeline var"
@@ -7770,8 +5465,8 @@ safe-outputs:
     fn test_generate_mcpg_docker_env_no_extensions() {
         // No tools enabled — no extension pipeline vars — only user MCP passthrough
         let fm = minimal_front_matter();
-        let extensions = collect_extensions(&fm);
-        let env = generate_mcpg_docker_env(&fm, &extensions);
+        let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
+        let env = generate_mcpg_docker_env(&fm, &declarations);
         assert!(
             !env.contains("ADO_MCP_AUTH_TOKEN"),
             "Should not have ADO token when no extension needs it"
@@ -7797,8 +5492,8 @@ safe-outputs:
                 ..Default::default()
             })),
         );
-        let extensions = collect_extensions(&fm);
-        let env = generate_mcpg_docker_env(&fm, &extensions);
+        let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
+        let env = generate_mcpg_docker_env(&fm, &declarations);
         let count = env.matches("ADO_MCP_AUTH_TOKEN").count();
         assert_eq!(
             count, 1,
@@ -7823,8 +5518,8 @@ safe-outputs:
                 ..Default::default()
             })),
         );
-        let extensions = collect_extensions(&fm);
-        let env = generate_mcpg_docker_env(&fm, &extensions);
+        let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
+        let env = generate_mcpg_docker_env(&fm, &declarations);
         assert!(
             env.contains("-e PASS_THROUGH"),
             "Should include passthrough var"
@@ -7848,8 +5543,8 @@ safe-outputs:
                 ..Default::default()
             })),
         );
-        let extensions = collect_extensions(&fm);
-        let env = generate_mcpg_docker_env(&fm, &extensions);
+        let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
+        let env = generate_mcpg_docker_env(&fm, &declarations);
         assert!(
             !env.contains("--privileged"),
             "Should reject invalid env var name with Docker flag injection"
@@ -7865,8 +5560,8 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\n---\n",
         )
         .unwrap();
-        let extensions = collect_extensions(&fm);
-        let env = generate_mcpg_step_env(&extensions);
+        let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
+        let env = generate_mcpg_step_env(&declarations);
         assert!(
             env.starts_with("env:\n"),
             "Should emit full env: block header"
@@ -7880,8 +5575,8 @@ safe-outputs:
     #[test]
     fn test_generate_mcpg_step_env_no_extensions() {
         let fm = minimal_front_matter();
-        let extensions = collect_extensions(&fm);
-        let env = generate_mcpg_step_env(&extensions);
+        let (_extensions, declarations) = collect_exts_and_decls(&fm);
+        let env = generate_mcpg_step_env(&declarations);
         assert!(
             env.is_empty(),
             "Should be empty when no extensions need pipeline vars"
@@ -7906,11 +5601,7 @@ safe-outputs:
     fn test_generate_mcpg_config_rejects_invalid_server_name() {
         let yaml = "---\nname: test-agent\ndescription: test\nmcp-servers:\n  bad/name:\n    container: python:3\n    entrypoint: python\n---\n";
         let (fm, _) = parse_markdown(yaml).unwrap();
-        let result = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        );
+        let result = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1);
         assert!(result.is_err(), "Should reject server name with /");
     }
 
@@ -7919,11 +5610,7 @@ safe-outputs:
         // ".." would resolve to /mcp via path normalization, bypassing routing
         let yaml = "---\nname: test-agent\ndescription: test\nmcp-servers:\n  ..:\n    container: python:3\n    entrypoint: python\n---\n";
         let (fm, _) = parse_markdown(yaml).unwrap();
-        let result = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        );
+        let result = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1);
         assert!(
             result.is_err(),
             "Should reject server name starting with dot"
@@ -7932,11 +5619,7 @@ safe-outputs:
         // ".hidden" would produce /mcp/.hidden
         let yaml2 = "---\nname: test-agent\ndescription: test\nmcp-servers:\n  .hidden:\n    container: python:3\n    entrypoint: python\n---\n";
         let (fm2, _) = parse_markdown(yaml2).unwrap();
-        let result2 = generate_mcpg_config(
-            &fm2,
-            &CompileContext::for_test(&fm2),
-            &collect_extensions(&fm2),
-        );
+        let result2 = generate_mcpg_config(&fm2, &collect_exts_and_decls(&fm2).1);
         assert!(
             result2.is_err(),
             "Should reject server name starting with dot"
@@ -7952,12 +5635,10 @@ safe-outputs:
         )
         .unwrap();
         // Pass inferred org since no explicit org is set
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test_with_org(&fm, "inferred-org"),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let extensions = collect_extensions(&fm);
+        let ctx = CompileContext::for_test_with_org(&fm, "inferred-org");
+        let declarations = extension_declarations_with_ctx(&extensions, &ctx);
+        let config = generate_mcpg_config(&fm, &declarations).unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         assert_eq!(ado.server_type, "stdio");
         assert_eq!(ado.container.as_deref(), Some(ADO_MCP_IMAGE));
@@ -7977,12 +5658,10 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    toolsets: [repos, wit, core]\n---\n",
         )
         .unwrap();
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test_with_org(&fm, "myorg"),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let extensions = collect_extensions(&fm);
+        let ctx = CompileContext::for_test_with_org(&fm, "myorg");
+        let declarations = extension_declarations_with_ctx(&extensions, &ctx);
+        let config = generate_mcpg_config(&fm, &declarations).unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         let args = ado.entrypoint_args.as_ref().unwrap();
         assert!(args.contains(&"-d".to_string()));
@@ -7998,12 +5677,7 @@ safe-outputs:
         )
         .unwrap();
         // Explicit org should be used even when inferred_org is None
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         let args = ado.entrypoint_args.as_ref().unwrap();
         assert!(args.contains(&"myorg".to_string()));
@@ -8015,12 +5689,10 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: explicit-org\n---\n",
         )
         .unwrap();
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test_with_org(&fm, "inferred-org"),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let extensions = collect_extensions(&fm);
+        let ctx = CompileContext::for_test_with_org(&fm, "inferred-org");
+        let declarations = extension_declarations_with_ctx(&extensions, &ctx);
+        let config = generate_mcpg_config(&fm, &declarations).unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         let args = ado.entrypoint_args.as_ref().unwrap();
         assert!(args.contains(&"explicit-org".to_string()));
@@ -8034,11 +5706,9 @@ safe-outputs:
         )
         .unwrap();
         // No explicit org and no inferred org — should fail
-        let result = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        );
+        let extensions = collect_extensions(&fm);
+        let ctx = CompileContext::for_test(&fm);
+        let result = try_extension_declarations_with_ctx(&extensions, &ctx);
         assert!(result.is_err());
         assert!(
             result
@@ -8055,11 +5725,9 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: \"my org/bad\"\n---\n",
         )
         .unwrap();
-        let result = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        );
+        let extensions = collect_extensions(&fm);
+        let ctx = CompileContext::for_test(&fm);
+        let result = try_extension_declarations_with_ctx(&extensions, &ctx);
         assert!(result.is_err());
         assert!(
             result
@@ -8076,11 +5744,9 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: myorg\n    toolsets: [\"repos\", \"bad toolset\"]\n---\n",
         )
         .unwrap();
-        let result = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        );
+        let extensions = collect_extensions(&fm);
+        let ctx = CompileContext::for_test(&fm);
+        let result = try_extension_declarations_with_ctx(&extensions, &ctx);
         assert!(result.is_err());
         assert!(
             result
@@ -8097,12 +5763,7 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: myorg\n    allowed:\n      - wit_get_work_item\n      - core_list_projects\n---\n",
         )
         .unwrap();
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         let tools = ado.tools.as_ref().unwrap();
         assert_eq!(tools, &["wit_get_work_item", "core_list_projects"]);
@@ -8114,24 +5775,14 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  azure-devops: false\n---\n",
         )
         .unwrap();
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         assert!(!config.mcp_servers.contains_key("azure-devops"));
     }
 
     #[test]
     fn test_ado_tool_not_set_not_generated() {
         let fm = minimal_front_matter();
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         assert!(!config.mcp_servers.contains_key("azure-devops"));
     }
 
@@ -8143,12 +5794,7 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: auto-org\nmcp-servers:\n  azure-devops:\n    container: \"node:20-slim\"\n    entrypoint: \"npx\"\n    entrypoint-args: [\"-y\", \"@azure-devops/mcp\", \"manual-org\"]\n---\n",
         )
         .unwrap();
-        let config = generate_mcpg_config(
-            &fm,
-            &CompileContext::for_test(&fm),
-            &collect_extensions(&fm),
-        )
-        .unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         // Should use the auto-configured org, not the manual one
         let args = ado.entrypoint_args.as_ref().unwrap();
@@ -8162,8 +5808,8 @@ safe-outputs:
             "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\npermissions:\n  read: my-read-sc\n---\n",
         )
         .unwrap();
-        let extensions = collect_extensions(&fm);
-        let env = generate_mcpg_docker_env(&fm, &extensions);
+        let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
+        let env = generate_mcpg_docker_env(&fm, &declarations);
         assert!(
             env.contains("ADO_MCP_AUTH_TOKEN"),
             "Should include ADO token passthrough when permissions.read is set"
@@ -8464,344 +6110,6 @@ safe-outputs:
     }
 
     // ─── standalone setup/teardown/finalize/checkout/repositories generators ───
-
-    #[test]
-    fn test_generate_setup_job_empty_returns_empty() {
-        let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
-        let ctx = CompileContext::for_test(&fm);
-        assert!(
-            generate_setup_job(&[], "name: MyPool", None, None, &[], &ctx)
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn test_generate_setup_job_with_steps() {
-        let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
-        let ctx = CompileContext::for_test(&fm);
-        let step: serde_yaml::Value = serde_yaml::from_str("bash: echo setup").unwrap();
-        let out = generate_setup_job(&[step], "name: MyPool", None, None, &[], &ctx).unwrap();
-        assert!(out.contains("- job: Setup"), "out: {out}");
-        assert!(out.contains("displayName: \"Setup\""), "out: {out}");
-        assert!(out.contains("name: MyPool"), "out: {out}");
-        assert!(out.contains("- checkout: self"), "out: {out}");
-        assert!(out.contains("echo setup"), "out: {out}");
-    }
-
-    #[test]
-    fn test_generate_teardown_job_empty_returns_empty() {
-        assert!(generate_teardown_job(&[], "name: MyPool").is_empty());
-    }
-
-    #[test]
-    fn test_generate_teardown_job_with_steps() {
-        let step: serde_yaml::Value = serde_yaml::from_str("bash: echo td").unwrap();
-        let out = generate_teardown_job(&[step], "name: MyPool");
-        assert!(out.contains("- job: Teardown"), "out: {out}");
-        assert!(out.contains("dependsOn: SafeOutputs"), "out: {out}");
-        assert!(out.contains("name: MyPool"), "out: {out}");
-        assert!(out.contains("echo td"), "out: {out}");
-    }
-
-    #[test]
-    fn test_generate_setup_job_multiline_pool_indentation() {
-        // 1ES pool resolves to a multi-line string; verify all lines
-        // are properly indented under `pool:`.
-        let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
-        let ctx = CompileContext::for_test(&fm);
-        let step: serde_yaml::Value = serde_yaml::from_str("bash: echo setup").unwrap();
-        let pool = "name: AZS-1ES-L-MMS-ubuntu-22.04\nos: linux";
-        let out = generate_setup_job(&[step], pool, None, None, &[], &ctx).unwrap();
-        // Both pool lines must be indented at the same level (4 spaces)
-        assert!(
-            out.contains("    name: AZS-1ES-L-MMS-ubuntu-22.04\n    os: linux"),
-            "multi-line pool must be indented correctly:\n{out}"
-        );
-    }
-
-    #[test]
-    fn test_generate_teardown_job_multiline_pool_indentation() {
-        let step: serde_yaml::Value = serde_yaml::from_str("bash: echo td").unwrap();
-        let pool = "name: AZS-1ES-L-MMS-ubuntu-22.04\nos: linux";
-        let out = generate_teardown_job(&[step], pool);
-        assert!(
-            out.contains("    name: AZS-1ES-L-MMS-ubuntu-22.04\n    os: linux"),
-            "multi-line pool must be indented correctly:\n{out}"
-        );
-    }
-
-    #[test]
-    fn test_resolve_pool_block_non_onees_defaults_to_vm_image() {
-        let block = resolve_pool_block(CompileTarget::Standalone, None).expect("pool block");
-        assert_eq!(block, "vmImage: ubuntu-22.04");
-    }
-
-    #[test]
-    fn test_resolve_pool_block_non_onees_from_name() {
-        let pool = PoolConfig::Name("SelfHostedPool".to_string());
-        let block = resolve_pool_block(CompileTarget::Standalone, Some(&pool)).expect("pool block");
-        assert_eq!(block, "name: SelfHostedPool");
-    }
-
-    #[test]
-    fn test_resolve_pool_block_non_onees_from_vm_image() {
-        let pool_yaml = "name: x\ndescription: x\npool:\n  vmImage: windows-latest";
-        let fm: FrontMatter = serde_yaml::from_str(pool_yaml).expect("front matter");
-        let block =
-            resolve_pool_block(CompileTarget::Standalone, fm.pool.as_ref()).expect("pool block");
-        assert_eq!(block, "vmImage: windows-latest");
-    }
-
-    #[test]
-    fn test_resolve_pool_block_onees_default_includes_name_and_os() {
-        let block = resolve_pool_block(CompileTarget::OneES, None).expect("pool block");
-        assert_eq!(block, "name: AZS-1ES-L-MMS-ubuntu-22.04\nos: linux");
-    }
-
-    #[test]
-    fn test_resolve_pool_block_onees_honors_os_from_object() {
-        let yaml = "name: x\ndescription: x\ntarget: 1es\npool:\n  name: CustomPool\n  os: windows";
-        let fm: FrontMatter = serde_yaml::from_str(yaml).expect("front matter");
-        let block = resolve_pool_block(CompileTarget::OneES, fm.pool.as_ref()).expect("pool block");
-        assert_eq!(block, "name: CustomPool\nos: windows");
-    }
-
-    #[test]
-    fn test_resolve_pool_block_non_onees_empty_object_defaults_to_vm_image() {
-        let pool = PoolConfig::Full(PoolConfigFull {
-            name: None,
-            vm_image: None,
-            os: None,
-        });
-        let block = resolve_pool_block(CompileTarget::Standalone, Some(&pool)).expect("pool block");
-        assert_eq!(block, "vmImage: ubuntu-22.04");
-    }
-
-    #[test]
-    fn test_generate_agentic_depends_on_empty_steps() {
-        assert!(generate_agentic_depends_on(&[], false, false, &[], false, false).is_empty());
-    }
-
-    #[test]
-    fn test_generate_agentic_depends_on_with_steps() {
-        let step: serde_yaml::Value = serde_yaml::from_str("bash: x").unwrap();
-        assert_eq!(
-            generate_agentic_depends_on(&[step], false, false, &[], false, false),
-            "dependsOn: Setup"
-        );
-    }
-
-    #[test]
-    fn test_generate_agentic_depends_on_jobs_template_with_setup() {
-        // When compiling for target: job and the agent has a Setup job, both
-        // dependsOn and condition (no internal gates here) are emitted as
-        // dual-branch ${{ if }} template expressions so external template
-        // parameters merge correctly.
-        let step: serde_yaml::Value = serde_yaml::from_str("bash: x").unwrap();
-        let out = generate_agentic_depends_on(&[step], false, false, &[], true, false);
-        // dependsOn branches
-        assert!(
-            out.contains("${{ if eq(length(parameters.dependsOn), 0) }}:"),
-            "missing empty-deps branch: {out}"
-        );
-        assert!(
-            out.contains("${{ if ne(length(parameters.dependsOn), 0) }}:"),
-            "missing non-empty-deps branch: {out}"
-        );
-        // Each-iteration over external list, with Setup as the leading item
-        assert!(out.contains("- Setup"), "missing Setup leading item: {out}");
-        assert!(
-            out.contains("${{ each d in parameters.dependsOn }}:"),
-            "missing each: {out}"
-        );
-        // condition branches (no internal gates, so external-only path)
-        assert!(
-            out.contains("${{ if ne(parameters.condition, '') }}:"),
-            "missing non-empty-condition branch: {out}"
-        );
-        assert!(
-            out.contains("condition: ${{ parameters.condition }}"),
-            "missing condition inline emit: {out}"
-        );
-    }
-
-    #[test]
-    fn test_generate_agentic_depends_on_jobs_template_no_setup() {
-        // No internal Setup, no gates: only the non-empty-external branches
-        // are emitted (both dependsOn and condition default to omitted).
-        let out = generate_agentic_depends_on(&[], false, false, &[], true, false);
-        assert!(
-            !out.contains("${{ if eq(length(parameters.dependsOn), 0) }}:"),
-            "should not emit empty-deps branch when no internal Setup: {out}"
-        );
-        assert!(
-            out.contains("${{ if ne(length(parameters.dependsOn), 0) }}:"),
-            "missing non-empty-deps branch: {out}"
-        );
-        assert!(
-            out.contains("dependsOn: ${{ parameters.dependsOn }}"),
-            "missing simple dependsOn inline: {out}"
-        );
-        assert!(
-            !out.contains("${{ if eq(parameters.condition, '') }}:"),
-            "should not emit empty-condition branch when no internal condition: {out}"
-        );
-        assert!(
-            out.contains("${{ if ne(parameters.condition, '') }}:"),
-            "missing non-empty-condition branch: {out}"
-        );
-    }
-
-    #[test]
-    fn test_generate_agentic_depends_on_jobs_template_with_pr_gate() {
-        // With internal PR gate, the condition block emits BOTH branches:
-        // empty-external uses the existing internal expression verbatim;
-        // non-empty-external ANDs the external clause into the body.
-        let out = generate_agentic_depends_on(&[], true, false, &[], true, false);
-        assert!(
-            out.contains("${{ if eq(parameters.condition, '') }}:"),
-            "missing empty-condition branch: {out}"
-        );
-        assert!(
-            out.contains("${{ if ne(parameters.condition, '') }}:"),
-            "missing non-empty-condition branch: {out}"
-        );
-        // The non-empty branch ANDs the external clause in.
-        assert!(
-            out.contains("${{ parameters.condition }}"),
-            "missing external condition reference: {out}"
-        );
-        // The PR gate clause appears in both branches.
-        assert_eq!(
-            out.matches("prGate.SHOULD_RUN").count(),
-            2,
-            "PR gate clause must appear in both empty/non-empty branches: {out}"
-        );
-    }
-
-    #[test]
-    fn test_agentic_depends_on_synthetic_pr_active_emits_skip_guard_and_gate_enforced_pr_clause() {
-        // synthetic_pr_active=true + has_pr_filters=true → emits the
-        // AW_SYNTHETIC_PR_SKIP guard and a gate-enforced PR clause: real
-        // and synth PR builds must pass the gate (no permissive
-        // bypass arms).
-        let out = generate_agentic_depends_on(&[], true, false, &[], false, true);
-        assert!(out.contains("dependsOn: Setup"), "should depend on Setup");
-        assert!(
-            out.contains("ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_SKIP'], 'true')"),
-            "must honour the synth-skip flag: {out}"
-        );
-        // The PR clause must REQUIRE the gate for real-PR AND synth-PR
-        // builds — i.e. allow unconditional run only when neither
-        // applies. Both AND-NOT arms must be present.
-        assert!(
-            out.contains("ne(variables['Build.Reason'], 'PullRequest')"),
-            "must contain the `ne(Build.Reason, 'PullRequest')` AND-NOT arm: {out}"
-        );
-        assert!(
-            out.contains("ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true')"),
-            "must contain the `ne(synthPr.AW_SYNTHETIC_PR, 'true')` AND-NOT arm: {out}"
-        );
-        assert!(
-            out.contains("eq(dependencies.Setup.outputs['prGate.SHOULD_RUN'], 'true')"),
-            "must still accept gate-passed as an activation reason: {out}"
-        );
-        // Defensive regression guards: the old permissive arms that
-        // bypassed the gate for any PR build MUST be gone.
-        assert!(
-            !out.contains("eq(variables['Build.Reason'], 'PullRequest')"),
-            "the buggy `eq(Build.Reason, PullRequest)` bypass arm must be gone: {out}"
-        );
-        assert!(
-            !out.contains("eq(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true')"),
-            "the buggy `eq(synthPr.AW_SYNTHETIC_PR, true)` bypass arm must be gone: {out}"
-        );
-    }
-
-    #[test]
-    fn test_agentic_depends_on_synthetic_pr_without_filters_still_emits_skip_guard() {
-        // synthetic_pr_active=true but no filters → Setup job still
-        // exists (the synthPr step lives there) so the dependsOn must
-        // be present and the skip guard must apply.
-        let out = generate_agentic_depends_on(&[], false, false, &[], false, true);
-        assert!(
-            out.contains("dependsOn: Setup"),
-            "should depend on Setup: {out}"
-        );
-        assert!(
-            out.contains("ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_SKIP'], 'true')"),
-            "must honour the synth-skip flag even without filters: {out}"
-        );
-    }
-
-    #[test]
-    fn test_generate_finalize_steps_empty() {
-        assert!(generate_finalize_steps(&[]).is_empty());
-    }
-
-    #[test]
-    fn test_generate_finalize_steps_with_step() {
-        let step: serde_yaml::Value = serde_yaml::from_str("bash: echo done").unwrap();
-        let out = generate_finalize_steps(&[step]);
-        assert!(out.contains("echo done"), "out: {out}");
-    }
-
-    #[test]
-    fn test_generate_checkout_steps_empty() {
-        assert!(generate_checkout_steps(&[]).is_empty());
-    }
-
-    #[test]
-    fn test_generate_checkout_steps_multiple() {
-        let aliases = vec!["repo-a".to_string(), "repo-b".to_string()];
-        let out = generate_checkout_steps(&aliases);
-        assert!(out.contains("- checkout: repo-a"), "out: {out}");
-        assert!(out.contains("- checkout: repo-b"), "out: {out}");
-    }
-
-    #[test]
-    fn test_generate_repositories_empty() {
-        assert!(generate_repositories(&[]).is_empty());
-    }
-
-    #[test]
-    fn test_generate_repositories_single() {
-        let repos = vec![Repository {
-            repository: "my-repo".to_string(),
-            repo_type: "git".to_string(),
-            name: "org/my-repo".to_string(),
-            repo_ref: "refs/heads/main".to_string(),
-        }];
-        let out = generate_repositories(&repos);
-        assert!(out.contains("- repository: my-repo"), "out: {out}");
-        assert!(out.contains("type: git"), "out: {out}");
-        assert!(out.contains("name: org/my-repo"), "out: {out}");
-        assert!(out.contains("ref: refs/heads/main"), "out: {out}");
-    }
-
-    #[test]
-    fn test_generate_repositories_multiple() {
-        let repos = vec![
-            Repository {
-                repository: "repo-a".to_string(),
-                repo_type: "git".to_string(),
-                name: "org/repo-a".to_string(),
-                repo_ref: "refs/heads/main".to_string(),
-            },
-            Repository {
-                repository: "repo-b".to_string(),
-                repo_type: "git".to_string(),
-                name: "org/repo-b".to_string(),
-                repo_ref: "refs/heads/develop".to_string(),
-            },
-        ];
-        let out = generate_repositories(&repos);
-        assert!(out.contains("- repository: repo-a"), "out: {out}");
-        assert!(out.contains("- repository: repo-b"), "out: {out}");
-        assert!(out.contains("name: org/repo-a"), "out: {out}");
-        assert!(out.contains("ref: refs/heads/develop"), "out: {out}");
-    }
 
     // ──────────────────────────────────────────────────────────────────────
     // Tests for compact `repos:` lowering

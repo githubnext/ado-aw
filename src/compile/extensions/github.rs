@@ -1,4 +1,4 @@
-use super::{CompilerExtension, ExtensionPhase};
+use super::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 
 // ─── GitHub (always-on, internal) ────────────────────────────────────
 
@@ -18,7 +18,35 @@ impl CompilerExtension for GitHubExtension {
         ExtensionPhase::Tool
     }
 
-    fn allowed_copilot_tools(&self) -> Vec<String> {
-        vec!["github".to_string()]
+    /// Typed-IR view. The GitHub extension only contributes a single
+    /// `--allow-tool github` flag — no steps, hosts, or env vars —
+    /// routed through the `Declarations` bundle.
+    fn declarations(&self, _ctx: &CompileContext) -> anyhow::Result<Declarations> {
+        Ok(Declarations {
+            copilot_allow_tools: vec!["github".to_string()],
+            ..Declarations::default()
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compile::extensions::CompileContext;
+    use crate::compile::types::FrontMatter;
+
+    fn parse_fm(yaml: &str) -> FrontMatter {
+        serde_yaml::from_str(yaml).expect("front matter parses")
+    }
+
+    #[test]
+    fn declarations_carries_only_copilot_allow_tools() {
+        let fm = parse_fm("name: t\ndescription: x\n");
+        let ctx = CompileContext::for_test(&fm);
+        let decl = GitHubExtension.declarations(&ctx).unwrap();
+        assert_eq!(decl.copilot_allow_tools, vec!["github".to_string()]);
+        assert!(decl.agent_prepare_steps.is_empty());
+        assert!(decl.network_hosts.is_empty());
+        assert!(decl.mcpg_servers.is_empty());
     }
 }

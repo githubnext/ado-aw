@@ -162,10 +162,6 @@ Every compiled pipeline runs as three sequential jobs:
 │   │       ├── mod.rs    # Config types, install/auth helpers
 │   │       └── extension.rs # CompilerExtension impl
 │   ├── data/
-│   │   ├── base.yml          # Base pipeline template for standalone
-│   │   ├── 1es-base.yml      # Base pipeline template for 1ES target
-│   │   ├── job-base.yml      # Job-level ADO template for target: job
-│   │   ├── stage-base.yml    # Stage-level ADO template for target: stage
 │   │   ├── ecosystem_domains.json # Network allowlists per ecosystem
 │   │   ├── init-agent.md     # Dispatcher agent template for `init` command
 │   │   └── threat-analysis.md # Threat detection analysis prompt template
@@ -256,8 +252,7 @@ index to jump to the right page.
 
 ### Compiler internals & operations
 
-- [`docs/template-markers.md`](docs/template-markers.md) — every `{{ marker }}`
-  in `src/data/base.yml`, `src/data/1es-base.yml`, `src/data/job-base.yml`, and `src/data/stage-base.yml` and how it is replaced.
+- [`docs/ir.md`](docs/ir.md) — typed Azure DevOps pipeline IR (`Pipeline`, jobs/stages/steps, output refs, graph pass, lowering, and target builders).
 - [`docs/cli.md`](docs/cli.md) — `ado-aw` CLI commands (`init`, `compile`,
   `check`, `mcp`, `mcp-http`, `execute`, `secrets`, `enable`, `disable`,
   `remove`, `list`, `status`, `run`, `audit`; `configure` is a deprecated hidden alias).
@@ -272,7 +267,7 @@ index to jump to the right page.
   allowed domains, ecosystem identifiers, blocking, and ADO `permissions:`
   service-connection model.
 - [`docs/extending.md`](docs/extending.md) — adding new CLI commands, compile
-  targets, front-matter fields, template markers, safe-output tools,
+  targets, front-matter fields, typed IR extensions, safe-output tools,
   first-class tools, and runtimes; the `CompilerExtension` trait.
 - [`docs/filter-ir.md`](docs/filter-ir.md) — filter expression IR
   specification: `Fact`/`Predicate` types, three-pass compilation (lower →
