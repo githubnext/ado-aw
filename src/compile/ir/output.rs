@@ -134,38 +134,56 @@ pub struct ProducerLocation<'a> {
 ///
 /// Mirrors the three-row table in this module's top-level
 /// doc-comment.
+///
+/// # Errors
+///
+/// Returns `Err` if the cross-stage branch is taken but the producer
+/// has no stage. Graph validation in [`super::graph::build_graph`]
+/// rejects mixed staged / un-staged references before lowering, so
+/// callers reached through [`super::graph::resolve`] → `lower` never
+/// trip this — but the error path keeps the function honest if it
+/// is invoked outside the validated flow.
 pub fn lower_outputref(
     consumer: ConsumerLocation<'_>,
     producer: ProducerLocation<'_>,
     r: &OutputRef,
-) -> String {
+) -> anyhow::Result<String> {
     // Same job?
     if consumer.job == producer.job && consumer.stage.map(|s| s.as_str()) == producer.stage.map(|s| s.as_str()) {
-        return format!("$({step}.{name})", step = r.step, name = r.name);
+        return Ok(format!("$({step}.{name})", step = r.step, name = r.name));
     }
     // Different stage?
     if consumer.stage.map(|s| s.as_str()) != producer.stage.map(|s| s.as_str()) {
         // Cross-stage refs are only valid when both sides are inside
-        // stages — graph validation already rejects mixed
-        // staged/un-staged, so unwrap here is load-bearing.
-        let prod_stage = producer
-            .stage
-            .expect("cross-stage ref must have producer stage (graph validation enforces)");
-        return format!(
+        // stages. Graph validation rejects mixed staged/un-staged
+        // before reaching here; the error path covers callers that
+        // bypass the validation pass.
+        let prod_stage = producer.stage.ok_or_else(|| {
+            anyhow::anyhow!(
+                "ir::output::lower_outputref: cross-stage reference to step '{}' \
+                 has no producer stage (graph validation should have rejected this; \
+                 producer job={}, consumer stage={:?}, consumer job={})",
+                r.step,
+                producer.job,
+                consumer.stage.map(|s| s.as_str()),
+                consumer.job,
+            )
+        })?;
+        return Ok(format!(
             "stageDependencies.{stage}.{job}.outputs['{step}.{name}']",
             stage = prod_stage,
             job = producer.job,
             step = r.step,
             name = r.name,
-        );
+        ));
     }
     // Same stage (or both stage-less), different jobs.
-    format!(
+    Ok(format!(
         "dependencies.{job}.outputs['{step}.{name}']",
         job = producer.job,
         step = r.step,
         name = r.name,
-    )
+    ))
 }
 
 #[cfg(test)]
@@ -215,7 +233,7 @@ mod tests {
         };
         let r = OutputRef::new(StepId::new("synthPr").unwrap(), "AW_SYNTHETIC_PR");
         assert_eq!(
-            lower_outputref(consumer, producer, &r),
+            lower_outputref(consumer, producer, &r).unwrap(),
             "$(synthPr.AW_SYNTHETIC_PR)"
         );
     }
@@ -236,7 +254,7 @@ mod tests {
         };
         let r = OutputRef::new(StepId::new("synthPr").unwrap(), "AW_SYNTHETIC_PR_SKIP");
         assert_eq!(
-            lower_outputref(consumer, producer, &r),
+            lower_outputref(consumer, producer, &r).unwrap(),
             "dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_SKIP']"
         );
     }
@@ -257,7 +275,7 @@ mod tests {
         };
         let r = OutputRef::new(StepId::new("synthPr").unwrap(), "AW_SYNTHETIC_PR");
         assert_eq!(
-            lower_outputref(consumer, producer, &r),
+            lower_outputref(consumer, producer, &r).unwrap(),
             "stageDependencies.StageA.Setup.outputs['synthPr.AW_SYNTHETIC_PR']"
         );
     }
@@ -272,8 +290,33 @@ mod tests {
         let consumer = ConsumerLocation { stage: None, job: &cj };
         let r = OutputRef::new(StepId::new("synthPr").unwrap(), "X");
         assert_eq!(
-            lower_outputref(consumer, producer, &r),
+            lower_outputref(consumer, producer, &r).unwrap(),
             "dependencies.Setup.outputs['synthPr.X']"
+        );
+    }
+
+    #[test]
+    fn errors_when_cross_stage_producer_has_no_stage() {
+        // Mixed staged/un-staged is invalid; graph validation
+        // normally rejects this before lowering, but the function
+        // surfaces it as a typed error rather than panicking.
+        let producer_job = job_id("Setup");
+        let producer = ProducerLocation {
+            stage: None,
+            job: &producer_job,
+        };
+        let consumer_job = job_id("Agent");
+        let consumer_stage = stage_id("StageB");
+        let consumer = ConsumerLocation {
+            stage: Some(&consumer_stage),
+            job: &consumer_job,
+        };
+        let r = OutputRef::new(StepId::new("synthPr").unwrap(), "AW_SYNTHETIC_PR");
+        let err = lower_outputref(consumer, producer, &r).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("cross-stage reference"),
+            "expected cross-stage error, got: {msg}"
         );
     }
 }

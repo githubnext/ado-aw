@@ -386,7 +386,7 @@ pub(crate) fn build_canonical_jobs(
 
     // Wire dependsOn between jobs (graph pass also derives but
     // explicit edges make the YAML match committed lock files).
-    wire_explicit_dependencies(&mut jobs, &p);
+    wire_explicit_dependencies(&mut jobs, &p)?;
     Ok(jobs)
 }
 
@@ -1167,11 +1167,19 @@ fn build_teardown_job(
 ///
 /// The `prefix` is threaded through so dependency edges use the
 /// correct (possibly prefixed) target job IDs for `target: job|stage`.
-fn wire_explicit_dependencies(jobs: &mut [Job], prefix: &JobPrefix<'_>) {
-    let setup_id = prefix.id("Setup").expect("Setup ID");
-    let agent_id = prefix.id("Agent").expect("Agent ID");
-    let detection_id = prefix.id("Detection").expect("Detection ID");
-    let safeoutputs_id = prefix.id("SafeOutputs").expect("SafeOutputs ID");
+///
+/// # Errors
+///
+/// Returns `Err` if `prefix.id(...)` fails for any of the canonical
+/// names. In the standard call graph the jobs were just constructed
+/// from the same `prefix`, so a failure here would indicate an
+/// invalid `JobPrefix` reaching this function — the typed error is
+/// preferable to a panic for any future caller.
+fn wire_explicit_dependencies(jobs: &mut [Job], prefix: &JobPrefix<'_>) -> Result<()> {
+    let setup_id = prefix.id("Setup")?;
+    let agent_id = prefix.id("Agent")?;
+    let detection_id = prefix.id("Detection")?;
+    let safeoutputs_id = prefix.id("SafeOutputs")?;
     let has_setup = jobs.iter().any(|j| j.id == setup_id);
     for j in jobs.iter_mut() {
         if j.id == agent_id && has_setup {
@@ -1184,6 +1192,7 @@ fn wire_explicit_dependencies(jobs: &mut [Job], prefix: &JobPrefix<'_>) {
             j.depends_on = vec![safeoutputs_id.clone()];
         }
     }
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────

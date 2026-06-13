@@ -295,7 +295,6 @@ pub trait CompilerExtension {
 /// Returned by [`CompilerExtension::declarations`]. Extensions that
 /// contribute pipeline steps return typed
 /// [`crate::compile::ir::step::Step`] values directly.
-#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct Declarations {
     /// Steps injected into the Agent job's `prepare` phase
@@ -305,10 +304,24 @@ pub struct Declarations {
     pub setup_steps: Vec<crate::compile::ir::step::Step>,
     /// Steps injected into the Agent job's `finalize` phase (after
     /// the agent invocation; conditioned on `always()` typically).
+    ///
+    /// **Reserved for future use** — no extension contributes here
+    /// today and no compile-target reads this field. Kept as a
+    /// declared surface so the contract is visible when an
+    /// extension does want to plug into this phase.
+    #[allow(dead_code)]
     pub agent_finalize_steps: Vec<crate::compile::ir::step::Step>,
     /// Steps injected into the Detection job's `prepare` phase.
+    ///
+    /// **Reserved for future use** — no extension contributes here
+    /// today and no compile-target reads this field.
+    #[allow(dead_code)]
     pub detection_prepare_steps: Vec<crate::compile::ir::step::Step>,
     /// Steps injected into the SafeOutputs job.
+    ///
+    /// **Reserved for future use** — no extension contributes here
+    /// today and no compile-target reads this field.
+    #[allow(dead_code)]
     pub safe_outputs_steps: Vec<crate::compile::ir::step::Step>,
     /// AWF network-allowlist domains.
     pub network_hosts: Vec<String>,

@@ -1133,7 +1133,7 @@ fn lower_outputref_for(ctx: &LoweringContext<'_>, r: &OutputRef) -> Result<Strin
         stage: producer_loc.stage.as_ref(),
         job: &producer_loc.job,
     };
-    Ok(lower_outputref(ctx.consumer(), producer, r))
+    lower_outputref(ctx.consumer(), producer, r)
 }
 
 /// Lower an OutputRef in **expression-atom** form (no `$(...)` wrap).
@@ -1151,7 +1151,7 @@ fn lower_outputref_for_expr(ctx: &LoweringContext<'_>, r: &OutputRef) -> Result<
     };
     // Reuse the same lowering and strip the `$()` wrap for same-job
     // macro form, since we're inside `$[ … ]` already.
-    let lowered = lower_outputref(ctx.consumer(), producer, r);
+    let lowered = lower_outputref(ctx.consumer(), producer, r)?;
     if let Some(rest) = lowered.strip_prefix("$(").and_then(|s| s.strip_suffix(')')) {
         // Same-job macro: `$(step.name)` → expression form
         // `variables['step.name']`. ADO runtime expressions cannot

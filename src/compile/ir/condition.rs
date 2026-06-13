@@ -206,7 +206,7 @@ pub mod codegen {
                     stage: producer_loc.stage.as_ref(),
                     job: &producer_loc.job,
                 };
-                lower_outputref(ctx.consumer(), producer, r)
+                lower_outputref(ctx.consumer(), producer, r)?
             }
         })
     }
