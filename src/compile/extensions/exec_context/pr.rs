@@ -213,13 +213,13 @@ mod tests {
 
     // ── Typed-IR `prepare_step_typed` shape tests ──
 
-    /// Synth-active: the typed prepare step's env block must carry
-    /// typed `Coalesce(AdoMacro, StepOutput)` for `SYSTEM_PULLREQUEST_*`
-    /// and a typed `Coalesce(StepOutput)` for `AW_SYNTHETIC_PR` —
+    /// Synth-active: the typed prepare step's env block consumes the
+    /// Agent-job-level unified pipeline variables populated from the
+    /// Setup-job synthPr outputs. This keeps step env in macro form —
     /// no [`Step::RawYaml`], no hand-written `$[ coalesce(...) ]`
     /// strings.
     #[test]
-    fn prepare_step_typed_synth_active_carries_typed_coalesce_envs() {
+    fn prepare_step_typed_synth_active_consumes_unified_pipeline_vars() {
         let contributor = PrContextContributor::new(PrContextConfig::default(), true);
         let fm = pr_fm();
         let ctx = CompileContext::for_test(&fm);

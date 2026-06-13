@@ -8,6 +8,8 @@
 
 use std::time::Duration;
 
+use anyhow::Result;
+
 use super::condition::Condition;
 use super::env::EnvValue;
 use super::ids::JobId;
@@ -119,11 +121,48 @@ pub struct JobVariable {
 #[derive(Debug, Clone)]
 pub struct TemplateDependsOnWrap {
     /// Name of the template parameter carrying the external
-    /// `dependsOn` value (always `"dependsOn"` today).
+    /// `dependsOn` value (always `"dependsOn"` today). MUST be a valid
+    /// ADO parameter identifier (`[A-Za-z_][A-Za-z0-9_]*`).
     pub depends_on_param: String,
     /// Name of the template parameter carrying the external
-    /// `condition` value (always `"condition"` today).
+    /// `condition` value (always `"condition"` today). MUST be a valid
+    /// ADO parameter identifier (`[A-Za-z_][A-Za-z0-9_]*`).
     pub condition_param: String,
+}
+
+impl TemplateDependsOnWrap {
+    /// Construct a template-parameter wrap, validating the parameter
+    /// names before they are embedded into ADO template-expression
+    /// YAML keys.
+    pub fn new(
+        depends_on_param: impl Into<String>,
+        condition_param: impl Into<String>,
+    ) -> Result<Self> {
+        let depends_on_param = depends_on_param.into();
+        let condition_param = condition_param.into();
+        validate_template_parameter_name(
+            "TemplateDependsOnWrap::depends_on_param",
+            &depends_on_param,
+        )?;
+        validate_template_parameter_name(
+            "TemplateDependsOnWrap::condition_param",
+            &condition_param,
+        )?;
+        Ok(Self {
+            depends_on_param,
+            condition_param,
+        })
+    }
+}
+
+fn validate_template_parameter_name(field: &str, value: &str) -> Result<()> {
+    if !crate::validate::is_valid_parameter_name(value) {
+        anyhow::bail!(
+            "{field} must be a valid ADO parameter identifier \
+             ([A-Za-z_][A-Za-z0-9_]*); got {value:?}"
+        );
+    }
+    Ok(())
 }
 
 /// ADO job pool. Captures the two shapes ado-aw uses today
@@ -208,5 +247,13 @@ mod tests {
             persist_credentials: None,
         }));
         assert_eq!(j.steps.len(), 1);
+    }
+
+    #[test]
+    fn template_depends_on_wrap_rejects_invalid_parameter_names() {
+        let err = TemplateDependsOnWrap::new("dependsOn", "bad }}").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("TemplateDependsOnWrap::condition_param"));
+        assert!(msg.contains("valid ADO parameter identifier"));
     }
 }

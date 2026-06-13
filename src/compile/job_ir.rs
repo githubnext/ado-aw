@@ -39,9 +39,7 @@ use super::common;
 use super::extensions::{CompileContext, Extension};
 use super::ir::ids::JobId;
 use super::ir::job::TemplateDependsOnWrap;
-use super::ir::{
-    Pipeline, PipelineBody, PipelineShape, Resources, TemplateParams, Triggers,
-};
+use super::ir::{Pipeline, PipelineBody, PipelineShape, Resources, TemplateParams, Triggers};
 use super::standalone_ir::build_pipeline_context;
 use super::types::FrontMatter;
 
@@ -85,10 +83,8 @@ pub fn build_job_pipeline(
     let mut jobs = built.jobs;
     for job in jobs.iter_mut() {
         if job.id == agent_id {
-            job.template_dependson_wrap = Some(TemplateDependsOnWrap {
-                depends_on_param: "dependsOn".into(),
-                condition_param: "condition".into(),
-            });
+            job.template_dependson_wrap =
+                Some(TemplateDependsOnWrap::new("dependsOn", "condition")?);
         }
     }
 

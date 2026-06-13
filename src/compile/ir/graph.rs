@@ -144,7 +144,8 @@ pub fn build_graph(p: &Pipeline) -> Result<Graph> {
                     if !local_jobs.insert(job.id.as_str()) {
                         bail!(
                             "ir::graph: duplicate JobId '{}' inside stage '{}'",
-                            job.id, stage.id
+                            job.id,
+                            stage.id
                         );
                     }
                     index_job_steps(Some(stage.id.clone()), job, &mut g)?;
@@ -153,7 +154,29 @@ pub fn build_graph(p: &Pipeline) -> Result<Graph> {
         }
     }
 
-    // Pass 2: walk every OutputRef and add the corresponding edges.
+    // Pass 2: fold manually-populated depends_on fields into the
+    // graph before cycle detection. The tuple shape is
+    // (consumer, producer): `Agent.depends_on = [Setup]` becomes
+    // `(Agent, Setup)`.
+    match &p.body {
+        PipelineBody::Jobs(jobs) => {
+            for job in jobs {
+                add_manual_job_edges(job, &mut g);
+            }
+        }
+        PipelineBody::Stages(stages) => {
+            for stage in stages {
+                for producer in &stage.depends_on {
+                    g.stage_edges.insert((stage.id.clone(), producer.clone()));
+                }
+                for job in &stage.jobs {
+                    add_manual_job_edges(job, &mut g);
+                }
+            }
+        }
+    }
+
+    // Pass 3: walk every OutputRef and add the corresponding edges.
     match &p.body {
         PipelineBody::Jobs(jobs) => {
             for job in jobs {
@@ -162,6 +185,11 @@ pub fn build_graph(p: &Pipeline) -> Result<Graph> {
         }
         PipelineBody::Stages(stages) => {
             for stage in stages {
+                if let Some(cond) = &stage.condition {
+                    for r in collect_condition_refs(cond) {
+                        add_edge_for_stage_condition(&stage.id, r, &mut g)?;
+                    }
+                }
                 for job in &stage.jobs {
                     add_edges_from_job(Some(stage.id.clone()), job, &mut g)?;
                 }
@@ -172,11 +200,13 @@ pub fn build_graph(p: &Pipeline) -> Result<Graph> {
     Ok(g)
 }
 
-fn index_job_steps(
-    stage: Option<StageId>,
-    job: &super::job::Job,
-    g: &mut Graph,
-) -> Result<()> {
+fn add_manual_job_edges(job: &super::job::Job, g: &mut Graph) {
+    for producer in &job.depends_on {
+        g.job_edges.insert((job.id.clone(), producer.clone()));
+    }
+}
+
+fn index_job_steps(stage: Option<StageId>, job: &super::job::Job, g: &mut Graph) -> Result<()> {
     for step in &job.steps {
         if let Some(id) = step.id() {
             // Step ids are pipeline-wide identifiers in ADO when
@@ -191,7 +221,8 @@ fn index_job_steps(
             {
                 bail!(
                     "ir::graph: duplicate StepId '{}' inside job '{}'",
-                    id, job.id
+                    id,
+                    job.id
                 );
             }
             let outputs: BTreeSet<String> = collect_step_outputs(step);
@@ -210,9 +241,7 @@ fn index_job_steps(
 
 fn collect_step_outputs(step: &Step) -> BTreeSet<String> {
     match step {
-        Step::Bash(BashStep { outputs, .. }) => {
-            outputs.iter().map(|o| o.name.clone()).collect()
-        }
+        Step::Bash(BashStep { outputs, .. }) => outputs.iter().map(|o| o.name.clone()).collect(),
         // TaskStep doesn't currently model outputs; if we ever add
         // them, extend here. CheckoutStep / DownloadStep / PublishStep
         // don't emit step outputs. RawYaml is opaque to the IR.
@@ -224,11 +253,7 @@ fn collect_step_outputs(step: &Step) -> BTreeSet<String> {
     }
 }
 
-fn add_edges_from_job(
-    stage: Option<StageId>,
-    job: &super::job::Job,
-    g: &mut Graph,
-) -> Result<()> {
+fn add_edges_from_job(stage: Option<StageId>, job: &super::job::Job, g: &mut Graph) -> Result<()> {
     // Walk job-level condition references.
     if let Some(cond) = &job.condition {
         for r in collect_condition_refs(cond) {
@@ -282,9 +307,7 @@ fn add_edges_from_job(
     Ok(())
 }
 
-fn collect_env_refs<'a, I: IntoIterator<Item = &'a EnvValue>>(
-    values: I,
-) -> Vec<&'a OutputRef> {
+fn collect_env_refs<'a, I: IntoIterator<Item = &'a EnvValue>>(values: I) -> Vec<&'a OutputRef> {
     let mut out = Vec::new();
     for v in values {
         collect_env_refs_into(v, &mut out);
@@ -351,7 +374,9 @@ fn add_edge_for_ref(
         anyhow::anyhow!(
             "ir::graph: OutputRef references unknown step '{}': consumer {}.{}",
             r.step,
-            consumer_stage.map(|s| s.to_string()).unwrap_or_else(|| "<no stage>".to_string()),
+            consumer_stage
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "<no stage>".to_string()),
             consumer_job
         )
     })?;
@@ -381,10 +406,9 @@ fn add_edge_for_ref(
         return Ok(());
     }
 
-    // Cross-stage edge: add stage edge AND surface a cross-job edge
-    // even when the producer's job has the same id as the consumer's
-    // job, because ADO requires both `stageDependencies` AND a
-    // `dependsOn` declaration on the consumer stage.
+    // Cross-stage edge: ADO models this as a stage-level `dependsOn`
+    // edge. The job-level graph intentionally stays untouched because
+    // jobs cannot depend directly on jobs in other stages.
     if producer_stage.as_ref() != consumer_stage {
         if let (Some(prod_stage), Some(cons_stage)) = (producer_stage, consumer_stage) {
             if &prod_stage != cons_stage {
@@ -395,14 +419,63 @@ fn add_edge_for_ref(
             bail!(
                 "ir::graph: cross-stage OutputRef between staged and un-staged sections \
                  of the same pipeline is not supported (consumer job '{}', producer step '{}')",
-                consumer_job, r.step
+                consumer_job,
+                r.step
             );
         }
     } else {
         // Same stage (or both stage-less): a cross-job edge inside it.
-        g.job_edges
-            .insert((consumer_job.clone(), producer_job));
+        g.job_edges.insert((consumer_job.clone(), producer_job));
     }
+    Ok(())
+}
+
+fn add_edge_for_stage_condition(
+    consumer_stage: &StageId,
+    r: &OutputRef,
+    g: &mut Graph,
+) -> Result<()> {
+    let loc = g.step_locations.get(&r.step).ok_or_else(|| {
+        anyhow::anyhow!(
+            "ir::graph: stage condition references unknown step '{}': consumer stage {}",
+            r.step,
+            consumer_stage
+        )
+    })?;
+    if !loc.outputs.contains(&r.name) {
+        let known: Vec<String> = loc.outputs.iter().cloned().collect();
+        bail!(
+            "ir::graph: stage condition OutputRef '{step}.{name}' is not declared by the \
+             producer step's outputs list (declared outputs: [{known}]).",
+            step = r.step,
+            name = r.name,
+            known = known.join(", "),
+        );
+    }
+
+    g.outputs_needing_is_output
+        .entry(r.step.clone())
+        .or_default()
+        .insert(r.name.clone());
+
+    let producer_stage = loc.stage.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "ir::graph: stage condition in stage '{}' references un-staged producer step '{}'",
+            consumer_stage,
+            r.step
+        )
+    })?;
+
+    if producer_stage == consumer_stage {
+        bail!(
+            "ir::graph: a stage condition cannot reference a step output from a job in the \
+             same stage ('{}'); the condition is evaluated before any job in the stage runs",
+            consumer_stage
+        );
+    }
+
+    g.stage_edges
+        .insert((consumer_stage.clone(), producer_stage.clone()));
     Ok(())
 }
 
@@ -427,7 +500,10 @@ fn detect_cycles_in<T: Clone + Eq + Ord + std::hash::Hash + std::fmt::Display>(
     let mut adjacency: HashMap<T, Vec<T>> = HashMap::new();
     let mut in_degree: HashMap<T, usize> = HashMap::new();
     for (consumer, producer) in edges {
-        adjacency.entry(producer.clone()).or_default().push(consumer.clone());
+        adjacency
+            .entry(producer.clone())
+            .or_default()
+            .push(consumer.clone());
         *in_degree.entry(consumer.clone()).or_insert(0) += 1;
         in_degree.entry(producer.clone()).or_insert(0);
     }
@@ -442,7 +518,9 @@ fn detect_cycles_in<T: Clone + Eq + Ord + std::hash::Hash + std::fmt::Display>(
         visited += 1;
         if let Some(succs) = adjacency.get(&n) {
             for s in succs {
-                let entry = in_degree.get_mut(s).expect("node must be in in_degree");
+                let entry = in_degree.get_mut(s).ok_or_else(|| {
+                    anyhow::anyhow!("ir::graph: internal invariant: node missing from in_degree")
+                })?;
                 *entry -= 1;
                 if *entry == 0 {
                     queue.push_back(s.clone());
@@ -508,10 +586,7 @@ fn apply_edges(p: &mut Pipeline, g: &Graph) {
     }
 }
 
-fn merge_job_deps(
-    job: &mut super::job::Job,
-    job_to_producers: &HashMap<JobId, BTreeSet<JobId>>,
-) {
+fn merge_job_deps(job: &mut super::job::Job, job_to_producers: &HashMap<JobId, BTreeSet<JobId>>) {
     if let Some(prods) = job_to_producers.get(&job.id) {
         let mut existing: BTreeSet<JobId> = job.depends_on.iter().cloned().collect();
         existing.extend(prods.iter().cloned());
@@ -594,13 +669,10 @@ mod tests {
         let mut setup = Job::new(JobId::new("Setup").unwrap(), "Setup", pool());
         setup.push_step(setup_step);
 
-        let agent_step = Step::Bash(
-            BashStep::new("Agent work", "echo a")
-                .with_env(
-                    "AW_SYNTHETIC_PR",
-                    EnvValue::step_output(OutputRef::new(synth, "AW_SYNTHETIC_PR")),
-                ),
-        );
+        let agent_step = Step::Bash(BashStep::new("Agent work", "echo a").with_env(
+            "AW_SYNTHETIC_PR",
+            EnvValue::step_output(OutputRef::new(synth, "AW_SYNTHETIC_PR")),
+        ));
         let mut agent = Job::new(JobId::new("Agent").unwrap(), "Agent", pool());
         agent.push_step(agent_step);
 
@@ -640,10 +712,10 @@ mod tests {
         let mut setup = Job::new(JobId::new("Setup").unwrap(), "Setup", pool());
         setup.push_step(producer);
         let mut agent = Job::new(JobId::new("Agent").unwrap(), "Agent", pool());
-        agent.push_step(Step::Bash(BashStep::new("a", "echo a").with_env(
-            "X",
-            EnvValue::step_output(OutputRef::new(synth, "READ_ME")),
-        )));
+        agent.push_step(Step::Bash(
+            BashStep::new("a", "echo a")
+                .with_env("X", EnvValue::step_output(OutputRef::new(synth, "READ_ME"))),
+        ));
         let mut p = pipe(PipelineBody::Jobs(vec![setup, agent]));
         resolve(&mut p).unwrap();
 
@@ -709,10 +781,10 @@ mod tests {
                 .with_id(synth.clone())
                 .with_output(OutputDecl::new("X")),
         );
-        let consumer = Step::Bash(BashStep::new("c", "echo c").with_env(
-            "X",
-            EnvValue::step_output(OutputRef::new(synth, "X")),
-        ));
+        let consumer = Step::Bash(
+            BashStep::new("c", "echo c")
+                .with_env("X", EnvValue::step_output(OutputRef::new(synth, "X"))),
+        );
         let mut job = Job::new(JobId::new("Same").unwrap(), "Same", pool());
         job.push_step(producer);
         job.push_step(consumer);
@@ -747,10 +819,10 @@ mod tests {
                 .with_id(id.clone())
                 .with_output(OutputDecl::new("KNOWN")),
         );
-        let consumer = Step::Bash(BashStep::new("c", "echo c").with_env(
-            "X",
-            EnvValue::step_output(OutputRef::new(id, "MISSING")),
-        ));
+        let consumer = Step::Bash(
+            BashStep::new("c", "echo c")
+                .with_env("X", EnvValue::step_output(OutputRef::new(id, "MISSING"))),
+        );
         let mut job_a = Job::new(JobId::new("A").unwrap(), "A", pool());
         job_a.push_step(producer);
         let mut job_b = Job::new(JobId::new("B").unwrap(), "B", pool());
@@ -813,6 +885,48 @@ mod tests {
     }
 
     #[test]
+    fn manual_job_depends_on_cycle_is_rejected() {
+        let mut a = Job::new(JobId::new("A").unwrap(), "A", pool());
+        a.depends_on.push(JobId::new("B").unwrap());
+        let mut b = Job::new(JobId::new("B").unwrap(), "B", pool());
+        b.depends_on.push(JobId::new("A").unwrap());
+
+        let mut p = pipe(PipelineBody::Jobs(vec![a, b]));
+        let err = resolve(&mut p).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("cycle in job dependency graph"));
+        assert!(msg.contains("A"));
+        assert!(msg.contains("B"));
+    }
+
+    #[test]
+    fn stage_condition_rejects_same_stage_step_output() {
+        let producer_id = StepId::new("producer").unwrap();
+        let mut producer_job = Job::new(JobId::new("Producer").unwrap(), "Producer", pool());
+        producer_job.push_step(Step::Bash(
+            BashStep::new("producer", "echo producer")
+                .with_id(producer_id.clone())
+                .with_output(OutputDecl::new("READY")),
+        ));
+
+        let consumer_job = Job::new(JobId::new("Consumer").unwrap(), "Consumer", pool());
+        let mut stage = Stage::new(StageId::new("Main").unwrap(), "Main");
+        stage.condition = Some(Condition::Eq(
+            Expr::StepOutput(OutputRef::new(producer_id, "READY")),
+            Expr::Literal("true".into()),
+        ));
+        stage.push_job(producer_job);
+        stage.push_job(consumer_job);
+
+        let mut p = pipe(PipelineBody::Stages(vec![stage]));
+        let err = resolve(&mut p).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("a stage condition cannot reference a step output"));
+        assert!(msg.contains("same stage"));
+        assert!(msg.contains("evaluated before any job"));
+    }
+
+    #[test]
     fn coalesce_children_contribute_edges() {
         let synth = StepId::new("synthPr").unwrap();
         let mut setup = Job::new(JobId::new("Setup").unwrap(), "Setup", pool());
@@ -854,10 +968,7 @@ mod tests {
         let make_consumer_step = |name: &str, producer: &str, output: &str| -> Step {
             Step::Bash(BashStep::new(name, format!("echo {name}")).with_env(
                 output,
-                EnvValue::step_output(OutputRef::new(
-                    StepId::new(producer).unwrap(),
-                    output,
-                )),
+                EnvValue::step_output(OutputRef::new(StepId::new(producer).unwrap(), output)),
             ))
         };
 
@@ -879,10 +990,7 @@ mod tests {
                 let prev_step = format!("p{}", i - 1);
                 let prev_var = format!("V{}", i - 1);
                 job.condition = Some(Condition::Ne(
-                    Expr::StepOutput(OutputRef::new(
-                        StepId::new(prev_step).unwrap(),
-                        prev_var,
-                    )),
+                    Expr::StepOutput(OutputRef::new(StepId::new(prev_step).unwrap(), prev_var)),
                     Expr::Literal("skip".into()),
                 ));
                 // Belt and suspenders: also reference it from a step's env so the
@@ -911,7 +1019,9 @@ mod tests {
                 assert_eq!(
                     dependences,
                     vec![expected.as_str()],
-                    "S{} depends_on must be exactly [S{}]", i + 1, i
+                    "S{} depends_on must be exactly [S{}]",
+                    i + 1,
+                    i
                 );
             }
         } else {

@@ -60,6 +60,9 @@ pub enum EnvValue {
     /// Coalesce expression: lowers to `$[ coalesce(<a>, <b>, …, '') ]`.
     /// Nested `Coalesce` is flattened so the final form has at most
     /// one outer `$[ coalesce(...) ]` wrapper.
+    ///
+    /// Children that resolve to same-job step outputs are rejected at
+    /// lower time — use [`EnvValue::Concat`] instead.
     Coalesce(Vec<EnvValue>),
     /// Macro-form concatenation: lowers each child individually and
     /// joins the results with no separator and no outer wrap.
@@ -159,7 +162,9 @@ impl EnvValue {
 
     /// Construct an [`EnvValue::Coalesce`]. The lowering pass
     /// flattens nested `Coalesce` and appends `''` for safety, so
-    /// callers do not have to.
+    /// callers do not have to. Children that resolve to same-job step
+    /// outputs are rejected at lower time — use [`EnvValue::Concat`]
+    /// instead.
     pub fn coalesce(values: Vec<EnvValue>) -> Self {
         EnvValue::Coalesce(values)
     }

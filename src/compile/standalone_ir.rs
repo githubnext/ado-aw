@@ -1892,7 +1892,10 @@ fn evaluate_threat_analysis_step() -> BashStep {
                   echo \"##vso[task.setvariable variable=SafeToProcess;isOutput=true]$SAFE_TO_PROCESS\"\n\
                   echo \"SafeToProcess set to: $SAFE_TO_PROCESS\"\n";
     bash("Evaluate threat analysis", script)
-        .with_id(StepId::new("threatAnalysis").unwrap())
+        .with_id(
+            StepId::new("threatAnalysis")
+                .expect("threatAnalysis is a valid StepId — see StepId::new contract"),
+        )
         .with_output(OutputDecl::new("SafeToProcess"))
         .with_condition(Condition::Always)
 }

@@ -35,8 +35,9 @@ use super::step::{
     BashStep, CheckoutRepo, CheckoutStep, DownloadStep, PublishStep, Step, SubmodulesOpt, TaskStep,
 };
 use super::{
-    CiTrigger, Parameter, ParameterDefault, ParameterKind, Pipeline, PipelineBody, PipelineResource,
-    PipelineShape, PipelineVar, PrTrigger, RepositoryResource, Resources, Schedule,
+    CiTrigger, Parameter, ParameterDefault, ParameterKind, Pipeline, PipelineBody,
+    PipelineResource, PipelineShape, PipelineVar, PrTrigger, RepositoryResource, Resources,
+    Schedule,
 };
 
 /// Per-step lowering context carried through the recursive helpers.
@@ -175,13 +176,7 @@ pub fn lower_with_graph(p: &Pipeline, graph: &Graph) -> Result<Value> {
             }
             root.insert(
                 s("extends"),
-                lower_onees_extends(
-                    sdl,
-                    top_level_pool,
-                    stage_id,
-                    stage_display_name,
-                    job_seq,
-                ),
+                lower_onees_extends(sdl, top_level_pool, stage_id, stage_display_name, job_seq),
             );
         }
         _ => match &p.body {
@@ -268,10 +263,7 @@ fn lower_onees_extends(
     stage_m.insert(s("stage"), s(stage_id.as_str()));
     stage_m.insert(s("displayName"), s(stage_display_name));
     stage_m.insert(s("jobs"), Value::Sequence(jobs));
-    params.insert(
-        s("stages"),
-        Value::Sequence(vec![Value::Mapping(stage_m)]),
-    );
+    params.insert(s("stages"), Value::Sequence(vec![Value::Mapping(stage_m)]));
 
     extends.insert(s("parameters"), Value::Mapping(params));
     Value::Mapping(extends)
@@ -512,20 +504,18 @@ fn lower_stage(stage: &Stage, graph: &Graph) -> Result<Value> {
                 stage: Some(&stage.id),
                 // Stage-level conditions can reference cross-stage outputs;
                 // there is no "consumer job" in that context. Use the
-                // first job's id as a placeholder — the lowering only
-                // distinguishes job identity for SAME-stage references,
-                // and a cross-stage ref always picks the
-                // `stageDependencies.*` syntax regardless of consumer job.
-                job: stage
-                    .jobs
-                    .first()
-                    .map(|j| &j.id)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "ir::lower: stage '{}' has a condition but no jobs",
-                            stage.id
-                        )
-                    })?,
+                // first job's id as a placeholder. The graph validation
+                // pass rejects same-stage step-output refs in stage
+                // conditions because a stage condition is evaluated before
+                // any job in that stage runs; for allowed cross-stage refs,
+                // any job placeholder picks the same `stageDependencies.*`
+                // syntax.
+                job: stage.jobs.first().map(|j| &j.id).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "ir::lower: stage '{}' has a condition but no jobs",
+                        stage.id
+                    )
+                })?,
             };
             m.insert(s("condition"), s(&lower_condition(&ctx.cond_ctx(), cond)?));
         }
@@ -697,8 +687,7 @@ fn lower_job_template_wrap(
         );
         // ne branch — list with internal deps then each external d
         let mut ne_body = Mapping::new();
-        let mut seq: Vec<Value> =
-            job.depends_on.iter().map(|d| s(d.as_str())).collect();
+        let mut seq: Vec<Value> = job.depends_on.iter().map(|d| s(d.as_str())).collect();
         // The `${{ each d in parameters.X }}: - ${{ d }}` pattern is a
         // template-expression nested mapping. We encode it as a
         // mapping whose key is the `${{ each ... }}` expression and
@@ -752,10 +741,7 @@ fn lower_job_template_wrap(
         // ne branch — internal condition with caller condition
         // appended into the same `and(…)` body. We extract the body
         // of the internal `and(...)` if present, otherwise wrap it.
-        let merged = merge_condition_with_template_param(
-            &internal_str,
-            &wrap.condition_param,
-        );
+        let merged = merge_condition_with_template_param(&internal_str, &wrap.condition_param);
         let mut ne_body = Mapping::new();
         ne_body.insert(s("condition"), s(&merged));
         m.insert(
@@ -1028,7 +1014,7 @@ fn lower_env_value(ctx: &LoweringContext<'_>, v: &EnvValue) -> Result<String> {
             // `lower_env_value`; the env-mapping insertion path in
             // `lower_bash` / `lower_task` short-circuits this variant
             // to preserve typed scalar identity.
-            Ok(yaml_value_to_scalar_string(raw))
+            yaml_value_to_scalar_string(raw)
         }
     }
 }
@@ -1056,14 +1042,17 @@ fn flatten_coalesce_into(
     Ok(())
 }
 
-fn yaml_value_to_scalar_string(v: &serde_yaml::Value) -> String {
-    match v {
+fn yaml_value_to_scalar_string(v: &serde_yaml::Value) -> Result<String> {
+    Ok(match v {
         serde_yaml::Value::String(s) => s.clone(),
         serde_yaml::Value::Number(n) => n.to_string(),
         serde_yaml::Value::Bool(b) => b.to_string(),
         serde_yaml::Value::Null => String::new(),
-        other => serde_yaml::to_string(other).unwrap_or_default().trim().to_string(),
-    }
+        other => serde_yaml::to_string(other)
+            .context("ir::lower: serializing raw YAML scalar fallback to string")?
+            .trim()
+            .to_string(),
+    })
 }
 
 /// Sub-expression form for atoms inside `$[ coalesce(...) ]`.
@@ -1113,7 +1102,7 @@ fn lower_env_value_as_expr_atom(ctx: &LoweringContext<'_>, v: &EnvValue) -> Resu
                 serde_yaml::Value::String(s) => Ok(format!("'{}'", s.replace('\'', "''"))),
                 serde_yaml::Value::Number(n) => Ok(n.to_string()),
                 serde_yaml::Value::Bool(b) => Ok(b.to_string()),
-                other => Ok(yaml_value_to_scalar_string(other)),
+                other => yaml_value_to_scalar_string(other),
             }
         }
     }
@@ -1149,18 +1138,18 @@ fn lower_outputref_for_expr(ctx: &LoweringContext<'_>, r: &OutputRef) -> Result<
         stage: producer_loc.stage.as_ref(),
         job: &producer_loc.job,
     };
-    // Reuse the same lowering and strip the `$()` wrap for same-job
-    // macro form, since we're inside `$[ … ]` already.
+    // Reuse the same lowering for cross-job/cross-stage expression
+    // atoms. Same-job macro form cannot be converted into a valid ADO
+    // runtime-expression atom.
     let lowered = lower_outputref(ctx.consumer(), producer, r)?;
     if let Some(rest) = lowered.strip_prefix("$(").and_then(|s| s.strip_suffix(')')) {
-        // Same-job macro: `$(step.name)` → expression form
-        // `variables['step.name']`. ADO runtime expressions cannot
-        // see step outputs from the producing job via `variables[…]`
-        // either; this is the same limitation as `compile_gate_step_external`
-        // documents in src/compile/filter_ir.rs. Coalesce inputs
-        // should therefore not target same-job outputs — the caller
-        // chooses Coalesce only for cross-job/cross-stage cases.
-        Ok(format!("variables['{rest}']"))
+        anyhow::bail!(
+            "ir::lower: EnvValue::Coalesce cannot contain same-job step output '{rest}'. \
+             ADO runtime expressions in the producing job cannot read step outputs via \
+             variables['{rest}']; extension authors must use EnvValue::Concat (macro-form) \
+             for same-job consumers instead. See the synthPr regression history \
+             (memory: azure devops, PR #956 / PR #975)."
+        )
     } else {
         Ok(lowered)
     }
@@ -1236,9 +1225,17 @@ mod tests {
                 .with_id(synth.clone())
                 .with_output(OutputDecl::new("AW_SYNTHETIC_PR_ID")),
         );
-        let mut setup = Job::new(JobId::new("Setup").unwrap(), "Setup", Pool::VmImage("u".into()));
+        let mut setup = Job::new(
+            JobId::new("Setup").unwrap(),
+            "Setup",
+            Pool::VmImage("u".into()),
+        );
         setup.push_step(producer);
-        let agent_job = Job::new(JobId::new("Agent").unwrap(), "Agent", Pool::VmImage("u".into()));
+        let agent_job = Job::new(
+            JobId::new("Agent").unwrap(),
+            "Agent",
+            Pool::VmImage("u".into()),
+        );
         let p = Pipeline {
             name: "t".into(),
             parameters: Vec::new(),
@@ -1279,9 +1276,17 @@ mod tests {
                 .with_id(synth.clone())
                 .with_output(OutputDecl::new("AW_SYNTHETIC_PR_ID")),
         );
-        let mut setup = Job::new(JobId::new("Setup").unwrap(), "Setup", Pool::VmImage("u".into()));
+        let mut setup = Job::new(
+            JobId::new("Setup").unwrap(),
+            "Setup",
+            Pool::VmImage("u".into()),
+        );
         setup.push_step(producer);
-        let agent_job = Job::new(JobId::new("Agent").unwrap(), "Agent", Pool::VmImage("u".into()));
+        let agent_job = Job::new(
+            JobId::new("Agent").unwrap(),
+            "Agent",
+            Pool::VmImage("u".into()),
+        );
         let p = Pipeline {
             name: "t".into(),
             parameters: Vec::new(),
@@ -1336,7 +1341,11 @@ mod tests {
                 .with_output(OutputDecl::new("AW_SYNTHETIC_PR_ID")),
         );
         let consumer = Step::Bash(BashStep::new("gate", "node gate.js"));
-        let mut setup = Job::new(JobId::new("Setup").unwrap(), "Setup", Pool::VmImage("u".into()));
+        let mut setup = Job::new(
+            JobId::new("Setup").unwrap(),
+            "Setup",
+            Pool::VmImage("u".into()),
+        );
         setup.push_step(producer);
         setup.push_step(consumer);
         let p = Pipeline {
@@ -1367,6 +1376,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn lower_env_value_coalesce_rejects_same_job_step_output() {
+        let synth = StepId::new("synthPr").unwrap();
+        let producer = Step::Bash(
+            BashStep::new("synth", "echo s")
+                .with_id(synth.clone())
+                .with_output(OutputDecl::new("AW_SYNTHETIC_PR_ID")),
+        );
+        let consumer = Step::Bash(BashStep::new("gate", "node gate.js"));
+        let mut setup = Job::new(
+            JobId::new("Setup").unwrap(),
+            "Setup",
+            Pool::VmImage("u".into()),
+        );
+        setup.push_step(producer);
+        setup.push_step(consumer);
+        let p = Pipeline {
+            name: "t".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers::default(),
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(vec![setup]),
+            shape: PipelineShape::Standalone,
+        };
+        let g = super::super::graph::build_graph(&p).unwrap();
+
+        let setup_id = JobId::new("Setup").unwrap();
+        let ctx = LoweringContext {
+            graph: &g,
+            stage: None,
+            job: &setup_id,
+        };
+
+        let v = EnvValue::coalesce(vec![
+            EnvValue::ado_macro("System.PullRequest.PullRequestId").unwrap(),
+            EnvValue::step_output(OutputRef::new(synth, "AW_SYNTHETIC_PR_ID")),
+        ]);
+        let err = lower_env_value(&ctx, &v).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("Coalesce cannot contain same-job step output"));
+        assert!(msg.contains("EnvValue::Concat"));
+        assert!(msg.contains("PR #956 / PR #975"));
+    }
+
     /// `EnvValue::Concat` is not valid inside a Coalesce — the macro
     /// form `$(…)` is not an ADO expression atom.
     #[test]
@@ -1377,7 +1431,11 @@ mod tests {
                 .with_id(synth.clone())
                 .with_output(OutputDecl::new("X")),
         );
-        let mut setup = Job::new(JobId::new("Setup").unwrap(), "Setup", Pool::VmImage("u".into()));
+        let mut setup = Job::new(
+            JobId::new("Setup").unwrap(),
+            "Setup",
+            Pool::VmImage("u".into()),
+        );
         setup.push_step(producer);
         let p = Pipeline {
             name: "t".into(),
@@ -1429,7 +1487,14 @@ mod tests {
         let keys: Vec<&str> = m.keys().filter_map(|k| k.as_str()).collect();
         assert_eq!(
             keys,
-            vec!["job", "displayName", "dependsOn", "condition", "pool", "steps"]
+            vec![
+                "job",
+                "displayName",
+                "dependsOn",
+                "condition",
+                "pool",
+                "steps"
+            ]
         );
     }
 
@@ -1672,7 +1737,10 @@ mod tests {
         let g = Graph::default();
         let v = lower_with_graph(&p, &g).unwrap();
         let yaml = serde_yaml::to_string(&v).unwrap();
-        assert!(yaml.contains("pr: none"), "expected `pr: none`; got: {yaml}");
+        assert!(
+            yaml.contains("pr: none"),
+            "expected `pr: none`; got: {yaml}"
+        );
         assert!(
             yaml.contains("trigger: none"),
             "expected `trigger: none`; got: {yaml}"
@@ -1833,10 +1901,22 @@ mod tests {
             !yaml.contains("name:") || !yaml.contains("should-not-appear"),
             "template shape must not emit top-level `name:`, got: {yaml}"
         );
-        assert!(!yaml.contains("resources:"), "template shape skips resources, got: {yaml}");
-        assert!(!yaml.contains("schedules:"), "template shape skips schedules, got: {yaml}");
-        assert!(!yaml.contains("pr:"), "template shape skips pr, got: {yaml}");
-        assert!(!yaml.contains("trigger:"), "template shape skips trigger, got: {yaml}");
+        assert!(
+            !yaml.contains("resources:"),
+            "template shape skips resources, got: {yaml}"
+        );
+        assert!(
+            !yaml.contains("schedules:"),
+            "template shape skips schedules, got: {yaml}"
+        );
+        assert!(
+            !yaml.contains("pr:"),
+            "template shape skips pr, got: {yaml}"
+        );
+        assert!(
+            !yaml.contains("trigger:"),
+            "template shape skips trigger, got: {yaml}"
+        );
         assert!(yaml.contains("stages:"), "must emit `stages:`, got: {yaml}");
     }
 
@@ -1845,7 +1925,11 @@ mod tests {
     #[test]
     fn lower_job_template_omits_name_resources_triggers() {
         use crate::compile::ir::TemplateParams;
-        let job_ = Job::new(JobId::new("Agent").unwrap(), "Agent", Pool::VmImage("u".into()));
+        let job_ = Job::new(
+            JobId::new("Agent").unwrap(),
+            "Agent",
+            Pool::VmImage("u".into()),
+        );
         let p = Pipeline {
             name: "x".into(),
             parameters: Vec::new(),
@@ -1859,7 +1943,10 @@ mod tests {
         };
         let g = Graph::default();
         let yaml = serde_yaml::to_string(&lower_with_graph(&p, &g).unwrap()).unwrap();
-        assert!(!yaml.starts_with("name:"), "must skip top-level name, got: {yaml}");
+        assert!(
+            !yaml.starts_with("name:"),
+            "must skip top-level name, got: {yaml}"
+        );
         assert!(yaml.contains("jobs:"), "must emit jobs:, got: {yaml}");
     }
 
@@ -1872,10 +1959,8 @@ mod tests {
             crate::compile::ir::ids::StageId::new("Main").unwrap(),
             "Main Stage",
         );
-        stage.external_params_wrap = Some(StageExternalParamsWrap {
-            depends_on_param: "dependsOn".into(),
-            condition_param: "condition".into(),
-        });
+        stage.external_params_wrap =
+            Some(StageExternalParamsWrap::new("dependsOn", "condition").unwrap());
         let g = Graph::default();
         let v = lower_stage(&stage, &g).unwrap();
         let yaml = serde_yaml::to_string(&v).unwrap();
@@ -1904,12 +1989,14 @@ mod tests {
     fn lower_job_emits_template_wrap_dual_branch_with_internal_setup() {
         use crate::compile::ir::job::TemplateDependsOnWrap;
         let setup = JobId::new("Setup").unwrap();
-        let mut agent = Job::new(JobId::new("Agent").unwrap(), "Agent", Pool::VmImage("u".into()));
+        let mut agent = Job::new(
+            JobId::new("Agent").unwrap(),
+            "Agent",
+            Pool::VmImage("u".into()),
+        );
         agent.depends_on = vec![setup.clone()];
-        agent.template_dependson_wrap = Some(TemplateDependsOnWrap {
-            depends_on_param: "dependsOn".into(),
-            condition_param: "condition".into(),
-        });
+        agent.template_dependson_wrap =
+            Some(TemplateDependsOnWrap::new("dependsOn", "condition").unwrap());
         let g = Graph::default();
         let v = lower_job(&agent, None, &g).unwrap();
         let yaml = serde_yaml::to_string(&v).unwrap();
@@ -1951,11 +2038,13 @@ mod tests {
     #[test]
     fn lower_job_template_wrap_no_internal_dep_emits_ne_only() {
         use crate::compile::ir::job::TemplateDependsOnWrap;
-        let mut agent = Job::new(JobId::new("Agent").unwrap(), "Agent", Pool::VmImage("u".into()));
-        agent.template_dependson_wrap = Some(TemplateDependsOnWrap {
-            depends_on_param: "dependsOn".into(),
-            condition_param: "condition".into(),
-        });
+        let mut agent = Job::new(
+            JobId::new("Agent").unwrap(),
+            "Agent",
+            Pool::VmImage("u".into()),
+        );
+        agent.template_dependson_wrap =
+            Some(TemplateDependsOnWrap::new("dependsOn", "condition").unwrap());
         let g = Graph::default();
         let v = lower_job(&agent, None, &g).unwrap();
         let yaml = serde_yaml::to_string(&v).unwrap();
@@ -1980,15 +2069,17 @@ mod tests {
     fn lower_job_template_wrap_merges_internal_and_condition_with_caller() {
         use crate::compile::ir::condition::Condition;
         use crate::compile::ir::job::TemplateDependsOnWrap;
-        let mut agent = Job::new(JobId::new("Agent").unwrap(), "Agent", Pool::VmImage("u".into()));
+        let mut agent = Job::new(
+            JobId::new("Agent").unwrap(),
+            "Agent",
+            Pool::VmImage("u".into()),
+        );
         agent.condition = Some(Condition::And(vec![
             Condition::Succeeded,
             Condition::Custom("eq(variables['x'], 'y')".into()),
         ]));
-        agent.template_dependson_wrap = Some(TemplateDependsOnWrap {
-            depends_on_param: "dependsOn".into(),
-            condition_param: "condition".into(),
-        });
+        agent.template_dependson_wrap =
+            Some(TemplateDependsOnWrap::new("dependsOn", "condition").unwrap());
         let g = Graph::default();
         let v = lower_job(&agent, None, &g).unwrap();
         let yaml = serde_yaml::to_string(&v).unwrap();

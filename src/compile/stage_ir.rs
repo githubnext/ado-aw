@@ -80,10 +80,7 @@ pub fn build_stage_pipeline(
     // condition.
     let mut stage = Stage::new(StageId::new(&stage_prefix)?, agent_display_name);
     stage.jobs = built.jobs;
-    stage.external_params_wrap = Some(StageExternalParamsWrap {
-        depends_on_param: "dependsOn".into(),
-        condition_param: "condition".into(),
-    });
+    stage.external_params_wrap = Some(StageExternalParamsWrap::new("dependsOn", "condition")?);
 
     // Discard top-level resources / triggers — the lower pass will
     // skip them for `PipelineShape::StageTemplate` anyway, but we
