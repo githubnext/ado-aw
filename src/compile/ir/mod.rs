@@ -1,9 +1,6 @@
 //! Pipeline IR — typed representation of an Azure DevOps pipeline.
 //!
-//! This module is the entry point for the new pipeline IR introduced
-//! by the "Native ADO Pipeline IR" plan. The full design lives in
-//! the plan file (`plan.md` in the session workspace) and will move
-//! to `docs/ir.md` as part of the `docs-update` commit.
+//! See `docs/ir.md` for the full reference.
 //!
 //! ## Layout
 //!
@@ -19,18 +16,23 @@
 //! - [`Pipeline`] / [`PipelineBody`] / [`PipelineShape`] — the root
 //!   container in this file.
 //!
-//! ## Status
+//! ## Dead-code allow rationale
 //!
-//! As of the `ir-types` commit the module exports **types only**.
-//! The dependency-graph pass, YAML emit, output-reference lowering,
-//! and condition codegen are introduced in subsequent commits per
-//! the plan.
+//! Several constructor helpers (`Condition::and`/`or`/`not`,
+//! `EnvValue::secret`/`concat`, `Job::push_step`, `Stage::push_job`,
+//! …) plus the convenience [`graph::resolve`] pipeline-mutation entry
+//! point and its sub-passes (`apply_edges`, `apply_auto_is_output`,
+//! `merge_job_deps`) are intentionally **API surface** rather than
+//! production callers. The compile path threads
+//! [`graph::build_graph`] → [`graph::detect_cycles`] → emit, wiring
+//! `depends_on` explicitly per-target (`standalone_ir.rs` /
+//! `job_ir.rs` / `stage_ir.rs` / `onees_ir.rs`); the `apply_*`
+//! helpers are kept for any future caller that wants the documented
+//! "build → derive → validate → emit" flow (e.g. tooling that
+//! lints or transforms a Pipeline before emit).
 //!
-//! Until the `extension-trait-port` commit wires real callers, every
-//! type in this module is unreachable from production code — hence
-//! the module-scoped `dead_code` allow. The unit tests in each
-//! submodule exercise constructors and would surface accidental
-//! breakage. The allow is removed atomically with the trait port.
+//! Per-item `#[allow(dead_code)]` annotations would be churn; the
+//! module-level allow is the pragmatic line.
 #![allow(dead_code)]
 
 pub mod condition;

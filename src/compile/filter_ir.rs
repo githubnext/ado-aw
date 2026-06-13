@@ -1268,6 +1268,13 @@ pub fn build_gate_step_typed(
     let mut step = BashStep::new(ctx.display_name(), script)
         .with_id(StepId::new(ctx.step_name())?)
         .with_condition(Condition::Succeeded)
+        // The gate evaluator JS bundle emits `##vso[task.setvariable
+        // variable=SHOULD_RUN;isOutput=true]` at runtime — declare it
+        // here so cross-job consumers (e.g. the Agent-job condition's
+        // typed `Condition::Eq(Expr::StepOutput(..., "SHOULD_RUN"))`)
+        // pass graph validation. See `src/compile/ir/output.rs` for
+        // the `OutputDecl` contract.
+        .with_output(crate::compile::ir::output::OutputDecl::new("SHOULD_RUN"))
         .with_env(
             "SYSTEM_ACCESSTOKEN",
             EnvValue::ado_macro("System.AccessToken")?,

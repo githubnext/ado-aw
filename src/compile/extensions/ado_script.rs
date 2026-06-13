@@ -239,6 +239,27 @@ pub const SYNTH_PR_OUTPUT_NAMES: &[&str] = &[
     "AW_SYNTHETIC_PR_SKIP",
 ];
 
+/// Subset of [`SYNTH_PR_OUTPUT_NAMES`] hoisted into the Agent-job
+/// `variables:` block by
+/// [`crate::compile::standalone_ir::agent_job_variables_hoist`].
+///
+/// Every name listed here MUST also be in [`SYNTH_PR_OUTPUT_NAMES`]
+/// (enforced by `synth_pr_hoist_subset_of_outputs` unit test) so
+/// graph validation will not reject the cross-job `OutputRef` the
+/// hoist emits.
+///
+/// `AW_SYNTHETIC_PR_SKIP` is intentionally excluded: it is consumed
+/// only by the Agent-job `condition:` (a typed `Condition::Ne` over
+/// the cross-job `OutputRef`), not by step `env:` — hoisting it
+/// would add a pipeline variable no consumer ever reads.
+pub const SYNTH_PR_AGENT_HOIST_NAMES: &[&str] = &[
+    "AW_PR_ID",
+    "AW_PR_TARGETBRANCH",
+    "AW_PR_SOURCEBRANCH",
+    "AW_PR_IS_DRAFT",
+    "AW_SYNTHETIC_PR",
+];
+
 impl CompilerExtension for AdoScriptExtension {
     fn name(&self) -> &str {
         "ado-script"
@@ -486,6 +507,20 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     // ── extension behaviour ────────────────────────────────────────────
+
+    /// Every name in `SYNTH_PR_AGENT_HOIST_NAMES` must also be declared
+    /// in `SYNTH_PR_OUTPUT_NAMES`, otherwise `agent_job_variables_hoist`
+    /// would emit a cross-job `OutputRef` to an output the producer
+    /// never declares — graph validation would reject the pipeline.
+    #[test]
+    fn synth_pr_hoist_subset_of_outputs() {
+        for hoisted in SYNTH_PR_AGENT_HOIST_NAMES {
+            assert!(
+                SYNTH_PR_OUTPUT_NAMES.contains(hoisted),
+                "{hoisted} is in SYNTH_PR_AGENT_HOIST_NAMES but not in SYNTH_PR_OUTPUT_NAMES"
+            );
+        }
+    }
 
     fn ext_with(
         pr: Option<PrFilters>,

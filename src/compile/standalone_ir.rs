@@ -73,12 +73,6 @@ use super::common::{generate_acquire_ado_token, generate_executor_ado_env};
 /// instead of templating a YAML string. Callers thread the result
 /// through [`crate::compile::ir::emit::emit`] to produce the final
 /// YAML.
-/// Build the typed [`Pipeline`] for the standalone target.
-///
-/// Mirrors the flow of `compile_shared` but composes a typed IR
-/// instead of templating a YAML string. Callers thread the result
-/// through [`crate::compile::ir::emit::emit`] to produce the final
-/// YAML.
 #[allow(clippy::too_many_arguments)]
 pub fn build_standalone_pipeline(
     front_matter: &FrontMatter,
@@ -906,12 +900,7 @@ fn agent_job_variables_hoist(
     }
     let synth = StepId::new("synthPr")?;
     let mut out: Vec<JobVariable> = Vec::new();
-    for name in &[
-        "AW_PR_ID",
-        "AW_PR_TARGETBRANCH",
-        "AW_PR_SOURCEBRANCH",
-        "AW_SYNTHETIC_PR",
-    ] {
+    for name in super::extensions::ado_script::SYNTH_PR_AGENT_HOIST_NAMES {
         // Single-child `Coalesce` lowers to
         // `coalesce(<child>, '')` so the variable is empty rather
         // than the unresolved literal `$[ ... ]` when the dependency
@@ -944,6 +933,9 @@ fn agent_job_variables_hoist(
 ///   `Condition::Custom` atoms (their injection-vector check applies
 ///   at codegen time).
 fn build_agentic_condition(front_matter: &FrontMatter) -> Option<Condition> {
+    use crate::compile::ir::condition::Expr;
+    use crate::compile::ir::output::OutputRef;
+
     let pr_filters = front_matter.pr_filters();
     let pipeline_filters = front_matter.pipeline_filters();
     let has_pr_filters = pr_filters
@@ -961,17 +953,38 @@ fn build_agentic_condition(front_matter: &FrontMatter) -> Option<Condition> {
         return None;
     }
 
+    // Typed step-output refs. The producer step IDs (`synthPr`,
+    // `prGate`, `pipelineGate`) and their declared outputs are
+    // graph-validated at `build_graph` time, so a future rename in
+    // `filter_ir.rs` or `ado_script.rs` becomes a compile error
+    // instead of silently broken runtime conditions. See
+    // [`OutputDecl`] for the `isOutput=true` contract.
+    let synth_step = StepId::new("synthPr").ok();
+    let pr_gate_step = StepId::new("prGate").ok();
+    let pipeline_gate_step = StepId::new("pipelineGate").ok();
+
     let mut parts: Vec<Condition> = vec![Condition::Succeeded];
 
-    if synthetic_pr_active {
+    if synthetic_pr_active
+        && let Some(synth) = &synth_step
+    {
         // ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_SKIP'], 'true')
-        parts.push(Condition::Custom(
-            "ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_SKIP'], 'true')".to_string(),
+        parts.push(Condition::Ne(
+            Expr::StepOutput(OutputRef::new(synth.clone(), "AW_SYNTHETIC_PR_SKIP")),
+            Expr::Literal("true".into()),
         ));
     }
 
-    if has_pr_filters {
-        if synthetic_pr_active {
+    if has_pr_filters
+        && let Some(pr_gate) = &pr_gate_step
+    {
+        let gate_passed = Condition::Eq(
+            Expr::StepOutput(OutputRef::new(pr_gate.clone(), "SHOULD_RUN")),
+            Expr::Literal("true".into()),
+        );
+        if synthetic_pr_active
+            && let Some(synth) = &synth_step
+        {
             // or(
             //   and(
             //     ne(variables['Build.Reason'], 'PullRequest'),
@@ -979,23 +992,43 @@ fn build_agentic_condition(front_matter: &FrontMatter) -> Option<Condition> {
             //   ),
             //   eq(dependencies.Setup.outputs['prGate.SHOULD_RUN'], 'true')
             // )
-            parts.push(Condition::Custom(
-                "or(and(ne(variables['Build.Reason'], 'PullRequest'), ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true')), eq(dependencies.Setup.outputs['prGate.SHOULD_RUN'], 'true'))"
-                    .to_string(),
-            ));
+            parts.push(Condition::Or(vec![
+                Condition::And(vec![
+                    Condition::Ne(
+                        Expr::Variable("Build.Reason".into()),
+                        Expr::Literal("PullRequest".into()),
+                    ),
+                    Condition::Ne(
+                        Expr::StepOutput(OutputRef::new(synth.clone(), "AW_SYNTHETIC_PR")),
+                        Expr::Literal("true".into()),
+                    ),
+                ]),
+                gate_passed,
+            ]));
         } else {
-            parts.push(Condition::Custom(
-                "or(ne(variables['Build.Reason'], 'PullRequest'), eq(dependencies.Setup.outputs['prGate.SHOULD_RUN'], 'true'))"
-                    .to_string(),
-            ));
+            parts.push(Condition::Or(vec![
+                Condition::Ne(
+                    Expr::Variable("Build.Reason".into()),
+                    Expr::Literal("PullRequest".into()),
+                ),
+                gate_passed,
+            ]));
         }
     }
 
-    if has_pipeline_filters {
-        parts.push(Condition::Custom(
-            "or(ne(variables['Build.Reason'], 'ResourceTrigger'), eq(dependencies.Setup.outputs['pipelineGate.SHOULD_RUN'], 'true'))"
-                .to_string(),
-        ));
+    if has_pipeline_filters
+        && let Some(pipeline_gate) = &pipeline_gate_step
+    {
+        parts.push(Condition::Or(vec![
+            Condition::Ne(
+                Expr::Variable("Build.Reason".into()),
+                Expr::Literal("ResourceTrigger".into()),
+            ),
+            Condition::Eq(
+                Expr::StepOutput(OutputRef::new(pipeline_gate.clone(), "SHOULD_RUN")),
+                Expr::Literal("true".into()),
+            ),
+        ]));
     }
 
     if let Some(e) = pr_expression {
