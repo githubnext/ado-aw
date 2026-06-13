@@ -16,6 +16,20 @@
 //! [`Result`] so call sites can surface a meaningful error rather
 //! than panic.
 //!
+//! ## Uniqueness contract
+//!
+//! - [`StageId`] is unique within a [`super::Pipeline`].
+//! - [`JobId`] is unique within a stage (or pipeline-wide for
+//!   stage-less pipelines). The graph builder rejects duplicates
+//!   with a typed error.
+//! - **[`StepId`] is unique pipeline-wide** — not just within a job.
+//!   [`super::output::OutputRef`] carries only a `StepId` (no
+//!   qualifying job name), so the IR's producer-resolution is keyed
+//!   on `StepId` alone. The graph builder rejects cross-job
+//!   duplicates with a typed error. (ADO YAML technically allows
+//!   `dependencies.<job>.outputs[...]` to disambiguate, but the IR
+//!   does not model the job-qualified form.)
+//!
 //! `Display` round-trips to the original string. `AsRef<str>` is
 //! provided so ids slot into format strings cheaply.
 

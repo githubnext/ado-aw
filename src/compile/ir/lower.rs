@@ -824,8 +824,18 @@ pub(crate) fn lower_step(step: &Step, ctx: &LoweringContext<'_>) -> Result<Value
 /// The body must be a single YAML mapping; we accept it with or
 /// without a leading `- ` because some legacy emitters include it
 /// (they're emitting a step inside an enclosing sequence). When the
-/// `- ` is present, every subsequent line is also de-indented by two
-/// columns so the mapping parses as a top-level document.
+/// `- ` is present, every subsequent line is also de-indented by
+/// exactly two columns so the mapping parses as a top-level
+/// document.
+///
+/// # Errors
+///
+/// Returns `Err` if a `- `-prefixed body has a continuation line
+/// that is non-empty and does not start with at least two spaces.
+/// The current producers in [`crate::compile::standalone_ir`] all
+/// emit exactly two-space-indented continuations via
+/// [`step_value_to_dash_yaml`], so any failure here indicates an
+/// out-of-contract producer (compiler bug).
 fn lower_raw_yaml(raw: &str) -> Result<Value> {
     let trimmed = raw.trim_start();
     let body = if let Some(rest) = trimmed.strip_prefix("- ") {
@@ -836,9 +846,24 @@ fn lower_raw_yaml(raw: &str) -> Result<Value> {
         for (i, line) in rest.split_inclusive('\n').enumerate() {
             if i == 0 {
                 out.push_str(line);
-            } else {
-                out.push_str(line.strip_prefix("  ").unwrap_or(line));
+                continue;
             }
+            // Empty / whitespace-only continuation lines are fine
+            // verbatim (a literal block-scalar terminator, a blank
+            // line between keys, etc.).
+            if line.trim().is_empty() {
+                out.push_str(line);
+                continue;
+            }
+            let dedented = line.strip_prefix("  ").ok_or_else(|| {
+                anyhow::anyhow!(
+                    "ir::lower: Step::RawYaml continuation line is not indented by at \
+                     least two spaces (the leading `- ` prefix on the first line \
+                     requires every subsequent non-blank line to start with at least \
+                     two spaces so the mapping parses as a top-level document). Line: {line:?}"
+                )
+            })?;
+            out.push_str(dedented);
         }
         out
     } else {
@@ -1579,6 +1604,40 @@ mod tests {
         };
         let err = super::lower(&p).unwrap_err();
         assert!(format!("{err:#}").contains("Step::RawYaml"));
+    }
+
+    #[test]
+    fn raw_yaml_dash_prefix_rejects_unindented_continuation() {
+        // A `- bash: ...` first line obligates every non-blank
+        // continuation line to start with at least two spaces (the
+        // standard YAML sequence-item indent that the dedent strips).
+        // The previous `unwrap_or(line)` fallback silently emitted
+        // misaligned YAML; the strict form bails with a clear error
+        // citing the offending line.
+        let body = "- bash: echo hi\n  displayName: greet\nnot-indented: oops\n";
+        let err = super::lower_raw_yaml(body).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("not indented by at least two spaces"),
+            "got: {msg}"
+        );
+        assert!(msg.contains("not-indented: oops"), "got: {msg}");
+    }
+
+    #[test]
+    fn raw_yaml_dash_prefix_accepts_blank_continuation_lines() {
+        // Blank/whitespace-only continuation lines are legal between
+        // mapping keys; the strict dedent must not bail on them.
+        let body = "- bash: echo hi\n\n  displayName: greet\n";
+        let v = super::lower_raw_yaml(body).unwrap();
+        let m = match v {
+            Value::Mapping(m) => m,
+            _ => panic!("expected mapping"),
+        };
+        assert_eq!(
+            m.get(Value::String("displayName".into())).and_then(|v| v.as_str()),
+            Some("greet")
+        );
     }
 
     // ── Phase 0: top-level pipeline lowering tests ─────────────────

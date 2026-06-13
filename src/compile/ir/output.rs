@@ -93,9 +93,16 @@ impl OutputDecl {
 /// output it wants; at lower time the IR picks the correct ADO
 /// reference syntax based on whether the consumer lives in the same
 /// job / a sibling job in the same stage / a different stage.
+///
+/// **Uniqueness:** the [`StepId`] is the *only* key used to resolve
+/// the producer's location — there is no job-qualified form here.
+/// Step IDs are therefore required to be pipeline-wide unique; see
+/// [`crate::compile::ir::ids`] for the contract and
+/// [`crate::compile::ir::graph::build_graph`] for the enforcement.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OutputRef {
-    /// The producer step's id.
+    /// The producer step's id. **Must be pipeline-wide unique** —
+    /// see type-level doc on uniqueness.
     pub step: StepId,
     /// The output variable name (must match an [`OutputDecl::name`]
     /// on the producer).

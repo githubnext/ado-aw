@@ -209,20 +209,33 @@ fn add_manual_job_edges(job: &super::job::Job, g: &mut Graph) {
 fn index_job_steps(stage: Option<StageId>, job: &super::job::Job, g: &mut Graph) -> Result<()> {
     for step in &job.steps {
         if let Some(id) = step.id() {
-            // Step ids are pipeline-wide identifiers in ADO when
-            // referenced via `dependencies.<job>.outputs['<step>.X']`,
-            // so duplicate ids across jobs are technically allowed if
-            // both jobs are referenced through the qualifying job
-            // name. We still reject true duplicates inside the SAME
-            // job, which would silently shadow.
-            if let Some(prev) = g.step_locations.get(id)
-                && prev.stage == stage
-                && prev.job == job.id
-            {
-                bail!(
-                    "ir::graph: duplicate StepId '{}' inside job '{}'",
-                    id,
+            // [`super::output::OutputRef`] carries only a [`StepId`] —
+            // no qualifying job name — so the IR's producer-resolution
+            // is keyed on `StepId` alone. Duplicate ids across jobs
+            // (or stages) would silently overwrite `step_locations`
+            // and every `OutputRef` to that id would resolve to
+            // whichever producer was indexed last. ADO YAML allows
+            // qualifying duplicates at the wire level (`dependencies.<job>.outputs[...]`)
+            // but the IR does not model the job-qualified form, so
+            // duplicates are rejected pipeline-wide.
+            if let Some(prev) = g.step_locations.get(id) {
+                let prev_loc = format!(
+                    "{}.{}",
+                    prev.stage
+                        .as_ref()
+                        .map(|s| s.as_str())
+                        .unwrap_or("<no stage>"),
+                    prev.job
+                );
+                let this_loc = format!(
+                    "{}.{}",
+                    stage.as_ref().map(|s| s.as_str()).unwrap_or("<no stage>"),
                     job.id
+                );
+                bail!(
+                    "ir::graph: duplicate StepId '{id}' — previously declared in {prev_loc}, \
+                     now also declared in {this_loc}. StepIds must be pipeline-wide unique \
+                     because OutputRef carries only the StepId (no job qualifier)."
                 );
             }
             let outputs: BTreeSet<String> = collect_step_outputs(step);
@@ -897,6 +910,55 @@ mod tests {
         assert!(msg.contains("cycle in job dependency graph"));
         assert!(msg.contains("A"));
         assert!(msg.contains("B"));
+    }
+
+    #[test]
+    fn cross_job_duplicate_step_id_is_rejected() {
+        // OutputRef carries only StepId (no job qualifier), so a
+        // duplicate StepId across two jobs would silently overwrite
+        // step_locations and every consumer would resolve to the
+        // last-indexed producer. Reject loudly at graph-build time.
+        let dup = StepId::new("synthPr").unwrap();
+        let mut job_a = Job::new(JobId::new("A").unwrap(), "A", pool());
+        job_a.push_step(Step::Bash(
+            BashStep::new("s", "echo a")
+                .with_id(dup.clone())
+                .with_output(OutputDecl::new("X")),
+        ));
+        let mut job_b = Job::new(JobId::new("B").unwrap(), "B", pool());
+        job_b.push_step(Step::Bash(
+            BashStep::new("s", "echo b")
+                .with_id(dup)
+                .with_output(OutputDecl::new("X")),
+        ));
+        let p = pipe(PipelineBody::Jobs(vec![job_a, job_b]));
+        let err = build_graph(&p).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("duplicate StepId 'synthPr'"), "got: {msg}");
+        assert!(msg.contains("previously declared in"), "got: {msg}");
+        assert!(msg.contains("pipeline-wide unique"), "got: {msg}");
+    }
+
+    #[test]
+    fn cross_stage_duplicate_step_id_is_rejected() {
+        // Same contract across stages.
+        let dup = StepId::new("marker").unwrap();
+        let mut job_a = Job::new(JobId::new("A").unwrap(), "A", pool());
+        job_a.push_step(Step::Bash(
+            BashStep::new("m", "echo a").with_id(dup.clone()),
+        ));
+        let mut stage_a = Stage::new(StageId::new("StageA").unwrap(), "StageA");
+        stage_a.push_job(job_a);
+
+        let mut job_b = Job::new(JobId::new("B").unwrap(), "B", pool());
+        job_b.push_step(Step::Bash(BashStep::new("m", "echo b").with_id(dup)));
+        let mut stage_b = Stage::new(StageId::new("StageB").unwrap(), "StageB");
+        stage_b.push_job(job_b);
+
+        let p = pipe(PipelineBody::Stages(vec![stage_a, stage_b]));
+        let err = build_graph(&p).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("duplicate StepId 'marker'"), "got: {msg}");
     }
 
     #[test]

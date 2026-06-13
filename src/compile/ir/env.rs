@@ -43,7 +43,18 @@ use super::output::OutputRef;
 /// `env:` mapping entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnvValue {
-    /// Plain string literal.
+    /// Plain string literal — emitted **verbatim** into the YAML
+    /// `env:` value position with no escaping or sanitisation.
+    ///
+    /// **Compiler-internal use only.** Construction sites must pass
+    /// a hardcoded string, a constant, or a value derived from
+    /// front-matter that has already been routed through
+    /// `crate::validate::reject_pipeline_injection` (or a stronger
+    /// equivalent). Never construct from raw user-supplied input —
+    /// use [`EnvValue::PipelineVar`] (`$(NAME)` macro form) or
+    /// [`EnvValue::Secret`] when the value should come from an ADO
+    /// variable, or [`EnvValue::AdoMacro`] for predefined variables
+    /// on the allowlist.
     Literal(String),
     /// ADO predefined-variable macro. Must be a member of
     /// [`ALLOWED_ADO_MACROS`].
@@ -124,7 +135,10 @@ pub const ALLOWED_ADO_MACROS: &[&str] = &[
 ];
 
 impl EnvValue {
-    /// Construct an [`EnvValue::Literal`].
+    /// Construct an [`EnvValue::Literal`]. **Compiler-internal use
+    /// only** — see the variant's doc-comment for the contract on
+    /// safe inputs (hardcoded strings, constants, or values
+    /// pre-validated against `reject_pipeline_injection`).
     pub fn literal(s: impl Into<String>) -> Self {
         EnvValue::Literal(s.into())
     }
