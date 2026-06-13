@@ -15,6 +15,7 @@ use crate::audit::analyzers::{
 use crate::audit::cache::{RunSummary, load_run_summary, save_run_summary};
 use crate::audit::findings;
 use crate::audit::model::{AuditData, ErrorInfo, FileInfo, OverviewData};
+use crate::audit::pipeline_graph;
 use crate::audit::render;
 use crate::audit::url::{ParsedBuildRef, parse_build_ref};
 
@@ -30,6 +31,26 @@ pub struct AuditOptions<'a> {
 }
 
 pub async fn dispatch(opts: AuditOptions<'_>) -> Result<()> {
+    let result = fetch_audit_data_inner(opts).await?;
+    render_audit(&result.audit, result.json)?;
+    if !result.json && !result.from_cache {
+        eprintln!("✓ Audit complete. Reports in {}", result.run_dir.display());
+    }
+    Ok(())
+}
+
+pub async fn fetch_audit_data(opts: AuditOptions<'_>) -> Result<AuditData> {
+    Ok(fetch_audit_data_inner(opts).await?.audit)
+}
+
+struct FetchAuditDataResult {
+    audit: AuditData,
+    run_dir: PathBuf,
+    json: bool,
+    from_cache: bool,
+}
+
+async fn fetch_audit_data_inner(opts: AuditOptions<'_>) -> Result<FetchAuditDataResult> {
     let parsed = parse_build_ref(opts.build_id_or_url)?;
     let artifact_filters = normalize_artifact_filters(opts.artifacts)?;
     let cwd = tokio::fs::canonicalize(".")
@@ -52,8 +73,22 @@ pub async fn dispatch(opts: AuditOptions<'_>) -> Result<()> {
                 summary.processed_at.to_rfc3339()
             );
         }
-        render_audit(&summary.audit_data, opts.json)?;
-        return Ok(());
+        let mut audit = summary.audit_data;
+        if let Err(error) = pipeline_graph::populate_pipeline_graph(&mut audit, &run_dir).await {
+            warn_and_record(
+                &mut audit,
+                "audit::pipeline_graph",
+                format!("pipeline graph correlation failed: {:#}", error),
+            );
+        }
+        findings::derive_findings(&mut audit);
+        audit.metrics.warning_count = audit.warnings.len() as u64;
+        return Ok(FetchAuditDataResult {
+            audit,
+            run_dir,
+            json: opts.json,
+            from_cache: true,
+        });
     }
 
     let client = reqwest::Client::builder()
@@ -68,9 +103,16 @@ pub async fn dispatch(opts: AuditOptions<'_>) -> Result<()> {
     };
 
     let filters = artifact_filters.as_deref();
-    let saw_artifact_auth_error =
-        fetch_and_record_artifacts(&client, &ctx, &auth, parsed.build_id, filters, &run_dir, &mut audit)
-            .await?;
+    let saw_artifact_auth_error = fetch_and_record_artifacts(
+        &client,
+        &ctx,
+        &auth,
+        parsed.build_id,
+        filters,
+        &run_dir,
+        &mut audit,
+    )
+    .await?;
 
     if saw_artifact_auth_error && !has_any_local_artifacts(&run_dir).await {
         anyhow::bail!(
@@ -79,8 +121,24 @@ pub async fn dispatch(opts: AuditOptions<'_>) -> Result<()> {
         );
     }
 
-    run_analyzers(&client, &ctx, &auth, parsed.build_id, filters, &run_dir, &mut audit).await;
+    run_analyzers(
+        &client,
+        &ctx,
+        &auth,
+        parsed.build_id,
+        filters,
+        &run_dir,
+        &mut audit,
+    )
+    .await;
     populate_performance_metrics(&mut audit);
+    if let Err(error) = pipeline_graph::populate_pipeline_graph(&mut audit, &run_dir).await {
+        warn_and_record(
+            &mut audit,
+            "audit::pipeline_graph",
+            format!("pipeline graph correlation failed: {:#}", error),
+        );
+    }
 
     audit.metrics.error_count = audit.errors.len() as u64;
     audit.metrics.warning_count = audit.warnings.len() as u64;
@@ -97,11 +155,12 @@ pub async fn dispatch(opts: AuditOptions<'_>) -> Result<()> {
     )
     .await?;
 
-    render_audit(&audit, opts.json)?;
-    if !opts.json {
-        eprintln!("✓ Audit complete. Reports in {}", run_dir.display());
-    }
-    Ok(())
+    Ok(FetchAuditDataResult {
+        audit,
+        run_dir,
+        json: opts.json,
+        from_cache: false,
+    })
 }
 
 /// Download all selected artifacts for the build, recording auth errors and
@@ -152,7 +211,10 @@ async fn fetch_and_record_artifacts(
                         warn_and_record(
                             audit,
                             "audit::artifacts",
-                            format!("failed to download artifact '{}': {:#}", artifact.name, error),
+                            format!(
+                                "failed to download artifact '{}': {:#}",
+                                artifact.name, error
+                            ),
                         );
                     }
                 }
@@ -170,8 +232,7 @@ async fn fetch_and_record_artifacts(
             );
         }
         Err(error) => {
-            return Err(error)
-                .context(format!("failed to list artifacts for build {}", build_id));
+            return Err(error).context(format!("failed to list artifacts for build {}", build_id));
         }
     }
     Ok(saw_artifact_auth_error)
@@ -891,7 +952,8 @@ mod tests {
 
     #[test]
     fn validate_host_accepts_dev_azure_com_case_insensitively() {
-        validate_audit_url_host("Dev.Azure.Com", None).expect("cloud host match is case-insensitive");
+        validate_audit_url_host("Dev.Azure.Com", None)
+            .expect("cloud host match is case-insensitive");
     }
 
     #[test]
