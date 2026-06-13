@@ -9,7 +9,7 @@ ado-aw compiles agent markdown into Azure DevOps YAML through the typed pipeline
 When extending the compiler:
 
 1. **New CLI commands**: add variants to the `Commands` enum in `src/main.rs`, implement dispatch, and add parsing/behavior tests.
-2. **New compile targets**: build a typed `Pipeline` IR in a target module under `src/compile/`; use existing `standalone_ir.rs`, `onees_ir.rs`, `job_ir.rs`, and `stage_ir.rs` as references.
+2. **New compile targets**: build a typed `Pipeline` IR in a target wrapper module under `src/compile/` (use existing `standalone_ir.rs`, `onees_ir.rs`, `job_ir.rs`, and `stage_ir.rs` as references). The canonical 5-job shape itself lives in `src/compile/agentic_pipeline.rs` and is reused by every target — wrappers only set the per-target `PipelineShape` and lift the shared `BuiltPipelineContext` into the right envelope.
 3. **New front matter fields**: add fields to `FrontMatter` or nested config types in `src/compile/types.rs`. Breaking changes require a codemod under `src/compile/codemods/`; see [`docs/codemods.md`](codemods.md).
 4. **New compiler extensions**: implement the `CompilerExtension` `name` / `phase` / `declarations` trio and return typed `Declarations`.
 5. **New safe-output tools**: add to `src/safeoutputs/`, implement the safe-output data model and executor, and register it in MCP and Stage 3 execution wiring.
@@ -196,7 +196,7 @@ Available forms include `Succeeded`, `Always`, `Failed`, `SucceededOrFailed`, `A
 
 ## Adding a compile target
 
-A compile target should build a complete typed `Pipeline` and then use the shared IR emit path. Follow the existing target builders:
+A compile target should build a complete typed `Pipeline` and then use the shared IR emit path. Follow the existing target wrapper modules — they delegate the heavy lifting to `src/compile/agentic_pipeline.rs::build_pipeline_context` and only handle the per-target envelope:
 
 - `src/compile/standalone_ir.rs`
 - `src/compile/onees_ir.rs`

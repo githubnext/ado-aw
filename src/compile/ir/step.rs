@@ -34,10 +34,10 @@ pub enum Step {
     /// `prepare_steps:` / engine `install_steps` content lifted
     /// verbatim from the agent's front matter or from
     /// [`crate::engine::Engine::install_steps`]. Producers live in
-    /// [`crate::compile::standalone_ir`] (search there for
+    /// [`crate::compile::agentic_pipeline`] (search there for
     /// `Step::RawYaml`); compiler-generated steps must use the typed
     /// variants instead — see the header comment of
-    /// [`crate::compile::standalone_ir`] for the "no `Step::RawYaml`
+    /// [`crate::compile::agentic_pipeline`] for the "no `Step::RawYaml`
     /// from generated code" rule.
     ///
     /// The string is expected to be a complete YAML mapping (e.g.

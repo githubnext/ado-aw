@@ -248,9 +248,11 @@ pub(crate) fn build_pipeline_context(
     // ─── Extension declaration fanout ─────────────────────────────
     let mut ext_setup_steps: Vec<Step> = Vec::new();
     let mut ext_agent_prepare: Vec<Step> = Vec::new();
+    let mut ext_agent_conditions: Vec<Condition> = Vec::new();
     for (ext, decl) in extensions.iter().zip(extension_declarations) {
         ext_setup_steps.extend(decl.setup_steps);
         ext_agent_prepare.extend(decl.agent_prepare_steps);
+        ext_agent_conditions.extend(decl.agent_conditions);
         // Prompt supplements append after the per-extension prepare
         // steps. `wrap_prompt_append` returns a YAML string for a
         // `bash: cat >> prompt …` step; emit as `Step::RawYaml`
@@ -299,6 +301,7 @@ pub(crate) fn build_pipeline_context(
         &cfg,
         &ext_setup_steps,
         &ext_agent_prepare,
+        &ext_agent_conditions,
         prefix,
     )?;
 
@@ -318,14 +321,21 @@ pub(crate) fn build_pipeline_context(
 /// unprefixed even in `target: job|stage`, see `src/data/job-base.yml`
 /// where `{{ setup_job }}` substitutes a literal `- job: Setup`).
 ///
+/// `ext_agent_conditions` is the per-extension contribution to the
+/// Agent job's `condition:`. The builder folds it into a single
+/// `Condition::And([Condition::Succeeded, ...])` (an empty set
+/// leaves the Agent job unconditional).
+///
 /// Returns jobs with their cross-job `depends_on` edges wired to the
 /// correct (possibly prefixed) names.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_canonical_jobs(
     front_matter: &FrontMatter,
     extensions: &[Extension],
     cfg: &StandaloneCtx,
     ext_setup_steps: &[Step],
     ext_agent_prepare: &[Step],
+    ext_agent_conditions: &[Condition],
     prefix: Option<&str>,
 ) -> Result<Vec<Job>> {
     let p = JobPrefix(prefix);
@@ -337,6 +347,7 @@ pub(crate) fn build_canonical_jobs(
         front_matter,
         extensions,
         ext_agent_prepare,
+        ext_agent_conditions,
         cfg,
         &p,
     )?);
@@ -703,6 +714,7 @@ fn build_agent_job(
     front_matter: &FrontMatter,
     extensions: &[Extension],
     ext_agent_prepare: &[Step],
+    ext_agent_conditions: &[Condition],
     cfg: &StandaloneCtx,
     prefix: &JobPrefix<'_>,
 ) -> Result<Job> {
@@ -830,13 +842,36 @@ fn build_agent_job(
     job.steps = steps;
     job.variables = agent_job_variables_hoist(front_matter)?;
 
-    // Agent-job condition: when PR/pipeline filters or synthetic-PR
-    // are active, the agent must wait on Setup-job gate outputs.
-    // Mirrors legacy `generate_agentic_depends_on` for standalone.
-    if let Some(cond) = build_agentic_condition(front_matter) {
-        job.condition = Some(cond);
-    }
+    // Agent-job condition: every extension that wants to gate the
+    // Agent job contributes typed clauses via
+    // [`Declarations::agent_conditions`]. The fold AND-s them
+    // together with a leading `succeeded()`; an empty contribution
+    // set leaves the Agent job unconditional (matching the pre-lift
+    // behaviour).
+    //
+    // No knowledge of which extensions contribute or what their step
+    // IDs / signals are lives here — every clause is owned by the
+    // extension that produces the underlying step output.
+    job.condition = fold_agent_conditions(ext_agent_conditions);
     Ok(job)
+}
+
+/// Fold a slice of extension-supplied Agent-job condition clauses
+/// into a single [`Condition::And`] led by [`Condition::Succeeded`].
+///
+/// Returns [`None`] for an empty slice — that matches the pre-lift
+/// behaviour where the Agent job had no `condition:` when no
+/// extension contributed. The leading `Succeeded` matches the
+/// `succeeded()` atom the previous monolithic
+/// `build_agentic_condition` emitted first.
+fn fold_agent_conditions(clauses: &[Condition]) -> Option<Condition> {
+    if clauses.is_empty() {
+        return None;
+    }
+    let mut parts: Vec<Condition> = Vec::with_capacity(clauses.len() + 1);
+    parts.push(Condition::Succeeded);
+    parts.extend(clauses.iter().cloned());
+    Some(Condition::And(parts))
 }
 
 /// Build the Agent-job-level `variables:` block. Typed sibling of
@@ -885,130 +920,12 @@ fn agent_job_variables_hoist(
     Ok(out)
 }
 
-/// Build the typed Agent-job condition mirroring
-/// `common::generate_agentic_depends_on` for the standalone target.
-///
-/// Encodes the same semantics:
-/// - When `synthetic_pr_active`, honour the Setup-job
-///   `synthPr.AW_SYNTHETIC_PR_SKIP=true` self-skip signal.
-/// - When `has_pr_filters`, REQUIRE the `prGate.SHOULD_RUN=true`
-///   output for any build that is a real PR OR a synth-promoted
-///   build; otherwise (non-PR, non-synth) bypass the gate.
-/// - When `has_pipeline_filters`, REQUIRE the
-///   `pipelineGate.SHOULD_RUN=true` output for `ResourceTrigger`
-///   builds; otherwise bypass.
-/// - User filter `expression:` escape hatches are AND-ed in as
-///   `Condition::Custom` atoms (their injection-vector check applies
-///   at codegen time).
-fn build_agentic_condition(front_matter: &FrontMatter) -> Option<Condition> {
-    use crate::compile::ir::condition::Expr;
-    use crate::compile::ir::output::OutputRef;
-
-    let pr_filters = front_matter.pr_filters();
-    let pipeline_filters = front_matter.pipeline_filters();
-    let has_pr_filters = pr_filters
-        .map(|f| !super::filter_ir::lower_pr_filters(f).is_empty())
-        .unwrap_or(false);
-    let has_pipeline_filters = pipeline_filters
-        .map(|f| !super::filter_ir::lower_pipeline_filters(f).is_empty())
-        .unwrap_or(false);
-    let synthetic_pr_active = front_matter.is_synthetic_pr();
-    let pr_expression = pr_filters.and_then(|f| f.expression.as_deref());
-    let pipeline_expression = pipeline_filters.and_then(|f| f.expression.as_deref());
-    let has_expressions = pr_expression.is_some() || pipeline_expression.is_some();
-
-    if !has_pr_filters && !has_pipeline_filters && !synthetic_pr_active && !has_expressions {
-        return None;
-    }
-
-    // Typed step-output refs. The producer step IDs (`synthPr`,
-    // `prGate`, `pipelineGate`) and their declared outputs are
-    // graph-validated at `build_graph` time, so a future rename in
-    // `filter_ir.rs` or `ado_script.rs` becomes a compile error
-    // instead of silently broken runtime conditions. See
-    // [`OutputDecl`] for the `isOutput=true` contract.
-    let synth_step = StepId::new("synthPr").ok();
-    let pr_gate_step = StepId::new("prGate").ok();
-    let pipeline_gate_step = StepId::new("pipelineGate").ok();
-
-    let mut parts: Vec<Condition> = vec![Condition::Succeeded];
-
-    if synthetic_pr_active
-        && let Some(synth) = &synth_step
-    {
-        // ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_SKIP'], 'true')
-        parts.push(Condition::Ne(
-            Expr::StepOutput(OutputRef::new(synth.clone(), "AW_SYNTHETIC_PR_SKIP")),
-            Expr::Literal("true".into()),
-        ));
-    }
-
-    if has_pr_filters
-        && let Some(pr_gate) = &pr_gate_step
-    {
-        let gate_passed = Condition::Eq(
-            Expr::StepOutput(OutputRef::new(pr_gate.clone(), "SHOULD_RUN")),
-            Expr::Literal("true".into()),
-        );
-        if synthetic_pr_active
-            && let Some(synth) = &synth_step
-        {
-            // or(
-            //   and(
-            //     ne(variables['Build.Reason'], 'PullRequest'),
-            //     ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true')
-            //   ),
-            //   eq(dependencies.Setup.outputs['prGate.SHOULD_RUN'], 'true')
-            // )
-            parts.push(Condition::Or(vec![
-                Condition::And(vec![
-                    Condition::Ne(
-                        Expr::Variable("Build.Reason".into()),
-                        Expr::Literal("PullRequest".into()),
-                    ),
-                    Condition::Ne(
-                        Expr::StepOutput(OutputRef::new(synth.clone(), "AW_SYNTHETIC_PR")),
-                        Expr::Literal("true".into()),
-                    ),
-                ]),
-                gate_passed,
-            ]));
-        } else {
-            parts.push(Condition::Or(vec![
-                Condition::Ne(
-                    Expr::Variable("Build.Reason".into()),
-                    Expr::Literal("PullRequest".into()),
-                ),
-                gate_passed,
-            ]));
-        }
-    }
-
-    if has_pipeline_filters
-        && let Some(pipeline_gate) = &pipeline_gate_step
-    {
-        parts.push(Condition::Or(vec![
-            Condition::Ne(
-                Expr::Variable("Build.Reason".into()),
-                Expr::Literal("ResourceTrigger".into()),
-            ),
-            Condition::Eq(
-                Expr::StepOutput(OutputRef::new(pipeline_gate.clone(), "SHOULD_RUN")),
-                Expr::Literal("true".into()),
-            ),
-        ]));
-    }
-
-    if let Some(e) = pr_expression {
-        parts.push(Condition::Custom(e.to_string()));
-    }
-    if let Some(e) = pipeline_expression {
-        parts.push(Condition::Custom(e.to_string()));
-    }
-
-    Some(Condition::And(parts))
-}
-
+/// The Agent-job condition fold lives inline in [`build_agent_job`].
+/// Per-extension contributions arrive via
+/// [`crate::compile::extensions::Declarations::agent_conditions`]
+/// (see `AdoScriptExtension::build_agent_conditions` for today's
+/// only contributor — synth-PR-skip, PR-filter gate, pipeline-filter
+/// gate, and user `expression:` escape hatches).
 fn build_detection_job(
     front_matter: &FrontMatter,
     cfg: &StandaloneCtx,
@@ -2266,6 +2183,57 @@ const _SUBMODULES_OPT_BIND: Option<SubmodulesOpt> = None;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── fold_agent_conditions (issue #987) ─────────────────────────────────
+
+    #[test]
+    fn fold_agent_conditions_empty_returns_none() {
+        // Pre-lift behaviour: when no extension contributes a clause,
+        // the Agent job has no `condition:` at all (so it inherits the
+        // default `succeeded()` from ADO). The fold MUST preserve
+        // that — emitting `condition: succeeded()` explicitly would
+        // be a fixture drift.
+        assert!(fold_agent_conditions(&[]).is_none());
+    }
+
+    #[test]
+    fn fold_agent_conditions_leads_with_succeeded() {
+        // The previous monolithic `build_agentic_condition` emitted
+        // `succeeded()` as the first And() part. The fold owns that
+        // prefix now so individual extensions don't have to duplicate
+        // it.
+        let clauses = vec![Condition::Custom("eq(variables['X'], 'y')".into())];
+        let cond = fold_agent_conditions(&clauses).expect("non-empty fold");
+        let Condition::And(parts) = cond else {
+            panic!("expected And, got {cond:?}");
+        };
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(parts[0], Condition::Succeeded));
+        assert!(matches!(&parts[1], Condition::Custom(s) if s == "eq(variables['X'], 'y')"));
+    }
+
+    #[test]
+    fn fold_agent_conditions_preserves_clause_order() {
+        // Declaration order matters for `condition:` readability AND
+        // for fixture parity. The fold must AND-append clauses in
+        // input order with no reordering, deduplication, or
+        // simplification.
+        let clauses = vec![
+            Condition::Custom("A".into()),
+            Condition::Custom("B".into()),
+            Condition::Custom("C".into()),
+        ];
+        let cond = fold_agent_conditions(&clauses).unwrap();
+        let Condition::And(parts) = cond else { panic!() };
+        assert_eq!(parts.len(), 4);
+        assert!(matches!(parts[0], Condition::Succeeded));
+        for (i, expected) in ["A", "B", "C"].iter().enumerate() {
+            match &parts[i + 1] {
+                Condition::Custom(s) => assert_eq!(s, expected),
+                other => panic!("part {} expected Custom, got {other:?}", i + 1),
+            }
+        }
+    }
 
     // ── parse_env_block ────────────────────────────────────────────────────
 

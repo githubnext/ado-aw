@@ -25,11 +25,11 @@
 //! `merge_job_deps`) are intentionally **API surface** rather than
 //! production callers. The compile path threads
 //! [`graph::build_graph`] → [`graph::detect_cycles`] → emit, wiring
-//! `depends_on` explicitly per-target (`standalone_ir.rs` /
-//! `job_ir.rs` / `stage_ir.rs` / `onees_ir.rs`); the `apply_*`
-//! helpers are kept for any future caller that wants the documented
-//! "build → derive → validate → emit" flow (e.g. tooling that
-//! lints or transforms a Pipeline before emit).
+//! `depends_on` explicitly inside the canonical-jobs builder
+//! (`agentic_pipeline.rs`, shared by every target wrapper); the
+//! `apply_*` helpers are kept for any future caller that wants the
+//! documented "build → derive → validate → emit" flow (e.g. tooling
+//! that lints or transforms a Pipeline before emit).
 //!
 //! Per-item `#[allow(dead_code)]` annotations would be churn; the
 //! module-level allow is the pragmatic line.

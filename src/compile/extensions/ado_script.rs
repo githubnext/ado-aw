@@ -116,6 +116,132 @@ impl AdoScriptExtension {
     fn runtime_imports_active(&self) -> bool {
         !self.inlined_imports
     }
+
+    /// Build the typed Agent-job condition clauses contributed by
+    /// `ado-script`. Returned by [`CompilerExtension::declarations`]
+    /// in [`Declarations::agent_conditions`] so the canonical-jobs
+    /// builder can fold them into the Agent job's
+    /// `condition:` without hard-coding knowledge of this extension's
+    /// step IDs (`synthPr`, `prGate`, `pipelineGate`) or its
+    /// signals.
+    ///
+    /// Semantics (preserved from the previous
+    /// `agentic_pipeline::build_agentic_condition`):
+    ///
+    /// - When [`Self::synthetic_pr_active`], honour the Setup-job
+    ///   `synthPr.AW_SYNTHETIC_PR_SKIP=true` self-skip signal.
+    /// - When PR filters lower to a non-empty check set, REQUIRE the
+    ///   `prGate.SHOULD_RUN=true` output for any build that is a real
+    ///   PR OR a synth-promoted build; otherwise (non-PR, non-synth)
+    ///   bypass the gate.
+    /// - When pipeline filters lower to a non-empty check set,
+    ///   REQUIRE the `pipelineGate.SHOULD_RUN=true` output for
+    ///   `ResourceTrigger` builds; otherwise bypass.
+    /// - User filter `expression:` escape hatches are emitted as
+    ///   `Condition::Custom` atoms (the injection-vector check runs
+    ///   at codegen time inside the `Custom` arm).
+    ///
+    /// The leading `succeeded()` clause is NOT included here — it is
+    /// prepended by [`crate::compile::agentic_pipeline`] when it
+    /// folds any non-empty contribution set into a single
+    /// `Condition::And`. This keeps emission order identical to the
+    /// pre-lift output (`succeeded()` first, then this extension's
+    /// clauses in declaration order).
+    fn build_agent_conditions(&self) -> Result<Vec<Condition>> {
+        use crate::compile::ir::output::OutputRef;
+
+        let (pr_checks, pipeline_checks) = self.lowered_checks();
+        let has_pr_filters = !pr_checks.is_empty();
+        let has_pipeline_filters = !pipeline_checks.is_empty();
+        let synthetic_pr_active = self.synthetic_pr_active();
+        let pr_expression = self
+            .pr_filters
+            .as_ref()
+            .and_then(|f| f.expression.as_deref());
+        let pipeline_expression = self
+            .pipeline_filters
+            .as_ref()
+            .and_then(|f| f.expression.as_deref());
+
+        let mut parts: Vec<Condition> = Vec::new();
+
+        // Typed step-output refs. The producer step IDs (`synthPr`,
+        // `prGate`, `pipelineGate`) and their declared outputs are
+        // graph-validated at `build_graph` time, so a future rename
+        // becomes a compile error instead of a silently broken runtime
+        // condition. The `?` propagates an invalid-StepId error as a
+        // compile-time bug (the strings are static).
+        if synthetic_pr_active {
+            let synth = StepId::new("synthPr")?;
+            // ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_SKIP'], 'true')
+            parts.push(Condition::Ne(
+                Expr::StepOutput(OutputRef::new(synth, "AW_SYNTHETIC_PR_SKIP")),
+                Expr::Literal("true".into()),
+            ));
+        }
+
+        if has_pr_filters {
+            let pr_gate = StepId::new("prGate")?;
+            let gate_passed = Condition::Eq(
+                Expr::StepOutput(OutputRef::new(pr_gate, "SHOULD_RUN")),
+                Expr::Literal("true".into()),
+            );
+            if synthetic_pr_active {
+                let synth = StepId::new("synthPr")?;
+                // or(
+                //   and(
+                //     ne(variables['Build.Reason'], 'PullRequest'),
+                //     ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true')
+                //   ),
+                //   eq(dependencies.Setup.outputs['prGate.SHOULD_RUN'], 'true')
+                // )
+                parts.push(Condition::Or(vec![
+                    Condition::And(vec![
+                        Condition::Ne(
+                            Expr::Variable("Build.Reason".into()),
+                            Expr::Literal("PullRequest".into()),
+                        ),
+                        Condition::Ne(
+                            Expr::StepOutput(OutputRef::new(synth, "AW_SYNTHETIC_PR")),
+                            Expr::Literal("true".into()),
+                        ),
+                    ]),
+                    gate_passed,
+                ]));
+            } else {
+                parts.push(Condition::Or(vec![
+                    Condition::Ne(
+                        Expr::Variable("Build.Reason".into()),
+                        Expr::Literal("PullRequest".into()),
+                    ),
+                    gate_passed,
+                ]));
+            }
+        }
+
+        if has_pipeline_filters {
+            let pipeline_gate = StepId::new("pipelineGate")?;
+            parts.push(Condition::Or(vec![
+                Condition::Ne(
+                    Expr::Variable("Build.Reason".into()),
+                    Expr::Literal("ResourceTrigger".into()),
+                ),
+                Condition::Eq(
+                    Expr::StepOutput(OutputRef::new(pipeline_gate, "SHOULD_RUN")),
+                    Expr::Literal("true".into()),
+                ),
+            ]));
+        }
+
+        if let Some(e) = pr_expression {
+            parts.push(Condition::Custom(e.to_string()));
+        }
+        if let Some(e) = pipeline_expression {
+            parts.push(Condition::Custom(e.to_string()));
+        }
+
+        Ok(parts)
+    }
 }
 
 /// Returns the two-step bundle as typed `Step`s: a
@@ -352,10 +478,19 @@ impl CompilerExtension for AdoScriptExtension {
             }
         }
 
+        // ─── Agent-job condition contribution ──────────────────
+        // Synth-PR / PR-filter / pipeline-filter / user-expression
+        // clauses that gate the Agent job. The canonical-jobs builder
+        // folds these (plus the contributions of any other extension
+        // that gates the Agent job) into a single `Condition::And`
+        // with a leading `succeeded()`.
+        let agent_conditions = self.build_agent_conditions()?;
+
         Ok(Declarations {
             setup_steps,
             agent_prepare_steps,
             warnings,
+            agent_conditions,
             ..Declarations::default()
         })
     }
@@ -792,6 +927,222 @@ mod tests {
         let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
         let ctx = CompileContext::for_test(&fm);
         assert!(ext.declarations(&ctx).unwrap().network_hosts.is_empty());
+    }
+
+    // ── agent_conditions contribution (issue #987) ──────────────────────
+    //
+    // These tests pin the shape of `Declarations::agent_conditions` per
+    // trigger configuration. The agentic-pipeline builder folds these
+    // into the Agent job's `condition:` with a leading `Succeeded`
+    // (covered by `agent_conditions_fold_*` tests below); per-extension
+    // contribution shape is asserted here so a future regression in
+    // `build_agent_conditions` fails close to its source rather than
+    // showing up as a fixture drift two layers away.
+
+    fn ext_with_synth(
+        pr: Option<PrFilters>,
+        pipeline: Option<PipelineFilters>,
+    ) -> AdoScriptExtension {
+        use crate::compile::types::{BranchFilter, PrTriggerConfig};
+        AdoScriptExtension {
+            pr_filters: pr,
+            pipeline_filters: pipeline,
+            inlined_imports: true,
+            exec_context_pr_active: false,
+            pr_trigger_for_synth: Some(PrTriggerConfig {
+                branches: Some(BranchFilter {
+                    include: vec!["main".into()],
+                    exclude: vec![],
+                }),
+                paths: None,
+                filters: None,
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn label_pr_filters(label: &str) -> PrFilters {
+        PrFilters {
+            labels: Some(LabelFilter {
+                any_of: vec![label.into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn label_pipeline_filters() -> PipelineFilters {
+        // `branch` is a fact-bearing field that lowers to a non-empty
+        // check, which is what we need to trigger the pipeline-filter
+        // gate clause without depending on a PR-only field.
+        PipelineFilters {
+            branch: Some(PatternFilter {
+                pattern: "main".into(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn agent_conditions_empty_when_no_filters_and_no_synth() {
+        let ext = ext_with(None, None, true);
+        let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
+        let ctx = CompileContext::for_test(&fm);
+        let decl = ext.declarations(&ctx).unwrap();
+        assert!(
+            decl.agent_conditions.is_empty(),
+            "no filters / no synth → no Agent-job clauses, got {:?}",
+            decl.agent_conditions
+        );
+    }
+
+    #[test]
+    fn agent_conditions_emits_synth_skip_clause_when_synthetic_pr_active() {
+        // Just synthetic-PR, no filters: a single Ne clause that
+        // self-skips the Agent job when the synthPr step set
+        // AW_SYNTHETIC_PR_SKIP=true.
+        let ext = ext_with_synth(None, None);
+        let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
+        let ctx = CompileContext::for_test(&fm);
+        let clauses = ext.declarations(&ctx).unwrap().agent_conditions;
+        assert_eq!(clauses.len(), 1, "single synth-skip clause: {clauses:?}");
+        match &clauses[0] {
+            Condition::Ne(Expr::StepOutput(out), Expr::Literal(lit)) => {
+                assert_eq!(out.step.as_str(), "synthPr");
+                assert_eq!(out.name, "AW_SYNTHETIC_PR_SKIP");
+                assert_eq!(lit, "true");
+            }
+            other => panic!("expected Ne(StepOutput, Literal), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_conditions_emits_pr_gate_clause_when_pr_filters_present_no_synth() {
+        // PR filters without synth-from-CI: an Or(...) gating real
+        // PullRequest builds on prGate.SHOULD_RUN.
+        let ext = ext_with(Some(label_pr_filters("run-agent")), None, true);
+        let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
+        let ctx = CompileContext::for_test(&fm);
+        let clauses = ext.declarations(&ctx).unwrap().agent_conditions;
+        assert_eq!(
+            clauses.len(),
+            1,
+            "single PR-gate Or clause (no synth-skip): {clauses:?}"
+        );
+        let Condition::Or(parts) = &clauses[0] else {
+            panic!("expected Or, got {:?}", clauses[0]);
+        };
+        assert_eq!(parts.len(), 2, "Or(Build.Reason!=PR, prGate.SHOULD_RUN=true)");
+        match &parts[0] {
+            Condition::Ne(Expr::Variable(name), Expr::Literal(lit)) => {
+                assert_eq!(name, "Build.Reason");
+                assert_eq!(lit, "PullRequest");
+            }
+            other => panic!("expected Ne(Build.Reason, PullRequest), got {other:?}"),
+        }
+        match &parts[1] {
+            Condition::Eq(Expr::StepOutput(out), Expr::Literal(lit)) => {
+                assert_eq!(out.step.as_str(), "prGate");
+                assert_eq!(out.name, "SHOULD_RUN");
+                assert_eq!(lit, "true");
+            }
+            other => panic!("expected Eq(prGate.SHOULD_RUN, true), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_conditions_pr_gate_carves_out_synth_when_synthetic_active() {
+        // PR filters AND synth-from-CI: the inner `Ne != PullRequest`
+        // becomes And(Ne != PullRequest, Ne synthPr.AW_SYNTHETIC_PR != true)
+        // so synth-promoted CI builds also have to clear prGate.
+        let ext = ext_with_synth(Some(label_pr_filters("run-agent")), None);
+        let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
+        let ctx = CompileContext::for_test(&fm);
+        let clauses = ext.declarations(&ctx).unwrap().agent_conditions;
+        assert_eq!(
+            clauses.len(),
+            2,
+            "synth-skip + PR-gate (with synth carve-out): {clauses:?}"
+        );
+        // Clause 0: synth-skip (already covered above; just sanity check).
+        assert!(matches!(
+            &clauses[0],
+            Condition::Ne(Expr::StepOutput(out), _)
+                if out.step.as_str() == "synthPr" && out.name == "AW_SYNTHETIC_PR_SKIP"
+        ));
+        // Clause 1: Or(And(Ne PullRequest, Ne synthPr.AW_SYNTHETIC_PR), Eq prGate.SHOULD_RUN).
+        let Condition::Or(parts) = &clauses[1] else {
+            panic!("expected Or, got {:?}", clauses[1]);
+        };
+        assert_eq!(parts.len(), 2);
+        let Condition::And(and_parts) = &parts[0] else {
+            panic!("expected And inside Or, got {:?}", parts[0]);
+        };
+        assert_eq!(and_parts.len(), 2);
+        assert!(matches!(
+            &and_parts[1],
+            Condition::Ne(Expr::StepOutput(out), Expr::Literal(lit))
+                if out.step.as_str() == "synthPr" && out.name == "AW_SYNTHETIC_PR" && lit == "true"
+        ));
+    }
+
+    #[test]
+    fn agent_conditions_emits_pipeline_gate_clause_when_pipeline_filters_present() {
+        let ext = ext_with(None, Some(label_pipeline_filters()), true);
+        let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
+        let ctx = CompileContext::for_test(&fm);
+        let clauses = ext.declarations(&ctx).unwrap().agent_conditions;
+        assert_eq!(clauses.len(), 1, "single pipeline-gate Or clause");
+        let Condition::Or(parts) = &clauses[0] else {
+            panic!("expected Or, got {:?}", clauses[0]);
+        };
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(
+            &parts[0],
+            Condition::Ne(Expr::Variable(name), Expr::Literal(lit))
+                if name == "Build.Reason" && lit == "ResourceTrigger"
+        ));
+        assert!(matches!(
+            &parts[1],
+            Condition::Eq(Expr::StepOutput(out), Expr::Literal(lit))
+                if out.step.as_str() == "pipelineGate" && out.name == "SHOULD_RUN" && lit == "true"
+        ));
+    }
+
+    #[test]
+    fn agent_conditions_appends_custom_expressions_after_typed_clauses() {
+        // User `expression:` escape hatches arrive after typed clauses
+        // in declaration order: pr_expression first, then
+        // pipeline_expression.
+        let pr = PrFilters {
+            labels: Some(LabelFilter {
+                any_of: vec!["run-agent".into()],
+                ..Default::default()
+            }),
+            expression: Some("eq(variables['MyVar'], 'pr-yes')".into()),
+            ..Default::default()
+        };
+        let pipeline = PipelineFilters {
+            branch: Some(PatternFilter {
+                pattern: "main".into(),
+            }),
+            expression: Some("eq(variables['MyVar'], 'pipe-yes')".into()),
+            ..Default::default()
+        };
+        let ext = ext_with(Some(pr), Some(pipeline), true);
+        let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
+        let ctx = CompileContext::for_test(&fm);
+        let clauses = ext.declarations(&ctx).unwrap().agent_conditions;
+        // [pr-gate Or, pipeline-gate Or, Custom pr-expr, Custom pipeline-expr]
+        assert_eq!(clauses.len(), 4, "got: {clauses:?}");
+        assert!(matches!(&clauses[0], Condition::Or(_)));
+        assert!(matches!(&clauses[1], Condition::Or(_)));
+        assert!(
+            matches!(&clauses[2], Condition::Custom(s) if s == "eq(variables['MyVar'], 'pr-yes')")
+        );
+        assert!(
+            matches!(&clauses[3], Condition::Custom(s) if s == "eq(variables['MyVar'], 'pipe-yes')")
+        );
     }
 
     // ── resolve_imports_inline ─────────────────────────────────────────

@@ -88,7 +88,7 @@ pub enum EnvValue {
     Concat(Vec<EnvValue>),
     /// Pre-built YAML scalar emitted verbatim into the value position.
     ///
-    /// Used by [`crate::compile::standalone_ir`] when a legacy YAML
+    /// Used by [`crate::compile::agentic_pipeline`] when a legacy YAML
     /// env-block carries a non-string scalar (integer / boolean) that
     /// must round-trip unquoted (e.g. `GITHUB_READ_ONLY: 1` — not
     /// `'1'`). Bypasses the string-formatting lowering so

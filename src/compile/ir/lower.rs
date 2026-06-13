@@ -832,7 +832,7 @@ pub(crate) fn lower_step(step: &Step, ctx: &LoweringContext<'_>) -> Result<Value
 ///
 /// Returns `Err` if a `- `-prefixed body has a continuation line
 /// that is non-empty and does not start with at least two spaces.
-/// The current producers in [`crate::compile::standalone_ir`] all
+/// The current producers in [`crate::compile::agentic_pipeline`] all
 /// emit exactly two-space-indented continuations via
 /// [`step_value_to_dash_yaml`], so any failure here indicates an
 /// out-of-contract producer (compiler bug).

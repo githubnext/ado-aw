@@ -6,7 +6,7 @@
 //! - Self-cancellation via ADO REST API when filters don't match
 //!
 //! All YAML-string emission for these concerns is now owned by the typed IR
-//! (see `src/compile/ir/` and `src/compile/standalone_ir.rs`). Gate steps are
+//! (see `src/compile/ir/` and `src/compile/agentic_pipeline.rs`). Gate steps are
 //! produced by `AdoScriptExtension`'s `setup_steps()` hook
 //! (`src/compile/extensions/ado_script.rs`). What remains here is the
 //! cfg(test) coverage of the `filter_ir` lowering / spec layer that those
