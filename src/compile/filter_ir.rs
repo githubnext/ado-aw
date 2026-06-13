@@ -1320,12 +1320,18 @@ pub fn build_gate_step_typed(
 /// Map a legacy `(env_var, "$(Some.Macro)")` exports entry to a typed
 /// [`crate::compile::ir::env::EnvValue`]. Predefined-variable macros
 /// route through [`crate::compile::ir::env::EnvValue::ado_macro`] (so
-/// the allowlist enforces no typos); free-form user vars or things the
-/// allowlist doesn't yet cover fall through to
-/// [`crate::compile::ir::env::EnvValue::Literal`] preserving the raw
-/// scalar.
+/// the allowlist enforces no typos).
+///
+/// Anything that does not match the allowlist falls through to
+/// [`crate::compile::ir::env::EnvValue::Literal`] with the raw
+/// `$(X.Y)` string preserved. ADO substitutes the macro at runtime
+/// either way, so emitted YAML is byte-identical to the allowlisted
+/// path, but the fallback emits a compile-time `log::warn!` so a
+/// new predefined-variable use site doesn't quietly accrete here —
+/// extend [`crate::compile::ir::env::ALLOWED_ADO_MACROS`] when you
+/// see this warning.
 fn env_value_from_ado_macro(
-    _name: &str,
+    name: &str,
     ado_macro: &'static str,
 ) -> anyhow::Result<crate::compile::ir::env::EnvValue> {
     use crate::compile::ir::env::{ALLOWED_ADO_MACROS, EnvValue};
@@ -1346,9 +1352,13 @@ fn env_value_from_ado_macro(
             }
         }
     }
-    // Fallback: keep the raw scalar verbatim (covers any
-    // not-yet-allowlisted predefined var so a new fact addition
-    // doesn't immediately break this codepath).
+    // Fallback: keep the raw scalar verbatim and surface the bypass
+    // so it doesn't silently accrete.
+    log::warn!(
+        "filter_ir: env var {name:?} maps to ADO macro {ado_macro:?} which is not in \
+         ALLOWED_ADO_MACROS. Emitting as a literal; consider adding it to the allowlist \
+         in src/compile/ir/env.rs so EnvValue::AdoMacro can carry it typed."
+    );
     Ok(EnvValue::literal(ado_macro))
 }
 

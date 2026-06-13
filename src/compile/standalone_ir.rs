@@ -754,12 +754,12 @@ fn build_agent_job(
     }
 
     // 3. acquire ADO read token (AzureCLI@2 task) — only when configured.
-    push_raw_yaml_if_nonempty(&mut steps, &cfg.acquire_read_token);
+    push_raw_yaml_if_nonempty(&mut steps, &cfg.acquire_read_token)?;
 
     // 4. engine install steps (Copilot CLI install). YAML string from
     //    `Engine::install_steps`; lowered through `Step::RawYaml`
     //    until a typed `Engine::install_steps_typed` lands.
-    push_raw_yaml_if_nonempty(&mut steps, &cfg.engine_install_steps_yaml);
+    push_raw_yaml_if_nonempty(&mut steps, &cfg.engine_install_steps_yaml)?;
 
     // 5. Download agentic pipeline compiler
     steps.push(Step::Bash(download_compiler_step(&cfg.compiler_version)));
@@ -772,7 +772,7 @@ fn build_agent_job(
             &cfg.pipeline_path,
             &cfg.trigger_repo_directory,
         ),
-    );
+    )?;
 
     // 7. Prepare tooling (generates MCPG API key, writes MCPG config to staging)
     steps.push(Step::Bash(prepare_mcpg_config_step(&cfg.mcpg_config_json)));
@@ -803,7 +803,7 @@ fn build_agent_job(
     }
 
     // 14. AWF path step (when extensions declare path prepends)
-    push_raw_yaml_if_nonempty(&mut steps, &cfg.awf_path_step_yaml);
+    push_raw_yaml_if_nonempty(&mut steps, &cfg.awf_path_step_yaml)?;
 
     // 15. SafeOutputs HTTP server
     steps.push(Step::Bash(start_safeoutputs_server_step(
@@ -816,7 +816,7 @@ fn build_agent_job(
         &cfg.mcpg_docker_env,
         &cfg.mcpg_step_env,
         cfg.debug_pipeline,
-    )));
+    )?));
 
     // 17. Verify MCP backends (debug-only)
     if cfg.debug_pipeline {
@@ -830,7 +830,7 @@ fn build_agent_job(
         &cfg.working_directory,
         &cfg.engine_run,
         &cfg.engine_env,
-    )));
+    )?));
 
     // 19. Collect safe outputs from AWF container
     steps.push(Step::Bash(collect_safe_outputs_step()));
@@ -1056,7 +1056,7 @@ fn build_detection_job(
     }));
 
     // Engine install
-    push_raw_yaml_if_nonempty(&mut steps, &cfg.engine_install_steps_yaml);
+    push_raw_yaml_if_nonempty(&mut steps, &cfg.engine_install_steps_yaml)?;
     // Download compiler
     steps.push(Step::Bash(download_compiler_step(&cfg.compiler_version)));
     // DockerInstaller
@@ -1121,7 +1121,7 @@ fn build_safeoutputs_job(
     let mut steps: Vec<Step> = Vec::new();
     steps.push(checkout_self_step());
     // Acquire write token (when configured)
-    push_raw_yaml_if_nonempty(&mut steps, &cfg.acquire_write_token);
+    push_raw_yaml_if_nonempty(&mut steps, &cfg.acquire_write_token)?;
     // Download analyzed outputs
     steps.push(Step::Download(DownloadStep {
         source: "current".to_string(),
@@ -1147,7 +1147,7 @@ fn build_safeoutputs_job(
         &cfg.source_path,
         &cfg.working_directory,
         &cfg.executor_ado_env,
-    )));
+    )?));
     // Copy logs
     steps.push(Step::Bash(copy_logs_safeoutputs_step(&cfg.engine_log_dir)));
     // Publish
@@ -1451,7 +1451,11 @@ fn start_safeoutputs_server_step(enabled_tools_args: &str, working_directory: &s
     bash("Start SafeOutputs HTTP server", script)
 }
 
-fn start_mcpg_step(mcpg_docker_env: &str, mcpg_step_env: &str, debug_pipeline: bool) -> BashStep {
+fn start_mcpg_step(
+    mcpg_docker_env: &str,
+    mcpg_step_env: &str,
+    debug_pipeline: bool,
+) -> Result<BashStep> {
     let mcpg_image_v = format!("{MCPG_IMAGE}:v{MCPG_VERSION}");
     // Build the docker-env block as additional `-e VAR=...` lines, one per
     // line, joined with `\n  ` (newline + 2-space continuation indent to
@@ -1594,10 +1598,10 @@ fn start_mcpg_step(mcpg_docker_env: &str, mcpg_step_env: &str, debug_pipeline: b
          cat /tmp/awf-tools/mcp-config.json\n"
     );
     let mut step = bash("Start MCP Gateway (MCPG)", script);
-    for (k, v) in parse_env_block(mcpg_step_env) {
+    for (k, v) in parse_env_block(mcpg_step_env)? {
         step = step.with_env(k, v);
     }
-    step
+    Ok(step)
 }
 
 fn run_agent_step(
@@ -1606,7 +1610,7 @@ fn run_agent_step(
     working_directory: &str,
     engine_run: &str,
     engine_env: &str,
-) -> BashStep {
+) -> Result<BashStep> {
     // The awf_mounts string is a `\`-joined chain of `--mount "..."` lines.
     // Render each at 2-space indent inside the bash body (the surrounding
     // `--allow-domains` line is at 2-space indent too — the block-scalar
@@ -1674,17 +1678,17 @@ fn run_agent_step(
             .collect::<Vec<_>>()
             .join("\n")
     );
-    for (k, v) in parse_env_block(&synthetic_block) {
+    for (k, v) in parse_env_block(&synthetic_block)? {
         step = step.with_env(k, v);
     }
-    step
+    Ok(step)
 }
 
 fn execute_safe_outputs_step(
     source_path: &str,
     working_directory: &str,
     executor_ado_env: &str,
-) -> BashStep {
+) -> Result<BashStep> {
     let script = format!(
         "ado-aw execute --source \"{source_path}\" --safe-output-dir \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)\" --output-dir \"$(Agent.TempDirectory)/staging\"\n\
          EXIT_CODE=$?\n\
@@ -1696,10 +1700,10 @@ fn execute_safe_outputs_step(
     );
     let mut step = bash("Execute safe outputs (Stage 3)", script);
     step.working_directory = Some(working_directory.to_string());
-    for (k, v) in parse_env_block(executor_ado_env) {
+    for (k, v) in parse_env_block(executor_ado_env)? {
         step = step.with_env(k, v);
     }
-    step
+    Ok(step)
 }
 
 fn collect_safe_outputs_step() -> BashStep {
@@ -2060,23 +2064,47 @@ fn dedent(s: &str) -> String {
 /// (`"true"`, `"file"`) become bare literals and ADO macros (`$(X)`)
 /// land as `EnvValue::PipelineVar` so the lowering pass re-emits the
 /// macro form. Anything else lands as `EnvValue::Literal`.
-fn parse_env_block(yaml_block: &str) -> Vec<(String, super::ir::env::EnvValue)> {
+///
+/// # Errors
+///
+/// Returns `Err` if the input fails to parse as YAML or does not
+/// match the `env: { KEY: VALUE, … }` shape. The inputs are
+/// compiler-generated from validated front-matter, so a parse
+/// failure here indicates a compiler bug rather than user error —
+/// surfacing it loudly is much better than the previous silent
+/// empty-vec fallback (which produced runtime "GITHUB_TOKEN missing"
+/// failures in the pipeline with no compile-time signal).
+fn parse_env_block(yaml_block: &str) -> Result<Vec<(String, super::ir::env::EnvValue)>> {
     use super::ir::env::EnvValue;
     if yaml_block.trim().is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    let parsed: serde_yaml::Value = match serde_yaml::from_str(yaml_block) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
+    let parsed: serde_yaml::Value = serde_yaml::from_str(yaml_block).map_err(|e| {
+        anyhow::anyhow!(
+            "ir::standalone: parse_env_block failed to parse compiler-generated YAML \
+             ({e}); this is a compiler bug. Block was:\n{yaml_block}"
+        )
+    })?;
     let env_map = match parsed {
         serde_yaml::Value::Mapping(mut m) => {
             match m.shift_remove(serde_yaml::Value::String("env".into())) {
                 Some(serde_yaml::Value::Mapping(inner)) => inner,
-                _ => return Vec::new(),
+                Some(other) => anyhow::bail!(
+                    "ir::standalone: parse_env_block: top-level `env:` value must be a \
+                     mapping, got {:?}",
+                    other
+                ),
+                None => anyhow::bail!(
+                    "ir::standalone: parse_env_block: top-level YAML mapping is missing \
+                     `env:` key"
+                ),
             }
         }
-        _ => return Vec::new(),
+        other => anyhow::bail!(
+            "ir::standalone: parse_env_block: top-level YAML must be a mapping with an \
+             `env:` key, got {:?}",
+            other
+        ),
     };
     let mut out = Vec::with_capacity(env_map.len());
     for (k, v) in env_map {
@@ -2108,7 +2136,7 @@ fn parse_env_block(yaml_block: &str) -> Vec<(String, super::ir::env::EnvValue)> 
             }
         }
     }
-    out
+    Ok(out)
 }
 
 fn step_to_raw_yaml_string(step: &serde_yaml::Value) -> Result<String> {
@@ -2132,17 +2160,21 @@ fn step_to_raw_yaml_string(step: &serde_yaml::Value) -> Result<String> {
     Ok(out)
 }
 
-fn push_raw_yaml_if_nonempty(steps: &mut Vec<Step>, yaml: &str) {
+fn push_raw_yaml_if_nonempty(steps: &mut Vec<Step>, yaml: &str) -> Result<()> {
     if yaml.trim().is_empty() {
-        return;
+        return Ok(());
     }
     // The body may contain one or more top-level `- ...` items (e.g.
     // engine_install_steps_yaml is two steps: install + version output).
-    // Split them so each lands as a separate Step::RawYaml that
-    // lower_raw_yaml can parse individually.
-    for chunk in split_yaml_step_sequence(yaml) {
+    // Split them through serde_yaml so each item lands as a separate
+    // Step::RawYaml that lower_raw_yaml can parse individually — this
+    // gives us a real YAML parse instead of relying on blank-line
+    // separators in the input. Any parse failure is a compiler bug
+    // (the producer just emitted invalid YAML) and surfaces loudly.
+    for chunk in split_yaml_step_sequence(yaml)? {
         steps.push(Step::RawYaml(chunk));
     }
+    Ok(())
 }
 
 /// Split a YAML string of the form
@@ -2157,60 +2189,57 @@ fn push_raw_yaml_if_nonempty(steps: &mut Vec<Step>, yaml: &str) {
 /// ```
 ///
 /// into individual sequence items (`- bash: ...`), preserving each
-/// item's body verbatim including its trailing newline. Each
-/// returned string starts with `- ` so `lower_raw_yaml` can handle
-/// it directly.
+/// item's body via `serde_yaml::to_string` so `lower_raw_yaml` can
+/// handle it directly. Each returned string starts with `- `.
 ///
-/// Single-item inputs return a one-element Vec.
-fn split_yaml_step_sequence(yaml: &str) -> Vec<String> {
-    let mut chunks: Vec<String> = Vec::new();
-    let mut current = String::new();
-    let mut depth_was_zero = false;
-    for line in yaml.lines() {
-        if (line.starts_with("- ") || line == "-") && depth_was_zero {
-            // New sequence item — flush.
-            if !current.trim().is_empty() {
-                chunks.push(strip_trailing_blank_lines(&current));
-            }
-            current.clear();
-            current.push_str(line);
-            current.push('\n');
-            depth_was_zero = false;
-        } else if line.starts_with("- ") || line == "-" {
-            // First item — open the accumulator.
-            current.push_str(line);
-            current.push('\n');
-            depth_was_zero = false;
-        } else if line.trim().is_empty() {
-            current.push_str(line);
-            current.push('\n');
-            depth_was_zero = true;
-        } else {
-            current.push_str(line);
-            current.push('\n');
-            depth_was_zero = false;
-        }
-    }
-    if !current.trim().is_empty() {
-        chunks.push(strip_trailing_blank_lines(&current));
-    }
-    chunks
+/// Single-item inputs return a one-element `Vec`. Inputs that are a
+/// bare mapping (no leading `- `) are treated as a single item.
+///
+/// # Errors
+///
+/// Returns `Err` if the input does not parse as YAML, or if it
+/// parses as something other than a sequence of mappings / a bare
+/// mapping. Inputs are compiler-generated, so any failure is a
+/// compiler bug.
+fn split_yaml_step_sequence(yaml: &str) -> Result<Vec<String>> {
+    let parsed: serde_yaml::Value = serde_yaml::from_str(yaml).map_err(|e| {
+        anyhow::anyhow!(
+            "ir::standalone: split_yaml_step_sequence failed to parse compiler-generated \
+             step YAML ({e}); this is a compiler bug. Input was:\n{yaml}"
+        )
+    })?;
+    let items: Vec<serde_yaml::Value> = match parsed {
+        serde_yaml::Value::Sequence(seq) => seq,
+        bare @ serde_yaml::Value::Mapping(_) => vec![bare],
+        other => anyhow::bail!(
+            "ir::standalone: split_yaml_step_sequence: expected a sequence of step mappings \
+             or a single step mapping, got {:?}",
+            other
+        ),
+    };
+    items.into_iter().map(step_value_to_dash_yaml).collect()
 }
 
-/// Strip trailing blank-only lines from `s` but preserve a single
-/// terminating newline if the final non-blank line was newline-terminated.
-fn strip_trailing_blank_lines(s: &str) -> String {
-    let trimmed: String = s.trim_end_matches([' ', '\t']).to_string();
-    // Collapse runs of trailing newlines down to one.
-    let mut end = trimmed.len();
-    while end > 0 && trimmed.as_bytes()[end - 1] == b'\n' {
-        end -= 1;
+/// Render a single YAML mapping value as a `- key: value\n  …` chunk
+/// (i.e. as one item of a YAML sequence). The output starts with
+/// `- ` so [`lower_raw_yaml`] can de-indent it.
+fn step_value_to_dash_yaml(v: serde_yaml::Value) -> Result<String> {
+    let yaml = serde_yaml::to_string(&v).map_err(|e| {
+        anyhow::anyhow!("ir::standalone: failed to re-serialize step value ({e})")
+    })?;
+    let mut out = String::with_capacity(yaml.len() + 4);
+    for (i, line) in yaml.lines().enumerate() {
+        if i == 0 {
+            out.push_str("- ");
+            out.push_str(line);
+        } else {
+            out.push('\n');
+            out.push_str("  ");
+            out.push_str(line);
+        }
     }
-    let mut out = trimmed[..end].to_string();
-    if trimmed.ends_with('\n') {
-        out.push('\n');
-    }
-    out
+    out.push('\n');
+    Ok(out)
 }
 
 /// Build the agent prompt body — either inlined imports or a
@@ -2265,3 +2294,92 @@ const _PIPELINE_VAR_BIND: Option<PipelineVar> = None;
 const _PIPELINE_RESOURCE_BIND: Option<PipelineResource> = None;
 #[allow(dead_code)]
 const _SUBMODULES_OPT_BIND: Option<SubmodulesOpt> = None;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── parse_env_block ────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_env_block_empty_input_is_ok_empty_vec() {
+        let pairs = parse_env_block("").unwrap();
+        assert!(pairs.is_empty());
+    }
+
+    #[test]
+    fn parse_env_block_routes_ado_macro_through_pipeline_var() {
+        let pairs = parse_env_block("env:\n  GITHUB_TOKEN: $(GITHUB_TOKEN)\n").unwrap();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0, "GITHUB_TOKEN");
+        assert!(matches!(
+            pairs[0].1,
+            crate::compile::ir::env::EnvValue::PipelineVar(ref name) if name == "GITHUB_TOKEN"
+        ));
+    }
+
+    #[test]
+    fn parse_env_block_bails_on_malformed_yaml() {
+        // Stray `:` inside a bare key would make this fail to parse as
+        // a mapping. The previous silent `return Vec::new()` swallowed
+        // this — the typed Result surface should bail loudly.
+        let err = parse_env_block("env:\n  KEY: : value\n").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("parse_env_block failed to parse compiler-generated YAML"),
+            "expected compiler-bug parse-failure message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_env_block_bails_when_top_level_is_not_a_mapping() {
+        let err = parse_env_block("just a string\n").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("top-level YAML must be a mapping"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_env_block_bails_when_env_key_is_missing() {
+        let err = parse_env_block("other: value\n").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("missing `env:` key"), "got: {msg}");
+    }
+
+    // ── split_yaml_step_sequence ───────────────────────────────────────────
+
+    #[test]
+    fn split_yaml_step_sequence_single_step() {
+        let yaml = "- bash: echo hi\n  displayName: greet\n";
+        let chunks = split_yaml_step_sequence(yaml).unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].starts_with("- bash:"));
+        assert!(chunks[0].contains("displayName: greet"));
+    }
+
+    #[test]
+    fn split_yaml_step_sequence_multiple_steps_without_blank_line_separator() {
+        // The previous blank-line-based splitter would have merged
+        // these two adjacent steps into a single garbage chunk. The
+        // serde_yaml-based splitter correctly returns one chunk per
+        // sequence item regardless of whitespace between them.
+        let yaml = "- bash: echo first\n  displayName: First\n- bash: echo second\n  displayName: Second\n";
+        let chunks = split_yaml_step_sequence(yaml).unwrap();
+        assert_eq!(chunks.len(), 2, "got chunks: {chunks:?}");
+        assert!(chunks[0].contains("First"));
+        assert!(chunks[1].contains("Second"));
+    }
+
+    #[test]
+    fn split_yaml_step_sequence_bails_on_invalid_yaml() {
+        let yaml = "- bash: |\n  unterminated [ block\n  more\n] mismatched\n";
+        let err = split_yaml_step_sequence(yaml).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("split_yaml_step_sequence failed to parse"),
+            "got: {msg}"
+        );
+    }
+}
