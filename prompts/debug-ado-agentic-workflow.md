@@ -361,16 +361,33 @@ This job executes the approved safe outputs using the write token. Failures here
 
 **Symptoms**: API calls return 401/403. The executor can't authenticate to Azure DevOps.
 
+**Decode the error first.** The body of an ADO 403 usually contains a structured `TF401027` message:
+
+```text
+TF401027: You need the Git '<PermissionName>' permission to perform
+this action. Details: identity 'Build\<guid>', scope '<scope>'.
+```
+
+| Field | What it tells you |
+|---|---|
+| `<PermissionName>` | The exact permission ADO denied. `PullRequestContribute` covers `add-pr-comment` / `submit-pr-review` / `reply-to-pr-comment` / `resolve-pr-thread` / `update-pr`. `GenericContribute` + `CreateBranch` + `PullRequestContribute` are what `create-pull-request` needs. `CreateBranch` alone is what `create-branch` needs. `CreateTag` is what `create-git-tag` needs. |
+| `Build\<guid>` | The Stage 3 identity. If the guid matches the **project ID**, the pipeline is running as the project-scoped `<ProjectName> Build Service (<org>)`. If it does not, it is the org-wide `Project Collection Build Service (<org>)` and "Limit job authorization scope to current project" is OFF. |
+| `<scope>` | `repository` = per-repo ACE, `project` = project-wide, `branch` = `refs/heads/<name>`. |
+
 **Common causes**:
 
-- **`permissions.write` not set**: The front matter is missing the write ARM service connection:
+- **No `permissions.write:` set, and the default build identity lacks the permission on the target repo.** The Stage 3 executor uses `$(System.AccessToken)` by default; the identity behind that token (PCBS or per-project Build Service) needs the right permission bit on the repo. An **explicit Deny** at the repo ACE on the failing identity will beat any group-level Allow. This is the most common Stage 3 failure mode; see [`docs/safe-output-permissions.md`](../docs/safe-output-permissions.md) for the full diagnosis flow, including a REST recipe for dumping the ACL and a decoder for the permission bitmask.
+- **`permissions.write` not set when the ADO admin has hardened the default build identity:**
   ```yaml
   permissions:
     write: my-write-arm-connection
   ```
 - **ARM service connection not authorized**: The pipeline needs explicit authorization for the service connection. Go to the pipeline's settings in ADO and authorize the service connection.
 - **Token scope insufficient**: The ARM service connection may not have the required permissions on the ADO project. Verify the connection's role assignments.
+- **Cross-project failure (`VS800075`)**: The pipeline is trying to act on a resource in a different project than where it runs and "Limit job authorization scope to current project" is ON. Either turn the toggle off (broader scope) or use a write service connection whose identity has explicit rights in the target project.
 - **Compile-time validation**: The compiler should catch missing `permissions.write` when write-requiring safe outputs are configured. If you're seeing this at runtime, the front matter may have been edited without recompiling.
+
+**Diagnosis hint when reporting**: include the full `TF401027` line (with `<PermissionName>` and the `Build\<guid>` value), the failing safe-output `name`, the target repo / PR / work item id, and — if you have it — whether the build identity has an explicit Deny vs missing Allow on the target. The [`safe-output-permissions.md`](../docs/safe-output-permissions.md) reference page has the REST recipe to pull this in one curl.
 
 ### PR Creation Failures
 

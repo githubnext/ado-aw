@@ -140,6 +140,12 @@ Stage 2 (Detection) may reject safe outputs that appear to contain:
 
 **Solution:** Review the agent's output proposals. Ensure generated content doesn't accidentally include patterns that resemble secrets (long base64 strings, key-value patterns matching `password=...`).
 
+### Stage 3 SafeOutputs fails with HTTP 403 / `TF401027`
+
+The Stage 3 executor uses `$(System.AccessToken)` by default, which represents one of two ADO-minted build-service identities (collection-scoped or project-scoped) depending on the **"Limit job authorization scope to current project"** setting. If that identity lacks `PullRequestContribute` / `GenericContribute` / `CreateBranch` (or, worse, has an *explicit Deny*) on the target repo, every safe output that touches PRs, branches, or pushes fails with `TF401027`.
+
+See the dedicated [Safe-output 401/403 errors](/ado-aw/troubleshooting/safe-output-permissions/) page for the full diagnosis flow, a permission bitmask decoder, a REST recipe for inspecting the ACEs, and the three fix paths (write service connection / flip the auth-scope toggle / lift the Deny).
+
 ## Build & Development
 
 ### `cargo build` fails with missing dependencies
