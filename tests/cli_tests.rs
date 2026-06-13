@@ -1,7 +1,11 @@
 use std::path::PathBuf;
 
+// The `run` subcommand previously had a description "Run agent locally" when
+// it was an internal developer tool. It now queues ADO builds ("Queue a build
+// for every ADO definition…"). This test guards against that old description
+// being reinstated.
 #[test]
-fn test_run_subcommand_not_present() {
+fn test_run_agent_locally_description_absent() {
     let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
     let output = std::process::Command::new(&binary_path)
         .arg("--help")
@@ -12,6 +16,7 @@ fn test_run_subcommand_not_present() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         !stdout.contains("Run agent locally"),
-        "Help output should not include a run subcommand, got:\n{stdout}"
+        "Help output should not contain the old 'Run agent locally' description; \
+         the run subcommand now queues ADO builds. Got:\n{stdout}"
     );
 }
