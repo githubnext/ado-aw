@@ -70,9 +70,6 @@ use super::ir::{
 };
 use super::types::{FrontMatter, OnConfig, PrMode, Repository as RepoCfg};
 
-// Suppress unused; this module is wired up in a sibling commit.
-#[allow(unused_imports)]
-use super::common::{generate_acquire_ado_token, generate_executor_ado_env};
 
 /// Built pipeline context — the result of running every validation,
 /// scalar computation, extension declaration fanout, and canonical-
@@ -1098,6 +1095,7 @@ fn wire_explicit_dependencies(jobs: &mut [Job], prefix: &JobPrefix<'_>) -> Resul
     let agent_id = prefix.id("Agent")?;
     let detection_id = prefix.id("Detection")?;
     let safeoutputs_id = prefix.id("SafeOutputs")?;
+    let teardown_id = prefix.id("Teardown")?;
     let has_setup = jobs.iter().any(|j| j.id == setup_id);
     for j in jobs.iter_mut() {
         if j.id == agent_id && has_setup {
@@ -1106,7 +1104,7 @@ fn wire_explicit_dependencies(jobs: &mut [Job], prefix: &JobPrefix<'_>) -> Resul
             j.depends_on = vec![agent_id.clone()];
         } else if j.id == safeoutputs_id {
             j.depends_on = vec![agent_id.clone(), detection_id.clone()];
-        } else if j.id.as_str() == "Teardown" {
+        } else if j.id == teardown_id {
             j.depends_on = vec![safeoutputs_id.clone()];
         }
     }
