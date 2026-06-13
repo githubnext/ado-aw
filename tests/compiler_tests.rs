@@ -3829,19 +3829,13 @@ fn test_standalone_minimal_compiled_output_is_valid_yaml() {
     );
 }
 
-/// Test that the complete standalone fixture produces valid YAML
-#[test]
-fn test_standalone_complete_compiled_output_is_valid_yaml() {
-    let compiled = compile_fixture("complete-agent.md");
-    assert_valid_yaml(&compiled, "complete-agent.md");
-}
-
 /// Test that the complete standalone fixture emits Setup/Teardown jobs and
 /// that the agentic task waits on Setup. The fixture has `setup:`,
 /// `teardown:`, and `post-steps:` sections so all three should appear.
 #[test]
 fn test_standalone_complete_agent_has_setup_and_teardown_jobs() {
     let compiled = compile_fixture("complete-agent.md");
+    assert_valid_yaml(&compiled, "complete-agent.md");
     assert!(
         compiled.contains("- job: Setup"),
         "Should generate Setup job: {compiled}"
@@ -4039,19 +4033,18 @@ fn test_debug_pipeline_probe_step_indentation_standalone() {
     let compiled = compile_fixture_with_flags("minimal-agent.md", &["--debug-pipeline"]);
 
     // The probe step should be a proper YAML step at the same indent level as
-    // other steps in the Agent job. Find the "- bash:" line and check indent.
-    for line in compiled.lines() {
-        if line.contains("displayName: \"Verify MCP backends\"") {
-            let indent = line.len() - line.trim_start().len();
-            // Standalone jobs use 8 spaces for step properties
-            assert_eq!(
-                indent, 8,
-                "Verify MCP backends displayName should be at 8 spaces indent in standalone, got {}",
-                indent
-            );
-            break;
-        }
-    }
+    // other steps in the Agent job. Find the displayName line and check indent.
+    // Standalone jobs use 4 spaces for step properties.
+    let line = compiled
+        .lines()
+        .find(|l| l.contains("displayName: Verify MCP backends"))
+        .expect("Should find 'Verify MCP backends' displayName in compiled output");
+    let indent = line.len() - line.trim_start().len();
+    assert_eq!(
+        indent, 4,
+        "Verify MCP backends displayName should be at 4 spaces indent in standalone, got {}",
+        indent
+    );
 }
 
 /// Test that debug probe step indentation is correct in 1ES output
@@ -4059,33 +4052,27 @@ fn test_debug_pipeline_probe_step_indentation_standalone() {
 fn test_debug_pipeline_probe_step_indentation_1es() {
     let compiled = compile_fixture_with_flags("1es-test-agent.md", &["--debug-pipeline"]);
 
-    for line in compiled.lines() {
-        if line.contains("displayName: \"Verify MCP backends\"") {
-            let indent = line.len() - line.trim_start().len();
-            // 1ES uses 18 spaces for step properties inside templateContext
-            assert_eq!(
-                indent, 18,
-                "Verify MCP backends displayName should be at 18 spaces indent in 1ES, got {}",
-                indent
-            );
-            break;
-        }
-    }
+    // 1ES uses 12 spaces for step properties inside templateContext.
+    let line = compiled
+        .lines()
+        .find(|l| l.contains("displayName: Verify MCP backends"))
+        .expect("Should find 'Verify MCP backends' displayName in 1ES compiled output");
+    let indent = line.len() - line.trim_start().len();
+    assert_eq!(
+        indent, 12,
+        "Verify MCP backends displayName should be at 12 spaces indent in 1ES, got {}",
+        indent
+    );
 }
 
 // ─── PR Filter Integration Tests ────────────────────────────────────────────
 
-/// Tier 1 PR filter fixture produces valid YAML with inline gate step.
-#[test]
-fn test_pr_filter_tier1_compiled_output_is_valid_yaml() {
-    let compiled = compile_fixture("pr-filter-tier1-agent.md");
-    assert_valid_yaml(&compiled, "pr-filter-tier1-agent.md");
-}
-
 /// Tier 1 PR filters use the bundled Node evaluator via extension.
+/// Also verifies the compiled output is valid YAML.
 #[test]
 fn test_pr_filter_tier1_has_evaluator_gate() {
     let compiled = compile_fixture("pr-filter-tier1-agent.md");
+    assert_valid_yaml(&compiled, "pr-filter-tier1-agent.md");
 
     assert!(
         compiled.contains("- job: Setup"),
@@ -4283,17 +4270,12 @@ fn test_node_runtime_install_orders_after_ado_script_so_user_version_wins() {
     );
 }
 
-/// Tier 2 PR filter fixture produces valid YAML.
-#[test]
-fn test_pr_filter_tier2_compiled_output_is_valid_yaml() {
-    let compiled = compile_fixture("pr-filter-tier2-agent.md");
-    assert_valid_yaml(&compiled, "pr-filter-tier2-agent.md");
-}
-
 /// Tier 2 PR filters produce a Setup job with extension-based gate step.
+/// Also verifies the compiled output is valid YAML.
 #[test]
 fn test_pr_filter_tier2_has_extension_gate() {
     let compiled = compile_fixture("pr-filter-tier2-agent.md");
+    assert_valid_yaml(&compiled, "pr-filter-tier2-agent.md");
 
     assert!(
         compiled.contains("- job: Setup"),
