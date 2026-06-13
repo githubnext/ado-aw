@@ -86,9 +86,10 @@ Current top-level keys include the following. Optional sections are omitted from
 | `rejected_safe_outputs` | Rollup of rejections by reason / threat flag. |
 | `detection_analysis` | `threat-analysis.json`. |
 | `mcp_server_health` | MCPG logs aggregated per server. |
+| `pipeline_graph` | Optional typed-IR `PipelineSummary` rebuilt from local source metadata (`aw_info.json.source`) for graph correlation. |
 | `mcp_tool_usage` | MCPG logs aggregated per `(server, tool)`. |
 | `mcp_failures` | MCPG `tool_error` / `server_error` events. |
-| `jobs` | ADO `/timeline` records filtered to `type: Job`. |
+| `jobs` | ADO `/timeline` records filtered to `type: Job`; when `pipeline_graph` is available, each entry may include `upstream_jobs` and `downstream_jobs` from IR job edges. |
 | `firewall_analysis` | AWF Squid proxy logs aggregated by domain. |
 | `policy_analysis` | AWF policy artifacts aggregated into allow / deny summaries. |
 | `missing_tools` / `missing_data` / `noops` | NDJSON entries from the corresponding SafeOutputs MCP tools. |
@@ -108,6 +109,23 @@ When `threat-analysis.json` reports any threat flag, the audit treats the SafeOu
 Additionally, exactly one severity-`high` finding is emitted summarizing the gate decision: which threat flags fired, how many proposals were dropped, and the full aggregate reasons.
 
 Per-item detection verdicts are not currently available. `threat-analysis.md` emits an aggregate verdict only; per-item verdicts are a follow-up that should stay aligned with gh-aw.
+
+## Pipeline graph correlation
+
+After the standard analyzers run, `audit` looks for
+`agent_outputs[_<BuildId>]/staging/aw_info.json` (falling back to the artifact
+top level) and resolves its `source` path relative to the current working
+directory. If that markdown source exists locally, the command rebuilds the
+typed IR with the same public summary shape emitted by `ado-aw inspect --json`
+and stores it under `pipeline_graph.graph`. The audit embeds the full
+`PipelineSummary` rather than a reduced subset so audit, inspect, graph, and
+trace consumers share one schema.
+
+When graph correlation succeeds, `jobs[]` entries also gain optional
+`upstream_jobs` and `downstream_jobs` arrays. These are omitted when empty or
+when the source markdown is unavailable locally. Failed jobs with downstream
+edges emit a medium-severity finding summarizing the downstream runtime
+classifications.
 
 ## Cache behavior
 
@@ -135,7 +153,7 @@ Per-item detection verdicts are not currently available. `threat-analysis.md` em
 
 ## Related Documentation
 
-- [CLI Commands](cli.md) — full CLI reference
+- [CLI Commands](cli.md) — full CLI reference, including `trace`
 - [Front Matter](front-matter.md) — agent file format
 - [Safe Outputs](safe-outputs.md) — what proposals look like
 - [Network](network.md) — AWF firewall configuration

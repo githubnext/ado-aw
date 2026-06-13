@@ -45,6 +45,7 @@ pub mod lower;
 pub mod output;
 pub mod stage;
 pub mod step;
+pub mod summary;
 pub mod tasks;
 
 use ids::StageId;

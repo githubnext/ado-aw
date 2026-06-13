@@ -7,10 +7,11 @@ pub mod cache;
 pub mod cli;
 pub mod findings;
 pub mod model;
+pub mod pipeline_graph;
 pub mod render;
 pub mod url;
 
-pub use cli::{AuditOptions, dispatch};
+pub use cli::{AuditOptions, dispatch, fetch_audit_data};
 #[allow(unused_imports)]
 pub use model::*;
 
@@ -26,7 +27,10 @@ pub use model::*;
 /// compares numerically so the highest-numbered build wins.
 pub(crate) fn cmp_numeric_suffix(a: &str, b: &str) -> std::cmp::Ordering {
     fn suffix(s: &str) -> u64 {
-        s.rsplit('_').next().and_then(|s| s.parse().ok()).unwrap_or(0)
+        s.rsplit('_')
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
     }
     suffix(a).cmp(&suffix(b)).then_with(|| a.cmp(b))
 }
