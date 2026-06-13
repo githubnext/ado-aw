@@ -181,11 +181,12 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── update-ado-agentic-workflow.md # Guide for modifying an existing agentic pipeline
 │   └── debug-ado-agentic-workflow.md  # Guide for troubleshooting a failing agentic pipeline
 ├── scripts/              # Supporting scripts shipped as release artifacts
-│   └── ado-script/       # TypeScript workspace for bundled gate.js, import.js, exec-context-pr.js, and future bundles
+│   └── ado-script/       # TypeScript workspace for bundled gate.js, import.js, exec-context-pr.js, exec-context-pr-synth.js
 │       └── src/
 │           ├── gate/     # Gate evaluator source (bundled to gate.js)
 │           ├── import/   # Runtime prompt resolver source (bundled to import.js)
 │           ├── exec-context-pr/ # PR-context precompute source (bundled to exec-context-pr.js)
+│           ├── exec-context-pr-synth/ # Synthetic-PR resolver source (bundled to exec-context-pr-synth.js)
 │           └── shared/   # Shared modules across bundles (auth, ado-client, env-facts, types.gen.ts)
 ├── tests/                # Integration tests and fixtures
 ├── docs/                 # Per-concept reference documentation (see index below)
@@ -198,7 +199,7 @@ Every compiled pipeline runs as three sequential jobs:
 - **Language**: Rust (2024 edition) - Note: Rust 2024 edition exists and is the edition used by this project
 - **CLI Framework**: clap v4 with derive macros
 - **Error Handling**: anyhow for ergonomic error propagation
-- **Bundled scripts**: TypeScript + ncc (`scripts/ado-script/`) — compiled gate evaluator, runtime import resolver, and future internal helpers; see [`docs/ado-script.md`](docs/ado-script.md).
+- **Bundled scripts**: TypeScript + ncc (`scripts/ado-script/`) — compiled gate evaluator, runtime import resolver, PR-context precompute, and synthetic-PR resolver; see [`docs/ado-script.md`](docs/ado-script.md).
 - **Async Runtime**: tokio with full features
 - **YAML Parsing**: serde_yaml
 - **MCP Server**: rmcp with server and transport-io features
@@ -284,7 +285,7 @@ index to jump to the right page.
   adding codemods.
 - [`docs/ado-script.md`](docs/ado-script.md) — `ado-script` workspace
   (`scripts/ado-script/`): the bundled TypeScript runtime helpers (today:
-  `gate.js`, `import.js`, `exec-context-pr.js`), schemars-driven type codegen, and the A2 design decision.
+  `gate.js`, `import.js`, `exec-context-pr.js`, `exec-context-pr-synth.js`), schemars-driven type codegen, and the A2 design decision.
 - [`docs/local-development.md`](docs/local-development.md) — local development
   setup notes.
 

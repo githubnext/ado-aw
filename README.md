@@ -616,7 +616,8 @@ index to jump to the right page.
 - [`docs/codemods.md`](docs/codemods.md) — front-matter codemod framework
   (detection-based source rewrites on breaking-change updates).
 - [`docs/ado-script.md`](docs/ado-script.md) — `scripts/ado-script/` workspace
-  (bundled TypeScript runtime helpers: `gate.js`, `import.js`).
+  (bundled TypeScript runtime helpers: `gate.js`, `import.js`,
+  `exec-context-pr.js`, `exec-context-pr-synth.js`).
 - [`docs/extending.md`](docs/extending.md) — adding new CLI commands, compile
   targets, front-matter fields, template markers, safe-output tools,
   first-class tools, and runtimes.
