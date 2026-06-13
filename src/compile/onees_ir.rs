@@ -15,7 +15,7 @@
 //! `Detection`, `SafeOutputs`, `Teardown?`). Job IDs are unprefixed
 //! (same as standalone).
 //!
-//! Differences from [`crate::compile::standalone_ir`]:
+//! Differences from [`crate::compile::agentic_pipeline`]:
 //!
 //! - Top-level [`crate::compile::ir::Resources`] prepends a
 //!   `1ESPipelineTemplates` repository resource at the head of the
@@ -42,7 +42,7 @@ use super::ir::job::JobTemplateContext;
 use super::ir::{
     OneEsSdlConfig, Pipeline, PipelineBody, PipelineShape, RepositoryResource,
 };
-use super::standalone_ir::build_pipeline_context;
+use super::agentic_pipeline::build_pipeline_context;
 use super::types::FrontMatter;
 
 /// 1ES Unofficial Pipeline Templates repository identifier used

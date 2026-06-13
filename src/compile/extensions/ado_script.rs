@@ -241,7 +241,7 @@ pub const SYNTH_PR_OUTPUT_NAMES: &[&str] = &[
 
 /// Subset of [`SYNTH_PR_OUTPUT_NAMES`] hoisted into the Agent-job
 /// `variables:` block by
-/// [`crate::compile::standalone_ir::agent_job_variables_hoist`].
+/// [`crate::compile::agentic_pipeline::agent_job_variables_hoist`].
 ///
 /// Every name listed here MUST also be in [`SYNTH_PR_OUTPUT_NAMES`]
 /// (enforced by `synth_pr_hoist_subset_of_outputs` unit test) so

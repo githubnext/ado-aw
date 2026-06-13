@@ -112,7 +112,7 @@ impl ContextContributor for PrContextContributor {
     fn prepare_step_typed(&self, _ctx: &CompileContext) -> anyhow::Result<Option<Step>> {
         // Synth-active path reads the Agent-job-level hoisted
         // variables `AW_PR_ID` / `AW_PR_TARGETBRANCH` (populated by
-        // `standalone_ir::agent_job_variables_hoist` from the
+        // `agentic_pipeline::agent_job_variables_hoist` from the
         // `synthPr` Setup-job step outputs) via the same-job `$(name)`
         // macro form. Step-level `env:` does NOT reliably evaluate
         // cross-job `$[ dependencies.<Job>.outputs[...] ]` runtime
@@ -244,7 +244,7 @@ mod tests {
 
         // PR id env: PipelineVar reading the Agent-job-level hoisted
         // `AW_PR_ID` variable (populated from synthPr Setup-job step
-        // output by `standalone_ir::agent_job_variables_hoist`). The
+        // output by `agentic_pipeline::agent_job_variables_hoist`). The
         // step env reads the resolved variable via the same-job
         // `$(name)` macro form — runtime `$[ ... ]` expressions are
         // NOT evaluated inside step env (PR #956).
