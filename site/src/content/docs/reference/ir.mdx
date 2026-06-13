@@ -7,14 +7,14 @@ description: Typed Azure DevOps pipeline IR, graph pass, output refs, conditions
 
 ado-aw no longer compiles pipelines by substituting strings into YAML template files. Every production target builds a typed Azure DevOps pipeline IR, resolves graph-level facts, lowers that IR to `serde_yaml::Value`, and serializes once with `serde_yaml::to_string`.
 
-The implementation lives under `src/compile/ir/` and the target-specific builders live beside the legacy target modules:
+The implementation lives under `src/compile/ir/`. The canonical 5-job agentic-pipeline shape (Setup → Agent → Detection → SafeOutputs → Teardown) lives in `src/compile/agentic_pipeline.rs` and is shared by every target. Per-target wrappers handle only the envelope:
 
 - `src/compile/standalone_ir.rs`
 - `src/compile/onees_ir.rs`
 - `src/compile/job_ir.rs`
 - `src/compile/stage_ir.rs`
 
-Those builders are the only place target shape should be assembled. Shared target logic should be typed IR construction helpers, not string fragments.
+Those wrappers are the only place per-target shape (top-level `PipelineShape`, template parameters, 1ES `extends:`) should be assembled. Shared canonical-shape logic belongs in `agentic_pipeline.rs`. Shared target logic should be typed IR construction helpers, not string fragments.
 
 ## Module layout
 
@@ -256,11 +256,13 @@ This gives all targets one serialization path and one canonical YAML style. Targ
 
 ## Per-target compilers
 
-The production target builders are:
+The production target wrappers are:
 
-- `standalone_ir.rs` — builds the standalone five-job pipeline and top-level triggers/resources.
-- `onees_ir.rs` — builds the same logical job graph with `PipelineShape::OneEs`, causing the lowerer to emit the 1ES `extends:` wrapper and `templateContext` outputs.
-- `job_ir.rs` — builds the target-job template with external `dependsOn` / `condition` template parameters.
-- `stage_ir.rs` — builds the target-stage template with the stage-level external-parameter wrapper.
+- `standalone_ir.rs` — wraps the canonical shape in a top-level standalone pipeline.
+- `onees_ir.rs` — wraps the same canonical shape with `PipelineShape::OneEs`, causing the lowerer to emit the 1ES `extends:` wrapper and `templateContext` outputs.
+- `job_ir.rs` — wraps the canonical shape as a target-job template with external `dependsOn` / `condition` template parameters.
+- `stage_ir.rs` — wraps the canonical shape as a target-stage template with the stage-level external-parameter wrapper.
+
+The canonical 5-job Setup → Agent → Detection → SafeOutputs → Teardown shape itself lives in `agentic_pipeline.rs` and is reused unchanged by every wrapper above; extensions plug into it via `Declarations` (steps, env, hosts, MCPG entries, and Agent-job condition clauses — see `Declarations::agent_conditions`).
 
 When adding a target, follow the same pattern: parse and validate front matter, collect extension `Declarations`, build typed jobs/stages/steps, set the correct `PipelineShape`, and call the shared emit path.

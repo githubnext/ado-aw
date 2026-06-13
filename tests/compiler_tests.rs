@@ -4,11 +4,12 @@ use std::path::PathBuf;
 // `assert_required_markers`, `assert_pool_config`, `assert_compiler_download`,
 // `assert_awf_download`, `assert_mcpg_integration`, and `test_compiled_yaml_structure`
 // validated the legacy `src/data/base.yml` template. The standalone target
-// now builds its YAML programmatically via `src/compile/standalone_ir.rs`
-// (see `feat(compile): standalone target builds Pipeline IR; delete base.yml`);
-// the template is gone, so these template-shape assertions no longer apply.
-// The shape tests in `src/compile/standalone_ir.rs` and the bash-lint suite
-// take over coverage.
+// now builds its YAML programmatically via `src/compile/agentic_pipeline.rs`
+// (see `feat(compile): standalone target builds Pipeline IR; delete base.yml`,
+// then `refactor(compile): extract canonical agentic-pipeline shape into
+// agentic_pipeline.rs`); the template is gone, so these template-shape
+// assertions no longer apply. The shape tests in
+// `src/compile/agentic_pipeline.rs` and the bash-lint suite take over coverage.
 
 /// Test that the example file is valid and can be parsed
 #[test]

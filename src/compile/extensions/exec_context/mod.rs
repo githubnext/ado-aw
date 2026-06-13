@@ -422,7 +422,7 @@ mod tests {
         );
         // The Agent job hoists the synthPr step outputs to
         // job-level variables — this is what
-        // `standalone_ir::agent_job_variables_hoist` populates in
+        // `agentic_pipeline::agent_job_variables_hoist` populates in
         // production builds. Reproduce a minimal subset here.
         let synth_id = StepId::new("synthPr").unwrap();
         for name in &["AW_PR_ID", "AW_PR_TARGETBRANCH", "AW_SYNTHETIC_PR"] {

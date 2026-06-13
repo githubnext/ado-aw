@@ -344,6 +344,26 @@ pub struct Declarations {
     pub agent_env_vars: Vec<(String, String)>,
     /// Non-fatal warnings to print at compile time.
     pub warnings: Vec<String>,
+    /// Clauses to AND into the canonical Agent job's `condition:`.
+    ///
+    /// The canonical-jobs builder folds every extension's contribution
+    /// into a single `Condition::And([Condition::Succeeded, ...])`
+    /// before emitting (an empty fold leaves the Agent job
+    /// unconditional, matching today's behaviour). This lets an
+    /// extension declaratively gate the Agent job — for example the
+    /// `ado-script` extension contributes the synth-PR-skip clause,
+    /// the PR-filter and pipeline-filter `SHOULD_RUN` checks, and the
+    /// user `expression:` escape hatches — without
+    /// [`crate::compile::agentic_pipeline`] hard-coding knowledge of
+    /// each extension's step IDs (`synthPr`, `prGate`,
+    /// `pipelineGate`) or signals.
+    ///
+    /// Clauses use typed [`crate::compile::ir::output::OutputRef`]
+    /// over the producing extension's declared
+    /// [`crate::compile::ir::output::OutputDecl`]s, so a future rename
+    /// of a producer step ID becomes a graph-validation compile
+    /// error rather than a silently broken runtime condition.
+    pub agent_conditions: Vec<crate::compile::ir::condition::Condition>,
 }
 
 /// Mount access mode for an AWF bind mount.

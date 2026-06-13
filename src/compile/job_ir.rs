@@ -30,7 +30,7 @@
 //!
 //! Job-id prefixing matches the legacy template (Agent / Detection /
 //! SafeOutputs are prefixed; Setup / Teardown are unprefixed). See
-//! [`crate::compile::standalone_ir::JobPrefix`] for the prefix rule.
+//! [`crate::compile::agentic_pipeline::JobPrefix`] for the prefix rule.
 
 use anyhow::Result;
 use std::path::Path;
@@ -40,7 +40,7 @@ use super::extensions::{CompileContext, Extension};
 use super::ir::ids::JobId;
 use super::ir::job::TemplateDependsOnWrap;
 use super::ir::{Pipeline, PipelineBody, PipelineShape, Resources, TemplateParams, Triggers};
-use super::standalone_ir::build_pipeline_context;
+use super::agentic_pipeline::build_pipeline_context;
 use super::types::FrontMatter;
 
 /// Build the typed [`Pipeline`] for the `target: job` compile target.
