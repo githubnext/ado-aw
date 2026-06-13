@@ -279,6 +279,45 @@ pub fn parse_markdown(content: &str) -> Result<(FrontMatter, String)> {
     Ok((parsed.front_matter, parsed.markdown_body))
 }
 
+/// Construct a guaranteed-unique heredoc sentinel for shell content.
+///
+/// Returns `<base>_<12-hex-chars-of-sha256(content)>`. The SHA suffix
+/// makes the sentinel deterministic per content (so lock files stay
+/// stable across recompiles) and astronomically unlikely to appear
+/// inside the content (a random 48-bit prefix collision has ~2^-48
+/// probability).
+///
+/// As defense in depth, validates that the content does not contain
+/// the resulting sentinel as a standalone line and returns `Err` if
+/// it does — converting a worst-case bash-injection silent failure
+/// into a typed compile error. In practice the error branch is
+/// unreachable without a deliberate SHA-256 prefix-collision attack
+/// on the content body.
+///
+/// # Why
+///
+/// Bash heredocs (`cat > file <<'EOF' ... EOF`) are terminated by a
+/// line whose entire content equals the sentinel. If `content`
+/// contains such a line, everything after it executes as bash
+/// instead of being captured into the file. With user-controlled
+/// content (e.g. resolved agent markdown, front-matter description),
+/// a fixed sentinel like `EOF` or `AGENT_PROMPT_EOF` is a latent
+/// shell-injection vector: a malicious agent file can break out of
+/// the heredoc and execute arbitrary commands in the Detection /
+/// Agent jobs.
+pub(crate) fn heredoc_sentinel(base: &str, content: &str) -> Result<String> {
+    let hash = crate::hash::sha256_hex(content.as_bytes());
+    let sentinel = format!("{base}_{}", &hash[..12]);
+    if content.lines().any(|line| line == sentinel) {
+        anyhow::bail!(
+            "heredoc sentinel '{sentinel}' would terminate the heredoc early — \
+             the content contains the sentinel as a standalone line. This requires \
+             a SHA-256 prefix collision on the content body; investigate if seen."
+        );
+    }
+    Ok(sentinel)
+}
+
 /// Round-trip a YAML body through `serde_yaml::from_str` ➜ `to_string` to
 /// produce a canonical form (deterministic key order via `Mapping`'s preserved
 /// insertion order, normalised quoting, normalised indentation).

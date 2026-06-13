@@ -177,12 +177,12 @@ jobs:
     displayName: Prepare tooling
   - bash: |
       # Write agent instructions to /tmp so it's accessible inside AWF container
-      cat > "/tmp/awf-tools/agent-prompt.md" << 'AGENT_PROMPT_EOF'
+      cat > "/tmp/awf-tools/agent-prompt.md" << 'AGENT_PROMPT_EOF_ff2fc9daf93e'
       ## Runtime Imports Author Marker Job
 
       RUNTIME_IMPORT_SNIPPET_INLINED_OK
 
-      AGENT_PROMPT_EOF
+      AGENT_PROMPT_EOF_ff2fc9daf93e
 
       echo "Agent prompt:"
       cat "/tmp/awf-tools/agent-prompt.md"
@@ -620,7 +620,7 @@ jobs:
     displayName: Prepare safe outputs for analysis
   - bash: |
       # Write threat analysis prompt to /tmp (accessible inside AWF container)
-      cat > "/tmp/awf-tools/threat-analysis-prompt.md" << 'THREAT_ANALYSIS_EOF'
+      cat > "/tmp/awf-tools/threat-analysis-prompt.md" << 'THREAT_ANALYSIS_EOF_180132da0260'
       # Threat Detection Analysis
 
       You are a security analyst tasked with analyzing agent output and code changes for potential security threats.
@@ -658,7 +658,7 @@ jobs:
       - Focus on actual security risks rather than style issues
       - If you're uncertain about a potential threat, err on the side of caution
       - Provide clear, actionable reasons for any threats detected
-      THREAT_ANALYSIS_EOF
+      THREAT_ANALYSIS_EOF_180132da0260
 
       echo "Threat analysis prompt:"
       cat "/tmp/awf-tools/threat-analysis-prompt.md"

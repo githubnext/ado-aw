@@ -169,9 +169,9 @@ stages:
       displayName: Prepare tooling
     - bash: |
         # Write agent instructions to /tmp so it's accessible inside AWF container
-        cat > "/tmp/awf-tools/agent-prompt.md" << 'AGENT_PROMPT_EOF'
+        cat > "/tmp/awf-tools/agent-prompt.md" << 'AGENT_PROMPT_EOF_c6024f20cde6'
         {{#runtime-import tests/fixtures/stage-agent.md}}
-        AGENT_PROMPT_EOF
+        AGENT_PROMPT_EOF_c6024f20cde6
 
         echo "Agent prompt:"
         cat "/tmp/awf-tools/agent-prompt.md"
@@ -630,7 +630,7 @@ stages:
       displayName: Prepare safe outputs for analysis
     - bash: |
         # Write threat analysis prompt to /tmp (accessible inside AWF container)
-        cat > "/tmp/awf-tools/threat-analysis-prompt.md" << 'THREAT_ANALYSIS_EOF'
+        cat > "/tmp/awf-tools/threat-analysis-prompt.md" << 'THREAT_ANALYSIS_EOF_a28625ba51dc'
         # Threat Detection Analysis
 
         You are a security analyst tasked with analyzing agent output and code changes for potential security threats.
@@ -668,7 +668,7 @@ stages:
         - Focus on actual security risks rather than style issues
         - If you're uncertain about a potential threat, err on the side of caution
         - Provide clear, actionable reasons for any threats detected
-        THREAT_ANALYSIS_EOF
+        THREAT_ANALYSIS_EOF_a28625ba51dc
 
         echo "Threat analysis prompt:"
         cat "/tmp/awf-tools/threat-analysis-prompt.md"

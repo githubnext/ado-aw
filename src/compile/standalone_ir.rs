@@ -789,7 +789,7 @@ fn build_agent_job(
     // 9. Prepare agent prompt (heredoc)
     steps.push(Step::Bash(prepare_agent_prompt_step(
         &cfg.agent_content_value,
-    )));
+    )?));
 
     // 10. DockerInstaller@0
     steps.push(Step::Task(
@@ -1053,7 +1053,7 @@ fn build_detection_job(
         .replace("{{ working_directory }}", &cfg.working_directory);
     steps.push(Step::Bash(prepare_threat_analysis_prompt_step(
         &threat_prompt,
-    )));
+    )?));
     // Setup compiler
     steps.push(Step::Bash(setup_compiler_step()));
     // Run threat analysis
@@ -1298,22 +1298,30 @@ fn prepare_tooling_step() -> BashStep {
     bash("Prepare tooling", script)
 }
 
-fn prepare_agent_prompt_step(agent_content: &str) -> BashStep {
+fn prepare_agent_prompt_step(agent_content: &str) -> Result<BashStep> {
     // The agent_content lands inside a bash heredoc at the same indent as
     // `cat > ...` (no extra prefix), matching base.yml's emission.
     // The template uses leading-9-space `\n\` continuations; `dedent()`
     // strips them uniformly so the resulting bash body has 0-indent
     // surrounding lines and the interpolated content lands flush left.
-    let template = "\
+    //
+    // The sentinel is per-content SHA-derived so a malicious agent
+    // markdown body cannot terminate the heredoc early and inject
+    // shell commands into the Agent job. See
+    // [`crate::compile::common::heredoc_sentinel`].
+    let sentinel = super::common::heredoc_sentinel("AGENT_PROMPT_EOF", agent_content)?;
+    let template = format!(
+        "\
          # Write agent instructions to /tmp so it's accessible inside AWF container\n\
-         cat > \"/tmp/awf-tools/agent-prompt.md\" << 'AGENT_PROMPT_EOF'\n\
-         {INTERP}\n\
-         AGENT_PROMPT_EOF\n\
+         cat > \"/tmp/awf-tools/agent-prompt.md\" << '{sentinel}'\n\
+         {{INTERP}}\n\
+         {sentinel}\n\
          \n\
          echo \"Agent prompt:\"\n\
-         cat \"/tmp/awf-tools/agent-prompt.md\"\n";
-    let script = dedent(template).replace("{INTERP}", agent_content);
-    bash("Prepare agent prompt", script)
+         cat \"/tmp/awf-tools/agent-prompt.md\"\n"
+    );
+    let script = dedent(&template).replace("{INTERP}", agent_content);
+    Ok(bash("Prepare agent prompt", script))
 }
 
 fn download_awf_step() -> BashStep {
@@ -1756,17 +1764,25 @@ fn prepare_safe_outputs_for_analysis(working_directory: &str) -> BashStep {
     bash("Prepare safe outputs for analysis", script)
 }
 
-fn prepare_threat_analysis_prompt_step(threat_prompt: &str) -> BashStep {
-    let template = "\
+fn prepare_threat_analysis_prompt_step(threat_prompt: &str) -> Result<BashStep> {
+    // Same heredoc-injection mitigation as `prepare_agent_prompt_step`:
+    // the sentinel is SHA-derived per content so a malicious
+    // front-matter `description:` (which lands inside this prompt
+    // body) cannot terminate the heredoc early and inject commands
+    // into the Detection job.
+    let sentinel = super::common::heredoc_sentinel("THREAT_ANALYSIS_EOF", threat_prompt)?;
+    let template = format!(
+        "\
          # Write threat analysis prompt to /tmp (accessible inside AWF container)\n\
-         cat > \"/tmp/awf-tools/threat-analysis-prompt.md\" << 'THREAT_ANALYSIS_EOF'\n\
-         {INTERP}\n\
-         THREAT_ANALYSIS_EOF\n\
+         cat > \"/tmp/awf-tools/threat-analysis-prompt.md\" << '{sentinel}'\n\
+         {{INTERP}}\n\
+         {sentinel}\n\
          \n\
          echo \"Threat analysis prompt:\"\n\
-         cat \"/tmp/awf-tools/threat-analysis-prompt.md\"\n";
-    let script = dedent(template).replace("{INTERP}", threat_prompt);
-    bash("Prepare threat analysis prompt", script)
+         cat \"/tmp/awf-tools/threat-analysis-prompt.md\"\n"
+    );
+    let script = dedent(&template).replace("{INTERP}", threat_prompt);
+    Ok(bash("Prepare threat analysis prompt", script))
 }
 
 fn setup_compiler_step() -> BashStep {
