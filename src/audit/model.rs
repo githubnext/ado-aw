@@ -351,6 +351,7 @@ impl JobData {
     /// Returns true when this job ended in a failure-like state.
     pub fn failed(&self) -> bool {
         let result = self.result.as_deref().unwrap_or_default();
+        // Be defensive on US/UK spelling variants from upstream sources.
         result.eq_ignore_ascii_case("failed")
             || result.eq_ignore_ascii_case("canceled")
             || result.eq_ignore_ascii_case("cancelled")

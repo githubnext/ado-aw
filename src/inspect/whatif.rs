@@ -253,11 +253,15 @@ fn contains_unnegated_call(normalized_condition: &str, call: &str) -> bool {
 }
 
 fn is_negated_call(normalized_condition: &str, call_idx: usize) -> bool {
+    const NOT_PREFIX: &str = "not(";
+    const NOT_PREFIX_LEN: usize = NOT_PREFIX.len();
     let mut idx = call_idx;
     let mut negated = false;
-    while idx >= 4 && normalized_condition[idx - 4..idx] == *"not(" {
+    while idx >= NOT_PREFIX_LEN
+        && normalized_condition[idx - NOT_PREFIX_LEN..idx] == *NOT_PREFIX
+    {
         negated = !negated;
-        idx -= 4;
+        idx -= NOT_PREFIX_LEN;
     }
     negated
 }
