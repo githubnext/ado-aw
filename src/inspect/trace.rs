@@ -315,14 +315,7 @@ fn runtime_job_for_location<'a>(
 }
 
 fn find_runtime_job<'a>(audit: &'a AuditData, ir_job_id: &str) -> Option<&'a JobData> {
-    audit.jobs.iter().find(|job| {
-        job.name == ir_job_id
-            || job
-                .name
-                .rsplit('.')
-                .next()
-                .is_some_and(|suffix| suffix == ir_job_id)
-    })
+    audit.jobs.iter().find(|job| job.matches_ir_id(ir_job_id))
 }
 
 fn stage_for_job(audit: &AuditData, runtime_job: &JobData) -> Option<String> {

@@ -230,19 +230,33 @@ fn rule_no_condition_references(summary: &PipelineSummary, findings: &mut Vec<Li
 }
 
 fn rule_step_id_collisions(summary: &PipelineSummary, findings: &mut Vec<LintFinding>) {
-    let mut seen: BTreeMap<String, &JobSummary> = BTreeMap::new();
+    // Track first-seen job for each step id, then emit one finding per
+    // collision that names BOTH the original producer location and the
+    // colliding consumer — otherwise the finding only points at the
+    // second occurrence and operators have to grep the rest of the
+    // pipeline to find the duplicate.
+    let mut first_seen: BTreeMap<String, &JobSummary> = BTreeMap::new();
     for (job, step) in all_steps(summary) {
-        if let Some(step_id) = step.id.as_deref()
-            && seen.insert(step_id.to_string(), job).is_some()
-        {
+        let Some(step_id) = step.id.as_deref() else {
+            continue;
+        };
+        if let Some(producer) = first_seen.get(step_id) {
             // The normal graph pass rejects pipeline-wide duplicate step ids.
             // Keep this defensive check for summaries that bypassed the graph.
+            let producer_location = match &producer.stage {
+                Some(stage) => format!("{stage}.{}", producer.id),
+                None => producer.id.clone(),
+            };
             findings.push(LintFinding {
                 severity: LintSeverity::Error,
                 code: "step-id-collisions".to_string(),
-                message: format!("step id '{step_id}' is used more than once in the pipeline"),
+                message: format!(
+                    "step id '{step_id}' is used more than once in the pipeline (also seen at {producer_location})"
+                ),
                 location: Some(location_for(job, Some(step_id))),
             });
+        } else {
+            first_seen.insert(step_id.to_string(), job);
         }
     }
 }

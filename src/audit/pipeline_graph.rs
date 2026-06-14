@@ -30,7 +30,17 @@ pub async fn populate_pipeline_graph(audit: &mut AuditData, run_dir: &Path) -> R
         return Ok(());
     };
 
-    let source_path = resolve_source_path(&source).await?;
+    let source_path = match resolve_source_path(&source).await {
+        Ok(path) => path,
+        Err(err) => {
+            record_warning(
+                audit,
+                "audit::pipeline_graph",
+                format!("could not resolve source path: {err:#}; skipping IR graph correlation"),
+            );
+            return Ok(());
+        }
+    };
     if tokio::fs::metadata(&source_path).await.is_err() {
         record_warning(
             audit,
@@ -143,12 +153,52 @@ async fn read_source_from_aw_info(run_dir: &Path) -> Option<Result<String>> {
     None
 }
 
+/// Resolve the `source` string taken from a downloaded `aw_info.json`
+/// into an on-disk path.
+///
+/// **Security**: this value is part of the audited build's artifact
+/// payload and must be treated as untrusted. A malicious or prompt-
+/// injected build could carry `"source": "/home/user/.ssh/id_rsa"`,
+/// and although [`crate::compile::build_pipeline_ir`] would fail to
+/// parse it the file would still be read. We mitigate by:
+///
+/// - Requiring the path to end with `.md` (the only valid agentic
+///   workflow source extension), which closes the
+///   arbitrary-file-read vector against keys, `/etc/passwd`, etc.
+/// - Rejecting relative paths that contain `..` components or a
+///   leading `~` (no directory traversal, no shell-style expansion).
+/// - Allowing absolute `.md` paths because legitimate compiled-
+///   elsewhere workflows commonly carry an absolute `source`.
 async fn resolve_source_path(source: &str) -> Result<PathBuf> {
     let normalized = normalize_source_path(source);
-    let path = PathBuf::from(normalized);
+    let path = PathBuf::from(&normalized);
+
+    let has_md_extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
+    if !has_md_extension {
+        anyhow::bail!(
+            "refusing source path '{}' from audited build artifact: only `.md` files are valid agentic workflow sources",
+            normalized
+        );
+    }
+
     if path.is_absolute() {
         return Ok(path);
     }
+
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+        || normalized.starts_with('~')
+    {
+        anyhow::bail!(
+            "refusing suspicious relative source path '{}' from audited build artifact",
+            normalized
+        );
+    }
+
     let cwd = tokio::fs::canonicalize(".")
         .await
         .context("Could not resolve current directory")?;
@@ -248,5 +298,85 @@ mod tests {
             .find(|job| job.name == "Detection")
             .expect("detection job");
         assert!(detection.upstream_jobs.iter().any(|job| job == "Agent"));
+    }
+
+    #[tokio::test]
+    async fn resolve_source_path_rejects_non_markdown_absolute_paths() {
+        // The exfiltration vector flagged by the PR reviewer: a malicious
+        // aw_info.json carries an absolute path to a non-`.md` file. The
+        // resolver must refuse before any file open happens.
+        assert!(
+            resolve_source_path("/home/user/.ssh/id_rsa").await.is_err(),
+            "expected resolver to reject non-markdown absolute path"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_source_path_rejects_parent_traversal() {
+        assert!(
+            resolve_source_path("../../../etc/passwd.md")
+                .await
+                .is_err(),
+            "expected resolver to reject parent-dir components"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_source_path_rejects_tilde_prefix() {
+        assert!(
+            resolve_source_path("~/secret.md").await.is_err(),
+            "expected resolver to reject tilde-prefixed path"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_source_path_accepts_markdown_absolute_paths() {
+        // Legitimate compiled-elsewhere workflows: absolute `.md` paths must still work.
+        let path = if cfg!(windows) {
+            r"C:\workflows\foo.md"
+        } else {
+            "/repo/workflows/foo.md"
+        };
+        assert!(
+            resolve_source_path(path).await.is_ok(),
+            "expected absolute `.md` paths to be accepted"
+        );
+    }
+
+    #[tokio::test]
+    async fn populate_pipeline_graph_records_warning_on_malicious_source() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let run_dir = temp_dir.path().join("build-99");
+        let staging_dir = run_dir.join("agent_outputs_99").join("staging");
+        tokio::fs::create_dir_all(&staging_dir)
+            .await
+            .expect("create staging");
+
+        let aw_info = serde_json::json!({
+            "source": "/home/user/.ssh/id_rsa",
+            "target": "standalone"
+        });
+        tokio::fs::write(staging_dir.join("aw_info.json"), aw_info.to_string())
+            .await
+            .expect("write aw_info");
+
+        let mut audit = AuditData::default();
+        populate_pipeline_graph(&mut audit, &run_dir)
+            .await
+            .expect("populate graph should not error on malicious source");
+
+        assert!(
+            audit.pipeline_graph.is_none(),
+            "malicious source must not populate pipeline_graph"
+        );
+        assert!(
+            audit
+                .warnings
+                .iter()
+                .any(|w| w.source == "audit::pipeline_graph"
+                    && w.message.contains("could not resolve source path")),
+            "expected a warning recording the rejection, got {:?}",
+            audit.warnings
+        );
     }
 }

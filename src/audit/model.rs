@@ -368,6 +368,22 @@ impl JobData {
             .unwrap_or(&self.status)
             .to_string()
     }
+
+    /// Returns `true` when this runtime job corresponds to the typed-IR
+    /// job id `ir_job_id`. Accepts either the bare id or a
+    /// `Stage.Job`-style qualified timeline name.
+    ///
+    /// Centralised so that `audit::findings` and `inspect::trace`
+    /// share one definition — a future typo or extension (e.g. handling
+    /// stage prefixes differently) only needs to change in one place.
+    pub fn matches_ir_id(&self, ir_job_id: &str) -> bool {
+        self.name == ir_job_id
+            || self
+                .name
+                .rsplit('.')
+                .next()
+                .is_some_and(|suffix| suffix == ir_job_id)
+    }
 }
 
 /// Metadata about a file downloaded while assembling the audit.

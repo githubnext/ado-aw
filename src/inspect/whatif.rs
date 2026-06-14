@@ -225,6 +225,25 @@ fn reachable_downstream_jobs(
         .collect()
 }
 
+/// Classify a rendered ADO `condition:` string for what-if analysis.
+///
+/// Returns [`WhatIfClassification::RunsAnyway`] if the condition
+/// contains a recognised failure-bypass marker (`always()`, `failed()`,
+/// `succeededOrFailed()`) that is **not** inside an odd number of
+/// `not(...)` wrappers. Negation is handled by
+/// [`is_negated_call`], so `not(failed())` is treated as `Skipped` and
+/// `not(not(failed()))` resolves back to `RunsAnyway`.
+///
+/// ## Coverage limitations
+///
+/// The classifier only recognises canonical failure-bypass calls and
+/// will conservatively report `Skipped` for any condition that gates
+/// execution on a variable instead — for example
+/// `eq(variables['Agent.JobStatus'], 'Failed')` or
+/// `eq(dependencies.Setup.result, 'Failed')`. Treat the `Skipped`
+/// classification as a lower bound: a job may still execute at runtime
+/// via a variable-based escape hatch we cannot statically detect. The
+/// authoritative source remains the live ADO pipeline run.
 fn classify_condition(condition: &Option<String>) -> WhatIfClassification {
     let Some(condition) = condition else {
         return WhatIfClassification::Skipped;
@@ -526,5 +545,25 @@ mod tests {
         let step_report = analyze(&fixture(None), "SetupStep").unwrap();
 
         assert_eq!(job_report.downstream_jobs, step_report.downstream_jobs);
+    }
+
+    #[test]
+    fn variable_based_condition_is_conservatively_skipped() {
+        // Documented limitation: variable-based conditions are not
+        // statically recognised and conservatively classify as Skipped.
+        let mut summary = fixture(None);
+        let PipelineBodySummary::Jobs { jobs } = &mut summary.body else {
+            unreachable!("fixture uses jobs body");
+        };
+        let detection = jobs.iter_mut().find(|job| job.id == "Detection").unwrap();
+        detection.condition = Some("eq(variables['Agent.JobStatus'], 'Failed')".to_string());
+
+        let report = analyze(&summary, "Setup").unwrap();
+        let detection = report
+            .downstream_jobs
+            .iter()
+            .find(|job| job.job == "Detection")
+            .unwrap();
+        assert_eq!(detection.classification, WhatIfClassification::Skipped);
     }
 }

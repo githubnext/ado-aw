@@ -63,7 +63,7 @@ struct StepOutputsParams {
     consumer: Option<String>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Deserialize, JsonSchema)]
 struct TraceFailureParams {
     /// Build ID, or full Azure DevOps build URL.
     build_id_or_url: String,
@@ -75,6 +75,20 @@ struct TraceFailureParams {
     project: Option<String>,
     /// Azure DevOps PAT override. If omitted, normal ado-aw auth resolution is used.
     pat: Option<String>,
+}
+
+// Manual `Debug` so any `{:?}` / `dbg!()` of this struct — including the
+// rmcp framework's error traces — never reveals the PAT in plaintext.
+impl std::fmt::Debug for TraceFailureParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TraceFailureParams")
+            .field("build_id_or_url", &self.build_id_or_url)
+            .field("step", &self.step)
+            .field("org", &self.org)
+            .field("project", &self.project)
+            .field("pat", &redacted_pat(&self.pat))
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -91,7 +105,7 @@ struct CatalogParams {
     kind: Option<String>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Deserialize, JsonSchema)]
 struct AuditBuildParams {
     /// Build ID, or full Azure DevOps build URL.
     build_id_or_url: String,
@@ -105,6 +119,25 @@ struct AuditBuildParams {
     artifacts: Option<Vec<String>>,
     /// Force re-processing even if a cached run-summary.json exists.
     no_cache: Option<bool>,
+}
+
+// Manual `Debug` so any `{:?}` / `dbg!()` of this struct — including the
+// rmcp framework's error traces — never reveals the PAT in plaintext.
+impl std::fmt::Debug for AuditBuildParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuditBuildParams")
+            .field("build_id_or_url", &self.build_id_or_url)
+            .field("org", &self.org)
+            .field("project", &self.project)
+            .field("pat", &redacted_pat(&self.pat))
+            .field("artifacts", &self.artifacts)
+            .field("no_cache", &self.no_cache)
+            .finish()
+    }
+}
+
+fn redacted_pat(pat: &Option<String>) -> &'static str {
+    if pat.is_some() { "<redacted>" } else { "<none>" }
 }
 
 #[derive(Debug, Serialize)]

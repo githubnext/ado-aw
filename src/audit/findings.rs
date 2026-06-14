@@ -367,7 +367,7 @@ fn add_error_count_findings(
 fn add_downstream_impact_findings(
     audit: &AuditData,
     findings: &mut Vec<Finding>,
-    _recommendations: &mut Vec<Recommendation>,
+    recommendations: &mut Vec<Recommendation>,
 ) {
     for job in &audit.jobs {
         if !job.failed() || job.downstream_jobs.is_empty() {
@@ -381,7 +381,7 @@ fn add_downstream_impact_findings(
                 let classification = audit
                     .jobs
                     .iter()
-                    .find(|candidate| job_name_matches(candidate, downstream_job))
+                    .find(|candidate| candidate.matches_ir_id(downstream_job))
                     .map(JobData::classification)
                     .unwrap_or_else(|| String::from("expected to skip"));
                 format!("{downstream_job}: {classification}")
@@ -402,16 +402,24 @@ fn add_downstream_impact_findings(
                 impact: None,
             },
         );
-    }
-}
 
-fn job_name_matches(job: &JobData, ir_job: &str) -> bool {
-    job.name == ir_job
-        || job
-            .name
-            .rsplit('.')
-            .next()
-            .is_some_and(|suffix| suffix == ir_job)
+        push_recommendation(
+            recommendations,
+            Recommendation {
+                priority: String::from("high"),
+                action: format!(
+                    "Inspect the {} job logs to identify the root cause; downstream jobs cannot succeed until this is resolved.",
+                    job.name
+                ),
+                reason: format!(
+                    "{} failed, which skipped {} downstream job(s).",
+                    job.name,
+                    job.downstream_jobs.len()
+                ),
+                example: None,
+            },
+        );
+    }
 }
 
 fn push_finding(findings: &mut Vec<Finding>, finding: Finding) {
