@@ -116,10 +116,18 @@ pub(crate) fn timeline_name_matches_job(
     {
         return true;
     }
-    timeline_name
-        .rsplit('.')
-        .next()
-        .is_some_and(|suffix| suffix == job_id)
+    // Fallback for unusual pipelines where the caller did not supply
+    // the stage but the timeline still emits a `Stage.Job` name. We
+    // only accept a *single-level* prefix — strings with two or more
+    // dots like `Stage1.SubStage.Agent` are rejected even when the
+    // trailing component matches, because the old
+    // `rsplit('.').next()` form could attach IR edges to the wrong
+    // runtime job in unusual pipeline shapes.
+    matches!(
+        timeline_name.rsplit_once('.'),
+        Some((prefix, suffix))
+            if suffix == job_id && !prefix.contains('.')
+    )
 }
 
 pub(crate) fn all_jobs(summary: &PipelineSummary) -> Vec<&JobSummary> {

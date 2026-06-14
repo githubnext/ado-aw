@@ -376,13 +376,21 @@ impl JobData {
     /// Centralised so that `audit::findings` and `inspect::trace`
     /// share one definition — a future typo or extension (e.g. handling
     /// stage prefixes differently) only needs to change in one place.
+    ///
+    /// Only accepts a **single-level** `Stage.Job` qualifier. Strings
+    /// with two or more dots (e.g. `Stage1.SubStage.Agent`) are
+    /// rejected even when the trailing component matches `ir_job_id`,
+    /// because the old `rsplit('.').next()` form could attach IR edges
+    /// to the wrong runtime job in unusual pipeline shapes.
     pub fn matches_ir_id(&self, ir_job_id: &str) -> bool {
-        self.name == ir_job_id
-            || self
-                .name
-                .rsplit('.')
-                .next()
-                .is_some_and(|suffix| suffix == ir_job_id)
+        if self.name == ir_job_id {
+            return true;
+        }
+        matches!(
+            self.name.rsplit_once('.'),
+            Some((prefix, suffix))
+                if suffix == ir_job_id && !prefix.contains('.')
+        )
     }
 }
 
@@ -1129,5 +1137,49 @@ mod tests {
         let mut keys_sorted = keys.clone();
         keys_sorted.sort();
         assert_eq!(keys_sorted, vec!["downloaded_files", "metrics", "overview"]);
+    }
+
+    #[test]
+    fn matches_ir_id_accepts_bare_and_single_level_qualified_names() {
+        let bare = JobData {
+            name: "Agent".to_string(),
+            ..Default::default()
+        };
+        assert!(bare.matches_ir_id("Agent"));
+
+        let qualified = JobData {
+            name: "Pipeline.Agent".to_string(),
+            ..Default::default()
+        };
+        assert!(qualified.matches_ir_id("Agent"));
+    }
+
+    #[test]
+    fn matches_ir_id_rejects_multi_level_suffix() {
+        // Regression: the old `rsplit('.').next()` form matched the
+        // last component of any dotted path, which could attach IR
+        // edges to the wrong runtime job in unusual pipeline shapes.
+        let job = JobData {
+            name: "Stage1.SubStage.Agent".to_string(),
+            ..Default::default()
+        };
+
+        assert!(
+            !job.matches_ir_id("Agent"),
+            "multi-level dotted timeline names must not match against a bare id"
+        );
+        assert!(
+            !job.matches_ir_id("SubStage.Agent"),
+            "matches_ir_id must not match an arbitrary tail substring"
+        );
+    }
+
+    #[test]
+    fn matches_ir_id_rejects_unrelated_names() {
+        let job = JobData {
+            name: "Detection".to_string(),
+            ..Default::default()
+        };
+        assert!(!job.matches_ir_id("Agent"));
     }
 }

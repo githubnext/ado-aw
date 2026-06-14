@@ -4,7 +4,7 @@
 //! trace, and audit queries over stdio. It intentionally has no workspace
 //! bounding directory: callers run it locally as the invoking user.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use log::{error, info};
@@ -297,16 +297,41 @@ impl AuthorMcp {
         params: Parameters<AuditBuildParams>,
     ) -> Result<CallToolResult, McpError> {
         let artifacts = params.0.artifacts.as_deref();
-        let output = std::env::temp_dir().join("ado-aw").join("audit");
+        let no_cache = params.0.no_cache.unwrap_or(false);
+
+        // Shared cache root for normal calls (the audit layer creates a
+        // per-build subdirectory keyed on build id). For `no_cache:
+        // true` we additionally route through a unique per-invocation
+        // tempdir so two concurrent calls for the *same* build cannot
+        // race on partially-written artifacts.
+        let shared_root = std::env::temp_dir().join("ado-aw").join("audit");
+        let invocation_tempdir = if no_cache {
+            Some(tempfile::Builder::new()
+                .prefix("ado-aw-mcp-audit-")
+                .tempdir()
+                .map_err(|err| {
+                    McpError::internal_error(
+                        format!("failed to create temp dir for no-cache audit: {err}"),
+                        None,
+                    )
+                })?)
+        } else {
+            None
+        };
+        let output: &Path = invocation_tempdir
+            .as_ref()
+            .map(tempfile::TempDir::path)
+            .unwrap_or(shared_root.as_path());
+
         let audit = crate::audit::fetch_audit_data(crate::audit::AuditOptions {
             build_id_or_url: &params.0.build_id_or_url,
-            output: &output,
+            output,
             json: true,
             org: params.0.org.as_deref(),
             project: params.0.project.as_deref(),
             pat: params.0.pat.as_deref(),
             artifacts,
-            no_cache: params.0.no_cache.unwrap_or(false),
+            no_cache,
         })
         .await
         .map_err(to_mcp_error)?;

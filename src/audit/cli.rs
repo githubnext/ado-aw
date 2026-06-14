@@ -74,15 +74,31 @@ async fn fetch_audit_data_inner(opts: AuditOptions<'_>) -> Result<FetchAuditData
             );
         }
         let mut audit = summary.audit_data;
-        if let Err(error) = pipeline_graph::populate_pipeline_graph(&mut audit, &run_dir).await {
+        let cached_audit_before_postprocess = audit.clone();
+        derive_post_processing(&mut audit, &run_dir).await;
+        // Persist recomputed pipeline_graph + findings back to the
+        // cached snapshot so subsequent runs see the same canonical
+        // AuditData shape; tooling that diffs successive outputs would
+        // otherwise observe drift between the saved file and the
+        // in-memory result.
+        if audit != cached_audit_before_postprocess
+            && let Err(error) = save_run_summary(
+                &run_dir,
+                &RunSummary {
+                    ado_aw_version: env!("CARGO_PKG_VERSION").to_string(),
+                    build_id: parsed.build_id,
+                    processed_at: Utc::now(),
+                    audit_data: audit.clone(),
+                },
+            )
+            .await
+        {
             warn_and_record(
                 &mut audit,
-                "audit::pipeline_graph",
-                format!("pipeline graph correlation failed: {:#}", error),
+                "audit::cli",
+                format!("failed to refresh cached run-summary.json: {error:#}"),
             );
         }
-        findings::derive_findings(&mut audit);
-        audit.metrics.warning_count = audit.warnings.len() as u64;
         return Ok(FetchAuditDataResult {
             audit,
             run_dir,
@@ -132,17 +148,9 @@ async fn fetch_audit_data_inner(opts: AuditOptions<'_>) -> Result<FetchAuditData
     )
     .await;
     populate_performance_metrics(&mut audit);
-    if let Err(error) = pipeline_graph::populate_pipeline_graph(&mut audit, &run_dir).await {
-        warn_and_record(
-            &mut audit,
-            "audit::pipeline_graph",
-            format!("pipeline graph correlation failed: {:#}", error),
-        );
-    }
 
     audit.metrics.error_count = audit.errors.len() as u64;
-    audit.metrics.warning_count = audit.warnings.len() as u64;
-    findings::derive_findings(&mut audit);
+    derive_post_processing(&mut audit, &run_dir).await;
 
     save_run_summary(
         &run_dir,
@@ -161,6 +169,25 @@ async fn fetch_audit_data_inner(opts: AuditOptions<'_>) -> Result<FetchAuditData
         json: opts.json,
         from_cache: false,
     })
+}
+
+/// Re-run the audit-time enrichment passes that depend on local state
+/// (pipeline-graph correlation, metric counters, derived findings).
+///
+/// Called both after a fresh download and after a cache load so that
+/// both code paths produce a structurally identical `AuditData`.
+/// `populate_pipeline_graph` failures are downgraded to warnings rather
+/// than aborting the audit.
+async fn derive_post_processing(audit: &mut AuditData, run_dir: &Path) {
+    if let Err(error) = pipeline_graph::populate_pipeline_graph(audit, run_dir).await {
+        warn_and_record(
+            audit,
+            "audit::pipeline_graph",
+            format!("pipeline graph correlation failed: {error:#}"),
+        );
+    }
+    audit.metrics.warning_count = audit.warnings.len() as u64;
+    findings::derive_findings(audit);
 }
 
 /// Download all selected artifacts for the build, recording auth errors and

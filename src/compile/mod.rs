@@ -922,8 +922,8 @@ pub async fn build_pipeline_ir(input_path: &Path) -> Result<(FrontMatter, ir::Pi
             input_path,
             &output_path,
             &markdown_body,
-            true,
-            false,
+            /* skip_integrity */ true,
+            /* debug_pipeline  */ false,
         )?,
         CompileTarget::Job => job_ir::build_job_pipeline(
             &front_matter,
@@ -932,8 +932,8 @@ pub async fn build_pipeline_ir(input_path: &Path) -> Result<(FrontMatter, ir::Pi
             input_path,
             &output_path,
             &markdown_body,
-            true,
-            false,
+            /* skip_integrity */ true,
+            /* debug_pipeline  */ false,
         )?,
         CompileTarget::Stage => stage_ir::build_stage_pipeline(
             &front_matter,
@@ -942,8 +942,8 @@ pub async fn build_pipeline_ir(input_path: &Path) -> Result<(FrontMatter, ir::Pi
             input_path,
             &output_path,
             &markdown_body,
-            true,
-            false,
+            /* skip_integrity */ true,
+            /* debug_pipeline  */ false,
         )?,
     };
     Ok((front_matter, pipeline))
