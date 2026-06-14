@@ -170,27 +170,37 @@ fn rule_unused_output(summary: &PipelineSummary, findings: &mut Vec<LintFinding>
     }
 }
 
+/// Lint rule: every output consumed across step boundaries must be
+/// declared with `isOutput=true` so ADO publishes it as a step output.
+///
+/// In the normal compile path `PipelineSummary::from_pipeline` already
+/// patches `auto_is_output = true` on every affected declaration based
+/// on the graph's `outputs_needing_is_output` set, so this rule will
+/// stay quiet for well-formed inputs. We still emit a finding when the
+/// flag is unset so that:
+///
+/// - Summaries constructed without going through `from_pipeline` (e.g.
+///   deserialised straight from disk) are still validated.
+/// - Future drift between the summary patcher and graph codegen — for
+///   instance a new declaration kind that the patcher forgets to touch
+///   — produces a real, surfaced finding instead of silently skipping.
 fn rule_missing_is_output(summary: &PipelineSummary, findings: &mut Vec<LintFinding>) {
     let declarations = output_declarations(summary);
     for needed in &summary.graph.outputs_needing_is_output {
         for output_name in &needed.outputs {
             if let Some((job, step, decl)) =
                 declarations.get(&(needed.step.clone(), output_name.clone()))
+                && !decl.auto_is_output
             {
-                // TODO: This should remain quiet while PipelineSummary patches
-                // auto_is_output from the graph. Keep the guard so lint catches
-                // future drift between summary generation and graph codegen.
-                if !decl.auto_is_output {
-                    findings.push(LintFinding {
-                        severity: LintSeverity::Info,
-                        code: "missing-is-output".to_string(),
-                        message: format!(
-                            "output '{}.{}' is consumed across steps but is not marked isOutput=true",
-                            needed.step, output_name
-                        ),
-                        location: Some(location_for(job, step.id.as_deref())),
-                    });
-                }
+                findings.push(LintFinding {
+                    severity: LintSeverity::Info,
+                    code: "missing-is-output".to_string(),
+                    message: format!(
+                        "output '{}.{}' is consumed across steps but is not marked isOutput=true",
+                        needed.step, output_name
+                    ),
+                    location: Some(location_for(job, step.id.as_deref())),
+                });
             }
         }
     }

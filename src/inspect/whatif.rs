@@ -263,12 +263,29 @@ fn contains_unnegated_call(normalized_condition: &str, call: &str) -> bool {
     let mut from = 0;
     while let Some(offset) = normalized_condition[from..].find(call) {
         let idx = from + offset;
-        if !is_negated_call(normalized_condition, idx) {
+        // Word-boundary guard so `failed()` does not match inside
+        // `succeededorfailed()` (which starts at offset 11 within that
+        // larger call). Without this the negation logic also misfires
+        // because the four chars before the inner match are `edor`,
+        // not `not(`, so `not(succeededOrFailed())` was wrongly
+        // classified as RunsAnyway.
+        if is_word_boundary_before(normalized_condition, idx)
+            && !is_negated_call(normalized_condition, idx)
+        {
             return true;
         }
         from = idx + call.len();
     }
     false
+}
+
+fn is_word_boundary_before(s: &str, idx: usize) -> bool {
+    if idx == 0 {
+        return true;
+    }
+    s.as_bytes()
+        .get(idx - 1)
+        .is_none_or(|&b| !b.is_ascii_alphanumeric())
 }
 
 fn is_negated_call(normalized_condition: &str, call_idx: usize) -> bool {
@@ -522,6 +539,28 @@ mod tests {
         };
         let detection = jobs.iter_mut().find(|job| job.id == "Detection").unwrap();
         detection.condition = Some("not(always())".to_string());
+
+        let report = analyze(&summary, "Setup").unwrap();
+        let detection = report
+            .downstream_jobs
+            .iter()
+            .find(|job| job.job == "Detection")
+            .unwrap();
+        assert_eq!(detection.classification, WhatIfClassification::Skipped);
+    }
+
+    #[test]
+    fn negated_succeeded_or_failed_condition_is_skipped() {
+        // Regression for the substring-match bug: `failed()` appears
+        // inside `succeededorfailed()` at byte offset 11, and the four
+        // chars before it are `edor` (not `not(`), so the old logic
+        // wrongly classified `not(succeededOrFailed())` as RunsAnyway.
+        let mut summary = fixture(None);
+        let PipelineBodySummary::Jobs { jobs } = &mut summary.body else {
+            unreachable!("fixture uses jobs body");
+        };
+        let detection = jobs.iter_mut().find(|job| job.id == "Detection").unwrap();
+        detection.condition = Some("not(succeededOrFailed())".to_string());
 
         let report = analyze(&summary, "Setup").unwrap();
         let detection = report

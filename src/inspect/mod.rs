@@ -8,14 +8,13 @@
 //! Layout follows `src/audit/`:
 //!
 //! - `cli.rs` — dispatchers for the public CLI subcommands.
-//! - `graph_query.rs` — the `ado-aw graph` family (text/json/dot,
-//!   `graph deps`, `graph outputs`).
-//!
-//! Future siblings (called out in the implementation plan, not yet
-//! landed):
-//!
+//! - `graph_query.rs` — the `ado-aw graph` family (text/json/dot).
+//! - `graph_deps.rs` — `ado-aw graph deps`: per-step upstream /
+//!   downstream walks over the typed graph.
+//! - `graph_outputs.rs` — `ado-aw graph outputs`: producer/consumer
+//!   relationships for declared step outputs.
 //! - `trace.rs` — `ado-aw trace`: joins build telemetry from
-//!   [`crate::audit`] with the IR graph.
+//!   [`crate::audit`] with the typed-IR graph for failure tracing.
 //! - `whatif.rs` — `ado-aw whatif`: static reachability ("which jobs
 //!   skip if X fails?") from the typed `Condition` + `depends_on`.
 //! - `lint.rs` — `ado-aw lint`: structural checks layered on top of
