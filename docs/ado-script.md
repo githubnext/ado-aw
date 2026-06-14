@@ -341,7 +341,11 @@ scripts/ado-script/
 │   │   ├── ado-client.ts        # azure-devops-node-api wrapper + retry + timeout + pagination
 │   │   ├── env-facts.ts         # Pipeline-variable readers + ENV_BY_FACT + BRANCH_FACTS + ref-prefix stripping
 │   │   ├── policy.ts            # PolicyTracker state machine
-│   │   └── vso-logger.ts        # ##vso[…] emitters with property/message escaping; complete() is idempotent
+│   │   ├── vso-logger.ts        # ##vso[…] emitters with property/message escaping; complete() is idempotent
+│   │   ├── git.ts               # execFile wrappers + bearerEnv helper (promoted from exec-context-pr/ in Stage 0)
+│   │   ├── merge-base.ts        # synthetic-merge detection + progressive-deepening fetch (promoted from exec-context-pr/)
+│   │   ├── validate.ts          # identifier regex guards (promoted from exec-context-pr/)
+│   │   └── prompt.ts            # agent-prompt-file append helpers (promoted from exec-context-pr/)
 │   ├── gate/                    # gate.js entry point + per-concern modules
 │   │   ├── index.ts             # main(): decode → preflight → bypass → facts → eval → emit
 │   │   ├── bypass.ts            # build-reason auto-pass
@@ -353,11 +357,10 @@ scripts/ado-script/
 │   │   └── __tests__/           # marker, path-resolution, and single-pass coverage
 │   ├── exec-context-pr/         # exec-context-pr.js entry point + PR precompute
 │   │   ├── index.ts             # main(): validate → resolve merge-base → stage SHAs → append prompt
-│   │   ├── validate.ts          # identifier regex guards
-│   │   ├── git.ts               # execFile wrappers + bearerEnv helper
-│   │   ├── merge-base.ts        # synthetic-merge detection + progressive-deepening fetch
-│   │   ├── prompt.ts            # success / failure prompt-fragment writers
-│   │   └── __tests__/           # 32 unit tests across the four modules
+│   │   │                        # (imports validate/git/merge-base/prompt from ../shared/)
+│   │   └── __tests__/           # end-to-end / integration tests live here; the
+│   │                            # per-module unit tests moved with their modules
+│   │                            # into ../shared/__tests__/
 │   └── exec-context-pr-synth/   # exec-context-pr-synth.js entry point + synthetic-PR resolver
 │       ├── index.ts             # main(): real-PR / GitHub / synth-promote branch resolution → emit AW_PR_*
 │       ├── match.ts             # branch/path include-exclude glob matching
