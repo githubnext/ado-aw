@@ -37,6 +37,7 @@ mod contributor;
 mod manual;
 mod pipeline;
 mod pr;
+mod schedule;
 mod workitem;
 
 use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
@@ -47,6 +48,7 @@ use contributor::{ContextContributor, Contributor};
 use manual::ManualContextContributor;
 use pipeline::PipelineContextContributor;
 use pr::PrContextContributor;
+use schedule::ScheduleContextContributor;
 use workitem::WorkitemContextContributor;
 
 /// Returns `true` iff the PR-context contributor will activate for the
@@ -126,6 +128,17 @@ pub fn workitem_contributor_will_activate(front_matter: &FrontMatter) -> bool {
         .as_ref()
         .unwrap_or(&default_cfg);
     workitem_contributor_will_activate_with_cfg(cfg, front_matter)
+}
+
+/// Returns `true` iff the Schedule contributor will activate. Opt-in
+/// (default OFF) AND requires `on.schedule` to be declared.
+pub fn schedule_contributor_will_activate(front_matter: &FrontMatter) -> bool {
+    let default_cfg = ExecutionContextConfig::default();
+    let cfg = front_matter
+        .execution_context
+        .as_ref()
+        .unwrap_or(&default_cfg);
+    schedule_contributor_will_activate_with_cfg(cfg, front_matter)
 }
 
 /// Variant that takes the resolved `ExecutionContextConfig` explicitly.
@@ -231,6 +244,25 @@ fn workitem_contributor_will_activate_with_cfg(
     !matches!(workitem_enabled, Some(false))
 }
 
+/// Whether the schedule contributor will activate. Opt-in (default
+/// OFF) AND requires `on.schedule` to be declared.
+///
+/// MAINTENANCE: this MUST stay in lock-step with
+/// `ScheduleContextContributor::should_activate` (in `schedule.rs`).
+fn schedule_contributor_will_activate_with_cfg(
+    cfg: &ExecutionContextConfig,
+    front_matter: &FrontMatter,
+) -> bool {
+    if front_matter.schedule().is_none() {
+        return false;
+    }
+    if !cfg.is_enabled() {
+        return false;
+    }
+    let schedule_enabled = cfg.schedule.as_ref().and_then(|s| s.enabled);
+    matches!(schedule_enabled, Some(true))
+}
+
 /// Always-on execution-context extension.
 ///
 /// Owns the `aw-context/` precompute pipeline. Registered
@@ -294,7 +326,8 @@ impl ExecContextExtension {
             || manual_contributor_will_activate_with_cfg(&config, front_matter)
             || pipeline_contributor_will_activate_with_cfg(&config, front_matter)
             || ci_push_contributor_will_activate_with_cfg(&config, front_matter)
-            || workitem_contributor_will_activate_with_cfg(&config, front_matter);
+            || workitem_contributor_will_activate_with_cfg(&config, front_matter)
+            || schedule_contributor_will_activate_with_cfg(&config, front_matter);
         let synthetic_pr_active = front_matter.is_synthetic_pr();
         Self {
             config,
@@ -320,13 +353,8 @@ impl ExecContextExtension {
         let pipeline_cfg = self.config.pipeline.clone().unwrap_or_default();
         let ci_push_cfg = self.config.ci_push.clone().unwrap_or_default();
         let workitem_cfg = self.config.workitem.clone().unwrap_or_default();
-        // The PR contributor needs to know whether `mode: synthetic`
-        // is on so it can emit coalesced SYSTEM_PULLREQUEST_* env vars
-        // (real value preferred, synthPr output as fallback).
+        let schedule_cfg = self.config.schedule.clone().unwrap_or_default();
         let synthetic_pr_active = self.synthetic_pr_active;
-        // Pr-contributor-enabled flag for the workitem contributor —
-        // workitem activation tracks PR activation per the plan.
-        // `pr.enabled` defaults to true unless explicitly false.
         let pr_enabled = !matches!(pr_cfg.enabled, Some(false));
         vec![
             Contributor::Pr(PrContextContributor::new(pr_cfg, synthetic_pr_active)),
@@ -341,6 +369,7 @@ impl ExecContextExtension {
                 synthetic_pr_active,
                 pr_enabled,
             )),
+            Contributor::Schedule(ScheduleContextContributor::new(schedule_cfg)),
         ]
     }
 
@@ -487,6 +516,7 @@ mod tests {
                     pipeline: None,
                     ci_push: None,
                     workitem: None,
+                    schedule: None,
         };
         let fm = pr_triggered_front_matter();
         let ext = ExecContextExtension::new(cfg, &fm);
@@ -510,6 +540,7 @@ mod tests {
                     pipeline: None,
                     ci_push: None,
                     workitem: None,
+                    schedule: None,
         };
         let fm = pr_triggered_front_matter();
         let ext = ExecContextExtension::new(cfg, &fm);
@@ -545,6 +576,7 @@ mod tests {
                     pipeline: None,
                     ci_push: None,
                     workitem: None,
+                    schedule: None,
         };
         let fm = no_trigger_front_matter();
         let ext = ExecContextExtension::new(cfg, &fm);
@@ -565,6 +597,7 @@ mod tests {
                     pipeline: None,
                     ci_push: None,
                     workitem: None,
+                    schedule: None,
         };
         let fm = pr_triggered_front_matter();
         let ext = ExecContextExtension::new(cfg, &fm);
@@ -652,6 +685,7 @@ mod tests {
         pipeline: None,
                     ci_push: None,
                     workitem: None,
+                    schedule: None,
         };
         let ext = ExecContextExtension::new(cfg, &fm);
         let ctx = CompileContext::for_test(&fm);
@@ -703,6 +737,7 @@ mod tests {
                 max_items: None,
                 max_body_kb: None,
             }),
+        schedule: None,
         };
         let ext = ExecContextExtension::new(cfg, &fm);
         // Force synthetic_pr_active so the unified `AW_PR_*` macros

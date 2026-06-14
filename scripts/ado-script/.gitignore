@@ -8,5 +8,6 @@ exec-context-manual.js
 exec-context-pipeline.js
 exec-context-ci-push.js
 exec-context-workitem.js
+exec-context-schedule.js
 schema
 *.tsbuildinfo

@@ -1231,6 +1231,13 @@ pub struct ExecutionContextConfig {
         /// boundary** (WI bodies are user-authored).
         #[serde(default)]
         pub workitem: Option<WorkitemContextConfig>,
+        /// Schedule-context contributor configuration. Stages "since last
+        /// run of this pipeline" diff context for scheduled builds.
+        /// Stage 5 of the build-out — see `docs/execution-context.md`.
+        /// Defaults to OFF (opt-in) — many scheduled agents are
+        /// operational (not repo-aware) and don't need diff context.
+        #[serde(default)]
+        pub schedule: Option<ScheduleContextConfig>,
     }
 
     impl ExecutionContextConfig {
@@ -1256,6 +1263,9 @@ pub struct ExecutionContextConfig {
             }
             if let Some(ref mut w) = self.workitem {
                 w.sanitize_config_fields();
+            }
+            if let Some(ref mut s) = self.schedule {
+                s.sanitize_config_fields();
             }
         }
     }
@@ -1448,6 +1458,33 @@ impl WorkitemContextConfig {
 impl SanitizeConfigTrait for WorkitemContextConfig {
     fn sanitize_config_fields(&mut self) {
         // No free-form string fields — booleans + numbers only.
+    }
+}
+
+/// Configuration for the `schedule` execution-context contributor.
+///
+/// Stages "since last run of this pipeline on this branch" diff
+/// context for scheduled builds (Stage 5 of the build-out — see
+/// plan.md). Defaults to OFF (opt-in) — many scheduled agents are
+/// operational (e.g. "every morning, summarize open work items")
+/// and don't need diff context. Runtime gate:
+/// `eq(variables['Build.Reason'], 'Schedule')`.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ScheduleContextConfig {
+    /// Whether the schedule contributor is active. **Default OFF**.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+impl ScheduleContextConfig {
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.unwrap_or(false)
+    }
+}
+
+impl SanitizeConfigTrait for ScheduleContextConfig {
+    fn sanitize_config_fields(&mut self) {
+        // No free-form string fields — booleans only.
     }
 }
 

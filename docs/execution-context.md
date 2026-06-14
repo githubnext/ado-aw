@@ -43,17 +43,14 @@ locally and `git` is added to its bash allow-list automatically.
 
 ## v1 contributors
 
-| Contributor | Trigger                       | Output layout                |
-|-------------|-------------------------------|------------------------------|
-| `pr`        | `on.pr`                       | `aw-context/pr/*`            |
-| `manual`    | any `parameters:` declared    | `aw-context/manual/*`        |
-| `pipeline`  | `on.pipeline`                 | `aw-context/pipeline/*`      |
-| `ci-push`   | `ci-push.enabled: true` (CI/push reasons)  | `aw-context/ci-push/*`      |
-| `workitem`  | activates with `pr` (PR-linked mode)       | `aw-context/workitem/*`     |
-
-Future trigger contributors (schedule) plug in via the same internal
-`ContextContributor` trait without breaking the agent-facing layout.
-See plan.md for the full build-out roadmap.
+| Contributor | Trigger                                                  | Output layout                |
+|-------------|----------------------------------------------------------|------------------------------|
+| `pr`        | `on.pr`                                                  | `aw-context/pr/*`            |
+| `manual`    | any `parameters:` declared                               | `aw-context/manual/*`        |
+| `pipeline`  | `on.pipeline`                                            | `aw-context/pipeline/*`      |
+| `ci-push`   | `ci-push.enabled: true` (CI/push reasons)                | `aw-context/ci-push/*`       |
+| `workitem`  | activates with `pr` (PR-linked mode)                     | `aw-context/workitem/*`      |
+| `schedule`  | `on.schedule` declared AND `schedule.enabled: true`      | `aw-context/schedule/*`      |
 
 ## Front-matter surface
 
@@ -76,6 +73,10 @@ execution-context:
     enabled: true     # defaults to true when the pr contributor activates
     max-items: 5      # cap on linked WIs staged per build
     max-body-kb: 32   # cap per body field (description / acceptance / repro)
+  schedule:
+    enabled: false    # OPT-IN (default OFF) — stages "since last successful
+                      # run on this branch" diff context for scheduled builds
+                      # (requires on.schedule)
 ```
 
 All keys are optional. When the `execution-context:` block is omitted
