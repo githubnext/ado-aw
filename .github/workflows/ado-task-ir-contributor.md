@@ -57,7 +57,7 @@ Track:
 If the most recent history entry has `pr_open: true`, look up that PR in GitHub:
 
 ```bash
-gh pr list --search "is:open in:title ado-task-ir OR \"typed IR\"" --limit 10
+gh pr list --search 'is:open in:title ado-task-ir' --limit 10
 ```
 
 If the prior PR is still open, emit `noop` with "Waiting on open PR #N before adding more tasks." and stop.
@@ -202,7 +202,7 @@ Add at least one unit test to the same file (or `tests/compiler_tests.rs` for in
 
 ```rust
 #[test]
-fn copy_files_step_builder_sets_inputs() {
+fn copy_files_step_creates_task_with_inputs() {
     let t = copy_files_step("$(Build.SourcesDirectory)", "**/*.rs", "$(Build.ArtifactStagingDirectory)");
     assert_eq!(t.task, "CopyFiles@2");
     assert_eq!(t.inputs.get("SourceFolder").map(|s| s.as_str()), Some("$(Build.SourcesDirectory)"));
@@ -229,26 +229,27 @@ Do not open a PR with a failing CI baseline.
 
 ## Step 8 — Save State
 
-Update cache memory:
+Update cache memory using `jq` to avoid manual JSON construction errors:
 
 ```bash
-cat > /tmp/gh-aw/cache-memory/ado-task-ir-state.json << 'EOF'
-{
-  "completed_tasks": [...previous list..., "<new-task-id>"],
-  "deferred_tasks": [...],
-  "history": [
-    {
-      "date": "<today>",
-      "outcome": "contributed|no-action|deferred",
-      "task": "<task-id>",
-      "pr_title": "<title or null>",
-      "pr_number": null,
-      "pr_open": true
-    },
-    ...previous entries (keep last 30)...
-  ]
-}
-EOF
+STATE_FILE=/tmp/gh-aw/cache-memory/ado-task-ir-state.json
+CURRENT=$(cat "$STATE_FILE" 2>/dev/null || echo '{"completed_tasks":[],"deferred_tasks":[],"history":[]}')
+
+jq \
+  --arg task "<new-task-id>" \
+  --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg outcome "contributed" \
+  --arg pr_title "<pr-title>" \
+  '.completed_tasks += [$task]
+  | .history = ([{
+      date: $date,
+      outcome: $outcome,
+      task: $task,
+      pr_title: $pr_title,
+      pr_number: null,
+      pr_open: true
+    }] + .history)[:30]' \
+  <<< "$CURRENT" > "$STATE_FILE"
 ```
 
 ## Step 9 — Open the PR
