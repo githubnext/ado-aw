@@ -1238,6 +1238,13 @@ pub struct ExecutionContextConfig {
         /// operational (not repo-aware) and don't need diff context.
         #[serde(default)]
         pub schedule: Option<ScheduleContextConfig>,
+        /// Repo-context contributor configuration. Always-on capability
+        /// (Stage 7 of the build-out — see `docs/execution-context.md`).
+        /// Stages repository identity info (branch, SHA, last release
+        /// tag, commits-since-tag). Defaults to OFF to avoid
+        /// prompt-clutter regression.
+        #[serde(default)]
+        pub repo: Option<RepoContextConfig>,
     }
 
     impl ExecutionContextConfig {
@@ -1266,6 +1273,9 @@ pub struct ExecutionContextConfig {
             }
             if let Some(ref mut s) = self.schedule {
                 s.sanitize_config_fields();
+            }
+            if let Some(ref mut r) = self.repo {
+                r.sanitize_config_fields();
             }
         }
     }
@@ -1515,6 +1525,41 @@ impl ScheduleContextConfig {
 }
 
 impl SanitizeConfigTrait for ScheduleContextConfig {
+    fn sanitize_config_fields(&mut self) {
+        // No free-form string fields — booleans only.
+    }
+}
+
+/// Configuration for the `repo` execution-context contributor.
+///
+/// Always-on capability (Stage 7 of the build-out — see plan.md):
+/// stages repository identity info (branch, SHA, last release tag,
+/// commits-since-tag). Pure git — no REST, no bearer. Defaults to
+/// OFF to avoid prompt-clutter regression for the agents that
+/// already get sufficient repo identity from PR / ci-push / pipeline
+/// contributors.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct RepoContextConfig {
+    /// Whether the repo contributor is active. **Default OFF**.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Whether to additionally stage `conventions.json` — a probe of
+    /// CODEOWNERS / CONTRIBUTING.md / .editorconfig / AGENTS.md
+    /// presence + first 50 lines of each found. Defaults to `false`.
+    #[serde(default)]
+    pub conventions: Option<bool>,
+}
+
+impl RepoContextConfig {
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.unwrap_or(false)
+    }
+    pub fn conventions_enabled(&self) -> bool {
+        self.conventions.unwrap_or(false)
+    }
+}
+
+impl SanitizeConfigTrait for RepoContextConfig {
     fn sanitize_config_fields(&mut self) {
         // No free-form string fields — booleans only.
     }

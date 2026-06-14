@@ -72,6 +72,10 @@ pub(crate) const EXEC_CONTEXT_SCHEDULE_PATH: &str =
 /// `aw-context/pr/checks/`.
 pub(crate) const EXEC_CONTEXT_PR_CHECKS_PATH: &str =
     "/tmp/ado-aw-scripts/ado-script/exec-context-pr-checks.js";
+/// Path to the exec-context-repo bundle (Stage 7 of the build-out —
+/// see plan.md). Pure git, no REST.
+pub(crate) const EXEC_CONTEXT_REPO_PATH: &str =
+    "/tmp/ado-aw-scripts/ado-script/exec-context-repo.js";
 /// Path to the synthetic-PR-context bundle inside the unpacked
 /// `ado-script.zip`. Runs in the Setup job before `prGate`; consumed
 /// by [`AdoScriptExtension::declarations`].
@@ -132,6 +136,10 @@ pub struct AdoScriptExtension {
     /// see plan.md) will activate. Opt-in (default OFF) AND
     /// requires the PR contributor to activate.
     pub exec_context_pr_checks_active: bool,
+    /// Whether the Repo-context contributor (Stage 7 of the
+    /// build-out — see plan.md) will activate. Always-on capability,
+    /// default OFF (opt-in).
+    pub exec_context_repo_active: bool,
     /// PR trigger config required to build `PR_SYNTH_SPEC`. `Some(_)`
     /// is the single source of truth for "synthetic-from-ci path is
     /// active for this agent" — `is_some()` replaces what used to be a
@@ -552,6 +560,7 @@ impl CompilerExtension for AdoScriptExtension {
             || self.exec_context_workitem_active
             || self.exec_context_schedule_active
             || self.exec_context_pr_checks_active
+            || self.exec_context_repo_active
         {
             agent_prepare_steps.extend(install_and_download_steps_typed());
             if import_active {
@@ -754,6 +763,7 @@ mod tests {
             exec_context_workitem_active: false,
             exec_context_schedule_active: false,
             exec_context_pr_checks_active: false,
+            exec_context_repo_active: false,
             pr_trigger_for_synth: None,
         }
     }
@@ -829,6 +839,7 @@ mod tests {
             exec_context_workitem_active: false,
             exec_context_schedule_active: false,
             exec_context_pr_checks_active: false,
+            exec_context_repo_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -883,6 +894,7 @@ mod tests {
             exec_context_workitem_active: false,
             exec_context_schedule_active: false,
             exec_context_pr_checks_active: false,
+            exec_context_repo_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -1054,6 +1066,7 @@ mod tests {
             exec_context_workitem_active: false,
             exec_context_schedule_active: false,
             exec_context_pr_checks_active: false,
+            exec_context_repo_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -1566,6 +1579,7 @@ mod tests {
             exec_context_workitem_active: false,
             exec_context_schedule_active: false,
             exec_context_pr_checks_active: false,
+            exec_context_repo_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],

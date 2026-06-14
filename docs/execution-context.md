@@ -52,6 +52,7 @@ locally and `git` is added to its bash allow-list automatically.
 | `workitem`  | activates with `pr` (PR-linked mode)                     | `aw-context/workitem/*`      |
 | `schedule`  | `on.schedule` declared AND `schedule.enabled: true`      | `aw-context/schedule/*`      |
 | `pr.checks` | activates with `pr` AND `pr.checks.enabled: true`        | `aw-context/pr/checks/*`     |
+| `repo`      | `repo.enabled: true` (always-on capability)              | `aw-context/repo/*`          |
 
 ## Front-matter surface
 
@@ -82,6 +83,10 @@ execution-context:
     enabled: false    # OPT-IN (default OFF) — stages "since last successful
                       # run on this branch" diff context for scheduled builds
                       # (requires on.schedule)
+  repo:
+    enabled: false    # OPT-IN (default OFF) — always-on capability; stages
+                      # branch / sha / last-release-tag / commits-since-tag
+    conventions: false # opt-in deeper probe of CODEOWNERS / CONTRIBUTING.md / etc
 ```
 
 All keys are optional. When the `execution-context:` block is omitted

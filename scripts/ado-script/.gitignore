@@ -10,5 +10,6 @@ exec-context-ci-push.js
 exec-context-workitem.js
 exec-context-schedule.js
 exec-context-pr-checks.js
+exec-context-repo.js
 schema
 *.tsbuildinfo

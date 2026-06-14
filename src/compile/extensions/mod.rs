@@ -580,7 +580,8 @@ pub use exec_context::{
     ExecContextExtension, ci_push_contributor_will_activate,
     manual_contributor_will_activate, pipeline_contributor_will_activate,
     pr_checks_contributor_will_activate, pr_contributor_will_activate,
-    schedule_contributor_will_activate, workitem_contributor_will_activate,
+    repo_contributor_will_activate, schedule_contributor_will_activate,
+    workitem_contributor_will_activate,
 };
 pub use github::GitHubExtension;
 pub use safe_outputs::SafeOutputsExtension;
@@ -693,6 +694,9 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
                 exec_context_pr_checks_active: pr_checks_contributor_will_activate(
                     front_matter,
                 ),
+                // Repo contributor (Stage 7 — opt-in, default OFF, no
+                // bearer / no REST, pure git).
+                exec_context_repo_active: repo_contributor_will_activate(front_matter),
                 pr_trigger_for_synth,
             }
         })),

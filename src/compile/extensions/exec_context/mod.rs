@@ -38,6 +38,7 @@ mod manual;
 mod pipeline;
 mod pr;
 mod pr_checks;
+mod repo;
 mod schedule;
 mod workitem;
 
@@ -50,6 +51,7 @@ use manual::ManualContextContributor;
 use pipeline::PipelineContextContributor;
 use pr::PrContextContributor;
 use pr_checks::PrChecksContextContributor;
+use repo::RepoContextContributor;
 use schedule::ScheduleContextContributor;
 use workitem::WorkitemContextContributor;
 
@@ -152,6 +154,17 @@ pub fn pr_checks_contributor_will_activate(front_matter: &FrontMatter) -> bool {
         .as_ref()
         .unwrap_or(&default_cfg);
     pr_checks_contributor_will_activate_with_cfg(cfg, front_matter)
+}
+
+/// Returns `true` iff the Repo contributor will activate. Pure
+/// config-driven (opt-in, default OFF).
+pub fn repo_contributor_will_activate(front_matter: &FrontMatter) -> bool {
+    let default_cfg = ExecutionContextConfig::default();
+    let cfg = front_matter
+        .execution_context
+        .as_ref()
+        .unwrap_or(&default_cfg);
+    repo_contributor_will_activate_with_cfg(cfg, front_matter)
 }
 
 /// Variant that takes the resolved `ExecutionContextConfig` explicitly.
@@ -296,6 +309,22 @@ fn pr_checks_contributor_will_activate_with_cfg(
     matches!(checks_enabled, Some(true))
 }
 
+/// Whether the repo contributor will activate. Pure config-driven
+/// (opt-in, default OFF).
+///
+/// MAINTENANCE: this MUST stay in lock-step with
+/// `RepoContextContributor::should_activate` (in `repo.rs`).
+fn repo_contributor_will_activate_with_cfg(
+    cfg: &ExecutionContextConfig,
+    _front_matter: &FrontMatter,
+) -> bool {
+    if !cfg.is_enabled() {
+        return false;
+    }
+    let repo_enabled = cfg.repo.as_ref().and_then(|r| r.enabled);
+    matches!(repo_enabled, Some(true))
+}
+
 /// Always-on execution-context extension.
 ///
 /// Owns the `aw-context/` precompute pipeline. Registered
@@ -361,7 +390,8 @@ impl ExecContextExtension {
             || ci_push_contributor_will_activate_with_cfg(&config, front_matter)
             || workitem_contributor_will_activate_with_cfg(&config, front_matter)
             || schedule_contributor_will_activate_with_cfg(&config, front_matter)
-            || pr_checks_contributor_will_activate_with_cfg(&config, front_matter);
+            || pr_checks_contributor_will_activate_with_cfg(&config, front_matter)
+            || repo_contributor_will_activate_with_cfg(&config, front_matter);
         let synthetic_pr_active = front_matter.is_synthetic_pr();
         Self {
             config,
@@ -389,6 +419,7 @@ impl ExecContextExtension {
         let workitem_cfg = self.config.workitem.clone().unwrap_or_default();
         let schedule_cfg = self.config.schedule.clone().unwrap_or_default();
         let pr_checks_cfg = pr_cfg.checks.clone().unwrap_or_default();
+        let repo_cfg = self.config.repo.clone().unwrap_or_default();
         let synthetic_pr_active = self.synthetic_pr_active;
         let pr_enabled = !matches!(pr_cfg.enabled, Some(false));
         vec![
@@ -410,6 +441,7 @@ impl ExecContextExtension {
                 synthetic_pr_active,
                 pr_enabled,
             )),
+            Contributor::Repo(RepoContextContributor::new(repo_cfg)),
         ]
     }
 
@@ -555,6 +587,7 @@ mod tests {
                     ci_push: None,
                     workitem: None,
                     schedule: None,
+                    repo: None,
         };
         let fm = pr_triggered_front_matter();
         let ext = ExecContextExtension::new(cfg, &fm);
@@ -577,6 +610,7 @@ mod tests {
                     ci_push: None,
                     workitem: None,
                     schedule: None,
+                    repo: None,
         };
         let fm = pr_triggered_front_matter();
         let ext = ExecContextExtension::new(cfg, &fm);
@@ -611,6 +645,7 @@ mod tests {
                     ci_push: None,
                     workitem: None,
                     schedule: None,
+                    repo: None,
         };
         let fm = no_trigger_front_matter();
         let ext = ExecContextExtension::new(cfg, &fm);
@@ -632,6 +667,7 @@ mod tests {
                     ci_push: None,
                     workitem: None,
                     schedule: None,
+                    repo: None,
         };
         let fm = pr_triggered_front_matter();
         let ext = ExecContextExtension::new(cfg, &fm);
@@ -720,6 +756,7 @@ mod tests {
                     ci_push: None,
                     workitem: None,
                     schedule: None,
+                    repo: None,
         };
         let ext = ExecContextExtension::new(cfg, &fm);
         let ctx = CompileContext::for_test(&fm);
@@ -772,6 +809,7 @@ mod tests {
                 max_body_kb: None,
             }),
         schedule: None,
+                    repo: None,
         };
         let ext = ExecContextExtension::new(cfg, &fm);
         // Force synthetic_pr_active so the unified `AW_PR_*` macros
