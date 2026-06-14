@@ -422,26 +422,34 @@ impl ExecContextExtension {
         let repo_cfg = self.config.repo.clone().unwrap_or_default();
         let synthetic_pr_active = self.synthetic_pr_active;
         let pr_enabled = !matches!(pr_cfg.enabled, Some(false));
+        // Stable prompt-fragment ordering (Stage 8 cleanup — plan.md):
+        // `repo` → trigger-specific (pr / pipeline / ci-push / schedule) →
+        // `workitem` → `pr.checks` (PR extension) → `manual`. This order
+        // gives the agent identity context first, then trigger-specific
+        // diff/build context, then linked-WI context (which depends on
+        // PR context being established), then PR-checks (which depends
+        // on `workitem` framing), and finally `manual` (a free-form
+        // parameter snapshot that doesn't fit the diff/identity narrative).
         vec![
+            Contributor::Repo(RepoContextContributor::new(repo_cfg)),
             Contributor::Pr(PrContextContributor::new(pr_cfg, synthetic_pr_active)),
-            Contributor::Manual(ManualContextContributor::new_from_parts(
-                manual_cfg,
-                self.parameter_names.clone(),
-            )),
             Contributor::Pipeline(PipelineContextContributor::new(pipeline_cfg)),
             Contributor::CiPush(CiPushContextContributor::new(ci_push_cfg)),
+            Contributor::Schedule(ScheduleContextContributor::new(schedule_cfg)),
             Contributor::Workitem(WorkitemContextContributor::new(
                 workitem_cfg,
                 synthetic_pr_active,
                 pr_enabled,
             )),
-            Contributor::Schedule(ScheduleContextContributor::new(schedule_cfg)),
             Contributor::PrChecks(PrChecksContextContributor::new(
                 pr_checks_cfg,
                 synthetic_pr_active,
                 pr_enabled,
             )),
-            Contributor::Repo(RepoContextContributor::new(repo_cfg)),
+            Contributor::Manual(ManualContextContributor::new_from_parts(
+                manual_cfg,
+                self.parameter_names.clone(),
+            )),
         ]
     }
 
@@ -752,11 +760,11 @@ mod tests {
             enabled: None,
             pr: None,
             manual: Some(ManualContextConfig { enabled: Some(false), include_email: None }),
-        pipeline: None,
-                    ci_push: None,
-                    workitem: None,
-                    schedule: None,
-                    repo: None,
+            pipeline: None,
+            ci_push: None,
+            workitem: None,
+            schedule: None,
+            repo: None,
         };
         let ext = ExecContextExtension::new(cfg, &fm);
         let ctx = CompileContext::for_test(&fm);
@@ -765,6 +773,119 @@ mod tests {
             !decl.agent_prepare_steps.iter().any(|s| matches!(s,
                 crate::compile::ir::step::Step::Bash(b) if b.display_name == "Stage manual execution context (aw-context/manual/*)")),
             "manual.enabled: false must suppress the manual prepare step"
+        );
+    }
+
+    /// Stage 8 cleanup test: bash_commands() across multiple active
+    /// contributors must be deduped. Today PR + ci-push + workitem +
+    /// schedule + repo could all activate together; each declares
+    /// overlapping read-only `git` commands. The aggregate output
+    /// MUST contain each command exactly once.
+    #[test]
+    fn bash_commands_are_deduped_across_active_contributors() {
+        use crate::compile::types::{
+            CiPushContextConfig, PrContextConfig, RepoContextConfig, ScheduleContextConfig,
+            WorkitemContextConfig,
+        };
+        let fm = parse_fm(
+            "---\nname: test\ndescription: test\non:\n  pr:\n    branches:\n      include: [main]\n  schedule: 'daily around 09:00'\n---\n",
+        );
+        let cfg = ExecutionContextConfig {
+            enabled: None,
+            pr: Some(PrContextConfig { enabled: Some(true), checks: None }),
+            manual: None,
+            pipeline: None,
+            ci_push: Some(CiPushContextConfig { enabled: Some(true) }),
+            workitem: Some(WorkitemContextConfig {
+                enabled: Some(true),
+                max_items: None,
+                max_body_kb: None,
+            }),
+            schedule: Some(ScheduleContextConfig { enabled: Some(true) }),
+            repo: Some(RepoContextConfig {
+                enabled: Some(true),
+                conventions: None,
+            }),
+        };
+        let ext = ExecContextExtension::new(cfg, &fm);
+        let cmds = declared_bash_commands(&ext, &fm);
+        let mut deduped = cmds.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(
+            cmds.len(),
+            deduped.len(),
+            "bash_commands() output contained duplicates: {cmds:?}"
+        );
+        for expected in &["git", "git diff", "git log", "git describe"] {
+            assert!(
+                cmds.iter().any(|c| c == expected),
+                "expected '{expected}' in bash_commands, got {cmds:?}"
+            );
+        }
+    }
+
+    /// Stage 8 cleanup test: when all contributors activate, the
+    /// emitted prepare-step ordering matches the canonical
+    /// `repo → pr → pipeline → ci-push → schedule → workitem →
+    /// pr.checks → manual` order documented in `contributors()`.
+    #[test]
+    fn prepare_step_ordering_is_stable_and_canonical() {
+        use crate::compile::types::{
+            CiPushContextConfig, ManualContextConfig, PipelineContextConfig,
+            PrChecksContextConfig, PrContextConfig, RepoContextConfig,
+            ScheduleContextConfig, WorkitemContextConfig,
+        };
+        // Front matter that triggers as many contributors as possible.
+        let fm = parse_fm(
+            "---\nname: test\ndescription: test\nparameters:\n  - name: topic\n    type: string\n    default: foo\non:\n  pr:\n    branches:\n      include: [main]\n  pipeline:\n    name: upstream\n  schedule: 'daily around 09:00'\n---\n",
+        );
+        let cfg = ExecutionContextConfig {
+            enabled: None,
+            pr: Some(PrContextConfig {
+                enabled: Some(true),
+                checks: Some(PrChecksContextConfig { enabled: Some(true) }),
+            }),
+            manual: Some(ManualContextConfig {
+                enabled: Some(true),
+                include_email: None,
+            }),
+            pipeline: Some(PipelineContextConfig { enabled: Some(true) }),
+            ci_push: Some(CiPushContextConfig { enabled: Some(true) }),
+            workitem: Some(WorkitemContextConfig {
+                enabled: Some(true),
+                max_items: None,
+                max_body_kb: None,
+            }),
+            schedule: Some(ScheduleContextConfig { enabled: Some(true) }),
+            repo: Some(RepoContextConfig {
+                enabled: Some(true),
+                conventions: None,
+            }),
+        };
+        let ext = ExecContextExtension::new(cfg, &fm);
+        let ctx = CompileContext::for_test(&fm);
+        let decl = ext.declarations(&ctx).unwrap();
+        let names: Vec<String> = decl
+            .agent_prepare_steps
+            .iter()
+            .filter_map(|s| match s {
+                crate::compile::ir::step::Step::Bash(b) => Some(b.display_name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "Stage repo execution context (aw-context/repo/*)".to_string(),
+                "Stage PR execution context (aw-context/pr/*)".to_string(),
+                "Stage pipeline execution context (aw-context/pipeline/*)".to_string(),
+                "Stage ci-push execution context (aw-context/ci-push/*)".to_string(),
+                "Stage schedule execution context (aw-context/schedule/*)".to_string(),
+                "Stage workitem execution context (aw-context/workitem/*)".to_string(),
+                "Stage PR-checks execution context (aw-context/pr/checks/*)".to_string(),
+                "Stage manual execution context (aw-context/manual/*)".to_string(),
+            ],
         );
     }
 
