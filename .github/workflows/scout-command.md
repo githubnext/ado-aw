@@ -8,6 +8,7 @@ permissions:
   contents: read
   issues: read
   pull-requests: read
+  copilot-requests: write
 tools:
   github:
     toolsets: [default]
@@ -16,6 +17,8 @@ network:
 safe-outputs:
   add-comment:
     max: 2
+max-ai-credits: -1
+max-daily-ai-credits: -1
 ---
 
 # Code History Scout

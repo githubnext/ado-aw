@@ -7,6 +7,7 @@ permissions:
   contents: read
   issues: read
   pull-requests: read
+  copilot-requests: write
 tools:
   github:
     toolsets: [default]
@@ -24,6 +25,8 @@ safe-outputs:
       - "src/compile/extensions/**"
       - "src/compile/agentic_pipeline.rs"
       - "tests/**"
+max-ai-credits: -1
+max-daily-ai-credits: -1
 ---
 
 # ADO Task IR Contributor

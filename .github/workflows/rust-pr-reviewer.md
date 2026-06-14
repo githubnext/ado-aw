@@ -12,6 +12,7 @@ permissions:
   contents: read
   pull-requests: read
   issues: read
+  copilot-requests: write
 tools:
   github:
     toolsets: [default]
@@ -20,6 +21,8 @@ network:
 safe-outputs:
   add-comment:
     max: 3
+max-ai-credits: -1
+max-daily-ai-credits: -1
 ---
 
 # Rust PR Reviewer

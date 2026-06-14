@@ -6,6 +6,7 @@ permissions:
   contents: read
   issues: read
   pull-requests: read
+  copilot-requests: write
 tools:
   github:
     toolsets: [default]
@@ -28,6 +29,8 @@ safe-outputs:
     required-title-prefix: "[deps-release-notes] "
     max: 10
     state-reason: "not_planned"
+max-ai-credits: -1
+max-daily-ai-credits: -1
 ---
 
 # Dependency Version Updater

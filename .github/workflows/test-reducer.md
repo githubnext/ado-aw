@@ -6,6 +6,7 @@ permissions:
   contents: read
   pull-requests: read
   issues: read
+  copilot-requests: write
 tools:
   github:
     toolsets: [default]
@@ -25,6 +26,8 @@ safe-outputs:
   create-issue:
     max: 1
     labels: [test-quality]
+max-ai-credits: -1
+max-daily-ai-credits: -1
 ---
 
 # Test Reducer
