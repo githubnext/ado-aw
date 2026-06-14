@@ -32,7 +32,7 @@ use super::PATH_SEGMENT;
 use crate::sanitize::SanitizeContent;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::tool_result;
-use crate::validate::{is_safe_path_segment, is_valid_artifact_name};
+use crate::validate::is_valid_artifact_name;
 use anyhow::{Context, ensure};
 
 /// Parameters for attaching a workspace file to an ADO build.
@@ -80,26 +80,7 @@ impl Validate for UploadBuildAttachmentParams {
 
         // file_path: must be relative, with no traversal, no absolute prefix,
         // no `.git`/hidden segments, no null bytes, no drive-letter colons.
-        ensure!(!self.file_path.is_empty(), "file_path must not be empty");
-        ensure!(
-            !self.file_path.contains('\0'),
-            "file_path must not contain null bytes"
-        );
-        ensure!(
-            !self.file_path.contains(':'),
-            "file_path must not contain ':'"
-        );
-        ensure!(
-            !self.file_path.contains("##vso[") && !self.file_path.contains("##["),
-            "file_path must not contain Azure DevOps pipeline command sequences"
-        );
-        for component in self.file_path.split(['/', '\\']) {
-            ensure!(
-                is_safe_path_segment(component),
-                "file_path component '{}' is not a safe path segment (no empty, '..', or leading '.' allowed)",
-                component
-            );
-        }
+        crate::validate::validate_relative_segment_path(&self.file_path, "file_path")?;
         Ok(())
     }
 }

@@ -213,35 +213,19 @@ impl SafeOutputs {
         let git_dir = match repository {
             Some("self") | None => self.bounding_directory.clone(),
             Some(repo_alias) => {
-                if repo_alias.contains('/')
-                    || repo_alias.contains('\\')
-                    || repo_alias.contains("..")
-                {
+                if !crate::validate::is_safe_path_segment(repo_alias) {
                     return Err(anyhow_to_mcp_error(anyhow::anyhow!(
                         "Invalid repository alias: {}. Path traversal is not allowed.",
                         repo_alias
                     )));
                 }
                 let repo_path = self.bounding_directory.join(repo_alias);
-                let canonical_repo_path = repo_path.canonicalize().map_err(|e| {
-                    anyhow_to_mcp_error(anyhow::anyhow!(
-                        "Failed to canonicalize repository path: {}",
-                        e
-                    ))
-                })?;
-                let canonical_bounding_dir =
-                    self.bounding_directory.canonicalize().map_err(|e| {
-                        anyhow_to_mcp_error(anyhow::anyhow!(
-                            "Failed to canonicalize bounding directory: {}",
-                            e
-                        ))
-                    })?;
-                if !canonical_repo_path.starts_with(&canonical_bounding_dir) {
-                    return Err(anyhow_to_mcp_error(anyhow::anyhow!(
-                        "Repository path escapes bounding directory: {}",
-                        repo_path.display()
-                    )));
-                }
+                crate::validate::ensure_path_within_base(
+                    &repo_path,
+                    &self.bounding_directory,
+                    "Repository path",
+                )
+                .map_err(anyhow_to_mcp_error)?;
                 if !repo_path.exists() {
                     return Err(anyhow_to_mcp_error(anyhow::anyhow!(
                         "Repository directory not found: {}",
@@ -1078,25 +1062,9 @@ may apply per the workflow's safe-outputs config."
         // canonicalises to a location *inside* that directory — guarding
         // against symlink escapes.
         let resolved = self.bounding_directory.join(&params.0.file_path);
-        let canonical = resolved.canonicalize().map_err(|e| {
-            anyhow_to_mcp_error(anyhow::anyhow!(
-                "File '{}' could not be located inside the workspace: {}",
-                params.0.file_path,
-                e
-            ))
-        })?;
-        let canonical_root = self.bounding_directory.canonicalize().map_err(|e| {
-            anyhow_to_mcp_error(anyhow::anyhow!(
-                "Failed to canonicalize bounding directory: {}",
-                e
-            ))
-        })?;
-        if !canonical.starts_with(&canonical_root) {
-            return Err(anyhow_to_mcp_error(anyhow::anyhow!(
-                "File '{}' resolves outside the workspace (symlink escape)",
-                params.0.file_path
-            )));
-        }
+        let canonical =
+            crate::validate::ensure_path_within_base(&resolved, &self.bounding_directory, "File")
+                .map_err(anyhow_to_mcp_error)?;
 
         // Reject directories — upload-build-attachment is single-file only.
         let metadata = tokio::fs::metadata(&canonical).await.map_err(|e| {
@@ -1222,25 +1190,9 @@ restrictions may apply per the workflow's safe-outputs config."
         crate::safeoutputs::Validate::validate(&params.0).map_err(anyhow_to_mcp_error)?;
 
         let resolved = self.bounding_directory.join(&params.0.file_path);
-        let canonical = resolved.canonicalize().map_err(|e| {
-            anyhow_to_mcp_error(anyhow::anyhow!(
-                "File '{}' could not be located inside the workspace: {}",
-                params.0.file_path,
-                e
-            ))
-        })?;
-        let canonical_root = self.bounding_directory.canonicalize().map_err(|e| {
-            anyhow_to_mcp_error(anyhow::anyhow!(
-                "Failed to canonicalize bounding directory: {}",
-                e
-            ))
-        })?;
-        if !canonical.starts_with(&canonical_root) {
-            return Err(anyhow_to_mcp_error(anyhow::anyhow!(
-                "File '{}' resolves outside the workspace (symlink escape)",
-                params.0.file_path
-            )));
-        }
+        let canonical =
+            crate::validate::ensure_path_within_base(&resolved, &self.bounding_directory, "File")
+                .map_err(anyhow_to_mcp_error)?;
 
         let metadata = tokio::fs::metadata(&canonical).await.map_err(|e| {
             anyhow_to_mcp_error(anyhow::anyhow!("Failed to stat '{}': {}", params.0.file_path, e))

@@ -2133,48 +2133,13 @@ fn glob_match_simple(pattern: &str, path: &str) -> bool {
     glob_match::glob_match(pattern, path)
 }
 
-/// Validate a single file path for security issues
+/// Validate a single file path for security issues.
+///
+/// Thin wrapper over the canonical [`crate::validate::validate_relative_safe_path`]
+/// primitive so all path-traversal / absolute / `.git` / null-byte / pipeline
+/// command checks live in one place.
 fn validate_single_path(path: &str) -> anyhow::Result<()> {
-    // Check for null bytes
-    ensure!(!path.contains('\0'), "Path contains null byte: {:?}", path);
-
-    // Check for absolute paths
-    ensure!(
-        !path.starts_with('/') && !path.starts_with('\\'),
-        "Absolute paths not allowed: {}",
-        path
-    );
-
-    // Check for Windows absolute paths (C:\, D:\, etc.)
-    ensure!(
-        !(path.len() >= 2 && path.chars().nth(1) == Some(':')),
-        "Windows absolute paths not allowed: {}",
-        path
-    );
-
-    // Check for path traversal
-    for component in path.split(['/', '\\']) {
-        ensure!(component != "..", "Path traversal not allowed: {}", path);
-    }
-
-    // Check for .git directory modifications
-    let lower_path = path.to_lowercase();
-    ensure!(
-        !lower_path.starts_with(".git/")
-            && !lower_path.starts_with(".git\\")
-            && lower_path != ".git",
-        ".git directory modifications not allowed: {}",
-        path
-    );
-
-    // Check for git hooks specifically
-    ensure!(
-        !lower_path.contains(".git/hooks") && !lower_path.contains(".git\\hooks"),
-        "Git hooks modifications not allowed: {}",
-        path
-    );
-
-    Ok(())
+    crate::validate::validate_relative_safe_path(path, "path")
 }
 
 /// Extract all file paths from a patch/diff content.

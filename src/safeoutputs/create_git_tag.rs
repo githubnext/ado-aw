@@ -58,16 +58,7 @@ impl Validate for CreateGitTagParams {
         validate_git_ref_name(&self.tag_name, "tag_name")?;
 
         if let Some(commit) = &self.commit {
-            ensure!(
-                commit.len() == 40,
-                "commit must be exactly 40 hex characters, got {} characters",
-                commit.len()
-            );
-            ensure!(
-                commit.chars().all(|c| c.is_ascii_hexdigit()),
-                "commit must be a valid hex string: {}",
-                commit
-            );
+            crate::validate::validate_commit_sha(commit, "commit")?;
         }
 
         if let Some(message) = &self.message {

@@ -12,6 +12,7 @@
 
 use anyhow::Result;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 // ── Character allowlist validators ──────────────────────────────────────────
 
@@ -444,6 +445,159 @@ pub fn validate_feed_url(url: &str, field_name: &str) -> Result<()> {
     Ok(())
 }
 
+// ── Relative path safety ─────────────────────────────────────────────────────
+
+/// Validate that `path` is a safe *relative* path for use inside a workspace.
+///
+/// This is the single canonical check for agent-supplied file paths. It rejects
+/// the union of every variant that was previously re-implemented inline across
+/// the safe-output tools and the MCP server:
+///
+/// - empty strings
+/// - null bytes (`\0`)
+/// - newlines / carriage returns (would split into multiple paths or inject)
+/// - Azure DevOps pipeline commands (`##vso[`, `##[`)
+/// - absolute paths (leading `/` or `\`)
+/// - Windows drive prefixes (`C:\`, `D:/`, …)
+/// - `..` path-traversal components (split on both `/` and `\`)
+/// - any `.git` path component (case-insensitive) — blocks writes into the git
+///   metadata directory, including `.git/hooks`
+///
+/// It intentionally does **not** reject leading-dot files in general (e.g.
+/// `.gitignore`, `.github/workflows/ci.yml` are legitimate), nor colons outside
+/// a drive prefix. For stricter single-segment identifiers use
+/// [`validate_relative_segment_path`] or [`is_safe_path_segment`].
+pub fn validate_relative_safe_path(path: &str, label: &str) -> Result<()> {
+    if path.is_empty() {
+        anyhow::bail!("{label} must not be empty");
+    }
+    if path.contains('\0') {
+        anyhow::bail!("{label} must not contain null bytes");
+    }
+    if contains_newline(path) {
+        anyhow::bail!("{label} must not contain newlines or carriage returns");
+    }
+    if contains_pipeline_command(path) {
+        anyhow::bail!(
+            "{label} must not contain Azure DevOps pipeline command sequences ('##vso[' or '##[')"
+        );
+    }
+    if path.starts_with('/') || path.starts_with('\\') {
+        anyhow::bail!("{label} must be a relative path (no leading '/' or '\\')");
+    }
+    // Windows drive prefix, e.g. `C:` at position 1.
+    if path.len() >= 2 && path.as_bytes()[1] == b':' {
+        anyhow::bail!("{label} must not be a Windows absolute path (drive letter)");
+    }
+    for component in path.split(['/', '\\']) {
+        if component == ".." {
+            anyhow::bail!("{label} must not contain '..' path-traversal components");
+        }
+        if component.eq_ignore_ascii_case(".git") {
+            anyhow::bail!("{label} must not contain a '.git' path component");
+        }
+    }
+    Ok(())
+}
+
+/// Validate that `path` is a safe relative path whose every component is also a
+/// safe single path segment (see [`is_safe_path_segment`]): non-empty, no
+/// leading `.`, no `..`. Additionally forbids `:` anywhere.
+///
+/// Use this for stricter contexts such as attachment / artifact staging paths
+/// where hidden files and colons are never expected.
+pub fn validate_relative_segment_path(path: &str, label: &str) -> Result<()> {
+    validate_relative_safe_path(path, label)?;
+    if path.contains(':') {
+        anyhow::bail!("{label} must not contain ':'");
+    }
+    for component in path.split(['/', '\\']) {
+        if !is_safe_path_segment(component) {
+            anyhow::bail!(
+                "{label} component '{component}' is not a safe path segment \
+                 (no empty, '..', or leading '.' allowed)"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Canonicalize `candidate` and verify it resolves to a location inside `base`,
+/// guarding against symlink / `..` escapes. `candidate` must already exist on
+/// disk (canonicalization follows symlinks and fails on missing paths).
+///
+/// Returns the canonical form of `candidate` on success. `base` is canonicalized
+/// internally so callers may pass the raw bounding directory.
+pub fn ensure_path_within_base(candidate: &Path, base: &Path, label: &str) -> Result<PathBuf> {
+    let canonical = candidate.canonicalize().map_err(|e| {
+        anyhow::anyhow!(
+            "{label} '{}' could not be located inside the workspace: {e}",
+            candidate.display()
+        )
+    })?;
+    let canonical_base = base
+        .canonicalize()
+        .map_err(|e| anyhow::anyhow!("Failed to canonicalize bounding directory: {e}"))?;
+    if !canonical.starts_with(&canonical_base) {
+        anyhow::bail!(
+            "{label} '{}' resolves outside the permitted directory",
+            candidate.display()
+        );
+    }
+    Ok(canonical)
+}
+
+// ── Git reference / commit validators ────────────────────────────────────────
+
+/// Return `true` if `s` is a full 40-character lowercase-or-uppercase hex SHA.
+pub fn is_valid_commit_sha(s: &str) -> bool {
+    s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Validate that `s` is a full 40-character hex commit SHA.
+pub fn validate_commit_sha(s: &str, label: &str) -> Result<()> {
+    if s.len() != 40 {
+        anyhow::bail!(
+            "{label} must be exactly 40 hex characters, got {} characters",
+            s.len()
+        );
+    }
+    if !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        anyhow::bail!("{label} must be a valid hex string: {s}");
+    }
+    Ok(())
+}
+
+/// Validate a string against `git check-ref-format` rules.
+///
+/// Returns `Ok(())` if the name is valid, or an `Err` describing the violation.
+/// This covers the structural rules that Azure DevOps also enforces — catching
+/// them early gives clearer error messages than letting the API fail.
+pub fn validate_git_ref_name(name: &str, label: &str) -> Result<()> {
+    use anyhow::ensure;
+
+    ensure!(!name.is_empty(), "{label} must not be empty");
+    ensure!(!name.contains(".."), "{label} must not contain '..'");
+    ensure!(!name.contains("@{"), "{label} must not contain '@{{'");
+    ensure!(!name.ends_with('.'), "{label} must not end with '.'");
+    ensure!(!name.ends_with(".lock"), "{label} must not end with '.lock'");
+    ensure!(!name.contains('\\'), "{label} must not contain backslash");
+    ensure!(
+        !name.contains("//"),
+        "{label} must not contain consecutive slashes"
+    );
+    for ch in ['~', '^', ':', '?', '*', '['] {
+        ensure!(!name.contains(ch), "{label} must not contain '{ch}'");
+    }
+    for component in name.split('/') {
+        ensure!(
+            !component.starts_with('.'),
+            "{label} path component must not start with '.'"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -696,5 +850,91 @@ mod tests {
     fn test_validate_feed_url_rejects_quotes() {
         assert!(validate_feed_url("https://example.com/feed\"name", "test").is_err());
         assert!(validate_feed_url("https://example.com/feed'name", "test").is_err());
+    }
+
+    // ── Relative path safety ───────────────────────────────────────────
+
+    #[test]
+    fn test_validate_relative_safe_path_accepts_legit() {
+        assert!(validate_relative_safe_path("src/main.rs", "p").is_ok());
+        assert!(validate_relative_safe_path(".gitignore", "p").is_ok());
+        assert!(validate_relative_safe_path(".github/workflows/ci.yml", "p").is_ok());
+        assert!(validate_relative_safe_path("a/b/c.txt", "p").is_ok());
+    }
+
+    #[test]
+    fn test_validate_relative_safe_path_rejects_dangerous() {
+        assert!(validate_relative_safe_path("", "p").is_err());
+        assert!(validate_relative_safe_path("/etc/passwd", "p").is_err());
+        assert!(validate_relative_safe_path("\\windows\\system32", "p").is_err());
+        assert!(validate_relative_safe_path("C:\\Users", "p").is_err());
+        assert!(validate_relative_safe_path("../secret", "p").is_err());
+        assert!(validate_relative_safe_path("a/../b", "p").is_err());
+        assert!(validate_relative_safe_path("a\\..\\b", "p").is_err());
+        assert!(validate_relative_safe_path(".git/config", "p").is_err());
+        assert!(validate_relative_safe_path("sub/.git/hooks/pre-commit", "p").is_err());
+        assert!(validate_relative_safe_path("sub/.GIT/config", "p").is_err());
+        assert!(validate_relative_safe_path("a\0b", "p").is_err());
+        assert!(validate_relative_safe_path("a\nb", "p").is_err());
+        assert!(validate_relative_safe_path("a/##vso[task]", "p").is_err());
+    }
+
+    #[test]
+    fn test_validate_relative_segment_path_is_stricter() {
+        assert!(validate_relative_segment_path("src/main.rs", "p").is_ok());
+        // leading-dot files are rejected here (allowed by the base variant)
+        assert!(validate_relative_safe_path(".gitignore", "p").is_ok());
+        assert!(validate_relative_segment_path(".gitignore", "p").is_err());
+        assert!(validate_relative_segment_path("a/.hidden/b", "p").is_err());
+        assert!(validate_relative_segment_path("a:b", "p").is_err());
+        assert!(validate_relative_segment_path("a//b", "p").is_err());
+    }
+
+    #[test]
+    fn test_ensure_path_within_base() {
+        let dir = std::env::temp_dir().join(format!("ado-aw-validate-{}", std::process::id()));
+        let inner = dir.join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        let file = inner.join("f.txt");
+        std::fs::write(&file, b"x").unwrap();
+
+        assert!(ensure_path_within_base(&file, &dir, "f").is_ok());
+        // A sibling of the base must not be considered "within".
+        let outside = std::env::temp_dir();
+        assert!(ensure_path_within_base(&file, &outside.join("nonexistent-base-xyz"), "f").is_err());
+        // Missing candidate canonicalization fails.
+        assert!(ensure_path_within_base(&dir.join("missing"), &dir, "f").is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Git ref / commit validators ────────────────────────────────────
+
+    #[test]
+    fn test_is_valid_commit_sha() {
+        assert!(is_valid_commit_sha("0123456789abcdef0123456789abcdef01234567"));
+        assert!(is_valid_commit_sha("0123456789ABCDEF0123456789abcdef01234567"));
+        assert!(!is_valid_commit_sha("0123")); // too short
+        assert!(!is_valid_commit_sha("z123456789abcdef0123456789abcdef01234567")); // non-hex
+    }
+
+    #[test]
+    fn test_validate_commit_sha() {
+        assert!(validate_commit_sha("0123456789abcdef0123456789abcdef01234567", "c").is_ok());
+        assert!(validate_commit_sha("short", "c").is_err());
+        assert!(validate_commit_sha("zzz3456789abcdef0123456789abcdef01234567", "c").is_err());
+    }
+
+    #[test]
+    fn test_validate_git_ref_name() {
+        assert!(validate_git_ref_name("feature/my-analysis", "b").is_ok());
+        assert!(validate_git_ref_name("release-1.0", "b").is_ok());
+        assert!(validate_git_ref_name("", "b").is_err());
+        assert!(validate_git_ref_name("foo..bar", "b").is_err());
+        assert!(validate_git_ref_name("foo@{bar", "b").is_err());
+        assert!(validate_git_ref_name("foo.lock", "b").is_err());
+        assert!(validate_git_ref_name("foo//bar", "b").is_err());
+        assert!(validate_git_ref_name("foo:bar", "b").is_err());
+        assert!(validate_git_ref_name("foo/.hidden", "b").is_err());
     }
 }
