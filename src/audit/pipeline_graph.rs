@@ -168,7 +168,12 @@ async fn read_source_from_aw_info(run_dir: &Path) -> Option<Result<String>> {
 /// - Rejecting relative paths that contain `..` components or a
 ///   leading `~` (no directory traversal, no shell-style expansion).
 /// - Allowing absolute `.md` paths because legitimate compiled-
-///   elsewhere workflows commonly carry an absolute `source`.
+///   elsewhere workflows commonly carry an absolute `source`. For
+///   absolute paths that exist on disk we additionally canonicalize
+///   and **re-check the extension on the resolved target**, which
+///   rejects a symlink-bypass such as `/tmp/foo.md` → `/etc/passwd`
+///   where the link itself satisfies the lexical `.md` check but
+///   points to an unrelated file.
 ///
 /// ## Residual risk
 ///
@@ -180,19 +185,17 @@ async fn read_source_from_aw_info(run_dir: &Path) -> Option<Result<String>> {
 /// markdown, the practical blast radius is an unexpected parse error
 /// surfaced in the audit warnings — not code execution or
 /// credential exfiltration. **Do not weaken or remove the `.md`
-/// extension check** without also adding a containment check (e.g.
-/// canonicalize + prefix-against-cwd) at the same level; without it
-/// any future maintainer would silently re-open the
-/// arbitrary-file-read vector.
+/// extension check or the symlink-target re-check** without also
+/// adding a containment check (e.g. canonicalize + prefix-against-
+/// cwd) at the same level; without them any future maintainer would
+/// silently re-open the arbitrary-file-read vector via either a
+/// non-markdown extension or a `.md` symlink targeting an arbitrary
+/// file.
 async fn resolve_source_path(source: &str) -> Result<PathBuf> {
     let normalized = normalize_source_path(source);
     let path = PathBuf::from(&normalized);
 
-    let has_md_extension = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
-    if !has_md_extension {
+    if !has_md_extension(&path) {
         anyhow::bail!(
             "refusing source path '{}' from audited build artifact: only `.md` files are valid agentic workflow sources",
             normalized
@@ -200,6 +203,22 @@ async fn resolve_source_path(source: &str) -> Result<PathBuf> {
     }
 
     if path.is_absolute() {
+        // If the file exists, resolve symlinks and re-check the
+        // extension on the actual target. Closes the
+        // `/tmp/foo.md → /etc/passwd` symlink-bypass vector. We
+        // intentionally tolerate `canonicalize` failing (the path may
+        // not exist locally — the caller upstream emits a warning in
+        // that case) and only enforce the re-check when the link
+        // resolved successfully.
+        if let Ok(canonical) = tokio::fs::canonicalize(&path).await
+            && !has_md_extension(&canonical)
+        {
+            anyhow::bail!(
+                "refusing source path '{}' from audited build artifact: symlink resolves to non-`.md` target '{}'",
+                normalized,
+                canonical.display()
+            );
+        }
         return Ok(path);
     }
 
@@ -218,6 +237,12 @@ async fn resolve_source_path(source: &str) -> Result<PathBuf> {
         .await
         .context("Could not resolve current directory")?;
     Ok(cwd.join(path))
+}
+
+fn has_md_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
 }
 
 fn normalize_source_path(source: &str) -> String {
@@ -356,6 +381,51 @@ mod tests {
             resolve_source_path(path).await.is_ok(),
             "expected absolute `.md` paths to be accepted"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolve_source_path_rejects_md_symlink_to_non_md_target() {
+        // Symlink-bypass regression: `foo.md` → `/etc/passwd` lexically
+        // satisfies the `.md` extension check but resolves to a
+        // non-markdown file. The post-canonicalize re-check must
+        // reject it.
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let target = temp_dir.path().join("not_markdown.bin");
+        tokio::fs::write(&target, b"binary").await.expect("write target");
+        let link = temp_dir.path().join("evil.md");
+        tokio::fs::symlink(&target, &link)
+            .await
+            .expect("create symlink");
+
+        let err = resolve_source_path(link.to_str().unwrap())
+            .await
+            .expect_err("symlink to non-md target must be rejected");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("symlink resolves to non-`.md` target"),
+            "expected symlink-target rejection message, got: {msg}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolve_source_path_accepts_md_symlink_to_md_target() {
+        // Legitimate `current.md` → `v1.md` style symlinks must still
+        // be accepted — the post-canonicalize re-check only rejects
+        // when the resolved target lacks the `.md` extension.
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let target = temp_dir.path().join("v1.md");
+        tokio::fs::write(&target, b"# pipeline").await.expect("write target");
+        let link = temp_dir.path().join("current.md");
+        tokio::fs::symlink(&target, &link)
+            .await
+            .expect("create symlink");
+
+        let resolved = resolve_source_path(link.to_str().unwrap())
+            .await
+            .expect("md symlink to md target must be accepted");
+        assert_eq!(resolved, link);
     }
 
     #[tokio::test]

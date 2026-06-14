@@ -298,12 +298,21 @@ fn is_word_boundary_before(s: &str, idx: usize) -> bool {
 }
 
 fn is_negated_call(normalized_condition: &str, call_idx: usize) -> bool {
-    const NOT_PREFIX: &str = "not(";
+    // Compare via the underlying byte slice instead of
+    // `normalized_condition[idx - NOT_PREFIX_LEN..idx]` so that a
+    // multi-byte UTF-8 sequence ending immediately before the call
+    // cannot land on a non-char-boundary and panic. `call_idx` is on a
+    // boundary (it comes from `str::find`) but `idx - 4` is not
+    // guaranteed to be. ADO normally emits ASCII-only conditions, but
+    // a leaked display name could carry non-ASCII bytes — this keeps
+    // us crash-safe regardless.
+    const NOT_PREFIX: &[u8] = b"not(";
     const NOT_PREFIX_LEN: usize = NOT_PREFIX.len();
+    let bytes = normalized_condition.as_bytes();
     let mut idx = call_idx;
     let mut negated = false;
     while idx >= NOT_PREFIX_LEN
-        && normalized_condition[idx - NOT_PREFIX_LEN..idx] == *NOT_PREFIX
+        && bytes.get(idx - NOT_PREFIX_LEN..idx) == Some(NOT_PREFIX)
     {
         negated = !negated;
         idx -= NOT_PREFIX_LEN;
@@ -604,5 +613,35 @@ mod tests {
             .find(|job| job.job == "Detection")
             .unwrap();
         assert_eq!(detection.classification, WhatIfClassification::Skipped);
+    }
+
+    #[test]
+    fn classifier_does_not_panic_on_multibyte_chars_adjacent_to_call() {
+        // Regression: the old `is_negated_call` indexed the str
+        // directly with `[idx - 4..idx]`, which panics if the four
+        // bytes before `failed()` straddle a UTF-8 char boundary. An
+        // emoji / accented character leaked into a display-name
+        // segment of the condition could trigger that crash.
+        //
+        // The accented `é` is two bytes (0xC3 0xA9), so prepending it
+        // makes the offset before `failed()` land *inside* the
+        // multi-byte sequence. The byte-slice comparison must handle
+        // that gracefully and not match `not(`.
+        let mut summary = fixture(None);
+        let PipelineBodySummary::Jobs { jobs } = &mut summary.body else {
+            unreachable!("fixture uses jobs body");
+        };
+        let detection = jobs.iter_mut().find(|job| job.id == "Detection").unwrap();
+        detection.condition = Some("éfailed()".to_string());
+
+        let report = analyze(&summary, "Setup").expect("must not panic on multi-byte input");
+        let detection = report
+            .downstream_jobs
+            .iter()
+            .find(|job| job.job == "Detection")
+            .unwrap();
+        // `é` is not part of `not(`, so the call is treated as
+        // un-negated and the job classifies as RunsAnyway.
+        assert_eq!(detection.classification, WhatIfClassification::RunsAnyway);
     }
 }
