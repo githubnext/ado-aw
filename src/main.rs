@@ -23,6 +23,7 @@ pub mod runtimes;
 mod safeoutputs;
 pub mod sanitize;
 mod secrets;
+pub mod secure;
 mod status;
 mod tools;
 mod update_check;

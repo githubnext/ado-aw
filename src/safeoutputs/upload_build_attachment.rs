@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use super::PATH_SEGMENT;
 use crate::sanitize::SanitizeContent;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::secure::{ArtifactName, StrictRelativePath};
 use crate::tool_result;
 use crate::validate::is_valid_artifact_name;
 use anyhow::{Context, ensure};
@@ -47,40 +48,23 @@ pub struct UploadBuildAttachmentParams {
     /// The artifact name to attach the file under. Used as the `{name}`
     /// segment of the ADO build attachments URL. ADO requires a non-empty
     /// name made of alphanumerics, `-`, `_`, or `.`. Must be 1-100 characters
-    /// and must not start with `.`.
-    pub artifact_name: String,
+    /// and must not start with `.`. Validated at deserialization time via
+    /// [`ArtifactName`].
+    pub artifact_name: ArtifactName,
 
     /// Path to the file in the workspace to attach. Must be a relative path
     /// with no directory traversal, no absolute prefix, and no `.git`
-    /// segments.
-    pub file_path: String,
+    /// segments. Validated at deserialization time via [`StrictRelativePath`].
+    pub file_path: StrictRelativePath,
 }
 
 impl Validate for UploadBuildAttachmentParams {
     fn validate(&self) -> anyhow::Result<()> {
-        // build_id: if present, must be positive.
+        // build_id: if present, must be positive. (artifact_name and file_path
+        // are structurally validated by their newtypes at deserialization.)
         if let Some(id) = self.build_id {
             ensure!(id > 0, "build_id must be positive when specified");
         }
-
-        // artifact_name: ADO requires non-empty, ≤100 chars, charset
-        // [A-Za-z0-9._-], and (per our hardening) no leading `.`.
-        ensure!(
-            self.artifact_name.len() <= 100,
-            "artifact_name must be at most 100 characters"
-        );
-        ensure!(
-            !self.artifact_name.starts_with('.'),
-            "artifact_name must not start with '.'"
-        );
-        ensure!(
-            is_valid_artifact_name(&self.artifact_name),
-            "artifact_name must be non-empty and contain only alphanumeric characters, '-', '_' or '.'"
-        );
-
-        // file_path: must be relative, with no traversal, no absolute prefix,
-        // no `.git`/hidden segments, no null bytes, no drive-letter colons.
-        crate::validate::validate_relative_segment_path(&self.file_path, "file_path")?;
         Ok(())
     }
 }
@@ -568,9 +552,26 @@ mod tests {
     ) -> UploadBuildAttachmentParams {
         UploadBuildAttachmentParams {
             build_id,
-            artifact_name: artifact_name.to_string(),
-            file_path: file_path.to_string(),
+            artifact_name: artifact_name.try_into().expect("test artifact_name must be valid"),
+            file_path: file_path.try_into().expect("test file_path must be valid"),
         }
+    }
+
+    /// Attempt to deserialize params from raw field values. Returns the serde
+    /// error when a newtype field (`artifact_name` / `file_path`) rejects its
+    /// value at parse time — used by the rejection tests that previously relied
+    /// on `validate()`.
+    fn try_params(
+        build_id: Option<i64>,
+        artifact_name: &str,
+        file_path: &str,
+    ) -> Result<UploadBuildAttachmentParams, serde_json::Error> {
+        let value = serde_json::json!({
+            "build_id": build_id,
+            "artifact_name": artifact_name,
+            "file_path": file_path,
+        });
+        serde_json::from_value(value)
     }
 
     /// Dummy SHA-256 hash for tests that use dry_run=true (hash check is
@@ -583,8 +584,8 @@ mod tests {
             r#"{"build_id": 1234, "artifact_name": "agent-report", "file_path": "out/report.pdf"}"#;
         let params: UploadBuildAttachmentParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.build_id, Some(1234));
-        assert_eq!(params.artifact_name, "agent-report");
-        assert_eq!(params.file_path, "out/report.pdf");
+        assert_eq!(params.artifact_name.as_str(), "agent-report");
+        assert_eq!(params.file_path.as_str(), "out/report.pdf");
     }
 
     #[test]
@@ -592,8 +593,8 @@ mod tests {
         let json = r#"{"artifact_name": "agent-report", "file_path": "out/report.pdf"}"#;
         let params: UploadBuildAttachmentParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.build_id, None);
-        assert_eq!(params.artifact_name, "agent-report");
-        assert_eq!(params.file_path, "out/report.pdf");
+        assert_eq!(params.artifact_name.as_str(), "agent-report");
+        assert_eq!(params.file_path.as_str(), "out/report.pdf");
     }
 
     #[test]
@@ -626,30 +627,22 @@ mod tests {
 
     #[test]
     fn test_validation_rejects_empty_artifact_name() {
-        assert!(make_params(Some(1), "", "out/report.pdf")
-            .validate()
-            .is_err());
+        assert!(try_params(Some(1), "", "out/report.pdf").is_err());
     }
 
     #[test]
     fn test_validation_rejects_artifact_name_starting_with_dot() {
-        assert!(make_params(Some(1), ".hidden", "out/report.pdf")
-            .validate()
-            .is_err());
+        assert!(try_params(Some(1), ".hidden", "out/report.pdf").is_err());
     }
 
     #[test]
     fn test_validation_rejects_artifact_name_with_space() {
-        assert!(make_params(Some(1), "my artifact", "out/report.pdf")
-            .validate()
-            .is_err());
+        assert!(try_params(Some(1), "my artifact", "out/report.pdf").is_err());
     }
 
     #[test]
     fn test_validation_rejects_artifact_name_with_slash() {
-        assert!(make_params(Some(1), "my/artifact", "out/report.pdf")
-            .validate()
-            .is_err());
+        assert!(try_params(Some(1), "my/artifact", "out/report.pdf").is_err());
     }
 
     #[test]
@@ -661,69 +654,50 @@ mod tests {
 
     #[test]
     fn test_validation_rejects_empty_file_path() {
-        assert!(make_params(Some(1), "agent-report", "")
-            .validate()
-            .is_err());
+        assert!(try_params(Some(1), "agent-report", "").is_err());
     }
 
     #[test]
     fn test_validation_rejects_path_traversal() {
-        assert!(make_params(Some(1), "agent-report", "../etc/passwd")
-            .validate()
-            .is_err());
+        assert!(try_params(Some(1), "agent-report", "../etc/passwd").is_err());
     }
 
     #[test]
     fn test_validation_rejects_absolute_path() {
-        assert!(make_params(Some(1), "agent-report", "/etc/passwd")
-            .validate()
-            .is_err());
+        assert!(try_params(Some(1), "agent-report", "/etc/passwd").is_err());
     }
 
     #[test]
     fn test_validation_rejects_backslash_traversal() {
-        assert!(make_params(Some(1), "agent-report", "src\\..\\secret.txt")
-            .validate()
-            .is_err());
+        assert!(try_params(Some(1), "agent-report", "src\\..\\secret.txt").is_err());
     }
 
     #[test]
     fn test_validation_rejects_dotgit_component() {
-        assert!(make_params(Some(1), "agent-report", ".git/config")
-            .validate()
-            .is_err());
+        assert!(try_params(Some(1), "agent-report", ".git/config").is_err());
     }
 
     #[test]
     fn test_validation_rejects_newline_in_file_path() {
-        assert!(make_params(Some(1), "agent-report", "out\n/report.pdf")
-            .validate()
-            .is_err());
+        assert!(try_params(Some(1), "agent-report", "out\n/report.pdf").is_err());
     }
 
     #[test]
     fn test_validation_rejects_carriage_return_in_file_path() {
-        assert!(make_params(Some(1), "agent-report", "out\r/report.pdf")
-            .validate()
-            .is_err());
+        assert!(try_params(Some(1), "agent-report", "out\r/report.pdf").is_err());
     }
 
     #[test]
     fn test_validation_rejects_pipeline_command_sequences_in_file_path() {
         assert!(
-            make_params(
+            try_params(
                 Some(1),
                 "agent-report",
                 "##vso[task.setvariable variable=EXPLOIT]value.txt"
             )
-            .validate()
             .is_err()
         );
-        assert!(
-            make_params(Some(1), "agent-report", "##[error]value.txt")
-                .validate()
-                .is_err()
-        );
+        assert!(try_params(Some(1), "agent-report", "##[error]value.txt").is_err());
     }
 
     #[test]

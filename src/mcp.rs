@@ -1095,7 +1095,7 @@ may apply per the workflow's safe-outputs config."
         // the agent's sandbox workspace is no longer accessible by then.
         // The staged name preserves the original extension and embeds a
         // short random suffix to avoid collisions across multiple calls.
-        let extension = std::path::Path::new(&params.0.file_path)
+        let extension = std::path::Path::new(params.0.file_path.as_str())
             .extension()
             .and_then(|s| s.to_str())
             .map(|s| {
@@ -1150,8 +1150,8 @@ may apply per the workflow's safe-outputs config."
 
         let result = UploadBuildAttachmentResult::new(
             params.0.build_id,
-            params.0.artifact_name.clone(),
-            params.0.file_path.clone(),
+            params.0.artifact_name.to_string(),
+            params.0.file_path.to_string(),
             staged_filename.clone(),
             file_size,
             staged_sha256,
