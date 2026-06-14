@@ -1,6 +1,6 @@
 ---
 on:
-  schedule: weekly on monday around 05:00
+  schedule: every 4h
   workflow_dispatch: {}
 description: Crawls Azure DevOps built-in task docs, contributes typed IR helper functions for uncovered tasks, converts compiler-generated Step::RawYaml usages to typed steps, and opens a focused PR per run.
 permissions:
