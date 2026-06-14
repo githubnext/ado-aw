@@ -560,7 +560,11 @@ mod tests {
     /// Attempt to deserialize params from raw field values. Returns the serde
     /// error when a newtype field (`artifact_name` / `file_path`) rejects its
     /// value at parse time — used by the rejection tests that previously relied
-    /// on `validate()`.
+    /// on `validate()`. Note the trade-off: invalid path/name input now surfaces
+    /// as a serde deserialization error (wrapping the newtype validator's
+    /// message) instead of an explicit `validate()` error; the underlying
+    /// `ArtifactName::parse` / `StrictRelativePath::parse` messages still
+    /// describe the specific failure.
     fn try_params(
         build_id: Option<i64>,
         artifact_name: &str,

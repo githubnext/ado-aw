@@ -41,10 +41,29 @@ use std::path::Path;
 
 use crate::validate;
 
-/// Generate a validated string newtype.
+/// Generate a validated string newtype ("parse, don't validate").
 ///
-/// `$validate` is an expression evaluating to a `fn(&str, &str) -> anyhow::Result<()>`
-/// (value, label) used to validate the wrapped string.
+/// Expands to a `#[serde(transparent)]` tuple struct wrapping a `String` that
+/// can only be constructed by running `$validate`, so an instance is a
+/// type-level proof the value passed its structural security checks.
+///
+/// Parameters:
+/// - `$name` — the generated newtype identifier.
+/// - `$label` — a short noun (e.g. `"path"`, `"branch"`) interpolated into
+///   validation error messages.
+/// - `$validate` — an expression evaluating to a
+///   `fn(&str, &str) -> anyhow::Result<()>` (value, label) that enforces the
+///   rules; typically a function from [`crate::validate`].
+///
+/// Generated impls and why they exist:
+/// - `Deserialize` (hand-written) runs `$validate`, so invalid JSON/YAML is
+///   rejected at deserialization time rather than in a later `validate()` pass.
+/// - `Serialize` / `JsonSchema` are transparent so the newtype is a drop-in
+///   replacement for a `String` field in MCP `Params` (same wire/schema shape).
+/// - `parse` / `TryFrom` / `FromStr` are the fallible constructors for code
+///   paths that build values directly (e.g. tests, internal conversions).
+/// - `Deref<Target=str>`, `AsRef<str>`, `AsRef<Path>`, `Display`, and
+///   `From<$name> for String` make the validated value ergonomic to read.
 macro_rules! validated_string {
     (
         $(#[$meta:meta])*

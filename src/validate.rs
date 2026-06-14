@@ -9,6 +9,13 @@
 //! (remove ANSI codes, neutralize mentions, etc.) and returns a cleaned
 //! `String`.  This module checks whether input is structurally valid and
 //! returns `bool` or `Result`.
+//!
+//! **See also `secure.rs`:** for fields where invalidity should be
+//! *unrepresentable*, prefer the validated newtypes in [`crate::secure`]
+//! (e.g. `RelativeSafePath`, `CommitSha`) over a raw `String` validated by a
+//! hand-written `validate()` method. Those newtypes run the primitives below
+//! at deserialization time. New safe-output tools dealing with file paths or
+//! identifiers should type their fields with `secure::` newtypes.
 
 use anyhow::Result;
 use std::collections::HashMap;
@@ -887,7 +894,12 @@ mod tests {
         assert!(validate_relative_segment_path(".gitignore", "p").is_err());
         assert!(validate_relative_segment_path("a/.hidden/b", "p").is_err());
         assert!(validate_relative_segment_path("a:b", "p").is_err());
+        // Consecutive slashes yield an empty component, rejected by the strict
+        // variant (each component must pass `is_safe_path_segment`).
         assert!(validate_relative_segment_path("a//b", "p").is_err());
+        // The base variant tolerates empty components (`is_safe_path_segment`
+        // is not applied per-component there), so `a//b` is accepted by it.
+        assert!(validate_relative_safe_path("a//b", "p").is_ok());
     }
 
     #[test]
@@ -899,7 +911,13 @@ mod tests {
         std::fs::write(&file, b"x").unwrap();
 
         assert!(ensure_path_within_base(&file, &dir, "f").is_ok());
-        // A sibling of the base must not be considered "within".
+        // A real escape: base exists but the candidate resolves outside it.
+        let sibling = dir.join("sibling");
+        std::fs::create_dir_all(&sibling).unwrap();
+        let sibling_file = sibling.join("g.txt");
+        std::fs::write(&sibling_file, b"y").unwrap();
+        assert!(ensure_path_within_base(&sibling_file, &inner, "f").is_err());
+        // A nonexistent base cannot be canonicalized, which is also an error.
         let outside = std::env::temp_dir();
         assert!(ensure_path_within_base(&file, &outside.join("nonexistent-base-xyz"), "f").is_err());
         // Missing candidate canonicalization fails.

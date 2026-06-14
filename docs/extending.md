@@ -229,6 +229,8 @@ Typical steps:
 5. Add front-matter configuration if the tool is configurable under `safe-outputs:`.
 6. Add tests for validation, NDJSON parsing, MCP handling, and executor behavior.
 
+> **Type path/identifier `Params` fields with validated newtypes.** If your tool's input holds a file path, git ref, commit SHA, artifact name, or similar identifier, use a newtype from [`src/secure.rs`](../src/secure.rs) (`RelativeSafePath`, `StrictRelativePath`, `PathSegment`, `GitRefName`, `BranchName`, `CommitSha`, `ArtifactName`, `Identifier`, `HostName`, `Version`) instead of a raw `String`. These wrap the canonical primitives in [`src/validate.rs`](../src/validate.rs) and run them at deserialization time, so the path-traversal / injection / format checks are applied automatically and cannot be silently omitted. Reserve the manual `validate()` method for cross-field and semantic rules (e.g. positive IDs, length minimums).
+
 Safe-output tools are not `CompilerExtension`s. If a safe output also needs compile-time MCP configuration, add that through the always-on `SafeOutputsExtension` declarations.
 
 ## Adding a runtime
