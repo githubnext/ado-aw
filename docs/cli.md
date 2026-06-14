@@ -135,7 +135,7 @@ Both `--all-repos` and `--source` route through `ado-aw`'s `discover_ado_aw_pipe
   - `--dry-run` - Print the planned `templateParameters` body without calling the ADO API.
 
 - `audit <build-id-or-url>` - Audit a single Azure DevOps build: download the known stage artifacts, run the audit analyzers, and render a structured console report or `AuditData` JSON.
-  - `-o, --output <dir>` - Output directory for downloaded artifacts and reports. Defaults to `./logs`; the run is stored under `<dir>/build-<id>/`.
+  - `-o, --output <dir>` - Output directory for downloaded artifacts and reports. Defaults to `${TEMP}/ado-aw/audit`; the run is stored under `<dir>/build-<id>/`. The default is shared with `ado-aw trace` and the mcp-author tools so concurrent invocations reuse each other's downloads.
   - `--json` - Emit machine-readable JSON (`AuditData`) instead of the console report. Suppresses the trailing `Audit complete` stderr line.
   - `--org <url>` - Override: Azure DevOps organization (used when the input is a bare build ID). Full build URLs provide the host / org directly.
   - `--project <name>` - Override: Azure DevOps project name (used when the input is a bare build ID). Full build URLs provide the project directly.
@@ -144,7 +144,7 @@ Both `--all-repos` and `--source` route through `ado-aw`'s `discover_ado_aw_pipe
   - `--no-cache` - Ignore `<output>/build-<id>/run-summary.json` and re-process the build.
   - See [`audit.md`](audit.md) for accepted build-reference formats, output layout, cache semantics, and the `AuditData` report shape.
 
-- `trace <build-id-or-url> [--step <id>] [--json]` - Query audit telemetry plus local typed-IR graph correlation to explain failed-job chains and downstream skip classifications. Uses `./logs/build-<id>/` cache when present and degrades to runtime-only output when the source markdown is not local.
+- `trace <build-id-or-url> [--step <id>] [--json]` - Query audit telemetry plus local typed-IR graph correlation to explain failed-job chains and downstream skip classifications. Shares the `${TEMP}/ado-aw/audit/build-<id>/` cache with `ado-aw audit`, and degrades to runtime-only output when the source markdown is not local.
   - `--step <id>` - Focus the report on a named IR step and show the containing job's runtime status plus upstream/downstream job classifications.
   - `--json` - Emit a structured `TraceReport`.
   - `--org <url>`, `--project <name>`, `--pat <pat>` / `AZURE_DEVOPS_EXT_PAT` - Same ADO context/auth passthroughs as `audit`.

@@ -11,7 +11,7 @@ pub mod pipeline_graph;
 pub mod render;
 pub mod url;
 
-pub use cli::{AuditOptions, dispatch, fetch_audit_data};
+pub use cli::{AuditOptions, default_cache_root, dispatch, fetch_audit_data};
 #[allow(unused_imports)]
 pub use model::*;
 

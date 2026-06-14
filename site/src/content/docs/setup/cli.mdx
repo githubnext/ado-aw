@@ -228,7 +228,7 @@ ado-aw audit <build-id-or-url> [--json] [--output <dir>] [--artifacts <set,...>]
 Options:
 
 - `--json` -- emit the full `AuditData` as JSON to stdout instead of the console report
-- `-o, --output <dir>` -- local directory for downloaded artifacts and the cached report (default: `./logs`)
+- `-o, --output <dir>` -- local directory for downloaded artifacts and the cached report (default: `${TEMP}/ado-aw/audit`, shared with `ado-aw trace` and the mcp-author tools)
 - `--artifacts <set,...>` -- restrict download to `agent`, `detection`, and/or `safe-outputs`
 - `--no-cache` -- re-process even when a cached `run-summary.json` already exists
 - `--org`, `--project`, `--pat` -- same as `enable`

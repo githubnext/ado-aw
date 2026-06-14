@@ -249,6 +249,9 @@ impl AuthorMcp {
             org: params.0.org.as_deref(),
             project: params.0.project.as_deref(),
             pat: params.0.pat.as_deref(),
+            // `None` → use the shared cache root via
+            // `crate::audit::default_cache_root`.
+            output: None,
         };
         let (_audit, report) = inspect::build_trace(&opts).await.map_err(to_mcp_error)?;
         structured_result(report)
@@ -299,12 +302,12 @@ impl AuthorMcp {
         let artifacts = params.0.artifacts.as_deref();
         let no_cache = params.0.no_cache.unwrap_or(false);
 
-        // Shared cache root for normal calls (the audit layer creates a
-        // per-build subdirectory keyed on build id). For `no_cache:
-        // true` we additionally route through a unique per-invocation
-        // tempdir so two concurrent calls for the *same* build cannot
-        // race on partially-written artifacts.
-        let shared_root = std::env::temp_dir().join("ado-aw").join("audit");
+        // Use the canonical shared cache root for normal calls (the
+        // audit layer creates a per-build subdirectory keyed on build
+        // id). For `no_cache: true` we additionally route through a
+        // unique per-invocation tempdir so two concurrent calls for
+        // the *same* build cannot race on partially-written artifacts.
+        let shared_root = crate::audit::default_cache_root();
         let invocation_tempdir = if no_cache {
             Some(tempfile::Builder::new()
                 .prefix("ado-aw-mcp-audit-")

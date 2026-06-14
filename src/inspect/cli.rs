@@ -170,6 +170,14 @@ pub struct TraceOptions<'a> {
     pub org: Option<&'a str>,
     pub project: Option<&'a str>,
     pub pat: Option<&'a str>,
+    /// Cache root for downloaded build artifacts. When `None`,
+    /// [`build_trace`] anchors writes under
+    /// [`crate::audit::default_cache_root`]
+    /// (`${TEMP}/ado-aw/audit`) so CLI invocations, the mcp-author
+    /// `trace_failure` tool, and `ado-aw audit` all share a single
+    /// cache root — preventing `./logs/` directories from being
+    /// scattered under arbitrary IDE working directories.
+    pub output: Option<&'a Path>,
 }
 
 /// Trace a build by joining audit telemetry with the local typed-IR graph.
@@ -194,9 +202,15 @@ pub async fn dispatch_trace(opts: TraceOptions<'_>) -> Result<()> {
 
 /// Build trace audit data and the derived trace report.
 pub async fn build_trace(opts: &TraceOptions<'_>) -> Result<(AuditData, trace::TraceReport)> {
+    // Default to the canonical audit cache root shared with every
+    // other entry point (CLI `audit`, mcp-author `audit_build` /
+    // `trace_failure`). Callers may pass `opts.output = Some(&Path)`
+    // to override (e.g. for tests).
+    let default_output = crate::audit::default_cache_root();
+    let output = opts.output.unwrap_or(default_output.as_path());
     let audit = crate::audit::fetch_audit_data(crate::audit::AuditOptions {
         build_id_or_url: opts.build_id_or_url,
-        output: Path::new("./logs"),
+        output,
         json: true,
         org: opts.org,
         project: opts.project,

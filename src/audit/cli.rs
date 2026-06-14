@@ -30,6 +30,26 @@ pub struct AuditOptions<'a> {
     pub no_cache: bool,
 }
 
+/// Canonical cache root for downloaded audit artifacts and the
+/// `run-summary.json` cache files.
+///
+/// Returns `${TEMP}/ado-aw/audit` on every platform. All entry points
+/// — the `ado-aw audit` CLI, `ado-aw trace`, the mcp-author
+/// `audit_build` and `trace_failure` tools — go through this helper so
+/// that runs invoked from different contexts share a single cache
+/// location and never silently scatter `./logs/` directories under
+/// whatever working directory the caller happened to inherit (most
+/// often the IDE's current project when the MCP server is started).
+///
+/// The audit layer creates a per-build subdirectory (`build-<id>`)
+/// under this root, keyed on the build id, so concurrent runs against
+/// different builds are isolated. Callers that need full per-invocation
+/// isolation (e.g. `no_cache: true` audits run concurrently against
+/// the same build) should layer a unique tempdir on top of this root.
+pub fn default_cache_root() -> PathBuf {
+    std::env::temp_dir().join("ado-aw").join("audit")
+}
+
 pub async fn dispatch(opts: AuditOptions<'_>) -> Result<()> {
     let result = fetch_audit_data_inner(opts).await?;
     render_audit(&result.audit, result.json)?;
