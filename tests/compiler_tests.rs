@@ -5450,6 +5450,12 @@ fn test_execution_context_pr_does_not_leak_system_accesstoken() {
     const ALLOWED_DISPLAY_NAMES: &[&str] = &[
         // Owned by this extension.
         "Stage PR execution context (aw-context/pr/*)",
+        // Workitem contributor (Stage 4 of plan.md). Activates whenever
+        // the PR contributor activates. Needs the token to call the
+        // ADO REST API to look up linked work items. Same trust-boundary
+        // posture as the PR contributor — token mapped only into this
+        // step's env, never reachable from the agent step.
+        "Stage workitem execution context (aw-context/workitem/*)",
         // Stage 3 SafeOutputs executor — separate non-agent job; needs
         // the token to apply safe outputs against ADO. See PR #873.
         "Execute safe outputs (Stage 3)",

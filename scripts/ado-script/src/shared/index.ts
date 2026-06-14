@@ -15,3 +15,9 @@ export * as prompt from "./prompt.js";
 // Build-API helpers shared by `pipeline`, `ci-push`, and
 // `pr.checks` contributors.
 export * as build from "./build.js";
+// Added in Stage 4 of the contributor build-out — see plan.md.
+// Work-item REST helpers + the untrusted-prose sentinel wrapper.
+// These are kept separate because `wit.ts` is REST and SDK-heavy
+// while `untrusted.ts` is pure and very lightweight.
+export * as wit from "./wit.js";
+export * as untrusted from "./untrusted.js";

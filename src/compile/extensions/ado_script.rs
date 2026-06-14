@@ -54,6 +54,14 @@ pub(crate) const EXEC_CONTEXT_PIPELINE_PATH: &str =
 /// `src/compile/extensions/exec_context/ci_push.rs`.
 pub(crate) const EXEC_CONTEXT_CI_PUSH_PATH: &str =
     "/tmp/ado-aw-scripts/ado-script/exec-context-ci-push.js";
+/// Path to the exec-context-workitem bundle (Stage 4 of the
+/// exec-context contributor build-out — see plan.md). Consumed by
+/// `src/compile/extensions/exec_context/workitem.rs`. Stages
+/// per-WI directories with description / acceptance / repro
+/// content; crosses an untrusted-prose boundary (WI bodies are
+/// user-authored — see `docs/execution-context.md`).
+pub(crate) const EXEC_CONTEXT_WORKITEM_PATH: &str =
+    "/tmp/ado-aw-scripts/ado-script/exec-context-workitem.js";
 /// Path to the synthetic-PR-context bundle inside the unpacked
 /// `ado-script.zip`. Runs in the Setup job before `prGate`; consumed
 /// by [`AdoScriptExtension::declarations`].
@@ -100,6 +108,12 @@ pub struct AdoScriptExtension {
     /// install/download must fire so that
     /// `exec-context-ci-push.js` is present.
     pub exec_context_ci_push_active: bool,
+    /// Whether the Workitem-context contributor (Stage 4 of the
+    /// exec-context contributor build-out — see plan.md) will
+    /// activate. Activates whenever the PR contributor activates
+    /// unless explicitly disabled. **Crosses an untrusted-prose
+    /// boundary** — see workitem.rs.
+    pub exec_context_workitem_active: bool,
     /// PR trigger config required to build `PR_SYNTH_SPEC`. `Some(_)`
     /// is the single source of truth for "synthetic-from-ci path is
     /// active for this agent" — `is_some()` replaces what used to be a
@@ -517,6 +531,7 @@ impl CompilerExtension for AdoScriptExtension {
             || self.exec_context_manual_active
             || self.exec_context_pipeline_active
             || self.exec_context_ci_push_active
+            || self.exec_context_workitem_active
         {
             agent_prepare_steps.extend(install_and_download_steps_typed());
             if import_active {
@@ -716,6 +731,7 @@ mod tests {
             exec_context_manual_active: false,
             exec_context_pipeline_active: false,
             exec_context_ci_push_active: false,
+            exec_context_workitem_active: false,
             pr_trigger_for_synth: None,
         }
     }
@@ -788,6 +804,7 @@ mod tests {
             exec_context_manual_active: false,
             exec_context_pipeline_active: false,
             exec_context_ci_push_active: false,
+            exec_context_workitem_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -839,6 +856,7 @@ mod tests {
             exec_context_manual_active: false,
             exec_context_pipeline_active: false,
             exec_context_ci_push_active: false,
+            exec_context_workitem_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -1007,6 +1025,7 @@ mod tests {
             exec_context_manual_active: false,
             exec_context_pipeline_active: false,
             exec_context_ci_push_active: false,
+            exec_context_workitem_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -1516,6 +1535,7 @@ mod tests {
             exec_context_manual_active: false,
             exec_context_pipeline_active: false,
             exec_context_ci_push_active: false,
+            exec_context_workitem_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],

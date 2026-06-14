@@ -7,5 +7,6 @@ exec-context-pr-synth.js
 exec-context-manual.js
 exec-context-pipeline.js
 exec-context-ci-push.js
+exec-context-workitem.js
 schema
 *.tsbuildinfo

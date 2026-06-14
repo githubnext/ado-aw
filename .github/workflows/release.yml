@@ -77,7 +77,7 @@ jobs:
         run: |
           set -euo pipefail
           cd scripts
-          zip -r ../ado-script.zip ado-script/gate.js ado-script/import.js ado-script/exec-context-pr.js ado-script/exec-context-pr-synth.js ado-script/exec-context-manual.js ado-script/exec-context-pipeline.js ado-script/exec-context-ci-push.js
+          zip -r ../ado-script.zip ado-script/gate.js ado-script/import.js ado-script/exec-context-pr.js ado-script/exec-context-pr-synth.js ado-script/exec-context-manual.js ado-script/exec-context-pipeline.js ado-script/exec-context-ci-push.js ado-script/exec-context-workitem.js
 
       - name: Upload release assets
         env:

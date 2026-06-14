@@ -1223,6 +1223,14 @@ pub struct ExecutionContextConfig {
         /// `ci-push.enabled: true`.
         #[serde(rename = "ci-push", default)]
         pub ci_push: Option<CiPushContextConfig>,
+        /// Workitem-context contributor configuration. PR-linked mode only
+        /// in this iteration — activates on PR builds and fetches the
+        /// linked WI(s) so a reviewer agent can verify acceptance
+        /// criteria. Stage 4 of the build-out — see
+        /// `docs/execution-context.md`. **Crosses an untrusted-prose
+        /// boundary** (WI bodies are user-authored).
+        #[serde(default)]
+        pub workitem: Option<WorkitemContextConfig>,
     }
 
     impl ExecutionContextConfig {
@@ -1245,6 +1253,9 @@ pub struct ExecutionContextConfig {
             }
             if let Some(ref mut c) = self.ci_push {
                 c.sanitize_config_fields();
+            }
+            if let Some(ref mut w) = self.workitem {
+                w.sanitize_config_fields();
             }
         }
     }
@@ -1386,6 +1397,57 @@ impl CiPushContextConfig {
 impl SanitizeConfigTrait for CiPushContextConfig {
     fn sanitize_config_fields(&mut self) {
         // No free-form string fields — booleans only.
+    }
+}
+
+/// Configuration for the `workitem` execution-context contributor.
+///
+/// PR-linked mode only in this iteration (Stage 4 of the build-out —
+/// see plan.md). Activates whenever the PR contributor activates and
+/// the workitem contributor isn't explicitly disabled. Fetches the
+/// linked WI(s) via the ADO REST API and stages per-WI directories
+/// with description / acceptance criteria / repro / comments /
+/// links / attachment-metadata.
+///
+/// **Crosses an untrusted-prose boundary** — WI body fields are
+/// user-authored and may contain arbitrary content. All staged
+/// prose is wrapped via `shared/untrusted.ts::wrapAgentReadableUntrusted`
+/// before being written, and the agent prompt fragment explicitly
+/// flags this. See `docs/execution-context.md` for the full guidance.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct WorkitemContextConfig {
+    /// Whether the workitem contributor is active. Defaults to
+    /// `true` when the PR contributor activates.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Cap on the number of linked WIs staged per build. Defaults to
+    /// 5 — additional WIs are listed in
+    /// `aw-context/workitem/truncated.txt` for visibility but their
+    /// bodies are NOT fetched.
+    #[serde(rename = "max-items", default)]
+    pub max_items: Option<usize>,
+    /// Cap on the size of each WI body field (description / acceptance /
+    /// repro), in kilobytes. Defaults to 32 KB. Bodies larger than the
+    /// cap are truncated with a trailing marker.
+    #[serde(rename = "max-body-kb", default)]
+    pub max_body_kb: Option<usize>,
+}
+
+impl WorkitemContextConfig {
+    pub fn explicit_enabled(&self) -> Option<bool> {
+        self.enabled
+    }
+    pub fn max_items_resolved(&self) -> usize {
+        self.max_items.unwrap_or(5)
+    }
+    pub fn max_body_kb_resolved(&self) -> usize {
+        self.max_body_kb.unwrap_or(32)
+    }
+}
+
+impl SanitizeConfigTrait for WorkitemContextConfig {
+    fn sanitize_config_fields(&mut self) {
+        // No free-form string fields — booleans + numbers only.
     }
 }
 

@@ -37,6 +37,7 @@ mod contributor;
 mod manual;
 mod pipeline;
 mod pr;
+mod workitem;
 
 use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 use crate::compile::types::{ExecutionContextConfig, FrontMatter};
@@ -46,6 +47,7 @@ use contributor::{ContextContributor, Contributor};
 use manual::ManualContextContributor;
 use pipeline::PipelineContextContributor;
 use pr::PrContextContributor;
+use workitem::WorkitemContextContributor;
 
 /// Returns `true` iff the PR-context contributor will activate for the
 /// given front matter. Shared between `ExecContextExtension::new` (for
@@ -113,6 +115,17 @@ pub fn ci_push_contributor_will_activate(front_matter: &FrontMatter) -> bool {
         .as_ref()
         .unwrap_or(&default_cfg);
     ci_push_contributor_will_activate_with_cfg(cfg, front_matter)
+}
+
+/// Returns `true` iff the Workitem contributor will activate.
+/// PR-linked mode only — depends on the PR trigger being configured.
+pub fn workitem_contributor_will_activate(front_matter: &FrontMatter) -> bool {
+    let default_cfg = ExecutionContextConfig::default();
+    let cfg = front_matter
+        .execution_context
+        .as_ref()
+        .unwrap_or(&default_cfg);
+    workitem_contributor_will_activate_with_cfg(cfg, front_matter)
 }
 
 /// Variant that takes the resolved `ExecutionContextConfig` explicitly.
@@ -192,6 +205,32 @@ fn ci_push_contributor_will_activate_with_cfg(
     matches!(ci_push_enabled, Some(true))
 }
 
+/// Whether the workitem contributor will activate. PR-linked mode:
+/// activates whenever the PR contributor would activate and the
+/// workitem contributor isn't explicitly disabled.
+///
+/// MAINTENANCE: this MUST stay in lock-step with
+/// `WorkitemContextContributor::should_activate` (in `workitem.rs`).
+fn workitem_contributor_will_activate_with_cfg(
+    cfg: &ExecutionContextConfig,
+    front_matter: &FrontMatter,
+) -> bool {
+    // Workitem activation tracks PR-contributor activation: the
+    // plan's contract is "activates whenever the pr contributor
+    // activates AND workitem isn't explicitly disabled". Without
+    // this we'd activate on PR builds where pr.enabled: false has
+    // explicitly opted out of PR context (and consequently of
+    // workitem context too, since workitem is a PR-context extension).
+    if !pr_contributor_will_activate_with_cfg(cfg, front_matter) {
+        return false;
+    }
+    if !cfg.is_enabled() {
+        return false;
+    }
+    let workitem_enabled = cfg.workitem.as_ref().and_then(|w| w.enabled);
+    !matches!(workitem_enabled, Some(false))
+}
+
 /// Always-on execution-context extension.
 ///
 /// Owns the `aw-context/` precompute pipeline. Registered
@@ -254,7 +293,8 @@ impl ExecContextExtension {
         let any_contributor_active = pr_contributor_will_activate_with_cfg(&config, front_matter)
             || manual_contributor_will_activate_with_cfg(&config, front_matter)
             || pipeline_contributor_will_activate_with_cfg(&config, front_matter)
-            || ci_push_contributor_will_activate_with_cfg(&config, front_matter);
+            || ci_push_contributor_will_activate_with_cfg(&config, front_matter)
+            || workitem_contributor_will_activate_with_cfg(&config, front_matter);
         let synthetic_pr_active = front_matter.is_synthetic_pr();
         Self {
             config,
@@ -279,10 +319,15 @@ impl ExecContextExtension {
         let manual_cfg = self.config.manual.clone().unwrap_or_default();
         let pipeline_cfg = self.config.pipeline.clone().unwrap_or_default();
         let ci_push_cfg = self.config.ci_push.clone().unwrap_or_default();
+        let workitem_cfg = self.config.workitem.clone().unwrap_or_default();
         // The PR contributor needs to know whether `mode: synthetic`
         // is on so it can emit coalesced SYSTEM_PULLREQUEST_* env vars
         // (real value preferred, synthPr output as fallback).
         let synthetic_pr_active = self.synthetic_pr_active;
+        // Pr-contributor-enabled flag for the workitem contributor —
+        // workitem activation tracks PR activation per the plan.
+        // `pr.enabled` defaults to true unless explicitly false.
+        let pr_enabled = !matches!(pr_cfg.enabled, Some(false));
         vec![
             Contributor::Pr(PrContextContributor::new(pr_cfg, synthetic_pr_active)),
             Contributor::Manual(ManualContextContributor::new_from_parts(
@@ -291,6 +336,11 @@ impl ExecContextExtension {
             )),
             Contributor::Pipeline(PipelineContextContributor::new(pipeline_cfg)),
             Contributor::CiPush(CiPushContextContributor::new(ci_push_cfg)),
+            Contributor::Workitem(WorkitemContextContributor::new(
+                workitem_cfg,
+                synthetic_pr_active,
+                pr_enabled,
+            )),
         ]
     }
 
@@ -436,6 +486,7 @@ mod tests {
             manual: None,
                     pipeline: None,
                     ci_push: None,
+                    workitem: None,
         };
         let fm = pr_triggered_front_matter();
         let ext = ExecContextExtension::new(cfg, &fm);
@@ -458,6 +509,7 @@ mod tests {
             manual: None,
                     pipeline: None,
                     ci_push: None,
+                    workitem: None,
         };
         let fm = pr_triggered_front_matter();
         let ext = ExecContextExtension::new(cfg, &fm);
@@ -492,6 +544,7 @@ mod tests {
             manual: None,
                     pipeline: None,
                     ci_push: None,
+                    workitem: None,
         };
         let fm = no_trigger_front_matter();
         let ext = ExecContextExtension::new(cfg, &fm);
@@ -511,6 +564,7 @@ mod tests {
             manual: None,
                     pipeline: None,
                     ci_push: None,
+                    workitem: None,
         };
         let fm = pr_triggered_front_matter();
         let ext = ExecContextExtension::new(cfg, &fm);
@@ -597,6 +651,7 @@ mod tests {
             manual: Some(ManualContextConfig { enabled: Some(false), include_email: None }),
         pipeline: None,
                     ci_push: None,
+                    workitem: None,
         };
         let ext = ExecContextExtension::new(cfg, &fm);
         let ctx = CompileContext::for_test(&fm);
@@ -633,7 +688,23 @@ mod tests {
         let fm = pr_triggered_front_matter();
         let ctx = CompileContext::for_test(&fm);
 
-        let ext = ExecContextExtension::new(ExecutionContextConfig::default(), &fm);
+        // Disable the workitem contributor for this test — it also
+        // activates on PR builds (Stage 4 of plan.md) but this test
+        // is focused on the PR contributor's typed-IR lowering, not
+        // on the multi-contributor fan-out.
+        let cfg = ExecutionContextConfig {
+            enabled: None,
+            pr: None,
+            manual: None,
+            pipeline: None,
+            ci_push: None,
+            workitem: Some(crate::compile::types::WorkitemContextConfig {
+                enabled: Some(false),
+                max_items: None,
+                max_body_kb: None,
+            }),
+        };
+        let ext = ExecContextExtension::new(cfg, &fm);
         // Force synthetic_pr_active so the unified `AW_PR_*` macros
         // are emitted in the prepare step's env (the path that needs
         // the Agent-job-level hoist to resolve at runtime).
