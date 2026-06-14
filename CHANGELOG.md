@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.36.0](https://github.com/githubnext/ado-aw/compare/v0.35.3...v0.36.0) (2026-06-14)
+
+
+### Features
+
+* **compile:** native ADO pipeline IR ([#960](https://github.com/githubnext/ado-aw/issues/960)) ([9a18b0e](https://github.com/githubnext/ado-aw/commit/9a18b0ed0ecc1d85c5a54f1c1e57183b22b1c2af))
+* **workflows:** add ado-task-ir-contributor agentic workflow ([#1004](https://github.com/githubnext/ado-aw/issues/1004)) ([79b357d](https://github.com/githubnext/ado-aw/commit/79b357d2457ae1c22ffc2de91c5cd5ac9b605f5e))
+
+
+### Bug Fixes
+
+* **ir:** reject cross-pipeline duplicate StepIds; strict de-indent in lower_raw_yaml; document EnvValue::Literal contract ([#992](https://github.com/githubnext/ado-aw/issues/992)) ([28403fe](https://github.com/githubnext/ado-aw/commit/28403fe5027709438c7004c8c62dbc0be6190a87))
+
 ## [0.35.3](https://github.com/githubnext/ado-aw/compare/v0.35.2...v0.35.3) (2026-06-11)
 
 
