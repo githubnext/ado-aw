@@ -320,7 +320,9 @@ fn find_runtime_job<'a>(audit: &'a AuditData, ir_job_id: &str) -> Option<&'a Job
 
 fn stage_for_job(audit: &AuditData, runtime_job: &JobData) -> Option<String> {
     let graph = audit.pipeline_graph.as_ref()?;
-    crate::audit::pipeline_graph::all_jobs(&graph.graph)
+    graph
+        .graph
+        .all_jobs()
         .into_iter()
         .find(|job| {
             crate::audit::pipeline_graph::timeline_name_matches_job(

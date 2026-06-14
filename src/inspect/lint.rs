@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::compile::ir::summary::{JobSummary, PipelineBodySummary, PipelineSummary, StepSummary};
+use crate::compile::ir::summary::{JobSummary, PipelineSummary, StepSummary};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -67,7 +67,6 @@ pub fn lint(summary: &PipelineSummary) -> Vec<LintFinding> {
     rule_unused_output(summary, &mut findings);
     rule_missing_is_output(summary, &mut findings);
     rule_anonymous_producer(summary, &mut findings);
-    rule_no_condition_references(summary, &mut findings);
     rule_step_id_collisions(summary, &mut findings);
     findings
 }
@@ -222,23 +221,6 @@ fn rule_anonymous_producer(summary: &PipelineSummary, findings: &mut Vec<LintFin
     }
 }
 
-fn rule_no_condition_references(summary: &PipelineSummary, findings: &mut Vec<LintFinding>) {
-    for job in all_jobs(summary) {
-        if !job.depends_on.is_empty() && job.condition.is_none() {
-            findings.push(LintFinding {
-                severity: LintSeverity::Info,
-                code: "no-condition-references".to_string(),
-                message: format!(
-                    "job '{}' depends on [{}] with no condition; Azure DevOps applies default succeeded(), so all upstream jobs must succeed",
-                    job.id,
-                    job.depends_on.join(", ")
-                ),
-                location: Some(location_for(job, None)),
-            });
-        }
-    }
-}
-
 fn rule_step_id_collisions(summary: &PipelineSummary, findings: &mut Vec<LintFinding>) {
     // Track first-seen job for each step id, then emit one finding per
     // collision that names BOTH the original producer location and the
@@ -306,17 +288,9 @@ fn output_declarations(
     declarations
 }
 
-fn all_jobs(summary: &PipelineSummary) -> Vec<&JobSummary> {
-    match &summary.body {
-        PipelineBodySummary::Jobs { jobs } => jobs.iter().collect(),
-        PipelineBodySummary::Stages { stages } => {
-            stages.iter().flat_map(|stage| stage.jobs.iter()).collect()
-        }
-    }
-}
-
 fn all_steps(summary: &PipelineSummary) -> Vec<(&JobSummary, &StepSummary)> {
-    all_jobs(summary)
+    summary
+        .all_jobs()
         .into_iter()
         .flat_map(|job| job.steps.iter().map(move |step| (job, step)))
         .collect()

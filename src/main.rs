@@ -506,12 +506,15 @@ enum Commands {
         /// Build ID, or full ADO build URL.
         build_id_or_url: String,
         /// Output directory for downloaded artifacts and reports.
-        /// Defaults to `${TEMP}/ado-aw/audit` so concurrent invocations
-        /// from the CLI, `ado-aw trace`, and the mcp-author tools all
-        /// share a single cache root and never scatter `./logs/`
-        /// directories under arbitrary working directories.
-        #[arg(short, long)]
-        output: Option<PathBuf>,
+        /// Defaults to `./logs` (preserved for operator muscle
+        /// memory and pre-existing scripts). Non-CLI callers — the
+        /// mcp-author tools and the `ado-aw trace` command — route
+        /// through `${TEMP}/ado-aw/audit` via
+        /// `crate::audit::default_cache_root` instead, so they do
+        /// not silently scatter `./logs/` directories under
+        /// arbitrary IDE working directories.
+        #[arg(short, long, default_value = "./logs")]
+        output: PathBuf,
         /// Emit the report as JSON to stdout instead of console text.
         #[arg(long)]
         json: bool,
@@ -1329,10 +1332,9 @@ async fn main() -> Result<()> {
             artifacts,
             no_cache,
         } => {
-            let resolved_output = output.unwrap_or_else(audit::default_cache_root);
             audit::dispatch(audit::AuditOptions {
                 build_id_or_url: &build_id_or_url,
-                output: &resolved_output,
+                output: &output,
                 json,
                 org: org.as_deref(),
                 project: project.as_deref(),

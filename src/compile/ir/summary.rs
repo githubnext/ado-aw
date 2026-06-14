@@ -63,6 +63,23 @@ pub enum PipelineBodySummary {
     Stages { stages: Vec<StageSummary> },
 }
 
+impl PipelineSummary {
+    /// Flatten the body into a single slice of [`JobSummary`] entries.
+    ///
+    /// Single source of truth for `Jobs`-bodied vs `Stages`-bodied
+    /// iteration; both `audit::pipeline_graph` and the `inspect`
+    /// commands go through this so that future shape additions (e.g. a
+    /// new `Templates` variant) only need to be handled in one place.
+    pub fn all_jobs(&self) -> Vec<&JobSummary> {
+        match &self.body {
+            PipelineBodySummary::Jobs { jobs } => jobs.iter().collect(),
+            PipelineBodySummary::Stages { stages } => {
+                stages.iter().flat_map(|stage| stage.jobs.iter()).collect()
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StageSummary {
     pub id: String,

@@ -26,7 +26,7 @@ URL-encoded project segments are decoded before the ADO context is resolved. `t=
 
 | Flag | Default | Behavior |
 | --- | --- | --- |
-| `-o, --output <dir>` | `${TEMP}/ado-aw/audit` | Directory under which `<dir>/build-<id>/` is written. The default is the shared cache root used by every audit entry point (CLI, `ado-aw trace`, and the mcp-author tools), so concurrent invocations reuse each other's downloads. |
+| `-o, --output <dir>` | `./logs` | Directory under which `<dir>/build-<id>/` is written. Non-CLI entry points (`ado-aw trace`, the mcp-author tools) instead default to the shared `${TEMP}/ado-aw/audit` cache root so they do not scatter `./logs/` directories under arbitrary working directories. |
 | `--json` | off | Emit the full `AuditData` as JSON to stdout (suppresses the trailing `Audit complete` stderr line). |
 | `--org <url>` | auto | Azure DevOps organization override for bare build IDs. Full build URLs provide the host / org directly. |
 | `--project <name>` | auto | Azure DevOps project override for bare build IDs. Full build URLs provide the project directly. |

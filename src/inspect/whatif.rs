@@ -344,21 +344,12 @@ fn known_ids(summary: &PipelineSummary) -> Vec<String> {
         .iter()
         .map(|loc| loc.step.clone())
         .collect();
-    ids.extend(all_jobs(summary).into_iter().map(|job| job.id.clone()));
+    ids.extend(summary.all_jobs().into_iter().map(|job| job.id.clone()));
     ids
 }
 
-fn all_jobs(summary: &PipelineSummary) -> Vec<&JobSummary> {
-    match &summary.body {
-        PipelineBodySummary::Jobs { jobs } => jobs.iter().collect(),
-        PipelineBodySummary::Stages { stages } => {
-            stages.iter().flat_map(|stage| stage.jobs.iter()).collect()
-        }
-    }
-}
-
 fn find_job<'a>(summary: &'a PipelineSummary, job_id: &str) -> Option<&'a JobSummary> {
-    all_jobs(summary).into_iter().find(|job| job.id == job_id)
+    summary.all_jobs().into_iter().find(|job| job.id == job_id)
 }
 
 fn stage_for_job(summary: &PipelineSummary, job_id: &str) -> Option<String> {

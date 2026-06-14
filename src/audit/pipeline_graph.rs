@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::audit::model::{AuditData, AwInfo, ErrorInfo, PipelineGraphSection};
-use crate::compile::ir::summary::{JobSummary, PipelineBodySummary, PipelineSummary};
+use crate::compile::ir::summary::{JobSummary, PipelineSummary};
 
 /// Populate `audit.pipeline_graph` and per-job upstream/downstream IR edges.
 ///
@@ -97,7 +97,8 @@ fn find_matching_job_summary<'a>(
     summary: &'a PipelineSummary,
     timeline_name: &str,
 ) -> Option<&'a JobSummary> {
-    all_jobs(summary)
+    summary
+        .all_jobs()
         .into_iter()
         .find(|job| timeline_name_matches_job(timeline_name, &job.id, job.stage.as_deref()))
 }
@@ -128,15 +129,6 @@ pub(crate) fn timeline_name_matches_job(
         Some((prefix, suffix))
             if suffix == job_id && !prefix.contains('.')
     )
-}
-
-pub(crate) fn all_jobs(summary: &PipelineSummary) -> Vec<&JobSummary> {
-    match &summary.body {
-        PipelineBodySummary::Jobs { jobs } => jobs.iter().collect(),
-        PipelineBodySummary::Stages { stages } => {
-            stages.iter().flat_map(|stage| stage.jobs.iter()).collect()
-        }
-    }
 }
 
 async fn read_source_from_aw_info(run_dir: &Path) -> Option<Result<String>> {

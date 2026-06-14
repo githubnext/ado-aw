@@ -52,7 +52,7 @@ You need minimal context from the user:
 - Error messages or log snippets from the failing step
 - The agent source `.md` file (or path) and the compiled `.lock.yml` (or path)
 
-**Fastest first move when a build ID or URL is available:** run `ado-aw audit <build-id-or-url> --json`. It downloads the build's artifacts, runs every analyzer (firewall, MCP gateway, OTel, safe outputs, detection verdict, timeline, missing tools/data/noops), and emits a structured JSON report you can read directly — much faster than paging through raw logs. The audit caches its results under `${TEMP}/ado-aw/audit/build-<id>/run-summary.json` so re-running is free.
+**Fastest first move when a build ID or URL is available:** run `ado-aw audit <build-id-or-url> --json`. It downloads the build's artifacts, runs every analyzer (firewall, MCP gateway, OTel, safe outputs, detection verdict, timeline, missing tools/data/noops), and emits a structured JSON report you can read directly — much faster than paging through raw logs. The audit caches its results under `./logs/build-<id>/run-summary.json` so re-running is free.
 
 ### Step 2: Investigate
 
