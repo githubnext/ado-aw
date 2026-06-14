@@ -5456,6 +5456,10 @@ fn test_execution_context_pr_does_not_leak_system_accesstoken() {
         // posture as the PR contributor — token mapped only into this
         // step's env, never reachable from the agent step.
         "Stage workitem execution context (aw-context/workitem/*)",
+        // PR-checks extension (Stage 6 of plan.md). Activates whenever
+        // the PR contributor activates AND `pr.checks.enabled: true`.
+        // Needs the token to call the Build REST API. Same posture.
+        "Stage PR-checks execution context (aw-context/pr/checks/*)",
         // Stage 3 SafeOutputs executor — separate non-agent job; needs
         // the token to apply safe outputs against ADO. See PR #873.
         "Execute safe outputs (Stage 3)",

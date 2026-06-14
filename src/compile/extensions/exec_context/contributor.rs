@@ -68,6 +68,7 @@ pub(super) enum Contributor {
     CiPush(super::ci_push::CiPushContextContributor),
     Workitem(super::workitem::WorkitemContextContributor),
     Schedule(super::schedule::ScheduleContextContributor),
+    PrChecks(super::pr_checks::PrChecksContextContributor),
 }
 
 impl ContextContributor for Contributor {
@@ -79,6 +80,7 @@ impl ContextContributor for Contributor {
             Contributor::CiPush(c) => c.name(),
             Contributor::Workitem(c) => c.name(),
             Contributor::Schedule(c) => c.name(),
+            Contributor::PrChecks(c) => c.name(),
         }
     }
     fn should_activate(&self, ctx: &CompileContext) -> bool {
@@ -89,6 +91,7 @@ impl ContextContributor for Contributor {
             Contributor::CiPush(c) => c.should_activate(ctx),
             Contributor::Workitem(c) => c.should_activate(ctx),
             Contributor::Schedule(c) => c.should_activate(ctx),
+            Contributor::PrChecks(c) => c.should_activate(ctx),
         }
     }
     fn prepare_step_typed(
@@ -102,6 +105,7 @@ impl ContextContributor for Contributor {
             Contributor::CiPush(c) => c.prepare_step_typed(ctx),
             Contributor::Workitem(c) => c.prepare_step_typed(ctx),
             Contributor::Schedule(c) => c.prepare_step_typed(ctx),
+            Contributor::PrChecks(c) => c.prepare_step_typed(ctx),
         }
     }
     fn bash_commands(&self) -> Vec<String> {
@@ -112,6 +116,7 @@ impl ContextContributor for Contributor {
             Contributor::CiPush(c) => c.bash_commands(),
             Contributor::Workitem(c) => c.bash_commands(),
             Contributor::Schedule(c) => c.bash_commands(),
+            Contributor::PrChecks(c) => c.bash_commands(),
         }
     }
 }

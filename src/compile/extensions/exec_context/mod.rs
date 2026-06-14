@@ -37,6 +37,7 @@ mod contributor;
 mod manual;
 mod pipeline;
 mod pr;
+mod pr_checks;
 mod schedule;
 mod workitem;
 
@@ -48,6 +49,7 @@ use contributor::{ContextContributor, Contributor};
 use manual::ManualContextContributor;
 use pipeline::PipelineContextContributor;
 use pr::PrContextContributor;
+use pr_checks::PrChecksContextContributor;
 use schedule::ScheduleContextContributor;
 use workitem::WorkitemContextContributor;
 
@@ -139,6 +141,17 @@ pub fn schedule_contributor_will_activate(front_matter: &FrontMatter) -> bool {
         .as_ref()
         .unwrap_or(&default_cfg);
     schedule_contributor_will_activate_with_cfg(cfg, front_matter)
+}
+
+/// Returns `true` iff the PR-checks extension will activate. Opt-in
+/// (default OFF) AND requires the PR contributor to activate.
+pub fn pr_checks_contributor_will_activate(front_matter: &FrontMatter) -> bool {
+    let default_cfg = ExecutionContextConfig::default();
+    let cfg = front_matter
+        .execution_context
+        .as_ref()
+        .unwrap_or(&default_cfg);
+    pr_checks_contributor_will_activate_with_cfg(cfg, front_matter)
 }
 
 /// Variant that takes the resolved `ExecutionContextConfig` explicitly.
@@ -263,6 +276,26 @@ fn schedule_contributor_will_activate_with_cfg(
     matches!(schedule_enabled, Some(true))
 }
 
+/// Whether the PR-checks extension will activate. Opt-in (default
+/// OFF), tracks PR contributor activation.
+///
+/// MAINTENANCE: this MUST stay in lock-step with
+/// `PrChecksContextContributor::should_activate` (in `pr_checks.rs`).
+fn pr_checks_contributor_will_activate_with_cfg(
+    cfg: &ExecutionContextConfig,
+    front_matter: &FrontMatter,
+) -> bool {
+    if !pr_contributor_will_activate_with_cfg(cfg, front_matter) {
+        return false;
+    }
+    let checks_enabled = cfg
+        .pr
+        .as_ref()
+        .and_then(|p| p.checks.as_ref())
+        .and_then(|c| c.enabled);
+    matches!(checks_enabled, Some(true))
+}
+
 /// Always-on execution-context extension.
 ///
 /// Owns the `aw-context/` precompute pipeline. Registered
@@ -327,7 +360,8 @@ impl ExecContextExtension {
             || pipeline_contributor_will_activate_with_cfg(&config, front_matter)
             || ci_push_contributor_will_activate_with_cfg(&config, front_matter)
             || workitem_contributor_will_activate_with_cfg(&config, front_matter)
-            || schedule_contributor_will_activate_with_cfg(&config, front_matter);
+            || schedule_contributor_will_activate_with_cfg(&config, front_matter)
+            || pr_checks_contributor_will_activate_with_cfg(&config, front_matter);
         let synthetic_pr_active = front_matter.is_synthetic_pr();
         Self {
             config,
@@ -354,6 +388,7 @@ impl ExecContextExtension {
         let ci_push_cfg = self.config.ci_push.clone().unwrap_or_default();
         let workitem_cfg = self.config.workitem.clone().unwrap_or_default();
         let schedule_cfg = self.config.schedule.clone().unwrap_or_default();
+        let pr_checks_cfg = pr_cfg.checks.clone().unwrap_or_default();
         let synthetic_pr_active = self.synthetic_pr_active;
         let pr_enabled = !matches!(pr_cfg.enabled, Some(false));
         vec![
@@ -370,6 +405,11 @@ impl ExecContextExtension {
                 pr_enabled,
             )),
             Contributor::Schedule(ScheduleContextContributor::new(schedule_cfg)),
+            Contributor::PrChecks(PrChecksContextContributor::new(
+                pr_checks_cfg,
+                synthetic_pr_active,
+                pr_enabled,
+            )),
         ]
     }
 
@@ -509,9 +549,7 @@ mod tests {
     fn required_bash_commands_matches_pr_contributor_active_explicit_enabled() {
         let cfg = ExecutionContextConfig {
             enabled: None,
-            pr: Some(PrContextConfig {
-                enabled: Some(true),
-            }),
+            pr: Some(PrContextConfig { enabled: Some(true), checks: None }),
             manual: None,
                     pipeline: None,
                     ci_push: None,
@@ -533,9 +571,7 @@ mod tests {
     fn required_bash_commands_suppressed_when_pr_disabled() {
         let cfg = ExecutionContextConfig {
             enabled: None,
-            pr: Some(PrContextConfig {
-                enabled: Some(false),
-            }),
+            pr: Some(PrContextConfig { enabled: Some(false), checks: None }),
             manual: None,
                     pipeline: None,
                     ci_push: None,
@@ -569,9 +605,7 @@ mod tests {
     fn required_bash_commands_suppressed_when_enabled_without_on_pr() {
         let cfg = ExecutionContextConfig {
             enabled: None,
-            pr: Some(PrContextConfig {
-                enabled: Some(true),
-            }),
+            pr: Some(PrContextConfig { enabled: Some(true), checks: None }),
             manual: None,
                     pipeline: None,
                     ci_push: None,

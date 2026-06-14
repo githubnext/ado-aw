@@ -51,6 +51,7 @@ locally and `git` is added to its bash allow-list automatically.
 | `ci-push`   | `ci-push.enabled: true` (CI/push reasons)                | `aw-context/ci-push/*`       |
 | `workitem`  | activates with `pr` (PR-linked mode)                     | `aw-context/workitem/*`      |
 | `schedule`  | `on.schedule` declared AND `schedule.enabled: true`      | `aw-context/schedule/*`      |
+| `pr.checks` | activates with `pr` AND `pr.checks.enabled: true`        | `aw-context/pr/checks/*`     |
 
 ## Front-matter surface
 
@@ -59,6 +60,10 @@ execution-context:
   enabled: true       # master switch; defaults to true
   pr:
     enabled: true     # defaults to true when `on.pr` is configured
+    checks:
+      enabled: false  # OPT-IN (default OFF) — stages
+                      # aw-context/pr/checks/{failing,succeeded}.json
+                      # listing Build Validation runs on the PR
   manual:
     enabled: true     # defaults to true when any `parameters:` are declared
     include-email: false  # whether to surface Build.RequestedForEmail

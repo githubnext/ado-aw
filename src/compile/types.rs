@@ -1282,20 +1282,52 @@ pub struct PrContextConfig {
     /// `on.pr` is configured. Set `false` to opt out.
     #[serde(default)]
     pub enabled: Option<bool>,
+        /// PR-checks (build validation) extension (Stage 6 of the
+        /// build-out — see plan.md). Stages a list of failing /
+        /// succeeded build-validation runs on the PR so a remediation
+        /// agent can read the failing logs and propose a fix.
+        /// Default OFF — opt in via `pr.checks.enabled: true`.
+        #[serde(default)]
+        pub checks: Option<PrChecksContextConfig>,
 }
 
-impl PrContextConfig {
-    /// Resolved-enabled value; `None` means "depends on whether `on.pr` is set".
-    pub fn explicit_enabled(&self) -> Option<bool> {
-        self.enabled
+    impl PrContextConfig {
+        /// Resolved-enabled value; `None` means "depends on whether `on.pr` is set".
+        pub fn explicit_enabled(&self) -> Option<bool> {
+            self.enabled
+        }
     }
-}
 
-impl SanitizeConfigTrait for PrContextConfig {
-    fn sanitize_config_fields(&mut self) {
-        // No string fields to sanitise after the v6.2 collapse.
+    impl SanitizeConfigTrait for PrContextConfig {
+        fn sanitize_config_fields(&mut self) {
+            if let Some(ref mut c) = self.checks {
+                c.sanitize_config_fields();
+            }
+        }
     }
-}
+
+    /// Configuration for the `pr.checks` extension of the PR contributor.
+    /// Default OFF. When enabled, stages
+    /// `aw-context/pr/checks/{failing,succeeded}.json` listing Build
+    /// Validation runs whose source matches the PR.
+    #[derive(Debug, Deserialize, Clone, Default)]
+    pub struct PrChecksContextConfig {
+        /// Default OFF.
+        #[serde(default)]
+        pub enabled: Option<bool>,
+    }
+
+    impl PrChecksContextConfig {
+        pub fn is_enabled(&self) -> bool {
+            self.enabled.unwrap_or(false)
+        }
+    }
+
+    impl SanitizeConfigTrait for PrChecksContextConfig {
+        fn sanitize_config_fields(&mut self) {
+            // No free-form string fields — booleans only.
+        }
+    }
 
 /// Configuration for the `manual` execution-context contributor.
 ///

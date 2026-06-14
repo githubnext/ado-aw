@@ -140,3 +140,49 @@ export async function listLastSuccessfulBuildOnBranch(
     return candidates.length > 0 ? (candidates[0] ?? null) : null;
   });
 }
+
+/**
+ * List builds attached to a PR via its `refs/pull/<id>/merge` (or
+ * `refs/pull/<id>/head`) ref. Used by the `pr.checks` extension
+ * (Stage 6) to enumerate build-validation runs whose source matches
+ * the PR so a remediation agent can read the failing logs.
+ *
+ * `currentBuildId` is excluded from results — the agent's own
+ * build is not interesting as a "PR check" to read.
+ *
+ * Returns up to `top` builds (default 50). Pagination beyond that
+ * is intentionally not implemented; a PR with >50 build runs is
+ * vanishingly rare and the agent should triage from the recent
+ * batch.
+ */
+export async function listBuildsForPullRequest(
+  project: string,
+  prRef: string,
+  currentBuildId: number,
+  top = 50,
+): Promise<Build[]> {
+  return withRetry("listBuildsForPullRequest", async () => {
+    const build = await (await getWebApi()).getBuildApi();
+    const builds = await build.getBuilds(
+      project,
+      undefined, // definitions (all)
+      undefined, // queues
+      undefined, // buildNumber
+      undefined, // minTime
+      undefined, // maxTime
+      undefined, // requestedFor
+      undefined, // reasonFilter
+      undefined, // statusFilter
+      undefined, // resultFilter
+      undefined, // tagFilters
+      undefined, // properties
+      top,
+      undefined, // continuationToken
+      undefined, // maxBuildsPerDefinition
+      undefined, // deletedFilter
+      undefined, // queryOrder
+      prRef,
+    );
+    return builds.filter((b) => b.id !== currentBuildId);
+  });
+}
