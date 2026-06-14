@@ -65,6 +65,12 @@ fn secrets_list_help_warns_no_values() {
         .expect("Failed to run ado-aw secrets list --help");
     assert!(output.status.success(), "--help should exit 0");
     let stdout = String::from_utf8_lossy(&output.stdout);
+    // The no-values policy is a security property: the list command
+    // must never print secret variable values.
+    assert!(
+        stdout.contains("Never prints values"),
+        "secrets list --help should warn that values are never printed, got:\n{stdout}"
+    );
     assert!(
         stdout.contains("--json"),
         "secrets list --help should advertise --json, got:\n{stdout}"
@@ -90,13 +96,17 @@ fn configure_is_hidden_in_top_level_help() {
     // We check the "Commands:" section, which is everything between
     // `Commands:` and `Options:`.
     let lower = stdout.to_lowercase();
-    if let (Some(c), Some(o)) = (lower.find("commands:"), lower.find("options:")) {
-        let block = &lower[c..o];
-        assert!(
-            !block.contains("configure"),
-            "configure should be hidden in top-level --help; commands block was:\n{block}"
-        );
-    }
+    let commands_start = lower
+        .find("commands:")
+        .expect("top-level --help should contain a 'Commands:' section");
+    let options_start = lower
+        .find("options:")
+        .expect("top-level --help should contain an 'Options:' section");
+    let block = &lower[commands_start..options_start];
+    assert!(
+        !block.contains("configure"),
+        "configure should be hidden in top-level --help; commands block was:\n{block}"
+    );
 }
 
 #[test]
