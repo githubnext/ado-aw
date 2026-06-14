@@ -230,9 +230,9 @@ fn classify_condition(condition: &Option<String>) -> WhatIfClassification {
         return WhatIfClassification::Skipped;
     };
     let normalized = condition.to_ascii_lowercase().replace(' ', "");
-    if normalized.contains("always()")
-        || normalized.contains("failed()")
-        || normalized.contains("succeededorfailed()")
+    if contains_unnegated_call(&normalized, "always()")
+        || contains_unnegated_call(&normalized, "failed()")
+        || contains_unnegated_call(&normalized, "succeededorfailed()")
     {
         WhatIfClassification::RunsAnyway
     } else {
@@ -240,17 +240,39 @@ fn classify_condition(condition: &Option<String>) -> WhatIfClassification {
     }
 }
 
+fn contains_unnegated_call(normalized_condition: &str, call: &str) -> bool {
+    let mut from = 0;
+    while let Some(offset) = normalized_condition[from..].find(call) {
+        let idx = from + offset;
+        if !is_negated_call(normalized_condition, idx) {
+            return true;
+        }
+        from = idx + call.len();
+    }
+    false
+}
+
+fn is_negated_call(normalized_condition: &str, call_idx: usize) -> bool {
+    let mut idx = call_idx;
+    let mut negated = false;
+    while idx >= 4 && normalized_condition[idx - 4..idx] == *"not(" {
+        negated = !negated;
+        idx -= 4;
+    }
+    negated
+}
+
 fn reachable_edges(edges: &[EdgeEntry], start: &str) -> BTreeSet<String> {
-    let mut reverse: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut downstream: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for edge in edges {
-        reverse
+        downstream
             .entry(edge.producer.clone())
             .or_default()
             .insert(edge.consumer.clone());
     }
 
     let mut seen = BTreeSet::new();
-    let mut queue: VecDeque<String> = reverse
+    let mut queue: VecDeque<String> = downstream
         .get(start)
         .into_iter()
         .flat_map(|next| next.iter().cloned())
@@ -259,7 +281,7 @@ fn reachable_edges(edges: &[EdgeEntry], start: &str) -> BTreeSet<String> {
         if !seen.insert(node.clone()) {
             continue;
         }
-        if let Some(next) = reverse.get(&node) {
+        if let Some(next) = downstream.get(&node) {
             queue.extend(next.iter().cloned());
         }
     }
@@ -431,6 +453,60 @@ mod tests {
             .find(|job| job.job == "Detection")
             .unwrap();
         assert_eq!(detection.classification, WhatIfClassification::RunsAnyway);
+    }
+
+    #[test]
+    fn negated_failed_condition_is_skipped() {
+        let mut summary = fixture(None);
+        let PipelineBodySummary::Jobs { jobs } = &mut summary.body else {
+            unreachable!("fixture uses jobs body");
+        };
+        let detection = jobs.iter_mut().find(|job| job.id == "Detection").unwrap();
+        detection.condition = Some("not(failed())".to_string());
+
+        let report = analyze(&summary, "Setup").unwrap();
+        let detection = report
+            .downstream_jobs
+            .iter()
+            .find(|job| job.job == "Detection")
+            .unwrap();
+        assert_eq!(detection.classification, WhatIfClassification::Skipped);
+    }
+
+    #[test]
+    fn double_negated_failed_condition_runs_anyway() {
+        let mut summary = fixture(None);
+        let PipelineBodySummary::Jobs { jobs } = &mut summary.body else {
+            unreachable!("fixture uses jobs body");
+        };
+        let detection = jobs.iter_mut().find(|job| job.id == "Detection").unwrap();
+        detection.condition = Some("not(not(failed()))".to_string());
+
+        let report = analyze(&summary, "Setup").unwrap();
+        let detection = report
+            .downstream_jobs
+            .iter()
+            .find(|job| job.job == "Detection")
+            .unwrap();
+        assert_eq!(detection.classification, WhatIfClassification::RunsAnyway);
+    }
+
+    #[test]
+    fn negated_always_condition_is_skipped() {
+        let mut summary = fixture(None);
+        let PipelineBodySummary::Jobs { jobs } = &mut summary.body else {
+            unreachable!("fixture uses jobs body");
+        };
+        let detection = jobs.iter_mut().find(|job| job.id == "Detection").unwrap();
+        detection.condition = Some("not(always())".to_string());
+
+        let report = analyze(&summary, "Setup").unwrap();
+        let detection = report
+            .downstream_jobs
+            .iter()
+            .find(|job| job.job == "Detection")
+            .unwrap();
+        assert_eq!(detection.classification, WhatIfClassification::Skipped);
     }
 
     #[test]

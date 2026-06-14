@@ -370,7 +370,7 @@ fn add_downstream_impact_findings(
     _recommendations: &mut Vec<Recommendation>,
 ) {
     for job in &audit.jobs {
-        if !job_failed(job) || job.downstream_jobs.is_empty() {
+        if !job.failed() || job.downstream_jobs.is_empty() {
             continue;
         }
 
@@ -382,7 +382,7 @@ fn add_downstream_impact_findings(
                     .jobs
                     .iter()
                     .find(|candidate| job_name_matches(candidate, downstream_job))
-                    .map(job_classification)
+                    .map(JobData::classification)
                     .unwrap_or_else(|| String::from("expected to skip"));
                 format!("{downstream_job}: {classification}")
             })
@@ -405,13 +405,6 @@ fn add_downstream_impact_findings(
     }
 }
 
-fn job_failed(job: &JobData) -> bool {
-    let result = job.result.as_deref().unwrap_or_default();
-    result.eq_ignore_ascii_case("failed")
-        || result.eq_ignore_ascii_case("canceled")
-        || job.status.eq_ignore_ascii_case("failed")
-}
-
 fn job_name_matches(job: &JobData, ir_job: &str) -> bool {
     job.name == ir_job
         || job
@@ -419,14 +412,6 @@ fn job_name_matches(job: &JobData, ir_job: &str) -> bool {
             .rsplit('.')
             .next()
             .is_some_and(|suffix| suffix == ir_job)
-}
-
-fn job_classification(job: &JobData) -> String {
-    job.result
-        .as_deref()
-        .filter(|result| !result.trim().is_empty())
-        .unwrap_or(&job.status)
-        .to_string()
 }
 
 fn push_finding(findings: &mut Vec<Finding>, finding: Finding) {

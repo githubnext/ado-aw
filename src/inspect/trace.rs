@@ -67,7 +67,7 @@ pub fn build_trace_report(audit: &AuditData, step: Option<&str>) -> TraceReport 
     let failing_jobs = audit
         .jobs
         .iter()
-        .filter(|job| job_failed(job))
+        .filter(|job| job.failed())
         .map(|job| job_report(audit, job))
         .collect();
 
@@ -210,7 +210,7 @@ fn build_step_report(audit: &AuditData, step_id: &str) -> Option<TraceStepReport
             job: location.job.clone(),
         },
         status: job
-            .map(job_status)
+            .map(JobData::classification)
             .unwrap_or_else(|| String::from("unknown")),
         upstream: job
             .map(|job| upstream_reports(audit, job))
@@ -246,7 +246,7 @@ fn upstream_reports(audit: &AuditData, job: &JobData) -> Vec<TraceUpstreamJob> {
         .into_iter()
         .map(|job_id| TraceUpstreamJob {
             status: find_runtime_job(audit, &job_id)
-                .map(job_status)
+                .map(JobData::classification)
                 .unwrap_or_else(|| String::from("unknown")),
             job: job_id,
         })
@@ -258,7 +258,7 @@ fn downstream_reports(audit: &AuditData, job: &JobData) -> Vec<TraceDownstreamJo
         .into_iter()
         .map(|job_id| TraceDownstreamJob {
             classification: find_runtime_job(audit, &job_id)
-                .map(job_status)
+                .map(JobData::classification)
                 .unwrap_or_else(|| String::from("expected to skip")),
             job: job_id,
         })
@@ -339,19 +339,8 @@ fn stage_for_job(audit: &AuditData, runtime_job: &JobData) -> Option<String> {
         .and_then(|job| job.stage.clone())
 }
 
-fn job_failed(job: &JobData) -> bool {
-    let result = job.result.as_deref().unwrap_or_default();
-    result.eq_ignore_ascii_case("failed")
-        || result.eq_ignore_ascii_case("canceled")
-        || job.status.eq_ignore_ascii_case("failed")
-}
-
 fn job_status(job: &JobData) -> String {
-    job.result
-        .as_deref()
-        .filter(|result| !result.trim().is_empty())
-        .unwrap_or(&job.status)
-        .to_string()
+    job.classification()
 }
 
 #[cfg(test)]
