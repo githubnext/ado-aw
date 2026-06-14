@@ -6,6 +6,7 @@ permissions:
   contents: read
   pull-requests: read
   issues: read
+  copilot-requests: write
 tools:
   github:
     toolsets: [default]
@@ -29,6 +30,8 @@ safe-outputs:
       - "tests/fixtures/**"
       - "AGENTS.md"
       - "docs/extending.md"
+max-ai-credits: -1
+max-daily-ai-credits: -1
 ---
 
 # Bash Step Hygiene Auditor
