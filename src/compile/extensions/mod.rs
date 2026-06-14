@@ -577,7 +577,8 @@ pub use ado_aw_marker::AdoAwMarkerExtension;
 pub use ado_script::AdoScriptExtension;
 pub use azure_cli::AzureCliExtension;
 pub use exec_context::{
-    ExecContextExtension, manual_contributor_will_activate, pr_contributor_will_activate,
+    ExecContextExtension, manual_contributor_will_activate,
+    pipeline_contributor_will_activate, pr_contributor_will_activate,
 };
 pub use github::GitHubExtension;
 pub use safe_outputs::SafeOutputsExtension;
@@ -672,6 +673,12 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
                 // block is declared and the contributor isn't explicitly
                 // disabled.
                 exec_context_manual_active: manual_contributor_will_activate(front_matter),
+                // Same loose-coupling pattern for the Pipeline contributor
+                // (Stage 2 of the exec-context contributor build-out —
+                // see plan.md). Activates whenever `on.pipeline` is
+                // configured and the contributor isn't explicitly
+                // disabled.
+                exec_context_pipeline_active: pipeline_contributor_will_activate(front_matter),
                 pr_trigger_for_synth,
             }
         })),

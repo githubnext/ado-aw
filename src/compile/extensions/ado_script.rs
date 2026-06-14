@@ -43,6 +43,12 @@ pub(crate) const EXEC_CONTEXT_PR_PATH: &str = "/tmp/ado-aw-scripts/ado-script/ex
 /// bundle from the Manual contributor's prepare step.
 pub(crate) const EXEC_CONTEXT_MANUAL_PATH: &str =
     "/tmp/ado-aw-scripts/ado-script/exec-context-manual.js";
+/// Path to the exec-context-pipeline bundle (Stage 2 of the
+/// exec-context contributor build-out — see plan.md). Consumed by
+/// `src/compile/extensions/exec_context/pipeline.rs` to invoke the
+/// bundle from the Pipeline contributor's prepare step.
+pub(crate) const EXEC_CONTEXT_PIPELINE_PATH: &str =
+    "/tmp/ado-aw-scripts/ado-script/exec-context-pipeline.js";
 /// Path to the synthetic-PR-context bundle inside the unpacked
 /// `ado-script.zip`. Runs in the Setup job before `prGate`; consumed
 /// by [`AdoScriptExtension::declarations`].
@@ -74,6 +80,15 @@ pub struct AdoScriptExtension {
     /// shared `manual_contributor_will_activate` predicate so this
     /// stays in lock-step with the contributor's `should_activate`.
     pub exec_context_manual_active: bool,
+    /// Whether the Pipeline-context contributor (Stage 2 of the
+    /// exec-context contributor build-out — see plan.md) will
+    /// activate. When true, the Agent-job install/download must
+    /// fire so that `exec-context-pipeline.js` is present.
+    ///
+    /// Populated at construction by `collect_extensions` using the
+    /// shared `pipeline_contributor_will_activate` predicate so this
+    /// stays in lock-step with the contributor's `should_activate`.
+    pub exec_context_pipeline_active: bool,
     /// PR trigger config required to build `PR_SYNTH_SPEC`. `Some(_)`
     /// is the single source of truth for "synthetic-from-ci path is
     /// active for this agent" — `is_some()` replaces what used to be a
@@ -486,7 +501,11 @@ impl CompilerExtension for AdoScriptExtension {
         // ─── Agent job ─────────────────────────────────────────
         let mut agent_prepare_steps: Vec<Step> = Vec::new();
         let import_active = self.runtime_imports_active();
-        if import_active || self.exec_context_pr_active || self.exec_context_manual_active {
+        if import_active
+            || self.exec_context_pr_active
+            || self.exec_context_manual_active
+            || self.exec_context_pipeline_active
+        {
             agent_prepare_steps.extend(install_and_download_steps_typed());
             if import_active {
                 agent_prepare_steps.push(resolver_step_typed());
@@ -683,6 +702,7 @@ mod tests {
             inlined_imports: inlined,
             exec_context_pr_active: false,
             exec_context_manual_active: false,
+            exec_context_pipeline_active: false,
             pr_trigger_for_synth: None,
         }
     }
@@ -753,6 +773,7 @@ mod tests {
             inlined_imports: true,
             exec_context_pr_active: false,
             exec_context_manual_active: false,
+            exec_context_pipeline_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -802,6 +823,7 @@ mod tests {
             inlined_imports: true,
             exec_context_pr_active: false,
             exec_context_manual_active: false,
+            exec_context_pipeline_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -968,6 +990,7 @@ mod tests {
             inlined_imports: true,
             exec_context_pr_active: false,
             exec_context_manual_active: false,
+            exec_context_pipeline_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -1475,6 +1498,7 @@ mod tests {
             inlined_imports: true,
             exec_context_pr_active: false,
             exec_context_manual_active: false,
+            exec_context_pipeline_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],

@@ -34,6 +34,7 @@
 
 mod contributor;
 mod manual;
+mod pipeline;
 mod pr;
 
 use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
@@ -41,6 +42,7 @@ use crate::compile::types::{ExecutionContextConfig, FrontMatter};
 
 use contributor::{ContextContributor, Contributor};
 use manual::ManualContextContributor;
+use pipeline::PipelineContextContributor;
 use pr::PrContextContributor;
 
 /// Returns `true` iff the PR-context contributor will activate for the
@@ -85,6 +87,20 @@ pub fn manual_contributor_will_activate(front_matter: &FrontMatter) -> bool {
     manual_contributor_will_activate_with_cfg(cfg, front_matter)
 }
 
+/// Returns `true` iff the Pipeline-context contributor will activate
+/// for the given front matter. Same pattern as the helpers above.
+///
+/// MAINTENANCE: this MUST match
+/// `PipelineContextContributor::should_activate` (in `pipeline.rs`).
+pub fn pipeline_contributor_will_activate(front_matter: &FrontMatter) -> bool {
+    let default_cfg = ExecutionContextConfig::default();
+    let cfg = front_matter
+        .execution_context
+        .as_ref()
+        .unwrap_or(&default_cfg);
+    pipeline_contributor_will_activate_with_cfg(cfg, front_matter)
+}
+
 /// Variant that takes the resolved `ExecutionContextConfig` explicitly.
 /// Used by [`ExecContextExtension::new`] so its internal
 /// `any_contributor_active` precomputation tracks the config it was
@@ -124,6 +140,26 @@ fn manual_contributor_will_activate_with_cfg(
     }
     let manual_enabled = cfg.manual.as_ref().and_then(|m| m.enabled);
     !matches!(manual_enabled, Some(false))
+}
+
+/// Whether the pipeline contributor will activate for the given front
+/// matter. Used by [`ExecContextExtension::new`] to populate its
+/// `any_contributor_active` aggregate flag.
+///
+/// MAINTENANCE: this MUST stay in lock-step with
+/// `PipelineContextContributor::should_activate` (in `pipeline.rs`).
+fn pipeline_contributor_will_activate_with_cfg(
+    cfg: &ExecutionContextConfig,
+    front_matter: &FrontMatter,
+) -> bool {
+    if front_matter.pipeline_trigger().is_none() {
+        return false;
+    }
+    if !cfg.is_enabled() {
+        return false;
+    }
+    let pipeline_enabled = cfg.pipeline.as_ref().and_then(|p| p.enabled);
+    !matches!(pipeline_enabled, Some(false))
 }
 
 /// Always-on execution-context extension.
@@ -186,7 +222,8 @@ impl ExecContextExtension {
         // returns true but `any_contributor_active` is false (which
         // would silently suppress the contributor's bash allow-list).
         let any_contributor_active = pr_contributor_will_activate_with_cfg(&config, front_matter)
-            || manual_contributor_will_activate_with_cfg(&config, front_matter);
+            || manual_contributor_will_activate_with_cfg(&config, front_matter)
+            || pipeline_contributor_will_activate_with_cfg(&config, front_matter);
         let synthetic_pr_active = front_matter.is_synthetic_pr();
         Self {
             config,
@@ -209,6 +246,7 @@ impl ExecContextExtension {
         // the user having to write `execution-context.pr: {}`.
         let pr_cfg = self.config.pr.clone().unwrap_or_default();
         let manual_cfg = self.config.manual.clone().unwrap_or_default();
+        let pipeline_cfg = self.config.pipeline.clone().unwrap_or_default();
         // The PR contributor needs to know whether `mode: synthetic`
         // is on so it can emit coalesced SYSTEM_PULLREQUEST_* env vars
         // (real value preferred, synthPr output as fallback).
@@ -224,6 +262,10 @@ impl ExecContextExtension {
                 manual_cfg,
                 self.parameter_names.clone(),
             )),
+            // Pipeline contributor — its `should_activate` only needs
+            // the `CompileContext`'s front_matter.pipeline_trigger(),
+            // so it doesn't need any extra parts captured here.
+            Contributor::Pipeline(PipelineContextContributor::new(pipeline_cfg)),
         ]
     }
 
@@ -367,6 +409,7 @@ mod tests {
                 enabled: Some(true),
             }),
             manual: None,
+                    pipeline: None,
         };
         let fm = pr_triggered_front_matter();
         let ext = ExecContextExtension::new(cfg, &fm);
@@ -387,6 +430,7 @@ mod tests {
                 enabled: Some(false),
             }),
             manual: None,
+                    pipeline: None,
         };
         let fm = pr_triggered_front_matter();
         let ext = ExecContextExtension::new(cfg, &fm);
@@ -419,6 +463,7 @@ mod tests {
                 enabled: Some(true),
             }),
             manual: None,
+                    pipeline: None,
         };
         let fm = no_trigger_front_matter();
         let ext = ExecContextExtension::new(cfg, &fm);
@@ -436,6 +481,7 @@ mod tests {
             enabled: Some(false),
             pr: None,
             manual: None,
+                    pipeline: None,
         };
         let fm = pr_triggered_front_matter();
         let ext = ExecContextExtension::new(cfg, &fm);
@@ -519,10 +565,8 @@ mod tests {
         let cfg = ExecutionContextConfig {
             enabled: None,
             pr: None,
-            manual: Some(ManualContextConfig {
-                enabled: Some(false),
-                include_email: None,
-            }),
+            manual: Some(ManualContextConfig { enabled: Some(false), include_email: None }),
+        pipeline: None,
         };
         let ext = ExecContextExtension::new(cfg, &fm);
         let ctx = CompileContext::for_test(&fm);

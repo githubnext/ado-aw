@@ -1210,6 +1210,12 @@ pub struct ExecutionContextConfig {
         /// `docs/execution-context.md`).
         #[serde(default)]
         pub manual: Option<ManualContextConfig>,
+        /// Pipeline-context contributor configuration. Activates whenever
+        /// the agent declares an `on.pipeline` trigger (Stage 2 of the
+        /// execution-context contributor build-out — see
+        /// `docs/execution-context.md`).
+        #[serde(default)]
+        pub pipeline: Option<PipelineContextConfig>,
     }
 
     impl ExecutionContextConfig {
@@ -1226,6 +1232,9 @@ pub struct ExecutionContextConfig {
             }
             if let Some(ref mut m) = self.manual {
                 m.sanitize_config_fields();
+            }
+            if let Some(ref mut p) = self.pipeline {
+                p.sanitize_config_fields();
             }
         }
     }
@@ -1299,6 +1308,39 @@ impl ManualContextConfig {
 }
 
 impl SanitizeConfigTrait for ManualContextConfig {
+    fn sanitize_config_fields(&mut self) {
+        // No free-form string fields — booleans only.
+    }
+}
+
+/// Configuration for the `pipeline` execution-context contributor.
+///
+/// Activates whenever the agent declares an `on.pipeline` trigger
+/// (and the execution-context master switch is on). Runtime gate:
+/// `eq(variables['Build.Reason'], 'ResourceTrigger')`. Stages
+/// upstream-build metadata (id, status, source SHA/branch, artifact
+/// list) under `aw-context/pipeline/` so the agent can decide what
+/// to do based on the run that triggered it.
+///
+/// Bearer required — fetches via the ADO Build REST API. See
+/// `docs/execution-context.md` for the staged layout.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct PipelineContextConfig {
+    /// Whether the pipeline contributor is active. Defaults to `true`
+    /// when `on.pipeline` is configured. Set `false` to opt out.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+impl PipelineContextConfig {
+    /// Resolved-enabled value; `None` means "depends on whether
+    /// `on.pipeline` is configured".
+    pub fn explicit_enabled(&self) -> Option<bool> {
+        self.enabled
+    }
+}
+
+impl SanitizeConfigTrait for PipelineContextConfig {
     fn sanitize_config_fields(&mut self) {
         // No free-form string fields — booleans only.
     }

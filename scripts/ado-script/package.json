@@ -7,17 +7,18 @@
     "node": ">=20.0.0"
   },
   "scripts": {
-    "build": "npm run codegen && npm run clean && npm run build:gate && npm run build:import && npm run build:exec-context-pr && npm run build:exec-context-pr-synth && npm run build:exec-context-manual",
-    "clean": "node -e \"const fs=require('node:fs'); fs.rmSync('.ado-build',{recursive:true,force:true}); fs.rmSync('gate.js',{force:true}); fs.rmSync('import.js',{force:true}); fs.rmSync('exec-context-pr.js',{force:true}); fs.rmSync('exec-context-pr-synth.js',{force:true}); fs.rmSync('exec-context-manual.js',{force:true});\"",
+    "build": "npm run codegen && npm run clean && npm run build:gate && npm run build:import && npm run build:exec-context-pr && npm run build:exec-context-pr-synth && npm run build:exec-context-manual && npm run build:exec-context-pipeline",
+    "clean": "node -e \"const fs=require('node:fs'); fs.rmSync('.ado-build',{recursive:true,force:true}); fs.rmSync('gate.js',{force:true}); fs.rmSync('import.js',{force:true}); fs.rmSync('exec-context-pr.js',{force:true}); fs.rmSync('exec-context-pr-synth.js',{force:true}); fs.rmSync('exec-context-manual.js',{force:true}); fs.rmSync('exec-context-pipeline.js',{force:true});\"",
     "build:gate": "ncc build src/gate/index.ts -o .ado-build/gate -m -t && node -e \"const fs=require('node:fs'); fs.copyFileSync('.ado-build/gate/index.js','gate.js'); fs.rmSync('.ado-build/gate',{recursive:true,force:true});\"",
     "build:import": "ncc build src/import/index.ts -o .ado-build/import -m -t && node -e \"const fs=require('node:fs'); fs.copyFileSync('.ado-build/import/index.js','import.js'); fs.rmSync('.ado-build/import',{recursive:true,force:true});\"",
     "build:exec-context-pr": "ncc build src/exec-context-pr/index.ts -o .ado-build/exec-context-pr -m -t && node -e \"const fs=require('node:fs'); fs.copyFileSync('.ado-build/exec-context-pr/index.js','exec-context-pr.js'); fs.rmSync('.ado-build/exec-context-pr',{recursive:true,force:true});\"",
     "build:exec-context-pr-synth": "ncc build src/exec-context-pr-synth/index.ts -o .ado-build/exec-context-pr-synth -m -t && node -e \"const fs=require('node:fs'); fs.copyFileSync('.ado-build/exec-context-pr-synth/index.js','exec-context-pr-synth.js'); fs.rmSync('.ado-build/exec-context-pr-synth',{recursive:true,force:true});\"",
     "build:exec-context-manual": "ncc build src/exec-context-manual/index.ts -o .ado-build/exec-context-manual -m -t && node -e \"const fs=require('node:fs'); fs.copyFileSync('.ado-build/exec-context-manual/index.js','exec-context-manual.js'); fs.rmSync('.ado-build/exec-context-manual',{recursive:true,force:true});\"",
+    "build:exec-context-pipeline": "ncc build src/exec-context-pipeline/index.ts -o .ado-build/exec-context-pipeline -m -t && node -e \"const fs=require('node:fs'); fs.copyFileSync('.ado-build/exec-context-pipeline/index.js','exec-context-pipeline.js'); fs.rmSync('.ado-build/exec-context-pipeline',{recursive:true,force:true});\"",
     "build:check": "ls -lh gate.js && wc -c gate.js",
     "codegen": "node -e \"require('node:fs').mkdirSync('schema', { recursive: true })\" && cargo run --quiet --manifest-path ../../Cargo.toml -- export-gate-schema --output schema/gate-spec.schema.json && npx json2ts schema/gate-spec.schema.json -o src/shared/types.gen.ts --bannerComment \"// AUTO-GENERATED from Rust IR via cargo run -- export-gate-schema. Do not edit; run npm run codegen.\"",
     "test": "vitest run",
-    "test:smoke": "npm run build:gate && npm run build:import && npm run build:exec-context-pr && npm run build:exec-context-pr-synth && npm run build:exec-context-manual && vitest run -c vitest.config.smoke.ts",
+    "test:smoke": "npm run build:gate && npm run build:import && npm run build:exec-context-pr && npm run build:exec-context-pr-synth && npm run build:exec-context-manual && npm run build:exec-context-pipeline && vitest run -c vitest.config.smoke.ts",
     "lint": "echo TODO",
     "typecheck": "tsc --noEmit"
   },

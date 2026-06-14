@@ -11,3 +11,7 @@ export * as git from "./git.js";
 export * as mergeBase from "./merge-base.js";
 export * as validate from "./validate.js";
 export * as prompt from "./prompt.js";
+// Added in Stage 2 of the contributor build-out — see plan.md.
+// Build-API helpers shared by `pipeline`, `ci-push`, and
+// `pr.checks` contributors.
+export * as build from "./build.js";

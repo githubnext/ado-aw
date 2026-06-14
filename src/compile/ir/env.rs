@@ -127,6 +127,18 @@ pub const ALLOWED_ADO_MACROS: &[&str] = &[
     // instead of stringly-typed `PipelineVar`.
     "Build.RequestedFor",
     "Build.RequestedForEmail",
+    // Upstream-build identifiers populated when ADO triggers this
+    // pipeline via a `resources.pipelines` completion trigger.
+    // Surfaced by the `pipeline` execution-context contributor
+    // (Stage 2 of the contributor build-out — see plan.md) so the
+    // bundle can fetch upstream-build metadata via the Build REST API.
+    // Note: these are always present on `Build.Reason == 'ResourceTrigger'`
+    // builds and absent otherwise — the contributor gates on Build.Reason
+    // so the macros never expand to empty in production paths.
+    "Build.TriggeredBy.BuildId",
+    "Build.TriggeredBy.DefinitionId",
+    "Build.TriggeredBy.DefinitionName",
+    "Build.TriggeredBy.ProjectID",
     // Pipeline / system context — Setup-job synthetic-PR resolver, AWF
     // launch, and most safe-output executors need at least one of
     // these.

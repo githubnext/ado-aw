@@ -47,11 +47,11 @@ locally and `git` is added to its bash allow-list automatically.
 |-------------|-------------------------------|------------------------------|
 | `pr`        | `on.pr`                       | `aw-context/pr/*`            |
 | `manual`    | any `parameters:` declared    | `aw-context/manual/*`        |
+| `pipeline`  | `on.pipeline`                 | `aw-context/pipeline/*`      |
 
-Future trigger contributors (pipeline-completion, ci-push, schedule,
-workitem) plug in via the same internal `ContextContributor` trait
-without breaking the agent-facing layout. See plan.md for the full
-build-out roadmap.
+Future trigger contributors (ci-push, schedule, workitem) plug in via
+the same internal `ContextContributor` trait without breaking the
+agent-facing layout. See plan.md for the full build-out roadmap.
 
 ## Front-matter surface
 
@@ -64,6 +64,8 @@ execution-context:
     enabled: true     # defaults to true when any `parameters:` are declared
     include-email: false  # whether to surface Build.RequestedForEmail
                           # in staged metadata + prompt (default false)
+  pipeline:
+    enabled: true     # defaults to true when `on.pipeline` is configured
 ```
 
 All keys are optional. When the `execution-context:` block is omitted
@@ -95,6 +97,12 @@ contributor).
   Defaults off for hygiene (ADO already exposes the address to the
   build, but we keep it out of the agent's prompt unless the user
   opts in).
+- **`pipeline.enabled`** (`bool`, default `true` when `on.pipeline`
+  is set) — whether to activate the Pipeline contributor (Stage 2 of
+  the build-out — see plan.md). **`on.pipeline` must be configured**
+  for the contributor to activate at all. Stages upstream-build
+  metadata under `aw-context/pipeline/` so the agent can decide what
+  to do based on the run that triggered it.
 
 `pr.enabled: false` also suppresses the auto-extension of the agent's
 bash allow-list with git commands described below.
@@ -238,6 +246,58 @@ values are sanitised to a single line.
 If the precompute fails (workspace not writable, etc.), a failure
 fragment is appended instead telling the agent NOT to invent
 parameter values it was supposed to receive.
+
+## Pipeline contributor (Stage 2)
+
+The **`pipeline` contributor** stages metadata about the *upstream*
+build that triggered this run. It activates whenever the agent
+declares an `on.pipeline` trigger (and
+`execution-context.pipeline.enabled` is not `false`).
+
+Runtime gate: `eq(variables['Build.Reason'], 'ResourceTrigger')` —
+non-pipeline-completion queues of the same agent skip the step at
+zero cost.
+
+### Trust boundary
+
+The `pipeline` contributor uses `SYSTEM_ACCESSTOKEN` to fetch
+upstream-build metadata via the Build REST API. The token is mapped
+only into this step's `env:` block (never the agent step's env),
+never written to disk, never logged. Same posture as the `pr`
+contributor.
+
+### Agent-visible layout
+
+```
+aw-context/
+  pipeline/
+    upstream-build-id        # numeric build id of the upstream
+    upstream-source-sha      # Build.sourceVersion of the upstream
+    upstream-source-branch   # Build.sourceBranch of the upstream
+    upstream-status          # succeeded|partiallySucceeded|failed|canceled|none
+    upstream-definition      # upstream pipeline name
+    upstream-artifacts.json  # artifact INDEX (NOT the bytes)
+    error.txt                # one-line reason on failure
+```
+
+**Artifacts are NOT auto-downloaded.** The agent calls
+`build_download_artifact` (or `az pipelines runs artifact download`)
+itself if it needs the bits — gated by AWF allow-list.
+
+### Bash allow-list
+
+The `pipeline` contributor adds **no commands** to the agent's bash
+allow-list — staged artefacts are read with `cat` / `jq`.
+
+### Prompt fragment
+
+A `## Pipeline-completion context` section is appended to the agent
+prompt listing the upstream build id / definition name / source ref /
+status, plus three example ADO MCP tool calls
+(`build_get_build_by_id`, `build_list_artifacts`, `build_get_log`)
+with the buildId pre-filled. When the upstream did NOT succeed, the
+fragment explicitly nudges the agent to surface the failure (e.g.
+via `report_incomplete`) rather than assume a clean state.
 
 ## Bash allow-list auto-extension
 

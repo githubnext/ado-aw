@@ -21,6 +21,11 @@ pipeline** as runtime helpers. Today it produces four bundles:
   manually-queued builds and appends a `## Manual run context`
   fragment to the agent prompt (Agent job; see
   [`execution-context.md`](execution-context.md)).
+- `exec-context-pipeline.js` — Pipeline-completion precompute that
+  fetches upstream-build metadata via the Build REST API and stages
+  `aw-context/pipeline/upstream-*` files plus a `## Pipeline-completion
+  context` prompt fragment (Agent job; see
+  [`execution-context.md`](execution-context.md)).
 
 > **Internal-only.** `ado-script` is not a user-facing front-matter
 > feature. Authors never write an `ado-script:` block in their agent
@@ -68,8 +73,9 @@ not re-expanded).
 
 The bundle lives at `import.js` and ships in the same
 `ado-script.zip` release asset as `gate.js`, `exec-context-pr.js`,
-`exec-context-pr-synth.js`, and `exec-context-manual.js`, so pipelines
-download it through the same Agent-job asset flow.
+`exec-context-pr-synth.js`, `exec-context-manual.js`, and
+`exec-context-pipeline.js`, so pipelines download it through the
+same Agent-job asset flow.
 `import.js` uses only the Node standard library, so the ncc bundle is
 small (~1.5 KB) and carries no SDK dependency.
 
@@ -350,7 +356,8 @@ scripts/ado-script/
 │   │   ├── git.ts               # execFile wrappers + bearerEnv helper (promoted from exec-context-pr/ in Stage 0)
 │   │   ├── merge-base.ts        # synthetic-merge detection + progressive-deepening fetch (promoted from exec-context-pr/)
 │   │   ├── validate.ts          # identifier regex guards (promoted from exec-context-pr/)
-│   │   └── prompt.ts            # agent-prompt-file append helpers (promoted from exec-context-pr/)
+│   │   ├── prompt.ts            # agent-prompt-file append helpers (promoted from exec-context-pr/)
+│   │   └── build.ts             # Build REST helpers (added in Stage 2; used by pipeline / ci-push / pr.checks)
 │   ├── gate/                    # gate.js entry point + per-concern modules
 │   │   ├── index.ts             # main(): decode → preflight → bypass → facts → eval → emit
 │   │   ├── bypass.ts            # build-reason auto-pass
@@ -371,23 +378,28 @@ scripts/ado-script/
 │   │   ├── match.ts             # branch/path include-exclude glob matching
 │   │   ├── spec.ts              # PR_SYNTH_SPEC base64 decode + validation
 │   │   └── __tests__/           # unit tests across the three modules
-│   └── exec-context-manual/     # exec-context-manual.js entry point + manual-context precompute
-│       ├── index.ts             # main(): collect PARAM_* env vars → JSON snapshot → prompt fragment
-│       └── __tests__/           # unit tests for success / failure / sanitisation paths
+│   ├── exec-context-manual/     # exec-context-manual.js entry point + manual-context precompute
+│   │   ├── index.ts             # main(): collect PARAM_* env vars → JSON snapshot → prompt fragment
+│   │   └── __tests__/           # unit tests for success / failure / sanitisation paths
+│   └── exec-context-pipeline/   # exec-context-pipeline.js entry point + pipeline-completion precompute
+│       ├── index.ts             # main(): validate TriggeredBy ids → fetch upstream Build via REST → stage + prompt
+│       └── __tests__/           # unit tests for validate / success / failure / sanitisation paths
 ├── test/                        # End-to-end smoke tests (gate, import, exec-context-pr)
 ├── gate.js                      # ncc bundle output (gitignored)
 ├── import.js                    # ncc bundle output (gitignored)
 ├── exec-context-pr.js           # ncc bundle output (gitignored)
 ├── exec-context-pr-synth.js     # ncc bundle output (gitignored)
-└── exec-context-manual.js       # ncc bundle output (gitignored)
+├── exec-context-manual.js       # ncc bundle output (gitignored)
+└── exec-context-pipeline.js     # ncc bundle output (gitignored)
 ```
 
 The release workflow (`.github/workflows/release.yml`) runs
 `npm ci && npm run build`, then zips `scripts/ado-script/gate.js`,
 `scripts/ado-script/import.js`,
 `scripts/ado-script/exec-context-pr.js`,
-`scripts/ado-script/exec-context-pr-synth.js`, and
-`scripts/ado-script/exec-context-manual.js` into the
+`scripts/ado-script/exec-context-pr-synth.js`,
+`scripts/ado-script/exec-context-manual.js`, and
+`scripts/ado-script/exec-context-pipeline.js` into the
 `ado-script.zip` release asset. Pipelines download that asset at
 runtime by URL pinned to the compiler's `CARGO_PKG_VERSION`, verify
 its SHA-256 against the `checksums.txt` asset, then extract.
