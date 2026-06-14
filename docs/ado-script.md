@@ -16,6 +16,11 @@ pipeline** as runtime helpers. Today it produces four bundles:
   PR-identifier variables into the stable `AW_PR_*` namespace,
   promoting CI builds with an open PR to PR semantics (Setup job,
   before any gate step).
+- `exec-context-manual.js` — Manual-context precompute that stages
+  `aw-context/manual/{requested-for, parameters.json}` for
+  manually-queued builds and appends a `## Manual run context`
+  fragment to the agent prompt (Agent job; see
+  [`execution-context.md`](execution-context.md)).
 
 > **Internal-only.** `ado-script` is not a user-facing front-matter
 > feature. Authors never write an `ado-script:` block in their agent
@@ -63,8 +68,8 @@ not re-expanded).
 
 The bundle lives at `import.js` and ships in the same
 `ado-script.zip` release asset as `gate.js`, `exec-context-pr.js`,
-and `exec-context-pr-synth.js`, so pipelines download it through the
-same Agent-job asset flow.
+`exec-context-pr-synth.js`, and `exec-context-manual.js`, so pipelines
+download it through the same Agent-job asset flow.
 `import.js` uses only the Node standard library, so the ncc bundle is
 small (~1.5 KB) and carries no SDK dependency.
 
@@ -361,23 +366,28 @@ scripts/ado-script/
 │   │   └── __tests__/           # end-to-end / integration tests live here; the
 │   │                            # per-module unit tests moved with their modules
 │   │                            # into ../shared/__tests__/
-│   └── exec-context-pr-synth/   # exec-context-pr-synth.js entry point + synthetic-PR resolver
-│       ├── index.ts             # main(): real-PR / GitHub / synth-promote branch resolution → emit AW_PR_*
-│       ├── match.ts             # branch/path include-exclude glob matching
-│       ├── spec.ts              # PR_SYNTH_SPEC base64 decode + validation
-│       └── __tests__/           # unit tests across the three modules
+│   ├── exec-context-pr-synth/   # exec-context-pr-synth.js entry point + synthetic-PR resolver
+│   │   ├── index.ts             # main(): real-PR / GitHub / synth-promote branch resolution → emit AW_PR_*
+│   │   ├── match.ts             # branch/path include-exclude glob matching
+│   │   ├── spec.ts              # PR_SYNTH_SPEC base64 decode + validation
+│   │   └── __tests__/           # unit tests across the three modules
+│   └── exec-context-manual/     # exec-context-manual.js entry point + manual-context precompute
+│       ├── index.ts             # main(): collect PARAM_* env vars → JSON snapshot → prompt fragment
+│       └── __tests__/           # unit tests for success / failure / sanitisation paths
 ├── test/                        # End-to-end smoke tests (gate, import, exec-context-pr)
 ├── gate.js                      # ncc bundle output (gitignored)
 ├── import.js                    # ncc bundle output (gitignored)
 ├── exec-context-pr.js           # ncc bundle output (gitignored)
-└── exec-context-pr-synth.js     # ncc bundle output (gitignored)
+├── exec-context-pr-synth.js     # ncc bundle output (gitignored)
+└── exec-context-manual.js       # ncc bundle output (gitignored)
 ```
 
 The release workflow (`.github/workflows/release.yml`) runs
 `npm ci && npm run build`, then zips `scripts/ado-script/gate.js`,
 `scripts/ado-script/import.js`,
-`scripts/ado-script/exec-context-pr.js`, and
-`scripts/ado-script/exec-context-pr-synth.js` into the
+`scripts/ado-script/exec-context-pr.js`,
+`scripts/ado-script/exec-context-pr-synth.js`, and
+`scripts/ado-script/exec-context-manual.js` into the
 `ado-script.zip` release asset. Pipelines download that asset at
 runtime by URL pinned to the compiler's `CARGO_PKG_VERSION`, verify
 its SHA-256 against the `checksums.txt` asset, then extract.

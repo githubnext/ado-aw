@@ -63,21 +63,25 @@ pub(super) trait ContextContributor {
 /// Static-dispatch enum over all known contributors.
 ///
 /// Mirrors the `Extension` enum pattern in `extensions/mod.rs`. v1
-/// ships `Pr`; adding a future variant requires only a new arm here
+/// shipped `Pr`; Stage 1 of the contributor build-out adds `Manual`
+/// (plan.md). Adding a future variant requires only a new arm here
 /// and a registration in `ExecContextExtension::contributors()`.
 pub(super) enum Contributor {
     Pr(super::pr::PrContextContributor),
+    Manual(super::manual::ManualContextContributor),
 }
 
 impl ContextContributor for Contributor {
     fn name(&self) -> &str {
         match self {
             Contributor::Pr(c) => c.name(),
+            Contributor::Manual(c) => c.name(),
         }
     }
     fn should_activate(&self, ctx: &CompileContext) -> bool {
         match self {
             Contributor::Pr(c) => c.should_activate(ctx),
+            Contributor::Manual(c) => c.should_activate(ctx),
         }
     }
     fn prepare_step_typed(
@@ -86,11 +90,13 @@ impl ContextContributor for Contributor {
     ) -> anyhow::Result<Option<crate::compile::ir::step::Step>> {
         match self {
             Contributor::Pr(c) => c.prepare_step_typed(ctx),
+            Contributor::Manual(c) => c.prepare_step_typed(ctx),
         }
     }
     fn bash_commands(&self) -> Vec<String> {
         match self {
             Contributor::Pr(c) => c.bash_commands(),
+            Contributor::Manual(c) => c.bash_commands(),
         }
     }
 }

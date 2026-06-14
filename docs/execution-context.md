@@ -43,13 +43,15 @@ locally and `git` is added to its bash allow-list automatically.
 
 ## v1 contributors
 
-| Contributor | Trigger | Output layout            |
-|-------------|---------|--------------------------|
-| `pr`        | `on.pr` | `aw-context/pr/*`        |
+| Contributor | Trigger                       | Output layout                |
+|-------------|-------------------------------|------------------------------|
+| `pr`        | `on.pr`                       | `aw-context/pr/*`            |
+| `manual`    | any `parameters:` declared    | `aw-context/manual/*`        |
 
-Future trigger contributors (pipeline-completion, schedule, manual)
-plug in via the same internal `ContextContributor` trait without
-breaking the agent-facing layout.
+Future trigger contributors (pipeline-completion, ci-push, schedule,
+workitem) plug in via the same internal `ContextContributor` trait
+without breaking the agent-facing layout. See plan.md for the full
+build-out roadmap.
 
 ## Front-matter surface
 
@@ -58,10 +60,16 @@ execution-context:
   enabled: true       # master switch; defaults to true
   pr:
     enabled: true     # defaults to true when `on.pr` is configured
+  manual:
+    enabled: true     # defaults to true when any `parameters:` are declared
+    include-email: false  # whether to surface Build.RequestedForEmail
+                          # in staged metadata + prompt (default false)
 ```
 
 All keys are optional. When the `execution-context:` block is omitted
-entirely, defaults are *"on for the triggers configured in `on:`"*.
+entirely, defaults are *"on for the triggers configured in `on:`"* and
+*"on whenever `parameters:` are declared"* (for the manual
+contributor).
 
 ### Fields
 
@@ -75,6 +83,18 @@ entirely, defaults are *"on for the triggers configured in `on:`"*.
   no effect (the prepare step would be dead code, and silently widening
   the agent's bash allow-list with git commands for a non-PR agent
   would be a footgun).
+- **`manual.enabled`** (`bool`, default `true` when any `parameters:`
+  are declared) — whether to activate the Manual contributor. Set
+  `false` to opt out. **At least one user-declared `parameters:`
+  entry must be present** for the contributor to activate at all —
+  `manual.enabled: true` without any declared parameters is a no-op
+  (no parameter snapshot to stage).
+- **`manual.include-email`** (`bool`, default `false`) — whether to
+  surface `Build.RequestedForEmail` in
+  `aw-context/manual/requested-for-email` and the prompt fragment.
+  Defaults off for hygiene (ADO already exposes the address to the
+  build, but we keep it out of the agent's prompt unless the user
+  opts in).
 
 `pr.enabled: false` also suppresses the auto-extension of the agent's
 bash allow-list with git commands described below.
@@ -153,6 +173,71 @@ and tells the agent:
 
 If neither fragment is appended (Build.Reason ≠ PullRequest), the
 agent prompt is silent on PR context.
+
+## Manual contributor (Stage 1)
+
+The **`manual` contributor** stages requestor identity and a snapshot
+of runtime parameter values for manually-queued builds. It activates
+whenever the agent declares any `parameters:` block (and
+`execution-context.manual.enabled` is not `false`).
+
+Runtime gate: `eq(variables['Build.Reason'], 'Manual')` — non-manual
+queues of the same pipeline (CI, schedule, resource trigger) skip
+the step at zero cost.
+
+### Trust boundary
+
+The `manual` contributor needs **no bearer** and makes **no network
+calls** — all inputs are ADO predefined variables and
+template-expanded parameter values. `SYSTEM_ACCESSTOKEN` is
+intentionally NOT projected into the step's `env:` block.
+
+Parameter NAMES are validated as ADO identifiers upstream
+(`crate::validate::is_valid_parameter_name`) and re-checked at
+emit time by the contributor as defence-in-depth; they are safe to
+interpolate into `${{ parameters.<name> }}` template expressions.
+Parameter VALUES, by contrast, come from user input at queue time
+and could contain arbitrary characters — they cross the
+template-expansion → YAML → env-var → bundle pipeline as opaque
+strings, are JSON-serialised when written to `parameters.json`
+(handles all escaping), and are sanitised via the shared
+`validate.sanitizeForPrompt` helper before any interpolation into
+the agent prompt fragment.
+
+### Agent-visible layout
+
+```
+aw-context/
+  manual/
+    requested-for          # Build.RequestedFor display name
+    requested-for-email    # ONLY when manual.include-email: true
+    parameters.json        # JSON snapshot of user-declared parameter
+                           # values (clearMemory is auto-injected at
+                           # IR-build time and is NOT included here)
+```
+
+`parameters.json` has the shape `{"name": "value", ...}` with keys
+in alphabetical order for deterministic output. Values are always
+strings (template-expansion produces stringified scalars regardless
+of the declared `type:`).
+
+### Bash allow-list
+
+The `manual` contributor adds **no commands** to the agent's bash
+allow-list — the agent reads the staged files with the
+already-permitted `cat` / `ls` commands.
+
+### Prompt fragment
+
+A short `## Manual run context` section is appended to the agent
+prompt. It states who queued the run (and their email if
+`include-email: true`) plus a list of parameter names with truncated
+values (full untruncated values live in `parameters.json`). Hostile
+values are sanitised to a single line.
+
+If the precompute fails (workspace not writable, etc.), a failure
+fragment is appended instead telling the agent NOT to invent
+parameter values it was supposed to receive.
 
 ## Bash allow-list auto-extension
 

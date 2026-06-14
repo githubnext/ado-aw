@@ -1204,24 +1204,33 @@ pub struct ExecutionContextConfig {
     /// PR-context contributor configuration.
     #[serde(default)]
     pub pr: Option<PrContextConfig>,
-}
-
-impl ExecutionContextConfig {
-    /// Whether the master switch is on. Defaults to `true` when unset.
-    pub fn is_enabled(&self) -> bool {
-        self.enabled.unwrap_or(true)
+        /// Manual-context contributor configuration. Activates whenever the
+        /// agent declares any `parameters:` block (Stage 1 of the
+        /// execution-context contributor build-out — see
+        /// `docs/execution-context.md`).
+        #[serde(default)]
+        pub manual: Option<ManualContextConfig>,
     }
-}
 
-impl SanitizeConfigTrait for ExecutionContextConfig {
-    fn sanitize_config_fields(&mut self) {
-        if let Some(ref mut p) = self.pr {
-            p.sanitize_config_fields();
+    impl ExecutionContextConfig {
+        /// Whether the master switch is on. Defaults to `true` when unset.
+        pub fn is_enabled(&self) -> bool {
+            self.enabled.unwrap_or(true)
         }
     }
-}
 
-/// Configuration for the PR-context contributor.
+    impl SanitizeConfigTrait for ExecutionContextConfig {
+        fn sanitize_config_fields(&mut self) {
+            if let Some(ref mut p) = self.pr {
+                p.sanitize_config_fields();
+            }
+            if let Some(ref mut m) = self.manual {
+                m.sanitize_config_fields();
+            }
+        }
+    }
+
+    /// Configuration for the PR-context contributor.
 ///
 /// Controls whether the precompute step materialises `aw-context/pr/*` for
 /// PR-triggered builds. v6.2 onward exposes only an opt-out switch — the
@@ -1245,6 +1254,53 @@ impl PrContextConfig {
 impl SanitizeConfigTrait for PrContextConfig {
     fn sanitize_config_fields(&mut self) {
         // No string fields to sanitise after the v6.2 collapse.
+    }
+}
+
+/// Configuration for the `manual` execution-context contributor.
+///
+/// Activates whenever the agent declares any `parameters:` block (and
+/// the execution-context master switch is on). Runtime gate:
+/// `eq(variables['Build.Reason'], 'Manual')`. Stages requestor
+/// identity and a snapshot of parameter values under
+/// `aw-context/manual/` so manually-queued agents can surface intent
+/// (selected options, free-text reasons) without the markdown body
+/// having to restate them.
+///
+/// No bearer, no network — pure ADO predefined-variable + template
+/// expansion. See `docs/execution-context.md` for the staged layout.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ManualContextConfig {
+    /// Whether the manual contributor is active. Defaults to `true`
+    /// when any `parameters:` block is declared. Set `false` to opt
+    /// out.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Whether to surface `Build.RequestedForEmail` in the staged
+    /// metadata + prompt fragment. Defaults to `false` (hygiene
+    /// posture; ADO already exposes the address to the build but
+    /// we don't want it appearing in agent prompts by default).
+    #[serde(rename = "include-email", default)]
+    pub include_email: Option<bool>,
+}
+
+impl ManualContextConfig {
+    /// Resolved-enabled value; `None` means "depends on whether any
+    /// `parameters:` are declared".
+    pub fn explicit_enabled(&self) -> Option<bool> {
+        self.enabled
+    }
+
+    /// Whether the staged `requested-for-email` file and prompt-fragment
+    /// line should be populated. Defaults to `false`.
+    pub fn include_email_resolved(&self) -> bool {
+        self.include_email.unwrap_or(false)
+    }
+}
+
+impl SanitizeConfigTrait for ManualContextConfig {
+    fn sanitize_config_fields(&mut self) {
+        // No free-form string fields — booleans only.
     }
 }
 
