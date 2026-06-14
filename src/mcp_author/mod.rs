@@ -39,7 +39,7 @@ struct SourcePathParams {
 struct GraphDumpParams {
     /// Path to the source markdown workflow file.
     source_path: String,
-    /// Render format: "text" (default) or "dot".
+    /// Render format: "text" (default), "json", or "dot".
     format: Option<String>,
 }
 
@@ -185,7 +185,7 @@ impl AuthorMcp {
 
     #[tool(
         name = "graph_dump",
-        description = "Render the resolved workflow graph as text or Graphviz DOT."
+        description = "Render the resolved workflow graph as text, JSON (GraphSummary), or Graphviz DOT."
     )]
     async fn graph_dump(
         &self,
@@ -375,9 +375,10 @@ fn source_path(path: &str) -> PathBuf {
 fn parse_graph_dump_format(format: Option<&str>) -> Result<GraphFormat, McpError> {
     match format.unwrap_or("text") {
         "text" => Ok(GraphFormat::Text),
+        "json" => Ok(GraphFormat::Json),
         "dot" => Ok(GraphFormat::Dot),
         other => Err(McpError::invalid_params(
-            format!("unknown format '{other}' (expected 'text' or 'dot')"),
+            format!("unknown format '{other}' (expected 'text', 'json', or 'dot')"),
             None,
         )),
     }

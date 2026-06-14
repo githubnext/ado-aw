@@ -353,7 +353,7 @@ fn known_ids(summary: &PipelineSummary) -> Vec<String> {
         .iter()
         .map(|loc| loc.step.clone())
         .collect();
-    ids.extend(summary.all_jobs().into_iter().map(|job| job.id.clone()));
+    ids.extend(summary.all_jobs().map(|job| job.id.clone()));
     ids
 }
 

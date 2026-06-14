@@ -64,18 +64,53 @@ pub enum PipelineBodySummary {
 }
 
 impl PipelineSummary {
-    /// Flatten the body into a single slice of [`JobSummary`] entries.
+    /// Iterate every job in the pipeline, regardless of whether the
+    /// body is `Jobs`-shaped or `Stages`-shaped.
     ///
-    /// Single source of truth for `Jobs`-bodied vs `Stages`-bodied
-    /// iteration; both `audit::pipeline_graph` and the `inspect`
-    /// commands go through this so that future shape additions (e.g. a
-    /// new `Templates` variant) only need to be handled in one place.
-    pub fn all_jobs(&self) -> Vec<&JobSummary> {
+    /// Single source of truth for body-shape iteration; both
+    /// `audit::pipeline_graph` and the `inspect` commands go through
+    /// this so that future shape additions (e.g. a new `Templates`
+    /// variant) only need to be handled in one place.
+    ///
+    /// Returns an `impl Iterator` rather than a `Vec` so hot paths
+    /// (`populate_job_edges`, `find_matching_job_summary`, the inspect
+    /// traversals) avoid a per-call heap allocation. Callers that
+    /// need a slice can `.collect::<Vec<_>>()` at the use site.
+    pub fn all_jobs(&self) -> impl Iterator<Item = &JobSummary> + '_ {
         match &self.body {
-            PipelineBodySummary::Jobs { jobs } => jobs.iter().collect(),
+            PipelineBodySummary::Jobs { jobs } => AllJobsIter::Flat(jobs.iter()),
             PipelineBodySummary::Stages { stages } => {
-                stages.iter().flat_map(|stage| stage.jobs.iter()).collect()
+                AllJobsIter::Stages(stages.iter().flat_map(stage_jobs))
             }
+        }
+    }
+}
+
+fn stage_jobs(stage: &StageSummary) -> std::slice::Iter<'_, JobSummary> {
+    stage.jobs.iter()
+}
+
+/// Either-style iterator that yields the same `&JobSummary` element type
+/// for both pipeline body shapes without heap-allocating into a `Vec`.
+#[allow(clippy::type_complexity)]
+enum AllJobsIter<'a> {
+    Flat(std::slice::Iter<'a, JobSummary>),
+    Stages(
+        std::iter::FlatMap<
+            std::slice::Iter<'a, StageSummary>,
+            std::slice::Iter<'a, JobSummary>,
+            fn(&'a StageSummary) -> std::slice::Iter<'a, JobSummary>,
+        >,
+    ),
+}
+
+impl<'a> Iterator for AllJobsIter<'a> {
+    type Item = &'a JobSummary;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Flat(iter) => iter.next(),
+            Self::Stages(iter) => iter.next(),
         }
     }
 }

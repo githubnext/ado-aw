@@ -208,6 +208,18 @@ async fn fetch_audit_data_inner(opts: AuditOptions<'_>) -> Result<FetchAuditData
 /// both code paths produce a structurally identical `AuditData`.
 /// `populate_pipeline_graph` failures are downgraded to warnings rather
 /// than aborting the audit.
+///
+/// ## Cache-hit behaviour
+///
+/// When invoked after a cache load this function correlates against
+/// the **current local source markdown**, not the source that was on
+/// disk when the build originally ran. That is intentional: the
+/// `pipeline_graph` section is meant to answer "how does this build's
+/// timeline map onto today's typed IR?", which is what an operator
+/// debugging an old failure with newly-rebased code actually wants.
+/// Do not "fix" this into using a cached graph snapshot — the
+/// downstream `findings::derive_findings` rules (e.g.
+/// downstream-impact) rely on the freshly-correlated graph.
 async fn derive_post_processing(audit: &mut AuditData, run_dir: &Path) {
     if let Err(error) = pipeline_graph::populate_pipeline_graph(audit, run_dir).await {
         warn_and_record(

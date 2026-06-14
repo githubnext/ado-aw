@@ -254,7 +254,15 @@ fn rule_step_id_collisions(summary: &PipelineSummary, findings: &mut Vec<LintFin
 }
 
 fn consumed_outputs(summary: &PipelineSummary) -> BTreeSet<(String, String)> {
-    summary
+    // Cross-step / cross-job consumers are surfaced through
+    // `outputs_needing_is_output` (the set the compiler patches with
+    // `isOutput=true`). That set deliberately omits same-job consumers
+    // because ADO does not require `isOutput=true` for those, so we
+    // additionally walk every step's `env_refs` and `condition_refs`
+    // to count references that stay inside one job. Matches
+    // `graph_deps::step_refs`, which already treats both sets
+    // uniformly regardless of job boundary.
+    let mut consumed: BTreeSet<(String, String)> = summary
         .graph
         .outputs_needing_is_output
         .iter()
@@ -264,7 +272,13 @@ fn consumed_outputs(summary: &PipelineSummary) -> BTreeSet<(String, String)> {
                 .iter()
                 .map(|output| (entry.step.clone(), output.clone()))
         })
-        .collect()
+        .collect();
+    for (_, step) in all_steps(summary) {
+        for r in step.env_refs.iter().chain(step.condition_refs.iter()) {
+            consumed.insert((r.step.clone(), r.name.clone()));
+        }
+    }
+    consumed
 }
 
 fn output_declarations(
@@ -291,7 +305,6 @@ fn output_declarations(
 fn all_steps(summary: &PipelineSummary) -> Vec<(&JobSummary, &StepSummary)> {
     summary
         .all_jobs()
-        .into_iter()
         .flat_map(|job| job.steps.iter().map(move |step| (job, step)))
         .collect()
 }
@@ -308,8 +321,8 @@ fn location_for(job: &JobSummary, step: Option<&str>) -> LintLocation {
 mod tests {
     use super::*;
     use crate::compile::ir::summary::{
-        GraphSummary, OutputDeclSummary, PipelineBodySummary, PoolSummary, StepKind,
-        StepOutputsEntry,
+        GraphSummary, OutputDeclSummary, OutputRefSummary, PipelineBodySummary, PoolSummary,
+        StepKind, StepOutputsEntry,
     };
 
     #[test]
@@ -341,6 +354,47 @@ mod tests {
         );
         let findings = lint(&summary);
         assert!(!findings.iter().any(|f| f.code == "unused-output"));
+    }
+
+    #[test]
+    fn same_job_env_ref_does_not_emit_unused_output_inspect_lint() {
+        // Regression: outputs consumed by a peer step **within the
+        // same job** (via env_refs / condition_refs) do not appear in
+        // graph.outputs_needing_is_output — ADO does not require
+        // isOutput=true for same-job reads. consumed_outputs must
+        // still treat them as consumed so we do not emit a
+        // false-positive `unused-output` finding.
+        let mut producer = step_with_output("producer", "value", false);
+        producer.id = Some("producer".to_string());
+        let mut consumer = plain_step("consumer");
+        consumer.env_refs.push(OutputRefSummary {
+            step: "producer".to_string(),
+            name: "value".to_string(),
+        });
+
+        let summary = summary_with_steps(vec![producer, consumer], vec![]);
+        let findings = lint(&summary);
+        assert!(
+            !findings.iter().any(|f| f.code == "unused-output"),
+            "same-job env_ref consumer must suppress unused-output, got {findings:?}"
+        );
+    }
+
+    #[test]
+    fn same_job_condition_ref_does_not_emit_unused_output_inspect_lint() {
+        let producer = step_with_output("producer", "value", false);
+        let mut consumer = plain_step("consumer");
+        consumer.condition_refs.push(OutputRefSummary {
+            step: "producer".to_string(),
+            name: "value".to_string(),
+        });
+
+        let summary = summary_with_steps(vec![producer, consumer], vec![]);
+        let findings = lint(&summary);
+        assert!(
+            !findings.iter().any(|f| f.code == "unused-output"),
+            "same-job condition_ref consumer must suppress unused-output, got {findings:?}"
+        );
     }
 
     #[tokio::test]
