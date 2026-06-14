@@ -25,9 +25,11 @@
  */
 import { getWebApi } from "./auth.js";
 import { withRetry } from "./ado-client.js";
-import type {
-  Build,
-  BuildArtifact,
+import {
+  BuildResult,
+  BuildStatus,
+  type Build,
+  type BuildArtifact,
 } from "azure-devops-node-api/interfaces/BuildInterfaces.js";
 
 /**
@@ -73,5 +75,68 @@ export async function listArtifacts(
   return withRetry("listArtifacts", async () => {
     const build = await (await getWebApi()).getBuildApi();
     return build.getArtifacts(project, buildId);
+  });
+}
+
+/**
+ * Find the most recent successful (completed + result=Succeeded) build of
+ * `definitionId` on `branchName`, EXCLUDING the current build (`currentBuildId`).
+ *
+ * Used by the `ci-push` contributor (Stage 3) to resolve the
+ * "previous green build" SHA so the agent can scope its diff to
+ * "what landed since the last green run on this branch".
+ *
+ * Returns `null` when no qualifying build exists — first ever push,
+ * branch was just created, last green build was age-pruned, etc.
+ * Callers translate `null` into the contributor's empty-history
+ * failure fragment (do NOT fabricate "diff is empty").
+ *
+ * Implementation note: ADO's `getBuilds` accepts both `resultFilter`
+ * and `statusFilter`. We pass both — `Succeeded` AND `Completed` —
+ * because a build in progress can technically have `result=Succeeded`
+ * if it was partially graded; we want runs that are fully settled.
+ * `top=2` because the current build may already be in the result set
+ * (especially if the build's status was Succeeded by the time the
+ * agent's prepare step runs, which it usually is — the contributor
+ * runs in the Agent job, which is downstream of the build's earlier
+ * stages). We filter out the current build below.
+ */
+export async function listLastSuccessfulBuildOnBranch(
+  project: string,
+  definitionId: number,
+  branchName: string,
+  currentBuildId: number,
+): Promise<Build | null> {
+  return withRetry("listLastSuccessfulBuildOnBranch", async () => {
+    const build = await (await getWebApi()).getBuildApi();
+    // SDK signature for getBuilds is long — only the first six
+    // positional params we use are relevant:
+    //   getBuilds(project, definitions?, queues?, buildNumber?,
+    //             minTime?, maxTime?, requestedFor?, reasonFilter?,
+    //             statusFilter?, resultFilter?, tagFilters?,
+    //             properties?, top?, continuationToken?, maxBuildsPerDefinition?,
+    //             deletedFilter?, queryOrder?, branchName?, ...)
+    const builds = await build.getBuilds(
+      project,
+      [definitionId],
+      undefined, // queues
+      undefined, // buildNumber
+      undefined, // minTime
+      undefined, // maxTime
+      undefined, // requestedFor
+      undefined, // reasonFilter
+      BuildStatus.Completed,
+      BuildResult.Succeeded,
+      undefined, // tagFilters
+      undefined, // properties
+      2, // top
+      undefined, // continuationToken
+      undefined, // maxBuildsPerDefinition
+      undefined, // deletedFilter
+      undefined, // queryOrder (default is finishTimeDescending)
+      branchName,
+    );
+    const candidates = builds.filter((b) => b.id !== currentBuildId);
+    return candidates.length > 0 ? (candidates[0] ?? null) : null;
   });
 }

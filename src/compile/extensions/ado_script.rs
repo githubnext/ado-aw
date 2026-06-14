@@ -49,6 +49,11 @@ pub(crate) const EXEC_CONTEXT_MANUAL_PATH: &str =
 /// bundle from the Pipeline contributor's prepare step.
 pub(crate) const EXEC_CONTEXT_PIPELINE_PATH: &str =
     "/tmp/ado-aw-scripts/ado-script/exec-context-pipeline.js";
+/// Path to the exec-context-ci-push bundle (Stage 3 of the
+/// exec-context contributor build-out — see plan.md). Consumed by
+/// `src/compile/extensions/exec_context/ci_push.rs`.
+pub(crate) const EXEC_CONTEXT_CI_PUSH_PATH: &str =
+    "/tmp/ado-aw-scripts/ado-script/exec-context-ci-push.js";
 /// Path to the synthetic-PR-context bundle inside the unpacked
 /// `ado-script.zip`. Runs in the Setup job before `prGate`; consumed
 /// by [`AdoScriptExtension::declarations`].
@@ -89,6 +94,12 @@ pub struct AdoScriptExtension {
     /// shared `pipeline_contributor_will_activate` predicate so this
     /// stays in lock-step with the contributor's `should_activate`.
     pub exec_context_pipeline_active: bool,
+    /// Whether the CI-push-context contributor (Stage 3 of the
+    /// exec-context contributor build-out — see plan.md) will
+    /// activate. Default-off opt-in feature; when true the
+    /// install/download must fire so that
+    /// `exec-context-ci-push.js` is present.
+    pub exec_context_ci_push_active: bool,
     /// PR trigger config required to build `PR_SYNTH_SPEC`. `Some(_)`
     /// is the single source of truth for "synthetic-from-ci path is
     /// active for this agent" — `is_some()` replaces what used to be a
@@ -505,6 +516,7 @@ impl CompilerExtension for AdoScriptExtension {
             || self.exec_context_pr_active
             || self.exec_context_manual_active
             || self.exec_context_pipeline_active
+            || self.exec_context_ci_push_active
         {
             agent_prepare_steps.extend(install_and_download_steps_typed());
             if import_active {
@@ -703,6 +715,7 @@ mod tests {
             exec_context_pr_active: false,
             exec_context_manual_active: false,
             exec_context_pipeline_active: false,
+            exec_context_ci_push_active: false,
             pr_trigger_for_synth: None,
         }
     }
@@ -774,6 +787,7 @@ mod tests {
             exec_context_pr_active: false,
             exec_context_manual_active: false,
             exec_context_pipeline_active: false,
+            exec_context_ci_push_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -824,6 +838,7 @@ mod tests {
             exec_context_pr_active: false,
             exec_context_manual_active: false,
             exec_context_pipeline_active: false,
+            exec_context_ci_push_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -991,6 +1006,7 @@ mod tests {
             exec_context_pr_active: false,
             exec_context_manual_active: false,
             exec_context_pipeline_active: false,
+            exec_context_ci_push_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -1499,6 +1515,7 @@ mod tests {
             exec_context_pr_active: false,
             exec_context_manual_active: false,
             exec_context_pipeline_active: false,
+            exec_context_ci_push_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],

@@ -1216,6 +1216,13 @@ pub struct ExecutionContextConfig {
         /// `docs/execution-context.md`).
         #[serde(default)]
         pub pipeline: Option<PipelineContextConfig>,
+        /// CI-push contributor configuration. Stages "since last green
+        /// build" diff context on non-PR push builds (Stage 3 of the
+        /// execution-context contributor build-out — see
+        /// `docs/execution-context.md`). Defaults to OFF — opt in via
+        /// `ci-push.enabled: true`.
+        #[serde(rename = "ci-push", default)]
+        pub ci_push: Option<CiPushContextConfig>,
     }
 
     impl ExecutionContextConfig {
@@ -1235,6 +1242,9 @@ pub struct ExecutionContextConfig {
             }
             if let Some(ref mut p) = self.pipeline {
                 p.sanitize_config_fields();
+            }
+            if let Some(ref mut c) = self.ci_push {
+                c.sanitize_config_fields();
             }
         }
     }
@@ -1341,6 +1351,39 @@ impl PipelineContextConfig {
 }
 
 impl SanitizeConfigTrait for PipelineContextConfig {
+    fn sanitize_config_fields(&mut self) {
+        // No free-form string fields — booleans only.
+    }
+}
+
+/// Configuration for the `ci-push` execution-context contributor.
+///
+/// Stages "since last green build" diff context for non-PR push
+/// builds. Defaults to OFF (opt-in) — most agents don't need this,
+/// and the helper does ADO REST + git fetch work that adds startup
+/// latency. Activates only when `enabled: true` is set explicitly.
+/// Runtime gate: `in(variables['Build.Reason'], 'IndividualCI',
+/// 'BatchedCI')`. Bearer required for both REST lookup and git fetch
+/// deepening.
+///
+/// See `docs/execution-context.md` for the staged layout.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct CiPushContextConfig {
+    /// Whether the ci-push contributor is active. **Defaults to
+    /// `false`** (opposite of PR / manual / pipeline contributors).
+    /// Set `true` to opt in.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+impl CiPushContextConfig {
+    /// Resolved-enabled value; default is `false`.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.unwrap_or(false)
+    }
+}
+
+impl SanitizeConfigTrait for CiPushContextConfig {
     fn sanitize_config_fields(&mut self) {
         // No free-form string fields — booleans only.
     }

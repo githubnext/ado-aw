@@ -48,9 +48,10 @@ locally and `git` is added to its bash allow-list automatically.
 | `pr`        | `on.pr`                       | `aw-context/pr/*`            |
 | `manual`    | any `parameters:` declared    | `aw-context/manual/*`        |
 | `pipeline`  | `on.pipeline`                 | `aw-context/pipeline/*`      |
+| `ci-push`   | `ci-push.enabled: true` (CI/push reasons)  | `aw-context/ci-push/*`      |
 
-Future trigger contributors (ci-push, schedule, workitem) plug in via
-the same internal `ContextContributor` trait without breaking the
+Future trigger contributors (schedule, workitem) plug in via the
+same internal `ContextContributor` trait without breaking the
 agent-facing layout. See plan.md for the full build-out roadmap.
 
 ## Front-matter surface
@@ -66,6 +67,10 @@ execution-context:
                           # in staged metadata + prompt (default false)
   pipeline:
     enabled: true     # defaults to true when `on.pipeline` is configured
+  ci-push:
+    enabled: false    # OPT-IN (default OFF) — stages "since last green
+                      # build on this branch" diff context for non-PR
+                      # push builds (IndividualCI / BatchedCI)
 ```
 
 All keys are optional. When the `execution-context:` block is omitted
@@ -103,6 +108,12 @@ contributor).
   for the contributor to activate at all. Stages upstream-build
   metadata under `aw-context/pipeline/` so the agent can decide what
   to do based on the run that triggered it.
+- **`ci-push.enabled`** (`bool`, **default `false`** — opt-in) —
+  whether to activate the CI-push contributor (Stage 3 of the
+  build-out — see plan.md). Stages "since last green build on this
+  branch" diff context for non-PR push builds. Default-off because
+  the helper does ADO REST + git fetch deepening that adds startup
+  latency; most agents don't need it.
 
 `pr.enabled: false` also suppresses the auto-extension of the agent's
 bash allow-list with git commands described below.

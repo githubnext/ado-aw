@@ -577,8 +577,9 @@ pub use ado_aw_marker::AdoAwMarkerExtension;
 pub use ado_script::AdoScriptExtension;
 pub use azure_cli::AzureCliExtension;
 pub use exec_context::{
-    ExecContextExtension, manual_contributor_will_activate,
-    pipeline_contributor_will_activate, pr_contributor_will_activate,
+    ExecContextExtension, ci_push_contributor_will_activate,
+    manual_contributor_will_activate, pipeline_contributor_will_activate,
+    pr_contributor_will_activate,
 };
 pub use github::GitHubExtension;
 pub use safe_outputs::SafeOutputsExtension;
@@ -679,6 +680,8 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
                 // configured and the contributor isn't explicitly
                 // disabled.
                 exec_context_pipeline_active: pipeline_contributor_will_activate(front_matter),
+                // CI-push contributor (Stage 3 — opt-in, default OFF).
+                exec_context_ci_push_active: ci_push_contributor_will_activate(front_matter),
                 pr_trigger_for_synth,
             }
         })),

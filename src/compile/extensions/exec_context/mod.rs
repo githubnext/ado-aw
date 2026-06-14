@@ -32,6 +32,7 @@
 //! container's env and never persisted to `.git/config`. See
 //! `pr.rs` for the in-step bearer wrapper.
 
+mod ci_push;
 mod contributor;
 mod manual;
 mod pipeline;
@@ -40,6 +41,7 @@ mod pr;
 use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 use crate::compile::types::{ExecutionContextConfig, FrontMatter};
 
+use ci_push::CiPushContextContributor;
 use contributor::{ContextContributor, Contributor};
 use manual::ManualContextContributor;
 use pipeline::PipelineContextContributor;
@@ -99,6 +101,18 @@ pub fn pipeline_contributor_will_activate(front_matter: &FrontMatter) -> bool {
         .as_ref()
         .unwrap_or(&default_cfg);
     pipeline_contributor_will_activate_with_cfg(cfg, front_matter)
+}
+
+/// Returns `true` iff the CI-push-context contributor will activate
+/// for the given front matter. Purely config-driven (opt-in,
+/// default OFF).
+pub fn ci_push_contributor_will_activate(front_matter: &FrontMatter) -> bool {
+    let default_cfg = ExecutionContextConfig::default();
+    let cfg = front_matter
+        .execution_context
+        .as_ref()
+        .unwrap_or(&default_cfg);
+    ci_push_contributor_will_activate_with_cfg(cfg, front_matter)
 }
 
 /// Variant that takes the resolved `ExecutionContextConfig` explicitly.
@@ -162,6 +176,22 @@ fn pipeline_contributor_will_activate_with_cfg(
     !matches!(pipeline_enabled, Some(false))
 }
 
+/// Whether the ci-push contributor will activate. Purely
+/// config-driven (opt-in, default OFF).
+///
+/// MAINTENANCE: this MUST stay in lock-step with
+/// `CiPushContextContributor::should_activate` (in `ci_push.rs`).
+fn ci_push_contributor_will_activate_with_cfg(
+    cfg: &ExecutionContextConfig,
+    _front_matter: &FrontMatter,
+) -> bool {
+    if !cfg.is_enabled() {
+        return false;
+    }
+    let ci_push_enabled = cfg.ci_push.as_ref().and_then(|c| c.enabled);
+    matches!(ci_push_enabled, Some(true))
+}
+
 /// Always-on execution-context extension.
 ///
 /// Owns the `aw-context/` precompute pipeline. Registered
@@ -223,7 +253,8 @@ impl ExecContextExtension {
         // would silently suppress the contributor's bash allow-list).
         let any_contributor_active = pr_contributor_will_activate_with_cfg(&config, front_matter)
             || manual_contributor_will_activate_with_cfg(&config, front_matter)
-            || pipeline_contributor_will_activate_with_cfg(&config, front_matter);
+            || pipeline_contributor_will_activate_with_cfg(&config, front_matter)
+            || ci_push_contributor_will_activate_with_cfg(&config, front_matter);
         let synthetic_pr_active = front_matter.is_synthetic_pr();
         Self {
             config,
@@ -247,25 +278,19 @@ impl ExecContextExtension {
         let pr_cfg = self.config.pr.clone().unwrap_or_default();
         let manual_cfg = self.config.manual.clone().unwrap_or_default();
         let pipeline_cfg = self.config.pipeline.clone().unwrap_or_default();
+        let ci_push_cfg = self.config.ci_push.clone().unwrap_or_default();
         // The PR contributor needs to know whether `mode: synthetic`
         // is on so it can emit coalesced SYSTEM_PULLREQUEST_* env vars
         // (real value preferred, synthPr output as fallback).
         let synthetic_pr_active = self.synthetic_pr_active;
         vec![
             Contributor::Pr(PrContextContributor::new(pr_cfg, synthetic_pr_active)),
-            // Manual contributor is constructed from a synthetic FrontMatter-like
-            // shape: it only needs the parameter names, captured into a
-            // local Vec when the extension was built. We avoid storing
-            // the full `FrontMatter` on the extension (it would force a
-            // lifetime parameter or a clone of the entire front matter).
             Contributor::Manual(ManualContextContributor::new_from_parts(
                 manual_cfg,
                 self.parameter_names.clone(),
             )),
-            // Pipeline contributor — its `should_activate` only needs
-            // the `CompileContext`'s front_matter.pipeline_trigger(),
-            // so it doesn't need any extra parts captured here.
             Contributor::Pipeline(PipelineContextContributor::new(pipeline_cfg)),
+            Contributor::CiPush(CiPushContextContributor::new(ci_push_cfg)),
         ]
     }
 
@@ -410,6 +435,7 @@ mod tests {
             }),
             manual: None,
                     pipeline: None,
+                    ci_push: None,
         };
         let fm = pr_triggered_front_matter();
         let ext = ExecContextExtension::new(cfg, &fm);
@@ -431,6 +457,7 @@ mod tests {
             }),
             manual: None,
                     pipeline: None,
+                    ci_push: None,
         };
         let fm = pr_triggered_front_matter();
         let ext = ExecContextExtension::new(cfg, &fm);
@@ -464,6 +491,7 @@ mod tests {
             }),
             manual: None,
                     pipeline: None,
+                    ci_push: None,
         };
         let fm = no_trigger_front_matter();
         let ext = ExecContextExtension::new(cfg, &fm);
@@ -482,6 +510,7 @@ mod tests {
             pr: None,
             manual: None,
                     pipeline: None,
+                    ci_push: None,
         };
         let fm = pr_triggered_front_matter();
         let ext = ExecContextExtension::new(cfg, &fm);
@@ -567,6 +596,7 @@ mod tests {
             pr: None,
             manual: Some(ManualContextConfig { enabled: Some(false), include_email: None }),
         pipeline: None,
+                    ci_push: None,
         };
         let ext = ExecContextExtension::new(cfg, &fm);
         let ctx = CompileContext::for_test(&fm);

@@ -63,13 +63,15 @@ pub(super) trait ContextContributor {
 /// Static-dispatch enum over all known contributors.
 ///
 /// Mirrors the `Extension` enum pattern in `extensions/mod.rs`. v1
-/// shipped `Pr`; Stage 1 adds `Manual`; Stage 2 adds `Pipeline`
-/// (plan.md). Adding a future variant requires only a new arm here
-/// and a registration in `ExecContextExtension::contributors()`.
+/// shipped `Pr`; Stage 1 adds `Manual`; Stage 2 adds `Pipeline`;
+/// Stage 3 adds `CiPush` (plan.md). Adding a future variant requires
+/// only a new arm here and a registration in
+/// `ExecContextExtension::contributors()`.
 pub(super) enum Contributor {
     Pr(super::pr::PrContextContributor),
     Manual(super::manual::ManualContextContributor),
     Pipeline(super::pipeline::PipelineContextContributor),
+    CiPush(super::ci_push::CiPushContextContributor),
 }
 
 impl ContextContributor for Contributor {
@@ -78,6 +80,7 @@ impl ContextContributor for Contributor {
             Contributor::Pr(c) => c.name(),
             Contributor::Manual(c) => c.name(),
             Contributor::Pipeline(c) => c.name(),
+            Contributor::CiPush(c) => c.name(),
         }
     }
     fn should_activate(&self, ctx: &CompileContext) -> bool {
@@ -85,6 +88,7 @@ impl ContextContributor for Contributor {
             Contributor::Pr(c) => c.should_activate(ctx),
             Contributor::Manual(c) => c.should_activate(ctx),
             Contributor::Pipeline(c) => c.should_activate(ctx),
+            Contributor::CiPush(c) => c.should_activate(ctx),
         }
     }
     fn prepare_step_typed(
@@ -95,6 +99,7 @@ impl ContextContributor for Contributor {
             Contributor::Pr(c) => c.prepare_step_typed(ctx),
             Contributor::Manual(c) => c.prepare_step_typed(ctx),
             Contributor::Pipeline(c) => c.prepare_step_typed(ctx),
+            Contributor::CiPush(c) => c.prepare_step_typed(ctx),
         }
     }
     fn bash_commands(&self) -> Vec<String> {
@@ -102,6 +107,7 @@ impl ContextContributor for Contributor {
             Contributor::Pr(c) => c.bash_commands(),
             Contributor::Manual(c) => c.bash_commands(),
             Contributor::Pipeline(c) => c.bash_commands(),
+            Contributor::CiPush(c) => c.bash_commands(),
         }
     }
 }
