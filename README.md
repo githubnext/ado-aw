@@ -601,6 +601,8 @@ index to jump to the right page.
 
 **Compiler internals & operations**
 
+- [`docs/ir.md`](docs/ir.md) — typed Azure DevOps pipeline IR (`Pipeline`,
+  jobs/stages/steps, output refs, graph pass, lowering, and target builders).
 - [`docs/cli.md`](docs/cli.md) — `ado-aw` CLI command and flag reference.
 - [`docs/mcp.md`](docs/mcp.md) — MCP server configuration (stdio containers,
   HTTP servers, env passthrough).
@@ -609,8 +611,6 @@ index to jump to the right page.
 - [`docs/network.md`](docs/network.md) — AWF network isolation, default
   allowed domains, ecosystem identifiers, blocking, and ADO `permissions:`
   service-connection model.
-- [`docs/template-markers.md`](docs/template-markers.md) — every `{{ marker }}`
-  in the base templates and how it is replaced.
 - [`docs/filter-ir.md`](docs/filter-ir.md) — filter expression IR for PR
   trigger filters and gate-step generation.
 - [`docs/codemods.md`](docs/codemods.md) — front-matter codemod framework
@@ -619,7 +619,7 @@ index to jump to the right page.
   (bundled TypeScript runtime helpers: `gate.js`, `import.js`,
   `exec-context-pr.js`, `exec-context-pr-synth.js`).
 - [`docs/extending.md`](docs/extending.md) — adding new CLI commands, compile
-  targets, front-matter fields, template markers, safe-output tools,
+  targets, front-matter fields, typed IR extensions, safe-output tools,
   first-class tools, and runtimes.
 - [`docs/local-development.md`](docs/local-development.md) — local development
   setup notes.
