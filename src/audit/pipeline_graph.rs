@@ -177,6 +177,21 @@ async fn read_source_from_aw_info(run_dir: &Path) -> Option<Result<String>> {
 ///   leading `~` (no directory traversal, no shell-style expansion).
 /// - Allowing absolute `.md` paths because legitimate compiled-
 ///   elsewhere workflows commonly carry an absolute `source`.
+///
+/// ## Residual risk
+///
+/// The `.md` extension check is the **primary gate** for absolute
+/// paths. A crafted `aw_info.json` carrying
+/// `"source": "/home/user/something.md"` will still reach
+/// `build_pipeline_ir`, which opens and reads the file. Because that
+/// function is read-only and fails gracefully on non-front-matter
+/// markdown, the practical blast radius is an unexpected parse error
+/// surfaced in the audit warnings — not code execution or
+/// credential exfiltration. **Do not weaken or remove the `.md`
+/// extension check** without also adding a containment check (e.g.
+/// canonicalize + prefix-against-cwd) at the same level; without it
+/// any future maintainer would silently re-open the
+/// arbitrary-file-read vector.
 async fn resolve_source_path(source: &str) -> Result<PathBuf> {
     let normalized = normalize_source_path(source);
     let path = PathBuf::from(&normalized);

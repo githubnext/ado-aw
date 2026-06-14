@@ -236,14 +236,23 @@ fn reachable_downstream_jobs(
 ///
 /// ## Coverage limitations
 ///
-/// The classifier only recognises canonical failure-bypass calls and
-/// will conservatively report `Skipped` for any condition that gates
-/// execution on a variable instead — for example
-/// `eq(variables['Agent.JobStatus'], 'Failed')` or
-/// `eq(dependencies.Setup.result, 'Failed')`. Treat the `Skipped`
-/// classification as a lower bound: a job may still execute at runtime
-/// via a variable-based escape hatch we cannot statically detect. The
-/// authoritative source remains the live ADO pipeline run.
+/// The classifier is a best-effort static analyser over the rendered
+/// condition string, not a semantic ADO expression evaluator. Known
+/// limitations:
+///
+/// - **Variable-based conditions** such as
+///   `eq(variables['Agent.JobStatus'], 'Failed')` or
+///   `eq(dependencies.Setup.result, 'Failed')` are conservatively
+///   reported as `Skipped`. Treat that result as a lower bound — a
+///   job may still execute at runtime via a variable-based escape
+///   hatch we cannot statically detect.
+/// - **String literals containing marker syntax** trigger a
+///   false-positive `RunsAnyway`: a condition like
+///   `eq(variables['result'], 'failed()')` would match the literal
+///   `failed()` substring even though the call is never invoked. ADO
+///   conditions are compiler-generated rather than raw user input, so
+///   this is an accepted residual gap; the authoritative source
+///   remains the live ADO pipeline run.
 fn classify_condition(condition: &Option<String>) -> WhatIfClassification {
     let Some(condition) = condition else {
         return WhatIfClassification::Skipped;

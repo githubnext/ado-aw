@@ -1445,6 +1445,12 @@ async fn main() -> Result<()> {
             })
             .await?;
             if had_errors {
+                // Intentional `exit(1)` (not a returned `Err`): mirrors
+                // how `tsc --noEmit` / `eslint` signal lint failure to
+                // CI, so callers can fail a pipeline step on the exit
+                // code without having to parse stderr. The async I/O
+                // resources used by `dispatch_lint` are runtime-managed
+                // and do not leak when we bypass `Drop` here.
                 std::process::exit(1);
             }
         }

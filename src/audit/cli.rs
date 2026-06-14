@@ -81,6 +81,16 @@ async fn fetch_audit_data_inner(opts: AuditOptions<'_>) -> Result<FetchAuditData
         // AuditData shape; tooling that diffs successive outputs would
         // otherwise observe drift between the saved file and the
         // in-memory result.
+        //
+        // NOTE on concurrency: two concurrent `ado-aw audit` runs for
+        // the same build id can race on this `save_run_summary` write.
+        // We do not take a filesystem lock — the failure path is
+        // recorded as a warning (see below) rather than aborting the
+        // audit, and the worst case is that one writer's recomputed
+        // snapshot overwrites the other's. Both writers derive from
+        // the same on-disk artifacts, so the resulting summary is
+        // still internally consistent; only the `processed_at`
+        // timestamp may flip between them.
         if audit != cached_audit_before_postprocess
             && let Err(error) = save_run_summary(
                 &run_dir,
