@@ -1297,6 +1297,7 @@ By threat:
                     unreliable: true,
                 }],
             }),
+            pipeline_graph: None,
             jobs: vec![
                 JobData {
                     name: "Agent".to_string(),
@@ -1305,6 +1306,7 @@ By threat:
                     duration: Some("2m 30s".to_string()),
                     started_at: Some("2026-05-21T12:01:00Z".to_string()),
                     finished_at: Some("2026-05-21T12:03:30Z".to_string()),
+                    ..Default::default()
                 },
                 JobData {
                     name: "Detection".to_string(),
@@ -1313,6 +1315,7 @@ By threat:
                     duration: Some("30s".to_string()),
                     started_at: Some("2026-05-21T12:03:30Z".to_string()),
                     finished_at: Some("2026-05-21T12:04:00Z".to_string()),
+                    ..Default::default()
                 },
                 JobData {
                     name: "SafeOutputs".to_string(),
@@ -1321,6 +1324,7 @@ By threat:
                     duration: Some("12s".to_string()),
                     started_at: Some("2026-05-21T12:04:00Z".to_string()),
                     finished_at: Some("2026-05-21T12:04:12Z".to_string()),
+                    ..Default::default()
                 },
             ],
             downloaded_files: vec![FileInfo {

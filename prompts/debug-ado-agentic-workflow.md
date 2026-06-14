@@ -79,6 +79,37 @@ The output JSON contains the full `AuditData` (see [What `ado-aw audit` extracts
 
 If the CLI is not available, fall through to the MCP-based steps below.
 
+#### 2a-prime-bis. Pair `audit` with the IR (when you have local CLI access)
+
+`ado-aw audit` answers "what happened at runtime?". `ado-aw inspect` /
+`graph` / `whatif` answer "what *should* happen, and what depends on
+what?". Pair them when an audit finding points at a specific job /
+step:
+
+```bash
+# Get the typed-IR summary for the source the build came from
+ado-aw inspect path/to/agent.md --json > ir.json
+
+# Print the resolved dependency graph (text, JSON, or Graphviz DOT)
+ado-aw graph dump path/to/agent.md --format text
+ado-aw graph dump path/to/agent.md --format dot | dot -Tsvg -o pipeline.svg
+```
+
+Use these to answer questions the audit alone cannot:
+
+- "Detection failed — which jobs were going to consume its output?"
+  → `ado-aw inspect <source> --json | jq '.graph.job_edges[] | select(.producer == "Detection")'`
+- "If `synthPr` failed, what skips downstream?"
+  → (when wired) `ado-aw whatif <source> --fail synthPr`
+- "Which step produced the empty output the agent step couldn't read?"
+  → `ado-aw inspect <source> --json` then locate the `env_refs` /
+    `outputs_needing_is_output` entry that matches.
+
+The IR view is **statically derived from the agent source**, so it
+reflects the pipeline shape the build was supposed to take. If the
+build's compiled `.lock.yml` diverged from what the current source
+would compile to, `ado-aw check <pipeline.lock.yml>` will catch it.
+
 #### 2a. Find the Pipeline Definition
 
 Use `mcp_ado_pipelines_get_build_definitions` to locate the pipeline by name or definition ID.

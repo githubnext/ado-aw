@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+use crate::compile::ir::summary::PipelineSummary;
+
 fn is_zero_u64(value: &u64) -> bool {
     *value == 0
 }
@@ -59,6 +61,9 @@ pub struct AuditData {
     /// MCP server reliability and call health derived from gateway logs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_server_health: Option<MCPServerHealth>,
+    /// Optional typed-IR graph correlation for the pipeline source that produced this build.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pipeline_graph: Option<PipelineGraphSection>,
     /// Job-level status data derived from the Azure DevOps build timeline.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub jobs: Vec<JobData>,
@@ -300,6 +305,16 @@ pub struct AuditEngineConfig {
     pub timeout_minutes: Option<u64>,
 }
 
+/// Typed-IR graph correlation derived from the source markdown for this audited run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PipelineGraphSection {
+    /// Source markdown path used to rebuild the typed IR.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source_path: String,
+    /// Full public pipeline summary, matching `ado-aw inspect --json`.
+    pub graph: PipelineSummary,
+}
+
 /// Job-level status information for one stage in the build timeline.
 ///
 /// This is derived from Azure DevOps timeline records for the audited build.
@@ -324,6 +339,35 @@ pub struct JobData {
     /// Job finish timestamp.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<String>,
+    /// Upstream job IDs from typed-IR graph correlation.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub upstream_jobs: Vec<String>,
+    /// Downstream job IDs from typed-IR graph correlation.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub downstream_jobs: Vec<String>,
+}
+
+impl JobData {
+    /// Returns true when this job ended in a failure-like state.
+    pub fn failed(&self) -> bool {
+        let result = self.result.as_deref().unwrap_or_default();
+        // Be defensive on US/UK spelling variants from upstream sources.
+        result.eq_ignore_ascii_case("failed")
+            || result.eq_ignore_ascii_case("canceled")
+            || result.eq_ignore_ascii_case("cancelled")
+            || self.status.eq_ignore_ascii_case("failed")
+            || self.status.eq_ignore_ascii_case("canceled")
+            || self.status.eq_ignore_ascii_case("cancelled")
+    }
+
+    /// Returns the best available status/result label for reporting.
+    pub fn classification(&self) -> String {
+        self.result
+            .as_deref()
+            .filter(|result| !result.trim().is_empty())
+            .unwrap_or(&self.status)
+            .to_string()
+    }
 }
 
 /// Metadata about a file downloaded while assembling the audit.
@@ -942,6 +986,7 @@ mod tests {
                     unreliable: true,
                 }],
             }),
+            pipeline_graph: None,
             jobs: vec![JobData {
                 name: String::from("Agent"),
                 status: String::from("completed"),
@@ -949,6 +994,7 @@ mod tests {
                 duration: Some(String::from("4m")),
                 started_at: Some(String::from("2026-05-21T12:01:00Z")),
                 finished_at: Some(String::from("2026-05-21T12:05:00Z")),
+                ..Default::default()
             }],
             downloaded_files: vec![FileInfo {
                 path: String::from("logs\\build-42\\agent_outputs_42\\otel.jsonl"),
