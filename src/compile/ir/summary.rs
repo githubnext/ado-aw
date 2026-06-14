@@ -15,8 +15,9 @@
 //! [`PipelineSummary::schema_version`] is pinned. Bump it whenever
 //! the JSON shape changes in a way a downstream consumer would
 //! notice (renamed field, removed variant, changed semantics).
-//! Additive changes — new optional fields, new enum variants in
-//! `unknown`-tolerant contexts — do not require a bump.
+//! Additive changes such as new optional fields do not require a bump.
+//! New enum variants currently require a schema-version bump so older
+//! consumers fail loudly instead of misinterpreting data.
 //!
 //! The summary is the **public** schema. The internal IR types
 //! (`super::Pipeline` and friends) are NOT public API and may change

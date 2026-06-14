@@ -347,6 +347,28 @@ pub struct JobData {
     pub downstream_jobs: Vec<String>,
 }
 
+impl JobData {
+    /// Returns true when this job ended in a failure-like state.
+    pub fn failed(&self) -> bool {
+        let result = self.result.as_deref().unwrap_or_default();
+        result.eq_ignore_ascii_case("failed")
+            || result.eq_ignore_ascii_case("canceled")
+            || result.eq_ignore_ascii_case("cancelled")
+            || self.status.eq_ignore_ascii_case("failed")
+            || self.status.eq_ignore_ascii_case("canceled")
+            || self.status.eq_ignore_ascii_case("cancelled")
+    }
+
+    /// Returns the best available status/result label for reporting.
+    pub fn classification(&self) -> String {
+        self.result
+            .as_deref()
+            .filter(|result| !result.trim().is_empty())
+            .unwrap_or(&self.status)
+            .to_string()
+    }
+}
+
 /// Metadata about a file downloaded while assembling the audit.
 ///
 /// These rows are produced by the artifact download phase for traceability and caching.

@@ -289,8 +289,9 @@ pipeline, `src/compile/ir/summary.rs` defines a parallel
 `PipelineSummary::schema_version` (currently `1`) is the public schema
 version. **Bump** it when the JSON shape changes in a way a downstream
 consumer would notice (renamed field, removed variant, changed
-semantics). Additive changes (new optional fields, new enum variants
-in `unknown`-tolerant contexts) do not require a bump.
+semantics). Additive changes like new optional fields do not require a
+bump. New enum variants currently do require a schema-version bump
+because the serialized enums do not have catch-all `Unknown` variants.
 
 The summary is the public schema. Internal IR types may change freely
 without bumping the summary version, as long as the summary lowering

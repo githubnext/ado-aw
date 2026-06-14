@@ -4,7 +4,7 @@
 //! trace, and audit queries over stdio. It intentionally has no workspace
 //! bounding directory: callers run it locally as the invoking user.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Result;
 use log::{error, info};
@@ -264,9 +264,10 @@ impl AuthorMcp {
         params: Parameters<AuditBuildParams>,
     ) -> Result<CallToolResult, McpError> {
         let artifacts = params.0.artifacts.as_deref();
+        let output = std::env::temp_dir().join("ado-aw").join("audit");
         let audit = crate::audit::fetch_audit_data(crate::audit::AuditOptions {
             build_id_or_url: &params.0.build_id_or_url,
-            output: Path::new("./logs"),
+            output: &output,
             json: true,
             org: params.0.org.as_deref(),
             project: params.0.project.as_deref(),
