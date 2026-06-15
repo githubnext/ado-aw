@@ -6,11 +6,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
-use ado_aw_derive::SanitizeConfig;
+use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::validate::reject_pipeline_injection;
+use ado_aw_derive::SanitizeConfig;
 use anyhow::{Context, ensure};
 
 /// Parameters for adding a comment thread on a pull request
@@ -74,10 +74,7 @@ impl Validate for AddPrCommentParams {
             );
         }
         if self.start_line.is_some() {
-            ensure!(
-                self.line.is_some(),
-                "start_line requires line to be set"
-            );
+            ensure!(self.line.is_some(), "start_line requires line to be set");
             if let (Some(start), Some(end)) = (self.start_line, self.line) {
                 ensure!(
                     start < end,
@@ -117,9 +114,10 @@ impl SanitizeContent for AddPrCommentResult {
         self.repository = sanitize_config(&self.repository);
         // Strip control characters from remaining structural fields for defense-in-depth
         self.status = self.status.chars().filter(|c| !c.is_control()).collect();
-        self.file_path = self.file_path.as_ref().map(|fp| {
-            fp.chars().filter(|c| !c.is_control()).collect()
-        });
+        self.file_path = self
+            .file_path
+            .as_ref()
+            .map(|fp| fp.chars().filter(|c| !c.is_control()).collect());
     }
 }
 
@@ -153,7 +151,10 @@ pub struct AddPrCommentConfig {
     #[serde(default, rename = "allowed-statuses")]
     pub allowed_statuses: Vec<String>,
     /// Whether to include agent execution stats in the output (default: true).
-    #[serde(default = "crate::agent_stats::default_include_stats", rename = "include-stats")]
+    #[serde(
+        default = "crate::agent_stats::default_include_stats",
+        rename = "include-stats"
+    )]
     pub include_stats: bool,
 }
 
@@ -304,11 +305,8 @@ impl Executor for AddPrCommentResult {
             Some(prefix) => format!("{}{}", prefix, self.content),
             None => self.content.clone(),
         };
-        let comment_body = crate::agent_stats::append_stats_to_body(
-            &comment_body,
-            ctx,
-            config.include_stats,
-        );
+        let comment_body =
+            crate::agent_stats::append_stats_to_body(&comment_body, ctx, config.include_stats);
 
         // Build the API URL
         let url = format!(
@@ -594,7 +592,15 @@ allowed-statuses:
 
     #[test]
     fn test_validation_accepts_valid_statuses() {
-        for s in &["active", "fixed", "wont-fix", "closed", "by-design", "Active", "WontFix"] {
+        for s in &[
+            "active",
+            "fixed",
+            "wont-fix",
+            "closed",
+            "by-design",
+            "Active",
+            "WontFix",
+        ] {
             let params = AddPrCommentParams {
                 pull_request_id: 42,
                 content: "This is a valid comment body text.".to_string(),

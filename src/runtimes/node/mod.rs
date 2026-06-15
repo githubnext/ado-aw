@@ -150,9 +150,7 @@ pub fn generate_npm_authenticate() -> String {
 /// npmjs registry) only when one doesn't already exist, preserving any
 /// repo-checked-in `.npmrc`.
 pub fn generate_ensure_npmrc(config: &NodeRuntimeConfig) -> String {
-    let registry = config
-        .feed_url()
-        .unwrap_or("https://registry.npmjs.org/");
+    let registry = config.feed_url().unwrap_or("https://registry.npmjs.org/");
 
     format!(
         r#"- bash: |

@@ -73,15 +73,17 @@ fn validate_memory_path(relative_path: &Path) -> Result<()> {
 
     // Check for path traversal
     for component in path_str.split(['/', '\\']) {
-        ensure!(component != "..", "Path traversal not allowed: {}", path_str);
+        ensure!(
+            component != "..",
+            "Path traversal not allowed: {}",
+            path_str
+        );
     }
 
     // Check for .git directory
     let lower = path_str.to_lowercase();
     ensure!(
-        !lower.starts_with(".git/")
-            && !lower.starts_with(".git\\")
-            && lower != ".git",
+        !lower.starts_with(".git/") && !lower.starts_with(".git\\") && lower != ".git",
         ".git directory not allowed: {}",
         path_str
     );
@@ -95,8 +97,20 @@ async fn validate_memory_file_content(path: &Path) -> Result<bool> {
     let is_text = match path.extension().and_then(|e| e.to_str()) {
         Some(ext) => matches!(
             ext.to_lowercase().as_str(),
-            "md" | "txt" | "json" | "yaml" | "yml" | "toml" | "xml" | "csv" | "log" | "sh"
-                | "ps1" | "py" | "rs" | "js" | "ts"
+            "md" | "txt"
+                | "json"
+                | "yaml"
+                | "yml"
+                | "toml"
+                | "xml"
+                | "csv"
+                | "log"
+                | "sh"
+                | "ps1"
+                | "py"
+                | "rs"
+                | "js"
+                | "ts"
         ),
         None => true, // No extension = assume text
     };
@@ -277,10 +291,7 @@ pub async fn process_agent_memory(
         Ok(_) => {} // real directory, proceed
     }
 
-    info!(
-        "Processing agent memory from: {}",
-        memory_source.display()
-    );
+    info!("Processing agent memory from: {}", memory_source.display());
 
     let files = collect_files(&memory_source, &memory_source).await?;
 
@@ -463,8 +474,20 @@ mod tests {
         assert!(result.success);
         assert!(result.message.contains("2 file(s) copied"));
 
-        assert!(output.path().join(AGENT_MEMORY_DIR).join("notes.md").exists());
-        assert!(output.path().join(AGENT_MEMORY_DIR).join("data.json").exists());
+        assert!(
+            output
+                .path()
+                .join(AGENT_MEMORY_DIR)
+                .join("notes.md")
+                .exists()
+        );
+        assert!(
+            output
+                .path()
+                .join(AGENT_MEMORY_DIR)
+                .join("data.json")
+                .exists()
+        );
     }
 
     #[tokio::test]
@@ -486,8 +509,20 @@ mod tests {
         assert!(result.message.contains("1 file(s) copied"));
         assert!(result.message.contains("1 skipped"));
 
-        assert!(output.path().join(AGENT_MEMORY_DIR).join("notes.md").exists());
-        assert!(!output.path().join(AGENT_MEMORY_DIR).join("script.exe").exists());
+        assert!(
+            output
+                .path()
+                .join(AGENT_MEMORY_DIR)
+                .join("notes.md")
+                .exists()
+        );
+        assert!(
+            !output
+                .path()
+                .join(AGENT_MEMORY_DIR)
+                .join("script.exe")
+                .exists()
+        );
     }
 
     #[tokio::test]
@@ -528,8 +563,20 @@ mod tests {
         assert!(result.message.contains("1 file(s) copied"));
         assert!(result.message.contains("1 skipped"));
 
-        assert!(output.path().join(AGENT_MEMORY_DIR).join("safe.md").exists());
-        assert!(!output.path().join(AGENT_MEMORY_DIR).join("poisoned.md").exists());
+        assert!(
+            output
+                .path()
+                .join(AGENT_MEMORY_DIR)
+                .join("safe.md")
+                .exists()
+        );
+        assert!(
+            !output
+                .path()
+                .join(AGENT_MEMORY_DIR)
+                .join("poisoned.md")
+                .exists()
+        );
     }
 
     #[tokio::test]
@@ -674,8 +721,14 @@ allowed-extensions:
         );
 
         let out_memory = output.path().join(AGENT_MEMORY_DIR);
-        assert!(out_memory.join("notes.md").exists(), "notes.md should be copied");
-        assert!(!out_memory.join("env.txt").exists(), "symlink target must not be copied");
+        assert!(
+            out_memory.join("notes.md").exists(),
+            "notes.md should be copied"
+        );
+        assert!(
+            !out_memory.join("env.txt").exists(),
+            "symlink target must not be copied"
+        );
 
         // The sensitive contents must not appear in the output at all
         let out_notes = std::fs::read_to_string(out_memory.join("notes.md")).unwrap();
@@ -752,6 +805,12 @@ allowed-extensions:
             result.message
         );
         // Sensitive file must not appear in output
-        assert!(!output.path().join(AGENT_MEMORY_DIR).join("environ").exists());
+        assert!(
+            !output
+                .path()
+                .join(AGENT_MEMORY_DIR)
+                .join("environ")
+                .exists()
+        );
     }
 }

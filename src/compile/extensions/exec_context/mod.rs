@@ -591,13 +591,16 @@ mod tests {
     fn required_bash_commands_matches_pr_contributor_active_explicit_enabled() {
         let cfg = ExecutionContextConfig {
             enabled: None,
-            pr: Some(PrContextConfig { enabled: Some(true), checks: None }),
+            pr: Some(PrContextConfig {
+                enabled: Some(true),
+                checks: None,
+            }),
             manual: None,
-                    pipeline: None,
-                    ci_push: None,
-                    workitem: None,
-                    schedule: None,
-                    repo: None,
+            pipeline: None,
+            ci_push: None,
+            workitem: None,
+            schedule: None,
+            repo: None,
         };
         let fm = pr_triggered_front_matter();
         let ext = ExecContextExtension::new(cfg, &fm);
@@ -614,13 +617,16 @@ mod tests {
     fn required_bash_commands_suppressed_when_pr_disabled() {
         let cfg = ExecutionContextConfig {
             enabled: None,
-            pr: Some(PrContextConfig { enabled: Some(false), checks: None }),
+            pr: Some(PrContextConfig {
+                enabled: Some(false),
+                checks: None,
+            }),
             manual: None,
-                    pipeline: None,
-                    ci_push: None,
-                    workitem: None,
-                    schedule: None,
-                    repo: None,
+            pipeline: None,
+            ci_push: None,
+            workitem: None,
+            schedule: None,
+            repo: None,
         };
         let fm = pr_triggered_front_matter();
         let ext = ExecContextExtension::new(cfg, &fm);
@@ -649,13 +655,16 @@ mod tests {
     fn required_bash_commands_suppressed_when_enabled_without_on_pr() {
         let cfg = ExecutionContextConfig {
             enabled: None,
-            pr: Some(PrContextConfig { enabled: Some(true), checks: None }),
+            pr: Some(PrContextConfig {
+                enabled: Some(true),
+                checks: None,
+            }),
             manual: None,
-                    pipeline: None,
-                    ci_push: None,
-                    workitem: None,
-                    schedule: None,
-                    repo: None,
+            pipeline: None,
+            ci_push: None,
+            workitem: None,
+            schedule: None,
+            repo: None,
         };
         let fm = no_trigger_front_matter();
         let ext = ExecContextExtension::new(cfg, &fm);
@@ -673,11 +682,11 @@ mod tests {
             enabled: Some(false),
             pr: None,
             manual: None,
-                    pipeline: None,
-                    ci_push: None,
-                    workitem: None,
-                    schedule: None,
-                    repo: None,
+            pipeline: None,
+            ci_push: None,
+            workitem: None,
+            schedule: None,
+            repo: None,
         };
         let fm = pr_triggered_front_matter();
         let ext = ExecContextExtension::new(cfg, &fm);
@@ -761,7 +770,10 @@ mod tests {
         let cfg = ExecutionContextConfig {
             enabled: None,
             pr: None,
-            manual: Some(ManualContextConfig { enabled: Some(false), include_email: None }),
+            manual: Some(ManualContextConfig {
+                enabled: Some(false),
+                include_email: None,
+            }),
             pipeline: None,
             ci_push: None,
             workitem: None,
@@ -794,16 +806,23 @@ mod tests {
         );
         let cfg = ExecutionContextConfig {
             enabled: None,
-            pr: Some(PrContextConfig { enabled: Some(true), checks: None }),
+            pr: Some(PrContextConfig {
+                enabled: Some(true),
+                checks: None,
+            }),
             manual: None,
             pipeline: None,
-            ci_push: Some(CiPushContextConfig { enabled: Some(true) }),
+            ci_push: Some(CiPushContextConfig {
+                enabled: Some(true),
+            }),
             workitem: Some(WorkitemContextConfig {
                 enabled: Some(true),
                 max_items: None,
                 max_body_kb: None,
             }),
-            schedule: Some(ScheduleContextConfig { enabled: Some(true) }),
+            schedule: Some(ScheduleContextConfig {
+                enabled: Some(true),
+            }),
             repo: Some(RepoContextConfig {
                 enabled: Some(true),
                 conventions: None,
@@ -834,9 +853,8 @@ mod tests {
     #[test]
     fn prepare_step_ordering_is_stable_and_canonical() {
         use crate::compile::types::{
-            CiPushContextConfig, ManualContextConfig, PipelineContextConfig,
-            PrChecksContextConfig, PrContextConfig, RepoContextConfig,
-            ScheduleContextConfig, WorkitemContextConfig,
+            CiPushContextConfig, ManualContextConfig, PipelineContextConfig, PrChecksContextConfig,
+            PrContextConfig, RepoContextConfig, ScheduleContextConfig, WorkitemContextConfig,
         };
         // Front matter that triggers as many contributors as possible.
         let fm = parse_fm(
@@ -846,20 +864,28 @@ mod tests {
             enabled: None,
             pr: Some(PrContextConfig {
                 enabled: Some(true),
-                checks: Some(PrChecksContextConfig { enabled: Some(true) }),
+                checks: Some(PrChecksContextConfig {
+                    enabled: Some(true),
+                }),
             }),
             manual: Some(ManualContextConfig {
                 enabled: Some(true),
                 include_email: None,
             }),
-            pipeline: Some(PipelineContextConfig { enabled: Some(true) }),
-            ci_push: Some(CiPushContextConfig { enabled: Some(true) }),
+            pipeline: Some(PipelineContextConfig {
+                enabled: Some(true),
+            }),
+            ci_push: Some(CiPushContextConfig {
+                enabled: Some(true),
+            }),
             workitem: Some(WorkitemContextConfig {
                 enabled: Some(true),
                 max_items: None,
                 max_body_kb: None,
             }),
-            schedule: Some(ScheduleContextConfig { enabled: Some(true) }),
+            schedule: Some(ScheduleContextConfig {
+                enabled: Some(true),
+            }),
             repo: Some(RepoContextConfig {
                 enabled: Some(true),
                 conventions: None,
@@ -931,8 +957,8 @@ mod tests {
                 max_items: None,
                 max_body_kb: None,
             }),
-        schedule: None,
-                    repo: None,
+            schedule: None,
+            repo: None,
         };
         let ext = ExecContextExtension::new(cfg, &fm);
         // Force synthetic_pr_active so the unified `AW_PR_*` macros

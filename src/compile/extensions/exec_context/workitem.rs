@@ -131,10 +131,7 @@ impl ContextContributor for WorkitemContextContributor {
         // selection — when synth is active the PR id comes from the
         // hoisted `AW_PR_ID` Agent-job variable.
         let (pr_id_env, condition) = if self.synthetic_pr_active {
-            (
-                EnvValue::pipeline_var("AW_PR_ID"),
-                Condition::Succeeded,
-            )
+            (EnvValue::pipeline_var("AW_PR_ID"), Condition::Succeeded)
         } else {
             (
                 EnvValue::ado_macro("System.PullRequest.PullRequestId")?,
@@ -154,9 +151,7 @@ impl ContextContributor for WorkitemContextContributor {
         let max_items = self.config.max_items_resolved();
         let max_body_kb = self.config.max_body_kb_resolved();
 
-        let script = format!(
-            "set -euo pipefail\n{prelude}node '{EXEC_CONTEXT_WORKITEM_PATH}'\n"
-        );
+        let script = format!("set -euo pipefail\n{prelude}node '{EXEC_CONTEXT_WORKITEM_PATH}'\n");
         let step = BashStep::new(
             "Stage workitem execution context (aw-context/workitem/*)",
             script,
@@ -369,7 +364,10 @@ mod tests {
         }
         assert!(matches!(bash.condition, Some(Condition::Succeeded)));
         // Bash gate present.
-        assert!(bash.script.contains("if [ -z \"$SYSTEM_PULLREQUEST_PULLREQUESTID\" ]"));
+        assert!(
+            bash.script
+                .contains("if [ -z \"$SYSTEM_PULLREQUEST_PULLREQUESTID\" ]")
+        );
     }
 
     #[test]

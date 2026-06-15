@@ -137,7 +137,11 @@ impl std::fmt::Debug for AuditBuildParams {
 }
 
 fn redacted_pat(pat: &Option<String>) -> &'static str {
-    if pat.is_some() { "<redacted>" } else { "<none>" }
+    if pat.is_some() {
+        "<redacted>"
+    } else {
+        "<none>"
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -322,15 +326,17 @@ impl AuthorMcp {
         // the *same* build cannot race on partially-written artifacts.
         let shared_root = crate::audit::default_cache_root();
         let invocation_tempdir = if no_cache {
-            Some(tempfile::Builder::new()
-                .prefix("ado-aw-mcp-audit-")
-                .tempdir()
-                .map_err(|err| {
-                    McpError::internal_error(
-                        format!("failed to create temp dir for no-cache audit: {err}"),
-                        None,
-                    )
-                })?)
+            Some(
+                tempfile::Builder::new()
+                    .prefix("ado-aw-mcp-audit-")
+                    .tempdir()
+                    .map_err(|err| {
+                        McpError::internal_error(
+                            format!("failed to create temp dir for no-cache audit: {err}"),
+                            None,
+                        )
+                    })?,
+            )
         } else {
             None
         };

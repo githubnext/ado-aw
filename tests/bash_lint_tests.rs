@@ -111,14 +111,14 @@ const REQUIRED_STEP_DISPLAY_NAMES: &[&str] = &[
     "Verify MCP backends",       // src/compile/common.rs (--debug-pipeline only)
     "Verify pipeline integrity", // src/compile/common.rs generate_integrity_check
     "Resolve runtime imports (agent prompt)", // src/compile/extensions/ado_script.rs resolver_step()
-    "Output copilot version",                 // src/engine.rs (copilot_install_from_nuget + copilot_install_from_github_release)
-    "Add copilot to PATH",                    // src/engine.rs copilot_install_from_nuget (1ES path)
-    "Resolve ADO organization",               // src/engine.rs copilot_install_from_nuget (1ES, no org)
-    "Append Node prompt",   // src/runtimes/node/extension.rs via wrap_prompt_append("Node")
-    "Append dotnet prompt", // src/runtimes/dotnet/extension.rs via wrap_prompt_append("dotnet")
+    "Output copilot version", // src/engine.rs (copilot_install_from_nuget + copilot_install_from_github_release)
+    "Add copilot to PATH",    // src/engine.rs copilot_install_from_nuget (1ES path)
+    "Resolve ADO organization", // src/engine.rs copilot_install_from_nuget (1ES, no org)
+    "Append Node prompt",     // src/runtimes/node/extension.rs via wrap_prompt_append("Node")
+    "Append dotnet prompt",   // src/runtimes/dotnet/extension.rs via wrap_prompt_append("dotnet")
     "Detect Azure CLI on host (for AWF mount)", // src/compile/extensions/azure_cli.rs detection_step()
     "Append Azure CLI prompt", // src/compile/extensions/azure_cli.rs conditional prompt-append step
-    "ado-aw",               // src/compile/extensions/ado_aw_marker.rs metadata marker step
+    "ado-aw",                  // src/compile/extensions/ado_aw_marker.rs metadata marker step
     "Stage PR execution context (aw-context/pr/*)", // src/compile/extensions/exec_context/pr.rs
     "Stage workitem execution context (aw-context/workitem/*)", // src/compile/extensions/exec_context/workitem.rs (activated by PR trigger)
     "Resolve synthetic PR context", // src/compile/extensions/ado_script.rs synthetic_pr_step()

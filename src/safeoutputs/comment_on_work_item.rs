@@ -6,10 +6,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
-use ado_aw_derive::SanitizeConfig;
+use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use ado_aw_derive::SanitizeConfig;
 use anyhow::{Context, ensure};
 
 /// Parameters for commenting on a work item
@@ -102,7 +102,10 @@ pub struct CommentOnWorkItemConfig {
     pub target: Option<CommentTarget>,
 
     /// Whether to include agent execution stats in the comment (default: true).
-    #[serde(default = "crate::agent_stats::default_include_stats", rename = "include-stats")]
+    #[serde(
+        default = "crate::agent_stats::default_include_stats",
+        rename = "include-stats"
+    )]
     pub include_stats: bool,
 }
 
@@ -215,10 +218,7 @@ impl Executor for CommentOnWorkItemResult {
         // Validate work item ID against target policy
         match target.allows_id(self.work_item_id) {
             Some(true) => {
-                debug!(
-                    "Work item #{} allowed by target policy",
-                    self.work_item_id
-                );
+                debug!("Work item #{} allowed by target policy", self.work_item_id);
             }
             Some(false) => {
                 return Ok(ExecutionResult::failure(format!(
@@ -232,9 +232,9 @@ impl Executor for CommentOnWorkItemResult {
                 // and area_path_prefix returns Some for exactly that case.
                 let prefix = match target.area_path_prefix() {
                     Some(p) => p,
-                    None => unreachable!(
-                        "allows_id returned None but area_path_prefix is also None"
-                    ),
+                    None => {
+                        unreachable!("allows_id returned None but area_path_prefix is also None")
+                    }
                 };
                 debug!(
                     "Validating area path for work item #{} against prefix '{}'",
@@ -249,9 +249,8 @@ impl Executor for CommentOnWorkItemResult {
                         // doesn't accidentally match "4x4Production".
                         let ap = area_path.to_lowercase();
                         let pf = prefix.to_lowercase();
-                        let is_match = ap == pf
-                            || (ap.starts_with(&*pf)
-                                && ap[pf.len()..].starts_with('\\'));
+                        let is_match =
+                            ap == pf || (ap.starts_with(&*pf) && ap[pf.len()..].starts_with('\\'));
                         if !is_match {
                             return Ok(ExecutionResult::failure(format!(
                                 "Work item #{} has area path '{}' which is not under allowed prefix '{}'",
@@ -280,11 +279,8 @@ impl Executor for CommentOnWorkItemResult {
         );
         debug!("API URL: {}", url);
 
-        let body_with_stats = crate::agent_stats::append_stats_to_body(
-            &self.body,
-            ctx,
-            config.include_stats,
-        );
+        let body_with_stats =
+            crate::agent_stats::append_stats_to_body(&self.body, ctx, config.include_stats);
         let comment_body = serde_json::json!({
             "text": body_with_stats,
         });
@@ -306,10 +302,7 @@ impl Executor for CommentOnWorkItemResult {
                 .context("Failed to parse response JSON")?;
 
             let comment_id = body.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
-            let comment_url = body
-                .get("url")
-                .and_then(|h| h.as_str())
-                .unwrap_or("");
+            let comment_url = body.get("url").and_then(|h| h.as_str()).unwrap_or("");
 
             info!(
                 "Comment added to work item #{}: comment #{}",
@@ -489,6 +482,4 @@ max: 3
         let config: CommentOnWorkItemConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.target.is_none());
     }
-
 }
-

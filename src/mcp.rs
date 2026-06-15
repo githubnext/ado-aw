@@ -9,30 +9,22 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
-use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::safeoutputs::{
-    AddBuildTagParams, AddBuildTagResult,
-    AddPrCommentParams, AddPrCommentResult,
-    CommentOnWorkItemParams, CommentOnWorkItemResult,
-    CreateBranchParams, CreateBranchResult,
-    CreateGitTagParams, CreateGitTagResult,
-    CreateIssueParams, CreateIssueResult,
-    CreatePrParams, CreatePrResult, CreateWikiPageParams, CreateWikiPageResult,
-    CreateWorkItemParams, CreateWorkItemResult,
-    LinkWorkItemsParams, LinkWorkItemsResult,
-    ReplyToPrCommentParams, ReplyToPrCommentResult,
-    ReportIncompleteParams, ReportIncompleteResult,
-    ResolvePrThreadParams, ResolvePrThreadResult,
-    UpdateWikiPageParams, UpdateWikiPageResult, MissingDataParams, MissingDataResult,
-    MissingToolParams, MissingToolResult, NoopParams, NoopResult, QueueBuildParams,
-    QueueBuildResult, SubmitPrReviewParams, SubmitPrReviewResult, ToolResult,
-    UpdatePrParams, UpdatePrResult,
-    UpdateWorkItemParams, UpdateWorkItemResult,
-    UploadBuildAttachmentParams, UploadBuildAttachmentResult, DEFAULT_MAX_FILE_SIZE,
-    UploadPipelineArtifactParams, UploadPipelineArtifactResult, PIPELINE_ARTIFACT_DEFAULT_MAX_FILE_SIZE,
-    UploadWorkitemAttachmentParams, UploadWorkitemAttachmentResult,
-    anyhow_to_mcp_error,
+    AddBuildTagParams, AddBuildTagResult, AddPrCommentParams, AddPrCommentResult,
+    CommentOnWorkItemParams, CommentOnWorkItemResult, CreateBranchParams, CreateBranchResult,
+    CreateGitTagParams, CreateGitTagResult, CreateIssueParams, CreateIssueResult, CreatePrParams,
+    CreatePrResult, CreateWikiPageParams, CreateWikiPageResult, CreateWorkItemParams,
+    CreateWorkItemResult, DEFAULT_MAX_FILE_SIZE, LinkWorkItemsParams, LinkWorkItemsResult,
+    MissingDataParams, MissingDataResult, MissingToolParams, MissingToolResult, NoopParams,
+    NoopResult, PIPELINE_ARTIFACT_DEFAULT_MAX_FILE_SIZE, QueueBuildParams, QueueBuildResult,
+    ReplyToPrCommentParams, ReplyToPrCommentResult, ReportIncompleteParams, ReportIncompleteResult,
+    ResolvePrThreadParams, ResolvePrThreadResult, SubmitPrReviewParams, SubmitPrReviewResult,
+    ToolResult, UpdatePrParams, UpdatePrResult, UpdateWikiPageParams, UpdateWikiPageResult,
+    UpdateWorkItemParams, UpdateWorkItemResult, UploadBuildAttachmentParams,
+    UploadBuildAttachmentResult, UploadPipelineArtifactParams, UploadPipelineArtifactResult,
+    UploadWorkitemAttachmentParams, UploadWorkitemAttachmentResult, anyhow_to_mcp_error,
 };
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 
 /// Sanitize a title into a safe branch name slug.
 /// Only allows alphanumeric characters and dashes, collapses multiple dashes,
@@ -157,7 +149,11 @@ impl SafeOutputs {
         //     reachable only when explicitly listed in `enabled_tools`.
         //   * Everything else — permissive default when `enabled_tools` is
         //     `None`; otherwise filtered against the explicit allowlist.
-        let all_tools: Vec<String> = tool_router.list_all().iter().map(|t| t.name.to_string()).collect();
+        let all_tools: Vec<String> = tool_router
+            .list_all()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
         let total = all_tools.len();
         let explicit_filter = enabled_tools.is_some();
         for tool_name in &all_tools {
@@ -185,15 +181,31 @@ impl SafeOutputs {
         if let Some(enabled) = enabled_tools {
             for name in enabled {
                 if !all_tools.iter().any(|t| t == name) {
-                    warn!("Enabled-tools entry '{}' has no matching route (ignored)", name);
+                    warn!(
+                        "Enabled-tools entry '{}' has no matching route (ignored)",
+                        name
+                    );
                 }
             }
         }
-        let remaining: Vec<String> = tool_router.list_all().iter().map(|t| t.name.to_string()).collect();
+        let remaining: Vec<String> = tool_router
+            .list_all()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
         if explicit_filter {
-            info!("Tool filtering applied: {} of {} tools enabled: {:?}", remaining.len(), total, remaining);
+            info!(
+                "Tool filtering applied: {} of {} tools enabled: {:?}",
+                remaining.len(),
+                total,
+                remaining
+            );
         } else {
-            info!("Default tool exposure: {} of {} tools served (debug-only stripped)", remaining.len(), total);
+            info!(
+                "Default tool exposure: {} of {} tools served (debug-only stripped)",
+                remaining.len(),
+                total
+            );
         }
 
         Ok(Self {
@@ -251,9 +263,7 @@ impl SafeOutputs {
             .current_dir(&git_dir)
             .output()
             .await
-            .map_err(|e| {
-                anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git status: {}", e))
-            })?;
+            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git status: {}", e)))?;
 
         if !status_output.status.success() {
             return Err(anyhow_to_mcp_error(anyhow::anyhow!(
@@ -296,18 +306,21 @@ impl SafeOutputs {
             // Create a temporary commit with git identity flags to avoid config dependency
             let commit_output = Command::new("git")
                 .args([
-                    "-c", "user.email=agent@ado-aw",
-                    "-c", "user.name=ADO Agent",
-                    "commit", "-m", "agent changes", "--allow-empty", "--no-verify",
+                    "-c",
+                    "user.email=agent@ado-aw",
+                    "-c",
+                    "user.name=ADO Agent",
+                    "commit",
+                    "-m",
+                    "agent changes",
+                    "--allow-empty",
+                    "--no-verify",
                 ])
                 .current_dir(&git_dir)
                 .output()
                 .await
                 .map_err(|e| {
-                    anyhow_to_mcp_error(anyhow::anyhow!(
-                        "Failed to create temporary commit: {}",
-                        e
-                    ))
+                    anyhow_to_mcp_error(anyhow::anyhow!("Failed to create temporary commit: {}", e))
                 })?;
 
             if !commit_output.status.success() {
@@ -584,7 +597,10 @@ impl SafeOutputs {
         Ok(CallToolResult::success(vec![]))
     }
 
-    #[tool(name = "create-work-item", description = "Create an azure devops work item")]
+    #[tool(
+        name = "create-work-item",
+        description = "Create an azure devops work item"
+    )]
     async fn create_work_item(
         &self,
         params: Parameters<CreateWorkItemParams>,
@@ -650,8 +666,9 @@ pipeline configuration."
         let mut sanitized = params.0;
         sanitized.body = sanitize_text(&sanitized.body);
         let result: CommentOnWorkItemResult = sanitized.try_into()?;
-        self.write_safe_output_file(&result).await
-            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        self.write_safe_output_file(&result).await.map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
+        })?;
         info!("Comment queued for work item #{}", result.work_item_id);
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Comment queued for work item #{}. The comment will be posted during safe output processing.",
@@ -675,8 +692,9 @@ fields you want to update."
         let mut result: UpdateWorkItemResult = params.0.try_into()?;
         // Sanitize before persisting to NDJSON (defense-in-depth; Stage 3 sanitizes again)
         result.sanitize_content_fields();
-        self.write_safe_output_file(&result).await
-            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        self.write_safe_output_file(&result).await.map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
+        })?;
         info!("Work item update queued for #{}", result.id);
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Work item #{} update queued. Changes will be applied during safe output processing.",
@@ -730,8 +748,7 @@ Use 'self' for the pipeline's own repository, or a repository alias from the che
             })?;
 
         // Compute SHA-256 of the patch for cross-stage integrity verification.
-        let patch_sha256 =
-            crate::hash::sha256_hex(patch_content.as_bytes());
+        let patch_sha256 = crate::hash::sha256_hex(patch_content.as_bytes());
 
         // Generate source branch name from sanitized title + short unique suffix
         let title_slug = slugify_title(&sanitized.title);
@@ -855,8 +872,9 @@ The comment will be posted during safe output processing."
         let mut sanitized = params.0;
         sanitized.content = sanitize_text(&sanitized.content);
         let result: AddPrCommentResult = sanitized.try_into()?;
-        self.write_safe_output_file(&result).await
-            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        self.write_safe_output_file(&result).await.map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
+        })?;
         info!("PR comment queued for PR #{}", result.pull_request_id);
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Comment queued for PR #{}. The comment will be posted during safe output processing.",
@@ -881,8 +899,9 @@ The link will be created during safe output processing."
         let mut sanitized = params.0;
         sanitized.comment = sanitized.comment.map(|c| sanitize_text(&c));
         let result: LinkWorkItemsResult = sanitized.try_into()?;
-        self.write_safe_output_file(&result).await
-            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        self.write_safe_output_file(&result).await.map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
+        })?;
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Link queued: work item #{} → #{} ({}). The link will be created during safe output processing.",
             result.source_id, result.target_id, result.link_type
@@ -906,8 +925,9 @@ and template parameters."
         let mut sanitized = params.0;
         sanitized.reason = sanitized.reason.map(|r| sanitize_text(&r));
         let result: QueueBuildResult = sanitized.try_into()?;
-        self.write_safe_output_file(&result).await
-            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        self.write_safe_output_file(&result).await.map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
+        })?;
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Build queued for pipeline {}. The build will be triggered during safe output processing.",
             result.pipeline_id
@@ -927,8 +947,9 @@ The tag will be created during safe output processing."
         let mut sanitized = params.0;
         sanitized.message = sanitized.message.map(|m| sanitize_text(&m));
         let result: CreateGitTagResult = sanitized.try_into()?;
-        self.write_safe_output_file(&result).await
-            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        self.write_safe_output_file(&result).await.map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
+        })?;
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Git tag '{}' queued. The tag will be created during safe output processing.",
             result.tag_name
@@ -949,8 +970,9 @@ The tag will be added during safe output processing."
             params.0.build_id, params.0.tag
         );
         let result: AddBuildTagResult = params.0.try_into()?;
-        self.write_safe_output_file(&result).await
-            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        self.write_safe_output_file(&result).await.map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
+        })?;
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Build tag '{}' queued for build #{}. The tag will be added during safe output processing.",
             result.tag, result.build_id
@@ -966,13 +988,11 @@ pull request. The branch will be created during safe output processing."
         &self,
         params: Parameters<CreateBranchParams>,
     ) -> Result<CallToolResult, McpError> {
-        info!(
-            "Tool called: create-branch - '{}'",
-            params.0.branch_name
-        );
+        info!("Tool called: create-branch - '{}'", params.0.branch_name);
         let result: CreateBranchResult = params.0.try_into()?;
-        self.write_safe_output_file(&result).await
-            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        self.write_safe_output_file(&result).await.map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
+        })?;
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Branch '{}' queued for creation. The branch will be created during safe output processing.",
             result.branch_name
@@ -996,8 +1016,9 @@ Changes will be applied during safe output processing."
         let mut sanitized = params.0;
         sanitized.description = sanitized.description.map(|d| sanitize_text(&d));
         let result: UpdatePrResult = sanitized.try_into()?;
-        self.write_safe_output_file(&result).await
-            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        self.write_safe_output_file(&result).await.map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
+        })?;
         Ok(CallToolResult::success(vec![Content::text(format!(
             "PR #{} '{}' operation queued. Changes will be applied during safe output processing.",
             result.pull_request_id, result.operation
@@ -1020,8 +1041,9 @@ uploaded and linked during safe output processing. File size and type restrictio
         let mut sanitized = params.0;
         sanitized.comment = sanitized.comment.map(|c| sanitize_text(&c));
         let result: UploadWorkitemAttachmentResult = sanitized.try_into()?;
-        self.write_safe_output_file(&result).await
-            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        self.write_safe_output_file(&result).await.map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
+        })?;
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Attachment '{}' queued for work item #{}. The file will be uploaded during safe output processing.",
             result.file_path, result.work_item_id
@@ -1064,7 +1086,11 @@ may apply per the workflow's safe-outputs config."
 
         // Reject directories — upload-build-attachment is single-file only.
         let metadata = tokio::fs::metadata(&canonical).await.map_err(|e| {
-            anyhow_to_mcp_error(anyhow::anyhow!("Failed to stat '{}': {}", params.0.file_path, e))
+            anyhow_to_mcp_error(anyhow::anyhow!(
+                "Failed to stat '{}': {}",
+                params.0.file_path,
+                e
+            ))
         })?;
         if metadata.is_dir() {
             return Err(anyhow_to_mcp_error(anyhow::anyhow!(
@@ -1136,13 +1162,15 @@ may apply per the workflow's safe-outputs config."
         let file_size = source_bytes.len() as u64;
 
         let staged_path = self.output_directory.join(&staged_filename);
-        tokio::fs::write(&staged_path, &source_bytes).await.map_err(|e| {
-            anyhow_to_mcp_error(anyhow::anyhow!(
-                "Failed to stage file '{}' into safe-outputs directory: {}",
-                params.0.file_path,
-                e
-            ))
-        })?;
+        tokio::fs::write(&staged_path, &source_bytes)
+            .await
+            .map_err(|e| {
+                anyhow_to_mcp_error(anyhow::anyhow!(
+                    "Failed to stage file '{}' into safe-outputs directory: {}",
+                    params.0.file_path,
+                    e
+                ))
+            })?;
 
         let result = UploadBuildAttachmentResult::new(
             params.0.build_id,
@@ -1152,8 +1180,9 @@ may apply per the workflow's safe-outputs config."
             file_size,
             staged_sha256,
         );
-        self.write_safe_output_file(&result).await
-            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        self.write_safe_output_file(&result).await.map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
+        })?;
 
         let build_desc = match params.0.build_id {
             Some(id) => format!("build #{}", id),
@@ -1191,7 +1220,11 @@ restrictions may apply per the workflow's safe-outputs config."
                 .map_err(anyhow_to_mcp_error)?;
 
         let metadata = tokio::fs::metadata(&canonical).await.map_err(|e| {
-            anyhow_to_mcp_error(anyhow::anyhow!("Failed to stat '{}': {}", params.0.file_path, e))
+            anyhow_to_mcp_error(anyhow::anyhow!(
+                "Failed to stat '{}': {}",
+                params.0.file_path,
+                e
+            ))
         })?;
         if metadata.is_dir() {
             return Err(anyhow_to_mcp_error(anyhow::anyhow!(
@@ -1249,13 +1282,15 @@ restrictions may apply per the workflow's safe-outputs config."
         let file_size = source_bytes.len() as u64;
 
         let staged_path = self.output_directory.join(&staged_filename);
-        tokio::fs::write(&staged_path, &source_bytes).await.map_err(|e| {
-            anyhow_to_mcp_error(anyhow::anyhow!(
-                "Failed to stage file '{}' into safe-outputs directory: {}",
-                params.0.file_path,
-                e
-            ))
-        })?;
+        tokio::fs::write(&staged_path, &source_bytes)
+            .await
+            .map_err(|e| {
+                anyhow_to_mcp_error(anyhow::anyhow!(
+                    "Failed to stage file '{}' into safe-outputs directory: {}",
+                    params.0.file_path,
+                    e
+                ))
+            })?;
 
         let result = UploadPipelineArtifactResult::new(
             params.0.build_id,
@@ -1265,8 +1300,9 @@ restrictions may apply per the workflow's safe-outputs config."
             file_size,
             staged_sha256,
         );
-        self.write_safe_output_file(&result).await
-            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        self.write_safe_output_file(&result).await.map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
+        })?;
 
         let build_desc = match params.0.build_id {
             Some(id) => format!("build #{}", id),
@@ -1295,8 +1331,9 @@ submitted during safe output processing. Requires 'allowed-events' to be configu
         let mut sanitized = params.0;
         sanitized.body = sanitized.body.map(|b| sanitize_text(&b));
         let result: SubmitPrReviewResult = sanitized.try_into()?;
-        self.write_safe_output_file(&result).await
-            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        self.write_safe_output_file(&result).await.map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
+        })?;
         Ok(CallToolResult::success(vec![Content::text(format!(
             "PR review '{}' queued for PR #{}. The review will be submitted during safe output processing.",
             result.event, result.pull_request_id
@@ -1319,8 +1356,9 @@ Provide the PR ID, thread ID, and reply content. The reply will be posted during
         let mut sanitized = params.0;
         sanitized.content = sanitize_text(&sanitized.content);
         let result: ReplyToPrCommentResult = sanitized.try_into()?;
-        self.write_safe_output_file(&result).await
-            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        self.write_safe_output_file(&result).await.map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
+        })?;
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Reply queued for thread #{} on PR #{}. The reply will be posted during safe output processing.",
             result.thread_id, result.pull_request_id
@@ -1342,8 +1380,9 @@ The status change will be applied during safe output processing."
             params.0.pull_request_id, params.0.thread_id, params.0.status
         );
         let result: ResolvePrThreadResult = params.0.try_into()?;
-        self.write_safe_output_file(&result).await
-            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e)))?;
+        self.write_safe_output_file(&result).await.map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
+        })?;
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Thread #{} status change to '{}' queued for PR #{}. The change will be applied during safe output processing.",
             result.thread_id, result.status, result.pull_request_id
@@ -1381,7 +1420,11 @@ impl ServerHandler for SafeOutputs {
     }
 }
 
-pub async fn run(output_directory: &str, bounding_directory: &str, enabled_tools: Option<&[String]>) -> Result<()> {
+pub async fn run(
+    output_directory: &str,
+    bounding_directory: &str,
+    enabled_tools: Option<&[String]>,
+) -> Result<()> {
     // Create and run the server with STDIO transport
     let service = SafeOutputs::new(bounding_directory, output_directory, enabled_tools)
         .await?
@@ -1410,8 +1453,7 @@ pub async fn run_http(
 ) -> Result<()> {
     use axum::Router;
     use rmcp::transport::streamable_http_server::{
-        StreamableHttpServerConfig, StreamableHttpService,
-        session::local::LocalSessionManager,
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     };
     use std::sync::Arc;
 
@@ -1466,35 +1508,37 @@ pub async fn run_http(
                 .get(axum::routing::any_service(mcp_service.clone()))
                 .delete(axum::routing::any_service(mcp_service)),
         )
-        .layer(axum::middleware::from_fn(move |req: axum::extract::Request, next: axum::middleware::Next| {
-            let expected = expected_key.clone();
-            async move {
-                // Skip auth for health endpoint
-                if req.uri().path() == "/health" {
-                    return next.run(req).await;
-                }
-
-                // Constant-time comparison to prevent timing side-channels.
-                // Length check is non-constant-time but leaking length doesn't
-                // help brute-force a high-entropy token.
-                if let Some(auth) = req.headers().get("authorization")
-                    && let Ok(auth_str) = auth.to_str()
-                {
-                    let expected_header = format!("Bearer {}", expected);
-                    use subtle::ConstantTimeEq;
-                    let expected_bytes = expected_header.as_bytes();
-                    let provided_bytes = auth_str.as_bytes();
-                    if expected_bytes.len() == provided_bytes.len()
-                        && expected_bytes.ct_eq(provided_bytes).into()
-                    {
+        .layer(axum::middleware::from_fn(
+            move |req: axum::extract::Request, next: axum::middleware::Next| {
+                let expected = expected_key.clone();
+                async move {
+                    // Skip auth for health endpoint
+                    if req.uri().path() == "/health" {
                         return next.run(req).await;
                     }
-                }
 
-                use axum::response::IntoResponse;
-                (axum::http::StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
-            }
-        }));
+                    // Constant-time comparison to prevent timing side-channels.
+                    // Length check is non-constant-time but leaking length doesn't
+                    // help brute-force a high-entropy token.
+                    if let Some(auth) = req.headers().get("authorization")
+                        && let Ok(auth_str) = auth.to_str()
+                    {
+                        let expected_header = format!("Bearer {}", expected);
+                        use subtle::ConstantTimeEq;
+                        let expected_bytes = expected_header.as_bytes();
+                        let provided_bytes = auth_str.as_bytes();
+                        if expected_bytes.len() == provided_bytes.len()
+                            && expected_bytes.ct_eq(provided_bytes).into()
+                        {
+                            return next.run(req).await;
+                        }
+                    }
+
+                    use axum::response::IntoResponse;
+                    (axum::http::StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
+                }
+            },
+        ));
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -1859,8 +1903,10 @@ mod tests {
             );
         }
         // Non-enabled tools should be absent
-        assert!(!tool_names.contains(&"update-wiki-page".to_string()),
-            "Non-enabled tool should be filtered out");
+        assert!(
+            !tool_names.contains(&"update-wiki-page".to_string()),
+            "Non-enabled tool should be filtered out"
+        );
     }
 
     /// Asserts that ALL_KNOWN_SAFE_OUTPUTS contains every NON-DEBUG-ONLY tool

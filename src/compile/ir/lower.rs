@@ -1635,7 +1635,8 @@ mod tests {
             _ => panic!("expected mapping"),
         };
         assert_eq!(
-            m.get(Value::String("displayName".into())).and_then(|v| v.as_str()),
+            m.get(Value::String("displayName".into()))
+                .and_then(|v| v.as_str()),
             Some("greet")
         );
     }

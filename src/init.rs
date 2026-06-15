@@ -8,7 +8,9 @@ const AGENT_DIR: &str = ".github/agents";
 const AGENT_FILENAME: &str = "ado-aw.agent.md";
 
 pub async fn run(path: Option<&std::path::Path>) -> Result<()> {
-    let base = path.map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    let base = path
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
     let agent_dir = base.join(AGENT_DIR);
     let agent_path = agent_dir.join(AGENT_FILENAME);
 
@@ -39,7 +41,9 @@ pub async fn run(path: Option<&std::path::Path>) -> Result<()> {
     println!("  \"Create an ADO agentic workflow that <describe your workflow>\"");
     println!();
     println!("Or use the prompt directly with any AI agent:");
-    println!("  https://raw.githubusercontent.com/githubnext/ado-aw/v{version}/prompts/create-ado-agentic-workflow.md");
+    println!(
+        "  https://raw.githubusercontent.com/githubnext/ado-aw/v{version}/prompts/create-ado-agentic-workflow.md"
+    );
 
     Ok(())
 }

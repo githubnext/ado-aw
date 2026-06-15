@@ -162,7 +162,9 @@ mod tests {
     fn activates_when_enabled_on_pr_with_pr_contributor_active() {
         let fm = pr_fm();
         let c = PrChecksContextContributor::new(
-            PrChecksContextConfig { enabled: Some(true) },
+            PrChecksContextConfig {
+                enabled: Some(true),
+            },
             false,
             true,
         );
@@ -174,7 +176,9 @@ mod tests {
     fn does_not_activate_without_on_pr() {
         let fm = no_trigger_fm();
         let c = PrChecksContextContributor::new(
-            PrChecksContextConfig { enabled: Some(true) },
+            PrChecksContextConfig {
+                enabled: Some(true),
+            },
             false,
             true,
         );
@@ -186,7 +190,9 @@ mod tests {
     fn does_not_activate_when_pr_contributor_disabled() {
         let fm = pr_fm();
         let c = PrChecksContextContributor::new(
-            PrChecksContextConfig { enabled: Some(true) },
+            PrChecksContextConfig {
+                enabled: Some(true),
+            },
             false,
             false, // pr_contributor_enabled = false
         );
@@ -197,7 +203,9 @@ mod tests {
     #[test]
     fn prepare_step_carries_bearer() {
         let c = PrChecksContextContributor::new(
-            PrChecksContextConfig { enabled: Some(true) },
+            PrChecksContextConfig {
+                enabled: Some(true),
+            },
             false,
             true,
         );

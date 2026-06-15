@@ -230,7 +230,8 @@ fn reachable_downstream_jobs(
                     .and_then(|stage_id| find_stage(summary, stage_id))
                     .map(|stage_summary| classify_condition(&stage_summary.condition))
                     .unwrap_or(WhatIfClassification::Skipped);
-                let classification = stronger_classification(job_classification, stage_classification);
+                let classification =
+                    stronger_classification(job_classification, stage_classification);
                 DownstreamJob {
                     job: job.id.clone(),
                     stage: stage.or_else(|| job.stage.clone()),
@@ -394,9 +395,7 @@ fn is_negated_call(normalized_condition: &str, call_idx: usize) -> bool {
     let bytes = normalized_condition.as_bytes();
     let mut idx = call_idx;
     let mut negated = false;
-    while idx >= NOT_PREFIX_LEN
-        && bytes.get(idx - NOT_PREFIX_LEN..idx) == Some(NOT_PREFIX)
-    {
+    while idx >= NOT_PREFIX_LEN && bytes.get(idx - NOT_PREFIX_LEN..idx) == Some(NOT_PREFIX) {
         negated = !negated;
         idx -= NOT_PREFIX_LEN;
     }

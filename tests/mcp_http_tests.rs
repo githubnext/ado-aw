@@ -413,4 +413,3 @@ fn test_mcp_call_create_work_item() {
         "NDJSON should contain work item title: {content}"
     );
 }
-

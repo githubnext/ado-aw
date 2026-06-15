@@ -39,7 +39,7 @@ mod m0001_repos_unified;
 mod m0002_pool_object_form;
 
 #[allow(unused_imports)] // Re-exported for future codemods; only `take_key` is in-tree use.
-pub use helpers::{insert_no_overwrite, rename_key, take_key, ConflictPolicy};
+pub use helpers::{ConflictPolicy, insert_no_overwrite, rename_key, take_key};
 
 /// Forward-compatible context passed to every codemod.
 ///
@@ -158,8 +158,7 @@ pub(crate) fn apply_codemods_with(
     let ctx = CodemodContext::current();
     let mut applied: Vec<AppliedCodemod> = Vec::new();
     for c in registry {
-        let changed =
-            (c.apply)(fm, &ctx).with_context(|| format!("codemod {} failed", c.id))?;
+        let changed = (c.apply)(fm, &ctx).with_context(|| format!("codemod {} failed", c.id))?;
         if changed {
             applied.push(AppliedCodemod {
                 id: c.id,
@@ -196,8 +195,7 @@ mod tests {
         // Each numeric `<NNNN>_<id>.rs` file must have a corresponding
         // entry in CODEMODS; forgetting to register a new codemod
         // in the slice is caught here.
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/compile/codemods");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/compile/codemods");
         let mut numeric_files: Vec<String> = Vec::new();
         for entry in std::fs::read_dir(&dir).expect("read codemods dir") {
             let entry = entry.expect("dir entry");
@@ -217,10 +215,7 @@ mod tests {
             // directory listings. The registry order is the canonical
             // application order; the prefix is purely cosmetic.
             let (prefix, _rest) = stem.split_once('_').unwrap_or_else(|| {
-                panic!(
-                    "codemod file {:?} does not match `<NNNN>_<id>.rs`",
-                    path
-                )
+                panic!("codemod file {:?} does not match `<NNNN>_<id>.rs`", path)
             });
             let _: u32 = prefix.parse().unwrap_or_else(|_| {
                 panic!(

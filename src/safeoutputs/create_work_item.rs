@@ -6,10 +6,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
-use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
-use ado_aw_derive::SanitizeConfig;
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
+use crate::tool_result;
+use ado_aw_derive::SanitizeConfig;
 use anyhow::{Context, ensure};
 
 /// Parameters for creating a work item
@@ -130,7 +130,10 @@ pub struct CreateWorkItemConfig {
     pub artifact_link: ArtifactLinkConfig,
 
     /// Whether to include agent execution stats in the output (default: true).
-    #[serde(default = "crate::agent_stats::default_include_stats", rename = "include-stats")]
+    #[serde(
+        default = "crate::agent_stats::default_include_stats",
+        rename = "include-stats"
+    )]
     pub include_stats: bool,
 }
 
@@ -301,7 +304,10 @@ impl Executor for CreateWorkItemResult {
         debug!("Area path: {:?}", config.area_path);
         debug!("Iteration path: {:?}", config.iteration_path);
         debug!("Assignee (config): {:?}", config.assignee);
-        debug!("Assignee (last author fallback): {:?}", ctx.agent_last_author);
+        debug!(
+            "Assignee (last author fallback): {:?}",
+            ctx.agent_last_author
+        );
 
         // Validate agent-provided tags against allowed-tags (if configured)
         if !self.tags.is_empty() && !config.allowed_tags.is_empty() {
@@ -318,7 +324,11 @@ impl Executor for CreateWorkItemResult {
             if !disallowed.is_empty() {
                 return Ok(ExecutionResult::failure(format!(
                     "Agent-provided tags not in allowed-tags: {}",
-                    disallowed.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(", ")
+                    disallowed
+                        .iter()
+                        .map(|t| t.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 )));
             }
         }
@@ -335,11 +345,8 @@ impl Executor for CreateWorkItemResult {
         debug!("API URL: {}", url);
 
         // Build the patch document for work item creation
-        let description_with_stats = crate::agent_stats::append_stats_to_body(
-            &self.description,
-            ctx,
-            config.include_stats,
-        );
+        let description_with_stats =
+            crate::agent_stats::append_stats_to_body(&self.description, ctx, config.include_stats);
         let mut patch_doc = vec![
             field_op("System.Title", &self.title),
             field_op("System.Description", &description_with_stats),

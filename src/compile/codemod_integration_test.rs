@@ -88,7 +88,10 @@ async fn codemod_rewrites_stale_source_and_preserves_body() {
     let orig = stale_source();
     let orig_body = &orig[orig.find("\n---\n").unwrap() + 5..];
     let new_body = &rewritten[rewritten.find("\n---\n").unwrap() + 5..];
-    assert_eq!(orig_body, new_body, "body region not preserved byte-for-byte");
+    assert_eq!(
+        orig_body, new_body,
+        "body region not preserved byte-for-byte"
+    );
 
     // Lock file generated.
     let lock = source_path.with_extension("lock.yml");
@@ -98,8 +101,7 @@ async fn codemod_rewrites_stale_source_and_preserves_body() {
     // further codemod fires — the rewrite moved the source to its
     // current shape.
     let after = std::fs::read_to_string(&source_path).unwrap();
-    let parsed_again =
-        common::parse_markdown_detailed_with_registry(&after, registry).unwrap();
+    let parsed_again = common::parse_markdown_detailed_with_registry(&after, registry).unwrap();
     assert!(
         !parsed_again.codemods.changed(),
         "expected post-rewrite source to require no further codemods, but \
@@ -117,16 +119,14 @@ async fn codemod_skip_when_no_stub_registry_runs() {
     let healthy = "---\nname: x\ndescription: y\n---\nbody\n";
     let (dir, source_path) = write_temp_md("agent.md", healthy);
     let registry: &[&'static Codemod] = &[];
-    let rewrote = compile_pipeline_with_registry(
-        &source_path.to_string_lossy(),
-        None,
-        true,
-        false,
-        registry,
-    )
-    .await
-    .expect("compile should succeed");
-    assert!(!rewrote, "expected no rewrite for source that needs no codemods");
+    let rewrote =
+        compile_pipeline_with_registry(&source_path.to_string_lossy(), None, true, false, registry)
+            .await
+            .expect("compile should succeed");
+    assert!(
+        !rewrote,
+        "expected no rewrite for source that needs no codemods"
+    );
     let after = std::fs::read_to_string(&source_path).unwrap();
     assert_eq!(after, healthy, "source must be byte-identical");
     drop(dir);
@@ -149,15 +149,10 @@ async fn codemod_no_op_returns_false_does_not_rewrite() {
     let healthy = "---\nname: x\ndescription: y\n---\nbody\n";
     let (dir, source_path) = write_temp_md("agent.md", healthy);
     let registry: &[&'static Codemod] = &[&NOOP_MIG];
-    let rewrote = compile_pipeline_with_registry(
-        &source_path.to_string_lossy(),
-        None,
-        true,
-        false,
-        registry,
-    )
-    .await
-    .expect("compile should succeed");
+    let rewrote =
+        compile_pipeline_with_registry(&source_path.to_string_lossy(), None, true, false, registry)
+            .await
+            .expect("compile should succeed");
     assert!(
         !rewrote,
         "no-op codemod that returns Ok(false) must not trigger a rewrite"
@@ -178,8 +173,7 @@ async fn perform_source_rewrite_lost_update_guard() {
     let (dir, source_path) = write_temp_md("agent.md", stale_source());
     let original = std::fs::read_to_string(&source_path).unwrap();
     let registry: &[&'static Codemod] = &[&TEST_RENAME_LEGACY_NAME];
-    let parsed =
-        common::parse_markdown_detailed_with_registry(&original, registry).unwrap();
+    let parsed = common::parse_markdown_detailed_with_registry(&original, registry).unwrap();
     assert!(parsed.codemods.changed());
 
     // Mutate the source after parse (simulates editor / concurrent

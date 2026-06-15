@@ -7,9 +7,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
+use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::validate::reject_pipeline_injection;
 use anyhow::{Context, ensure};
 
@@ -96,7 +96,10 @@ pub struct ReplyToPrCommentConfig {
 #[async_trait::async_trait]
 impl Executor for ReplyToPrCommentResult {
     fn dry_run_summary(&self) -> String {
-        format!("reply to thread #{} on PR #{}", self.thread_id, self.pull_request_id)
+        format!(
+            "reply to thread #{} on PR #{}",
+            self.thread_id, self.pull_request_id
+        )
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
@@ -128,14 +131,13 @@ impl Executor for ReplyToPrCommentResult {
         let config: ReplyToPrCommentConfig = ctx.get_tool_config("reply-to-pr-comment");
         debug!("Config: {:?}", config);
 
-        let repository = self
-            .repository
-            .as_deref()
-            .unwrap_or("self");
+        let repository = self.repository.as_deref().unwrap_or("self");
 
         // Validate repository against allowed-repositories config
         if !config.allowed_repositories.is_empty()
-            && !config.allowed_repositories.contains(&repository.to_string())
+            && !config
+                .allowed_repositories
+                .contains(&repository.to_string())
         {
             return Ok(ExecutionResult::failure(format!(
                 "Repository '{}' is not in the allowed-repositories list",
@@ -150,7 +152,10 @@ impl Executor for ReplyToPrCommentResult {
                 .context("BUILD_REPOSITORY_NAME not set and repository is 'self'")?
                 .clone()
         } else {
-            match crate::safeoutputs::lookup_allowed_repository(repository, &ctx.allowed_repositories) {
+            match crate::safeoutputs::lookup_allowed_repository(
+                repository,
+                &ctx.allowed_repositories,
+            ) {
                 Some(name) => name.clone(),
                 None => {
                     return Ok(ExecutionResult::failure(format!(
@@ -254,8 +259,7 @@ mod tests {
 
     #[test]
     fn test_params_deserializes() {
-        let json =
-            r#"{"pull_request_id": 42, "thread_id": 7, "content": "This is a reply to the review comment."}"#;
+        let json = r#"{"pull_request_id": 42, "thread_id": 7, "content": "This is a reply to the review comment."}"#;
         let params: ReplyToPrCommentParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.pull_request_id, 42);
         assert_eq!(params.thread_id, 7);
@@ -275,7 +279,10 @@ mod tests {
         assert_eq!(result.name, "reply-to-pr-comment");
         assert_eq!(result.pull_request_id, 42);
         assert_eq!(result.thread_id, 7);
-        assert_eq!(result.content, "This is a test reply with enough characters.");
+        assert_eq!(
+            result.content,
+            "This is a test reply with enough characters."
+        );
     }
 
     #[test]

@@ -1150,7 +1150,11 @@ mod tests {
         let Condition::Or(parts) = &clauses[0] else {
             panic!("expected Or, got {:?}", clauses[0]);
         };
-        assert_eq!(parts.len(), 2, "Or(Build.Reason!=PR, prGate.SHOULD_RUN=true)");
+        assert_eq!(
+            parts.len(),
+            2,
+            "Or(Build.Reason!=PR, prGate.SHOULD_RUN=true)"
+        );
         match &parts[0] {
             Condition::Ne(Expr::Variable(name), Expr::Literal(lit)) => {
                 assert_eq!(name, "Build.Reason");

@@ -409,9 +409,7 @@ mod tests {
             .join("tests")
             .join("safe-outputs")
             .join("create-pull-request.md");
-        let (_fm, pipeline) = crate::compile::build_pipeline_ir(&fixture)
-            .await
-            .unwrap();
+        let (_fm, pipeline) = crate::compile::build_pipeline_ir(&fixture).await.unwrap();
         let summary = PipelineSummary::from_pipeline(&pipeline).unwrap();
         let findings = lint(&summary);
         assert!(!findings.iter().any(|f| f.code == "unused-output"));

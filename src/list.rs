@@ -15,8 +15,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::ado::{
-    DefinitionSummary, MatchedDefinition, get_latest_build, list_definitions,
-    match_definitions_in, resolve_ado_context, resolve_auth,
+    DefinitionSummary, MatchedDefinition, get_latest_build, list_definitions, match_definitions_in,
+    resolve_ado_context, resolve_auth,
 };
 use crate::detect;
 
@@ -126,11 +126,10 @@ pub fn build_rows(
         .iter()
         .filter(|d| include_unmatched || matched_ids.contains(&d.id))
         .map(|d| {
-            let yaml_filename = yaml_by_id.get(&d.id).cloned().or_else(|| {
-                d.process
-                    .as_ref()
-                    .and_then(|p| p.yaml_filename.clone())
-            });
+            let yaml_filename = yaml_by_id
+                .get(&d.id)
+                .cloned()
+                .or_else(|| d.process.as_ref().and_then(|p| p.yaml_filename.clone()));
             let last_run = last_runs.get(&d.id).cloned().and_then(LastRun::from_json);
             ListRow {
                 id: d.id,
@@ -254,15 +253,17 @@ pub async fn run(opts: ListOptions<'_>) -> Result<()> {
         .context("Failed to create HTTP client")?;
 
     let definitions = list_definitions(&client, &ado_ctx, &auth).await?;
-    let detected = detect::detect_pipelines(&repo_path).await.unwrap_or_else(|e| {
-        // Distinguish "detection failed" from "no pipelines compiled
-        // here": both produce zero matches downstream, but only the
-        // former is something the operator should know about. Don't
-        // bail outright — list is read-only and useful even with
-        // partial inputs (`--all` doesn't need fixtures at all).
-        eprintln!("warning: failed to scan local pipelines: {:#}", e);
-        Vec::new()
-    });
+    let detected = detect::detect_pipelines(&repo_path)
+        .await
+        .unwrap_or_else(|e| {
+            // Distinguish "detection failed" from "no pipelines compiled
+            // here": both produce zero matches downstream, but only the
+            // former is something the operator should know about. Don't
+            // bail outright — list is read-only and useful even with
+            // partial inputs (`--all` doesn't need fixtures at all).
+            eprintln!("warning: failed to scan local pipelines: {:#}", e);
+            Vec::new()
+        });
     let matched = match_definitions_in(&definitions, &detected);
 
     // Decide which IDs need a last-build fetch.
@@ -283,7 +284,10 @@ pub async fn run(opts: ListOptions<'_>) -> Result<()> {
             }
             Ok(None) => {}
             Err(e) => {
-                eprintln!("  warning: failed to fetch latest build for {}: {:#}", id, e);
+                eprintln!(
+                    "  warning: failed to fetch latest build for {}: {:#}",
+                    id, e
+                );
             }
         }
     }
@@ -304,7 +308,13 @@ mod tests {
     use crate::ado::{MatchMethod, ProcessInfo};
     use std::collections::HashMap;
 
-    fn def(id: u64, name: &str, folder: Option<&str>, yaml: Option<&str>, status: Option<&str>) -> DefinitionSummary {
+    fn def(
+        id: u64,
+        name: &str,
+        folder: Option<&str>,
+        yaml: Option<&str>,
+        status: Option<&str>,
+    ) -> DefinitionSummary {
         DefinitionSummary {
             id,
             name: name.to_string(),
@@ -368,8 +378,20 @@ mod tests {
     #[test]
     fn build_rows_default_filters_unmatched() {
         let defs = vec![
-            def(1, "matched", Some("\\smoke"), Some("/a.yml"), Some("enabled")),
-            def(2, "unmatched", Some("\\other"), Some("/b.yml"), Some("enabled")),
+            def(
+                1,
+                "matched",
+                Some("\\smoke"),
+                Some("/a.yml"),
+                Some("enabled"),
+            ),
+            def(
+                2,
+                "unmatched",
+                Some("\\other"),
+                Some("/b.yml"),
+                Some("enabled"),
+            ),
         ];
         let m = vec![matched(1, "matched", "/a.yml")];
         let rows = build_rows(&defs, &m, &HashMap::new(), false);
@@ -381,8 +403,20 @@ mod tests {
     #[test]
     fn build_rows_all_flag_includes_unmatched() {
         let defs = vec![
-            def(1, "matched", Some("\\smoke"), Some("/a.yml"), Some("enabled")),
-            def(2, "unmatched", Some("\\other"), Some("/b.yml"), Some("disabled")),
+            def(
+                1,
+                "matched",
+                Some("\\smoke"),
+                Some("/a.yml"),
+                Some("enabled"),
+            ),
+            def(
+                2,
+                "unmatched",
+                Some("\\other"),
+                Some("/b.yml"),
+                Some("disabled"),
+            ),
         ];
         let m = vec![matched(1, "matched", "/a.yml")];
         let rows = build_rows(&defs, &m, &HashMap::new(), true);
@@ -399,9 +433,16 @@ mod tests {
             def(2, "alpha", None, None, None),
             def(3, "Beta", None, None, None),
         ];
-        let m = vec![matched(1, "Zebra", "/z.yml"), matched(2, "alpha", "/a.yml"), matched(3, "Beta", "/b.yml")];
+        let m = vec![
+            matched(1, "Zebra", "/z.yml"),
+            matched(2, "alpha", "/a.yml"),
+            matched(3, "Beta", "/b.yml"),
+        ];
         let rows = build_rows(&defs, &m, &HashMap::new(), false);
-        assert_eq!(rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), vec!["alpha", "Beta", "Zebra"]);
+        assert_eq!(
+            rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            vec!["alpha", "Beta", "Zebra"]
+        );
     }
 
     #[test]
@@ -409,19 +450,11 @@ mod tests {
         let defs = vec![def(1, "x", None, Some("/x.yml"), Some("enabled"))];
         let m = vec![matched(1, "x", "/x.yml")];
         let mut runs = HashMap::new();
-        runs.insert(
-            1u64,
-            serde_json::json!({ "id": 99, "result": "succeeded" }),
-        );
+        runs.insert(1u64, serde_json::json!({ "id": 99, "result": "succeeded" }));
         let rows = build_rows(&defs, &m, &runs, false);
         assert_eq!(rows[0].last_run.as_ref().unwrap().id, 99);
         assert_eq!(
-            rows[0]
-                .last_run
-                .as_ref()
-                .unwrap()
-                .result
-                .as_deref(),
+            rows[0].last_run.as_ref().unwrap().result.as_deref(),
             Some("succeeded")
         );
     }

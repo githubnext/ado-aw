@@ -420,7 +420,10 @@ fn add_downstream_impact_findings(
                 // gate above, some downstream jobs in this set may have
                 // bypassed the failure (e.g. via `always()`). The
                 // description embeds the real per-job classification.
-                title: format!("Downstream jobs potentially impacted by {} failure", job.name),
+                title: format!(
+                    "Downstream jobs potentially impacted by {} failure",
+                    job.name
+                ),
                 description: format!(
                     "The typed pipeline graph shows downstream impact from {}: {}.",
                     job.name, downstream
@@ -777,8 +780,10 @@ mod tests {
 
         derive_findings(&mut audit);
 
-        let finding =
-            finding_by_title(&audit, "Downstream jobs potentially impacted by Agent failure");
+        let finding = finding_by_title(
+            &audit,
+            "Downstream jobs potentially impacted by Agent failure",
+        );
         assert_eq!(finding.severity, Severity::Medium);
         assert!(finding.description.contains("Detection: skipped"));
         assert!(
