@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.36.0](https://github.com/githubnext/ado-aw/compare/v0.35.3...v0.36.0) (2026-06-15)
+
+
+### Features
+
+* **compile:** native ADO pipeline IR ([#960](https://github.com/githubnext/ado-aw/issues/960)) ([9a18b0e](https://github.com/githubnext/ado-aw/commit/9a18b0ed0ecc1d85c5a54f1c1e57183b22b1c2af))
+* **exec-context:** add 7 trigger-context contributors with shared/ refactor ([#1019](https://github.com/githubnext/ado-aw/issues/1019)) ([816ba39](https://github.com/githubnext/ado-aw/commit/816ba39368ba1a308fdc7c7de46c9a770edfb27d))
+* **inspect:** add IR-based pipeline reasoning tools (inspect, graph, whatif, lint, catalog, trace, mcp-author) ([#998](https://github.com/githubnext/ado-aw/issues/998)) ([64e59bc](https://github.com/githubnext/ado-aw/commit/64e59bc6d1cabc2129695ad114512c1a50951325))
+* **ir:** add tasks module with typed helper for PublishTestResults@2 ([#1012](https://github.com/githubnext/ado-aw/issues/1012)) ([e6489b8](https://github.com/githubnext/ado-aw/commit/e6489b8828d8aa77d6ffb05e198910fe5ae278da))
+* **ir:** add typed helper for CopyFiles@2 ([#1017](https://github.com/githubnext/ado-aw/issues/1017)) ([f56b150](https://github.com/githubnext/ado-aw/commit/f56b1502cd666ddd41e5265b1cef59bafe35ab8c))
+* **ir:** add typed helper for DockerInstaller@0 ([#1015](https://github.com/githubnext/ado-aw/issues/1015)) ([ca64336](https://github.com/githubnext/ado-aw/commit/ca64336c809b9303ed25024bb892409b1bacee19))
+* **ir:** add typed helper for DotNetCoreCLI@2 ([#1025](https://github.com/githubnext/ado-aw/issues/1025)) ([74e7bea](https://github.com/githubnext/ado-aw/commit/74e7bead730b84b4d9bd3c6a2806043c8fcbae6f))
+* **workflows:** add ado-task-ir-contributor agentic workflow ([#1004](https://github.com/githubnext/ado-aw/issues/1004)) ([79b357d](https://github.com/githubnext/ado-aw/commit/79b357d2457ae1c22ffc2de91c5cd5ac9b605f5e))
+
+
+### Bug Fixes
+
+* **ir:** reject cross-pipeline duplicate StepIds; strict de-indent in lower_raw_yaml; document EnvValue::Literal contract ([#992](https://github.com/githubnext/ado-aw/issues/992)) ([28403fe](https://github.com/githubnext/ado-aw/commit/28403fe5027709438c7004c8c62dbc0be6190a87))
+* **validate:** block workspace alias shell injection in generated bash steps ([#1018](https://github.com/githubnext/ado-aw/issues/1018)) ([e7bf9c4](https://github.com/githubnext/ado-aw/commit/e7bf9c419d03cc7ad35bf42fe62b140f6679e008))
+
 ## [0.35.3](https://github.com/githubnext/ado-aw/compare/v0.35.2...v0.35.3) (2026-06-11)
 
 
