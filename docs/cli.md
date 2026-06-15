@@ -23,6 +23,7 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - Useful for CI checks to ensure pipelines are regenerated after source changes
 - `mcp <output_directory> <bounding_directory>` - Run SafeOutputs as a stdio MCP server
   - `--enabled-tools <name>` - Restrict available tools to those named (repeatable)
+- `mcp-author` - Run the author-facing stdio MCP server for IDE/Copilot Chat integrations. See [`mcp-author.md`](mcp-author.md) for the full tool surface and trust model.
 - `mcp-http <output_directory> <bounding_directory>` - Run SafeOutputs as an HTTP MCP server (for MCPG integration)
   - `--port <port>` - Port to listen on (default: 8100)
   - `--api-key <key>` - API key for authentication (auto-generated if not provided)
@@ -134,7 +135,7 @@ Both `--all-repos` and `--source` route through `ado-aw`'s `discover_ado_aw_pipe
   - `--dry-run` - Print the planned `templateParameters` body without calling the ADO API.
 
 - `audit <build-id-or-url>` - Audit a single Azure DevOps build: download the known stage artifacts, run the audit analyzers, and render a structured console report or `AuditData` JSON.
-  - `-o, --output <dir>` - Output directory for downloaded artifacts and reports. Defaults to `./logs`; the run is stored under `<dir>/build-<id>/`.
+  - `-o, --output <dir>` - Output directory for downloaded artifacts and reports. Defaults to `./logs`; the run is stored under `<dir>/build-<id>/`. Non-CLI entry points (`ado-aw trace` and the mcp-author tools) instead anchor under `${TEMP}/ado-aw/audit` so they do not scatter directories under arbitrary working directories.
   - `--json` - Emit machine-readable JSON (`AuditData`) instead of the console report. Suppresses the trailing `Audit complete` stderr line.
   - `--org <url>` - Override: Azure DevOps organization (used when the input is a bare build ID). Full build URLs provide the host / org directly.
   - `--project <name>` - Override: Azure DevOps project name (used when the input is a bare build ID). Full build URLs provide the project directly.
@@ -142,6 +143,28 @@ Both `--all-repos` and `--source` route through `ado-aw`'s `discover_ado_aw_pipe
   - `--artifacts <set[,set...]>` - Restrict download + analysis to the named sets: `agent`, `detection`, `safe-outputs` (`safe_outputs` is also accepted). Defaults to all three.
   - `--no-cache` - Ignore `<output>/build-<id>/run-summary.json` and re-process the build.
   - See [`audit.md`](audit.md) for accepted build-reference formats, output layout, cache semantics, and the `AuditData` report shape.
+
+- `trace <build-id-or-url> [--step <id>] [--json]` - Query audit telemetry plus local typed-IR graph correlation to explain failed-job chains and downstream skip classifications. Downloads / caches under `${TEMP}/ado-aw/audit/build-<id>/` (separate from `ado-aw audit`'s `./logs` default so the MCP server and IDE-driven traces do not scatter `./logs/` directories under arbitrary working dirs), and degrades to runtime-only output when the source markdown is not local.
+  - `--step <id>` - Focus the report on a named IR step and show the containing job's runtime status plus upstream/downstream job classifications.
+  - `--json` - Emit a structured `TraceReport`.
+  - `--org <url>`, `--project <name>`, `--pat <pat>` / `AZURE_DEVOPS_EXT_PAT` - Same ADO context/auth passthroughs as `audit`.
+
+- `inspect <source> [--json]` - Build the typed IR for an agent source file and emit a terse summary (jobs, stages, steps, output decls, derived `dependsOn` edges, isOutput-promoted outputs).
+  - `<source>` - Path to the agent markdown file.
+  - `--json` - Emit the full [`PipelineSummary`](ir.md#public-json-summary-irsummary) as pretty-printed JSON instead of the human view.
+  - No YAML is written; this is a read-only query over the same IR the compiler builds.
+
+- `graph dump <source> [--format text|json|dot]` - Print the resolved dependency graph (job edges, stage edges, step locations, outputs needing `isOutput=true`). The graph dump now uses an explicit `dump` subcommand so `graph deps` and `graph outputs` can share the namespace.
+  - `<source>` - Path to the agent markdown file.
+  - `--format text` - Default. Human-scannable plain text.
+  - `--format json` - Emit the [`GraphSummary`](ir.md#public-json-summary-irsummary) JSON.
+  - `--format dot` - Emit Graphviz DOT. Pipe to `dot -Tsvg -o pipeline.svg` to visualize.
+
+- `graph deps <source> <step-id> [--direction upstream|downstream] [--json]` - Traverse transitive job and step-output dependencies for one step. If `<step-id>` names a job with no matching step, the command falls back to job-level traversal.
+
+- `graph outputs <source> [--producer <step-id>] [--consumer <step-id>] [--json]` - Print declared step outputs and the steps that read them from `env` or `condition`.
+
+- `whatif <source> --fail <step-id-or-job-id> [--json]` - Statically classify downstream jobs that would be skipped, or would run anyway, if a step or job failed.
 
 ### Hidden Build-Time Tools
 

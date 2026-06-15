@@ -156,6 +156,7 @@ mod tests {
                     unreliable: true,
                 }],
             }),
+            pipeline_graph: None,
             jobs: vec![JobData {
                 name: String::from("Agent"),
                 status: String::from("completed"),
@@ -163,6 +164,7 @@ mod tests {
                 duration: Some(String::from("4m")),
                 started_at: Some(String::from("2026-05-21T12:01:00Z")),
                 finished_at: Some(String::from("2026-05-21T12:05:00Z")),
+                ..Default::default()
             }],
             downloaded_files: vec![FileInfo {
                 path: String::from("logs\\build-42\\agent_outputs_42\\otel.jsonl"),

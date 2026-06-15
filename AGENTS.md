@@ -93,7 +93,20 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   │   ├── 0002_pool_object_form.rs # Legacy scalar pool → object form codemod
 │   │   │   └── helpers.rs # take_key, insert_no_overwrite, rename_key, ConflictPolicy
 │   │   ├── codemod_integration_test.rs # White-box rewrite-path tests (stub registry injection)
-│   │   └── types.rs      # Front matter grammar and types
+│   │   ├── types.rs      # Front matter grammar and types
+│   │   └── ir/           # Typed Azure DevOps pipeline IR (see docs/ir.md)
+│   │       ├── mod.rs    # Pipeline / PipelineBody / PipelineShape root types
+│   │       ├── ids.rs    # Typed StageId / JobId / StepId newtypes
+│   │       ├── step.rs   # Step variants (Bash, Task, Checkout, Download, Publish, RawYaml)
+│   │       ├── job.rs    # Job, Pool, TemplateContext, JobVariable
+│   │       ├── stage.rs  # Stage + external-params wrap
+│   │       ├── env.rs    # Typed EnvValue (Literal, AdoMacro, PipelineVar, Secret, StepOutput, Coalesce, Concat)
+│   │       ├── condition.rs # Typed Condition / Expr AST + codegen to ADO condition syntax
+│   │       ├── output.rs # OutputDecl / OutputRef + location-aware lowering
+│   │       ├── graph.rs  # Dependency graph: validation, edge derivation, isOutput promotion, cycle detection
+│   │       ├── lower.rs  # IR → serde_yaml::Value lowering
+│   │       ├── emit.rs   # Thin `lower() + serde_yaml::to_string()` wrapper
+│   │       └── summary.rs # Public, serializable PipelineSummary / GraphSummary for agent-facing tooling (see docs/ir.md Public JSON summary)
 │   ├── init.rs           # Repository initialization for AI-first authoring
 │   ├── execute.rs        # Stage 3 safe output execution
 │   ├── fuzzy_schedule.rs # Fuzzy schedule parsing
@@ -131,6 +144,10 @@ Every compiled pipeline runs as three sequential jobs:
 │   │       ├── mod.rs
 │   │       ├── console.rs # Human-readable console report
 │   │       └── json.rs    # Machine-readable AuditData JSON
+│   ├── inspect/          # `ado-aw inspect` / `graph` / (planned) `trace` / `whatif` / `lint` / `catalog` — read-only IR queries
+│   │   ├── mod.rs        # Module entry; public re-exports of every dispatcher
+│   │   ├── cli.rs        # Dispatchers (`dispatch_inspect`, `dispatch_graph`, …) and option structs
+│   │   └── graph_query.rs # Text/DOT renderers for the resolved dependency graph
 │   ├── detect.rs         # Agentic pipeline detection — discovers compiled pipelines; used by all lifecycle commands
 │   ├── update_check.rs   # Version update check — queries GitHub Releases and prints advisory when newer version is available
 │   ├── ndjson.rs         # NDJSON parsing utilities
@@ -277,7 +294,7 @@ index to jump to the right page.
 
 ### Compiler internals & operations
 
-- [`docs/ir.md`](docs/ir.md) — typed Azure DevOps pipeline IR (`Pipeline`, jobs/stages/steps, output refs, graph pass, lowering, and target builders).
+- [`docs/ir.md`](docs/ir.md) — typed Azure DevOps pipeline IR (`Pipeline`, jobs/stages/steps, output refs, graph pass, lowering, target builders, and the public JSON summary consumed by agent-facing tooling).
 - [`docs/cli.md`](docs/cli.md) — `ado-aw` CLI commands (`init`, `compile`,
   `check`, `mcp`, `mcp-http`, `execute`, `secrets`, `enable`, `disable`,
   `remove`, `list`, `status`, `run`, `audit`; `configure` is a deprecated hidden alias).
@@ -286,6 +303,9 @@ index to jump to the right page.
   report shape.
 - [`docs/mcp.md`](docs/mcp.md) — MCP server configuration (stdio containers,
   HTTP servers, env passthrough).
+- [`docs/mcp-author.md`](docs/mcp-author.md) — author-facing MCP server
+  (stdio); exposes `inspect`, `graph`, `whatif`, `lint`, `catalog`, `trace`,
+  `audit_build` over MCP for IDE/Copilot Chat agents.
 - [`docs/mcpg.md`](docs/mcpg.md) — MCP Gateway architecture and pipeline
   integration.
 - [`docs/network.md`](docs/network.md) — AWF network isolation, default
