@@ -520,8 +520,17 @@ fn qualified_job(stage: &Option<String>, job: &str) -> String {
 }
 
 fn closest<'a>(needle: &str, candidates: impl Iterator<Item = &'a str>) -> Option<String> {
+    // Same Levenshtein threshold as `inspect::whatif::closest`:
+    // suppress low-quality suggestions so an input like `xyzzy`
+    // does not get the lexicographically nearest match as its
+    // "did you mean" hint. Half the needle length + 2 keeps short
+    // single-typo cases (`Aget` → `Agent`) intact while rejecting
+    // genuinely unrelated input.
+    let needle_len = needle.chars().count();
+    let max_distance = needle_len / 2 + 2;
     candidates
         .map(|candidate| (levenshtein(needle, candidate), candidate))
+        .filter(|(distance, _)| *distance <= max_distance)
         .min_by_key(|(distance, candidate)| (*distance, (*candidate).to_string()))
         .map(|(_, candidate)| candidate.to_string())
 }

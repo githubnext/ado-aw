@@ -216,14 +216,55 @@ fn reachable_downstream_jobs(
 
     keys.into_iter()
         .filter_map(|(stage, job_id)| {
-            find_job(summary, &job_id).map(|job| DownstreamJob {
-                job: job.id.clone(),
-                stage: stage.or_else(|| job.stage.clone()),
-                classification: classify_condition(&job.condition),
-                condition: job.condition.clone(),
+            find_job(summary, &job_id).map(|job| {
+                let job_classification = classify_condition(&job.condition);
+                // Inherit the stage's bypass classification when the
+                // containing stage carries a `condition: always()` /
+                // `succeededOrFailed()` / similar. Without this the
+                // job branch alone reads as Skipped — wrong for the
+                // common cleanup-stage pattern where the stage
+                // bypasses failure but its inner jobs keep the
+                // default `succeeded()` condition.
+                let stage_classification = stage
+                    .as_deref()
+                    .and_then(|stage_id| find_stage(summary, stage_id))
+                    .map(|stage_summary| classify_condition(&stage_summary.condition))
+                    .unwrap_or(WhatIfClassification::Skipped);
+                let classification = stronger_classification(job_classification, stage_classification);
+                DownstreamJob {
+                    job: job.id.clone(),
+                    stage: stage.or_else(|| job.stage.clone()),
+                    classification,
+                    condition: job.condition.clone(),
+                }
             })
         })
         .collect()
+}
+
+/// Return `RunsAnyway` if either side asserts the job runs after
+/// upstream failure; otherwise `Skipped`. Used to lift a stage's
+/// bypass classification through to its contained jobs.
+fn stronger_classification(
+    a: WhatIfClassification,
+    b: WhatIfClassification,
+) -> WhatIfClassification {
+    match (a, b) {
+        (WhatIfClassification::RunsAnyway, _) | (_, WhatIfClassification::RunsAnyway) => {
+            WhatIfClassification::RunsAnyway
+        }
+        _ => WhatIfClassification::Skipped,
+    }
+}
+
+fn find_stage<'a>(
+    summary: &'a PipelineSummary,
+    stage_id: &str,
+) -> Option<&'a crate::compile::ir::summary::StageSummary> {
+    match &summary.body {
+        PipelineBodySummary::Jobs { .. } => None,
+        PipelineBodySummary::Stages { stages } => stages.iter().find(|stage| stage.id == stage_id),
+    }
 }
 
 /// Classify a rendered ADO `condition:` string for what-if analysis.
@@ -407,8 +448,17 @@ fn qualified_job(stage: &Option<String>, job: &str) -> String {
 }
 
 fn closest<'a>(needle: &str, candidates: impl Iterator<Item = &'a str>) -> Option<String> {
+    // Reject low-quality matches: a completely unrelated input like
+    // `xyzzy` should not get a suggestion just because some
+    // candidate happens to be lexicographically nearest. The
+    // threshold is half the needle length plus 2 so single typos in
+    // short ids (e.g. `Aget` → `Agent`) still suggest while genuinely
+    // unrelated inputs return `None`.
+    let needle_len = needle.chars().count();
+    let max_distance = needle_len / 2 + 2;
     candidates
         .map(|candidate| (levenshtein(needle, candidate), candidate))
+        .filter(|(distance, _)| *distance <= max_distance)
         .min_by_key(|(distance, candidate)| (*distance, (*candidate).to_string()))
         .map(|(_, candidate)| candidate.to_string())
 }
@@ -667,5 +717,104 @@ mod tests {
         // `é` is not part of `not(`, so the call is treated as
         // un-negated and the job classifies as RunsAnyway.
         assert_eq!(detection.classification, WhatIfClassification::RunsAnyway);
+    }
+
+    #[test]
+    fn closest_returns_none_for_unrelated_input() {
+        // Regression: without the Levenshtein threshold, an input
+        // like `xyzzy` would always be suggested the
+        // lexicographically nearest candidate. That's noise.
+        let candidates = ["Setup", "Agent", "Detection", "SafeOutputs"];
+        assert_eq!(
+            closest("xyzzy", candidates.iter().copied()),
+            None,
+            "unrelated input must not get a 'did you mean' hint"
+        );
+    }
+
+    #[test]
+    fn closest_suggests_single_typo_within_threshold() {
+        let candidates = ["Setup", "Agent", "Detection", "SafeOutputs"];
+        assert_eq!(
+            closest("Aget", candidates.iter().copied()),
+            Some("Agent".to_string()),
+        );
+    }
+
+    #[test]
+    fn stage_always_condition_propagates_to_inner_jobs_runs_anyway() {
+        // Regression: in a Stages-bodied pipeline, when a downstream
+        // stage carries `condition: always()` but its inner jobs
+        // keep the default `succeeded()`, the jobs should classify
+        // as RunsAnyway. Previously only `job.condition` was checked
+        // and the stage-level bypass was dropped on the floor.
+        use crate::compile::ir::summary::StageSummary;
+        let stage_a = StageSummary {
+            id: "BuildStage".to_string(),
+            display_name: "BuildStage".to_string(),
+            depends_on: Vec::new(),
+            condition: None,
+            jobs: vec![JobSummary {
+                id: "Build".to_string(),
+                stage: Some("BuildStage".to_string()),
+                display_name: "Build".to_string(),
+                depends_on: Vec::new(),
+                condition: None,
+                pool: PoolSummary::VmImage {
+                    image: "ubuntu-latest".to_string(),
+                },
+                steps: Vec::new(),
+            }],
+        };
+        let stage_b = StageSummary {
+            id: "Cleanup".to_string(),
+            display_name: "Cleanup".to_string(),
+            depends_on: vec!["BuildStage".to_string()],
+            // Stage-level always() — common cleanup pattern.
+            condition: Some("always()".to_string()),
+            jobs: vec![JobSummary {
+                id: "CleanupJob".to_string(),
+                stage: Some("Cleanup".to_string()),
+                display_name: "CleanupJob".to_string(),
+                depends_on: Vec::new(),
+                // No job-level condition → defaults to succeeded()
+                // semantics on its own.
+                condition: None,
+                pool: PoolSummary::VmImage {
+                    image: "ubuntu-latest".to_string(),
+                },
+                steps: Vec::new(),
+            }],
+        };
+
+        let summary = PipelineSummary {
+            schema_version: 1,
+            name: "stages-test".to_string(),
+            shape: "1es".to_string(),
+            body: PipelineBodySummary::Stages {
+                stages: vec![stage_a, stage_b],
+            },
+            graph: GraphSummary {
+                step_locations: Vec::new(),
+                job_edges: Vec::new(),
+                stage_edges: vec![EdgeEntry {
+                    consumer: "Cleanup".to_string(),
+                    producer: "BuildStage".to_string(),
+                }],
+                outputs_needing_is_output: Vec::new(),
+            },
+        };
+
+        let report = analyze(&summary, "Build").expect("analyze Build failure");
+        let cleanup = report
+            .downstream_jobs
+            .iter()
+            .find(|job| job.job == "CleanupJob")
+            .expect("CleanupJob must appear via stage-edge traversal");
+        assert_eq!(
+            cleanup.classification,
+            WhatIfClassification::RunsAnyway,
+            "stage-level always() must propagate to inner jobs"
+        );
     }
 }

@@ -76,6 +76,22 @@ pub async fn validate_workflow_source_path(source: &str) -> Result<ValidatedSour
         );
     }
 
+    // ParentDir + tilde checks apply to *both* absolute and relative
+    // inputs. The old layout gated them behind the relative branch,
+    // which let an adversarial absolute path like
+    // `/workspace/../../home/runner/.env.md` through unchecked even
+    // though the module's stated contract refuses parent-directory
+    // traversal. Run the check before splitting on `is_absolute()`.
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+        || normalized.starts_with('~')
+    {
+        anyhow::bail!(
+            "refusing source path '{normalized}': parent-directory components and `~` are not permitted"
+        );
+    }
+
     if path.is_absolute() {
         if let Ok(canonical) = tokio::fs::canonicalize(&path).await
             && !has_md_extension(&canonical)
@@ -89,14 +105,6 @@ pub async fn validate_workflow_source_path(source: &str) -> Result<ValidatedSour
             path,
             normalized,
         });
-    }
-
-    if path
-        .components()
-        .any(|component| matches!(component, Component::ParentDir))
-        || normalized.starts_with('~')
-    {
-        anyhow::bail!("refusing suspicious relative source path '{normalized}'");
     }
 
     let cwd = tokio::fs::canonicalize(".")
@@ -169,8 +177,8 @@ mod tests {
             .await
             .expect_err("`..` must be rejected");
         assert!(
-            format!("{err}").contains("suspicious relative source path"),
-            "expected traversal rejection message, got: {err}"
+            format!("{err}").contains("parent-directory components"),
+            "expected parent-dir rejection message, got: {err}"
         );
     }
 
@@ -184,8 +192,29 @@ mod tests {
             .await
             .expect_err("backslash-encoded `..` must be rejected");
         assert!(
-            format!("{err}").contains("suspicious relative source path"),
-            "expected traversal rejection message, got: {err}"
+            format!("{err}").contains("parent-directory components"),
+            "expected parent-dir rejection message, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_absolute_path_with_parent_dir_component() {
+        // Regression: the ParentDir check was previously inside the
+        // relative-path branch only, so an adversarial absolute path
+        // like `/workspace/../../home/runner/.env.md` slipped through
+        // even though the module documents `..` rejection without
+        // qualifying by absolute/relative.
+        let path = if cfg!(windows) {
+            r"C:\workspace\..\..\home\runner\.env.md"
+        } else {
+            "/workspace/../../home/runner/.env.md"
+        };
+        let err = validate_workflow_source_path(path)
+            .await
+            .expect_err("absolute path with `..` must be rejected");
+        assert!(
+            format!("{err}").contains("parent-directory components"),
+            "expected parent-dir rejection message, got: {err}"
         );
     }
 
@@ -195,7 +224,8 @@ mod tests {
             .await
             .expect_err("tilde prefix must be rejected");
         assert!(
-            format!("{err}").contains("suspicious relative source path"),
+            format!("{err}").contains("parent-directory components")
+                || format!("{err}").contains("`~`"),
             "expected tilde rejection message, got: {err}"
         );
     }

@@ -73,8 +73,14 @@ pub fn lint(summary: &PipelineSummary) -> Vec<LintFinding> {
 
 pub fn report(summary: &PipelineSummary) -> LintReport {
     let findings = lint(summary);
-    let summary = summarize_findings(&findings);
-    LintReport { findings, summary }
+    // Rename the local to avoid shadowing the `PipelineSummary`
+    // parameter with a `LintSummary` of the same name in the same
+    // scope; the struct field is still called `summary` below.
+    let tally = summarize_findings(&findings);
+    LintReport {
+        findings,
+        summary: tally,
+    }
 }
 
 pub fn summarize_findings(findings: &[LintFinding]) -> LintSummary {
