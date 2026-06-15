@@ -388,6 +388,53 @@ impl AdoAuth {
     }
 }
 
+/// Detect Azure DevOps's AAD "sign-in" HTML response.
+///
+/// When the supplied credentials are missing, invalid, or expired, ADO does
+/// **not** return a clean `401` for API requests — instead it serves the AAD
+/// sign-in page with a `203 Non-Authoritative Information` status (or a
+/// `text/html` content type). Because `203` is in the `2xx` range,
+/// [`reqwest::StatusCode::is_success`] returns `true`, the status check passes,
+/// and the JSON parser then chokes on HTML — surfacing a misleading
+/// "the PAT is invalid or expired" error even when the user authenticated via
+/// the Azure CLI. Run this check before deserializing a response body as JSON.
+fn looks_like_ado_signin(
+    status: reqwest::StatusCode,
+    content_type: Option<&str>,
+    body: &str,
+) -> bool {
+    if status == reqwest::StatusCode::NON_AUTHORITATIVE_INFORMATION {
+        return true;
+    }
+    if content_type
+        .map(|ct| ct.to_ascii_lowercase().contains("text/html"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    let trimmed = body.trim_start();
+    let lower = trimmed.get(..16).unwrap_or(trimmed).to_ascii_lowercase();
+    lower.starts_with("<!doctype") || lower.starts_with("<html")
+}
+
+/// Build an actionable error for the ADO sign-in response detected by
+/// [`looks_like_ado_signin`], tailored to the authentication method in use.
+fn ado_signin_error(auth: &AdoAuth) -> anyhow::Error {
+    match auth {
+        AdoAuth::Bearer(_) => anyhow::anyhow!(
+            "Azure DevOps returned a sign-in page instead of data, which means the \
+             current credentials were rejected. You authenticated with the Azure CLI; \
+             refresh your session with 'az login' and confirm you have access to this \
+             organization and project, then try again."
+        ),
+        AdoAuth::Pat(_) => anyhow::anyhow!(
+            "Azure DevOps returned a sign-in page instead of data, which means the PAT \
+             is invalid, expired, or lacks access to this organization and project. \
+             Generate a new PAT and try again."
+        ),
+    }
+}
+
 /// Minimal subset of an ADO Build Definition for listing.
 #[derive(Debug, Deserialize)]
 pub struct DefinitionListResponse {
@@ -534,10 +581,21 @@ pub async fn list_definitions(
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
         let body = resp
             .text()
             .await
             .context("Failed to read definitions response body")?;
+
+        if looks_like_ado_signin(status, content_type.as_deref(), &body) {
+            return Err(ado_signin_error(auth));
+        }
+
         let response: DefinitionListResponse = serde_json::from_str(&body).with_context(|| {
             let snippet: String = body.chars().take(500).collect();
             format!(
@@ -2558,6 +2616,55 @@ mod tests {
         let raw = serde_json::json!({ "id": 1, "name": "x" });
         let def: DefinitionSummary = serde_json::from_value(raw).unwrap();
         assert!(def.queue_status.is_none());
+    }
+
+    // ==================== ADO sign-in detection ====================
+
+    #[test]
+    fn signin_detected_for_203_status() {
+        // ADO serves the AAD sign-in page with 203 Non-Authoritative
+        // Information, which is a 2xx success status, so it must be caught
+        // by status alone even when the body looks JSON-ish.
+        assert!(looks_like_ado_signin(
+            reqwest::StatusCode::NON_AUTHORITATIVE_INFORMATION,
+            Some("application/json"),
+            "{}",
+        ));
+    }
+
+    #[test]
+    fn signin_detected_for_html_content_type() {
+        assert!(looks_like_ado_signin(
+            reqwest::StatusCode::OK,
+            Some("text/html; charset=utf-8"),
+            "   \n   ",
+        ));
+    }
+
+    #[test]
+    fn signin_detected_for_html_body_without_content_type() {
+        assert!(looks_like_ado_signin(
+            reqwest::StatusCode::OK,
+            None,
+            "\n\n   <!DOCTYPE html><html><head></head></html>",
+        ));
+    }
+
+    #[test]
+    fn signin_not_detected_for_valid_json() {
+        assert!(!looks_like_ado_signin(
+            reqwest::StatusCode::OK,
+            Some("application/json; charset=utf-8"),
+            "{\"count\":0,\"value\":[]}",
+        ));
+    }
+
+    #[test]
+    fn signin_error_message_is_auth_specific() {
+        let bearer = ado_signin_error(&AdoAuth::Bearer("t".into())).to_string();
+        assert!(bearer.contains("az login"));
+        let pat = ado_signin_error(&AdoAuth::Pat("p".into())).to_string();
+        assert!(pat.contains("PAT"));
     }
 
     // ==================== PATH_SEGMENT percent-encoding ====================
