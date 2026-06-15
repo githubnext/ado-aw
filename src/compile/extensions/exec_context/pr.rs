@@ -34,7 +34,7 @@
 //!   passed in argv, and never written to `.git/config`.
 //! - The wrapping `GIT_CONFIG_*` env vars that actually carry the
 //!   bearer into `git`'s `http.extraheader` config (see
-//!   `scripts/ado-script/src/exec-context-pr/git.ts::bearerEnv`) are
+//!   `scripts/ado-script/src/shared/git.ts::bearerEnv`) are
 //!   only ever set in the *spawned `git` child's* environment — not
 //!   in Node's global `process.env`. This is a strict improvement
 //!   over the v6.2 bash implementation, where the bearer also lived

@@ -61,23 +61,40 @@ pub(super) trait ContextContributor {
 }
 
 /// Static-dispatch enum over all known contributors.
-///
-/// Mirrors the `Extension` enum pattern in `extensions/mod.rs`. v1
-/// ships `Pr`; adding a future variant requires only a new arm here
-/// and a registration in `ExecContextExtension::contributors()`.
 pub(super) enum Contributor {
     Pr(super::pr::PrContextContributor),
+    Manual(super::manual::ManualContextContributor),
+    Pipeline(super::pipeline::PipelineContextContributor),
+    CiPush(super::ci_push::CiPushContextContributor),
+    Workitem(super::workitem::WorkitemContextContributor),
+    Schedule(super::schedule::ScheduleContextContributor),
+    PrChecks(super::pr_checks::PrChecksContextContributor),
+    Repo(super::repo::RepoContextContributor),
 }
 
 impl ContextContributor for Contributor {
     fn name(&self) -> &str {
         match self {
             Contributor::Pr(c) => c.name(),
+            Contributor::Manual(c) => c.name(),
+            Contributor::Pipeline(c) => c.name(),
+            Contributor::CiPush(c) => c.name(),
+            Contributor::Workitem(c) => c.name(),
+            Contributor::Schedule(c) => c.name(),
+            Contributor::PrChecks(c) => c.name(),
+            Contributor::Repo(c) => c.name(),
         }
     }
     fn should_activate(&self, ctx: &CompileContext) -> bool {
         match self {
             Contributor::Pr(c) => c.should_activate(ctx),
+            Contributor::Manual(c) => c.should_activate(ctx),
+            Contributor::Pipeline(c) => c.should_activate(ctx),
+            Contributor::CiPush(c) => c.should_activate(ctx),
+            Contributor::Workitem(c) => c.should_activate(ctx),
+            Contributor::Schedule(c) => c.should_activate(ctx),
+            Contributor::PrChecks(c) => c.should_activate(ctx),
+            Contributor::Repo(c) => c.should_activate(ctx),
         }
     }
     fn prepare_step_typed(
@@ -86,11 +103,25 @@ impl ContextContributor for Contributor {
     ) -> anyhow::Result<Option<crate::compile::ir::step::Step>> {
         match self {
             Contributor::Pr(c) => c.prepare_step_typed(ctx),
+            Contributor::Manual(c) => c.prepare_step_typed(ctx),
+            Contributor::Pipeline(c) => c.prepare_step_typed(ctx),
+            Contributor::CiPush(c) => c.prepare_step_typed(ctx),
+            Contributor::Workitem(c) => c.prepare_step_typed(ctx),
+            Contributor::Schedule(c) => c.prepare_step_typed(ctx),
+            Contributor::PrChecks(c) => c.prepare_step_typed(ctx),
+            Contributor::Repo(c) => c.prepare_step_typed(ctx),
         }
     }
     fn bash_commands(&self) -> Vec<String> {
         match self {
             Contributor::Pr(c) => c.bash_commands(),
+            Contributor::Manual(c) => c.bash_commands(),
+            Contributor::Pipeline(c) => c.bash_commands(),
+            Contributor::CiPush(c) => c.bash_commands(),
+            Contributor::Workitem(c) => c.bash_commands(),
+            Contributor::Schedule(c) => c.bash_commands(),
+            Contributor::PrChecks(c) => c.bash_commands(),
+            Contributor::Repo(c) => c.bash_commands(),
         }
     }
 }

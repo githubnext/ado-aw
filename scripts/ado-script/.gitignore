@@ -4,5 +4,12 @@ gate.js
 import.js
 exec-context-pr.js
 exec-context-pr-synth.js
+exec-context-manual.js
+exec-context-pipeline.js
+exec-context-ci-push.js
+exec-context-workitem.js
+exec-context-schedule.js
+exec-context-pr-checks.js
+exec-context-repo.js
 schema
 *.tsbuildinfo
