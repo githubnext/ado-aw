@@ -48,6 +48,25 @@ export const UNTRUSTED_SENTINEL_PREFIX = "<<<AW-UNTRUSTED:";
 /** The sentinel suffix used to mark the end of an untrusted region. */
 export const UNTRUSTED_SENTINEL_SUFFIX = ":AW-UNTRUSTED>>>";
 
+/** Inert escape marker substituted into the body when it contains a
+ * literal sentinel marker. The escape is intentionally one-way (no
+ * round-trip back to the original text) because the body is read-only
+ * by the agent — the goal is to make the staged content structurally
+ * unambiguous, not to losslessly transport the original bytes. */
+const UNTRUSTED_SENTINEL_PREFIX_ESCAPED = "<<<AW-UNTRUSTED-ESCAPED:";
+const UNTRUSTED_SENTINEL_SUFFIX_ESCAPED = ":AW-UNTRUSTED-ESCAPED>>>";
+
+/** Replace any literal sentinel marker substrings in `body` with their
+ * `-ESCAPED` variants so the wrapped body cannot smuggle a fake
+ * `<<<AW-UNTRUSTED:...>>>` open/close pair inside an outer region. */
+function escapeSentinelMarkers(body: string): string {
+  return body
+    .split(UNTRUSTED_SENTINEL_PREFIX)
+    .join(UNTRUSTED_SENTINEL_PREFIX_ESCAPED)
+    .split(UNTRUSTED_SENTINEL_SUFFIX)
+    .join(UNTRUSTED_SENTINEL_SUFFIX_ESCAPED);
+}
+
 /**
  * Wrap `body` with sentinel markers so the agent + Stage-2 detection
  * can recognise the region as untrusted.
@@ -60,6 +79,21 @@ export const UNTRUSTED_SENTINEL_SUFFIX = ":AW-UNTRUSTED>>>";
  *
  * The wrapped output always ends with a newline so consecutive
  * wraps don't run together when concatenated.
+ *
+ * ## Boundary integrity
+ *
+ * The wrapped body has any literal occurrences of the sentinel
+ * prefix / suffix substituted with their `-ESCAPED` variants
+ * (e.g. `<<<AW-UNTRUSTED:` → `<<<AW-UNTRUSTED-ESCAPED:`). This
+ * prevents an adversarial author (anyone with WI write access can
+ * edit prose bodies) from forging a fake close marker inside the
+ * region — e.g. by writing `:AW-UNTRUSTED>>>` followed by content
+ * they want to appear outside the boundary. The escape is one-way
+ * (no round-trip back to the original text); the body is read-only
+ * to the agent, so structural unambiguity matters more than byte
+ * fidelity. The agent sees a clear marker that the original text
+ * tried to slip the boundary; Stage-2 detection can scan for the
+ * `-ESCAPED` substring as a smuggling-attempt signal.
  */
 export function wrapAgentReadableUntrusted(
   body: string,
@@ -83,12 +117,10 @@ export function wrapAgentReadableUntrusted(
   const footer =
     `\n${UNTRUSTED_SENTINEL_PREFIX}${source}${UNTRUSTED_SENTINEL_SUFFIX}\n` +
     `[End untrusted content from ${source}.]\n`;
-  // Ensure the body itself doesn't trivially close the boundary by
-  // containing the literal suffix. If the user wrote the suffix as
-  // legitimate text (unlikely but possible), we leave it — the
-  // sentinel pair we emit is still distinctive because it carries
-  // the matching `source` label.
-  return header + body + footer;
+  // Escape any literal sentinel markers in the body so the wrapped
+  // region is structurally unambiguous — a hostile author cannot
+  // forge a close marker that matches the outer sentinel pair.
+  return header + escapeSentinelMarkers(body) + footer;
 }
 
 /**
