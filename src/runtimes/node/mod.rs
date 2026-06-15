@@ -1,16 +1,16 @@
 //! Node.js runtime support for the ado-aw compiler.
 //!
 //! When enabled via `runtimes: node:`, the compiler auto-installs a specific
-//! Node.js version via `NodeTool@0`, emits `npmAuthenticate@0` for internal
+//! Node.js version via `UseNode@1`, emits `npmAuthenticate@0` for internal
 //! feed access, adds Node ecosystem domains to the AWF network allowlist,
 //! extends the bash command allow-list, and optionally injects feed URL env
 //! vars for npm.
 //!
-//! No AWF mounts or PATH prepends are needed because `NodeTool@0` installs
+//! No AWF mounts or PATH prepends are needed because `UseNode@1` installs
 //! to `/opt/hostedtoolcache` (already mounted read-only by AWF) and publishes
 //! `##vso[task.prependpath]` entries that AWF merges via `$GITHUB_PATH`.
 //!
-//! This module generates `NodeTool@0` YAML inline rather than importing
+//! This module generates `UseNode@1` YAML inline rather than importing
 //! the `node_tool_step()` helper from `compile/extensions/mod.rs`, keeping
 //! the runtime decoupled from the ado-script infrastructure.
 
@@ -93,7 +93,7 @@ impl SanitizeConfigTrait for NodeRuntimeConfig {
 #[derive(Debug, Deserialize, Clone, Default, SanitizeConfig)]
 pub struct NodeOptions {
     /// Node.js version to install (e.g., "22.x", "20.x").
-    /// Passed to `NodeTool@0` `versionSpec`.
+    /// Passed to `UseNode@1` `version`.
     #[serde(default)]
     pub version: Option<String>,
 
@@ -114,14 +114,14 @@ pub struct NodeOptions {
 /// Bash commands that the Node.js runtime adds to the allow-list.
 pub const NODE_BASH_COMMANDS: &[&str] = &["node", "npm", "npx"];
 
-/// Generate the `NodeTool@0` pipeline step (inline, decoupled from ado-script).
+/// Generate the `UseNode@1` pipeline step (inline, decoupled from ado-script).
 pub fn generate_node_install(config: &NodeRuntimeConfig) -> String {
     let version = config.version().unwrap_or("22.x");
     format!(
         "\
-- task: NodeTool@0
+- task: UseNode@1
   inputs:
-    versionSpec: '{version}'
+    version: '{version}'
   displayName: 'Install Node.js {version}'"
     )
 }
@@ -174,10 +174,10 @@ mod tests {
         let config = NodeRuntimeConfig::Enabled(true);
         let step = generate_node_install(&config);
         assert!(
-            step.contains("versionSpec: '22.x'"),
+            step.contains("version: '22.x'"),
             "should default to 22.x, got: {step}"
         );
-        assert!(step.contains("NodeTool@0"));
+        assert!(step.contains("UseNode@1"));
         assert!(step.contains("Install Node.js 22.x"));
     }
 
@@ -189,7 +189,7 @@ mod tests {
         });
         let step = generate_node_install(&config);
         assert!(
-            step.contains("versionSpec: '20.x'"),
+            step.contains("version: '20.x'"),
             "should use pinned version, got: {step}"
         );
         assert!(step.contains("Install Node.js 20.x"));

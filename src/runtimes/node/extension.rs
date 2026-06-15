@@ -9,7 +9,7 @@ use anyhow::Result;
 /// Node.js runtime extension.
 ///
 /// Injects: ecosystem network hosts (node), bash commands (node, npm, npx),
-/// install steps (NodeTool@0), authenticate steps (npmAuthenticate@0),
+/// install steps (UseNode@1), authenticate steps (npmAuthenticate@0),
 /// env vars (NPM_CONFIG_REGISTRY when feed-url is set), and a prompt
 /// supplement.
 pub struct NodeExtension {
@@ -33,7 +33,7 @@ impl CompilerExtension for NodeExtension {
 
     /// Typed-IR view. Returns:
     ///
-    /// * a [`Step::Task`] for `NodeTool@0`,
+    /// * a [`Step::Task`] for `UseNode@1`,
     /// * (optionally, when `feed-url:` or `config:` is set):
     ///   a [`Step::Bash`] that creates a minimal `.npmrc` if missing,
     ///   then a [`Step::Task`] for `npmAuthenticate@0`.
@@ -125,8 +125,8 @@ Node.js is installed and available. Use `node` to run scripts, \
 /// default ("22.x") matches the legacy emitter.
 fn node_install_task_step(config: &NodeRuntimeConfig) -> TaskStep {
     let version = config.version().unwrap_or("22.x");
-    TaskStep::new("NodeTool@0", format!("Install Node.js {version}"))
-        .with_input("versionSpec", version)
+    TaskStep::new("UseNode@1", format!("Install Node.js {version}"))
+        .with_input("version", version)
 }
 
 /// Build the typed [`TaskStep`] for npm authentication.
@@ -222,7 +222,7 @@ mod tests {
         assert!(ext.declarations(&ctx_from(&fm)).is_err());
     }
 
-    /// Default Node install: only a single `Step::Task(NodeTool@0)`
+    /// Default Node install: only a single `Step::Task(UseNode@1)`
     /// surfaces; no npmrc / npmAuthenticate steps are emitted.
     #[test]
     fn declarations_returns_typed_task_for_default_node() {
@@ -232,10 +232,10 @@ mod tests {
         assert_eq!(decl.agent_prepare_steps.len(), 1);
         match &decl.agent_prepare_steps[0] {
             Step::Task(t) => {
-                assert_eq!(t.task, "NodeTool@0");
+                assert_eq!(t.task, "UseNode@1");
                 assert_eq!(t.display_name, "Install Node.js 22.x");
                 assert_eq!(
-                    t.inputs.get("versionSpec").map(String::as_str),
+                    t.inputs.get("version").map(String::as_str),
                     Some("22.x")
                 );
             }
@@ -245,7 +245,7 @@ mod tests {
     }
 
     /// With `feed-url:` set, three steps surface in order:
-    /// `NodeTool@0` → `Ensure .npmrc exists` → `npmAuthenticate@0`,
+    /// `UseNode@1` → `Ensure .npmrc exists` → `npmAuthenticate@0`,
     /// and `NPM_CONFIG_REGISTRY` flows into agent env vars.
     #[test]
     fn declarations_with_feed_url_appends_npmrc_and_auth() {

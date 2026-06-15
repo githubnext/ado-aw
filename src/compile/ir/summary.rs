@@ -161,7 +161,7 @@ pub struct StepSummary {
     pub id: Option<String>,
     pub kind: StepKind,
     pub display_name: Option<String>,
-    /// For `task` steps: the ADO task identifier (e.g. `"NodeTool@0"`).
+    /// For `task` steps: the ADO task identifier (e.g. `"UseNode@1"`).
     pub task: Option<String>,
     /// Lowered ADO condition string, when one is set on the step.
     pub condition: Option<String>,

@@ -326,13 +326,13 @@ impl AdoScriptExtension {
 }
 
 /// Returns the two-step bundle as typed `Step`s: a
-/// `Step::Task(NodeTool@0)` plus a `Step::Bash` for the curl + sha256
+/// `Step::Task(UseNode@1)` plus a `Step::Bash` for the curl + sha256
 /// + unzip pipeline.
 fn install_and_download_steps_typed() -> Vec<Step> {
     let version = env!("CARGO_PKG_VERSION");
     let install = {
         let mut t =
-            TaskStep::new("NodeTool@0", "Install Node.js 20.x").with_input("versionSpec", "20.x");
+            TaskStep::new("UseNode@1", "Install Node.js 22.x").with_input("version", "22.x");
         t.timeout = Some(std::time::Duration::from_secs(300));
         t.condition = Some(Condition::Succeeded);
         t
@@ -473,14 +473,14 @@ impl CompilerExtension for AdoScriptExtension {
     }
 
     fn phase(&self) -> ExtensionPhase {
-        // System phase: ado-script's NodeTool@0 install + bundle download +
+        // System phase: ado-script's UseNode@1 install + bundle download +
         // resolver step must complete BEFORE any user-facing Runtime
-        // extension (e.g. NodeExtension) runs. Otherwise our Node 20
+        // extension (e.g. NodeExtension) runs. Otherwise our Node 22
         // install would prepend onto PATH after the user's pinned Node,
         // silently overriding the user's choice for the rest of the
         // Agent job. By running first, our install lives only during the
         // brief window before the user's Runtime install, and the
-        // resolver step inside that window picks up our Node 20.
+        // resolver step inside that window picks up our Node 22.
         ExtensionPhase::System
     }
 
@@ -772,7 +772,7 @@ mod tests {
     fn name_and_phase() {
         let ext = ext_with(None, None, true);
         assert_eq!(ext.name(), "ado-script");
-        // System phase ensures NodeTool@0 install + bundle download +
+        // System phase ensures UseNode@1 install + bundle download +
         // resolver run BEFORE user-facing Runtime extensions (e.g. the
         // Node runtime), so the user's pinned Node version wins on PATH
         // for the rest of the Agent job.
@@ -803,8 +803,8 @@ mod tests {
         assert_eq!(steps.len(), 3, "install + download + gate");
         match &steps[0] {
             Step::Task(t) => {
-                assert_eq!(t.task, "NodeTool@0");
-                assert_eq!(t.display_name, "Install Node.js 20.x");
+                assert_eq!(t.task, "UseNode@1");
+                assert_eq!(t.display_name, "Install Node.js 22.x");
                 assert!(!t.display_name.contains("for gate evaluator"));
             }
             other => panic!("expected NodeTool task, got {other:?}"),
@@ -854,7 +854,7 @@ mod tests {
         let ctx = CompileContext::for_test(&fm);
         let steps = ext.declarations(&ctx).unwrap().setup_steps;
         assert_eq!(steps.len(), 3, "install + download + synthPr");
-        assert!(matches!(&steps[0], Step::Task(t) if t.task == "NodeTool@0"));
+        assert!(matches!(&steps[0], Step::Task(t) if t.task == "UseNode@1"));
         assert!(
             matches!(&steps[1], Step::Bash(b) if b.display_name.contains("Download ado-aw scripts"))
         );
@@ -974,7 +974,7 @@ mod tests {
         let ctx = CompileContext::for_test(&fm);
         let steps = ext.declarations(&ctx).unwrap().agent_prepare_steps;
         assert_eq!(steps.len(), 3, "install + download + resolver");
-        assert!(matches!(&steps[0], Step::Task(t) if t.task == "NodeTool@0"));
+        assert!(matches!(&steps[0], Step::Task(t) if t.task == "UseNode@1"));
         assert!(
             matches!(&steps[1], Step::Bash(b) if b.display_name.contains("Download ado-aw scripts"))
         );
@@ -1528,7 +1528,7 @@ mod tests {
     }
 
     /// `declarations()` setup_steps must surface a typed
-    /// `Step::Task(NodeTool@0)` followed by `Step::Bash` (download)
+    /// `Step::Task(UseNode@1)` followed by `Step::Bash` (download)
     /// followed by the typed gate `Step::Bash` when a PR gate is
     /// active. No `Step::RawYaml`.
     #[test]
@@ -1548,8 +1548,8 @@ mod tests {
         assert_eq!(decl.setup_steps.len(), 3, "install + download + prGate");
 
         match &decl.setup_steps[0] {
-            Step::Task(t) => assert_eq!(t.task, "NodeTool@0"),
-            other => panic!("expected Task(NodeTool@0), got {other:?}"),
+            Step::Task(t) => assert_eq!(t.task, "UseNode@1"),
+            other => panic!("expected Task(UseNode@1), got {other:?}"),
         }
         match &decl.setup_steps[1] {
             Step::Bash(b) => assert!(b.display_name.starts_with("Download ado-aw scripts")),
@@ -1651,7 +1651,7 @@ mod tests {
         let decl = ext.declarations(&ctx).unwrap();
         assert_eq!(decl.agent_prepare_steps.len(), 3);
         match &decl.agent_prepare_steps[0] {
-            Step::Task(t) => assert_eq!(t.task, "NodeTool@0"),
+            Step::Task(t) => assert_eq!(t.task, "UseNode@1"),
             other => panic!("expected Task, got {other:?}"),
         }
         match &decl.agent_prepare_steps[2] {

@@ -1,9 +1,9 @@
 ---
 name: "Dedupe Node Runtime And Imports"
-description: "User pins Node 22 via runtime; ado-script must NOT override on PATH"
+description: "User pins Node 20 via runtime; ado-script must NOT override on PATH"
 runtimes:
   node:
-    version: "22.x"
+    version: "20.x"
 ---
 
 ## Dedupe Node Runtime And Imports
