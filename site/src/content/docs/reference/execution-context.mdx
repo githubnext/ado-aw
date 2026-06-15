@@ -42,24 +42,51 @@ local once the precompute step finishes.
 
 ## Contributors
 
-| Contributor | Activates when | Output layout |
-|-------------|----------------|---------------|
-| `pr` | `on.pr` is configured (and not explicitly disabled) | `aw-context/pr/` |
+All contributors are scoped by a runtime ADO `condition:` so they run only on
+the matching trigger type — no unnecessary REST calls or git fetches fire on
+every build.
 
-Future contributors (pipeline-completion, scheduled, manual) will plug in via the
-same internal `ContextContributor` trait without changing the agent-facing layout.
+| Contributor | Activates when | Default | Output layout |
+|-------------|----------------|---------|---------------|
+| `pr` | `on.pr` is configured | **ON** | `aw-context/pr/` |
+| `pr.checks` | `pr` contributor is active AND `pr.checks.enabled: true` | OFF (opt-in) | `aw-context/pr/checks/` |
+| `workitem` | `pr` contributor is active | **ON** | `aw-context/workitem/` |
+| `manual` | Any `parameters:` block is declared | **ON** | `aw-context/manual/` |
+| `pipeline` | `on.pipeline` is configured | **ON** | `aw-context/pipeline/` |
+| `ci-push` | `on` push trigger AND `ci-push.enabled: true` | OFF (opt-in) | `aw-context/ci-push/` |
+| `schedule` | `on.schedule` is configured AND `schedule.enabled: true` | OFF (opt-in) | `aw-context/schedule/` |
+| `repo` | `repo.enabled: true` | OFF (opt-in) | `aw-context/repo/` |
 
 ## Front-matter configuration
 
 ```yaml
 execution-context:
-  enabled: true   # master switch; default: true
+  enabled: true      # master switch; default: true
   pr:
-    enabled: true # default: true when on.pr is configured
+    enabled: true    # default: true when on.pr is configured
+    checks:
+      enabled: false # default: false; opt in to stage pr/checks/*.json
+  workitem:
+    enabled: true    # default: true when pr contributor is active
+    max-items: 5     # cap on linked WIs staged (default: 5)
+    max-body-kb: 32  # cap per prose body field, in KB (default: 32)
+  manual:
+    enabled: true          # default: true when any parameters: block is declared
+    include-email: false   # whether to stage requestor email (default: false)
+  pipeline:
+    enabled: true    # default: true when on.pipeline is configured
+  ci-push:
+    enabled: false   # default: false; opt in for "since last green build" diff context
+  schedule:
+    enabled: false   # default: false; opt in for "since last run" diff context
+  repo:
+    enabled: false         # default: false; opt in for repo identity context
+    conventions: false     # whether to probe CODEOWNERS/CONTRIBUTING.md/AGENTS.md (default: false)
 ```
 
 All keys are optional. When the `execution-context:` block is omitted entirely,
-defaults activate per trigger — PR context is on whenever `on.pr` is set.
+defaults activate per trigger — PR, workitem, manual, and pipeline contributors
+turn on automatically when their respective trigger is configured.
 
 ### Fields
 
@@ -67,8 +94,7 @@ defaults activate per trigger — PR context is on whenever `on.pr` is set.
 runs and no `aw-context/` directory is staged.
 
 **`pr.enabled`** (`bool`, default `true` when `on.pr` is configured) — whether to
-activate the PR contributor. Set `false` to opt out (e.g. when your agent already
-does its own precompute, or simply does not need diff context).
+activate the PR contributor. Set `false` to opt out.
 
 <Aside type="tip">
   `pr.enabled: true` without an `on.pr` trigger has no effect — the contributor
@@ -81,18 +107,72 @@ Setting `pr.enabled: false` also suppresses the automatic git commands in the
 agent's bash allow-list (see [Bash allow-list](#bash-allow-list-auto-extension)
 below).
 
+**`pr.checks.enabled`** (`bool`, default `false`) — opt in to stage Build Validation
+run results under `aw-context/pr/checks/`. Requires the `pr` contributor to be active.
+Useful for remediation agents that need to identify which checks are failing before
+proposing a fix.
+
+**`workitem.enabled`** (`bool`, default `true` when the `pr` contributor is active) —
+whether to fetch and stage linked work item details for each PR. Disable to skip WI
+fetching (e.g. when your pipeline's WIs contain sensitive content you do not want
+in the agent's prompt window).
+
+**`workitem.max-items`** (`integer`, default `5`) — maximum number of linked WIs staged.
+Additional WIs are listed in `aw-context/workitem/truncated.txt` (names only) so the
+agent knows they exist.
+
+**`workitem.max-body-kb`** (`integer`, default `32`) — maximum kilobytes per prose body
+field (description, acceptance criteria, repro steps). Bodies larger than the cap are
+truncated with a trailing `[truncated]` marker.
+
+**`manual.enabled`** (`bool`, default `true` when any `parameters:` block is declared) —
+whether to stage manual-run context. Set `false` to opt out of requestor-identity
+and parameter-snapshot staging.
+
+**`manual.include-email`** (`bool`, default `false`) — whether to include
+`$(Build.RequestedForEmail)` in the staged metadata and prompt fragment. Off by default
+as a hygiene posture — the address is already visible in the ADO build UI, and most
+agents do not need it.
+
+**`pipeline.enabled`** (`bool`, default `true` when `on.pipeline` is configured) —
+whether to stage upstream-build metadata when the pipeline fires as a resource trigger.
+Set `false` to opt out.
+
+**`ci-push.enabled`** (`bool`, default `false`) — opt in to stage "since last successful
+build on this branch" diff context for CI push builds (`IndividualCI` / `BatchedCI`
+build reasons). OFF by default because the REST lookup and git fetch deepening add
+startup latency most push-CI agents do not need.
+
+**`schedule.enabled`** (`bool`, default `false`) — opt in to stage diff context for
+scheduled builds. Same REST-and-deepening cost as `ci-push`; OFF by default because
+many scheduled agents are operational (report generators, health checks) and do not
+need diff context.
+
+**`repo.enabled`** (`bool`, default `false`) — opt in to stage repository identity
+context (current branch, SHA, last release tag, commits-since-tag). Pure git — no
+REST, no bearer. OFF by default to avoid prompt-clutter regression for agents that
+already receive sufficient repo identity from the PR or CI-push contributor.
+
+**`repo.conventions`** (`bool`, default `false`) — when `repo.enabled: true`, also
+probe for common convention files (`CODEOWNERS`, `.github/CODEOWNERS`,
+`CONTRIBUTING.md`, `.editorconfig`, `AGENTS.md`) and stage `aw-context/repo/conventions.json`
+with presence flags and the first 50 lines of each file found.
+
 ## Agent-visible layout
 
-For PR-triggered builds, the precompute step stages files under
-`$(Build.SourcesDirectory)/aw-context/` — i.e. the agent's working directory.
+Every active contributor stages files under
+`$(Build.SourcesDirectory)/aw-context/` — the agent's working directory. Each
+contributor occupies its own subdirectory and runs under a runtime `condition:`
+so unmatched trigger types produce no files.
 
-### Success case
+### `pr` — pull request context
 
 ```
 aw-context/
   pr/
     base.sha   # merge-base SHA (40-char hex, no trailing newline)
     head.sha   # PR head SHA   (40-char hex, no trailing newline)
+    error.txt  # present only on failure (one-line reason)
 ```
 
 `base.sha` is the common ancestor of the PR head and the PR target branch —
@@ -100,53 +180,168 @@ aw-context/
 paths. This makes `git diff $BASE..$HEAD` produce the same change set regardless
 of how ADO checked out the workspace.
 
-### Failure case
+On failure, `base.sha` and `head.sha` are not written. The bundle appends a
+failure prompt fragment explaining the reason and reminding the agent to surface
+the failure via `report_incomplete` or fall back to the ADO API.
+
+### `pr.checks` — build validation run results
 
 ```
 aw-context/
   pr/
-    error.txt  # one-line failure reason
+    checks/
+      failing.json   # Build Validation runs that did not succeed
+      succeeded.json # Build Validation runs that succeeded
+      error.txt      # REST failure (only on error)
 ```
 
-`base.sha` / `head.sha` are not written on failure. The bundle also appends a
-failure prompt fragment explaining the reason and reminding the agent not to
-produce an empty review — it should surface the failure via `report_incomplete` or
-fall back to the ADO API.
+Requires `pr.checks.enabled: true`. Useful for remediation agents that need to
+identify which CI checks failed before proposing a fix.
+
+### `workitem` — PR-linked work items
+
+```
+aw-context/
+  workitem/
+    ids.txt                    # newline-delimited list of WI ids
+    <id>/
+      summary.json             # id, type, title, state, area-path, assigned-to, tags
+      description.md           # System.Description (HTML→plain text, untrusted sentinel)
+      acceptance.md            # AcceptanceCriteria (untrusted sentinel)
+      repro.md                 # ReproSteps for Bug type (untrusted sentinel)
+      comments.json            # discussion history (untrusted sentinels)
+      links.json               # relations summary
+      attachments.json         # attachment metadata (name, size, url); bytes NOT downloaded
+    truncated.txt              # present when linked WI count exceeded max-items
+    errors.txt                 # per-id fetch failures (if any)
+    error.txt                  # present only on total failure
+```
+
+Prose body fields (description, acceptance criteria, repro, comments) are wrapped in
+`<<<AW-UNTRUSTED:` / `AW-UNTRUSTED>>>` sentinels — a visible signal to the agent (and
+to Stage-2 detection) that the content crosses a trust boundary and may contain
+arbitrary user-authored text.
+
+The prompt fragment interpolates only short structured fields (id, title, type, state)
+as natural English. Prose stays in files.
+
+### `manual` — manual-run context
+
+```
+aw-context/
+  manual/
+    requested-for         # $(Build.RequestedFor) display name
+    requested-for-email   # $(Build.RequestedForEmail) — only when include-email: true
+    parameters.json       # snapshot of user-declared parameter values (pretty-printed JSON)
+```
+
+Activated on `Build.Reason == Manual` builds when any `parameters:` block is
+declared. The `clearMemory` auto-injected parameter is **not** included in
+`parameters.json` (it is not in `front_matter.parameters`). Parameter values come
+from user input at queue time and are sanitised by the bundle before any prompt
+interpolation.
+
+### `pipeline` — upstream-pipeline-completion context
+
+```
+aw-context/
+  pipeline/
+    upstream-build-id        # numeric Build ID of the triggering upstream run
+    upstream-source-sha      # Build.sourceVersion of the upstream
+    upstream-source-branch   # Build.sourceBranch of the upstream
+    upstream-status          # succeeded / failed / partiallySucceeded / canceled
+    upstream-definition      # upstream pipeline definition name
+    upstream-artifacts.json  # artifact INDEX (names + download URLs; bytes NOT downloaded)
+    error.txt                # present only on failure
+```
+
+Activated on `Build.Reason == ResourceTrigger` builds when `on.pipeline` is
+configured. Bearer required for the ADO Build REST API lookup. The prompt fragment
+appends a `## Pipeline-completion context` section.
+
+### `ci-push` — CI push diff context
+
+```
+aw-context/
+  ci-push/
+    current-sha          # Build.SourceVersion
+    previous-sha         # SHA of the last successful build on this branch
+    base.sha             # git merge-base between previous and current
+    commits.txt          # git log previous..current --oneline
+    changed-files.txt    # git diff --name-status previous..current
+    error.txt            # present on failure (no prior build, depth exhausted, REST error)
+```
+
+Activated on `IndividualCI` / `BatchedCI` builds when `ci-push.enabled: true`.
+Bearer required for both the ADO Build REST API lookup (finding the last successful
+build) and git fetch deepening. Adds the same 7 read-only git commands to the
+bash allow-list as the `pr` contributor.
+
+### `schedule` — scheduled-build diff context
+
+Same artifact layout as `ci-push`, staged under `aw-context/schedule/`:
+
+```
+aw-context/
+  schedule/
+    current-sha
+    previous-sha
+    base.sha
+    commits.txt
+    changed-files.txt
+    error.txt
+```
+
+Activated on `Build.Reason == Schedule` builds when `schedule.enabled: true`. Bearer
+required. Adds git read commands to the bash allow-list.
+
+### `repo` — repository identity context
+
+```
+aw-context/
+  repo/
+    branch                  # short branch name (refs/heads/ prefix stripped)
+    sha                     # Build.SourceVersion (current commit SHA)
+    last-release-tag        # git describe --tags --abbrev=0 (empty when no tags exist)
+    commits-since-tag.txt   # git log <tag>..HEAD --oneline (empty when no tag)
+    conventions.json        # convention-file probe — only when conventions: true
+```
+
+Activated when `repo.enabled: true` on any build reason. Pure git — no REST, no
+bearer. Adds `git`, `git log`, `git rev-parse`, `git describe` to the bash allow-list.
+
+`conventions.json` is a small JSON object with presence flags and the first 50 lines
+of each convention file found (`CODEOWNERS`, `.github/CODEOWNERS`, `CONTRIBUTING.md`,
+`.editorconfig`, `AGENTS.md`). Only staged when `repo.conventions: true`.
 
 ### Short identifiers in the prompt
 
-PR id, ADO project name, and repository name are **not** staged as files. They are
-interpolated directly into the prompt fragment ("This is PR #4242 in project
-`OneBranch` / repository `my-repo`.") as natural English and as literal arguments
-in example ADO MCP tool calls (`repo_get_pull_request_by_id`,
-`repo_list_pull_request_threads`, `repo_create_pull_request_thread`). Files are
-reserved for the opaque 40-char SHAs the agent reuses across many commands.
+Short, well-structured values (PR id, project, repo, requestor name, upstream
+definition name) are interpolated directly into prompt fragments as natural English
+and as literal arguments in example ADO MCP tool calls. Files are reserved for
+long opaque values (40-char SHAs, JSON blobs) the agent reuses across many
+commands.
 
 ## Bash allow-list auto-extension
 
-When the PR contributor activates, these read-only git commands are added to the
-agent's bash allow-list:
+Several contributors automatically extend the agent's bash allow-list with
+read-only git commands. The set contributed by each:
 
-```
-git
-git diff
-git log
-git show
-git status
-git rev-parse
-git symbolic-ref
-```
+| Contributor | Commands added |
+|-------------|----------------|
+| `pr` | `git`, `git diff`, `git log`, `git show`, `git status`, `git rev-parse`, `git symbolic-ref` |
+| `ci-push` | same 7 as `pr` |
+| `schedule` | same 7 as `pr` |
+| `repo` | `git`, `git log`, `git rev-parse`, `git describe` |
+| `workitem`, `manual`, `pipeline`, `pr.checks` | none |
 
 | `tools.bash` setting | Behaviour |
 |----------------------|-----------|
 | `bash:` omitted (allow-all) | Extension is a no-op — all commands are already permitted. |
-| `bash: ["..."]` (explicit list) | The 7 git commands are appended to your list. |
-| `pr.enabled: false` | The git commands are **not** added. |
+| `bash: ["..."]` (explicit list) | Each contributor's commands are appended to your list. |
+| `pr.enabled: false` | The PR contributor's 7 git commands are **not** added. |
 
-This keeps the agent's bash surface intentional: opting out of the PR contributor
-also opts out of the corresponding git capability.
-
-## What the precompute step does
+## What the `pr` precompute step does
 
 The step invokes `node /tmp/ado-aw-scripts/ado-script/exec-context-pr.js` with
 `SYSTEM_ACCESSTOKEN` plus the five `SYSTEM_*` / `BUILD_*` identifier env vars.
@@ -241,9 +436,16 @@ appended automatically.
 
 - Extension: `src/compile/extensions/exec_context/mod.rs`
   (`ExtensionPhase::Tool`)
-- Contributor trait: `src/compile/extensions/exec_context/contributor.rs`
+- Contributor trait + enum: `src/compile/extensions/exec_context/contributor.rs`
 - PR contributor: `src/compile/extensions/exec_context/pr.rs`
-- Front-matter types: `ExecutionContextConfig` / `PrContextConfig` in
+- PR checks contributor: `src/compile/extensions/exec_context/pr_checks.rs`
+- Work item contributor: `src/compile/extensions/exec_context/workitem.rs`
+- Manual contributor: `src/compile/extensions/exec_context/manual.rs`
+- Pipeline contributor: `src/compile/extensions/exec_context/pipeline.rs`
+- CI-push contributor: `src/compile/extensions/exec_context/ci_push.rs`
+- Schedule contributor: `src/compile/extensions/exec_context/schedule.rs`
+- Repo contributor: `src/compile/extensions/exec_context/repo.rs`
+- Front-matter types: `ExecutionContextConfig` and per-contributor `*Config` structs in
   `src/compile/types.rs`
-- Compile tests: `tests/compiler_tests.rs` (search `test_execution_context_pr_*`)
+- Compile tests: `tests/compiler_tests.rs` (search `test_execution_context_*`)
 - Bash lint fixture: `execution-context-agent.md`
