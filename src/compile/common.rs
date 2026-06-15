@@ -392,6 +392,9 @@ pub fn validate_front_matter_identity(front_matter: &FrontMatter) -> Result<()> 
     ] {
         validate::reject_pipeline_injection(value, field)?;
     }
+    if let Some(workspace) = &front_matter.workspace {
+        validate::reject_pipeline_injection(workspace, "workspace")?;
+    }
 
     // Validate trigger.pipeline fields for newlines and ADO expressions
     if let Some(trigger_config) = &front_matter.on_config {
@@ -798,8 +801,8 @@ pub fn compute_effective_workspace(
                     if !validate::is_safe_path_segment(alias) {
                         anyhow::bail!(
                             "Agent '{}' has workspace: '{}' which is not a safe path \
-                            segment. Repository aliases must not be empty, contain '..', \
-                            '/', '\\\\' or start with '.'.",
+                            segment. Repository aliases must match [A-Za-z0-9._-], \
+                            must not contain '..', '/', '\\\\', and must not start with '.'.",
                             agent_name,
                             alias
                         );
@@ -2858,6 +2861,19 @@ mod tests {
         let checkouts = vec!["foo/bar".to_string()];
         let err = compute_effective_workspace(&Some("foo/bar".to_string()), &checkouts, "agent")
             .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not a safe path"), "msg: {msg}");
+    }
+
+    #[test]
+    fn test_workspace_explicit_alias_with_shell_metacharacters_fails() {
+        let checkouts = vec!["evil`env|base64>creds`".to_string()];
+        let err = compute_effective_workspace(
+            &Some("evil`env|base64>creds`".to_string()),
+            &checkouts,
+            "agent",
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("not a safe path"), "msg: {msg}");
     }
@@ -4972,6 +4988,15 @@ safe-outputs:
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("ADO expression"));
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_ado_expression_in_workspace() {
+        let mut fm = minimal_front_matter();
+        fm.workspace = Some("$(System.AccessToken)".to_string());
+        let result = validate_front_matter_identity(&fm);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("workspace"));
     }
 
     #[test]
