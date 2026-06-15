@@ -229,7 +229,13 @@ fn transitive_jobs(
         .collect()
 }
 
-fn reachable_edges(
+/// BFS-walk a directed edge list from `start`, returning every node
+/// reachable in the requested direction (transitive closure;
+/// `start` itself is not included unless cyclically reachable).
+///
+/// Shared with [`crate::inspect::whatif`] so the two failure
+/// reachability tools cannot drift apart on traversal semantics.
+pub fn reachable_edges(
     edges: &[EdgeEntry],
     start: &str,
     direction: GraphDepsDirection,

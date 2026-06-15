@@ -5,7 +5,7 @@
 //! strings to classify downstream jobs that would be skipped after a
 //! chosen job or step fails.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 
@@ -13,6 +13,7 @@ use anyhow::{Result, anyhow};
 use serde::Serialize;
 
 use crate::compile::ir::summary::{EdgeEntry, JobSummary, PipelineBodySummary, PipelineSummary};
+use crate::inspect::graph_deps;
 
 /// JSON report emitted by `ado-aw whatif --json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -321,29 +322,10 @@ fn is_negated_call(normalized_condition: &str, call_idx: usize) -> bool {
 }
 
 fn reachable_edges(edges: &[EdgeEntry], start: &str) -> BTreeSet<String> {
-    let mut downstream: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for edge in edges {
-        downstream
-            .entry(edge.producer.clone())
-            .or_default()
-            .insert(edge.consumer.clone());
-    }
-
-    let mut seen = BTreeSet::new();
-    let mut queue: VecDeque<String> = downstream
-        .get(start)
-        .into_iter()
-        .flat_map(|next| next.iter().cloned())
-        .collect();
-    while let Some(node) = queue.pop_front() {
-        if !seen.insert(node.clone()) {
-            continue;
-        }
-        if let Some(next) = downstream.get(&node) {
-            queue.extend(next.iter().cloned());
-        }
-    }
-    seen
+    // whatif always walks downstream (producer → consumers); the
+    // shared helper in graph_deps owns the BFS so the two failure
+    // reachability tools cannot drift apart on traversal semantics.
+    graph_deps::reachable_edges(edges, start, graph_deps::GraphDepsDirection::Downstream)
 }
 
 fn known_ids(summary: &PipelineSummary) -> Vec<String> {

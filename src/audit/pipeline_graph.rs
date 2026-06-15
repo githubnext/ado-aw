@@ -13,8 +13,21 @@ use crate::compile::ir::summary::{JobSummary, PipelineSummary};
 /// emitted by the Agent job. Missing local sources are common when auditing an
 /// arbitrary build, so absence is recorded as a warning rather than an error.
 pub async fn populate_pipeline_graph(audit: &mut AuditData, run_dir: &Path) -> Result<()> {
-    let source = match read_source_from_aw_info(run_dir).await.transpose()? {
-        Some(source) if !source.trim().is_empty() => Some(source),
+    let source = match read_source_from_aw_info(run_dir).await {
+        Some(Ok(value)) if !value.trim().is_empty() => Some(value),
+        Some(Err(err)) => {
+            // Previously `transpose()?` propagated this as a hard
+            // error and aborted the audit. A corrupt aw_info.json
+            // from a bad run is a realistic scenario; downgrade to
+            // the same warn-and-continue path documented for
+            // resolve_source_path failures below.
+            record_warning(
+                audit,
+                "audit::pipeline_graph",
+                format!("failed to read aw_info.json: {err:#}; skipping IR graph correlation"),
+            );
+            return Ok(());
+        }
         _ => audit
             .overview
             .aw_info
@@ -155,102 +168,15 @@ async fn read_source_from_aw_info(run_dir: &Path) -> Option<Result<String>> {
 /// Resolve the `source` string taken from a downloaded `aw_info.json`
 /// into an on-disk path.
 ///
-/// **Security**: this value is part of the audited build's artifact
-/// payload and must be treated as untrusted. A malicious or prompt-
-/// injected build could carry `"source": "/home/user/.ssh/id_rsa"`,
-/// and although [`crate::compile::build_pipeline_ir`] would fail to
-/// parse it the file would still be read. We mitigate by:
-///
-/// - Requiring the path to end with `.md` (the only valid agentic
-///   workflow source extension), which closes the
-///   arbitrary-file-read vector against keys, `/etc/passwd`, etc.
-/// - Rejecting relative paths that contain `..` components or a
-///   leading `~` (no directory traversal, no shell-style expansion).
-/// - Allowing absolute `.md` paths because legitimate compiled-
-///   elsewhere workflows commonly carry an absolute `source`. For
-///   absolute paths that exist on disk we additionally canonicalize
-///   and **re-check the extension on the resolved target**, which
-///   rejects a symlink-bypass such as `/tmp/foo.md` → `/etc/passwd`
-///   where the link itself satisfies the lexical `.md` check but
-///   points to an unrelated file.
-///
-/// ## Residual risk
-///
-/// The `.md` extension check is the **primary gate** for absolute
-/// paths. A crafted `aw_info.json` carrying
-/// `"source": "/home/user/something.md"` will still reach
-/// `build_pipeline_ir`, which opens and reads the file. Because that
-/// function is read-only and fails gracefully on non-front-matter
-/// markdown, the practical blast radius is an unexpected parse error
-/// surfaced in the audit warnings — not code execution or
-/// credential exfiltration. **Do not weaken or remove the `.md`
-/// extension check or the symlink-target re-check** without also
-/// adding a containment check (e.g. canonicalize + prefix-against-
-/// cwd) at the same level; without them any future maintainer would
-/// silently re-open the arbitrary-file-read vector via either a
-/// non-markdown extension or a `.md` symlink targeting an arbitrary
-/// file.
+/// Delegates the whole security contract to
+/// [`crate::compile::source_path_guard::validate_workflow_source_path`],
+/// which both this entry point and the mcp-author server share.
+/// See that module-level doc for the full list of mitigations.
 async fn resolve_source_path(source: &str) -> Result<PathBuf> {
-    let normalized = normalize_source_path(source);
-    let path = PathBuf::from(&normalized);
-
-    if !has_md_extension(&path) {
-        anyhow::bail!(
-            "refusing source path '{}' from audited build artifact: only `.md` files are valid agentic workflow sources",
-            normalized
-        );
-    }
-
-    if path.is_absolute() {
-        // If the file exists, resolve symlinks and re-check the
-        // extension on the actual target. Closes the
-        // `/tmp/foo.md → /etc/passwd` symlink-bypass vector. We
-        // intentionally tolerate `canonicalize` failing (the path may
-        // not exist locally — the caller upstream emits a warning in
-        // that case) and only enforce the re-check when the link
-        // resolved successfully.
-        if let Ok(canonical) = tokio::fs::canonicalize(&path).await
-            && !has_md_extension(&canonical)
-        {
-            anyhow::bail!(
-                "refusing source path '{}' from audited build artifact: symlink resolves to non-`.md` target '{}'",
-                normalized,
-                canonical.display()
-            );
-        }
-        return Ok(path);
-    }
-
-    if path
-        .components()
-        .any(|component| matches!(component, std::path::Component::ParentDir))
-        || normalized.starts_with('~')
-    {
-        anyhow::bail!(
-            "refusing suspicious relative source path '{}' from audited build artifact",
-            normalized
-        );
-    }
-
-    let cwd = tokio::fs::canonicalize(".")
+    let validated = crate::compile::source_path_guard::validate_workflow_source_path(source)
         .await
-        .context("Could not resolve current directory")?;
-    Ok(cwd.join(path))
-}
-
-fn has_md_extension(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
-}
-
-fn normalize_source_path(source: &str) -> String {
-    let trimmed = source.trim();
-    if std::path::MAIN_SEPARATOR == '/' {
-        trimmed.replace('\\', "/")
-    } else {
-        trimmed.replace('/', "\\")
-    }
+        .with_context(|| "validate aw_info.json source string from audited build artifact")?;
+    Ok(validated.path)
 }
 
 async fn find_artifact_dir(run_dir: &Path, prefix: &str) -> Option<PathBuf> {
@@ -460,6 +386,42 @@ mod tests {
                 .any(|w| w.source == "audit::pipeline_graph"
                     && w.message.contains("could not resolve source path")),
             "expected a warning recording the rejection, got {:?}",
+            audit.warnings
+        );
+    }
+
+    #[tokio::test]
+    async fn populate_pipeline_graph_records_warning_on_corrupt_aw_info_json() {
+        // Regression: previously `read_source_from_aw_info`'s
+        // Some(Err(_)) was propagated via `transpose()?` and aborted
+        // the entire audit. A corrupt aw_info.json from a bad run is
+        // a realistic scenario; it must degrade to a warning.
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let run_dir = temp_dir.path().join("build-77");
+        let staging_dir = run_dir.join("agent_outputs_77").join("staging");
+        tokio::fs::create_dir_all(&staging_dir)
+            .await
+            .expect("create staging");
+        tokio::fs::write(staging_dir.join("aw_info.json"), b"{not valid json")
+            .await
+            .expect("write malformed aw_info");
+
+        let mut audit = AuditData::default();
+        populate_pipeline_graph(&mut audit, &run_dir)
+            .await
+            .expect("populate graph must not bail on corrupt aw_info.json");
+
+        assert!(
+            audit.pipeline_graph.is_none(),
+            "corrupt aw_info.json must not populate pipeline_graph"
+        );
+        assert!(
+            audit
+                .warnings
+                .iter()
+                .any(|w| w.source == "audit::pipeline_graph"
+                    && w.message.contains("failed to read aw_info.json")),
+            "expected a warning recording the read failure, got {:?}",
             audit.warnings
         );
     }

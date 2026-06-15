@@ -21,6 +21,7 @@ mod job_ir;
 mod onees;
 mod onees_ir;
 pub(crate) mod pr_filters;
+pub mod source_path_guard;
 mod stage;
 mod stage_ir;
 mod standalone;

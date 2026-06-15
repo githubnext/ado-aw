@@ -385,77 +385,20 @@ pub async fn run_stdio() -> Result<()> {
 /// resolve it to a `PathBuf` suitable for passing to
 /// `crate::compile::build_pipeline_ir`.
 ///
-/// **Security**: the mcp-author server runs in an IDE/Copilot Chat
-/// context where the surrounding agent may be processing
-/// untrusted content (PR descriptions, issue comments, fetched web
-/// pages). A prompt-injected request such as
-/// `inspect_workflow(source_path="../../.ssh/authorized_keys.md")`
-/// would otherwise reach `build_pipeline_ir`, open the file, and
-/// surface the path in the parse-error message.
-///
-/// We apply the same guards as
-/// [`crate::audit::pipeline_graph::resolve_source_path`]:
-///
-/// - Require a `.md` extension (the only valid agentic workflow
-///   source extension); closes the arbitrary-file-read vector
-///   against keys, `/etc/passwd`, etc.
-/// - Reject relative paths that contain `..` components or a leading
-///   `~` (no directory traversal, no shell-style expansion).
-/// - For absolute paths, canonicalize and re-check the extension on
-///   the resolved target so a `foo.md → /etc/passwd` symlink does
-///   not satisfy the lexical check.
+/// Delegates to the shared
+/// [`crate::compile::source_path_guard::validate_workflow_source_path`]
+/// so the audit and mcp-author entry points cannot drift apart on
+/// path validation. The shared guard rejects non-`.md` paths,
+/// `..` components, `~` prefixes, and `.md` symlinks resolving to
+/// non-`.md` targets (the latter via `canonicalize` re-check on
+/// absolute paths), and **normalises platform separators first** so
+/// a Linux caller cannot smuggle `..\\workflow.md` past the
+/// traversal check.
 async fn source_path(path: &str) -> Result<PathBuf, McpError> {
-    let trimmed = path.trim();
-    let buf = PathBuf::from(trimmed);
-
-    let has_md_extension = buf
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
-    if !has_md_extension {
-        return Err(McpError::invalid_params(
-            format!(
-                "refusing source_path '{trimmed}': only `.md` files are valid agentic workflow sources"
-            ),
-            None,
-        ));
-    }
-
-    if buf.is_absolute() {
-        // Resolve symlinks and re-check the extension on the target so a
-        // `foo.md` link pointing at an arbitrary file is rejected. We
-        // tolerate canonicalize failing (file may not exist locally —
-        // build_pipeline_ir will then surface a clean read error).
-        if let Ok(canonical) = tokio::fs::canonicalize(&buf).await {
-            let target_has_md = canonical
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
-            if !target_has_md {
-                return Err(McpError::invalid_params(
-                    format!(
-                        "refusing source_path '{trimmed}': symlink resolves to non-`.md` target '{}'",
-                        canonical.display()
-                    ),
-                    None,
-                ));
-            }
-        }
-        return Ok(buf);
-    }
-
-    if buf
-        .components()
-        .any(|component| matches!(component, std::path::Component::ParentDir))
-        || trimmed.starts_with('~')
-    {
-        return Err(McpError::invalid_params(
-            format!("refusing suspicious relative source_path '{trimmed}'"),
-            None,
-        ));
-    }
-
-    Ok(buf)
+    crate::compile::source_path_guard::validate_workflow_source_path(path)
+        .await
+        .map(|validated| validated.path)
+        .map_err(|err| McpError::invalid_params(format!("{err:#}"), None))
 }
 
 fn parse_graph_dump_format(format: Option<&str>) -> Result<GraphFormat, McpError> {

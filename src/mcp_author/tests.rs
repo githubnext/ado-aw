@@ -101,7 +101,19 @@ async fn source_path_rejects_parent_traversal() {
         .await
         .expect_err("parent traversal must be rejected");
     assert!(
-        format!("{err}").contains("suspicious relative source_path"),
+        format!("{err}").contains("suspicious relative source path"),
+        "expected traversal rejection message, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn source_path_rejects_backslash_parent_traversal() {
+    // Regression for the linux-side `..\\workflow.md` bypass.
+    let err = source_path("..\\..\\authorized_keys.md")
+        .await
+        .expect_err("backslash-encoded `..` must be rejected");
+    assert!(
+        format!("{err}").contains("suspicious relative source path"),
         "expected traversal rejection message, got: {err}"
     );
 }
@@ -112,7 +124,7 @@ async fn source_path_rejects_tilde_prefix() {
         .await
         .expect_err("tilde prefix must be rejected");
     assert!(
-        format!("{err}").contains("suspicious relative source_path"),
+        format!("{err}").contains("suspicious relative source path"),
         "expected tilde rejection message, got: {err}"
     );
 }
