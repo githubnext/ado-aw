@@ -55,10 +55,7 @@ impl Validate for CreateBranchParams {
         validate_git_ref_name(&self.branch_name, "branch_name")?;
 
         if let Some(ref commit) = self.source_commit {
-            ensure!(
-                commit.len() == 40 && commit.chars().all(|c| c.is_ascii_hexdigit()),
-                "source_commit must be a valid 40-character hex SHA"
-            );
+            crate::validate::validate_commit_sha(commit, "source_commit")?;
         }
 
         if let Some(ref branch) = self.source_branch {

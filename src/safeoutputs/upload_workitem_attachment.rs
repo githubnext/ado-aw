@@ -10,7 +10,6 @@ use super::PATH_SEGMENT;
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
-use crate::validate::contains_newline;
 use anyhow::{Context, ensure};
 
 /// Parameters for uploading an attachment to a work item
@@ -29,37 +28,13 @@ pub struct UploadWorkitemAttachmentParams {
 impl Validate for UploadWorkitemAttachmentParams {
     fn validate(&self) -> anyhow::Result<()> {
         ensure!(self.work_item_id > 0, "work_item_id must be positive");
-        ensure!(!self.file_path.is_empty(), "file_path must not be empty");
-        ensure!(
-            !self.file_path.split(['/', '\\']).any(|component| component == ".."),
-            "file_path must not contain '..' path components"
-        );
-        ensure!(
-            !self.file_path.starts_with('/') && !self.file_path.starts_with('\\'),
-            "file_path must not be an absolute path"
-        );
+        crate::validate::validate_relative_safe_path(&self.file_path, "file_path")?;
+        // `validate_relative_safe_path` only blocks a colon in a Windows drive
+        // prefix (position 1), not colons elsewhere. This explicit check is
+        // load-bearing: it rejects paths like `output/file:name.txt`.
         ensure!(
             !self.file_path.contains(':'),
             "file_path must not contain ':'"
-        );
-        ensure!(
-            !self.file_path.contains('\0'),
-            "file_path must not contain null bytes"
-        );
-        ensure!(
-            !contains_newline(&self.file_path),
-            "file_path must not contain newlines or carriage returns"
-        );
-        ensure!(
-            !self.file_path.contains("##vso[") && !self.file_path.contains("##["),
-            "file_path must not contain Azure DevOps pipeline command sequences"
-        );
-        ensure!(
-            !self
-                .file_path
-                .split(['/', '\\'])
-                .any(|component| component == ".git"),
-            "file_path must not contain '.git' components"
         );
         if let Some(comment) = &self.comment {
             ensure!(

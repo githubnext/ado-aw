@@ -152,6 +152,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── update_check.rs   # Version update check — queries GitHub Releases and prints advisory when newer version is available
 │   ├── ndjson.rs         # NDJSON parsing utilities
 │   ├── sanitize.rs       # Input sanitization for safe outputs
+│   ├── secure.rs         # Validated newtype value objects (parse-don't-validate path/identifier types)
 │   ├── validate.rs       # Structural input validators (char allowlists, format checks, injection detectors)
 │   ├── agent_stats.rs    # OTel-based agent statistics parsing (token usage, duration, turns)
 │   ├── hash.rs           # SHA-256 utilities for safe-output file integrity
@@ -376,7 +377,15 @@ Following the gh-aw security model:
    [`docs/mcp.md`](docs/mcp.md).
 4. **Input Sanitization**: Validate and sanitize all inputs before
    transformation — `src/validate.rs` and `src/sanitize.rs`.
-5. **Permission Scoping**: Default to minimal permissions, require explicit
+5. **Typed path/identifier fields**: When adding a safe-output tool (or any
+   code) with a `Params` field that holds a file path, git ref, commit SHA,
+   artifact name, or other identifier, type it with a validated newtype from
+   `src/secure.rs` (e.g. `RelativeSafePath`, `StrictRelativePath`,
+   `GitRefName`, `CommitSha`, `ArtifactName`) instead of a raw `String`. These
+   newtypes run the `src/validate.rs` primitives at deserialization time, so
+   the security checks cannot be silently forgotten or weakened. Keep
+   `validate()` only for cross-field/semantic rules.
+6. **Permission Scoping**: Default to minimal permissions, require explicit
    elevation — see the *Permissions* section in
    [`docs/network.md`](docs/network.md).
 

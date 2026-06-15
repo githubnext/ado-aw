@@ -326,41 +326,8 @@ pub(crate) fn name_matches_pattern(name: &str, pattern: &str) -> bool {
     wildcard_match(pattern, name)
 }
 
-/// Validate a string against `git check-ref-format` rules.
-///
-/// Returns `Ok(())` if the name is valid, or an `Err` describing the violation.
-/// This covers the structural rules that Azure DevOps also enforces — catching
-/// them early gives clearer error messages than letting the API fail.
-pub(crate) fn validate_git_ref_name(name: &str, label: &str) -> anyhow::Result<()> {
-    use anyhow::ensure;
-
-    ensure!(!name.is_empty(), "{label} must not be empty");
-    ensure!(!name.contains(".."), "{label} must not contain '..'");
-    ensure!(!name.contains("@{"), "{label} must not contain '@{{'");
-    ensure!(!name.ends_with('.'), "{label} must not end with '.'");
-    ensure!(!name.ends_with(".lock"), "{label} must not end with '.lock'");
-    ensure!(
-        !name.contains('\\'),
-        "{label} must not contain backslash"
-    );
-    ensure!(
-        !name.contains("//"),
-        "{label} must not contain consecutive slashes"
-    );
-    for ch in ['~', '^', ':', '?', '*', '['] {
-        ensure!(
-            !name.contains(ch),
-            "{label} must not contain '{ch}'"
-        );
-    }
-    for component in name.split('/') {
-        ensure!(
-            !component.starts_with('.'),
-            "{label} path component must not start with '.'"
-        );
-    }
-    Ok(())
-}
+/// Re-export of the canonical git ref-name validator (now in [`crate::validate`]).
+pub(crate) use crate::validate::validate_git_ref_name;
 
 fn work_item_report_default_type() -> String {
     "Task".to_string()
