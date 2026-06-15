@@ -239,21 +239,62 @@ fn reachable_downstream_jobs(
 ///
 /// The classifier is a best-effort static analyser over the rendered
 /// condition string, not a semantic ADO expression evaluator. Known
-/// limitations:
+/// limitations, in order of "most likely to surprise an author":
 ///
-/// - **Variable-based conditions** such as
-///   `eq(variables['Agent.JobStatus'], 'Failed')` or
-///   `eq(dependencies.Setup.result, 'Failed')` are conservatively
-///   reported as `Skipped`. Treat that result as a lower bound — a
-///   job may still execute at runtime via a variable-based escape
-///   hatch we cannot statically detect.
+/// - **`not(succeeded())` is misclassified as `Skipped`**. The
+///   classifier's bypass list contains only `always()`, `failed()`,
+///   and `succeededOrFailed()`; `succeeded()` is not recognised, so
+///   negating it does not flip the classification. In practice
+///   `not(succeeded())` (run when the parent did **not** succeed —
+///   typically a cleanup job) would execute after an upstream
+///   failure but is conservatively reported as `Skipped`. Treat
+///   that result as a lower bound for any cleanup job using this
+///   form.
+/// - **Scoped predicate forms are not recognised**. ADO accepts
+///   arguments such as `failed('Setup')`,
+///   `succeededOrFailed('Stage.Job')`, or `always('Stage1')` to
+///   scope the predicate to specific upstream jobs/stages. The
+///   classifier searches for the bare `failed()` /
+///   `succeededorfailed()` / `always()` tokens (parens immediately
+///   closed), so any argumented form drops through to `Skipped`.
+/// - **`canceled()` is not recognised**. A condition of `canceled()`
+///   alone classifies as `Skipped`. The common
+///   `or(failed(), canceled())` form is still classified as
+///   `RunsAnyway` because `failed()` is in the list, so this only
+///   matters for cancellation-only bypass jobs.
+/// - **Variable-based and dependency-result conditions** such as
+///   `eq(variables['Agent.JobStatus'], 'Failed')`,
+///   `eq(dependencies.Setup.result, 'Failed')`, or
+///   `in(dependencies.Agent.result, 'Failed', 'Canceled')` are
+///   conservatively reported as `Skipped`. Treat that result as a
+///   lower bound — a job may still execute at runtime via a
+///   variable-based escape hatch we cannot statically detect.
+/// - **Templated `${{ }}` expressions** that survived compile-time
+///   substitution (e.g. `eq('${{ parameters.runAnyway }}', 'true')`)
+///   are opaque to the classifier and report `Skipped`.
+/// - **Boolean composition is ignored**. `and(failed(), eq(...))`
+///   classifies as `RunsAnyway` because the unnegated `failed()`
+///   marker is enough — the `eq(...)` half is not evaluated for
+///   short-circuit semantics.
+/// - **Multi-line `not(...)` wraps** can defeat the negation
+///   detector. The normaliser strips spaces but not tabs or
+///   newlines, so `not\n(failed())` would not satisfy the `not(`
+///   lookbehind and the marker would be treated as un-negated.
+///   ADO emits compact single-line conditions in practice.
+/// - **Step-level conditions are ignored**. `classify_condition` is
+///   only called for job/stage `condition:` strings; a step inside a
+///   job with its own bypass does not affect the job's
+///   classification.
 /// - **String literals containing marker syntax** trigger a
 ///   false-positive `RunsAnyway`: a condition like
 ///   `eq(variables['result'], 'failed()')` would match the literal
 ///   `failed()` substring even though the call is never invoked. ADO
 ///   conditions are compiler-generated rather than raw user input, so
-///   this is an accepted residual gap; the authoritative source
-///   remains the live ADO pipeline run.
+///   this is an accepted residual gap.
+///
+/// The authoritative source for any classification disagreement
+/// remains the live ADO pipeline run (or
+/// [`crate::inspect::trace`] over a real build's timeline).
 fn classify_condition(condition: &Option<String>) -> WhatIfClassification {
     let Some(condition) = condition else {
         return WhatIfClassification::Skipped;

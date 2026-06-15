@@ -62,7 +62,10 @@ pub struct ValidatedSourcePath {
 ///    caller upstream surfaces a clean read error in that case).
 /// 4. For relative paths, reject `..` components and a leading
 ///    `~` (no directory traversal, no shell-style expansion), then
-///    join to the canonicalised current working directory.
+///    join to the canonicalised current working directory. **Apply
+///    the same symlink-target extension re-check** as for absolute
+///    paths so a `workflows/evil.md` link to `/etc/passwd` cannot
+///    sneak through after a downstream `canonicalize` resolves it.
 pub async fn validate_workflow_source_path(source: &str) -> Result<ValidatedSourcePath> {
     let normalized = normalize_separators(source.trim());
     let path = PathBuf::from(&normalized);
@@ -99,8 +102,25 @@ pub async fn validate_workflow_source_path(source: &str) -> Result<ValidatedSour
     let cwd = tokio::fs::canonicalize(".")
         .await
         .map_err(|err| anyhow::anyhow!("could not resolve current directory: {err}"))?;
+    let joined = cwd.join(&path);
+
+    // Mirror the absolute-path symlink check so a relative input like
+    // `workflows/evil.md` whose joined form symlinks to `/etc/passwd`
+    // is also rejected. Without this guard the lexical `.md` check on
+    // the link name passes and the eventual `canonicalize` inside
+    // `populate_pipeline_graph` resolves to the arbitrary target,
+    // narrowing the contract documented at module level.
+    if let Ok(canonical) = tokio::fs::canonicalize(&joined).await
+        && !has_md_extension(&canonical)
+    {
+        anyhow::bail!(
+            "refusing source path '{normalized}': symlink resolves to non-`.md` target '{}'",
+            canonical.display()
+        );
+    }
+
     Ok(ValidatedSourcePath {
-        path: cwd.join(&path),
+        path: joined,
         normalized,
     })
 }
@@ -214,6 +234,43 @@ mod tests {
         let err = validate_workflow_source_path(link.to_str().unwrap())
             .await
             .expect_err("symlink to non-md target must be rejected");
+        assert!(
+            format!("{err}").contains("symlink resolves to non-`.md` target"),
+            "expected symlink rejection message, got: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_relative_md_symlink_to_non_md_target() {
+        // Regression: the symlink target re-check originally only
+        // fired for absolute input paths, so a relative
+        // `workflows/evil.md` symlink pointing at /etc/passwd slipped
+        // past the lexical `.md` check and the eventual
+        // `canonicalize` inside `populate_pipeline_graph` would read
+        // the target. The guard now fires on the relative branch
+        // too. Switch the process cwd to a tempdir so the relative
+        // join lands on our symlink.
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let target = temp_dir.path().join("binary.bin");
+        tokio::fs::write(&target, b"x").await.unwrap();
+        let workflows = temp_dir.path().join("workflows");
+        tokio::fs::create_dir_all(&workflows).await.unwrap();
+        let link = workflows.join("evil.md");
+        tokio::fs::symlink(&target, &link).await.unwrap();
+
+        // `std::env::set_current_dir` is process-global; serialise
+        // via a static mutex so concurrent tests do not stomp.
+        static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = CWD_LOCK.lock().unwrap();
+        let original_cwd = std::env::current_dir().expect("save cwd");
+        std::env::set_current_dir(temp_dir.path()).expect("enter tempdir");
+
+        let result = validate_workflow_source_path("workflows/evil.md").await;
+
+        std::env::set_current_dir(&original_cwd).expect("restore cwd");
+
+        let err = result.expect_err("relative symlink to non-md target must be rejected");
         assert!(
             format!("{err}").contains("symlink resolves to non-`.md` target"),
             "expected symlink rejection message, got: {err}"
