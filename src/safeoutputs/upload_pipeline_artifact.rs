@@ -50,8 +50,8 @@ use serde::{Deserialize, Serialize};
 use super::PATH_SEGMENT;
 use crate::sanitize::SanitizeContent;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::secure::{ArtifactName, StrictRelativePath};
 use crate::tool_result;
-use crate::validate::is_valid_artifact_name;
 use anyhow::{Context, ensure};
 
 /// Parameters for publishing a workspace file as an ADO pipeline artifact.
@@ -74,35 +74,23 @@ pub struct UploadPipelineArtifactParams {
 
     /// The artifact name shown in the Artifacts tab.  ADO requires a non-empty
     /// name made of alphanumerics, `-`, `_`, or `.`. Must be 1-100 characters
-    /// and must not start with `.`.
-    pub artifact_name: String,
+    /// and must not start with `.`. Validated at deserialization time via
+    /// [`ArtifactName`].
+    pub artifact_name: ArtifactName,
 
     /// Path to the file in the workspace to publish. Must be a relative path
     /// with no directory traversal, no absolute prefix, and no `.git`
-    /// segments.
-    pub file_path: String,
+    /// segments. Validated at deserialization time via [`StrictRelativePath`].
+    pub file_path: StrictRelativePath,
 }
 
 impl Validate for UploadPipelineArtifactParams {
     fn validate(&self) -> anyhow::Result<()> {
+        // build_id: if present, must be positive. (artifact_name and file_path
+        // are structurally validated by their newtypes at deserialization.)
         if let Some(id) = self.build_id {
             ensure!(id > 0, "build_id must be positive when specified");
         }
-
-        ensure!(
-            self.artifact_name.len() <= 100,
-            "artifact_name must be at most 100 characters"
-        );
-        ensure!(
-            !self.artifact_name.starts_with('.'),
-            "artifact_name must not start with '.'"
-        );
-        ensure!(
-            is_valid_artifact_name(&self.artifact_name),
-            "artifact_name must be non-empty and contain only alphanumeric characters, '-', '_' or '.'"
-        );
-
-        crate::validate::validate_relative_segment_path(&self.file_path, "file_path")?;
         Ok(())
     }
 }
@@ -313,7 +301,7 @@ impl Executor for UploadPipelineArtifactResult {
             Some(prefix) => format!("{}{}", prefix, self.artifact_name),
             None => self.artifact_name.clone(),
         };
-        if final_name.starts_with('.') || final_name.len() > 100 || !is_valid_artifact_name(&final_name) {
+        if final_name.starts_with('.') || final_name.len() > 100 || !crate::validate::is_valid_artifact_name(&final_name) {
             return Ok(ExecutionResult::failure(format!(
                 "Resolved artifact name '{}' is not a valid Azure DevOps artifact name",
                 final_name
@@ -663,9 +651,26 @@ mod tests {
     ) -> UploadPipelineArtifactParams {
         UploadPipelineArtifactParams {
             build_id,
-            artifact_name: artifact_name.to_string(),
-            file_path: file_path.to_string(),
+            artifact_name: artifact_name.try_into().expect("test artifact_name must be valid"),
+            file_path: file_path.try_into().expect("test file_path must be valid"),
         }
+    }
+
+    /// Deserialize params from JSON so that the `ArtifactName` /
+    /// `StrictRelativePath` newtype validators run at the parse boundary. Used
+    /// by the rejection tests, which cannot build invalid values via
+    /// `make_params` (the newtypes refuse to construct from an invalid string).
+    fn try_params(
+        build_id: Option<i64>,
+        artifact_name: &str,
+        file_path: &str,
+    ) -> Result<UploadPipelineArtifactParams, serde_json::Error> {
+        let value = serde_json::json!({
+            "build_id": build_id,
+            "artifact_name": artifact_name,
+            "file_path": file_path,
+        });
+        serde_json::from_value(value)
     }
 
     const DUMMY_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -696,87 +701,66 @@ mod tests {
 
     #[test]
     fn test_validation_rejects_empty_artifact_name() {
-        assert!(make_params(None, "", "out/report.pdf").validate().is_err());
+        assert!(try_params(None, "", "out/report.pdf").is_err());
     }
 
     #[test]
     fn test_validation_rejects_artifact_name_with_spaces() {
-        assert!(make_params(None, "my report", "out/report.pdf")
-            .validate()
-            .is_err());
+        assert!(try_params(None, "my report", "out/report.pdf").is_err());
     }
 
     #[test]
     fn test_validation_rejects_leading_dot_artifact_name() {
-        assert!(make_params(None, ".hidden", "out/report.pdf")
-            .validate()
-            .is_err());
+        assert!(try_params(None, ".hidden", "out/report.pdf").is_err());
     }
 
     #[test]
     fn test_validation_rejects_long_artifact_name() {
         let long_name = "a".repeat(101);
-        assert!(make_params(None, &long_name, "out/report.pdf")
-            .validate()
-            .is_err());
+        assert!(try_params(None, &long_name, "out/report.pdf").is_err());
     }
 
     #[test]
     fn test_validation_rejects_empty_file_path() {
-        assert!(make_params(None, "report", "").validate().is_err());
+        assert!(try_params(None, "report", "").is_err());
     }
 
     #[test]
     fn test_validation_rejects_traversal_in_file_path() {
-        assert!(make_params(None, "report", "../etc/passwd")
-            .validate()
-            .is_err());
+        assert!(try_params(None, "report", "../etc/passwd").is_err());
     }
 
     #[test]
     fn test_validation_rejects_null_bytes_in_file_path() {
-        assert!(make_params(None, "report", "out/report\0.pdf")
-            .validate()
-            .is_err());
+        assert!(try_params(None, "report", "out/report\0.pdf").is_err());
     }
 
     #[test]
     fn test_validation_rejects_newline_in_file_path() {
-        assert!(make_params(None, "report", "out\n/report.pdf")
-            .validate()
-            .is_err());
+        assert!(try_params(None, "report", "out\n/report.pdf").is_err());
     }
 
     #[test]
     fn test_validation_rejects_carriage_return_in_file_path() {
-        assert!(make_params(None, "report", "out\r/report.pdf")
-            .validate()
-            .is_err());
+        assert!(try_params(None, "report", "out\r/report.pdf").is_err());
     }
 
     #[test]
     fn test_validation_rejects_colon_in_file_path() {
-        assert!(make_params(None, "report", "C:\\out\\report.pdf")
-            .validate()
-            .is_err());
+        assert!(try_params(None, "report", "C:\\out\\report.pdf").is_err());
     }
 
     #[test]
     fn test_validation_rejects_pipeline_command_sequences_in_file_path() {
         assert!(
-            make_params(
+            try_params(
                 None,
                 "report",
                 "##vso[task.setvariable variable=EXPLOIT]value.txt"
             )
-            .validate()
             .is_err()
         );
-        assert!(
-            make_params(None, "report", "##[error]value.txt")
-                .validate()
-                .is_err()
-        );
+        assert!(try_params(None, "report", "##[error]value.txt").is_err());
     }
 
     #[test]

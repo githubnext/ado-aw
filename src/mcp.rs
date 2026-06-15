@@ -1210,7 +1210,7 @@ restrictions may apply per the workflow's safe-outputs config."
             )));
         }
 
-        let extension = std::path::Path::new(&params.0.file_path)
+        let extension = std::path::Path::new(params.0.file_path.as_str())
             .extension()
             .and_then(|s| s.to_str())
             .map(|s| {
@@ -1259,8 +1259,8 @@ restrictions may apply per the workflow's safe-outputs config."
 
         let result = UploadPipelineArtifactResult::new(
             params.0.build_id,
-            params.0.artifact_name.clone(),
-            params.0.file_path.clone(),
+            params.0.artifact_name.to_string(),
+            params.0.file_path.to_string(),
             staged_filename.clone(),
             file_size,
             staged_sha256,
