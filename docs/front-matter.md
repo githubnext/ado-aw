@@ -148,6 +148,15 @@ execution-context:             # optional execution-context plugin (see docs/exe
     enabled: true              # defaults to true when on.pr is configured. Set false to opt out
                                # (also suppresses auto-adding the read-only git commands to the
                                # agent's bash allow-list).
+self-optimization:             # optional, opt-in self-optimization preview (see "Self-optimization")
+  enabled: true                # default: false. Set true to let the agent propose step optimizations.
+  staged: true                 # default: true. Preview proposals in the build summary only.
+                               # Set false only after reviewing preview quality and choosing to
+                               # allow source-file mutation proposals to land.
+  max-proposals-per-run: 3     # default: 3. Sanitized/clamped to a maximum of 50.
+  allowed-sections:            # default: [steps, post-steps] (same job/security context as agent).
+    - steps                    # allowed values: steps, post-steps, setup, teardown.
+    - post-steps               # setup/teardown are separate jobs and require explicit opt-in.
 steps:                         # inline steps before agent runs (same job, generate context)
   - bash: echo "Preparing context for agent"
     displayName: "Prepare context"
@@ -184,6 +193,28 @@ parameters:                    # optional ADO runtime parameters (surfaced in UI
 
 Build the project and run all tests...
 ```
+
+## Self-optimization (opt-in)
+
+`self-optimization:` is an opt-in feature that gives the Stage-1 agent a
+structured safe-output, `propose-step-optimization`, for proposing that
+deterministic bash it successfully ran be lifted into front-matter `steps:` or
+`post-steps:`. The runtime pieces that consume this configuration — the
+proposing tool and Stage 3 executor — are part of the same feature build-out and
+may land in follow-up layers.
+
+The default is OFF (`enabled: false`). When you first set `enabled: true`,
+`staged: true` remains the default: accepted proposals are rendered as PREVIEW
+diffs in the build summary and no source-file mutations land. Flip
+`staged: false` only after reviewing preview quality and deciding the pipeline
+should allow accepted optimizations to update the source `.md`.
+
+`allowed-sections` defaults to `[steps, post-steps]`, because both sections run
+in the same job and security context as the agent. Opting in to `setup` or
+`teardown` is explicit because those sections run in separate jobs that may have
+different identities. See the self-optimization reference
+([`docs/self-optimization.md`](self-optimization.md)) for the full feature
+design. <!-- TODO: lands with Layer 5 -->
 
 ## Workspace Defaults
 
@@ -420,4 +451,3 @@ pipeline. In this mode the compiler:
 
 Result: every PR update fires exactly one PR-typed build (`Build.Reason
 == PullRequest`); commit-driven CI is fully silenced.
-

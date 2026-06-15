@@ -232,6 +232,20 @@ Typical steps:
 
 > **Type path/identifier `Params` fields with validated newtypes.** If your tool's input holds a file path, git ref, commit SHA, artifact name, or similar identifier, use a newtype from [`src/secure.rs`](../src/secure.rs) (`RelativeSafePath`, `StrictRelativePath`, `PathSegment`, `GitRefName`, `BranchName`, `CommitSha`, `ArtifactName`, `Identifier`, `HostName`, `Version`) instead of a raw `String`. These wrap the canonical primitives in [`src/validate.rs`](../src/validate.rs) and run them at deserialization time, so the path-traversal / injection / format checks are applied automatically and cannot be silently omitted. Reserve the manual `validate()` method for cross-field and semantic rules (e.g. positive IDs, length minimums).
 
+### Validating untrusted step blocks
+
+Use `compile::ir::validate_step_block` as the shared structural validator
+whenever a safe-output tool or other component accepts a YAML step block from an
+untrusted source. It returns all validation errors at once rather than
+short-circuiting; collect those errors into the safe-output's structured
+rejection so both the agent and audit pipeline get the full picture.
+
+For agent-proposed blocks, always pass `StepKindAllow::Curated`. Only pass
+`StepKindAllow::Full` when the caller is human-supervised, such as the
+`validate_steps` author MCP tool. References: `src/compile/ir/step_validation.rs`
+and the typed-factory task allow-list in
+`src/compile/ir/tasks.rs::CURATED_TASK_IDS`.
+
 Safe-output tools are not `CompilerExtension`s. If a safe output also needs compile-time MCP configuration, add that through the always-on `SafeOutputsExtension` declarations.
 
 ## Adding a runtime
