@@ -16,13 +16,14 @@ use crate::safeoutputs::{
     CreatePrResult, CreateWikiPageParams, CreateWikiPageResult, CreateWorkItemParams,
     CreateWorkItemResult, DEFAULT_MAX_FILE_SIZE, LinkWorkItemsParams, LinkWorkItemsResult,
     MissingDataParams, MissingDataResult, MissingToolParams, MissingToolResult, NoopParams,
-    NoopResult, PIPELINE_ARTIFACT_DEFAULT_MAX_FILE_SIZE, QueueBuildParams, QueueBuildResult,
-    ReplyToPrCommentParams, ReplyToPrCommentResult, ReportIncompleteParams, ReportIncompleteResult,
-    ResolvePrThreadParams, ResolvePrThreadResult, SubmitPrReviewParams, SubmitPrReviewResult,
-    ToolResult, UpdatePrParams, UpdatePrResult, UpdateWikiPageParams, UpdateWikiPageResult,
-    UpdateWorkItemParams, UpdateWorkItemResult, UploadBuildAttachmentParams,
-    UploadBuildAttachmentResult, UploadPipelineArtifactParams, UploadPipelineArtifactResult,
-    UploadWorkitemAttachmentParams, UploadWorkitemAttachmentResult, anyhow_to_mcp_error,
+    NoopResult, PIPELINE_ARTIFACT_DEFAULT_MAX_FILE_SIZE, ProposeStepOptimizationParams,
+    ProposeStepOptimizationResult, QueueBuildParams, QueueBuildResult, ReplyToPrCommentParams,
+    ReplyToPrCommentResult, ReportIncompleteParams, ReportIncompleteResult, ResolvePrThreadParams,
+    ResolvePrThreadResult, SubmitPrReviewParams, SubmitPrReviewResult, ToolResult, UpdatePrParams,
+    UpdatePrResult, UpdateWikiPageParams, UpdateWikiPageResult, UpdateWorkItemParams,
+    UpdateWorkItemResult, UploadBuildAttachmentParams, UploadBuildAttachmentResult,
+    UploadPipelineArtifactParams, UploadPipelineArtifactResult, UploadWorkitemAttachmentParams,
+    UploadWorkitemAttachmentResult, anyhow_to_mcp_error,
 };
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 
@@ -55,7 +56,7 @@ fn generate_short_id() -> String {
 }
 
 // Re-export from tools module
-use crate::safeoutputs::{ALWAYS_ON_TOOLS, DEBUG_ONLY_TOOLS};
+use crate::safeoutputs::{ALWAYS_ON_TOOLS, DEBUG_ONLY_TOOLS, OPT_IN_GATED_TOOLS};
 
 // ============================================================================
 // SafeOutputs MCP Server
@@ -142,11 +143,16 @@ impl SafeOutputs {
 
         let mut tool_router = Self::tool_router();
 
-        // Apply tool filtering. Three categories:
+        // Apply tool filtering. Four categories:
         //   * ALWAYS_ON_TOOLS — diagnostic/transparency tools always served.
-        //   * DEBUG_ONLY_TOOLS — gated tools (e.g. `create-issue`) that are
-        //     stripped even when `enabled_tools` is `None`. They become
-        //     reachable only when explicitly listed in `enabled_tools`.
+        //   * DEBUG_ONLY_TOOLS — gated debug tools (e.g. `create-issue`)
+        //     that are stripped even when `enabled_tools` is `None`. They
+        //     become reachable only when explicitly listed in `enabled_tools`.
+        //   * OPT_IN_GATED_TOOLS — gated opt-in feature tools (e.g.
+        //     `propose-step-optimization`) that are stripped by default
+        //     and only enabled when the compiler explicitly lists them
+        //     (driven by the matching front-matter section, e.g.
+        //     `self-optimization.enabled: true`).
         //   * Everything else — permissive default when `enabled_tools` is
         //     `None`; otherwise filtered against the explicit allowlist.
         let all_tools: Vec<String> = tool_router
@@ -158,12 +164,13 @@ impl SafeOutputs {
         let explicit_filter = enabled_tools.is_some();
         for tool_name in &all_tools {
             let is_always_on = ALWAYS_ON_TOOLS.contains(&tool_name.as_str());
-            let is_debug_only = DEBUG_ONLY_TOOLS.contains(&tool_name.as_str());
+            let is_gated = DEBUG_ONLY_TOOLS.contains(&tool_name.as_str())
+                || OPT_IN_GATED_TOOLS.contains(&tool_name.as_str());
             let explicitly_enabled = enabled_tools
                 .map(|enabled| enabled.iter().any(|e| e == tool_name))
                 .unwrap_or(false);
 
-            let keep = if is_debug_only {
+            let keep = if is_gated {
                 explicitly_enabled
             } else if is_always_on {
                 true
@@ -1408,6 +1415,37 @@ agent attempted work but couldn't finish (e.g., API timeouts, build failures, re
             warn!("Failed to write report-incomplete safe output: {}", e);
         }
         Ok(CallToolResult::success(vec![]))
+    }
+
+    #[tool(
+        name = "propose-step-optimization",
+        description = "Propose lifting deterministic bash work the agent ran successfully into \
+the front-matter steps:/post-steps: section. Stage 3 IR-validates the proposed block (Curated \
+allow-list — bash + typed-factory tasks only) and either previews the diff in the build summary \
+(`staged: true`, the default) or opens a PR against the source .md (`staged: false`). Opt-in: \
+this tool is only available when `self-optimization.enabled: true` is set in the front matter. \
+The agent must populate `source_command_evidence` with the bash commands it actually ran so \
+Stage 2 detection can cross-check the proposal against the audit trail."
+    )]
+    async fn propose_step_optimization(
+        &self,
+        params: Parameters<ProposeStepOptimizationParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!(
+            "Tool called: propose-step-optimization - section={:?}, evidence_count={}",
+            params.0.section,
+            params.0.source_command_evidence.len()
+        );
+        let result: ProposeStepOptimizationResult = params.0.try_into()?;
+        self.write_safe_output_file(&result).await.map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
+        })?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Step-optimization proposal recorded for section `{}`. Stage 3 will \
+             IR-validate and either preview the diff (staged mode) or open a PR \
+             against the source workflow.",
+            result.section.as_wire_str()
+        ))]))
     }
 }
 

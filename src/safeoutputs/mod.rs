@@ -42,6 +42,25 @@ pub const NON_MCP_SAFE_OUTPUT_KEYS: &[&str] = &[];
 /// `ado-aw-debug.<tool>` front-matter section.
 pub const DEBUG_ONLY_TOOLS: &[&str] = tool_names![CreateIssueResult];
 
+/// Safe-output tools that are gated behind the
+/// `self-optimization:` front-matter section and must NOT be exposed
+/// to a regular pipeline. The SafeOutputs MCP filter strips these
+/// even when `enabled_tools` is `None`, so they only become reachable
+/// when the compiler explicitly lists them in `--enabled-tools` —
+/// which it does only when `self-optimization.enabled: true` (see
+/// [`crate::compile::types::SelfOptimizationConfig`]).
+///
+/// Adding a new opt-in gated tool: register its result type with
+/// `tool_result! { write = true, ... }`, add it here, and gate the
+/// compiler-side `--enabled-tools` injection on the corresponding
+/// front-matter section.
+///
+/// Distinct from [`DEBUG_ONLY_TOOLS`]: those tools are for ado-aw
+/// dogfood / debug pipelines only and must NEVER ship in a regular
+/// agent. Opt-in gated tools are real features that authors enable
+/// in production once they're ready.
+pub const OPT_IN_GATED_TOOLS: &[&str] = tool_names![ProposeStepOptimizationResult];
+
 /// All recognised safe-output keys accepted in front matter `safe-outputs:`.
 /// This is the union of write-requiring tool types and diagnostic tool types.
 ///
@@ -694,6 +713,7 @@ mod link_work_items;
 mod missing_data;
 mod missing_tool;
 mod noop;
+mod propose_step_optimization;
 mod queue_build;
 mod reply_to_pr_comment;
 mod report_incomplete;
@@ -721,6 +741,7 @@ pub use link_work_items::*;
 pub use missing_data::*;
 pub use missing_tool::*;
 pub use noop::*;
+pub use propose_step_optimization::*;
 pub use queue_build::*;
 pub use reply_to_pr_comment::*;
 pub use report_incomplete::*;

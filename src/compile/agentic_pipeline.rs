@@ -115,6 +115,7 @@ pub(crate) fn build_pipeline_context(
     common::validate_update_pr_votes(front_matter)?;
     common::validate_resolve_pr_thread_statuses(front_matter)?;
     common::validate_ado_aw_debug_config(front_matter)?;
+    common::validate_self_optimization_config(front_matter)?;
 
     let mut extension_declarations = Vec::with_capacity(extensions.len());
     for ext in extensions {
