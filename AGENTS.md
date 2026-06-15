@@ -55,6 +55,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   │   ├── mod.rs     # IR module entry point and shared types
 │   │   │   ├── ids.rs     # Stable IDs for jobs/steps/outputs in the IR
 │   │   │   ├── step.rs    # Step declarations and typed step variants
+│   │   │   ├── tasks.rs   # Typed factory helpers for built-in ADO TaskStep creation
 │   │   │   ├── job.rs     # Job declarations and typed job graph nodes
 │   │   │   ├── stage.rs   # Stage declarations and typed stage graph nodes
 │   │   │   ├── env.rs     # Typed environment and variable modeling
