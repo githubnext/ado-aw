@@ -13,19 +13,25 @@ engine:
 permissions:
   read: agent-playground-read
   write: agent-playground-write
+repos:
+  - agent-definitions=agent-definitions
 safe-outputs:
   create-branch:
     branch-pattern: "ado-aw-smoke-*"
+    allowed-repositories:
+      - agent-definitions
     max: 1
 ---
 
 ## Daily smoke for create-branch
 
-You are a smoke test. Call exactly one safe-output tool: `create-branch`.
-Use these literal values (no improvisation):
+You are a smoke test. The smoke targets the AgentPlayground ADO repo
+`agent-definitions` (the YAML lives in GitHub, so address the ADO repo
+explicitly). Call exactly one safe-output tool: `create-branch`. Use
+these literal values (no improvisation):
 
 - branch_name: "ado-aw-smoke-$(Build.BuildId)-create-branch"
 - source_branch: "main"
-- repository: "self"
+- repository: "agent-definitions"
 
 Do not call any other tool. After the safe output is emitted, stop.

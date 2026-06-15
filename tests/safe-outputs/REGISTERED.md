@@ -20,24 +20,56 @@ After the manual-handoff registration step is complete, fill in the
 | `comment-on-work-item.md` | `daily around 03:00` | `TBD` | References `$(permaWorkItemId)`. |
 | `update-work-item.md` | `daily around 03:00` | `TBD` | References `$(permaWorkItemId)`. |
 | `link-work-items.md` | `daily around 03:00` | `TBD` | References `$(permaWorkItemId)` and `$(permaWorkItem2Id)`. |
-| `create-branch.md` | `daily around 03:00` | `TBD` | Janitor prunes by prefix. |
-| `create-git-tag.md` | `daily around 03:00` | `TBD` | Janitor prunes by prefix. |
+| `create-branch.md` | `daily around 03:00` | `TBD` | Janitor prunes by prefix. Targets ADO repo `agent-definitions`. |
+| `create-git-tag.md` | `daily around 03:00` | `TBD` | Janitor prunes by prefix. Targets ADO repo `agent-definitions`. |
 | `create-wiki-page.md` | `daily around 03:00` | `TBD` | References `$(permaWikiName)`. |
 | `update-wiki-page.md` | `daily around 03:00` | `TBD` | References `$(permaWikiName)` and `$(permaWikiPagePath)`. |
 | `add-build-tag.md` | `daily around 03:00` | `TBD` | Tags the current build; no cleanup needed. |
 | `queue-build.md` | `daily around 03:00` | `TBD` | References `$(noopPipelineId)`. |
-| `create-pull-request.md` | `daily around 03:00` | `TBD` | Janitor abandons transient PRs by prefix. |
-| `add-pr-comment.md` | `daily around 03:00` | `TBD` | References `$(permaPullRequestId)`. |
-| `reply-to-pr-comment.md` | `daily around 03:00` | `TBD` | References `$(permaPullRequestId)` and `$(permaThreadId)`. |
-| `resolve-pr-thread.md` | `daily around 03:00` | `TBD` | Setup placeholder; needs real thread setup wired. |
-| `submit-pr-review.md` | `daily around 03:00` | `TBD` | References `$(permaPullRequestId)`. |
-| `update-pr.md` | `daily around 03:00` | `TBD` | References `$(permaPullRequestId)`; uses `update-description` operation only. |
+| `create-pull-request.md` | `daily around 03:00` | `TBD` | Janitor abandons transient PRs by prefix. **⚠️ Not yet exercised against AgentPlayground**: fixture still uses `repository: "self"` which resolves to the GitHub source repo (`githubnext/ado-aw`). Needs a redesign that targets the ADO repo `agent-definitions` and produces a working-tree commit there. Tracked as follow-up to PR fixing the 7 sibling fixtures. |
+| `add-pr-comment.md` | `daily around 03:00` | `TBD` | References `$(permaPullRequestId)`. Targets ADO repo `agent-definitions` (see "ADO repo targeting" note below). |
+| `reply-to-pr-comment.md` | `daily around 03:00` | `TBD` | References `$(permaPullRequestId)` and `$(permaThreadId)`. Targets ADO repo `agent-definitions`. |
+| `resolve-pr-thread.md` | `daily around 03:00` | `TBD` | Setup placeholder; needs real thread setup wired. Targets ADO repo `agent-definitions`. |
+| `submit-pr-review.md` | `daily around 03:00` | `TBD` | References `$(permaPullRequestId)`. Targets ADO repo `agent-definitions`. |
+| `update-pr.md` | `daily around 03:00` | `TBD` | References `$(permaPullRequestId)`; uses `update-description` operation only. Targets ADO repo `agent-definitions`. |
 | `upload-build-attachment.md` | `daily around 03:00` | `TBD` | Setup writes a small file under `$(Build.ArtifactStagingDirectory)`. |
 | `upload-workitem-attachment.md` | `daily around 03:00` | `TBD` | Setup writes a small file; references `$(permaWorkItemId)`. |
 | `upload-pipeline-artifact.md` | `daily around 03:00` | `TBD` | Setup writes a small file. |
 | `noop-target.md` | _no schedule_ | `TBD` | Target of `queue-build.md`. Its pipeline ID populates `$(noopPipelineId)`. |
 | `janitor.md` | `weekly on monday around 02:00` | `TBD` | Prunes `ado-aw-smoke-*` artifacts older than 30 days. |
 | `smoke-failure-reporter.md` | `daily around 04:30` | `TBD` | Files `[smoke-failure] ...` issues on `githubnext/ado-aw`. Needs the `ADO_AW_DEBUG_GITHUB_TOKEN` secret pipeline variable, **only on this pipeline**. |
+
+## ADO repo targeting (PR / git-write smokes)
+
+The pipeline YAML lives in GitHub (`githubnext/ado-aw`), but the ADO
+safe-output APIs that the PR / git-write smokes call must address an
+**Azure DevOps** repo, not a GitHub repo. `repository: "self"` resolves
+at runtime to `$(Build.Repository.Name)` which is the *GitHub* repo for
+these pipelines, so the ADO Git REST endpoints would 404.
+
+The seven affected fixtures (`add-pr-comment`, `reply-to-pr-comment`,
+`resolve-pr-thread`, `submit-pr-review`, `update-pr`, `create-branch`,
+`create-git-tag`) therefore declare an explicit ADO repo via:
+
+```yaml
+repos:
+  - agent-definitions=agent-definitions
+safe-outputs:
+  <tool>:
+    allowed-repositories:
+      - agent-definitions
+```
+
+and the prompt passes `repository: "agent-definitions"` instead of
+`"self"`. The perma-PR and perma-thread must therefore live in the
+AgentPlayground ADO repo named `agent-definitions` (the only repo in
+the project with an initialised `main` branch).
+
+`create-pull-request.md` is **not yet exercised** against
+AgentPlayground for the same reason — it requires a working-tree commit
+that the smoke prompt cannot synthesise inside the ADO repo from a
+GitHub-sourced pipeline. Redesigning that fixture is tracked as a
+follow-up to the PR fixing the seven sibling fixtures.
 
 ## Manual-handoff checklist
 
