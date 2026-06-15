@@ -288,8 +288,8 @@ mod tests {
 
         // `std::env::set_current_dir` is process-global; serialise
         // via a static mutex so concurrent tests do not stomp.
-        static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = CWD_LOCK.lock().unwrap();
+        static CWD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _guard = CWD_LOCK.lock().await;
         let original_cwd = std::env::current_dir().expect("save cwd");
         std::env::set_current_dir(temp_dir.path()).expect("enter tempdir");
 
