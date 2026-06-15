@@ -1836,6 +1836,16 @@ fn test_mcpg_docker_env_passthrough() {
         "Static env var should be in config"
     );
 
+    // Regression for issue #1034: the docker-env continuation lines must never
+    // emit a stray `\ \` sequence. In bash `\ ` is an escaped space (a
+    // one-character " " argument) followed by a line continuation, which
+    // corrupts the `docker run` image reference and makes MCPG fail with
+    // `docker: invalid reference format.`
+    assert!(
+        !compiled.contains("\\ \\"),
+        "Compiled YAML must not contain the corrupt `\\ \\` continuation sequence"
+    );
+
     let _ = fs::remove_dir_all(&temp_dir);
 }
 

@@ -1360,9 +1360,13 @@ fn start_mcpg_step(
             // two-marker layout.
             "\\\n  \\".to_string()
         } else {
+            // `generate_mcpg_docker_env` already terminates every line with a
+            // ` \` continuation, so re-indent the lines without re-appending
+            // another ` \` (doing so would emit a stray `\ \` that bash reads
+            // as a one-character " " argument, corrupting the `docker run`
+            // image reference — see issue #1034).
             mcpg_docker_env
                 .lines()
-                .map(|l| format!("{l} \\"))
                 .collect::<Vec<_>>()
                 .join("\n  ")
         };
