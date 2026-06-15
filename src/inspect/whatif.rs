@@ -358,7 +358,7 @@ fn known_ids(summary: &PipelineSummary) -> Vec<String> {
 }
 
 fn find_job<'a>(summary: &'a PipelineSummary, job_id: &str) -> Option<&'a JobSummary> {
-    summary.all_jobs().into_iter().find(|job| job.id == job_id)
+    summary.all_jobs().find(|job| job.id == job_id)
 }
 
 fn stage_for_job(summary: &PipelineSummary, job_id: &str) -> Option<String> {
@@ -391,7 +391,8 @@ fn closest<'a>(needle: &str, candidates: impl Iterator<Item = &'a str>) -> Optio
 }
 
 fn levenshtein(a: &str, b: &str) -> usize {
-    let mut prev: Vec<usize> = (0..=b.chars().count()).collect();
+    let b_len = b.chars().count();
+    let mut prev: Vec<usize> = (0..=b_len).collect();
     for (i, ca) in a.chars().enumerate() {
         let mut curr = vec![i + 1];
         for (j, cb) in b.chars().enumerate() {
@@ -400,7 +401,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
         }
         prev = curr;
     }
-    prev[b.chars().count()]
+    prev[b_len]
 }
 
 #[cfg(test)]

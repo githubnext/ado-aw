@@ -323,7 +323,6 @@ fn stage_for_job(audit: &AuditData, runtime_job: &JobData) -> Option<String> {
     graph
         .graph
         .all_jobs()
-        .into_iter()
         .find(|job| {
             crate::audit::pipeline_graph::timeline_name_matches_job(
                 &runtime_job.name,

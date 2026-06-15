@@ -161,7 +161,7 @@ impl AuthorMcp {
         &self,
         params: Parameters<SourcePathParams>,
     ) -> Result<CallToolResult, McpError> {
-        let source = source_path(&params.0.source_path);
+        let source = source_path(&params.0.source_path).await?;
         let summary = inspect::build_inspect(&source)
             .await
             .map_err(to_mcp_error)?;
@@ -176,7 +176,7 @@ impl AuthorMcp {
         &self,
         params: Parameters<SourcePathParams>,
     ) -> Result<CallToolResult, McpError> {
-        let source = source_path(&params.0.source_path);
+        let source = source_path(&params.0.source_path).await?;
         let graph = inspect::build_graph_summary(&source)
             .await
             .map_err(to_mcp_error)?;
@@ -192,7 +192,20 @@ impl AuthorMcp {
         params: Parameters<GraphDumpParams>,
     ) -> Result<CallToolResult, McpError> {
         let format = parse_graph_dump_format(params.0.format.as_deref())?;
-        let source = source_path(&params.0.source_path);
+        let source = source_path(&params.0.source_path).await?;
+        // Route `format = "json"` through `build_graph_summary` so the
+        // MCP caller receives a structured GraphSummary object rather
+        // than `{ "text_or_dot": "<escaped JSON string>" }`. The
+        // `build_graph_dump(Json)` codepath produces a JSON *string*
+        // intended for the CLI's stdout; wrapping that in
+        // GraphDumpResult would force callers to parse the inner JSON
+        // a second time.
+        if format == GraphFormat::Json {
+            let graph = inspect::build_graph_summary(&source)
+                .await
+                .map_err(to_mcp_error)?;
+            return structured_result(graph);
+        }
         let text_or_dot = inspect::build_graph_dump(&source, format)
             .await
             .map_err(to_mcp_error)?;
@@ -208,7 +221,7 @@ impl AuthorMcp {
         params: Parameters<StepDependenciesParams>,
     ) -> Result<CallToolResult, McpError> {
         let direction = parse_graph_deps_direction(&params.0.direction)?;
-        let source = source_path(&params.0.source_path);
+        let source = source_path(&params.0.source_path).await?;
         let report = inspect::build_graph_deps(&source, &params.0.step_id, direction)
             .await
             .map_err(to_mcp_error)?;
@@ -223,7 +236,7 @@ impl AuthorMcp {
         &self,
         params: Parameters<StepOutputsParams>,
     ) -> Result<CallToolResult, McpError> {
-        let source = source_path(&params.0.source_path);
+        let source = source_path(&params.0.source_path).await?;
         let edges = inspect::build_graph_outputs(
             &source,
             params.0.producer.as_deref(),
@@ -262,7 +275,7 @@ impl AuthorMcp {
         description = "Classify downstream jobs that would skip if a step or job failed."
     )]
     async fn whatif(&self, params: Parameters<WhatIfParams>) -> Result<CallToolResult, McpError> {
-        let source = source_path(&params.0.source_path);
+        let source = source_path(&params.0.source_path).await?;
         let report = inspect::build_whatif(&source, &params.0.failing_id)
             .await
             .map_err(to_mcp_error)?;
@@ -277,7 +290,7 @@ impl AuthorMcp {
         &self,
         params: Parameters<SourcePathParams>,
     ) -> Result<CallToolResult, McpError> {
-        let source = source_path(&params.0.source_path);
+        let source = source_path(&params.0.source_path).await?;
         let report = inspect::build_lint(&source).await.map_err(to_mcp_error)?;
         structured_result(report)
     }
@@ -368,8 +381,81 @@ pub async fn run_stdio() -> Result<()> {
     Ok(())
 }
 
-fn source_path(path: &str) -> PathBuf {
-    PathBuf::from(path)
+/// Validate a caller-supplied `source_path` MCP-tool parameter and
+/// resolve it to a `PathBuf` suitable for passing to
+/// `crate::compile::build_pipeline_ir`.
+///
+/// **Security**: the mcp-author server runs in an IDE/Copilot Chat
+/// context where the surrounding agent may be processing
+/// untrusted content (PR descriptions, issue comments, fetched web
+/// pages). A prompt-injected request such as
+/// `inspect_workflow(source_path="../../.ssh/authorized_keys.md")`
+/// would otherwise reach `build_pipeline_ir`, open the file, and
+/// surface the path in the parse-error message.
+///
+/// We apply the same guards as
+/// [`crate::audit::pipeline_graph::resolve_source_path`]:
+///
+/// - Require a `.md` extension (the only valid agentic workflow
+///   source extension); closes the arbitrary-file-read vector
+///   against keys, `/etc/passwd`, etc.
+/// - Reject relative paths that contain `..` components or a leading
+///   `~` (no directory traversal, no shell-style expansion).
+/// - For absolute paths, canonicalize and re-check the extension on
+///   the resolved target so a `foo.md → /etc/passwd` symlink does
+///   not satisfy the lexical check.
+async fn source_path(path: &str) -> Result<PathBuf, McpError> {
+    let trimmed = path.trim();
+    let buf = PathBuf::from(trimmed);
+
+    let has_md_extension = buf
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
+    if !has_md_extension {
+        return Err(McpError::invalid_params(
+            format!(
+                "refusing source_path '{trimmed}': only `.md` files are valid agentic workflow sources"
+            ),
+            None,
+        ));
+    }
+
+    if buf.is_absolute() {
+        // Resolve symlinks and re-check the extension on the target so a
+        // `foo.md` link pointing at an arbitrary file is rejected. We
+        // tolerate canonicalize failing (file may not exist locally —
+        // build_pipeline_ir will then surface a clean read error).
+        if let Ok(canonical) = tokio::fs::canonicalize(&buf).await {
+            let target_has_md = canonical
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
+            if !target_has_md {
+                return Err(McpError::invalid_params(
+                    format!(
+                        "refusing source_path '{trimmed}': symlink resolves to non-`.md` target '{}'",
+                        canonical.display()
+                    ),
+                    None,
+                ));
+            }
+        }
+        return Ok(buf);
+    }
+
+    if buf
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+        || trimmed.starts_with('~')
+    {
+        return Err(McpError::invalid_params(
+            format!("refusing suspicious relative source_path '{trimmed}'"),
+            None,
+        ));
+    }
+
+    Ok(buf)
 }
 
 fn parse_graph_dump_format(format: Option<&str>) -> Result<GraphFormat, McpError> {

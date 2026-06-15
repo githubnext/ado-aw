@@ -99,7 +99,6 @@ fn find_matching_job_summary<'a>(
 ) -> Option<&'a JobSummary> {
     summary
         .all_jobs()
-        .into_iter()
         .find(|job| timeline_name_matches_job(timeline_name, &job.id, job.stage.as_deref()))
 }
 
