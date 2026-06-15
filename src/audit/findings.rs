@@ -374,6 +374,27 @@ fn add_downstream_impact_findings(
             continue;
         }
 
+        // Filter to downstream jobs that actually skipped (or were
+        // absent from the timeline, which also signals an expected
+        // skip). Jobs with bypass conditions like `always()` would
+        // still appear in `job.downstream_jobs` because that field is
+        // populated from typed-IR edges; without this gate we would
+        // emit "Downstream jobs skipped" findings even for cleanup
+        // jobs that successfully ran through the failure.
+        let any_actually_skipped = job.downstream_jobs.iter().any(|downstream_id| {
+            audit
+                .jobs
+                .iter()
+                .find(|candidate| candidate.matches_ir_id(downstream_id))
+                .map(is_skipped_or_cancelled)
+                // Absent from runtime timeline → typed-IR expected it
+                // to skip after the upstream failure.
+                .unwrap_or(true)
+        });
+        if !any_actually_skipped {
+            continue;
+        }
+
         let downstream = job
             .downstream_jobs
             .iter()
@@ -394,7 +415,12 @@ fn add_downstream_impact_findings(
             Finding {
                 category: String::from("pipeline_graph"),
                 severity: Severity::Medium,
-                title: format!("Downstream jobs skipped due to {} failure", job.name),
+                // Title intentionally says "potentially impacted" rather
+                // than "skipped": even with the `any_actually_skipped`
+                // gate above, some downstream jobs in this set may have
+                // bypassed the failure (e.g. via `always()`). The
+                // description embeds the real per-job classification.
+                title: format!("Downstream jobs potentially impacted by {} failure", job.name),
                 description: format!(
                     "The typed pipeline graph shows downstream impact from {}: {}.",
                     job.name, downstream
@@ -412,7 +438,7 @@ fn add_downstream_impact_findings(
                     job.name
                 ),
                 reason: format!(
-                    "{} failed, which skipped {} downstream job(s).",
+                    "{} failed, which impacted {} downstream job(s).",
                     job.name,
                     job.downstream_jobs.len()
                 ),
@@ -420,6 +446,14 @@ fn add_downstream_impact_findings(
             },
         );
     }
+}
+
+fn is_skipped_or_cancelled(job: &JobData) -> bool {
+    let result = job.result.as_deref().unwrap_or_default();
+    result.eq_ignore_ascii_case("skipped")
+        || result.eq_ignore_ascii_case("canceled")
+        || result.eq_ignore_ascii_case("cancelled")
+        || job.status.eq_ignore_ascii_case("skipped")
 }
 
 fn push_finding(findings: &mut Vec<Finding>, finding: Finding) {
@@ -743,13 +777,52 @@ mod tests {
 
         derive_findings(&mut audit);
 
-        let finding = finding_by_title(&audit, "Downstream jobs skipped due to Agent failure");
+        let finding =
+            finding_by_title(&audit, "Downstream jobs potentially impacted by Agent failure");
         assert_eq!(finding.severity, Severity::Medium);
         assert!(finding.description.contains("Detection: skipped"));
         assert!(
             finding
                 .description
                 .contains("SafeOutputs: expected to skip")
+        );
+    }
+
+    #[test]
+    fn downstream_impact_rule_suppresses_when_all_downstream_jobs_ran_via_bypass() {
+        // Regression: previously the rule fired whenever an upstream
+        // job failed and had any IR-derived downstream — even when
+        // every downstream job successfully ran via an always()
+        // bypass. The "skipped" wording was then a lie. With the
+        // any_actually_skipped gate the finding is suppressed.
+        let mut audit = AuditData {
+            jobs: vec![
+                JobData {
+                    name: String::from("Agent"),
+                    status: String::from("completed"),
+                    result: Some(String::from("failed")),
+                    downstream_jobs: vec![String::from("Cleanup")],
+                    ..Default::default()
+                },
+                JobData {
+                    name: String::from("Cleanup"),
+                    status: String::from("completed"),
+                    result: Some(String::from("succeeded")),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        derive_findings(&mut audit);
+
+        assert!(
+            !audit
+                .key_findings
+                .iter()
+                .any(|f| f.title.contains("Downstream jobs potentially impacted")),
+            "must not emit downstream-impact finding when every downstream succeeded, got {:?}",
+            audit.key_findings
         );
     }
 

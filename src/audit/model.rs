@@ -312,7 +312,7 @@ pub struct PipelineGraphSection {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source_path: String,
     /// Full public pipeline summary, matching `ado-aw inspect --json`.
-    pub graph: PipelineSummary,
+    pub summary: PipelineSummary,
 }
 
 /// Job-level status information for one stage in the build timeline.

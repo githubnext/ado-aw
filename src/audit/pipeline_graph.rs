@@ -65,7 +65,7 @@ pub async fn populate_pipeline_graph(audit: &mut AuditData, run_dir: &Path) -> R
     populate_job_edges(audit, &summary);
     audit.pipeline_graph = Some(PipelineGraphSection {
         source_path: resolved_source_path.display().to_string(),
-        graph: summary,
+        summary,
     });
     Ok(())
 }

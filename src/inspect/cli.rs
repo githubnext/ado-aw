@@ -52,7 +52,8 @@ pub async fn build_inspect(source: &Path) -> Result<PipelineSummary> {
 }
 
 /// Output format selector for `ado-aw graph`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[clap(rename_all = "lower")]
 pub enum GraphFormat {
     Text,
     Json,

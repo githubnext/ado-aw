@@ -195,9 +195,9 @@ fn render_step_dependencies(label: &str, steps: &[StepDependency], out: &mut Str
 }
 
 fn build_step_report(audit: &AuditData, step_id: &str) -> Option<TraceStepReport> {
-    let graph = audit.pipeline_graph.as_ref()?;
-    let location = graph
-        .graph
+    let pipeline_graph = audit.pipeline_graph.as_ref()?;
+    let location = pipeline_graph
+        .summary
         .graph
         .step_locations
         .iter()
@@ -218,11 +218,15 @@ fn build_step_report(audit: &AuditData, step_id: &str) -> Option<TraceStepReport
         downstream: job
             .map(|job| downstream_reports(audit, job))
             .unwrap_or_default(),
-        upstream_steps: graph_deps::analyze(&graph.graph, step_id, GraphDepsDirection::Upstream)
-            .map(|report| report.transitive_steps)
-            .unwrap_or_default(),
+        upstream_steps: graph_deps::analyze(
+            &pipeline_graph.summary,
+            step_id,
+            GraphDepsDirection::Upstream,
+        )
+        .map(|report| report.transitive_steps)
+        .unwrap_or_default(),
         downstream_steps: graph_deps::analyze(
-            &graph.graph,
+            &pipeline_graph.summary,
             step_id,
             GraphDepsDirection::Downstream,
         )
@@ -319,9 +323,9 @@ fn find_runtime_job<'a>(audit: &'a AuditData, ir_job_id: &str) -> Option<&'a Job
 }
 
 fn stage_for_job(audit: &AuditData, runtime_job: &JobData) -> Option<String> {
-    let graph = audit.pipeline_graph.as_ref()?;
-    graph
-        .graph
+    let pipeline_graph = audit.pipeline_graph.as_ref()?;
+    pipeline_graph
+        .summary
         .all_jobs()
         .find(|job| {
             crate::audit::pipeline_graph::timeline_name_matches_job(

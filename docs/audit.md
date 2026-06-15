@@ -117,7 +117,7 @@ After the standard analyzers run, `audit` looks for
 top level) and resolves its `source` path relative to the current working
 directory. If that markdown source exists locally, the command rebuilds the
 typed IR with the same public summary shape emitted by `ado-aw inspect --json`
-and stores it under `pipeline_graph.graph`. The audit embeds the full
+and stores it under `pipeline_graph.summary`. The audit embeds the full
 `PipelineSummary` rather than a reduced subset so audit, inspect, graph, and
 trace consumers share one schema.
 

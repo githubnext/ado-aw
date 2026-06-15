@@ -166,8 +166,8 @@ enum GraphCmd {
         /// Path to the agent markdown source.
         source: PathBuf,
         /// Output format: `text` (default), `json`, or `dot` (Graphviz).
-        #[arg(long, default_value = "text")]
-        format: String,
+        #[arg(long, value_enum, default_value_t = inspect::GraphFormat::Text)]
+        format: inspect::GraphFormat,
     },
     /// Traverse dependencies for one named step.
     Deps {
@@ -176,8 +176,8 @@ enum GraphCmd {
         /// Step id to traverse from.
         step: String,
         /// Traversal direction: `upstream` (default) or `downstream`.
-        #[arg(long, default_value = "upstream")]
-        direction: String,
+        #[arg(long, value_enum, default_value_t = inspect::GraphDepsDirection::Upstream)]
+        direction: inspect::GraphDepsDirection,
         /// Emit machine-readable JSON.
         #[arg(long)]
         json: bool,
@@ -1391,17 +1391,9 @@ async fn main() -> Result<()> {
         }
         Commands::Graph { subcommand } => match subcommand {
             GraphCmd::Dump { source, format } => {
-                let fmt = match format.as_str() {
-                    "text" => inspect::GraphFormat::Text,
-                    "json" => inspect::GraphFormat::Json,
-                    "dot" => inspect::GraphFormat::Dot,
-                    other => anyhow::bail!(
-                        "unknown --format '{other}' (expected one of: text, json, dot)"
-                    ),
-                };
                 inspect::dispatch_graph(inspect::GraphOptions {
                     source: &source,
-                    format: fmt,
+                    format,
                 })
                 .await?;
             }
@@ -1411,13 +1403,6 @@ async fn main() -> Result<()> {
                 direction,
                 json,
             } => {
-                let direction = match direction.as_str() {
-                    "upstream" => inspect::GraphDepsDirection::Upstream,
-                    "downstream" => inspect::GraphDepsDirection::Downstream,
-                    other => anyhow::bail!(
-                        "unknown --direction '{other}' (expected one of: upstream, downstream)"
-                    ),
-                };
                 inspect::dispatch_graph_deps(inspect::GraphDepsOptions {
                     source: &source,
                     step: &step,

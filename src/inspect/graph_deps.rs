@@ -17,7 +17,8 @@ use crate::compile::ir::summary::{
 };
 
 /// Traversal direction for `ado-aw graph deps`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[clap(rename_all = "lower")]
 pub enum GraphDepsDirection {
     /// Walk producer-side dependencies.
     Upstream,

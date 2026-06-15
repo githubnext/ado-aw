@@ -109,8 +109,10 @@ fn graph_rejects_unknown_format() {
         .expect("run ado-aw graph dump --format yaml");
     assert!(!out.status.success(), "unknown format should fail");
     let stderr = String::from_utf8_lossy(&out.stderr);
+    // Clap value-enum validation emits "invalid value 'yaml' for
+    // '--format <FORMAT>': ... [possible values: text, json, dot]".
     assert!(
-        stderr.contains("unknown --format"),
-        "expected unknown-format error, got:\n{stderr}"
+        stderr.contains("invalid value 'yaml'") && stderr.contains("--format"),
+        "expected clap value-enum rejection for --format, got:\n{stderr}"
     );
 }
