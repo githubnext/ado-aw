@@ -143,12 +143,12 @@ impl BashStep {
     }
 }
 
-/// A `task:` step (e.g. `NodeTool@0`, `UsePythonVersion@0`).
+/// A `task:` step (e.g. `UseNode@1`, `UsePythonVersion@0`).
 #[derive(Debug, Clone)]
 pub struct TaskStep {
     pub id: Option<StepId>,
     pub display_name: String,
-    /// The task identifier, e.g. `"NodeTool@0"` or `"UseNode@1"`.
+    /// The task identifier, e.g. `"UseNode@1"` or `"UseDotNet@2"`.
     pub task: String,
     /// `inputs:` block — emitted in insertion order.
     pub inputs: IndexMap<String, String>,
@@ -270,10 +270,10 @@ mod tests {
 
     #[test]
     fn task_step_builder_adds_inputs() {
-        let t = TaskStep::new("NodeTool@0", "Install Node.js 20.x")
-            .with_input("versionSpec", "20.x");
-        assert_eq!(t.task, "NodeTool@0");
-        assert_eq!(t.inputs.get("versionSpec").map(|s| s.as_str()), Some("20.x"));
+        let t = TaskStep::new("UseNode@1", "Install Node.js 20.x")
+            .with_input("version", "20.x");
+        assert_eq!(t.task, "UseNode@1");
+        assert_eq!(t.inputs.get("version").map(|s| s.as_str()), Some("20.x"));
     }
 
     #[test]

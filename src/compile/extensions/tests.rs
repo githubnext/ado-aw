@@ -593,7 +593,7 @@ fn test_node_declarations_prepare_steps() {
     let ctx = ctx_from(&fm);
     let steps = ext.declarations(&ctx).unwrap().agent_prepare_steps;
     assert_eq!(steps.len(), 1, "no auth steps without feed-url/config");
-    assert!(matches!(&steps[0], Step::Task(t) if t.task == "NodeTool@0"));
+    assert!(matches!(&steps[0], Step::Task(t) if t.task == "UseNode@1"));
 }
 
 #[test]
@@ -607,7 +607,7 @@ fn test_node_declarations_prepare_steps_with_feed_url() {
     let ctx = ctx_from(&fm);
     let steps = ext.declarations(&ctx).unwrap().agent_prepare_steps;
     assert_eq!(steps.len(), 3);
-    assert!(matches!(&steps[0], Step::Task(t) if t.task == "NodeTool@0"));
+    assert!(matches!(&steps[0], Step::Task(t) if t.task == "UseNode@1"));
     assert!(matches!(&steps[1], Step::Bash(b) if b.display_name.contains("Ensure .npmrc")));
     assert!(matches!(&steps[2], Step::Task(t) if t.task == "npmAuthenticate@0"));
 }

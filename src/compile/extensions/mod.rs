@@ -243,7 +243,7 @@ impl<'a> CompileContext<'a> {
 ///   any other phase runs**, so that later phases can override shared
 ///   tool versions (notably the `node` on PATH).
 /// - **Runtime** installs language toolchains (Lean, Python, Node, etc.)
-///   for the user agent. A `NodeTool@0` here will land on top of any
+///   for the user agent. A `UseNode@1` here will land on top of any
 ///   System-phase Node install, so the user's pinned version wins on
 ///   PATH for everything after Runtime.
 /// - **Tool** is first-party tooling (azure-devops, cache-memory, …)
@@ -618,7 +618,7 @@ extension_enum! {
 /// **System → Runtime → Tool**. System owns compiler-internal
 /// infrastructure (ado-script bundle download + prompt resolver) that
 /// must complete before user-facing toolchains land — notably so that a
-/// later `NodeTool@0` from `NodeExtension` wins on PATH instead of
+/// later `UseNode@1` from `NodeExtension` wins on PATH instead of
 /// being silently overridden by the System-phase Node install.
 ///
 /// Within the same phase, extensions preserve definition order
@@ -631,7 +631,7 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
     // gating on `filters:` and `inlined-imports` means the extension
     // emits no steps when neither feature is needed.
     //
-    // Phase: `System` — so its `NodeTool@0` install + bundle download +
+    // Phase: `System` — so its `UseNode@1` install + bundle download +
     // resolver step run BEFORE any user-facing Runtime extension (e.g.
     // `NodeExtension`). The user's pinned Node version then "wins last"
     // on PATH for the rest of the Agent job.
