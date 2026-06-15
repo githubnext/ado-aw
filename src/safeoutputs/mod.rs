@@ -1,11 +1,11 @@
 //! Tool parameter and result structs for MCP tools
 
 use crate::{all_safe_output_names, tool_names};
+use ado_aw_derive::SanitizeConfig;
 use anyhow::Context;
 use log::{debug, warn};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
-use ado_aw_derive::SanitizeConfig;
 
 /// Characters to percent-encode in a URL path segment.
 /// Encodes the structural delimiters that would break URL parsing if left raw:
@@ -313,10 +313,7 @@ pub(crate) fn wildcard_match(pattern: &str, value: &str) -> bool {
 /// This is the shared matcher for `allowed-tags` in `create-work-item`,
 /// `update-work-item`, and `add-build-tag`.
 pub(crate) fn tag_matches_pattern(tag: &str, pattern: &str) -> bool {
-    wildcard_match(
-        &pattern.to_ascii_lowercase(),
-        &tag.to_ascii_lowercase(),
-    )
+    wildcard_match(&pattern.to_ascii_lowercase(), &tag.to_ascii_lowercase())
 }
 
 /// Return `true` if `name` is matched by `pattern` (**case-sensitive**).
@@ -392,7 +389,10 @@ pub struct WorkItemReportConfig {
     pub tags: Vec<String>,
 
     /// Whether to include agent execution stats in the work item description/comment (default: true)
-    #[serde(default = "crate::agent_stats::default_include_stats", rename = "include-stats")]
+    #[serde(
+        default = "crate::agent_stats::default_include_stats",
+        rename = "include-stats"
+    )]
     pub include_stats: bool,
 }
 
@@ -539,8 +539,7 @@ pub(crate) async fn file_or_append_work_item(
             }
         };
 
-    let body_with_stats =
-        crate::agent_stats::append_stats_to_body(body, ctx, config.include_stats);
+    let body_with_stats = crate::agent_stats::append_stats_to_body(body, ctx, config.include_stats);
 
     if let Some(work_item_id) = existing_id {
         // Append a comment to the existing work item
@@ -713,8 +712,8 @@ pub use add_pr_comment::*;
 pub use comment_on_work_item::*;
 pub use create_branch::*;
 pub use create_git_tag::*;
-pub use create_issue::*;
 pub(crate) use create_issue::validate_target_repo;
+pub use create_issue::*;
 pub use create_pull_request::*;
 pub use create_wiki_page::*;
 pub use create_work_item::*;
@@ -769,32 +768,80 @@ mod tests {
     #[test]
     fn test_requires_write_consistency() {
         // Write-requiring tools
-        const { assert!(CreateIssueResult::REQUIRES_WRITE); }
-        const { assert!(CreateWorkItemResult::REQUIRES_WRITE); }
-        const { assert!(CommentOnWorkItemResult::REQUIRES_WRITE); }
-        const { assert!(UpdateWorkItemResult::REQUIRES_WRITE); }
-        const { assert!(CreatePrResult::REQUIRES_WRITE); }
-        const { assert!(CreateWikiPageResult::REQUIRES_WRITE); }
-        const { assert!(UpdateWikiPageResult::REQUIRES_WRITE); }
-        const { assert!(AddPrCommentResult::REQUIRES_WRITE); }
-        const { assert!(LinkWorkItemsResult::REQUIRES_WRITE); }
-        const { assert!(QueueBuildResult::REQUIRES_WRITE); }
-        const { assert!(CreateGitTagResult::REQUIRES_WRITE); }
-        const { assert!(AddBuildTagResult::REQUIRES_WRITE); }
-        const { assert!(CreateBranchResult::REQUIRES_WRITE); }
-        const { assert!(UpdatePrResult::REQUIRES_WRITE); }
-        const { assert!(UploadBuildAttachmentResult::REQUIRES_WRITE); }
-        const { assert!(UploadPipelineArtifactResult::REQUIRES_WRITE); }
-        const { assert!(UploadWorkitemAttachmentResult::REQUIRES_WRITE); }
-        const { assert!(SubmitPrReviewResult::REQUIRES_WRITE); }
-        const { assert!(ReplyToPrCommentResult::REQUIRES_WRITE); }
-        const { assert!(ResolvePrThreadResult::REQUIRES_WRITE); }
+        const {
+            assert!(CreateIssueResult::REQUIRES_WRITE);
+        }
+        const {
+            assert!(CreateWorkItemResult::REQUIRES_WRITE);
+        }
+        const {
+            assert!(CommentOnWorkItemResult::REQUIRES_WRITE);
+        }
+        const {
+            assert!(UpdateWorkItemResult::REQUIRES_WRITE);
+        }
+        const {
+            assert!(CreatePrResult::REQUIRES_WRITE);
+        }
+        const {
+            assert!(CreateWikiPageResult::REQUIRES_WRITE);
+        }
+        const {
+            assert!(UpdateWikiPageResult::REQUIRES_WRITE);
+        }
+        const {
+            assert!(AddPrCommentResult::REQUIRES_WRITE);
+        }
+        const {
+            assert!(LinkWorkItemsResult::REQUIRES_WRITE);
+        }
+        const {
+            assert!(QueueBuildResult::REQUIRES_WRITE);
+        }
+        const {
+            assert!(CreateGitTagResult::REQUIRES_WRITE);
+        }
+        const {
+            assert!(AddBuildTagResult::REQUIRES_WRITE);
+        }
+        const {
+            assert!(CreateBranchResult::REQUIRES_WRITE);
+        }
+        const {
+            assert!(UpdatePrResult::REQUIRES_WRITE);
+        }
+        const {
+            assert!(UploadBuildAttachmentResult::REQUIRES_WRITE);
+        }
+        const {
+            assert!(UploadPipelineArtifactResult::REQUIRES_WRITE);
+        }
+        const {
+            assert!(UploadWorkitemAttachmentResult::REQUIRES_WRITE);
+        }
+        const {
+            assert!(SubmitPrReviewResult::REQUIRES_WRITE);
+        }
+        const {
+            assert!(ReplyToPrCommentResult::REQUIRES_WRITE);
+        }
+        const {
+            assert!(ResolvePrThreadResult::REQUIRES_WRITE);
+        }
 
         // Diagnostic tools (should NOT require write)
-        const { assert!(!NoopResult::REQUIRES_WRITE); }
-        const { assert!(!MissingDataResult::REQUIRES_WRITE); }
-        const { assert!(!MissingToolResult::REQUIRES_WRITE); }
-        const { assert!(!ReportIncompleteResult::REQUIRES_WRITE); }
+        const {
+            assert!(!NoopResult::REQUIRES_WRITE);
+        }
+        const {
+            assert!(!MissingDataResult::REQUIRES_WRITE);
+        }
+        const {
+            assert!(!MissingToolResult::REQUIRES_WRITE);
+        }
+        const {
+            assert!(!ReportIncompleteResult::REQUIRES_WRITE);
+        }
     }
 
     /// Verify ALL_KNOWN_SAFE_OUTPUTS contains no duplicate entries, and

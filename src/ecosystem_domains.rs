@@ -124,7 +124,11 @@ mod tests {
         assert!(names.contains(&"node".to_string()));
         assert!(names.contains(&"go".to_string()));
         assert!(names.contains(&"defaults".to_string()));
-        assert!(names.len() > 20, "expected 20+ ecosystems, got {}", names.len());
+        assert!(
+            names.len() > 20,
+            "expected 20+ ecosystems, got {}",
+            names.len()
+        );
     }
 
     #[test]
@@ -167,8 +171,14 @@ mod tests {
         let domains = get_ecosystem_domains("default-safe-outputs");
         assert!(!domains.is_empty());
         // Should include domains from defaults, dev-tools, github, local
-        assert!(domains.contains(&"github.com".to_string()), "should include github domains");
-        assert!(domains.contains(&"localhost".to_string()), "should include local domains");
+        assert!(
+            domains.contains(&"github.com".to_string()),
+            "should include github domains"
+        );
+        assert!(
+            domains.contains(&"localhost".to_string()),
+            "should include local domains"
+        );
     }
 
     #[test]
@@ -205,15 +215,17 @@ mod tests {
     fn test_embedded_json_parses_as_expected_schema() {
         // Validates that the compile-time-embedded ecosystem_domains.json
         // deserializes into HashMap<String, Vec<String>> without panicking.
-        let parsed: Result<HashMap<String, Vec<String>>, _> =
-            serde_json::from_str(ECOSYSTEM_JSON);
+        let parsed: Result<HashMap<String, Vec<String>>, _> = serde_json::from_str(ECOSYSTEM_JSON);
         assert!(
             parsed.is_ok(),
             "embedded ecosystem_domains.json failed to parse: {}",
             parsed.unwrap_err()
         );
         let map = parsed.unwrap();
-        assert!(!map.is_empty(), "ecosystem_domains.json should not be empty");
+        assert!(
+            !map.is_empty(),
+            "ecosystem_domains.json should not be empty"
+        );
         // Every ecosystem should have a non-empty domain list
         for (key, domains) in &map {
             assert!(
@@ -230,19 +242,22 @@ mod tests {
         // the expected HashMap<String, Vec<String>> schema, validating
         // the safety of the .expect() guard on the LazyLock.
         let bad_schema = r#"{"python": "not-a-list"}"#;
-        let result: Result<HashMap<String, Vec<String>>, _> =
-            serde_json::from_str(bad_schema);
+        let result: Result<HashMap<String, Vec<String>>, _> = serde_json::from_str(bad_schema);
         assert!(result.is_err(), "schema mismatch should produce an error");
 
         let bad_json = r#"{"python": [123, true]}"#;
-        let result: Result<HashMap<String, Vec<String>>, _> =
-            serde_json::from_str(bad_json);
-        assert!(result.is_err(), "non-string array elements should produce an error");
+        let result: Result<HashMap<String, Vec<String>>, _> = serde_json::from_str(bad_json);
+        assert!(
+            result.is_err(),
+            "non-string array elements should produce an error"
+        );
 
         let invalid_json = r#"{not valid json"#;
-        let result: Result<HashMap<String, Vec<String>>, _> =
-            serde_json::from_str(invalid_json);
-        assert!(result.is_err(), "invalid JSON syntax should produce an error");
+        let result: Result<HashMap<String, Vec<String>>, _> = serde_json::from_str(invalid_json);
+        assert!(
+            result.is_err(),
+            "invalid JSON syntax should produce an error"
+        );
     }
 
     #[test]

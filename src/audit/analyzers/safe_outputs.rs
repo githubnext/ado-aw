@@ -598,8 +598,7 @@ async fn top_level_dirs_with_prefix(root: &Path, prefix: &str) -> anyhow::Result
             Ok(Some(entry)) => entry,
             Ok(None) => break,
             Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("Failed to iterate {}", root.display()));
+                return Err(error).with_context(|| format!("Failed to iterate {}", root.display()));
             }
         };
 

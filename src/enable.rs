@@ -80,7 +80,11 @@ pub fn sanitize_ado_display_name(raw: &str) -> String {
 /// against `normalize_ado_yaml_path` on the read side.
 pub fn compute_yaml_filename(repo_relative: &Path) -> String {
     let s = repo_relative.to_string_lossy().replace('\\', "/");
-    if s.starts_with('/') { s } else { format!("/{}", s) }
+    if s.starts_with('/') {
+        s
+    } else {
+        format!("/{}", s)
+    }
 }
 
 /// Pure function: decide what to do for one local fixture against a
@@ -230,8 +234,13 @@ pub struct EnableOptions<'a> {
 /// connection GUID for GitHub).
 #[derive(Debug)]
 enum ResolvedSource {
-    AdoGit { source: RepoSource },
-    Github { source: RepoSource, service_connection: String },
+    AdoGit {
+        source: RepoSource,
+    },
+    Github {
+        source: RepoSource,
+        service_connection: String,
+    },
 }
 
 /// Resolved provider-specific identifiers required by the
@@ -501,13 +510,12 @@ async fn process_all_pipelines(
             .map(Path::to_path_buf)
             .unwrap_or_else(|_| pipeline.yaml_path.clone());
         let repo_ref = match (resolved, identifiers) {
-            (
-                ResolvedSource::AdoGit { source },
-                ResolvedIdentifiers::AdoGit { repo_id },
-            ) => RepositoryRef::AdoGit {
-                repo_id,
-                repo_name: &source.repo,
-            },
+            (ResolvedSource::AdoGit { source }, ResolvedIdentifiers::AdoGit { repo_id }) => {
+                RepositoryRef::AdoGit {
+                    repo_id,
+                    repo_name: &source.repo,
+                }
+            }
             (
                 ResolvedSource::Github { .. },
                 ResolvedIdentifiers::Github {
@@ -523,9 +531,7 @@ async fn process_all_pipelines(
             // unreachable. We bail rather than `unreachable!()` so a
             // future refactor that decouples the two can't silently
             // produce a malformed POST body.
-            _ => anyhow::bail!(
-                "internal error: resolved source and identifier variants disagree"
-            ),
+            _ => anyhow::bail!("internal error: resolved source and identifier variants disagree"),
         };
         let result = process_one(
             client,
@@ -748,10 +754,11 @@ fn resolve_token_arg(also_set_token: bool, token: Option<&str>) -> Result<Option
     {
         return Ok(Some(env));
     }
-    let prompted = inquire::Password::new("Enter the GITHUB_TOKEN to set on newly-created definitions:")
-        .without_confirmation()
-        .prompt()
-        .context("Failed to read token from interactive prompt")?;
+    let prompted =
+        inquire::Password::new("Enter the GITHUB_TOKEN to set on newly-created definitions:")
+            .without_confirmation()
+            .prompt()
+            .context("Failed to read token from interactive prompt")?;
     Ok(Some(prompted))
 }
 
@@ -810,13 +817,7 @@ async fn process_one(
             Ok(None)
         }
         Action::Create => {
-            let body = build_create_body(
-                &sanitized,
-                folder,
-                repo,
-                default_branch,
-                &yaml_filename,
-            );
+            let body = build_create_body(&sanitized, folder, repo, default_branch, &yaml_filename);
             if dry_run {
                 let pretty = serde_json::to_string_pretty(&body).unwrap_or_default();
                 println!(
@@ -1081,7 +1082,10 @@ mod tests {
     fn sanitize_trims_trailing_dot() {
         assert_eq!(sanitize_ado_display_name("name..."), "name");
         assert_eq!(sanitize_ado_display_name("name."), "name");
-        assert_eq!(sanitize_ado_display_name("name.with.dots"), "name.with.dots");
+        assert_eq!(
+            sanitize_ado_display_name("name.with.dots"),
+            "name.with.dots"
+        );
     }
 
     #[test]
@@ -1264,8 +1268,13 @@ mod tests {
         // Definition B appears second and matches by yaml path.
         // yaml-path must win (definition B), even though A is earlier in the slice.
         let defs = vec![
-            def(1, "My Pipeline", None, Some("enabled")),           // name match, no path
-            def(2, "Old Name", Some("/pipelines/agent.yml"), Some("disabled")), // path match, different name
+            def(1, "My Pipeline", None, Some("enabled")), // name match, no path
+            def(
+                2,
+                "Old Name",
+                Some("/pipelines/agent.yml"),
+                Some("disabled"),
+            ), // path match, different name
         ];
         let action = decide_action("My Pipeline", "/pipelines/agent.yml", &defs);
         // Should pick definition 2 (path match) not 1 (name match).
@@ -1367,9 +1376,7 @@ mod tests {
             "/x.yml",
         );
         assert!(
-            body.get("repository")
-                .and_then(|r| r.get("id"))
-                .is_none(),
+            body.get("repository").and_then(|r| r.get("id")).is_none(),
             "GitHub-source body must not include repository.id"
         );
     }
@@ -1379,7 +1386,10 @@ mod tests {
     #[test]
     fn resolve_token_arg_rejects_token_without_also_set() {
         let err = resolve_token_arg(false, Some("x")).unwrap_err();
-        assert!(err.to_string().contains("--token requires --also-set-token"));
+        assert!(
+            err.to_string()
+                .contains("--token requires --also-set-token")
+        );
     }
 
     #[test]

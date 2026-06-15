@@ -46,7 +46,11 @@ impl Target {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     /// Already at the requested status; nothing to do.
-    Skip { id: u64, name: String, reason: String },
+    Skip {
+        id: u64,
+        name: String,
+        reason: String,
+    },
     /// `queueStatus` needs to be patched.
     Patch {
         id: u64,

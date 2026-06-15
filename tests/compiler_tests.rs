@@ -3209,18 +3209,12 @@ fn assert_no_dollar_bracket_in_step_env(compiled: &str) {
 
 /// Helper: walk every step in the YAML document, invoking `f` with each
 /// step mapping and a slash-delimited path describing where it was found.
-fn walk_steps<F: FnMut(&serde_yaml::Value, &str)>(
-    doc: &serde_yaml::Value,
-    path: &str,
-    f: &mut F,
-) {
+fn walk_steps<F: FnMut(&serde_yaml::Value, &str)>(doc: &serde_yaml::Value, path: &str, f: &mut F) {
     use serde_yaml::Value;
     match doc {
         Value::Mapping(m) => {
             // If this is a job with `steps:`, visit each step.
-            if let Some(Value::Sequence(steps)) =
-                m.get(Value::String("steps".into()))
-            {
+            if let Some(Value::Sequence(steps)) = m.get(Value::String("steps".into())) {
                 for (i, step) in steps.iter().enumerate() {
                     let step_path = format!("{path}/steps[{i}]");
                     f(step, &step_path);
@@ -4374,7 +4368,9 @@ fn test_pr_filter_synth_mode_agent_condition_enforces_gate() {
         tail[..end].to_string()
     } else if let Some(tail) = agent_block.split("condition: ").nth(1) {
         // Single-line — terminate at the next newline.
-        tail.split_once('\n').map(|(line, _)| line.to_string()).unwrap_or_else(|| tail.to_string())
+        tail.split_once('\n')
+            .map(|(line, _)| line.to_string())
+            .unwrap_or_else(|| tail.to_string())
     } else {
         String::new()
     };
@@ -5541,10 +5537,10 @@ fn test_no_step_condition_references_cross_job_dependencies() {
     /// filters, etc.). Add new fixtures here as we add new extensions
     /// or new step-condition emission paths.
     const FIXTURES: &[&str] = &[
-        "synthetic-pr-default.md",     // synth-active, no pr.filters
-        "execution-context-agent.md",  // exec_context_pr active, default config
-        "pr-mode-policy.md",           // synth-inactive, on.pr present
-        "minimal-agent.md",            // no on.pr at all
+        "synthetic-pr-default.md",    // synth-active, no pr.filters
+        "execution-context-agent.md", // exec_context_pr active, default config
+        "pr-mode-policy.md",          // synth-inactive, on.pr present
+        "minimal-agent.md",           // no on.pr at all
     ];
 
     /// Walk the YAML. For every mapping that has a `condition:` key,
@@ -5926,10 +5922,14 @@ fn test_synthetic_pr_default_emits_full_synth_wiring() {
     );
     // The Agent-job-level hoist itself must be present and pull from
     // the cross-job synth outputs (legal scope for `dependencies.X.outputs[...]`).
-    for name in &["AW_PR_ID", "AW_PR_TARGETBRANCH", "AW_PR_SOURCEBRANCH", "AW_SYNTHETIC_PR"] {
-        let needle = format!(
-            "{name}: $[ coalesce(dependencies.Setup.outputs['synthPr.{name}'], '') ]"
-        );
+    for name in &[
+        "AW_PR_ID",
+        "AW_PR_TARGETBRANCH",
+        "AW_PR_SOURCEBRANCH",
+        "AW_SYNTHETIC_PR",
+    ] {
+        let needle =
+            format!("{name}: $[ coalesce(dependencies.Setup.outputs['synthPr.{name}'], '') ]");
         assert!(
             compiled.contains(&needle),
             "Fixture A must hoist `synthPr.{name}` into Agent-job-level `variables:` \

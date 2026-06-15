@@ -1,9 +1,12 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::safeoutputs::{
+    ExecutionContext, ExecutionResult, Executor, Validate, WorkItemReportConfig,
+    file_or_append_work_item,
+};
 use crate::sanitize::{SanitizeConfig, SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate, WorkItemReportConfig, file_or_append_work_item};
 
 /// Parameters for describing a no operation. Use this if there is no work to do.
 #[derive(Deserialize, JsonSchema)]
@@ -102,7 +105,13 @@ impl Executor for NoopResult {
         };
 
         let config: NoopConfig = ctx.get_tool_config("noop");
-        file_or_append_work_item(&config.work_item, &noop_default_work_item_title(), &message, ctx).await
+        file_or_append_work_item(
+            &config.work_item,
+            &noop_default_work_item_title(),
+            &message,
+            ctx,
+        )
+        .await
     }
 }
 
@@ -164,7 +173,10 @@ mod tests {
     fn test_config_default_has_sensible_work_item() {
         let config = NoopConfig::default();
         assert!(config.work_item.enabled);
-        assert_eq!(config.work_item.title.as_deref(), Some("[ado-aw] Agent reported no operation"));
+        assert_eq!(
+            config.work_item.title.as_deref(),
+            Some("[ado-aw] Agent reported no operation")
+        );
         assert_eq!(config.work_item.work_item_type, "Task");
         assert!(config.work_item.area_path.is_none());
         assert!(config.work_item.iteration_path.is_none());
@@ -183,9 +195,15 @@ work-item:
     - agent-noop
 "#;
         let config: NoopConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.work_item.title.as_deref(), Some("My custom noop title"));
+        assert_eq!(
+            config.work_item.title.as_deref(),
+            Some("My custom noop title")
+        );
         assert_eq!(config.work_item.work_item_type, "Bug");
-        assert_eq!(config.work_item.area_path.as_deref(), Some("MyProject\\MyTeam"));
+        assert_eq!(
+            config.work_item.area_path.as_deref(),
+            Some("MyProject\\MyTeam")
+        );
         assert_eq!(config.work_item.tags, vec!["agent-noop"]);
     }
 
@@ -193,7 +211,10 @@ work-item:
     fn test_config_deserializes_empty_uses_defaults() {
         let yaml = r#"{}"#;
         let config: NoopConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.work_item.title.as_deref(), Some("[ado-aw] Agent reported no operation"));
+        assert_eq!(
+            config.work_item.title.as_deref(),
+            Some("[ado-aw] Agent reported no operation")
+        );
         assert_eq!(config.work_item.work_item_type, "Task");
     }
 
@@ -211,9 +232,15 @@ work-item:
   area-path: "MyProject\\MyTeam"
 "#;
         let config: NoopConfig = serde_yaml::from_str(yaml).unwrap();
-        assert!(config.work_item.title.is_none(), "title should be None when omitted");
+        assert!(
+            config.work_item.title.is_none(),
+            "title should be None when omitted"
+        );
         assert_eq!(config.work_item.work_item_type, "Bug");
-        assert_eq!(config.work_item.area_path.as_deref(), Some("MyProject\\MyTeam"));
+        assert_eq!(
+            config.work_item.area_path.as_deref(),
+            Some("MyProject\\MyTeam")
+        );
     }
 
     #[tokio::test]

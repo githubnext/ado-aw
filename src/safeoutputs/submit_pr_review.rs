@@ -7,9 +7,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{PATH_SEGMENT, resolve_repo_name};
+use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::validate::reject_pipeline_injection;
 use anyhow::{Context, ensure};
 
@@ -73,10 +73,7 @@ impl Validate for SubmitPrReviewParams {
             );
         }
         if let Some(ref body) = self.body {
-            ensure!(
-                body.len() >= 10,
-                "body must be at least 10 characters"
-            );
+            ensure!(body.len() >= 10, "body must be at least 10 characters");
         }
         Ok(())
     }
@@ -129,7 +126,10 @@ pub struct SubmitPrReviewConfig {
 #[async_trait::async_trait]
 impl Executor for SubmitPrReviewResult {
     fn dry_run_summary(&self) -> String {
-        format!("submit '{}' review on PR #{}", self.event, self.pull_request_id)
+        format!(
+            "submit '{}' review on PR #{}",
+            self.event, self.pull_request_id
+        )
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
@@ -181,7 +181,9 @@ impl Executor for SubmitPrReviewResult {
         // Validate repository against allowed-repositories config
         let repo_alias = self.repository.as_deref().unwrap_or("self");
         if !config.allowed_repositories.is_empty()
-            && !config.allowed_repositories.contains(&repo_alias.to_string())
+            && !config
+                .allowed_repositories
+                .contains(&repo_alias.to_string())
         {
             return Ok(ExecutionResult::failure(format!(
                 "Repository '{}' is not in the allowed-repositories list: [{}]",
@@ -215,10 +217,7 @@ impl Executor for SubmitPrReviewResult {
 
         // Resolve the current user identity via connection data.
         // Use the org URL — supports vanity domains and national clouds.
-        let connection_url = format!(
-            "{}/_apis/connectiondata",
-            org_url.trim_end_matches('/')
-        );
+        let connection_url = format!("{}/_apis/connectiondata", org_url.trim_end_matches('/'));
         debug!("Connection data URL: {}", connection_url);
 
         let conn_response = client
@@ -384,10 +383,7 @@ impl Executor for SubmitPrReviewResult {
                 .await
                 .context("Failed to parse comment thread response")?;
 
-            let thread_id = thread_resp
-                .get("id")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
+            let thread_id = thread_resp.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
 
             info!(
                 "Review comment thread #{} posted on PR #{}",

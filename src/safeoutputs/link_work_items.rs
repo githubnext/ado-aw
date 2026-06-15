@@ -6,11 +6,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
-use ado_aw_derive::SanitizeConfig;
+use crate::safeoutputs::comment_on_work_item::CommentTarget;
+use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
-use crate::safeoutputs::comment_on_work_item::CommentTarget;
+use ado_aw_derive::SanitizeConfig;
 use anyhow::{Context, ensure};
 
 /// Resolve a human-friendly link type name to the ADO relation type string.
@@ -69,10 +69,7 @@ impl Validate for LinkWorkItemsParams {
             VALID_LINK_TYPES.join(", ")
         );
         if let Some(ref comment) = self.comment {
-            ensure!(
-                comment.len() >= 5,
-                "comment must be at least 5 characters"
-            );
+            ensure!(comment.len() >= 5, "comment must be at least 5 characters");
         }
         Ok(())
     }
@@ -128,7 +125,10 @@ pub struct LinkWorkItemsConfig {
 #[async_trait::async_trait]
 impl Executor for LinkWorkItemsResult {
     fn dry_run_summary(&self) -> String {
-        format!("link work items #{} -> #{} ({})", self.source_id, self.target_id, self.link_type)
+        format!(
+            "link work items #{} -> #{} ({})",
+            self.source_id, self.target_id, self.link_type
+        )
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
@@ -314,8 +314,7 @@ mod tests {
 
     #[test]
     fn test_params_deserializes() {
-        let json =
-            r#"{"source_id": 100, "target_id": 200, "link_type": "parent", "comment": "test linking"}"#;
+        let json = r#"{"source_id": 100, "target_id": 200, "link_type": "parent", "comment": "test linking"}"#;
         let params: LinkWorkItemsParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.source_id, 100);
         assert_eq!(params.target_id, 200);

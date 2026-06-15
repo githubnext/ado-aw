@@ -812,7 +812,10 @@ mod tests {
             schedule,
             FuzzySchedule::Daily(TimeConstraint::Between(
                 TimeSpec { hour: 9, minute: 0 },
-                TimeSpec { hour: 17, minute: 0 }
+                TimeSpec {
+                    hour: 17,
+                    minute: 0
+                }
             )),
             "daily between should capture both boundary times"
         );
@@ -899,7 +902,10 @@ mod tests {
         assert_eq!(cron1, cron2, "Same workflow should produce same cron");
 
         let cron3 = generate_cron(&schedule, "other/workflow");
-        assert_ne!(cron1, cron3, "Different workflow IDs should produce different crons");
+        assert_ne!(
+            cron1, cron3,
+            "Different workflow IDs should produce different crons"
+        );
     }
 
     #[test]
@@ -920,9 +926,15 @@ mod tests {
         // Daily schedule must not restrict day-of-month, month, or day-of-week.
         // A regression that adds e.g. a day-of-week constraint would silently
         // turn a daily schedule into a weekly one.
-        assert_eq!(parts[2], "*", "Day-of-month should be * for a daily schedule");
+        assert_eq!(
+            parts[2], "*",
+            "Day-of-month should be * for a daily schedule"
+        );
         assert_eq!(parts[3], "*", "Month should be * for a daily schedule");
-        assert_eq!(parts[4], "*", "Day-of-week should be * for a daily schedule");
+        assert_eq!(
+            parts[4], "*",
+            "Day-of-week should be * for a daily schedule"
+        );
     }
 
     #[test]
@@ -997,5 +1009,4 @@ mod tests {
             err
         );
     }
-
 }

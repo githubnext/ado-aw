@@ -6,10 +6,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
-use crate::tool_result;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
-use ado_aw_derive::SanitizeConfig;
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
+use crate::tool_result;
+use ado_aw_derive::SanitizeConfig;
 use anyhow::{Context, ensure};
 
 /// Parameters for updating a work item
@@ -199,7 +199,7 @@ pub struct UpdateWorkItemConfig {
 /// Check that `config.target` permits updating the given work item ID.
 /// Returns `Some(failure)` if the update should be blocked, `None` if it is allowed.
 fn check_target_config(id: u64, config: &UpdateWorkItemConfig) -> Option<ExecutionResult> {
-    let target = config.target.as_ref()?;  // None → missing config handled below
+    let target = config.target.as_ref()?; // None → missing config handled below
     let target_allowed = match target {
         TargetConfig::Pattern(p) if p == "*" => true,
         TargetConfig::Id(allowed_id) => *allowed_id == id,
@@ -228,13 +228,41 @@ fn check_field_permissions(
     config: &UpdateWorkItemConfig,
 ) -> Option<ExecutionResult> {
     let checks: &[(&str, bool, bool)] = &[
-        ("Title updates are not enabled in the update-work-item configuration; set 'title: true' in safe-outputs",           params.title.is_some(),          config.title),
-        ("Body/description updates are not enabled in the update-work-item configuration; set 'body: true' in safe-outputs", params.body.is_some(),           config.body),
-        ("State/status updates are not enabled in the update-work-item configuration; set 'status: true' in safe-outputs",  params.state.is_some(),          config.status),
-        ("Area path updates are not enabled in the update-work-item configuration; set 'area-path: true' in safe-outputs",  params.area_path.is_some(),      config.area_path),
-        ("Iteration path updates are not enabled in the update-work-item configuration; set 'iteration-path: true' in safe-outputs", params.iteration_path.is_some(), config.iteration_path),
-        ("Assignee updates are not enabled in the update-work-item configuration; set 'assignee: true' in safe-outputs",    params.assignee.is_some(),       config.assignee),
-        ("Tag updates are not enabled in the update-work-item configuration; set 'tags: true' in safe-outputs",             params.tags.is_some(),           config.tags),
+        (
+            "Title updates are not enabled in the update-work-item configuration; set 'title: true' in safe-outputs",
+            params.title.is_some(),
+            config.title,
+        ),
+        (
+            "Body/description updates are not enabled in the update-work-item configuration; set 'body: true' in safe-outputs",
+            params.body.is_some(),
+            config.body,
+        ),
+        (
+            "State/status updates are not enabled in the update-work-item configuration; set 'status: true' in safe-outputs",
+            params.state.is_some(),
+            config.status,
+        ),
+        (
+            "Area path updates are not enabled in the update-work-item configuration; set 'area-path: true' in safe-outputs",
+            params.area_path.is_some(),
+            config.area_path,
+        ),
+        (
+            "Iteration path updates are not enabled in the update-work-item configuration; set 'iteration-path: true' in safe-outputs",
+            params.iteration_path.is_some(),
+            config.iteration_path,
+        ),
+        (
+            "Assignee updates are not enabled in the update-work-item configuration; set 'assignee: true' in safe-outputs",
+            params.assignee.is_some(),
+            config.assignee,
+        ),
+        (
+            "Tag updates are not enabled in the update-work-item configuration; set 'tags: true' in safe-outputs",
+            params.tags.is_some(),
+            config.tags,
+        ),
     ];
     for (msg, field_set, field_enabled) in checks {
         if *field_set && !field_enabled {
@@ -465,7 +493,7 @@ impl Executor for UpdateWorkItemResult {
             return Ok(result);
         }
 
-                // Validate agent-provided tags against allowed-tags (if configured)
+        // Validate agent-provided tags against allowed-tags (if configured)
         if let Some(tags) = &self.tags
             && !config.allowed_tags.is_empty()
         {
@@ -481,7 +509,11 @@ impl Executor for UpdateWorkItemResult {
             if !disallowed.is_empty() {
                 return Ok(ExecutionResult::failure(format!(
                     "Agent-provided tags not in allowed-tags: {}",
-                    disallowed.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(", ")
+                    disallowed
+                        .iter()
+                        .map(|t| t.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 )));
             }
         }
@@ -838,7 +870,11 @@ target: 42
 
         let exec_result = result.execute_sanitized(&ctx).await.unwrap();
         assert!(!exec_result.success);
-        assert!(exec_result.message.contains("Title updates are not enabled"));
+        assert!(
+            exec_result
+                .message
+                .contains("Title updates are not enabled")
+        );
     }
 
     #[tokio::test]
@@ -1033,7 +1069,10 @@ target: 42
         let result: Result<UpdateWorkItemResult, _> = params.try_into();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("semicolon"), "Expected semicolon error, got: {err}");
+        assert!(
+            err.contains("semicolon"),
+            "Expected semicolon error, got: {err}"
+        );
     }
 
     #[test]

@@ -102,8 +102,15 @@ mod tests {
         // es-chat, msft-learn, asa, stack, calculator, github) are no longer
         // special-cased — they must declare hosts via `network.allowed`.
         for name in [
-            "kusto", "icm", "bluebird", "es-chat", "msft-learn", "asa", "stack",
-            "calculator", "github",
+            "kusto",
+            "icm",
+            "bluebird",
+            "es-chat",
+            "msft-learn",
+            "asa",
+            "stack",
+            "calculator",
+            "github",
         ] {
             assert!(
                 mcp_required_hosts(name).is_empty(),

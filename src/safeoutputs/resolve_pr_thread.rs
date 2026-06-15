@@ -6,11 +6,11 @@ use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::resolve_repo_name;
 use super::PATH_SEGMENT;
+use super::resolve_repo_name;
+use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize_config};
 use crate::tool_result;
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::validate::reject_pipeline_injection;
 use anyhow::{Context, ensure};
 
@@ -60,10 +60,7 @@ pub struct ResolvePrThreadParams {
 
 impl Validate for ResolvePrThreadParams {
     fn validate(&self) -> anyhow::Result<()> {
-        ensure!(
-            self.pull_request_id > 0,
-            "pull_request_id must be positive"
-        );
+        ensure!(self.pull_request_id > 0, "pull_request_id must be positive");
         ensure!(self.thread_id > 0, "thread_id must be positive");
         ensure!(
             VALID_STATUSES.contains(&self.status.as_str()),
@@ -129,7 +126,10 @@ pub struct ResolvePrThreadConfig {
 #[async_trait::async_trait]
 impl Executor for ResolvePrThreadResult {
     fn dry_run_summary(&self) -> String {
-        format!("resolve thread #{} on PR #{} as '{}'", self.thread_id, self.pull_request_id, self.status)
+        format!(
+            "resolve thread #{} on PR #{} as '{}'",
+            self.thread_id, self.pull_request_id, self.status
+        )
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
@@ -180,14 +180,13 @@ impl Executor for ResolvePrThreadResult {
             )));
         }
 
-        let effective_repo = self
-            .repository
-            .as_deref()
-            .unwrap_or("self");
+        let effective_repo = self.repository.as_deref().unwrap_or("self");
 
         // Validate repository against allowed-repositories config
         if !config.allowed_repositories.is_empty()
-            && !config.allowed_repositories.contains(&effective_repo.to_string())
+            && !config
+                .allowed_repositories
+                .contains(&effective_repo.to_string())
         {
             return Ok(ExecutionResult::failure(format!(
                 "Repository '{}' is not in the allowed-repositories list",
@@ -299,8 +298,7 @@ mod tests {
 
     #[test]
     fn test_params_deserializes() {
-        let json =
-            r#"{"pull_request_id": 42, "thread_id": 7, "status": "fixed"}"#;
+        let json = r#"{"pull_request_id": 42, "thread_id": 7, "status": "fixed"}"#;
         let params: ResolvePrThreadParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.pull_request_id, 42);
         assert_eq!(params.thread_id, 7);

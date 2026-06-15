@@ -33,10 +33,7 @@ use super::step::TaskStep;
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/copy-files-v2>
-pub fn copy_files_step(
-    contents: impl Into<String>,
-    target_folder: impl Into<String>,
-) -> TaskStep {
+pub fn copy_files_step(contents: impl Into<String>, target_folder: impl Into<String>) -> TaskStep {
     TaskStep::new("CopyFiles@2", "Copy Files")
         .with_input("Contents", contents)
         .with_input("TargetFolder", target_folder)
@@ -138,7 +135,10 @@ mod tests {
         let t = copy_files_step("**/*.rs", "$(Build.ArtifactStagingDirectory)");
         assert_eq!(t.task, "CopyFiles@2");
         assert_eq!(t.display_name, "Copy Files");
-        assert_eq!(t.inputs.get("Contents").map(|s| s.as_str()), Some("**/*.rs"));
+        assert_eq!(
+            t.inputs.get("Contents").map(|s| s.as_str()),
+            Some("**/*.rs")
+        );
         assert_eq!(
             t.inputs.get("TargetFolder").map(|s| s.as_str()),
             Some("$(Build.ArtifactStagingDirectory)")
@@ -234,7 +234,10 @@ mod tests {
     fn dot_net_core_cli_step_publish_optional_inputs() {
         let t = dot_net_core_cli_step("publish")
             .with_input("projects", "src/MyApp/MyApp.csproj")
-            .with_input("arguments", "--configuration Release --output $(Build.ArtifactStagingDirectory)")
+            .with_input(
+                "arguments",
+                "--configuration Release --output $(Build.ArtifactStagingDirectory)",
+            )
             .with_input("zipAfterPublish", "false")
             .with_input("modifyOutputPath", "false");
         assert_eq!(t.inputs.get("command").map(|s| s.as_str()), Some("publish"));

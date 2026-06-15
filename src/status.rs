@@ -48,7 +48,10 @@ pub fn render_blocks(ado_org_url: &str, ado_project: &str, rows: &[ListRow]) -> 
             r.queue_status.as_deref().unwrap_or("?")
         ));
         if let Some(yaml) = &r.yaml_filename {
-            out.push_str(&format!("  source:       {}\n", yaml.trim_start_matches('/')));
+            out.push_str(&format!(
+                "  source:       {}\n",
+                yaml.trim_start_matches('/')
+            ));
         }
         match &r.last_run {
             Some(lr) => {
@@ -101,15 +104,17 @@ pub async fn run(opts: StatusOptions<'_>) -> Result<()> {
         .context("Failed to create HTTP client")?;
 
     let definitions = list_definitions(&client, &ado_ctx, &auth).await?;
-    let detected = detect::detect_pipelines(&repo_path).await.unwrap_or_else(|e| {
-        // Distinguish "detection failed" from "no pipelines compiled
-        // here": both produce zero matches downstream, but only the
-        // former is something the operator should know about. Don't
-        // bail outright — status is read-only and useful even with
-        // partial inputs.
-        eprintln!("warning: failed to scan local pipelines: {:#}", e);
-        Vec::new()
-    });
+    let detected = detect::detect_pipelines(&repo_path)
+        .await
+        .unwrap_or_else(|e| {
+            // Distinguish "detection failed" from "no pipelines compiled
+            // here": both produce zero matches downstream, but only the
+            // former is something the operator should know about. Don't
+            // bail outright — status is read-only and useful even with
+            // partial inputs.
+            eprintln!("warning: failed to scan local pipelines: {:#}", e);
+            Vec::new()
+        });
     let matched = match_definitions_in(&definitions, &detected);
 
     // Surface the "no matched fixtures" case explicitly. `status` is
@@ -133,7 +138,10 @@ pub async fn run(opts: StatusOptions<'_>) -> Result<()> {
             }
             Ok(None) => {}
             Err(e) => {
-                eprintln!("  warning: failed to fetch latest build for {}: {:#}", id, e);
+                eprintln!(
+                    "  warning: failed to fetch latest build for {}: {:#}",
+                    id, e
+                );
             }
         }
     }
@@ -143,7 +151,10 @@ pub async fn run(opts: StatusOptions<'_>) -> Result<()> {
     if opts.json {
         println!("{}", render_json(&rows)?);
     } else {
-        print!("{}", render_blocks(&ado_ctx.org_url, &ado_ctx.project, &rows));
+        print!(
+            "{}",
+            render_blocks(&ado_ctx.org_url, &ado_ctx.project, &rows)
+        );
     }
     Ok(())
 }
@@ -153,7 +164,12 @@ mod tests {
     use super::*;
     use crate::list::LastRun;
 
-    fn row_with_run(id: u64, name: &str, status: Option<&str>, last_run: Option<LastRun>) -> ListRow {
+    fn row_with_run(
+        id: u64,
+        name: &str,
+        status: Option<&str>,
+        last_run: Option<LastRun>,
+    ) -> ListRow {
         ListRow {
             id,
             name: name.to_string(),

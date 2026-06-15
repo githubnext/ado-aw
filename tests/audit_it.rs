@@ -60,21 +60,20 @@ async fn run_audit(
     server: Option<&MockServer>,
 ) -> std::process::Output {
     let mut command = Command::new(binary());
-    command
-        .current_dir(workspace)
-        .env("CI", "1")
-        .args([
-            "audit",
-            build_id_or_url,
-            "--output",
-            output_dir.to_str().expect("output path should be valid UTF-8"),
-            "--org",
-            "test-org",
-            "--project",
-            "test-project",
-            "--pat",
-            "test-pat",
-        ]);
+    command.current_dir(workspace).env("CI", "1").args([
+        "audit",
+        build_id_or_url,
+        "--output",
+        output_dir
+            .to_str()
+            .expect("output path should be valid UTF-8"),
+        "--org",
+        "test-org",
+        "--project",
+        "test-project",
+        "--pat",
+        "test-pat",
+    ]);
 
     if let Some(server) = server {
         command.env("ADO_AW_TEST_ORG_URL", server.uri());
@@ -230,9 +229,13 @@ async fn audit_uses_cached_run_summary_when_present() {
     let output_dir = TempDir::new().expect("create output temp dir");
     let summary_path = run_summary_path(output_dir.path(), 12345);
 
-    fs::create_dir_all(summary_path.parent().expect("run summary should have a parent"))
-        .await
-        .expect("create cached summary directory");
+    fs::create_dir_all(
+        summary_path
+            .parent()
+            .expect("run summary should have a parent"),
+    )
+    .await
+    .expect("create cached summary directory");
     fs::write(
         &summary_path,
         serde_json::to_vec_pretty(&json!({

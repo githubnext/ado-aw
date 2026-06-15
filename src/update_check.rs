@@ -9,8 +9,7 @@
 use serde::Deserialize;
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-const RELEASES_API: &str =
-    "https://api.github.com/repos/githubnext/ado-aw/releases/latest";
+const RELEASES_API: &str = "https://api.github.com/repos/githubnext/ado-aw/releases/latest";
 
 #[derive(Deserialize)]
 struct LatestRelease {

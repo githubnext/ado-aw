@@ -121,10 +121,7 @@ impl ContextContributor for CiPushContextContributor {
             "SYSTEM_DEFINITIONID",
             EnvValue::ado_macro("System.DefinitionId")?,
         )
-        .with_env(
-            "BUILD_BUILDID",
-            EnvValue::ado_macro("Build.BuildId")?,
-        )
+        .with_env("BUILD_BUILDID", EnvValue::ado_macro("Build.BuildId")?)
         .with_env(
             "BUILD_SOURCESDIRECTORY",
             EnvValue::ado_macro("Build.SourcesDirectory")?,

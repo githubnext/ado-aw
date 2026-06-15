@@ -229,9 +229,7 @@ mod tests {
     #[test]
     fn test_log_directory() {
         let dir = log_directory(None).unwrap();
-        assert!(
-            dir.ends_with(".ado-aw/logs") || dir.ends_with(".ado-aw\\logs")
-        );
+        assert!(dir.ends_with(".ado-aw/logs") || dir.ends_with(".ado-aw\\logs"));
     }
 
     #[test]
@@ -272,6 +270,9 @@ mod tests {
         );
         assert_eq!(selected_stderr_level(false, true, false), LevelFilter::Info);
         assert_eq!(selected_stderr_level(false, false, true), LevelFilter::Info);
-        assert_eq!(selected_stderr_level(false, false, false), LevelFilter::Warn);
+        assert_eq!(
+            selected_stderr_level(false, false, false),
+            LevelFilter::Warn
+        );
     }
 }

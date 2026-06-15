@@ -73,7 +73,11 @@ impl Compiler for StageCompiler {
 }
 
 /// Generate the header comment block for stage-level templates.
-fn generate_stage_header(input_path: &Path, output_path: &Path, front_matter: &FrontMatter) -> String {
+fn generate_stage_header(
+    input_path: &Path,
+    output_path: &Path,
+    front_matter: &FrontMatter,
+) -> String {
     let base_header = generate_header_comment(input_path);
     let mut lock_path = output_path.to_string_lossy().replace('\\', "/");
     while lock_path.starts_with("./") {
@@ -88,11 +92,17 @@ fn generate_stage_header(input_path: &Path, output_path: &Path, front_matter: &F
     header.push_str(&format!("#     - template: {}\n", lock_path));
     header.push_str("#       parameters:\n");
     header.push_str("#         dependsOn: Build              # or [Build, Test]; omit for implicit dep on previous stage\n");
-    header.push_str("#         condition: succeeded('Build') # omit for ADO's default succeeded()\n");
+    header
+        .push_str("#         condition: succeeded('Build') # omit for ADO's default succeeded()\n");
     header.push_str("#\n");
-    header.push_str("# ADO's stages.template schema only allows `template:` and `parameters:` at\n");
-    header.push_str("# the call site \u{2014} `dependsOn:` / `condition:` are passed via parameters.\n");
-    header.push_str("# See https://learn.microsoft.com/azure/devops/pipelines/yaml-schema/stages-template\n");
+    header
+        .push_str("# ADO's stages.template schema only allows `template:` and `parameters:` at\n");
+    header.push_str(
+        "# the call site \u{2014} `dependsOn:` / `condition:` are passed via parameters.\n",
+    );
+    header.push_str(
+        "# See https://learn.microsoft.com/azure/devops/pipelines/yaml-schema/stages-template\n",
+    );
 
     // Document required resources if agent uses repos
     if !front_matter.repositories.is_empty() {

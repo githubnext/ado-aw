@@ -34,9 +34,7 @@ pub const OTEL_FILENAME: &str = "otel.jsonl";
 /// Copilot CLI internal tool names excluded from the tool call count.
 /// These are administrative spans, not user-visible tool invocations.
 /// Names must include the "execute_tool " prefix as emitted in the OTel span name.
-const INTERNAL_TOOL_NAMES: &[&str] = &[
-    "execute_tool report_intent",
-];
+const INTERNAL_TOOL_NAMES: &[&str] = &["execute_tool report_intent"];
 
 impl AgentStats {
     /// Parse agent stats from an OTel JSONL file.
@@ -67,12 +65,10 @@ impl AgentStats {
         };
 
         // Find the last invoke_agent span (contains aggregated totals)
-        let last_agent_span = entries
-            .iter()
-            .rfind(|e| {
-                e.get("type").and_then(|t| t.as_str()) == Some("span")
-                    && e.get("name").and_then(|n| n.as_str()) == Some("invoke_agent")
-            });
+        let last_agent_span = entries.iter().rfind(|e| {
+            e.get("type").and_then(|t| t.as_str()) == Some("span")
+                && e.get("name").and_then(|n| n.as_str()) == Some("invoke_agent")
+        });
 
         if let Some(span) = last_agent_span {
             let attrs = span.get("attributes").cloned().unwrap_or(Value::Null);
@@ -108,12 +104,9 @@ impl AgentStats {
             .iter()
             .filter(|e| {
                 e.get("type").and_then(|t| t.as_str()) == Some("span")
-                    && e.get("name")
-                        .and_then(|n| n.as_str())
-                        .is_some_and(|n| {
-                            n.starts_with("execute_tool")
-                                && !INTERNAL_TOOL_NAMES.contains(&n)
-                        })
+                    && e.get("name").and_then(|n| n.as_str()).is_some_and(|n| {
+                        n.starts_with("execute_tool") && !INTERNAL_TOOL_NAMES.contains(&n)
+                    })
             })
             .count() as u64;
 
@@ -126,9 +119,7 @@ impl AgentStats {
     /// that works across all ADO markdown surfaces.
     pub fn to_markdown(&self) -> String {
         let duration = format_duration(self.duration_seconds);
-        let model = sanitize_for_markdown(
-            self.model.as_deref().unwrap_or("unknown"),
-        );
+        let model = sanitize_for_markdown(self.model.as_deref().unwrap_or("unknown"));
         let name = sanitize_for_markdown(&self.agent_name);
 
         format!(
@@ -339,18 +330,12 @@ mod tests {
 
     #[test]
     fn test_sanitize_for_markdown_strips_vso_commands() {
-        assert_eq!(
-            sanitize_for_markdown("normal text"),
-            "normal text"
-        );
+        assert_eq!(sanitize_for_markdown("normal text"), "normal text");
         assert_eq!(
             sanitize_for_markdown("##vso[task.setvariable]evil"),
             "[vso-filtered][task.setvariable]evil"
         );
-        assert_eq!(
-            sanitize_for_markdown("model|name"),
-            "model\\|name"
-        );
+        assert_eq!(sanitize_for_markdown("model|name"), "model\\|name");
     }
 
     #[test]

@@ -80,18 +80,11 @@ fn scan_directory<'a>(
 ///
 /// Reads only the first 5 lines of the file for performance — the `@ado-aw`
 /// marker is always in the first two lines of compiled output.
-async fn try_detect_pipeline(
-    file_path: &Path,
-    root: &Path,
-) -> Result<Option<DetectedPipeline>> {
+async fn try_detect_pipeline(file_path: &Path, root: &Path) -> Result<Option<DetectedPipeline>> {
     let file = match tokio::fs::File::open(file_path).await {
         Ok(f) => f,
         Err(e) => {
-            debug!(
-                "Skipping {} (open error: {})",
-                file_path.display(),
-                e
-            );
+            debug!("Skipping {} (open error: {})", file_path.display(), e);
             return Ok(None);
         }
     };
@@ -475,10 +468,7 @@ jobs:
 
         let results = detect_pipelines(dir.path()).await.unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(
-            results[0].yaml_path,
-            PathBuf::from("pipeline.yml")
-        );
+        assert_eq!(results[0].yaml_path, PathBuf::from("pipeline.yml"));
         assert_eq!(results[0].source, "agents/test.md");
         assert_eq!(results[0].version, "0.3.2");
     }

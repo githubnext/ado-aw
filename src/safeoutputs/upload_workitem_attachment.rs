@@ -7,9 +7,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
+use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use anyhow::{Context, ensure};
 
 /// Parameters for uploading an attachment to a work item
@@ -37,10 +37,7 @@ impl Validate for UploadWorkitemAttachmentParams {
             "file_path must not contain ':'"
         );
         if let Some(comment) = &self.comment {
-            ensure!(
-                comment.len() >= 3,
-                "comment must be at least 3 characters"
-            );
+            ensure!(comment.len() >= 3, "comment must be at least 3 characters");
         }
         Ok(())
     }
@@ -113,7 +110,10 @@ impl Default for UploadWorkitemAttachmentConfig {
 #[async_trait::async_trait]
 impl Executor for UploadWorkitemAttachmentResult {
     fn dry_run_summary(&self) -> String {
-        format!("upload '{}' to work item #{}", self.file_path, self.work_item_id)
+        format!(
+            "upload '{}' to work item #{}",
+            self.file_path, self.work_item_id
+        )
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
@@ -140,17 +140,17 @@ impl Executor for UploadWorkitemAttachmentResult {
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
         debug!("ADO org: {}, project: {}", org_url, project);
 
-        let config: UploadWorkitemAttachmentConfig = ctx.get_tool_config("upload-workitem-attachment");
+        let config: UploadWorkitemAttachmentConfig =
+            ctx.get_tool_config("upload-workitem-attachment");
         debug!("Max file size: {} bytes", config.max_file_size);
         debug!("Allowed extensions: {:?}", config.allowed_extensions);
 
         // Validate file extension against allowed-extensions (if configured)
         if !config.allowed_extensions.is_empty() {
-            let has_valid_ext = config.allowed_extensions.iter().any(|ext| {
-                self.file_path
-                    .to_lowercase()
-                    .ends_with(&ext.to_lowercase())
-            });
+            let has_valid_ext = config
+                .allowed_extensions
+                .iter()
+                .any(|ext| self.file_path.to_lowercase().ends_with(&ext.to_lowercase()));
             if !has_valid_ext {
                 return Ok(ExecutionResult::failure(format!(
                     "File '{}' has an extension not in the allowed list: {:?}",
@@ -164,9 +164,9 @@ impl Executor for UploadWorkitemAttachmentResult {
         debug!("Resolved file path: {}", resolved_path.display());
 
         // Canonicalize to resolve symlinks, then verify the path stays within source_directory.
-        let canonical = resolved_path
-            .canonicalize()
-            .context("Failed to canonicalize file path — file may not exist or contains broken symlinks")?;
+        let canonical = resolved_path.canonicalize().context(
+            "Failed to canonicalize file path — file may not exist or contains broken symlinks",
+        )?;
         let canonical_base = ctx
             .source_directory
             .canonicalize()
@@ -179,8 +179,7 @@ impl Executor for UploadWorkitemAttachmentResult {
         }
 
         // Check file size
-        let metadata = std::fs::metadata(&canonical)
-            .context("Failed to read file metadata")?;
+        let metadata = std::fs::metadata(&canonical).context("Failed to read file metadata")?;
         let file_size = metadata.len();
         debug!("File size: {} bytes", file_size);
         if file_size > config.max_file_size {
@@ -191,8 +190,7 @@ impl Executor for UploadWorkitemAttachmentResult {
         }
 
         // Read file bytes
-        let file_bytes =
-            std::fs::read(&canonical).context("Failed to read file contents")?;
+        let file_bytes = std::fs::read(&canonical).context("Failed to read file contents")?;
 
         // Check if file is text (valid UTF-8) — if text, scan for ##vso[ command injection.
         // Binary files (where from_utf8 fails) skip this check intentionally: ADO's attachment
@@ -291,10 +289,7 @@ impl Executor for UploadWorkitemAttachmentResult {
             }
         }]);
 
-        info!(
-            "Linking attachment to work item #{}",
-            self.work_item_id
-        );
+        info!("Linking attachment to work item #{}", self.work_item_id);
         let link_response = client
             .patch(&link_url)
             .header("Content-Type", "application/json-patch+json")
@@ -349,7 +344,10 @@ mod tests {
 
     #[test]
     fn test_result_has_correct_name() {
-        assert_eq!(UploadWorkitemAttachmentResult::NAME, "upload-workitem-attachment");
+        assert_eq!(
+            UploadWorkitemAttachmentResult::NAME,
+            "upload-workitem-attachment"
+        );
     }
 
     #[test]
@@ -554,10 +552,7 @@ comment-prefix: "[Agent] "
 "#;
         let config: UploadWorkitemAttachmentConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.max_file_size, 1_048_576);
-        assert_eq!(
-            config.allowed_extensions,
-            vec![".png", ".pdf", ".log"]
-        );
+        assert_eq!(config.allowed_extensions, vec![".png", ".pdf", ".log"]);
         assert_eq!(config.comment_prefix, Some("[Agent] ".to_string()));
     }
 }

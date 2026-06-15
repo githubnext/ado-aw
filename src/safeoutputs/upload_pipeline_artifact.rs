@@ -48,8 +48,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
-use crate::sanitize::SanitizeContent;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::sanitize::SanitizeContent;
 use crate::secure::{ArtifactName, StrictRelativePath};
 use crate::tool_result;
 use anyhow::{Context, ensure};
@@ -271,7 +271,11 @@ impl Executor for UploadPipelineArtifactResult {
             self.file_path,
             self.artifact_name,
             effective_build_id,
-            if self.build_id.is_none() { " (current build)" } else { "" }
+            if self.build_id.is_none() {
+                " (current build)"
+            } else {
+                ""
+            }
         );
 
         let config: UploadPipelineArtifactConfig = ctx.get_tool_config("upload-pipeline-artifact");
@@ -301,7 +305,10 @@ impl Executor for UploadPipelineArtifactResult {
             Some(prefix) => format!("{}{}", prefix, self.artifact_name),
             None => self.artifact_name.clone(),
         };
-        if final_name.starts_with('.') || final_name.len() > 100 || !crate::validate::is_valid_artifact_name(&final_name) {
+        if final_name.starts_with('.')
+            || final_name.len() > 100
+            || !crate::validate::is_valid_artifact_name(&final_name)
+        {
             return Ok(ExecutionResult::failure(format!(
                 "Resolved artifact name '{}' is not a valid Azure DevOps artifact name",
                 final_name
@@ -328,9 +335,10 @@ impl Executor for UploadPipelineArtifactResult {
                 .extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or("");
-            let has_valid_ext = config.allowed_extensions.iter().any(|ext| {
-                ext.trim_start_matches('.').eq_ignore_ascii_case(file_ext)
-            });
+            let has_valid_ext = config
+                .allowed_extensions
+                .iter()
+                .any(|ext| ext.trim_start_matches('.').eq_ignore_ascii_case(file_ext));
             if !has_valid_ext {
                 return Ok(ExecutionResult::failure(format!(
                     "File '{}' has an extension not in the allowed list: {:?}",
@@ -385,11 +393,17 @@ impl Executor for UploadPipelineArtifactResult {
                 file_size,
                 final_name,
                 effective_build_id,
-                if self.build_id.is_none() { " (current build)" } else { "" }
+                if self.build_id.is_none() {
+                    " (current build)"
+                } else {
+                    ""
+                }
             )));
         }
 
-        let file_bytes = tokio::fs::read(&canonical).await.context("Failed to read file contents")?;
+        let file_bytes = tokio::fs::read(&canonical)
+            .await
+            .context("Failed to read file contents")?;
 
         let live_hash = crate::hash::sha256_hex(&file_bytes);
         if live_hash != self.staged_sha256 {
@@ -434,10 +448,9 @@ impl Executor for UploadPipelineArtifactResult {
         // overwrite each other's bytes in the shared container.
         let dedupe_key = format!("{}/{}", effective_build_id, final_name);
         if config.require_unique_names {
-            let seen = ctx
-                .uploaded_pipeline_artifact_keys
-                .lock()
-                .map_err(|e| anyhow::anyhow!("uploaded_pipeline_artifact_keys mutex poisoned: {}", e))?;
+            let seen = ctx.uploaded_pipeline_artifact_keys.lock().map_err(|e| {
+                anyhow::anyhow!("uploaded_pipeline_artifact_keys mutex poisoned: {}", e)
+            })?;
             if seen.contains(&dedupe_key) {
                 return Ok(ExecutionResult::failure(format!(
                     "upload-pipeline-artifact: artifact_name '{}' was already used \
@@ -580,7 +593,9 @@ impl Executor for UploadPipelineArtifactResult {
             if config.require_unique_names {
                 ctx.uploaded_pipeline_artifact_keys
                     .lock()
-                    .map_err(|e| anyhow::anyhow!("uploaded_pipeline_artifact_keys mutex poisoned: {}", e))?
+                    .map_err(|e| {
+                        anyhow::anyhow!("uploaded_pipeline_artifact_keys mutex poisoned: {}", e)
+                    })?
                     .insert(dedupe_key);
             }
 
@@ -608,8 +623,12 @@ impl Executor for UploadPipelineArtifactResult {
                 .unwrap_or_else(|_| "Unknown error".to_string());
             // Best-effort hint when the most common failure modes show up.
             let hint = match status.as_u16() {
-                401 | 403 => " — token may lack 'Build (Read & Execute)' scope on the target build's project",
-                404 => " — target build does not exist or is in a different project (cross-project publishing is not supported)",
+                401 | 403 => {
+                    " — token may lack 'Build (Read & Execute)' scope on the target build's project"
+                }
+                404 => {
+                    " — target build does not exist or is in a different project (cross-project publishing is not supported)"
+                }
                 409 => " — an artifact with this name already exists on the target build",
                 _ => "",
             };
@@ -628,7 +647,10 @@ mod tests {
 
     #[test]
     fn test_result_has_correct_name() {
-        assert_eq!(UploadPipelineArtifactResult::NAME, "upload-pipeline-artifact");
+        assert_eq!(
+            UploadPipelineArtifactResult::NAME,
+            "upload-pipeline-artifact"
+        );
     }
 
     #[test]
@@ -651,7 +673,9 @@ mod tests {
     ) -> UploadPipelineArtifactParams {
         UploadPipelineArtifactParams {
             build_id,
-            artifact_name: artifact_name.try_into().expect("test artifact_name must be valid"),
+            artifact_name: artifact_name
+                .try_into()
+                .expect("test artifact_name must be valid"),
             file_path: file_path.try_into().expect("test file_path must be valid"),
         }
     }
@@ -677,26 +701,34 @@ mod tests {
 
     #[test]
     fn test_params_validate_accepts_valid() {
-        assert!(make_params(Some(1), "agent-report", "out/report.pdf")
-            .validate()
-            .is_ok());
-        assert!(make_params(None, "agent-report", "out/report.pdf")
-            .validate()
-            .is_ok());
+        assert!(
+            make_params(Some(1), "agent-report", "out/report.pdf")
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            make_params(None, "agent-report", "out/report.pdf")
+                .validate()
+                .is_ok()
+        );
     }
 
     #[test]
     fn test_validation_rejects_zero_build_id() {
-        assert!(make_params(Some(0), "report", "out/report.pdf")
-            .validate()
-            .is_err());
+        assert!(
+            make_params(Some(0), "report", "out/report.pdf")
+                .validate()
+                .is_err()
+        );
     }
 
     #[test]
     fn test_validation_rejects_negative_build_id() {
-        assert!(make_params(Some(-1), "report", "out/report.pdf")
-            .validate()
-            .is_err());
+        assert!(
+            make_params(Some(-1), "report", "out/report.pdf")
+                .validate()
+                .is_err()
+        );
     }
 
     #[test]
@@ -790,7 +822,10 @@ mod tests {
     #[test]
     fn test_config_defaults() {
         let config = UploadPipelineArtifactConfig::default();
-        assert_eq!(config.max_file_size, PIPELINE_ARTIFACT_DEFAULT_MAX_FILE_SIZE);
+        assert_eq!(
+            config.max_file_size,
+            PIPELINE_ARTIFACT_DEFAULT_MAX_FILE_SIZE
+        );
         assert!(config.allowed_extensions.is_empty());
         assert!(config.allowed_artifact_names.is_empty());
         assert!(config.allowed_build_ids.is_empty());

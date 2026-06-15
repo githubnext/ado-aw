@@ -35,14 +35,12 @@
 use anyhow::Result;
 use std::path::Path;
 
+use super::agentic_pipeline::build_pipeline_context;
 use super::common;
 use super::extensions::{CompileContext, Extension};
 use super::ir::ids::StageId;
 use super::ir::job::JobTemplateContext;
-use super::ir::{
-    OneEsSdlConfig, Pipeline, PipelineBody, PipelineShape, RepositoryResource,
-};
-use super::agentic_pipeline::build_pipeline_context;
+use super::ir::{OneEsSdlConfig, Pipeline, PipelineBody, PipelineShape, RepositoryResource};
 use super::types::FrontMatter;
 
 /// 1ES Unofficial Pipeline Templates repository identifier used
@@ -83,10 +81,8 @@ pub fn build_onees_pipeline(
         None,
     )?;
 
-    let top_level_pool = common::resolve_pool_typed(
-        front_matter.target.clone(),
-        front_matter.pool.as_ref(),
-    )?;
+    let top_level_pool =
+        common::resolve_pool_typed(front_matter.target.clone(), front_matter.pool.as_ref())?;
 
     let mut jobs = built.jobs;
     for job in jobs.iter_mut() {

@@ -15,7 +15,11 @@ fn test_init_creates_agent_file() {
         .output()
         .expect("Failed to run ado-aw init");
 
-    assert!(output.status.success(), "init should succeed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "init should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let agent_path = temp_dir.path().join(".github/agents/ado-aw.agent.md");
     assert!(agent_path.exists(), "Agent file should be created");

@@ -7,9 +7,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{PATH_SEGMENT, validate_git_ref_name};
+use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::validate::reject_pipeline_injection;
 use anyhow::{Context, ensure};
 
@@ -62,10 +62,7 @@ impl Validate for CreateGitTagParams {
         }
 
         if let Some(message) = &self.message {
-            ensure!(
-                message.len() >= 5,
-                "message must be at least 5 characters"
-            );
+            ensure!(message.len() >= 5, "message must be at least 5 characters");
         }
         if let Some(repository) = &self.repository {
             reject_pipeline_injection(repository, "repository")?;
@@ -91,16 +88,13 @@ tool_result! {
 impl SanitizeContent for CreateGitTagResult {
     fn sanitize_content_fields(&mut self) {
         // tag_name is a structural identifier — only strip control characters
-        self.tag_name = self
-            .tag_name
-            .chars()
-            .filter(|c| !c.is_control())
-            .collect();
+        self.tag_name = self.tag_name.chars().filter(|c| !c.is_control()).collect();
         self.message = self.message.as_ref().map(|m| sanitize_text(m));
         // commit and repository are structural identifiers; strip control chars only
-        self.commit = self.commit.as_ref().map(|c| {
-            c.chars().filter(|ch| !ch.is_control()).collect()
-        });
+        self.commit = self
+            .commit
+            .as_ref()
+            .map(|c| c.chars().filter(|ch| !ch.is_control()).collect());
         self.repository = self.repository.as_deref().map(sanitize_config);
     }
 }
@@ -176,7 +170,10 @@ async fn resolve_head_commit(
     let branch_filter = default_branch
         .strip_prefix("refs/")
         .unwrap_or(default_branch);
-    debug!("Default branch: {} (filter: {})", default_branch, branch_filter);
+    debug!(
+        "Default branch: {} (filter: {})",
+        default_branch, branch_filter
+    );
 
     // Now resolve the HEAD commit of the default branch
     let url = format!(
@@ -249,10 +246,8 @@ impl Executor for CreateGitTagResult {
 
         // Validate tag against configured pattern
         if let Some(pattern) = &config.tag_pattern {
-            let re = regex_lite::Regex::new(pattern).context(format!(
-                "Invalid tag-pattern regex in config: {}",
-                pattern
-            ))?;
+            let re = regex_lite::Regex::new(pattern)
+                .context(format!("Invalid tag-pattern regex in config: {}", pattern))?;
             if !re.is_match(&self.tag_name) {
                 return Ok(ExecutionResult::failure(format!(
                     "Tag name '{}' does not match required pattern '{}'",
@@ -267,7 +262,9 @@ impl Executor for CreateGitTagResult {
         // Validate repository against config policy BEFORE resolving the name,
         // so operators see a policy error rather than a confusing resolution error.
         if !config.allowed_repositories.is_empty()
-            && !config.allowed_repositories.contains(&repo_alias.to_string())
+            && !config
+                .allowed_repositories
+                .contains(&repo_alias.to_string())
         {
             return Ok(ExecutionResult::failure(format!(
                 "Repository '{}' is not in the allowed-repositories list: [{}]",
@@ -343,10 +340,7 @@ impl Executor for CreateGitTagResult {
                 .await
                 .context("Failed to parse response JSON")?;
 
-            let tag_url = resp_body
-                .get("url")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let tag_url = resp_body.get("url").and_then(|v| v.as_str()).unwrap_or("");
 
             info!("Tag created: {} -> {}", self.tag_name, commit_sha);
 
@@ -505,10 +499,7 @@ allowed-repositories:
 message-prefix: "[release] "
 "#;
         let config: CreateGitTagConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(
-            config.tag_pattern.as_deref(),
-            Some("^v\\d+\\.\\d+\\.\\d+$")
-        );
+        assert_eq!(config.tag_pattern.as_deref(), Some("^v\\d+\\.\\d+\\.\\d+$"));
         assert_eq!(config.allowed_repositories, vec!["self", "my-lib"]);
         assert_eq!(config.message_prefix.as_deref(), Some("[release] "));
     }

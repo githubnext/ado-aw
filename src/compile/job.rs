@@ -61,7 +61,11 @@ impl Compiler for JobCompiler {
 }
 
 /// Generate the header comment block for job-level templates.
-fn generate_job_header(input_path: &Path, output_path: &Path, front_matter: &FrontMatter) -> String {
+fn generate_job_header(
+    input_path: &Path,
+    output_path: &Path,
+    front_matter: &FrontMatter,
+) -> String {
     let base_header = generate_header_comment(input_path);
     let mut lock_path = output_path.to_string_lossy().replace('\\', "/");
     // Strip redundant leading "./" (same normalization as generate_header_comment)
@@ -77,7 +81,8 @@ fn generate_job_header(input_path: &Path, output_path: &Path, front_matter: &Fro
     header.push_str(&format!("#     - template: {}\n", lock_path));
     header.push_str("#       parameters:\n");
     header.push_str("#         dependsOn: [Build]            # list of upstream job names; omit for implicit dep on previous job\n");
-    header.push_str("#         condition: succeeded('Build') # omit for ADO's default succeeded()\n");
+    header
+        .push_str("#         condition: succeeded('Build') # omit for ADO's default succeeded()\n");
     header.push_str("#\n");
     header.push_str("# Or inside a user-defined stage in a multi-stage pipeline:\n");
     header.push_str("#\n");
@@ -88,11 +93,18 @@ fn generate_job_header(input_path: &Path, output_path: &Path, front_matter: &Fro
     header.push_str(&format!("#         - template: {}\n", lock_path));
     header.push_str("#\n");
     header.push_str("# ADO's jobs.template schema only allows `template:` and `parameters:` at\n");
-    header.push_str("# the call site \u{2014} `dependsOn:` / `condition:` on a `- template:` call are\n");
-    header.push_str("# rejected. Pass them via `parameters:` so the template applies them inside.\n");
-    header.push_str("# When the agent has a Setup job (e.g. PR/pipeline filters), `dependsOn` MUST\n");
+    header.push_str(
+        "# the call site \u{2014} `dependsOn:` / `condition:` on a `- template:` call are\n",
+    );
+    header
+        .push_str("# rejected. Pass them via `parameters:` so the template applies them inside.\n");
+    header.push_str(
+        "# When the agent has a Setup job (e.g. PR/pipeline filters), `dependsOn` MUST\n",
+    );
     header.push_str("# be a list so the template can merge `Setup` with the caller's deps.\n");
-    header.push_str("# See https://learn.microsoft.com/azure/devops/pipelines/yaml-schema/jobs-template\n");
+    header.push_str(
+        "# See https://learn.microsoft.com/azure/devops/pipelines/yaml-schema/jobs-template\n",
+    );
 
     // Document required resources if agent uses repos
     if !front_matter.repositories.is_empty() {
@@ -118,7 +130,10 @@ mod tests {
 
     #[test]
     fn test_generate_stage_prefix_basic() {
-        assert_eq!(generate_stage_prefix("Daily Code Review"), "DailyCodeReview");
+        assert_eq!(
+            generate_stage_prefix("Daily Code Review"),
+            "DailyCodeReview"
+        );
     }
 
     #[test]
@@ -143,7 +158,10 @@ mod tests {
 
     #[test]
     fn test_generate_stage_prefix_underscores() {
-        assert_eq!(generate_stage_prefix("code_review_agent"), "CodeReviewAgent");
+        assert_eq!(
+            generate_stage_prefix("code_review_agent"),
+            "CodeReviewAgent"
+        );
     }
 
     #[test]

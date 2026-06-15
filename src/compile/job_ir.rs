@@ -35,12 +35,12 @@
 use anyhow::Result;
 use std::path::Path;
 
+use super::agentic_pipeline::build_pipeline_context;
 use super::common;
 use super::extensions::{CompileContext, Extension};
 use super::ir::ids::JobId;
 use super::ir::job::TemplateDependsOnWrap;
 use super::ir::{Pipeline, PipelineBody, PipelineShape, Resources, TemplateParams, Triggers};
-use super::agentic_pipeline::build_pipeline_context;
 use super::types::FrontMatter;
 
 /// Build the typed [`Pipeline`] for the `target: job` compile target.

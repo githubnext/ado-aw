@@ -87,7 +87,10 @@ pub fn parse_parameters(values: &[String]) -> Result<serde_json::Map<String, ser
             }
             // All values are strings — ADO coerces template-parameter
             // values as the pipeline definition requires.
-            out.insert(key.to_string(), serde_json::Value::String(v.trim().to_string()));
+            out.insert(
+                key.to_string(),
+                serde_json::Value::String(v.trim().to_string()),
+            );
         }
     }
     Ok(out)
@@ -372,7 +375,10 @@ async fn poll_until_complete(
                     match classify_build(&body) {
                         BuildOutcome::InProgress => next_pending.push(*t),
                         BuildOutcome::Succeeded => {
-                            println!("✓ build {} (definition {}) succeeded", t.build_id, t.definition_id);
+                            println!(
+                                "✓ build {} (definition {}) succeeded",
+                                t.build_id, t.definition_id
+                            );
                             outcome.succeeded += 1;
                         }
                         BuildOutcome::Failed => {
@@ -404,11 +410,7 @@ async fn poll_until_complete(
                     } else {
                         eprintln!(
                             "  warning: poll error for build {} (definition {}) (attempt {}/{}): {:#}",
-                            t.build_id,
-                            t.definition_id,
-                            count,
-                            MAX_CONSECUTIVE_POLL_ERRORS,
-                            e
+                            t.build_id, t.definition_id, count, MAX_CONSECUTIVE_POLL_ERRORS, e
                         );
                         // Treat as still-in-progress; we'll retry on
                         // the next tick.
@@ -461,8 +463,7 @@ mod tests {
 
     #[test]
     fn parse_parameters_repeated_comma_mix() {
-        let m =
-            parse_parameters(&["a=1,b=2".to_string(), "c=3".to_string()]).unwrap();
+        let m = parse_parameters(&["a=1,b=2".to_string(), "c=3".to_string()]).unwrap();
         assert_eq!(m.len(), 3);
     }
 
@@ -514,11 +515,7 @@ mod tests {
         );
 
         // The well-formed workaround is one --parameters flag per pair.
-        let m = parse_parameters(&[
-            "urls=https://a".to_string(),
-            "extra=b".to_string(),
-        ])
-        .unwrap();
+        let m = parse_parameters(&["urls=https://a".to_string(), "extra=b".to_string()]).unwrap();
         assert_eq!(m.get("urls").unwrap().as_str(), Some("https://a"));
         assert_eq!(m.get("extra").unwrap().as_str(), Some("b"));
     }
@@ -557,8 +554,7 @@ mod tests {
 
     #[test]
     fn classify_failed_when_completed_partial() {
-        let body =
-            serde_json::json!({ "status": "completed", "result": "partiallySucceeded" });
+        let body = serde_json::json!({ "status": "completed", "result": "partiallySucceeded" });
         assert_eq!(classify_build(&body), BuildOutcome::Failed);
     }
 
