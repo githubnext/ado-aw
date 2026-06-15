@@ -95,6 +95,36 @@ pub fn dot_net_core_cli_step(command: impl Into<String>) -> TaskStep {
     TaskStep::new("DotNetCoreCLI@2", format!("dotnet {}", cmd)).with_input("command", cmd)
 }
 
+/// Returns a [`TaskStep`] for `ArchiveFiles@2`.
+///
+/// Creates an archive from `root_folder_or_file` and writes it to
+/// `archive_file`. The archive type defaults to `zip`; override with
+/// `.with_input("archiveType", "7z")` (or `"tar"` / `"wim"`) when needed.
+///
+/// Required inputs are positional parameters. Optional inputs (applied
+/// via `.with_input(…)` on the returned value):
+///
+/// | Input key | Type | Default | Description |
+/// |---|---|---|---|
+/// | `archiveType` | string | `"zip"` | Archive format: `"zip"`, `"7z"`, `"tar"`, `"wim"`. |
+/// | `includeRootFolder` | bool string | `"true"` | Prepend root folder name to archive paths. |
+/// | `replaceExistingArchive` | bool string | `"true"` | Replace existing archive. |
+/// | `sevenZipCompression` | string | `"normal"` | 7z compression level (when `archiveType = 7z`). |
+/// | `tarCompression` | string | `"gz"` | Tar compression (when `archiveType = tar`): `"gz"`, `"bz2"`, `"xz"`, `"none"`. |
+/// | `verbose` | bool string | `"false"` | Force verbose output. |
+/// | `quiet` | bool string | `"false"` | Force quiet output. |
+///
+/// ADO task reference:
+/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/archive-files-v2>
+pub fn archive_files_step(
+    root_folder_or_file: impl Into<String>,
+    archive_file: impl Into<String>,
+) -> TaskStep {
+    TaskStep::new("ArchiveFiles@2", "Archive Files")
+        .with_input("rootFolderOrFile", root_folder_or_file)
+        .with_input("archiveFile", archive_file)
+}
+
 /// Returns a [`TaskStep`] for `PublishTestResults@2`.
 ///
 /// Publishes test results to the ADO build summary and timeline.
@@ -340,5 +370,77 @@ mod tests {
                 Some(*version)
             );
         }
+    }
+
+    // ── ArchiveFiles@2 ───────────────────────────────────────────────────
+
+    #[test]
+    fn archive_files_step_sets_task_and_required_inputs() {
+        let t = archive_files_step(
+            "$(Build.BinariesDirectory)",
+            "$(Build.ArtifactStagingDirectory)/output.zip",
+        );
+        assert_eq!(t.task, "ArchiveFiles@2");
+        assert_eq!(t.display_name, "Archive Files");
+        assert_eq!(
+            t.inputs.get("rootFolderOrFile").map(|s| s.as_str()),
+            Some("$(Build.BinariesDirectory)")
+        );
+        assert_eq!(
+            t.inputs.get("archiveFile").map(|s| s.as_str()),
+            Some("$(Build.ArtifactStagingDirectory)/output.zip")
+        );
+        // no optional inputs by default
+        assert_eq!(t.inputs.len(), 2);
+    }
+
+    #[test]
+    fn archive_files_step_accepts_archive_type_override() {
+        let t = archive_files_step("$(Build.BinariesDirectory)", "$(Build.ArtifactStagingDirectory)/output.tar.gz")
+            .with_input("archiveType", "tar")
+            .with_input("tarCompression", "gz");
+        assert_eq!(t.task, "ArchiveFiles@2");
+        assert_eq!(
+            t.inputs.get("archiveType").map(|s| s.as_str()),
+            Some("tar")
+        );
+        assert_eq!(
+            t.inputs.get("tarCompression").map(|s| s.as_str()),
+            Some("gz")
+        );
+        assert_eq!(t.inputs.len(), 4);
+    }
+
+    #[test]
+    fn archive_files_step_accepts_optional_flags() {
+        let t = archive_files_step("$(Build.SourcesDirectory)", "$(Build.ArtifactStagingDirectory)/src.zip")
+            .with_input("includeRootFolder", "false")
+            .with_input("replaceExistingArchive", "true");
+        assert_eq!(
+            t.inputs.get("includeRootFolder").map(|s| s.as_str()),
+            Some("false")
+        );
+        assert_eq!(
+            t.inputs.get("replaceExistingArchive").map(|s| s.as_str()),
+            Some("true")
+        );
+        assert_eq!(t.inputs.len(), 4);
+    }
+
+    #[test]
+    fn archive_files_step_seven_zip_compression() {
+        let t = archive_files_step("$(Build.BinariesDirectory)", "$(Build.ArtifactStagingDirectory)/output.7z")
+            .with_input("archiveType", "7z")
+            .with_input("sevenZipCompression", "maximum");
+        assert_eq!(t.task, "ArchiveFiles@2");
+        assert_eq!(
+            t.inputs.get("archiveType").map(|s| s.as_str()),
+            Some("7z")
+        );
+        assert_eq!(
+            t.inputs.get("sevenZipCompression").map(|s| s.as_str()),
+            Some("maximum")
+        );
+        assert_eq!(t.inputs.len(), 4);
     }
 }
