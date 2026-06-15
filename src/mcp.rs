@@ -220,19 +220,15 @@ impl SafeOutputs {
                     )));
                 }
                 let repo_path = self.bounding_directory.join(repo_alias);
+                // `ensure_path_within_base` canonicalizes `repo_path` (which fails
+                // for a non-existent directory) and verifies containment, returning
+                // the symlink-resolved path we should hand to git.
                 crate::validate::ensure_path_within_base(
                     &repo_path,
                     &self.bounding_directory,
                     "Repository path",
                 )
-                .map_err(anyhow_to_mcp_error)?;
-                if !repo_path.exists() {
-                    return Err(anyhow_to_mcp_error(anyhow::anyhow!(
-                        "Repository directory not found: {}",
-                        repo_path.display()
-                    )));
-                }
-                repo_path
+                .map_err(anyhow_to_mcp_error)?
             }
         };
 

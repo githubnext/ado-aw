@@ -29,6 +29,9 @@ impl Validate for UploadWorkitemAttachmentParams {
     fn validate(&self) -> anyhow::Result<()> {
         ensure!(self.work_item_id > 0, "work_item_id must be positive");
         crate::validate::validate_relative_safe_path(&self.file_path, "file_path")?;
+        // `validate_relative_safe_path` only blocks a colon in a Windows drive
+        // prefix (position 1), not colons elsewhere. This explicit check is
+        // load-bearing: it rejects paths like `output/file:name.txt`.
         ensure!(
             !self.file_path.contains(':'),
             "file_path must not contain ':'"
