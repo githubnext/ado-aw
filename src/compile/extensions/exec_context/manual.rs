@@ -130,12 +130,15 @@ impl ContextContributor for ManualContextContributor {
         }
     }
 
-    fn prepare_step_typed(&self, _ctx: &CompileContext) -> anyhow::Result<Option<Step>> {
-        // Defensive: never emit a step when the contributor is inactive.
-        // `ExecContextExtension::declarations` already filters via
-        // `should_activate`, but this guard catches misuse if the
-        // contributor is called directly (e.g. from a future test).
-        if self.parameter_names.is_empty() {
+    fn prepare_step_typed(&self, ctx: &CompileContext) -> anyhow::Result<Option<Step>> {
+        // Defensive: mirror the same guard pattern as every other
+        // contributor — `declarations()` already gates on
+        // `should_activate`, but this guard catches direct callers
+        // (tests / future tooling) that bypass the outer filter.
+        // Using the full `should_activate` predicate (rather than
+        // just the `parameter_names.is_empty()` sub-check) ensures
+        // the explicit `enabled: false` case is also caught.
+        if !self.should_activate(ctx) {
             return Ok(None);
         }
 
@@ -365,6 +368,32 @@ mod tests {
         // Direct call returns None even though `should_activate`
         // would also return false — defensive guard against misuse.
         assert!(c.prepare_step_typed(&ctx).unwrap().is_none());
+    }
+
+    /// Defensive guard parity test: when `enabled: Some(false)` is set
+    /// explicitly AND parameters are non-empty, direct calls to
+    /// `prepare_step_typed` MUST still return `Ok(None)`. Mirrors
+    /// `workitem::tests::prepare_step_returns_none_when_inactive` —
+    /// the guard now uses `!should_activate(ctx)` rather than just
+    /// the `parameter_names.is_empty()` sub-check, so this case is
+    /// covered.
+    #[test]
+    fn prepare_step_none_when_explicitly_disabled() {
+        let fm = manual_fm_with_params();
+        let cfg = ManualContextConfig {
+            enabled: Some(false),
+            include_email: None,
+        };
+        let c = ManualContextContributor::from_fm(cfg, &fm);
+        let ctx = CompileContext::for_test(&fm);
+        assert!(
+            c.prepare_step_typed(&ctx).unwrap().is_none(),
+            "manual contributor with enabled: Some(false) and non-empty \
+             parameters MUST return Ok(None) from prepare_step_typed; \
+             without the full should_activate guard, the no-bearer step \
+             would be emitted as a live step bypassing the explicit \
+             opt-out."
+        );
     }
 
     #[test]
