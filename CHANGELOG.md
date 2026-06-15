@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.37.0](https://github.com/githubnext/ado-aw/compare/v0.36.0...v0.37.0) (2026-06-15)
+
+
+### Features
+
+* **ir:** add typed helper for ArchiveFiles@2 ([#1028](https://github.com/githubnext/ado-aw/issues/1028)) ([608f402](https://github.com/githubnext/ado-aw/commit/608f4025d1748b95bd9bc6d67921606d9d3d7d6c))
+
+
+### Bug Fixes
+
+* **clippy:** replace std::sync::Mutex with tokio::sync::Mutex in test ([#1031](https://github.com/githubnext/ado-aw/issues/1031)) ([b7eee72](https://github.com/githubnext/ado-aw/commit/b7eee726803359b06f41c5bbfbb4ee9923fe18eb))
+* **compile:** drop stray `\ \` in MCPG docker-env continuation lines ([#1035](https://github.com/githubnext/ado-aw/issues/1035)) ([ebda84d](https://github.com/githubnext/ado-aw/commit/ebda84d9c8cee090bdd2788485bafed9932dc1fa))
+
 ## [0.36.0](https://github.com/githubnext/ado-aw/compare/v0.35.3...v0.36.0) (2026-06-15)
 
 
