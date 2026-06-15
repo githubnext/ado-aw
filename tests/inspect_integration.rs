@@ -39,12 +39,18 @@ fn inspect_emits_pipeline_summary_text() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("Target shape:"));
+    assert!(
+        stdout.contains("Target shape:"),
+        "expected 'Target shape:' line in inspect output, got:\n{stdout}"
+    );
     assert!(
         stdout.contains("Jobs ("),
         "expected jobs section, got:\n{stdout}"
     );
-    assert!(stdout.contains("Graph:"));
+    assert!(
+        stdout.contains("Graph:"),
+        "expected 'Graph:' section in inspect output, got:\n{stdout}"
+    );
 }
 
 #[test]
@@ -67,8 +73,14 @@ fn inspect_json_emits_schema_version_one() {
         stdout.contains("\"schema_version\": 1"),
         "expected schema_version: 1 in JSON output, got:\n{stdout}"
     );
-    assert!(stdout.contains("\"shape\":"));
-    assert!(stdout.contains("\"graph\":"));
+    assert!(
+        stdout.contains("\"shape\":"),
+        "expected 'shape' key in JSON output, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("\"graph\":"),
+        "expected 'graph' key in JSON output, got:\n{stdout}"
+    );
 }
 
 #[test]
@@ -82,13 +94,22 @@ fn graph_dot_emits_digraph_with_known_edges() {
         .arg("dot")
         .output()
         .expect("run ado-aw graph dump --format dot");
-    assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "graph dump --format dot exited non-zero. stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.starts_with("digraph ado_aw_pipeline {"));
-    // Canonical 3-job graph has Detection→Agent and SafeOutputs→Detection.
+    // The canonical 3-job pipeline produces three dependency edges:
+    // Detection depends on Agent, SafeOutputs depends on both Agent and Detection.
     assert!(
         stdout.contains("\"Detection\" -> \"Agent\""),
         "expected Detection→Agent edge, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("\"SafeOutputs\" -> \"Agent\""),
+        "expected SafeOutputs→Agent edge, got:\n{stdout}"
     );
     assert!(
         stdout.contains("\"SafeOutputs\" -> \"Detection\""),

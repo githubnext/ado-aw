@@ -56,7 +56,7 @@ fn run_rejects_poll_interval_without_wait() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("--wait") || stderr.contains("wait"),
-        "stderr should reference the requires-constraint, got:\n{stderr}"
+        stderr.contains("--wait"),
+        "stderr should reference '--wait' as the missing required argument, got:\n{stderr}"
     );
 }
