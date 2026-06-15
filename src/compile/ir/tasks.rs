@@ -11,6 +11,38 @@
 
 use super::step::TaskStep;
 
+/// The set of ADO task identifiers emitted by the typed factories in
+/// this module.
+///
+/// This list is the **source of truth** for the "curated" task subset
+/// that agent-proposed step blocks (e.g. via
+/// `propose-step-optimization`) are allowed to reference. Any
+/// `TaskStep` whose `task` field is **not** in this list is rejected
+/// by [`crate::compile::ir::validate_step_block`] when called with
+/// [`crate::compile::ir::StepKindAllow::Curated`].
+///
+/// Keep this list in lock-step with the public factory functions
+/// below — the [`tests::curated_task_ids_match_factories`] test
+/// asserts that every factory's emitted task identifier appears here
+/// and that this list contains no entries without a corresponding
+/// factory.
+pub const CURATED_TASK_IDS: &[&str] = &[
+    "ArchiveFiles@2",
+    "CopyFiles@2",
+    "DockerInstaller@0",
+    "DotNetCoreCLI@2",
+    "PublishTestResults@2",
+];
+
+/// Returns `true` when `task_id` matches one of the ADO tasks for
+/// which we expose a typed factory in this module.
+///
+/// Used by the IR fragment validator to enforce the "curated task
+/// only" allow-list for untrusted agent-proposed step blocks.
+pub fn is_curated_task(task_id: &str) -> bool {
+    CURATED_TASK_IDS.contains(&task_id)
+}
+
 /// Returns a [`TaskStep`] for `CopyFiles@2`.
 ///
 /// Copies files matching `contents` into `target_folder`. The optional
@@ -157,6 +189,64 @@ pub fn publish_test_results_step(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Curated-task allow-list ──────────────────────────────────────────
+
+    #[test]
+    fn curated_task_ids_match_factories() {
+        // Every factory in this module returns a `TaskStep` whose
+        // `task` field MUST appear in `CURATED_TASK_IDS`. Likewise,
+        // every entry in `CURATED_TASK_IDS` MUST be backed by one of
+        // these factories — otherwise the allow-list is exposing a
+        // task the compiler does not actually configure.
+        let factory_task_ids: Vec<&str> = vec![
+            archive_files_step("a", "b").task.leak_as_static(),
+            copy_files_step("a", "b").task.leak_as_static(),
+            docker_installer_step("26.1.4").task.leak_as_static(),
+            dot_net_core_cli_step("build").task.leak_as_static(),
+            publish_test_results_step("JUnit", "**/TEST-*.xml")
+                .task
+                .leak_as_static(),
+        ];
+
+        let mut from_factories: Vec<&str> = factory_task_ids.clone();
+        from_factories.sort();
+        from_factories.dedup();
+
+        let mut from_const: Vec<&str> = CURATED_TASK_IDS.to_vec();
+        from_const.sort();
+
+        assert_eq!(
+            from_factories, from_const,
+            "CURATED_TASK_IDS must list exactly the tasks emitted by \
+             the factories in tasks.rs (factories: {factory_task_ids:?})"
+        );
+    }
+
+    #[test]
+    fn is_curated_task_accepts_factory_outputs_and_rejects_others() {
+        for id in CURATED_TASK_IDS {
+            assert!(is_curated_task(id), "expected {id} to be curated");
+        }
+        for id in &["UseNode@1", "AzureCLI@2", "Bash@3", "", "CopyFiles"] {
+            assert!(
+                !is_curated_task(id),
+                "expected {id} to NOT be curated (no typed factory)"
+            );
+        }
+    }
+
+    // Helper trait used only by `curated_task_ids_match_factories` to
+    // produce `&'static str` values from owned `String`s for clean
+    // assertion output. Test-only — never used in production code.
+    trait LeakAsStatic {
+        fn leak_as_static(self) -> &'static str;
+    }
+    impl LeakAsStatic for String {
+        fn leak_as_static(self) -> &'static str {
+            Box::leak(self.into_boxed_str())
+        }
+    }
 
     // ── CopyFiles@2 ──────────────────────────────────────────────────────
 

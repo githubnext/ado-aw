@@ -726,6 +726,18 @@ pub struct FrontMatter {
     /// PR context is on when `on.pr` is set.
     #[serde(default, rename = "execution-context")]
     pub execution_context: Option<ExecutionContextConfig>,
+    /// Self-optimization configuration — opt-in. When enabled, the
+    /// Stage-1 agent gets access to a `propose-step-optimization`
+    /// safe-output that lets it propose lifting deterministic bash
+    /// work it ran into front-matter `steps:` / `post-steps:`
+    /// entries. Stage 2 cross-checks the proposal against the agent's
+    /// actual command telemetry; Stage 3 IR-validates the proposed
+    /// block and (by default in `staged: true` mode) renders a diff
+    /// preview to the build summary instead of opening a PR.
+    ///
+    /// See `docs/self-optimization.md`.
+    #[serde(default, rename = "self-optimization")]
+    pub self_optimization: Option<SelfOptimizationConfig>,
 }
 
 impl FrontMatter {
@@ -822,6 +834,9 @@ impl SanitizeConfigTrait for FrontMatter {
         }
         if let Some(ref mut ec) = self.execution_context {
             ec.sanitize_config_fields();
+        }
+        if let Some(ref mut so) = self.self_optimization {
+            so.sanitize_config_fields();
         }
     }
 }
@@ -1337,6 +1352,125 @@ impl SanitizeConfigTrait for PrChecksContextConfig {
     fn sanitize_config_fields(&mut self) {
         // No free-form string fields — booleans only.
     }
+}
+
+// ─── Self-optimization (opt-in) ──────────────────────────────────────────
+
+/// Top-level configuration for the self-optimization feature.
+///
+/// When `enabled: true`, the Stage-1 agent gets a structured
+/// safe-output (`propose-step-optimization`) it can call to propose
+/// lifting deterministic bash work it ran successfully into the
+/// agent's own front-matter `steps:` / `post-steps:` (and optionally
+/// `setup:` / `teardown:`). Stage 2 cross-checks the proposal against
+/// the agent's actual command telemetry as an anti-injection signal.
+/// Stage 3 IR-validates the proposed step block — only Bash steps and
+/// the curated set of `tasks.rs` factory tasks are accepted (see
+/// [`crate::compile::ir::tasks::CURATED_TASK_IDS`]) — and either
+/// renders a `🎭`-marked diff preview to the build summary
+/// (`staged: true`, the default) or opens a PR against the source
+/// `.md` (`staged: false`).
+///
+/// Defaults are conservative: `staged: true` so the first runs of
+/// any newly-opted-in pipeline only **preview** what they would
+/// propose, giving authors a chance to review the agent's judgement
+/// before any real source-file mutation lands. The author flips
+/// `staged: false` once they trust the proposals.
+///
+/// `allowed_sections` defaults to `[Steps, PostSteps]` — both run in
+/// the same job as the agent and inherit the same security context.
+/// Opting in to `Setup` or `Teardown` is explicit because those are
+/// separate jobs that may have different identities; the
+/// threat-analysis prompt treats those proposal classes with extra
+/// scrutiny.
+///
+/// See `docs/self-optimization.md`.
+#[derive(Debug, Deserialize, Clone)]
+pub struct SelfOptimizationConfig {
+    /// Master switch. Defaults to `false` — this is opt-in.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Preview mode. Defaults to `true`. When `true`, IR-validated
+    /// proposals are rendered to the build summary as a diff preview
+    /// and no PR is opened. When `false`, accepted proposals are
+    /// applied as a PR against the source `.md`.
+    #[serde(default = "default_self_optimization_staged")]
+    pub staged: bool,
+    /// Maximum number of proposals the agent may emit per build.
+    /// Defaults to 3. Capped at 50.
+    #[serde(
+        default = "default_self_optimization_max_proposals",
+        rename = "max-proposals-per-run"
+    )]
+    pub max_proposals_per_run: u32,
+    /// Front-matter sections the agent is allowed to propose into.
+    /// Defaults to `[steps, post-steps]` (same job as the agent).
+    /// Explicit opt-in is required for `setup` / `teardown` (separate
+    /// jobs).
+    #[serde(
+        default = "default_self_optimization_allowed_sections",
+        rename = "allowed-sections"
+    )]
+    pub allowed_sections: Vec<StepSection>,
+}
+
+impl Default for SelfOptimizationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            staged: default_self_optimization_staged(),
+            max_proposals_per_run: default_self_optimization_max_proposals(),
+            allowed_sections: default_self_optimization_allowed_sections(),
+        }
+    }
+}
+
+impl SelfOptimizationConfig {
+    /// Convenience: is this section opted in?
+    pub fn allows_section(&self, section: StepSection) -> bool {
+        self.allowed_sections.contains(&section)
+    }
+}
+
+impl SanitizeConfigTrait for SelfOptimizationConfig {
+    fn sanitize_config_fields(&mut self) {
+        // No free-form string fields — booleans, capped u32, and enum
+        // variants only. Clamp `max_proposals_per_run` defensively.
+        if self.max_proposals_per_run > 50 {
+            self.max_proposals_per_run = 50;
+        }
+    }
+}
+
+fn default_self_optimization_staged() -> bool {
+    true
+}
+
+fn default_self_optimization_max_proposals() -> u32 {
+    3
+}
+
+fn default_self_optimization_allowed_sections() -> Vec<StepSection> {
+    vec![StepSection::Steps, StepSection::PostSteps]
+}
+
+/// Front-matter section a self-optimization proposal targets.
+///
+/// `Steps` and `PostSteps` run inside the agent job (same security
+/// context as the agent itself). `Setup` and `Teardown` are separate
+/// jobs that may run under different identities, so opt-in for those
+/// must be explicit in [`SelfOptimizationConfig::allowed_sections`].
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum StepSection {
+    /// `steps:` — runs BEFORE the agent in the agent job.
+    Steps,
+    /// `post-steps:` — runs AFTER the agent in the agent job.
+    PostSteps,
+    /// `setup:` — separate job that runs before the agent job.
+    Setup,
+    /// `teardown:` — separate job that runs after safe-outputs.
+    Teardown,
 }
 
 /// Configuration for the `manual` execution-context contributor.
@@ -2493,6 +2627,99 @@ triggers:
         let pr = tc.pr.unwrap();
         let filters = pr.filters.unwrap();
         assert_eq!(filters.title.unwrap().pattern, "*[agent]*");
+    }
+
+    // ─── SelfOptimizationConfig deserialization ──────────────────────────
+
+    #[test]
+    fn self_optimization_absent_field_yields_none() {
+        let yaml = "name: x\ndescription: y\n";
+        let fm: FrontMatter = serde_yaml::from_str(yaml).unwrap();
+        assert!(fm.self_optimization.is_none());
+    }
+
+    #[test]
+    fn self_optimization_minimal_uses_documented_defaults() {
+        // `enabled: true` with no other fields must apply the
+        // documented defaults: staged=true, max=3,
+        // allowed-sections=[steps, post-steps].
+        let yaml = "enabled: true";
+        let so: SelfOptimizationConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(so.enabled);
+        assert!(so.staged, "staged must default to true");
+        assert_eq!(so.max_proposals_per_run, 3);
+        assert_eq!(
+            so.allowed_sections,
+            vec![StepSection::Steps, StepSection::PostSteps]
+        );
+        // Convenience predicate must respect the default allow-list.
+        assert!(so.allows_section(StepSection::Steps));
+        assert!(so.allows_section(StepSection::PostSteps));
+        assert!(!so.allows_section(StepSection::Setup));
+        assert!(!so.allows_section(StepSection::Teardown));
+    }
+
+    #[test]
+    fn self_optimization_empty_object_disabled_by_default() {
+        // Omitting `enabled:` must leave the feature OFF — the whole
+        // point of the config is opt-in.
+        let yaml = "{}";
+        let so: SelfOptimizationConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(!so.enabled, "self-optimization must be opt-in (default off)");
+    }
+
+    #[test]
+    fn self_optimization_accepts_setup_teardown_opt_in() {
+        let yaml = "
+enabled: true
+staged: false
+max-proposals-per-run: 10
+allowed-sections: [steps, post-steps, setup, teardown]
+";
+        let so: SelfOptimizationConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(so.enabled);
+        assert!(!so.staged);
+        assert_eq!(so.max_proposals_per_run, 10);
+        assert!(so.allows_section(StepSection::Setup));
+        assert!(so.allows_section(StepSection::Teardown));
+    }
+
+    #[test]
+    fn self_optimization_sanitize_clamps_max_proposals() {
+        let yaml = "enabled: true\nmax-proposals-per-run: 9999";
+        let mut so: SelfOptimizationConfig = serde_yaml::from_str(yaml).unwrap();
+        so.sanitize_config_fields();
+        assert_eq!(
+            so.max_proposals_per_run, 50,
+            "sanitize must clamp at the documented ceiling of 50"
+        );
+    }
+
+    #[test]
+    fn self_optimization_step_section_kebab_case_roundtrip() {
+        // Wire format must be kebab-case (`post-steps`), matching how
+        // the front-matter top-level fields are named.
+        let s: StepSection = serde_yaml::from_str("post-steps").unwrap();
+        assert_eq!(s, StepSection::PostSteps);
+        let out = serde_yaml::to_string(&StepSection::PostSteps).unwrap();
+        assert!(out.contains("post-steps"), "got: {out}");
+    }
+
+    #[test]
+    fn front_matter_parses_self_optimization_block() {
+        let yaml = r#"
+name: "Demo"
+description: "Demo agent"
+self-optimization:
+  enabled: true
+  staged: true
+  max-proposals-per-run: 5
+"#;
+        let fm: FrontMatter = serde_yaml::from_str(yaml).unwrap();
+        let so = fm.self_optimization.expect("self-optimization parsed");
+        assert!(so.enabled);
+        assert!(so.staged);
+        assert_eq!(so.max_proposals_per_run, 5);
     }
 
     #[test]
