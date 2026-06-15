@@ -149,6 +149,41 @@ struct GraphDumpResult {
     text_or_dot: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ValidateStepsParams {
+    /// Step entries to validate, as a JSON array of objects. Each
+    /// object is one ADO step entry (e.g. `{"bash": "echo hi",
+    /// "displayName": "Greet"}`). Use `"full"` mode to accept every
+    /// IR-modeled step kind and any task identifier; `"curated"`
+    /// only accepts bash steps and the typed-factory tasks listed in
+    /// `src/compile/ir/tasks.rs::CURATED_TASK_IDS`.
+    steps: serde_json::Value,
+    /// Optional allow-list mode: `"full"` (default) or `"curated"`.
+    /// Authors writing their own steps should use `"full"`; tooling
+    /// that double-checks an agent-proposed block before applying it
+    /// should use `"curated"`.
+    allow_list: Option<String>,
+}
+
+/// Structured response from the `validate_steps` MCP tool. Serialised
+/// as `{ "ok": true, "kinds": [...] }` on success or
+/// `{ "ok": false, "errors": [...] }` on failure.
+#[derive(Debug, Serialize)]
+#[serde(tag = "ok")]
+enum ValidateStepsResponse {
+    #[serde(rename = "true")]
+    Ok {
+        /// The inferred step kind for each entry, in input order.
+        kinds: Vec<crate::compile::ir::StepKind>,
+    },
+    #[serde(rename = "false")]
+    Err {
+        /// Every validation failure detected — validation does not
+        /// short-circuit, so a single call returns the full picture.
+        errors: Vec<crate::compile::ir::StepValidationError>,
+    },
+}
+
 #[tool_router]
 impl AuthorMcp {
     pub fn new() -> Self {
@@ -297,6 +332,52 @@ impl AuthorMcp {
         let source = source_path(&params.0.source_path).await?;
         let report = inspect::build_lint(&source).await.map_err(to_mcp_error)?;
         structured_result(report)
+    }
+
+    #[tool(
+        name = "validate_steps",
+        description = "Validate a proposed front-matter steps: block against the typed IR. \
+                       Pass `allow_list: \"curated\"` to additionally restrict task: steps \
+                       to the typed-factory set (intended for use when double-checking \
+                       agent-proposed step blocks). Returns the inferred kind of each step \
+                       on success, or every validation failure on error."
+    )]
+    async fn validate_steps(
+        &self,
+        params: Parameters<ValidateStepsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let allow = match params.0.allow_list.as_deref() {
+            None | Some("full") => crate::compile::ir::StepKindAllow::Full,
+            Some("curated") => crate::compile::ir::StepKindAllow::Curated,
+            Some(other) => {
+                return Err(McpError::invalid_params(
+                    format!(
+                        "allow_list must be \"full\" or \"curated\" (got {other:?})"
+                    ),
+                    None,
+                ));
+            }
+        };
+
+        // The MCP transport hands us JSON; convert to a `serde_yaml::Value`
+        // so the validator can operate on its natural input type. The
+        // conversion goes through a textual round-trip because
+        // `serde_yaml` and `serde_json` do not share a common Value type;
+        // YAML is a strict superset of JSON so the round-trip is
+        // lossless for JSON-shaped inputs.
+        let json_text = serde_json::to_string(&params.0.steps).map_err(|err| {
+            McpError::invalid_params(format!("failed to serialise steps input: {err}"), None)
+        })?;
+        let yaml_value: serde_yaml::Value =
+            serde_yaml::from_str(&json_text).map_err(|err| {
+                McpError::invalid_params(format!("steps input is not valid YAML: {err}"), None)
+            })?;
+
+        let response = match crate::compile::ir::validate_step_block(&yaml_value, allow) {
+            Ok(ok) => ValidateStepsResponse::Ok { kinds: ok.kinds },
+            Err(errors) => ValidateStepsResponse::Err { errors },
+        };
+        structured_result(response)
     }
 
     #[tool(

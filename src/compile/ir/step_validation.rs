@@ -33,6 +33,7 @@
 //! `propose-step-optimization`), the executor calls with
 //! [`StepKindAllow::Curated`].
 
+use serde::Serialize;
 use serde_yaml::Value;
 
 use super::tasks::is_curated_task;
@@ -55,7 +56,8 @@ pub enum StepKindAllow {
 }
 
 /// The kind of an individual step, inferred from its unique kind key.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
 pub enum StepKind {
     /// A `bash:` step.
     Bash,
@@ -81,7 +83,7 @@ pub struct ValidatedStepBlock {
 }
 
 /// A single, addressable validation failure.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StepValidationError {
     /// Zero-based index of the offending step entry in the input
     /// sequence. `usize::MAX` is used for whole-block errors (e.g.
