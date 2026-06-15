@@ -28,6 +28,11 @@ safe-outputs:
     allowed-files:
       - "tests/safe-outputs/*.lock.yml"
       - "tests/safe-outputs/**/*.lock.yml"
+    # Recompiling every fixture rewrites ~30 lock files at once; the combined
+    # signed-commit payload exceeds the 1024 KB default and pushes fail with
+    # "Signed-commit payload exceeds max-patch-size". Raise the ceiling with
+    # headroom for additional fixtures.
+    max-patch-size: 4096
   close-pull-request:
     required-title-prefix: "chore(workflows): recompile safe-output fixtures"
     target: "*"
