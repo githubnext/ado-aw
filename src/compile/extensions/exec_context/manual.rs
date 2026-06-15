@@ -109,11 +109,18 @@ impl ContextContributor for ManualContextContributor {
     }
 
     fn should_activate(&self, _ctx: &CompileContext) -> bool {
-        // MAINTENANCE: this MUST stay in lock-step with
-        // `super::manual_contributor_will_activate` (used by
-        // `ExecContextExtension::new` to populate
-        // `any_contributor_active`). The divergence-trap tests in
-        // `super::tests` exercise both paths to keep them aligned.
+        // MAINTENANCE: this MUST agree with
+        // `super::manual_contributor_will_activate` on the
+        // contributor-local conditions — i.e. "parameters declared"
+        // AND "per-contributor `enabled` flag not Some(false)". The
+        // master switch (`execution-context.enabled`) is enforced by
+        // the outer `ExecContextExtension::declarations()` guard
+        // (which short-circuits when the master switch is off) AND
+        // by `manual_contributor_will_activate_with_cfg`, but is
+        // intentionally absent here because the contributor only
+        // sees a `CompileContext`, not the resolved config.
+        // Divergence-trap tests in `super::tests` exercise both
+        // paths to keep them aligned on the conditions they share.
         if self.parameter_names.is_empty() {
             return false;
         }

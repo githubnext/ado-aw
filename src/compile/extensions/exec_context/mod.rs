@@ -260,10 +260,12 @@ fn workitem_contributor_will_activate_with_cfg(
     // this we'd activate on PR builds where pr.enabled: false has
     // explicitly opted out of PR context (and consequently of
     // workitem context too, since workitem is a PR-context extension).
+    //
+    // `pr_contributor_will_activate_with_cfg` already enforces the
+    // master switch (`cfg.is_enabled()`) and the `on.pr`-configured
+    // check, so we only need the per-contributor enabled-flag check
+    // here.
     if !pr_contributor_will_activate_with_cfg(cfg, front_matter) {
-        return false;
-    }
-    if !cfg.is_enabled() {
         return false;
     }
     let workitem_enabled = cfg.workitem.as_ref().and_then(|w| w.enabled);

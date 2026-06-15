@@ -1204,83 +1204,83 @@ pub struct ExecutionContextConfig {
     /// PR-context contributor configuration.
     #[serde(default)]
     pub pr: Option<PrContextConfig>,
-        /// Manual-context contributor configuration. Activates whenever the
-        /// agent declares any `parameters:` block (Stage 1 of the
-        /// execution-context contributor build-out — see
-        /// `docs/execution-context.md`).
-        #[serde(default)]
-        pub manual: Option<ManualContextConfig>,
-        /// Pipeline-context contributor configuration. Activates whenever
-        /// the agent declares an `on.pipeline` trigger (Stage 2 of the
-        /// execution-context contributor build-out — see
-        /// `docs/execution-context.md`).
-        #[serde(default)]
-        pub pipeline: Option<PipelineContextConfig>,
-        /// CI-push contributor configuration. Stages "since last green
-        /// build" diff context on non-PR push builds (Stage 3 of the
-        /// execution-context contributor build-out — see
-        /// `docs/execution-context.md`). Defaults to OFF — opt in via
-        /// `ci-push.enabled: true`.
-        #[serde(rename = "ci-push", default)]
-        pub ci_push: Option<CiPushContextConfig>,
-        /// Workitem-context contributor configuration. PR-linked mode only
-        /// in this iteration — activates on PR builds and fetches the
-        /// linked WI(s) so a reviewer agent can verify acceptance
-        /// criteria. Stage 4 of the build-out — see
-        /// `docs/execution-context.md`. **Crosses an untrusted-prose
-        /// boundary** (WI bodies are user-authored).
-        #[serde(default)]
-        pub workitem: Option<WorkitemContextConfig>,
-        /// Schedule-context contributor configuration. Stages "since last
-        /// run of this pipeline" diff context for scheduled builds.
-        /// Stage 5 of the build-out — see `docs/execution-context.md`.
-        /// Defaults to OFF (opt-in) — many scheduled agents are
-        /// operational (not repo-aware) and don't need diff context.
-        #[serde(default)]
-        pub schedule: Option<ScheduleContextConfig>,
-        /// Repo-context contributor configuration. Always-on capability
-        /// (Stage 7 of the build-out — see `docs/execution-context.md`).
-        /// Stages repository identity info (branch, SHA, last release
-        /// tag, commits-since-tag). Defaults to OFF to avoid
-        /// prompt-clutter regression.
-        #[serde(default)]
-        pub repo: Option<RepoContextConfig>,
-    }
+    /// Manual-context contributor configuration. Activates whenever the
+    /// agent declares any `parameters:` block (Stage 1 of the
+    /// execution-context contributor build-out — see
+    /// `docs/execution-context.md`).
+    #[serde(default)]
+    pub manual: Option<ManualContextConfig>,
+    /// Pipeline-context contributor configuration. Activates whenever
+    /// the agent declares an `on.pipeline` trigger (Stage 2 of the
+    /// execution-context contributor build-out — see
+    /// `docs/execution-context.md`).
+    #[serde(default)]
+    pub pipeline: Option<PipelineContextConfig>,
+    /// CI-push contributor configuration. Stages "since last green
+    /// build" diff context on non-PR push builds (Stage 3 of the
+    /// execution-context contributor build-out — see
+    /// `docs/execution-context.md`). Defaults to OFF — opt in via
+    /// `ci-push.enabled: true`.
+    #[serde(rename = "ci-push", default)]
+    pub ci_push: Option<CiPushContextConfig>,
+    /// Workitem-context contributor configuration. PR-linked mode only
+    /// in this iteration — activates on PR builds and fetches the
+    /// linked WI(s) so a reviewer agent can verify acceptance
+    /// criteria. Stage 4 of the build-out — see
+    /// `docs/execution-context.md`. **Crosses an untrusted-prose
+    /// boundary** (WI bodies are user-authored).
+    #[serde(default)]
+    pub workitem: Option<WorkitemContextConfig>,
+    /// Schedule-context contributor configuration. Stages "since last
+    /// run of this pipeline" diff context for scheduled builds.
+    /// Stage 5 of the build-out — see `docs/execution-context.md`.
+    /// Defaults to OFF (opt-in) — many scheduled agents are
+    /// operational (not repo-aware) and don't need diff context.
+    #[serde(default)]
+    pub schedule: Option<ScheduleContextConfig>,
+    /// Repo-context contributor configuration. Always-on capability
+    /// (Stage 7 of the build-out — see `docs/execution-context.md`).
+    /// Stages repository identity info (branch, SHA, last release
+    /// tag, commits-since-tag). Defaults to OFF to avoid
+    /// prompt-clutter regression.
+    #[serde(default)]
+    pub repo: Option<RepoContextConfig>,
+}
 
-    impl ExecutionContextConfig {
-        /// Whether the master switch is on. Defaults to `true` when unset.
-        pub fn is_enabled(&self) -> bool {
-            self.enabled.unwrap_or(true)
+impl ExecutionContextConfig {
+    /// Whether the master switch is on. Defaults to `true` when unset.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+}
+
+impl SanitizeConfigTrait for ExecutionContextConfig {
+    fn sanitize_config_fields(&mut self) {
+        if let Some(ref mut p) = self.pr {
+            p.sanitize_config_fields();
+        }
+        if let Some(ref mut m) = self.manual {
+            m.sanitize_config_fields();
+        }
+        if let Some(ref mut p) = self.pipeline {
+            p.sanitize_config_fields();
+        }
+        if let Some(ref mut c) = self.ci_push {
+            c.sanitize_config_fields();
+        }
+        if let Some(ref mut w) = self.workitem {
+            w.sanitize_config_fields();
+        }
+        if let Some(ref mut s) = self.schedule {
+            s.sanitize_config_fields();
+        }
+        if let Some(ref mut r) = self.repo {
+            r.sanitize_config_fields();
         }
     }
+}
 
-    impl SanitizeConfigTrait for ExecutionContextConfig {
-        fn sanitize_config_fields(&mut self) {
-            if let Some(ref mut p) = self.pr {
-                p.sanitize_config_fields();
-            }
-            if let Some(ref mut m) = self.manual {
-                m.sanitize_config_fields();
-            }
-            if let Some(ref mut p) = self.pipeline {
-                p.sanitize_config_fields();
-            }
-            if let Some(ref mut c) = self.ci_push {
-                c.sanitize_config_fields();
-            }
-            if let Some(ref mut w) = self.workitem {
-                w.sanitize_config_fields();
-            }
-            if let Some(ref mut s) = self.schedule {
-                s.sanitize_config_fields();
-            }
-            if let Some(ref mut r) = self.repo {
-                r.sanitize_config_fields();
-            }
-        }
-    }
-
-    /// Configuration for the PR-context contributor.
+/// Configuration for the PR-context contributor.
 ///
 /// Controls whether the precompute step materialises `aw-context/pr/*` for
 /// PR-triggered builds. v6.2 onward exposes only an opt-out switch — the
@@ -1292,52 +1292,52 @@ pub struct PrContextConfig {
     /// `on.pr` is configured. Set `false` to opt out.
     #[serde(default)]
     pub enabled: Option<bool>,
-        /// PR-checks (build validation) extension (Stage 6 of the
-        /// build-out — see plan.md). Stages a list of failing /
-        /// succeeded build-validation runs on the PR so a remediation
-        /// agent can read the failing logs and propose a fix.
-        /// Default OFF — opt in via `pr.checks.enabled: true`.
-        #[serde(default)]
-        pub checks: Option<PrChecksContextConfig>,
+    /// PR-checks (build validation) extension (Stage 6 of the
+    /// build-out — see plan.md). Stages a list of failing /
+    /// succeeded build-validation runs on the PR so a remediation
+    /// agent can read the failing logs and propose a fix.
+    /// Default OFF — opt in via `pr.checks.enabled: true`.
+    #[serde(default)]
+    pub checks: Option<PrChecksContextConfig>,
 }
 
-    impl PrContextConfig {
-        /// Resolved-enabled value; `None` means "depends on whether `on.pr` is set".
-        pub fn explicit_enabled(&self) -> Option<bool> {
-            self.enabled
+impl PrContextConfig {
+    /// Resolved-enabled value; `None` means "depends on whether `on.pr` is set".
+    pub fn explicit_enabled(&self) -> Option<bool> {
+        self.enabled
+    }
+}
+
+impl SanitizeConfigTrait for PrContextConfig {
+    fn sanitize_config_fields(&mut self) {
+        if let Some(ref mut c) = self.checks {
+            c.sanitize_config_fields();
         }
     }
+}
 
-    impl SanitizeConfigTrait for PrContextConfig {
-        fn sanitize_config_fields(&mut self) {
-            if let Some(ref mut c) = self.checks {
-                c.sanitize_config_fields();
-            }
-        }
-    }
+/// Configuration for the `pr.checks` extension of the PR contributor.
+/// Default OFF. When enabled, stages
+/// `aw-context/pr/checks/{failing,succeeded}.json` listing Build
+/// Validation runs whose source matches the PR.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct PrChecksContextConfig {
+    /// Default OFF.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
 
-    /// Configuration for the `pr.checks` extension of the PR contributor.
-    /// Default OFF. When enabled, stages
-    /// `aw-context/pr/checks/{failing,succeeded}.json` listing Build
-    /// Validation runs whose source matches the PR.
-    #[derive(Debug, Deserialize, Clone, Default)]
-    pub struct PrChecksContextConfig {
-        /// Default OFF.
-        #[serde(default)]
-        pub enabled: Option<bool>,
+impl PrChecksContextConfig {
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.unwrap_or(false)
     }
+}
 
-    impl PrChecksContextConfig {
-        pub fn is_enabled(&self) -> bool {
-            self.enabled.unwrap_or(false)
-        }
+impl SanitizeConfigTrait for PrChecksContextConfig {
+    fn sanitize_config_fields(&mut self) {
+        // No free-form string fields — booleans only.
     }
-
-    impl SanitizeConfigTrait for PrChecksContextConfig {
-        fn sanitize_config_fields(&mut self) {
-            // No free-form string fields — booleans only.
-        }
-    }
+}
 
 /// Configuration for the `manual` execution-context contributor.
 ///

@@ -241,9 +241,20 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
   try {
     mkdirSync(dir, { recursive: true });
   } catch (err) {
-    process.stderr.write(
-      `[aw-context] fatal: could not create ${dir}: ${(err as Error).message}\n`,
-    );
+    const reason = `could not create ${dir}: ${(err as Error).message}`;
+    process.stderr.write(`[aw-context] fatal: ${reason}\n`);
+    // Match the posture of the other contributors (manual, pipeline,
+    // ci-push, schedule, pr-checks, repo): append a failure fragment
+    // so the agent prompt has consistent "## Linked work items"
+    // section structure even on infra failure. The step still exits 1
+    // so the agent job is skipped, but the prompt write is best-effort
+    // — if the workspace is so broken we can't even mkdir, the prompt
+    // file write may also fail, in which case we just return.
+    try {
+      appendToAgentPrompt(promptPath, failureFragment(reason));
+    } catch {
+      // Best-effort only — the underlying infra issue takes precedence.
+    }
     return 1;
   }
 
