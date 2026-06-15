@@ -4912,6 +4912,35 @@ fn test_compile_ado_aw_debug_fixture() {
     );
 }
 
+/// Compile the `self-optimization-agent.md` fixture and assert the
+/// opt-in front-matter section's compile-time effects:
+/// 1. `--enabled-tools propose-step-optimization` is wired into the
+///    SafeOutputs MCP invocation (proving the OPT_IN_GATED_TOOLS
+///    gating mechanism reached the agent's tool manifest).
+/// 2. The compile pipeline accepts the schema end-to-end (parse →
+///    validate_self_optimization_config → emit) without errors.
+/// 3. The output is otherwise valid YAML.
+///
+/// Acts as the integration counterpart to the unit tests in
+/// `compile::common::tests::test_generate_enabled_tools_args_self_optimization_*`.
+#[test]
+fn test_self_optimization_enables_propose_step_optimization_tool() {
+    let compiled = compile_fixture("self-optimization-agent.md");
+    assert_valid_yaml(&compiled, "self-optimization-agent.md");
+
+    assert!(
+        compiled.contains("--enabled-tools propose-step-optimization"),
+        "Compiler must add --enabled-tools propose-step-optimization when self-optimization.enabled: true"
+    );
+    // The always-on diagnostic tools must still be present — when the
+    // filter activates it must include them so noop/missing-tool/etc.
+    // remain reachable.
+    assert!(
+        compiled.contains("--enabled-tools noop"),
+        "Always-on diagnostic tools must remain enabled alongside the opt-in tool"
+    );
+}
+
 /// The example file in `examples/dogfood-failure-reporter.md` must compile
 /// cleanly. Mirror of the structural smoke test for `examples/sample-agent.md`.
 #[test]
