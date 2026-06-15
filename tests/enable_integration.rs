@@ -70,16 +70,17 @@ fn enable_rejects_token_without_also_set_token() {
 
 #[test]
 fn enable_help_describes_github_source_support() {
-    // The new --service-connection flag should have a help string
-    // that mentions GitHub so operators discover the feature.
+    // The --service-connection flag description must begin with "GitHub
+    // service-connection …" so operators know what kind of service
+    // connection is expected without leaving the terminal.
     let output = std::process::Command::new(binary())
         .args(["enable", "--help"])
         .output()
         .expect("Failed to run ado-aw enable --help");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("GitHub"),
-        "Help text should mention GitHub in the --service-connection / --repository-name docs, got:\n{stdout}"
+        stdout.contains("GitHub service-connection"),
+        "Help text for --service-connection should say 'GitHub service-connection …', got:\n{stdout}"
     );
 }
 
