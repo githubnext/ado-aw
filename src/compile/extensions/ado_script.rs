@@ -37,6 +37,45 @@ pub(crate) const IMPORT_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/import
 /// Consumed by `src/compile/extensions/exec_context/pr.rs` to invoke
 /// the bundle from the PR contributor's prepare step.
 pub(crate) const EXEC_CONTEXT_PR_PATH: &str = "/tmp/ado-aw-scripts/ado-script/exec-context-pr.js";
+/// Path to the exec-context-manual bundle (Stage 1 of the
+/// exec-context contributor build-out — see plan.md). Consumed by
+/// `src/compile/extensions/exec_context/manual.rs` to invoke the
+/// bundle from the Manual contributor's prepare step.
+pub(crate) const EXEC_CONTEXT_MANUAL_PATH: &str =
+    "/tmp/ado-aw-scripts/ado-script/exec-context-manual.js";
+/// Path to the exec-context-pipeline bundle (Stage 2 of the
+/// exec-context contributor build-out — see plan.md). Consumed by
+/// `src/compile/extensions/exec_context/pipeline.rs` to invoke the
+/// bundle from the Pipeline contributor's prepare step.
+pub(crate) const EXEC_CONTEXT_PIPELINE_PATH: &str =
+    "/tmp/ado-aw-scripts/ado-script/exec-context-pipeline.js";
+/// Path to the exec-context-ci-push bundle (Stage 3 of the
+/// exec-context contributor build-out — see plan.md). Consumed by
+/// `src/compile/extensions/exec_context/ci_push.rs`.
+pub(crate) const EXEC_CONTEXT_CI_PUSH_PATH: &str =
+    "/tmp/ado-aw-scripts/ado-script/exec-context-ci-push.js";
+/// Path to the exec-context-workitem bundle (Stage 4 of the
+/// exec-context contributor build-out — see plan.md). Consumed by
+/// `src/compile/extensions/exec_context/workitem.rs`. Stages
+/// per-WI directories with description / acceptance / repro
+/// content; crosses an untrusted-prose boundary (WI bodies are
+/// user-authored — see `docs/execution-context.md`).
+pub(crate) const EXEC_CONTEXT_WORKITEM_PATH: &str =
+    "/tmp/ado-aw-scripts/ado-script/exec-context-workitem.js";
+/// Path to the exec-context-schedule bundle (Stage 5 of the
+/// exec-context contributor build-out — see plan.md).
+pub(crate) const EXEC_CONTEXT_SCHEDULE_PATH: &str =
+    "/tmp/ado-aw-scripts/ado-script/exec-context-schedule.js";
+/// Path to the exec-context-pr-checks bundle (Stage 6 of the
+/// exec-context contributor build-out — see plan.md). Extension of
+/// the PR contributor that stages build-validation check info under
+/// `aw-context/pr/checks/`.
+pub(crate) const EXEC_CONTEXT_PR_CHECKS_PATH: &str =
+    "/tmp/ado-aw-scripts/ado-script/exec-context-pr-checks.js";
+/// Path to the exec-context-repo bundle (Stage 7 of the build-out —
+/// see plan.md). Pure git, no REST.
+pub(crate) const EXEC_CONTEXT_REPO_PATH: &str =
+    "/tmp/ado-aw-scripts/ado-script/exec-context-repo.js";
 /// Path to the synthetic-PR-context bundle inside the unpacked
 /// `ado-script.zip`. Runs in the Setup job before `prGate`; consumed
 /// by [`AdoScriptExtension::declarations`].
@@ -59,6 +98,48 @@ pub struct AdoScriptExtension {
     /// shared `exec_context_pr_active` predicate so this stays in
     /// lock-step with `ExecContextExtension`'s own activation gate.
     pub exec_context_pr_active: bool,
+    /// Whether the Manual-context contributor (Stage 1 of the
+    /// exec-context contributor build-out — see plan.md) will
+    /// activate. When true, the Agent-job install/download must
+    /// fire so that `exec-context-manual.js` is present.
+    ///
+    /// Populated at construction by `collect_extensions` using the
+    /// shared `manual_contributor_will_activate` predicate so this
+    /// stays in lock-step with the contributor's `should_activate`.
+    pub exec_context_manual_active: bool,
+    /// Whether the Pipeline-context contributor (Stage 2 of the
+    /// exec-context contributor build-out — see plan.md) will
+    /// activate. When true, the Agent-job install/download must
+    /// fire so that `exec-context-pipeline.js` is present.
+    ///
+    /// Populated at construction by `collect_extensions` using the
+    /// shared `pipeline_contributor_will_activate` predicate so this
+    /// stays in lock-step with the contributor's `should_activate`.
+    pub exec_context_pipeline_active: bool,
+    /// Whether the CI-push-context contributor (Stage 3 of the
+    /// exec-context contributor build-out — see plan.md) will
+    /// activate. Default-off opt-in feature; when true the
+    /// install/download must fire so that
+    /// `exec-context-ci-push.js` is present.
+    pub exec_context_ci_push_active: bool,
+    /// Whether the Workitem-context contributor (Stage 4 of the
+    /// exec-context contributor build-out — see plan.md) will
+    /// activate. Activates whenever the PR contributor activates
+    /// unless explicitly disabled. **Crosses an untrusted-prose
+    /// boundary** — see workitem.rs.
+    pub exec_context_workitem_active: bool,
+    /// Whether the Schedule-context contributor (Stage 5 of the
+    /// exec-context contributor build-out — see plan.md) will
+    /// activate. Opt-in (default OFF).
+    pub exec_context_schedule_active: bool,
+    /// Whether the PR-checks extension (Stage 6 of the build-out —
+    /// see plan.md) will activate. Opt-in (default OFF) AND
+    /// requires the PR contributor to activate.
+    pub exec_context_pr_checks_active: bool,
+    /// Whether the Repo-context contributor (Stage 7 of the
+    /// build-out — see plan.md) will activate. Always-on capability,
+    /// default OFF (opt-in).
+    pub exec_context_repo_active: bool,
     /// PR trigger config required to build `PR_SYNTH_SPEC`. `Some(_)`
     /// is the single source of truth for "synthetic-from-ci path is
     /// active for this agent" — `is_some()` replaces what used to be a
@@ -471,7 +552,16 @@ impl CompilerExtension for AdoScriptExtension {
         // ─── Agent job ─────────────────────────────────────────
         let mut agent_prepare_steps: Vec<Step> = Vec::new();
         let import_active = self.runtime_imports_active();
-        if import_active || self.exec_context_pr_active {
+        if import_active
+            || self.exec_context_pr_active
+            || self.exec_context_manual_active
+            || self.exec_context_pipeline_active
+            || self.exec_context_ci_push_active
+            || self.exec_context_workitem_active
+            || self.exec_context_schedule_active
+            || self.exec_context_pr_checks_active
+            || self.exec_context_repo_active
+        {
             agent_prepare_steps.extend(install_and_download_steps_typed());
             if import_active {
                 agent_prepare_steps.push(resolver_step_typed());
@@ -667,6 +757,13 @@ mod tests {
             pipeline_filters: pipeline,
             inlined_imports: inlined,
             exec_context_pr_active: false,
+            exec_context_manual_active: false,
+            exec_context_pipeline_active: false,
+            exec_context_ci_push_active: false,
+            exec_context_workitem_active: false,
+            exec_context_schedule_active: false,
+            exec_context_pr_checks_active: false,
+            exec_context_repo_active: false,
             pr_trigger_for_synth: None,
         }
     }
@@ -736,6 +833,13 @@ mod tests {
             pipeline_filters: None,
             inlined_imports: true,
             exec_context_pr_active: false,
+            exec_context_manual_active: false,
+            exec_context_pipeline_active: false,
+            exec_context_ci_push_active: false,
+            exec_context_workitem_active: false,
+            exec_context_schedule_active: false,
+            exec_context_pr_checks_active: false,
+            exec_context_repo_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -784,6 +888,13 @@ mod tests {
             pipeline_filters: None,
             inlined_imports: true,
             exec_context_pr_active: false,
+            exec_context_manual_active: false,
+            exec_context_pipeline_active: false,
+            exec_context_ci_push_active: false,
+            exec_context_workitem_active: false,
+            exec_context_schedule_active: false,
+            exec_context_pr_checks_active: false,
+            exec_context_repo_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -949,6 +1060,13 @@ mod tests {
             pipeline_filters: pipeline,
             inlined_imports: true,
             exec_context_pr_active: false,
+            exec_context_manual_active: false,
+            exec_context_pipeline_active: false,
+            exec_context_ci_push_active: false,
+            exec_context_workitem_active: false,
+            exec_context_schedule_active: false,
+            exec_context_pr_checks_active: false,
+            exec_context_repo_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -1455,6 +1573,13 @@ mod tests {
             pipeline_filters: None,
             inlined_imports: true,
             exec_context_pr_active: false,
+            exec_context_manual_active: false,
+            exec_context_pipeline_active: false,
+            exec_context_ci_push_active: false,
+            exec_context_workitem_active: false,
+            exec_context_schedule_active: false,
+            exec_context_pr_checks_active: false,
+            exec_context_repo_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],

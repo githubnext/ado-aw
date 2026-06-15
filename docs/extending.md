@@ -116,15 +116,16 @@ let step = Step::Bash(
 ### Task steps
 
 ```rust
-use crate::compile::ir::step::{Step, TaskStep};
+use crate::compile::ir::step::Step;
+use crate::compile::ir::tasks::publish_test_results_step;
 
 let step = Step::Task(
-    TaskStep::new("NodeTool@0", "Install Node.js")
-        .with_input("versionSpec", "20.x"),
+    publish_test_results_step("JUnit", "**/TEST-*.xml")
+        .with_input("testRunTitle", "Unit Tests"),
 );
 ```
 
-Use `TaskStep` for Azure DevOps built-in tasks such as `NodeTool@0`, `UsePythonVersion@0`, and `UseDotNet@2`.
+Use `TaskStep` for Azure DevOps built-in tasks. When the task is compiler-generated, add or reuse a typed helper in `src/compile/ir/tasks.rs` so required inputs are explicit and call sites do not hand-construct `TaskStep::new(...)` with raw task/input strings.
 
 ### Download and publish steps
 

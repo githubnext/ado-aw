@@ -345,6 +345,12 @@ impl Executor for UpdatePrResult {
     }
 }
 
+/// Outcome of a single reviewer resolution + add attempt.
+enum ReviewerAddResult {
+    Added,
+    Failed(String),
+}
+
 impl UpdatePrResult {
     /// Set auto-complete on a pull request.
     ///
@@ -677,99 +683,20 @@ impl UpdatePrResult {
         }
 
         for reviewer in reviewers {
-            let identity_url = format!(
-                "{}/_apis/identities?searchFilter=General&filterValue={}&api-version=7.1",
-                vssps_base,
-                utf8_percent_encode(reviewer, PATH_SEGMENT),
-            );
-            debug!("Resolving identity for '{}': {}", reviewer, identity_url);
-
-            let identity_response = client
-                .get(&identity_url)
-                .basic_auth("", Some(token))
-                .send()
-                .await;
-
-            let reviewer_id = match identity_response {
-                Ok(resp) if resp.status().is_success() => {
-                    let body: serde_json::Value = resp.json().await.unwrap_or_default();
-                    body.get("value")
-                        .and_then(|v| v.as_array())
-                        .and_then(|arr| arr.first())
-                        .and_then(|entry| entry.get("id"))
-                        .and_then(|id| id.as_str())
-                        .map(|s| s.to_string())
-                }
-                Ok(resp) => {
-                    warn!(
-                        "Identity lookup for '{}' returned HTTP {}",
-                        reviewer,
-                        resp.status()
-                    );
-                    None
-                }
-                Err(e) => {
-                    warn!("Identity lookup for '{}' failed: {}", reviewer, e);
-                    None
-                }
-            };
-
-            let reviewer_id = match reviewer_id {
-                Some(id) => id,
-                None => {
-                    warn!(
-                        "Could not resolve identity for '{}', skipping",
-                        reviewer
-                    );
-                    failed.push(format!("{} (identity not found)", reviewer));
-                    continue;
-                }
-            };
-
-            let reviewer_url = format!(
-                "{}/{}/pullRequests/{}/reviewers/{}?api-version=7.1",
+            match resolve_and_add_reviewer(
+                client,
+                &vssps_base,
                 base_url,
-                encoded_repo,
+                &encoded_repo,
                 self.pull_request_id,
-                reviewer_id,
-            );
-            let reviewer_body = serde_json::json!({
-                "vote": 0,
-                "isRequired": false
-            });
-
-            debug!("Adding reviewer '{}' to PR #{}", reviewer, self.pull_request_id);
-            let response = client
-                .put(&reviewer_url)
-                .header("Content-Type", "application/json")
-                .basic_auth("", Some(token))
-                .json(&reviewer_body)
-                .send()
-                .await;
-
-            match response {
-                Ok(resp) if resp.status().is_success() => {
-                    info!("Added reviewer '{}' to PR #{}", reviewer, self.pull_request_id);
-                    added.push(reviewer.clone());
-                }
-                Ok(resp) => {
-                    let status = resp.status();
-                    let error_body = resp
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| "Unknown error".to_string());
-                    warn!(
-                        "Failed to add reviewer '{}' to PR #{} (HTTP {}): {}",
-                        reviewer, self.pull_request_id, status, error_body
-                    );
-                    failed.push(format!("{} (HTTP {})", reviewer, status));
-                }
-                Err(e) => {
-                    warn!(
-                        "Request failed for reviewer '{}' on PR #{}: {}",
-                        reviewer, self.pull_request_id, e
-                    );
-                    failed.push(format!("{} (request error)", reviewer));
+                reviewer,
+                token,
+            )
+            .await
+            {
+                ReviewerAddResult::Added => added.push(reviewer.clone()),
+                ReviewerAddResult::Failed(reason) => {
+                    failed.push(format!("{} ({})", reviewer, reason));
                 }
             }
         }
@@ -962,6 +889,104 @@ impl UpdatePrResult {
                 "Failed to update description on PR #{} (HTTP {}): {}",
                 self.pull_request_id, status, error_body
             )))
+        }
+    }
+}
+
+/// Resolve an ADO identity for `reviewer` via the VSSPS identities API, then
+/// PUT the reviewer onto the PR. Returns [`ReviewerAddResult::Added`] on success
+/// or [`ReviewerAddResult::Failed`] with a short reason string on any failure.
+async fn resolve_and_add_reviewer(
+    client: &reqwest::Client,
+    vssps_base: &str,
+    base_url: &str,
+    encoded_repo: &str,
+    pr_id: i32,
+    reviewer: &str,
+    token: &str,
+) -> ReviewerAddResult {
+    // Step 1: Resolve the reviewer's Azure DevOps identity via VSSPS.
+    let identity_url = format!(
+        "{}/_apis/identities?searchFilter=General&filterValue={}&api-version=7.1",
+        vssps_base,
+        utf8_percent_encode(reviewer, PATH_SEGMENT),
+    );
+    debug!("Resolving identity for '{}': {}", reviewer, identity_url);
+
+    let identity_response = client
+        .get(&identity_url)
+        .basic_auth("", Some(token))
+        .send()
+        .await;
+
+    let reviewer_id = match identity_response {
+        Ok(resp) if resp.status().is_success() => {
+            let body: serde_json::Value = resp.json().await.unwrap_or_default();
+            body.get("value")
+                .and_then(|v| v.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|entry| entry.get("id"))
+                .and_then(|id| id.as_str())
+                .map(|s| s.to_string())
+        }
+        Ok(resp) => {
+            warn!(
+                "Identity lookup for '{}' returned HTTP {}",
+                reviewer,
+                resp.status()
+            );
+            None
+        }
+        Err(e) => {
+            warn!("Identity lookup for '{}' failed: {}", reviewer, e);
+            None
+        }
+    };
+
+    let Some(reviewer_id) = reviewer_id else {
+        warn!("Could not resolve identity for '{}', skipping", reviewer);
+        return ReviewerAddResult::Failed("identity not found".to_string());
+    };
+
+    // Step 2: Add the resolved identity to the PR as a reviewer.
+    let reviewer_url = format!(
+        "{}/{}/pullRequests/{}/reviewers/{}?api-version=7.1",
+        base_url, encoded_repo, pr_id, reviewer_id,
+    );
+    let reviewer_body = serde_json::json!({ "vote": 0, "isRequired": false });
+
+    debug!("Adding reviewer '{}' to PR #{}", reviewer, pr_id);
+    let response = client
+        .put(&reviewer_url)
+        .header("Content-Type", "application/json")
+        .basic_auth("", Some(token))
+        .json(&reviewer_body)
+        .send()
+        .await;
+
+    match response {
+        Ok(resp) if resp.status().is_success() => {
+            info!("Added reviewer '{}' to PR #{}", reviewer, pr_id);
+            ReviewerAddResult::Added
+        }
+        Ok(resp) => {
+            let status = resp.status();
+            let error_body = resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            warn!(
+                "Failed to add reviewer '{}' to PR #{} (HTTP {}): {}",
+                reviewer, pr_id, status, error_body
+            );
+            ReviewerAddResult::Failed(format!("HTTP {}", status))
+        }
+        Err(e) => {
+            warn!(
+                "Request failed for reviewer '{}' on PR #{}: {}",
+                reviewer, pr_id, e
+            );
+            ReviewerAddResult::Failed("request error".to_string())
         }
     }
 }

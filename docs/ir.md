@@ -19,6 +19,7 @@ Those wrappers are the only place per-target shape (top-level `PipelineShape`, t
 
 - `ids.rs` — typed `StageId`, `JobId`, and `StepId` newtypes. Constructors validate the ADO identifier grammar (`^[A-Za-z_][A-Za-z0-9_]*$`) so invalid names fail at compile time.
 - `step.rs` — `Step` and concrete step structs: `BashStep`, `TaskStep`, `CheckoutStep`, `DownloadStep`, and `PublishStep`.
+- `tasks.rs` — typed factory helpers for built-in ADO tasks that return preconfigured `TaskStep` values with required inputs set. Prefer extending these helpers for compiler-generated tasks rather than open-coding `TaskStep::new(...)` with raw string keys at each call site.
 - `job.rs` — `Job`, `Pool`, job variables, 1ES `templateContext` support, and target-job external `dependsOn` / `condition` wrapping.
 - `stage.rs` — `Stage` plus target-stage external `dependsOn` / `condition` wrapping.
 - `env.rs` — typed environment values (`EnvValue`) including ADO macros, pipeline variables, secrets, `OutputRef`s, `Coalesce`, and macro-form `Concat`.
@@ -85,7 +86,7 @@ pub enum Step {
 Use the typed structs whenever the compiler owns the step:
 
 - `Step::Bash` for inline bash (`BashStep::script` is the raw body, not a YAML block).
-- `Step::Task` for ADO task invocations such as `NodeTool@0`, `UsePythonVersion@0`, or `UseDotNet@2`.
+- `Step::Task` for ADO task invocations such as `NodeTool@0`, `UsePythonVersion@0`, or `UseDotNet@2`. For compiler-generated built-in tasks, prefer `src/compile/ir/tasks.rs` factory helpers over ad-hoc `TaskStep::new(...)` calls.
 - `Step::Checkout` for `checkout:` steps.
 - `Step::Download` for pipeline-artifact downloads.
 - `Step::Publish` for pipeline-artifact publishes. Under 1ES, lowering moves publish steps into `templateContext.outputs` so artifacts are published by the 1ES template machinery exactly once.
@@ -263,3 +264,84 @@ The production target wrappers are:
 The canonical 5-job Setup → Agent → Detection → SafeOutputs → Teardown shape itself lives in `agentic_pipeline.rs` and is reused unchanged by every wrapper above; extensions plug into it via `Declarations` (steps, env, hosts, MCPG entries, and Agent-job condition clauses — see `Declarations::agent_conditions`).
 
 When adding a target, follow the same pattern: parse and validate front matter, collect extension `Declarations`, build typed jobs/stages/steps, set the correct `PipelineShape`, and call the shared emit path.
+
+## Public JSON summary (`ir::summary`)
+
+The internal IR types (`Pipeline`, `Job`, `Step`, `Graph`, …) are
+intentionally tied to the compiler's lowering needs and are **not**
+public API. To give agent-facing tooling a stable view of a compiled
+pipeline, `src/compile/ir/summary.rs` defines a parallel
+**summary tree** with `#[derive(Serialize)]` that is consumed by:
+
+- `ado-aw inspect <source> [--json]` — top-level pipeline summary.
+- `ado-aw graph dump <source> [--format text|json|dot]` — resolved
+  dependency graph (subset of the summary).
+- `ado-aw graph deps <source> <step-id>` and `ado-aw graph outputs
+  <source>` — focused graph queries over step dependencies and output
+  declaration/reference edges.
+- `ado-aw whatif <source> --fail <step-id-or-job-id>` — static
+  downstream skip classification from graph reachability and rendered
+  conditions.
+- The `ado-aw audit` JSON (`AuditData.pipeline_graph`) and the
+  author-MCP server.
+
+### Stability contract
+
+`PipelineSummary::schema_version` (currently `1`) is the public schema
+version. **Bump** it when the JSON shape changes in a way a downstream
+consumer would notice (renamed field, removed variant, changed
+semantics). Additive changes like new optional fields do not require a
+bump. New enum variants currently do require a schema-version bump
+because the serialized enums do not have catch-all `Unknown` variants.
+
+The summary is the public schema. Internal IR types may change freely
+without bumping the summary version, as long as the summary lowering
+keeps the existing field set populated correctly.
+
+### Shape
+
+```jsonc
+{
+  "schema_version": 1,
+  "name": "<pipeline name>",
+  "shape": "standalone" | "1es" | "job-template" | "stage-template",
+  "body": { "kind": "jobs", "jobs": [...] }
+              // OR
+           { "kind": "stages", "stages": [...] },
+  "graph": {
+    "step_locations": [{ "step", "stage?", "job", "outputs": [...] }],
+    "job_edges":      [{ "consumer", "producer" }],  // consumer dependsOn producer
+    "stage_edges":    [{ "consumer", "producer" }],
+    "outputs_needing_is_output": [{ "step", "outputs": [...] }]
+  }
+}
+```
+
+Per-`JobSummary`: `id`, `stage?`, `display_name`, `depends_on`,
+`condition?` (lowered ADO condition string), `pool`, `steps`.
+
+Per-`StepSummary`: `id?`, `kind` (`bash` / `task` / `checkout` /
+`download` / `publish` / `raw_yaml`), `display_name?`, `task?`,
+`condition?`, `outputs[]` (`{name, is_secret, auto_is_output}`),
+`env_refs[]` (`{step, name}`), `condition_refs[]` (`{step, name}`).
+
+`condition?` is the lowered ADO condition string (e.g.
+`"eq(dependencies.Detection.outputs['threatAnalysis.SafeToProcess'], 'true')"`),
+not the typed AST — consumers don't need the AST to reason about
+"would this run if X failed?".
+
+### Construction
+
+```rust
+let (front_matter, pipeline) = ado_aw::compile::build_pipeline_ir(&source).await?;
+let summary = ado_aw::compile::ir::summary::PipelineSummary::from_pipeline(&pipeline)?;
+let json = serde_json::to_string_pretty(&summary)?;
+```
+
+`build_pipeline_ir` is the public read-only entry point: it parses
+and sanitises front matter, runs the same target dispatch as
+`compile_pipeline`, and returns the typed `Pipeline` without writing
+any YAML. `PipelineSummary::from_pipeline` runs the graph pass
+(reusing `graph::build_graph` for validation + edge derivation) and
+populates `auto_is_output` for any output that has at least one
+cross-step consumer — without mutating the input pipeline.

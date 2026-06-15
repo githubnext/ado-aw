@@ -21,6 +21,7 @@ mod job_ir;
 mod onees;
 mod onees_ir;
 pub(crate) mod pr_filters;
+pub mod source_path_guard;
 mod stage;
 mod stage_ir;
 mod standalone;
@@ -434,8 +435,7 @@ pub async fn compile_all_pipelines(skip_integrity: bool, debug_pipeline: bool) -
 
     for pipeline in &detected {
         let yaml_output_path = root.join(&pipeline.yaml_path);
-        let source_path =
-            resolve_pipeline_source_path(&yaml_output_path, &pipeline.source, root);
+        let source_path = resolve_pipeline_source_path(&yaml_output_path, &pipeline.source, root);
 
         if !source_path.exists() {
             eprintln!(
@@ -779,10 +779,7 @@ fn format_pipeline_version_status(version: &str, current_version: &str) -> Strin
 /// Tries the path relative to the YAML file's directory first, then relative
 /// to the scan root. This mirrors the lookup the ADO pipeline itself uses.
 fn resolve_pipeline_source_path(yaml_output_path: &Path, source: &str, root: &Path) -> PathBuf {
-    let candidate_from_yaml_dir = yaml_output_path
-        .parent()
-        .unwrap_or(root)
-        .join(source);
+    let candidate_from_yaml_dir = yaml_output_path.parent().unwrap_or(root).join(source);
     if candidate_from_yaml_dir.exists() {
         candidate_from_yaml_dir
     } else {
@@ -844,7 +841,6 @@ fn log_pipeline_metadata(front_matter: &FrontMatter) {
     debug!("Repositories: {}", front_matter.repositories.len());
 }
 
-/// Walk up from `start` to find the nearest directory containing `.git`.
 /// Walk up from `start` looking for the nearest ancestor containing a
 /// `.git` directory or file.
 ///
@@ -867,6 +863,91 @@ pub fn find_repo_root(start: &Path) -> Option<PathBuf> {
             return None;
         }
     }
+}
+
+/// Public, read-only entry point that returns the typed [`ir::Pipeline`]
+/// for an agent source file **without** writing any YAML.
+///
+/// Mirrors [`compile_pipeline`]'s parse/sanitize/resolve-repos flow,
+/// then dispatches to the appropriate `build_*_pipeline` IR builder
+/// for the front-matter target. Used by commands that need to reason
+/// about a pipeline's structure (e.g. `ado-aw inspect`, `ado-aw graph`)
+/// rather than rebuild it.
+///
+/// Returns both the sanitized front matter and the typed pipeline so
+/// callers do not need to re-parse the source to get at high-level
+/// fields like `front_matter.target`.
+///
+/// **Codemods are applied in memory only**, matching `check_pipeline`'s
+/// behavior: this function never rewrites the source on disk.
+pub async fn build_pipeline_ir(input_path: &Path) -> Result<(FrontMatter, ir::Pipeline)> {
+    let content = tokio::fs::read_to_string(input_path)
+        .await
+        .with_context(|| format!("Failed to read input file: {}", input_path.display()))?;
+
+    let parsed = common::parse_markdown_detailed(&content)?;
+    let mut front_matter = parsed.front_matter;
+    let markdown_body = parsed.markdown_body;
+
+    use crate::sanitize::SanitizeConfig;
+    front_matter.sanitize_config_fields();
+
+    let (resolved_repos, resolved_checkout) = common::resolve_repos(&front_matter)?;
+    front_matter.repositories = resolved_repos;
+    front_matter.checkout = resolved_checkout;
+    common::validate_checkout_list(&front_matter.repositories, &front_matter.checkout)?;
+
+    // Inferred output path for the marker step. Defaults to
+    // `<stem>.lock.yml` next to the source, same default as
+    // `compile_pipeline` when `--output` is omitted.
+    let output_path = input_path.with_extension("lock.yml");
+
+    let extensions = extensions::collect_extensions(&front_matter);
+    let ctx = extensions::CompileContext::new(&front_matter, input_path).await?;
+
+    let pipeline = match front_matter.target {
+        CompileTarget::Standalone => standalone_ir::build_standalone_pipeline(
+            &front_matter,
+            &extensions,
+            &ctx,
+            input_path,
+            &output_path,
+            &markdown_body,
+            /* skip_integrity */ true,
+            /* debug_pipeline  */ false,
+        )?,
+        CompileTarget::OneES => onees_ir::build_onees_pipeline(
+            &front_matter,
+            &extensions,
+            &ctx,
+            input_path,
+            &output_path,
+            &markdown_body,
+            /* skip_integrity */ true,
+            /* debug_pipeline  */ false,
+        )?,
+        CompileTarget::Job => job_ir::build_job_pipeline(
+            &front_matter,
+            &extensions,
+            &ctx,
+            input_path,
+            &output_path,
+            &markdown_body,
+            /* skip_integrity */ true,
+            /* debug_pipeline  */ false,
+        )?,
+        CompileTarget::Stage => stage_ir::build_stage_pipeline(
+            &front_matter,
+            &extensions,
+            &ctx,
+            input_path,
+            &output_path,
+            &markdown_body,
+            /* skip_integrity */ true,
+            /* debug_pipeline  */ false,
+        )?,
+    };
+    Ok((front_matter, pipeline))
 }
 
 /// Clean up spacing artifacts in generated YAML.
@@ -1184,7 +1265,8 @@ description: "A test agent for directory output"
 
     #[tokio::test]
     async fn read_existing_pipeline_version_returns_none_for_missing_file() {
-        let version = read_existing_pipeline_version(Path::new("/tmp/does-not-exist.lock.yml")).await;
+        let version =
+            read_existing_pipeline_version(Path::new("/tmp/does-not-exist.lock.yml")).await;
         assert!(version.is_none(), "expected None for a non-existent file");
     }
 
@@ -1200,7 +1282,10 @@ description: "A test agent for directory output"
         ));
         std::fs::write(&temp, "# plain yaml\nname: foo\n").unwrap();
         let version = read_existing_pipeline_version(&temp).await;
-        assert!(version.is_none(), "expected None when file has no @ado-aw header");
+        assert!(
+            version.is_none(),
+            "expected None when file has no @ado-aw header"
+        );
         let _ = std::fs::remove_file(&temp);
     }
 

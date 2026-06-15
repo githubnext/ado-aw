@@ -118,6 +118,27 @@ pub const ALLOWED_ADO_MACROS: &[&str] = &[
     "Build.Repository.Name",
     "Build.Repository.Provider",
     "Build.DefinitionName",
+    // Requestor identity — surfaced by the `manual` execution-context
+    // contributor (issue #860 follow-up; plan.md Stage 1) to give
+    // manually-queued agents access to who queued them. Already
+    // referenced as `$(Build.RequestedForEmail)` by the PR filter IR
+    // (`src/compile/filter_ir.rs`); adding them to the typed allowlist
+    // so the manual contributor can use `EnvValue::ado_macro(...)`
+    // instead of stringly-typed `PipelineVar`.
+    "Build.RequestedFor",
+    "Build.RequestedForEmail",
+    // Upstream-build identifiers populated when ADO triggers this
+    // pipeline via a `resources.pipelines` completion trigger.
+    // Surfaced by the `pipeline` execution-context contributor
+    // (Stage 2 of the contributor build-out — see plan.md) so the
+    // bundle can fetch upstream-build metadata via the Build REST API.
+    // Note: these are always present on `Build.Reason == 'ResourceTrigger'`
+    // builds and absent otherwise — the contributor gates on Build.Reason
+    // so the macros never expand to empty in production paths.
+    "Build.TriggeredBy.BuildId",
+    "Build.TriggeredBy.DefinitionId",
+    "Build.TriggeredBy.DefinitionName",
+    "Build.TriggeredBy.ProjectID",
     // Pipeline / system context — Setup-job synthetic-PR resolver, AWF
     // launch, and most safe-output executors need at least one of
     // these.

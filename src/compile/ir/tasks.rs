@@ -11,6 +11,58 @@
 
 use super::step::TaskStep;
 
+/// Returns a [`TaskStep`] for `CopyFiles@2`.
+///
+/// Copies files matching `contents` into `target_folder`. The optional
+/// `source_folder` narrows the root from which the glob is evaluated;
+/// when omitted ADO defaults to `$(Build.SourcesDirectory)`.
+///
+/// Required inputs are positional parameters. Optional inputs (applied
+/// via `.with_input(…)` on the returned value):
+///
+/// | Input key | Type | Default | Description |
+/// |---|---|---|---|
+/// | `SourceFolder` | string | `$(Build.SourcesDirectory)` | Root for glob evaluation. |
+/// | `CleanTargetFolder` | bool string | `"false"` | Delete target folder contents before copy. |
+/// | `OverWrite` | bool string | `"false"` | Overwrite files in target folder. |
+/// | `flattenFolders` | bool string | `"false"` | Flatten directory structure in target. |
+/// | `preserveTimestamp` | bool string | `"false"` | Preserve source timestamps. |
+/// | `retryCount` | string | `"0"` | Number of retry attempts on failure. |
+/// | `delayBetweenRetries` | string | `"1000"` | Milliseconds between retries. |
+/// | `ignoreMakeDirErrors` | bool string | `"false"` | Ignore errors when creating target folder. |
+///
+/// ADO task reference:
+/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/copy-files-v2>
+pub fn copy_files_step(
+    contents: impl Into<String>,
+    target_folder: impl Into<String>,
+) -> TaskStep {
+    TaskStep::new("CopyFiles@2", "Copy Files")
+        .with_input("Contents", contents)
+        .with_input("TargetFolder", target_folder)
+}
+
+/// Returns a [`TaskStep`] for `DockerInstaller@0`.
+///
+/// Installs a specific version of Docker Engine on the agent.
+///
+/// - `docker_version` — the Docker Engine version to install (e.g.
+///   `"26.1.4"`). Maps to the `dockerVersion` ADO task input, which
+///   is **required** by the task.
+///
+/// Optional inputs (applied with `.with_input(…)` on the returned
+/// value):
+///
+/// | Input key | Type | Default | Description |
+/// |---|---|---|---|
+/// | `releaseType` | string | `"stable"` | Release channel: `"stable"`, `"edge"`, `"test"`, or `"nightly"`. |
+///
+/// ADO task reference:
+/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/docker-installer-v0>
+pub fn docker_installer_step(docker_version: impl Into<String>) -> TaskStep {
+    TaskStep::new("DockerInstaller@0", "Install Docker").with_input("dockerVersion", docker_version)
+}
+
 /// Returns a [`TaskStep`] for `PublishTestResults@2`.
 ///
 /// Publishes test results to the ADO build summary and timeline.
@@ -46,6 +98,54 @@ pub fn publish_test_results_step(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── CopyFiles@2 ──────────────────────────────────────────────────────
+
+    #[test]
+    fn copy_files_step_sets_task_and_required_inputs() {
+        let t = copy_files_step("**/*.rs", "$(Build.ArtifactStagingDirectory)");
+        assert_eq!(t.task, "CopyFiles@2");
+        assert_eq!(t.display_name, "Copy Files");
+        assert_eq!(t.inputs.get("Contents").map(|s| s.as_str()), Some("**/*.rs"));
+        assert_eq!(
+            t.inputs.get("TargetFolder").map(|s| s.as_str()),
+            Some("$(Build.ArtifactStagingDirectory)")
+        );
+        // no optional inputs by default
+        assert_eq!(t.inputs.len(), 2);
+    }
+
+    #[test]
+    fn copy_files_step_accepts_source_folder_via_with_input() {
+        let t = copy_files_step("**", "$(Build.ArtifactStagingDirectory)")
+            .with_input("SourceFolder", "$(Build.SourcesDirectory)/src");
+        assert_eq!(t.task, "CopyFiles@2");
+        assert_eq!(
+            t.inputs.get("SourceFolder").map(|s| s.as_str()),
+            Some("$(Build.SourcesDirectory)/src")
+        );
+        assert_eq!(t.inputs.len(), 3);
+    }
+
+    #[test]
+    fn copy_files_step_accepts_optional_flags() {
+        let t = copy_files_step("**", "$(Build.ArtifactStagingDirectory)")
+            .with_input("CleanTargetFolder", "true")
+            .with_input("OverWrite", "true")
+            .with_input("flattenFolders", "true");
+        assert_eq!(
+            t.inputs.get("CleanTargetFolder").map(|s| s.as_str()),
+            Some("true")
+        );
+        assert_eq!(t.inputs.get("OverWrite").map(|s| s.as_str()), Some("true"));
+        assert_eq!(
+            t.inputs.get("flattenFolders").map(|s| s.as_str()),
+            Some("true")
+        );
+        assert_eq!(t.inputs.len(), 5);
+    }
+
+    // ── PublishTestResults@2 ─────────────────────────────────────────────
 
     #[test]
     fn publish_test_results_step_sets_task_and_required_inputs() {
@@ -97,5 +197,44 @@ mod tests {
             Some("$(System.DefaultWorkingDirectory)")
         );
         assert_eq!(t.inputs.len(), 5);
+    }
+
+    #[test]
+    fn docker_installer_step_sets_task_and_required_input() {
+        let t = docker_installer_step("26.1.4");
+        assert_eq!(t.task, "DockerInstaller@0");
+        assert_eq!(t.display_name, "Install Docker");
+        assert_eq!(
+            t.inputs.get("dockerVersion").map(|s| s.as_str()),
+            Some("26.1.4")
+        );
+        // only the required input is set by default
+        assert_eq!(t.inputs.len(), 1);
+    }
+
+    #[test]
+    fn docker_installer_step_optional_release_type_via_with_input() {
+        let t = docker_installer_step("26.1.4").with_input("releaseType", "edge");
+        assert_eq!(t.task, "DockerInstaller@0");
+        assert_eq!(
+            t.inputs.get("dockerVersion").map(|s| s.as_str()),
+            Some("26.1.4")
+        );
+        assert_eq!(
+            t.inputs.get("releaseType").map(|s| s.as_str()),
+            Some("edge")
+        );
+        assert_eq!(t.inputs.len(), 2);
+    }
+
+    #[test]
+    fn docker_installer_step_accepts_different_versions() {
+        for version in &["17.09.0-ce", "20.10.0", "26.1.4"] {
+            let t = docker_installer_step(*version);
+            assert_eq!(
+                t.inputs.get("dockerVersion").map(|s| s.as_str()),
+                Some(*version)
+            );
+        }
     }
 }
