@@ -41,7 +41,17 @@ impl ContextContributor for RepoContextContributor {
         self.config.is_enabled()
     }
 
-    fn prepare_step_typed(&self, _ctx: &CompileContext) -> anyhow::Result<Option<Step>> {
+    fn prepare_step_typed(&self, ctx: &CompileContext) -> anyhow::Result<Option<Step>> {
+        // Defensive: mirror the manual.rs pattern — `declarations()`
+        // already gates on `should_activate`, but this guard catches
+        // direct callers (tests / future tooling). Returning `Ok(None)`
+        // ensures no live step is emitted when the contributor is
+        // inactive. Repo has no bearer so the security impact is
+        // lower than the other contributors, but the consistent
+        // posture matters for the test pattern.
+        if !self.should_activate(ctx) {
+            return Ok(None);
+        }
         let script = format!("set -euo pipefail\nnode '{EXEC_CONTEXT_REPO_PATH}'\n");
         let step = BashStep::new(
             "Stage repo execution context (aw-context/repo/*)",

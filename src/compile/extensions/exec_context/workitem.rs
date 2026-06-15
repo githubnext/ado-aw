@@ -115,7 +115,18 @@ impl ContextContributor for WorkitemContextContributor {
         }
     }
 
-    fn prepare_step_typed(&self, _ctx: &CompileContext) -> anyhow::Result<Option<Step>> {
+    fn prepare_step_typed(&self, ctx: &CompileContext) -> anyhow::Result<Option<Step>> {
+        // Defensive: mirror the manual.rs pattern — `declarations()`
+        // already gates on `should_activate`, but this guard catches
+        // direct callers (tests / future tooling). Returning `Ok(None)`
+        // ensures no live step (with an active bearer) is emitted
+        // when the contributor is inactive. The workitem contributor
+        // is the highest-consequence bearer holder among the new
+        // contributors (REST calls expose linked-WI prose), so the
+        // guard matters most here.
+        if !self.should_activate(ctx) {
+            return Ok(None);
+        }
         // Mirror the PR contributor's synth-vs-real PR identifier
         // selection — when synth is active the PR id comes from the
         // hoisted `AW_PR_ID` Agent-job variable.
@@ -242,6 +253,46 @@ mod tests {
         );
         let ctx = CompileContext::for_test(&fm);
         assert!(!c.should_activate(&ctx));
+    }
+
+    /// Defensive guard: when the contributor is inactive, calling
+    /// `prepare_step_typed` directly MUST return `Ok(None)` rather
+    /// than a live step. Mirrors the manual.rs guard pattern and
+    /// catches direct callers (tests / future tooling) that bypass
+    /// the outer `declarations()`-level `should_activate` filter —
+    /// without this guard, a future test could silently emit a
+    /// step with a live SYSTEM_ACCESSTOKEN bearer.
+    #[test]
+    fn prepare_step_returns_none_when_inactive() {
+        // Inactive case 1: no on.pr trigger.
+        let fm = no_trigger_fm();
+        let c = WorkitemContextContributor::new(WorkitemContextConfig::default(), false, true);
+        let ctx = CompileContext::for_test(&fm);
+        assert!(c.prepare_step_typed(&ctx).unwrap().is_none());
+
+        // Inactive case 2: on.pr present but workitem.enabled: false.
+        let fm = pr_fm();
+        let c = WorkitemContextContributor::new(
+            WorkitemContextConfig {
+                enabled: Some(false),
+                max_items: None,
+                max_body_kb: None,
+            },
+            false,
+            true,
+        );
+        let ctx = CompileContext::for_test(&fm);
+        assert!(c.prepare_step_typed(&ctx).unwrap().is_none());
+
+        // Inactive case 3: PR contributor disabled (workitem tracks PR).
+        let fm = pr_fm();
+        let c = WorkitemContextContributor::new(
+            WorkitemContextConfig::default(),
+            false,
+            false, // pr_contributor_enabled = false
+        );
+        let ctx = CompileContext::for_test(&fm);
+        assert!(c.prepare_step_typed(&ctx).unwrap().is_none());
     }
 
     #[test]

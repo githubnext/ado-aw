@@ -78,7 +78,15 @@ impl ContextContributor for PipelineContextContributor {
         }
     }
 
-    fn prepare_step_typed(&self, _ctx: &CompileContext) -> anyhow::Result<Option<Step>> {
+    fn prepare_step_typed(&self, ctx: &CompileContext) -> anyhow::Result<Option<Step>> {
+        // Defensive: mirror the manual.rs pattern — `declarations()`
+        // already gates on `should_activate`, but this guard catches
+        // direct callers (tests / future tooling). Returning `Ok(None)`
+        // ensures no live step (with an active bearer) is emitted
+        // when the contributor is inactive.
+        if !self.should_activate(ctx) {
+            return Ok(None);
+        }
         let script = format!("set -euo pipefail\nnode '{EXEC_CONTEXT_PIPELINE_PATH}'\n");
         let step = BashStep::new(
             "Stage pipeline execution context (aw-context/pipeline/*)",

@@ -67,7 +67,15 @@ impl ContextContributor for PrChecksContextContributor {
         self.config.is_enabled()
     }
 
-    fn prepare_step_typed(&self, _ctx: &CompileContext) -> anyhow::Result<Option<Step>> {
+    fn prepare_step_typed(&self, ctx: &CompileContext) -> anyhow::Result<Option<Step>> {
+        // Defensive: mirror the manual.rs pattern — `declarations()`
+        // already gates on `should_activate`, but this guard catches
+        // direct callers (tests / future tooling). Returning `Ok(None)`
+        // ensures no live step (with an active bearer) is emitted
+        // when the contributor is inactive.
+        if !self.should_activate(ctx) {
+            return Ok(None);
+        }
         // Mirror the PR contributor's synth-active env selection so
         // the bundle reads the same PR id under both real and synth
         // paths.
