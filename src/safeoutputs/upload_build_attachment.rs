@@ -29,8 +29,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
-use crate::sanitize::SanitizeContent;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::sanitize::SanitizeContent;
 use crate::secure::{ArtifactName, StrictRelativePath};
 use crate::tool_result;
 use crate::validate::is_valid_artifact_name;
@@ -257,7 +257,11 @@ impl Executor for UploadBuildAttachmentResult {
             self.file_path,
             self.artifact_name,
             effective_build_id,
-            if self.build_id.is_none() { " (current build)" } else { "" }
+            if self.build_id.is_none() {
+                " (current build)"
+            } else {
+                ""
+            }
         );
         debug!(
             "upload-build-attachment: build_id={}, artifact_name='{}', file_path='{}'",
@@ -267,7 +271,10 @@ impl Executor for UploadBuildAttachmentResult {
         let config: UploadBuildAttachmentConfig = ctx.get_tool_config("upload-build-attachment");
         debug!("Max file size: {} bytes", config.max_file_size);
         debug!("Allowed extensions: {:?}", config.allowed_extensions);
-        debug!("Allowed artifact names: {:?}", config.allowed_artifact_names);
+        debug!(
+            "Allowed artifact names: {:?}",
+            config.allowed_artifact_names
+        );
         debug!("Allowed build IDs: {:?}", config.allowed_build_ids);
 
         // Check build-id allow-list (if configured).  When the agent omitted
@@ -304,7 +311,9 @@ impl Executor for UploadBuildAttachmentResult {
             Some(prefix) => format!("{}{}", prefix, self.artifact_name),
             None => self.artifact_name.clone(),
         };
-        if final_name.starts_with('.') || final_name.len() > 100 || !is_valid_artifact_name(&final_name)
+        if final_name.starts_with('.')
+            || final_name.len() > 100
+            || !is_valid_artifact_name(&final_name)
         {
             return Ok(ExecutionResult::failure(format!(
                 "Resolved artifact name '{}' is not a valid Azure DevOps artifact name",
@@ -336,9 +345,10 @@ impl Executor for UploadBuildAttachmentResult {
                 .extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or("");
-            let has_valid_ext = config.allowed_extensions.iter().any(|ext| {
-                ext.trim_start_matches('.').eq_ignore_ascii_case(file_ext)
-            });
+            let has_valid_ext = config
+                .allowed_extensions
+                .iter()
+                .any(|ext| ext.trim_start_matches('.').eq_ignore_ascii_case(file_ext));
             if !has_valid_ext {
                 return Ok(ExecutionResult::failure(format!(
                     "File '{}' has an extension not in the allowed list: {:?}",
@@ -427,14 +437,20 @@ impl Executor for UploadBuildAttachmentResult {
                 file_size,
                 final_name,
                 effective_build_id,
-                if self.build_id.is_none() { " (current build)" } else { "" }
+                if self.build_id.is_none() {
+                    " (current build)"
+                } else {
+                    ""
+                }
             )));
         }
 
         // Read the file bytes for upload (after the dry-run guard to avoid
         // reading up to 50 MB into memory only to discard it).  Uses async I/O
         // to avoid blocking the tokio runtime for large files.
-        let file_bytes = tokio::fs::read(&canonical).await.context("Failed to read file contents")?;
+        let file_bytes = tokio::fs::read(&canonical)
+            .await
+            .context("Failed to read file contents")?;
 
         // SHA-256 integrity check: verify the staged file hasn't been swapped
         // between stages.  This catches same-size replacements that the size
@@ -552,7 +568,9 @@ mod tests {
     ) -> UploadBuildAttachmentParams {
         UploadBuildAttachmentParams {
             build_id,
-            artifact_name: artifact_name.try_into().expect("test artifact_name must be valid"),
+            artifact_name: artifact_name
+                .try_into()
+                .expect("test artifact_name must be valid"),
             file_path: file_path.try_into().expect("test file_path must be valid"),
         }
     }
@@ -603,30 +621,38 @@ mod tests {
 
     #[test]
     fn test_params_validate_accepts_valid_with_build_id() {
-        assert!(make_params(Some(1), "agent-report", "out/report.pdf")
-            .validate()
-            .is_ok());
+        assert!(
+            make_params(Some(1), "agent-report", "out/report.pdf")
+                .validate()
+                .is_ok()
+        );
     }
 
     #[test]
     fn test_params_validate_accepts_valid_without_build_id() {
-        assert!(make_params(None, "agent-report", "out/report.pdf")
-            .validate()
-            .is_ok());
+        assert!(
+            make_params(None, "agent-report", "out/report.pdf")
+                .validate()
+                .is_ok()
+        );
     }
 
     #[test]
     fn test_validation_rejects_zero_build_id() {
-        assert!(make_params(Some(0), "agent-report", "out/report.pdf")
-            .validate()
-            .is_err());
+        assert!(
+            make_params(Some(0), "agent-report", "out/report.pdf")
+                .validate()
+                .is_err()
+        );
     }
 
     #[test]
     fn test_validation_rejects_negative_build_id() {
-        assert!(make_params(Some(-1), "agent-report", "out/report.pdf")
-            .validate()
-            .is_err());
+        assert!(
+            make_params(Some(-1), "agent-report", "out/report.pdf")
+                .validate()
+                .is_err()
+        );
     }
 
     #[test]
@@ -651,9 +677,11 @@ mod tests {
 
     #[test]
     fn test_validation_accepts_dotted_artifact_name() {
-        assert!(make_params(Some(1), "agent.report.v2", "out/report.pdf")
-            .validate()
-            .is_ok());
+        assert!(
+            make_params(Some(1), "agent.report.v2", "out/report.pdf")
+                .validate()
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1031,7 +1059,9 @@ attachment-type: "agent-artifact"
         let outcome = result.execute_impl(&ctx).await.unwrap();
         assert!(!outcome.success);
         assert!(
-            outcome.message.contains("extension not in the allowed list"),
+            outcome
+                .message
+                .contains("extension not in the allowed list"),
             "expected extension rejection, got: {}",
             outcome.message
         );

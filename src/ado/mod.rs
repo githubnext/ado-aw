@@ -272,13 +272,16 @@ pub fn parse_git_remote(remote_url: &str) -> Result<RepoSource> {
         // always return `Some`. Bail explicitly on the unreachable
         // path rather than silently producing an empty `owner` that
         // would surface later as a confusing ADO API error.
-        let owner = ctx.org_name().ok_or_else(|| {
-            anyhow::anyhow!(
-                "Parsed '{}' as an ADO remote but could not extract the org segment from '{}'",
-                remote_url,
-                ctx.org_url
-            )
-        })?.to_string();
+        let owner = ctx
+            .org_name()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Parsed '{}' as an ADO remote but could not extract the org segment from '{}'",
+                    remote_url,
+                    ctx.org_url
+                )
+            })?
+            .to_string();
         return Ok(RepoSource {
             provider: RepoProvider::AdoGit,
             owner,
@@ -1251,18 +1254,17 @@ pub async fn resolve_service_connection_id(
         percent_encoding::utf8_percent_encode(trimmed, QUERY_VALUE),
     );
 
-    debug!("Looking up GitHub service connection '{}': {}", trimmed, url);
+    debug!(
+        "Looking up GitHub service connection '{}': {}",
+        trimmed, url
+    );
 
-    let resp = auth
-        .apply(client.get(&url))
-        .send()
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to look up GitHub service connection '{}' in project '{}'",
-                trimmed, ctx.project
-            )
-        })?;
+    let resp = auth.apply(client.get(&url)).send().await.with_context(|| {
+        format!(
+            "Failed to look up GitHub service connection '{}' in project '{}'",
+            trimmed, ctx.project
+        )
+    })?;
 
     let status = resp.status();
     if !status.is_success() {
@@ -1276,7 +1278,10 @@ pub async fn resolve_service_connection_id(
     }
 
     let body: serde_json::Value = resp.json().await.with_context(|| {
-        format!("Failed to parse service-endpoint response for '{}'", trimmed)
+        format!(
+            "Failed to parse service-endpoint response for '{}'",
+            trimmed
+        )
     })?;
 
     pick_service_endpoint_id(&body, trimmed, &ctx.project)
@@ -1314,11 +1319,7 @@ fn is_uuid_like(value: &str) -> bool {
 /// Factored out for unit-testability: the JSON shape is stable
 /// (`{ count, value: [ { id, name, … } ] }`) and the 0 / 1 / >1 result
 /// triage logic is the interesting part.
-fn pick_service_endpoint_id(
-    body: &serde_json::Value,
-    name: &str,
-    project: &str,
-) -> Result<String> {
+fn pick_service_endpoint_id(body: &serde_json::Value, name: &str, project: &str) -> Result<String> {
     let entries = body
         .get("value")
         .and_then(|v| v.as_array())
@@ -1340,9 +1341,7 @@ fn pick_service_endpoint_id(
             .get("id")
             .and_then(|v| v.as_str())
             .map(str::to_string)
-            .ok_or_else(|| {
-                anyhow::anyhow!("Service connection '{}' has no `id` field", name)
-            }),
+            .ok_or_else(|| anyhow::anyhow!("Service connection '{}' has no `id` field", name)),
         n => anyhow::bail!(
             "{} GitHub service connections named '{}' in project '{}'. \
              Pass the GUID directly to --service-connection to disambiguate.",
@@ -2069,8 +2068,7 @@ mod tests {
 
     #[test]
     fn parse_git_remote_ado_https() {
-        let source =
-            parse_git_remote("https://dev.azure.com/myorg/MyProject/_git/myrepo").unwrap();
+        let source = parse_git_remote("https://dev.azure.com/myorg/MyProject/_git/myrepo").unwrap();
         assert_eq!(source.provider, RepoProvider::AdoGit);
         assert_eq!(source.owner, "myorg");
         assert_eq!(source.repo, "myrepo");
@@ -2079,8 +2077,7 @@ mod tests {
 
     #[test]
     fn parse_git_remote_ado_ssh() {
-        let source =
-            parse_git_remote("git@ssh.dev.azure.com:v3/myorg/MyProject/myrepo").unwrap();
+        let source = parse_git_remote("git@ssh.dev.azure.com:v3/myorg/MyProject/myrepo").unwrap();
         assert_eq!(source.provider, RepoProvider::AdoGit);
         assert_eq!(source.owner, "myorg");
         assert_eq!(source.repo, "myrepo");
@@ -2269,8 +2266,7 @@ mod tests {
     /// query metachars escape, RFC 3986 unreserved chars don't.
     #[test]
     fn service_connection_query_value_encodes_query_metacharacters() {
-        let encoded =
-            percent_encoding::utf8_percent_encode("foo&bar=baz", QUERY_VALUE).to_string();
+        let encoded = percent_encoding::utf8_percent_encode("foo&bar=baz", QUERY_VALUE).to_string();
         assert!(!encoded.contains('&'), "must encode '&' in query value");
         assert!(!encoded.contains('='), "must encode '=' in query value");
         assert!(encoded.contains("foo"));
@@ -2284,8 +2280,7 @@ mod tests {
         // pass through literally. Pins that we don't regress to
         // `NON_ALPHANUMERIC` which would over-encode them.
         let encoded =
-            percent_encoding::utf8_percent_encode("ado-aw_github.v1~beta", QUERY_VALUE)
-                .to_string();
+            percent_encoding::utf8_percent_encode("ado-aw_github.v1~beta", QUERY_VALUE).to_string();
         assert_eq!(encoded, "ado-aw_github.v1~beta");
     }
 

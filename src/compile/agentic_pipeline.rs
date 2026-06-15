@@ -71,7 +71,6 @@ use super::ir::{
 };
 use super::types::{FrontMatter, OnConfig, PrMode, Repository as RepoCfg};
 
-
 /// Built pipeline context — the result of running every validation,
 /// scalar computation, extension declaration fanout, and canonical-
 /// job construction once. Callers wrap the contained data into the
@@ -2104,9 +2103,8 @@ fn split_yaml_step_sequence(yaml: &str) -> Result<Vec<String>> {
 /// (i.e. as one item of a YAML sequence). The output starts with
 /// `- ` so [`lower_raw_yaml`] can de-indent it.
 fn step_value_to_dash_yaml(v: serde_yaml::Value) -> Result<String> {
-    let yaml = serde_yaml::to_string(&v).map_err(|e| {
-        anyhow::anyhow!("ir::standalone: failed to re-serialize step value ({e})")
-    })?;
+    let yaml = serde_yaml::to_string(&v)
+        .map_err(|e| anyhow::anyhow!("ir::standalone: failed to re-serialize step value ({e})"))?;
     let mut out = String::with_capacity(yaml.len() + 4);
     for (i, line) in yaml.lines().enumerate() {
         if i == 0 {
@@ -2219,7 +2217,9 @@ mod tests {
             Condition::Custom("C".into()),
         ];
         let cond = fold_agent_conditions(&clauses).unwrap();
-        let Condition::And(parts) = cond else { panic!() };
+        let Condition::And(parts) = cond else {
+            panic!()
+        };
         assert_eq!(parts.len(), 4);
         assert!(matches!(parts[0], Condition::Succeeded));
         for (i, expected) in ["A", "B", "C"].iter().enumerate() {

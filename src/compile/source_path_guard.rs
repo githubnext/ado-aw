@@ -101,10 +101,7 @@ pub async fn validate_workflow_source_path(source: &str) -> Result<ValidatedSour
                 canonical.display()
             );
         }
-        return Ok(ValidatedSourcePath {
-            path,
-            normalized,
-        });
+        return Ok(ValidatedSourcePath { path, normalized });
     }
 
     let cwd = tokio::fs::canonicalize(".")

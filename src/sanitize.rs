@@ -67,11 +67,7 @@ pub fn sanitize(input: &str) -> String {
     s = escape_html_tags(&s);
     s = sanitize_url_protocols(&s);
     s = enforce_content_limits(&s);
-    debug!(
-        "Sanitized content: {} -> {} bytes",
-        input.len(),
-        s.len()
-    );
+    debug!("Sanitized content: {} -> {} bytes", input.len(), s.len());
     s
 }
 
@@ -218,12 +214,10 @@ use std::sync::LazyLock;
 static RE_BOT_KEYWORDS: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
     regex_lite::Regex::new(r"(?i)\b(fix(?:es)?|close[sd]?|resolve[sd]?)\s+(#\d+)").unwrap()
 });
-static RE_AB_LINK: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
-    regex_lite::Regex::new(r"\bAB#(\d+)").unwrap()
-});
-static RE_SLASH_CMD: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
-    regex_lite::Regex::new(r"(?m)^(/[a-zA-Z][\w-]*)").unwrap()
-});
+static RE_AB_LINK: LazyLock<regex_lite::Regex> =
+    LazyLock::new(|| regex_lite::Regex::new(r"\bAB#(\d+)").unwrap());
+static RE_SLASH_CMD: LazyLock<regex_lite::Regex> =
+    LazyLock::new(|| regex_lite::Regex::new(r"(?m)^(/[a-zA-Z][\w-]*)").unwrap());
 
 /// Neutralize bot command patterns and Azure DevOps work item link syntax.
 fn neutralize_bot_triggers(input: &str) -> String {
@@ -240,9 +234,7 @@ fn neutralize_bot_triggers(input: &str) -> String {
         .to_string();
 
     RE_SLASH_CMD
-        .replace_all(&s, |caps: &regex_lite::Captures| {
-            format!("`{}`", &caps[1])
-        })
+        .replace_all(&s, |caps: &regex_lite::Captures| format!("`{}`", &caps[1]))
         .to_string()
 }
 
@@ -404,18 +396,12 @@ mod tests {
     // IS-05: Bot trigger / work item link protection
     #[test]
     fn test_neutralize_fixes() {
-        assert_eq!(
-            neutralize_bot_triggers("fixes #123"),
-            "`fixes #123`"
-        );
+        assert_eq!(neutralize_bot_triggers("fixes #123"), "`fixes #123`");
     }
 
     #[test]
     fn test_neutralize_closes_case_insensitive() {
-        assert_eq!(
-            neutralize_bot_triggers("Closes #456"),
-            "`Closes #456`"
-        );
+        assert_eq!(neutralize_bot_triggers("Closes #456"), "`Closes #456`");
     }
 
     #[test]
@@ -437,8 +423,10 @@ mod tests {
     // IS-06: HTML/XML tag filtering
     #[test]
     fn test_escape_html_tags() {
-        assert_eq!(escape_html_tags("<script>alert(1)</script>"),
-            "&lt;script&gt;alert(1)&lt;/script&gt;");
+        assert_eq!(
+            escape_html_tags("<script>alert(1)</script>"),
+            "&lt;script&gt;alert(1)&lt;/script&gt;"
+        );
     }
 
     #[test]
@@ -456,7 +444,10 @@ mod tests {
 
     #[test]
     fn test_remove_xml_comments() {
-        assert_eq!(remove_xml_comments("before<!-- comment -->after"), "beforeafter");
+        assert_eq!(
+            remove_xml_comments("before<!-- comment -->after"),
+            "beforeafter"
+        );
     }
 
     #[test]
@@ -633,19 +624,30 @@ mod tests {
     fn test_sanitize_config_preserves_html_tags() {
         let input = "area-path: <MyProject>\\Team";
         let result = sanitize_config(input);
-        assert!(result.contains("<MyProject>"), "Config sanitize should NOT escape HTML tags");
+        assert!(
+            result.contains("<MyProject>"),
+            "Config sanitize should NOT escape HTML tags"
+        );
     }
 
     #[test]
     fn test_sanitize_config_preserves_at_mentions() {
         let input = "user@example.com";
-        assert_eq!(sanitize_config(input), input, "Config sanitize should NOT wrap @mentions");
+        assert_eq!(
+            sanitize_config(input),
+            input,
+            "Config sanitize should NOT wrap @mentions"
+        );
     }
 
     #[test]
     fn test_sanitize_config_preserves_bot_triggers() {
         let input = "fixes #123";
-        assert_eq!(sanitize_config(input), input, "Config sanitize should NOT neutralize bot triggers");
+        assert_eq!(
+            sanitize_config(input),
+            input,
+            "Config sanitize should NOT neutralize bot triggers"
+        );
     }
 
     #[test]

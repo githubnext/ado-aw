@@ -6,10 +6,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
-use ado_aw_derive::SanitizeConfig;
+use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use ado_aw_derive::SanitizeConfig;
 use anyhow::{Context, ensure};
 
 /// Parameters for queuing a build
@@ -32,16 +32,10 @@ impl Validate for QueueBuildParams {
     fn validate(&self) -> anyhow::Result<()> {
         ensure!(self.pipeline_id > 0, "pipeline_id must be positive");
         if let Some(reason) = &self.reason {
-            ensure!(
-                reason.len() >= 5,
-                "reason must be at least 5 characters"
-            );
+            ensure!(reason.len() >= 5, "reason must be at least 5 characters");
         }
         if let Some(branch) = &self.branch {
-            ensure!(
-                !branch.contains(".."),
-                "branch name must not contain '..'"
-            );
+            ensure!(!branch.contains(".."), "branch name must not contain '..'");
             ensure!(
                 !branch.contains('\0'),
                 "branch name must not contain null bytes"
@@ -235,8 +229,8 @@ impl Executor for QueueBuildResult {
         if let Some(params) = &self.parameters
             && !params.is_empty()
         {
-            let params_json = serde_json::to_string(params)
-                .context("Failed to serialize template parameters")?;
+            let params_json =
+                serde_json::to_string(params).context("Failed to serialize template parameters")?;
             body["parameters"] = serde_json::Value::String(params_json);
         }
 

@@ -171,8 +171,12 @@ impl ExecutionContext {
     /// [`SanitizeConfig`] to all textual fields before returning. The
     /// `SanitizeConfig` bound acts as a compile-time forcing function:
     /// adding a new config struct without implementing the trait won't compile.
-    pub fn get_tool_config<T: serde::de::DeserializeOwned + Default + SanitizeConfig>(&self, tool_name: &str) -> T {
-        let mut config: T = self.tool_configs
+    pub fn get_tool_config<T: serde::de::DeserializeOwned + Default + SanitizeConfig>(
+        &self,
+        tool_name: &str,
+    ) -> T {
+        let mut config: T = self
+            .tool_configs
             .get(tool_name)
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
@@ -206,8 +210,8 @@ impl ExecutionContext {
         F: Fn(&str) -> Option<String>,
     {
         // Try AZURE_DEVOPS_ORG_URL first, then fall back to Azure DevOps built-in var
-        let ado_org_url = env("AZURE_DEVOPS_ORG_URL")
-            .or_else(|| env("SYSTEM_TEAMFOUNDATIONCOLLECTIONURI"));
+        let ado_org_url =
+            env("AZURE_DEVOPS_ORG_URL").or_else(|| env("SYSTEM_TEAMFOUNDATIONCOLLECTIONURI"));
 
         // Extract organization name from URL (e.g., "https://dev.azure.com/myorg/" -> "myorg")
         let ado_organization = ado_org_url.as_ref().and_then(|url| org_from_url(url));
@@ -407,7 +411,10 @@ pub trait Executor: SanitizeContent + Send + Sync {
     ///
     /// In dry-run mode, sanitization still runs but `execute_impl()` is skipped —
     /// no network calls are made.
-    async fn execute_sanitized(&mut self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
+    async fn execute_sanitized(
+        &mut self,
+        ctx: &ExecutionContext,
+    ) -> anyhow::Result<ExecutionResult> {
         self.sanitize_content_fields();
         if ctx.dry_run {
             return Ok(ExecutionResult::success(format!(
@@ -784,7 +791,8 @@ mod tests {
 
     #[test]
     fn test_execution_result_budget_exhausted_serializes_flag() {
-        let r = ExecutionResult::budget_exhausted("Skipped: maximum noop count (1) already reached");
+        let r =
+            ExecutionResult::budget_exhausted("Skipped: maximum noop count (1) already reached");
         let json = serde_json::to_value(&r).expect("serialize");
         assert_eq!(
             json.get("budget_exhausted").and_then(|v| v.as_bool()),
@@ -883,8 +891,7 @@ mod tests {
 
     #[test]
     fn test_from_env_lookup_build_container_id_parses_numeric() {
-        let ctx =
-            ExecutionContext::from_env_lookup(env_from(&[("BUILD_CONTAINERID", "112233")]));
+        let ctx = ExecutionContext::from_env_lookup(env_from(&[("BUILD_CONTAINERID", "112233")]));
         assert_eq!(ctx.build_container_id, Some(112233));
     }
 

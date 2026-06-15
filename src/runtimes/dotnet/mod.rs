@@ -204,7 +204,9 @@ pub fn generate_nuget_authenticate() -> String {
 /// `NuGet.Config`); the file is always created with the lowercase form,
 /// matching the cross-platform convention.
 pub fn generate_ensure_nuget_config(config: &DotnetRuntimeConfig) -> String {
-    let feed_url = config.feed_url().unwrap_or("https://api.nuget.org/v3/index.json");
+    let feed_url = config
+        .feed_url()
+        .unwrap_or("https://api.nuget.org/v3/index.json");
 
     format!(
         r#"- bash: |

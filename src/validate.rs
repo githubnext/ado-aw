@@ -89,8 +89,9 @@ pub fn is_valid_artifact_name(s: &str) -> bool {
 /// Strict allowlist to prevent shell injection inside AWF single-quoted commands.
 pub fn is_valid_arg(s: &str) -> bool {
     !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-' | '=' | '/' | '@'))
+        && s.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-' | '=' | '/' | '@')
+        })
 }
 
 // ── Format validators ───────────────────────────────────────────────────────
@@ -252,13 +253,7 @@ pub fn validate_dns_domain(host: &str) -> Result<()> {
 // ── Container / Docker validators ───────────────────────────────────────────
 
 /// Sensitive host path prefixes that should not be bind-mounted into MCP containers.
-pub const SENSITIVE_MOUNT_PREFIXES: &[&str] = &[
-    "/etc",
-    "/root",
-    "/home",
-    "/proc",
-    "/sys",
-];
+pub const SENSITIVE_MOUNT_PREFIXES: &[&str] = &["/etc", "/root", "/home", "/proc", "/sys"];
 
 /// Docker runtime flag names that grant dangerous host access.
 /// Checked both as `--flag=value` and as `--flag value` (split across two args).
@@ -280,10 +275,16 @@ pub const DANGEROUS_DOCKER_FLAGS: &[&str] = &[
 pub fn validate_container_image(image: &str, mcp_name: &str) -> Vec<String> {
     let mut warnings = Vec::new();
     if image.is_empty() {
-        warnings.push(format!("Warning: MCP '{}': container image name is empty.", mcp_name));
+        warnings.push(format!(
+            "Warning: MCP '{}': container image name is empty.",
+            mcp_name
+        ));
         return warnings;
     }
-    if !image.chars().all(|c| c.is_ascii_alphanumeric() || "._/:-@".contains(c)) {
+    if !image
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "._/:-@".contains(c))
+    {
         warnings.push(format!(
             "Warning: MCP '{}': container image '{}' contains unexpected characters. \
             Image names should only contain [a-zA-Z0-9./_:-@].",
@@ -334,9 +335,7 @@ pub fn validate_docker_args(args: &[String], mcp_name: &str) -> Vec<String> {
         let arg_lower = arg.to_lowercase();
         // Check for dangerous Docker flags (both --flag=value and --flag value)
         for dangerous in DANGEROUS_DOCKER_FLAGS {
-            if arg_lower == *dangerous
-                || arg_lower.starts_with(&format!("{}=", dangerous))
-            {
+            if arg_lower == *dangerous || arg_lower.starts_with(&format!("{}=", dangerous)) {
                 let extra_hint = if *dangerous == "--entrypoint" {
                     " Use the 'entrypoint:' field instead of passing --entrypoint in args."
                 } else {
@@ -393,14 +392,19 @@ pub fn validate_mcp_url(url: &str, mcp_name: &str) -> Vec<String> {
 
 /// Warn when env values or headers look like they contain inline secrets.
 /// Secrets should use pipeline variables and passthrough ("") instead.
-pub fn warn_potential_secrets(mcp_name: &str, env: &HashMap<String, String>, headers: &HashMap<String, String>) -> Vec<String> {
+pub fn warn_potential_secrets(
+    mcp_name: &str,
+    env: &HashMap<String, String>,
+    headers: &HashMap<String, String>,
+) -> Vec<String> {
     let mut warnings = Vec::new();
     for (key, value) in env {
-        if !value.is_empty() && (key.to_lowercase().contains("token")
-            || key.to_lowercase().contains("secret")
-            || key.to_lowercase().contains("key")
-            || key.to_lowercase().contains("password")
-            || key.to_lowercase().contains("pat"))
+        if !value.is_empty()
+            && (key.to_lowercase().contains("token")
+                || key.to_lowercase().contains("secret")
+                || key.to_lowercase().contains("key")
+                || key.to_lowercase().contains("password")
+                || key.to_lowercase().contains("pat"))
         {
             warnings.push(format!(
                 "Warning: MCP '{}': env var '{}' has an inline value that may be a secret. \
@@ -410,9 +414,7 @@ pub fn warn_potential_secrets(mcp_name: &str, env: &HashMap<String, String>, hea
         }
     }
     for (key, value) in headers {
-        if value.to_lowercase().contains("bearer ")
-            || key.to_lowercase() == "authorization"
-        {
+        if value.to_lowercase().contains("bearer ") || key.to_lowercase() == "authorization" {
             warnings.push(format!(
                 "Warning: MCP '{}': header '{}' may contain inline credentials. \
                 These will appear in plaintext in the compiled pipeline YAML.",
@@ -592,7 +594,10 @@ pub fn validate_git_ref_name(name: &str, label: &str) -> Result<()> {
     ensure!(!name.contains(".."), "{label} must not contain '..'");
     ensure!(!name.contains("@{"), "{label} must not contain '@{{'");
     ensure!(!name.ends_with('.'), "{label} must not end with '.'");
-    ensure!(!name.ends_with(".lock"), "{label} must not end with '.lock'");
+    ensure!(
+        !name.ends_with(".lock"),
+        "{label} must not end with '.lock'"
+    );
     ensure!(!name.contains('\\'), "{label} must not contain backslash");
     ensure!(
         !name.contains("//"),
@@ -790,7 +795,10 @@ mod tests {
             serde_yaml::Value::String("$(secretVar)".to_string()),
         ]);
         let result = reject_ado_expressions_in_value(&seq, "myParam", "default");
-        assert!(result.is_err(), "Sequence with ADO expression must be rejected");
+        assert!(
+            result.is_err(),
+            "Sequence with ADO expression must be rejected"
+        );
     }
 
     #[test]
@@ -845,7 +853,13 @@ mod tests {
 
     #[test]
     fn test_validate_feed_url_valid() {
-        assert!(validate_feed_url("https://pkgs.dev.azure.com/org/_packaging/feed/pypi/simple/", "test").is_ok());
+        assert!(
+            validate_feed_url(
+                "https://pkgs.dev.azure.com/org/_packaging/feed/pypi/simple/",
+                "test"
+            )
+            .is_ok()
+        );
         assert!(validate_feed_url("http://internal.registry.example.com/", "test").is_ok());
     }
 
@@ -929,7 +943,9 @@ mod tests {
         assert!(ensure_path_within_base(&sibling_file, &inner, "f").is_err());
         // A nonexistent base cannot be canonicalized, which is also an error.
         let outside = std::env::temp_dir();
-        assert!(ensure_path_within_base(&file, &outside.join("nonexistent-base-xyz"), "f").is_err());
+        assert!(
+            ensure_path_within_base(&file, &outside.join("nonexistent-base-xyz"), "f").is_err()
+        );
         // Missing candidate canonicalization fails.
         assert!(ensure_path_within_base(&dir.join("missing"), &dir, "f").is_err());
 
@@ -940,10 +956,16 @@ mod tests {
 
     #[test]
     fn test_is_valid_commit_sha() {
-        assert!(is_valid_commit_sha("0123456789abcdef0123456789abcdef01234567"));
-        assert!(is_valid_commit_sha("0123456789ABCDEF0123456789abcdef01234567"));
+        assert!(is_valid_commit_sha(
+            "0123456789abcdef0123456789abcdef01234567"
+        ));
+        assert!(is_valid_commit_sha(
+            "0123456789ABCDEF0123456789abcdef01234567"
+        ));
         assert!(!is_valid_commit_sha("0123")); // too short
-        assert!(!is_valid_commit_sha("z123456789abcdef0123456789abcdef01234567")); // non-hex
+        assert!(!is_valid_commit_sha(
+            "z123456789abcdef0123456789abcdef01234567"
+        )); // non-hex
     }
 
     #[test]

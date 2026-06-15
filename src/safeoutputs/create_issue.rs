@@ -60,7 +60,10 @@ impl Validate for CreateIssueParams {
         // here because limits are defensive bounds rather than user-facing quotas.
         ensure!(self.title.len() >= 5, "title must be at least 5 characters");
         ensure!(self.body.len() >= 30, "body must be at least 30 characters");
-        ensure!(self.title.len() <= 256, "title must be 256 characters or fewer");
+        ensure!(
+            self.title.len() <= 256,
+            "title must be 256 characters or fewer"
+        );
         for label in &self.labels {
             ensure!(!label.is_empty(), "label must not be empty");
             reject_pipeline_injection(label, "create-issue.label")?;
@@ -191,7 +194,8 @@ fn build_footer(ctx: &ExecutionContext) -> String {
         lines.push(format!("Pipeline: `{name}`"));
     }
     if let Some(build_id) = ctx.build_id {
-        if let (Some(org_url), Some(project)) = (ctx.ado_org_url.as_ref(), ctx.ado_project.as_ref()) {
+        if let (Some(org_url), Some(project)) = (ctx.ado_org_url.as_ref(), ctx.ado_project.as_ref())
+        {
             let url = format!(
                 "{}/{}/_build/results?buildId={}",
                 org_url.trim_end_matches('/'),
@@ -213,7 +217,10 @@ fn build_footer(ctx: &ExecutionContext) -> String {
 fn merge_dedup_strings(static_items: &[String], agent_items: &[String]) -> Vec<String> {
     let mut all = static_items.to_vec();
     for item in agent_items {
-        if !all.iter().any(|existing| existing.eq_ignore_ascii_case(item)) {
+        if !all
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(item))
+        {
             all.push(item.clone());
         }
     }
@@ -237,7 +244,11 @@ impl Executor for CreateIssueResult {
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
-        info!("Filing GitHub issue: '{}' ({} chars body)", self.title, self.body.len());
+        info!(
+            "Filing GitHub issue: '{}' ({} chars body)",
+            self.title,
+            self.body.len()
+        );
 
         // SECURITY GATE: independently of the SafeOutputs MCP filter, refuse
         // to act on a `create-issue` NDJSON entry unless the operator
@@ -383,7 +394,10 @@ impl Executor for CreateIssueResult {
                 config.target_repo, number, html_url
             );
             Ok(ExecutionResult::success_with_data(
-                format!("Filed issue {}#{}: {}", config.target_repo, number, html_url),
+                format!(
+                    "Filed issue {}#{}: {}",
+                    config.target_repo, number, html_url
+                ),
                 serde_json::json!({
                     "number": number,
                     "url": html_url,
@@ -410,7 +424,10 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    fn ctx_with_config(config: serde_json::Value, github_token: Option<String>) -> ExecutionContext {
+    fn ctx_with_config(
+        config: serde_json::Value,
+        github_token: Option<String>,
+    ) -> ExecutionContext {
         let mut tool_configs: HashMap<String, serde_json::Value> = HashMap::new();
         tool_configs.insert("create-issue".to_string(), config);
         let mut debug_enabled_tools = std::collections::HashSet::new();
@@ -428,7 +445,10 @@ mod tests {
     /// Build a context that mirrors a forged-NDJSON scenario: tool config is
     /// present, but the operator never authorised the debug tool via
     /// `ado-aw-debug.create-issue`, so `debug_enabled_tools` is empty.
-    fn ctx_unauthorized(config: serde_json::Value, github_token: Option<String>) -> ExecutionContext {
+    fn ctx_unauthorized(
+        config: serde_json::Value,
+        github_token: Option<String>,
+    ) -> ExecutionContext {
         let mut tool_configs: HashMap<String, serde_json::Value> = HashMap::new();
         tool_configs.insert("create-issue".to_string(), config);
         ExecutionContext {
@@ -517,7 +537,10 @@ mod tests {
             labels: vec![],
             assignees: vec![],
         };
-        assert_eq!(result.dry_run_summary(), "create GitHub issue: 'Fix the build'");
+        assert_eq!(
+            result.dry_run_summary(),
+            "create GitHub issue: 'Fix the build'"
+        );
     }
 
     #[test]
@@ -553,7 +576,10 @@ mod tests {
             &["bug".into(), "Triage".into()],
             &["BUG".into(), "fresh".into()],
         );
-        assert_eq!(merged, vec!["bug".to_string(), "Triage".to_string(), "fresh".to_string()]);
+        assert_eq!(
+            merged,
+            vec!["bug".to_string(), "Triage".to_string(), "fresh".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -809,7 +835,10 @@ target-repo: githubnext/ado-aw
 unexpected: oops
 "#;
         let result: Result<CreateIssueConfig, _> = serde_yaml::from_str(yaml);
-        assert!(result.is_err(), "deny_unknown_fields should reject unexpected key");
+        assert!(
+            result.is_err(),
+            "deny_unknown_fields should reject unexpected key"
+        );
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! conflicts (e.g. both old and new keys present) are surfaced rather than
 //! silently overwritten.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde_yaml::{Mapping, Value};
 
 /// Conflict policy used by [`rename_key`] when the destination key is
@@ -30,11 +30,7 @@ pub fn take_key(m: &mut Mapping, key: &str) -> Option<Value> {
 /// Prefer this over `Mapping::insert` in codemods: silent overwrite is
 /// almost always a bug when transforming user data.
 #[allow(dead_code)]
-pub fn insert_no_overwrite(
-    m: &mut Mapping,
-    key: &str,
-    value: Value,
-) -> Result<()> {
+pub fn insert_no_overwrite(m: &mut Mapping, key: &str, value: Value) -> Result<()> {
     if m.contains_key(Value::String(key.to_string())) {
         bail!(
             "refusing to overwrite existing key `{}` in front matter",
@@ -65,12 +61,7 @@ pub fn insert_no_overwrite(
 /// won't leave the mapping in a half-mutated state for the next call
 /// to inspect.
 #[allow(dead_code)]
-pub fn rename_key(
-    m: &mut Mapping,
-    old: &str,
-    new: &str,
-    policy: ConflictPolicy,
-) -> Result<bool> {
+pub fn rename_key(m: &mut Mapping, old: &str, new: &str, policy: ConflictPolicy) -> Result<bool> {
     let old_key = Value::String(old.to_string());
     let new_key = Value::String(new.to_string());
 
@@ -147,8 +138,7 @@ mod tests {
     #[test]
     fn insert_no_overwrite_errors_on_conflict() {
         let mut m = map_with(&[("k", "v1")]);
-        let err = insert_no_overwrite(&mut m, "k", Value::String("v2".into()))
-            .unwrap_err();
+        let err = insert_no_overwrite(&mut m, "k", Value::String("v2".into())).unwrap_err();
         assert!(
             format!("{}", err).contains("refusing to overwrite"),
             "unexpected error message: {}",
@@ -206,8 +196,7 @@ mod tests {
     #[test]
     fn rename_key_new_present_with_prefer_new_drops_old() {
         let mut m = map_with(&[("old", "v_old"), ("new", "v_new")]);
-        let renamed =
-            rename_key(&mut m, "old", "new", ConflictPolicy::PreferNew).unwrap();
+        let renamed = rename_key(&mut m, "old", "new", ConflictPolicy::PreferNew).unwrap();
         assert!(renamed);
         assert!(!m.contains_key(Value::String("old".into())));
         assert_eq!(
@@ -219,8 +208,7 @@ mod tests {
     #[test]
     fn rename_key_new_present_with_prefer_old_overwrites() {
         let mut m = map_with(&[("old", "v_old"), ("new", "v_new")]);
-        let renamed =
-            rename_key(&mut m, "old", "new", ConflictPolicy::PreferOld).unwrap();
+        let renamed = rename_key(&mut m, "old", "new", ConflictPolicy::PreferOld).unwrap();
         assert!(renamed);
         assert!(!m.contains_key(Value::String("old".into())));
         assert_eq!(

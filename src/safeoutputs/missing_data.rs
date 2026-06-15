@@ -3,9 +3,9 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 
 /// Parameters for reporting missing data
 #[derive(Deserialize, JsonSchema)]

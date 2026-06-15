@@ -105,8 +105,7 @@ mod tests {
 
     #[test]
     fn inserts_legacy_default_when_pool_absent_1es_and_version_gte() {
-        let mut fm: Mapping =
-            serde_yaml::from_str("name: x\ndescription: y\ntarget: 1es").unwrap();
+        let mut fm: Mapping = serde_yaml::from_str("name: x\ndescription: y\ntarget: 1es").unwrap();
         let changed = apply_codemod(&mut fm, &ctx("0.30.0")).expect("apply");
         assert!(changed);
         assert_eq!(
@@ -126,14 +125,17 @@ mod tests {
             let mut fm: Mapping = serde_yaml::from_str(yaml).unwrap();
             let changed = apply_codemod(&mut fm, &ctx("0.30.0")).expect("apply");
             assert!(!changed, "yaml: {}", yaml);
-            assert!(!fm.contains_key(Value::String("pool".into())), "yaml: {}", yaml);
+            assert!(
+                !fm.contains_key(Value::String("pool".into())),
+                "yaml: {}",
+                yaml
+            );
         }
     }
 
     #[test]
     fn noops_when_pool_absent_1es_and_version_below() {
-        let mut fm: Mapping =
-            serde_yaml::from_str("name: x\ndescription: y\ntarget: 1es").unwrap();
+        let mut fm: Mapping = serde_yaml::from_str("name: x\ndescription: y\ntarget: 1es").unwrap();
         let changed = apply_codemod(&mut fm, &ctx("0.29.0")).expect("apply");
         assert!(!changed);
         assert!(!fm.contains_key(Value::String("pool".into())));
@@ -141,8 +143,7 @@ mod tests {
 
     #[test]
     fn idempotent_after_inserting_legacy_default() {
-        let mut fm: Mapping =
-            serde_yaml::from_str("name: x\ndescription: y\ntarget: 1es").unwrap();
+        let mut fm: Mapping = serde_yaml::from_str("name: x\ndescription: y\ntarget: 1es").unwrap();
         let changed1 = apply_codemod(&mut fm, &ctx("0.30.0")).expect("first apply");
         assert!(changed1);
         let snapshot = fm.clone();

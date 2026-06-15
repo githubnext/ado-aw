@@ -263,7 +263,10 @@ mod tests {
             }
             other => panic!("expected NumericRange, got {:?}", other),
         }
-        assert!(spec.facts.iter().any(|f| f.kind == "changed_file_count"), "should include changed_file_count fact");
+        assert!(
+            spec.facts.iter().any(|f| f.kind == "changed_file_count"),
+            "should include changed_file_count fact"
+        );
         assert_eq!(spec.checks[0].tag_suffix, "changes-mismatch");
     }
 
@@ -440,13 +443,29 @@ on:
         let oc: OnConfig = serde_yaml::from_value(val["on"].clone()).unwrap();
         let schedule = oc.schedule.unwrap();
         assert_eq!(schedule.expression(), "weekly on monday");
-        assert_eq!(schedule.branches(), &["main"], "schedule branches should round-trip");
+        assert_eq!(
+            schedule.branches(),
+            &["main"],
+            "schedule branches should round-trip"
+        );
         let pipeline = oc.pipeline.unwrap();
         assert_eq!(pipeline.name, "Build Pipeline");
-        assert_eq!(pipeline.project.as_deref(), Some("OtherProject"), "pipeline project should round-trip");
-        assert_eq!(pipeline.branches, vec!["main"], "pipeline branches should round-trip");
+        assert_eq!(
+            pipeline.project.as_deref(),
+            Some("OtherProject"),
+            "pipeline project should round-trip"
+        );
+        assert_eq!(
+            pipeline.branches,
+            vec!["main"],
+            "pipeline branches should round-trip"
+        );
         let pr = oc.pr.unwrap();
-        assert_eq!(pr.branches.as_ref().unwrap().include, vec!["main"], "pr branches should round-trip");
+        assert_eq!(
+            pr.branches.as_ref().unwrap().include,
+            vec!["main"],
+            "pr branches should round-trip"
+        );
         let filters = pr.filters.unwrap();
         assert_eq!(filters.title.unwrap().pattern, "*[agent]*");
         assert_eq!(filters.commit_message.unwrap().pattern, "*[skip-agent]*");

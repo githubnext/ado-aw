@@ -191,17 +191,13 @@ pub mod codegen {
             Expr::Literal(v) => format!("'{}'", v.replace('\'', "''")),
             Expr::Variable(name) => format!("variables['{name}']"),
             Expr::StepOutput(r) => {
-                let producer_loc = ctx
-                    .graph
-                    .step_locations
-                    .get(&r.step)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "ir::condition: Expr::StepOutput references unknown step '{}' \
+                let producer_loc = ctx.graph.step_locations.get(&r.step).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "ir::condition: Expr::StepOutput references unknown step '{}' \
                              (graph::build_graph should have caught this)",
-                            r.step
-                        )
-                    })?;
+                        r.step
+                    )
+                })?;
                 let producer = ProducerLocation {
                     stage: producer_loc.stage.as_ref(),
                     job: &producer_loc.job,
@@ -253,9 +249,18 @@ pub mod codegen {
             let g = Graph::default();
             let job = JobId::new("J").unwrap();
             let ctx = ctx_for(&g, &job);
-            assert_eq!(lower_condition(&ctx, &Condition::Succeeded).unwrap(), "succeeded()");
-            assert_eq!(lower_condition(&ctx, &Condition::Always).unwrap(), "always()");
-            assert_eq!(lower_condition(&ctx, &Condition::Failed).unwrap(), "failed()");
+            assert_eq!(
+                lower_condition(&ctx, &Condition::Succeeded).unwrap(),
+                "succeeded()"
+            );
+            assert_eq!(
+                lower_condition(&ctx, &Condition::Always).unwrap(),
+                "always()"
+            );
+            assert_eq!(
+                lower_condition(&ctx, &Condition::Failed).unwrap(),
+                "failed()"
+            );
             assert_eq!(
                 lower_condition(&ctx, &Condition::SucceededOrFailed).unwrap(),
                 "succeededOrFailed()"
@@ -337,9 +342,7 @@ pub mod codegen {
             let g = Graph::default();
             let job = JobId::new("J").unwrap();
             let ctx = ctx_for(&g, &job);
-            let c = Condition::Custom(
-                "eq(dependencies.Setup.outputs['x.y'], 'true')".to_string(),
-            );
+            let c = Condition::Custom("eq(dependencies.Setup.outputs['x.y'], 'true')".to_string());
             assert_eq!(
                 lower_condition(&ctx, &c).unwrap(),
                 "eq(dependencies.Setup.outputs['x.y'], 'true')"

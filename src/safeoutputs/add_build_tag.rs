@@ -7,9 +7,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
+use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize_config};
 use crate::tool_result;
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use anyhow::{Context, ensure};
 
 // ── Stage 1: Params (agent-provided) ──────────────────────────────────────
@@ -27,10 +27,7 @@ impl Validate for AddBuildTagParams {
     fn validate(&self) -> anyhow::Result<()> {
         ensure!(self.build_id > 0, "build_id must be positive");
         ensure!(!self.tag.is_empty(), "tag must not be empty");
-        ensure!(
-            self.tag.len() <= 100,
-            "tag must be at most 100 characters"
-        );
+        ensure!(self.tag.len() <= 100, "tag must be at most 100 characters");
         ensure!(
             self.tag
                 .bytes()
@@ -102,7 +99,10 @@ impl Executor for AddBuildTagResult {
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!("Adding tag '{}' to build #{}", self.tag, self.build_id);
-        debug!("add-build-tag: build_id={}, tag='{}'", self.build_id, self.tag);
+        debug!(
+            "add-build-tag: build_id={}, tag='{}'",
+            self.build_id, self.tag
+        );
 
         // 1. Extract required context
         let org_url = ctx
@@ -175,7 +175,10 @@ impl Executor for AddBuildTagResult {
 
         // 6. PUT request (empty body)
         let client = reqwest::Client::new();
-        info!("Sending PUT to add tag '{}' to build #{}", final_tag, self.build_id);
+        info!(
+            "Sending PUT to add tag '{}' to build #{}",
+            final_tag, self.build_id
+        );
         let response = client
             .put(&url)
             .basic_auth("", Some(token))
@@ -184,16 +187,10 @@ impl Executor for AddBuildTagResult {
             .context("Failed to send request")?;
 
         if response.status().is_success() {
-            info!(
-                "Tag '{}' added to build #{}",
-                final_tag, self.build_id
-            );
+            info!("Tag '{}' added to build #{}", final_tag, self.build_id);
 
             Ok(ExecutionResult::success_with_data(
-                format!(
-                    "Added tag '{}' to build #{}",
-                    final_tag, self.build_id
-                ),
+                format!("Added tag '{}' to build #{}", final_tag, self.build_id),
                 serde_json::json!({
                     "build_id": self.build_id,
                     "tag": final_tag,

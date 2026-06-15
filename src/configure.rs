@@ -20,14 +20,6 @@ pub async fn run(
     dry_run: bool,
     definition_ids: Option<&[u64]>,
 ) -> Result<()> {
-    crate::secrets::run_set_github_token(
-        token,
-        org,
-        project,
-        pat,
-        path,
-        dry_run,
-        definition_ids,
-    )
-    .await
+    crate::secrets::run_set_github_token(token, org, project, pat, path, dry_run, definition_ids)
+        .await
 }

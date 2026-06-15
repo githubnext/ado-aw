@@ -279,9 +279,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_source_path_rejects_parent_traversal() {
         assert!(
-            resolve_source_path("../../../etc/passwd.md")
-                .await
-                .is_err(),
+            resolve_source_path("../../../etc/passwd.md").await.is_err(),
             "expected resolver to reject parent-dir components"
         );
     }
@@ -317,7 +315,9 @@ mod tests {
         // reject it.
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let target = temp_dir.path().join("not_markdown.bin");
-        tokio::fs::write(&target, b"binary").await.expect("write target");
+        tokio::fs::write(&target, b"binary")
+            .await
+            .expect("write target");
         let link = temp_dir.path().join("evil.md");
         tokio::fs::symlink(&target, &link)
             .await
@@ -341,7 +341,9 @@ mod tests {
         // when the resolved target lacks the `.md` extension.
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let target = temp_dir.path().join("v1.md");
-        tokio::fs::write(&target, b"# pipeline").await.expect("write target");
+        tokio::fs::write(&target, b"# pipeline")
+            .await
+            .expect("write target");
         let link = temp_dir.path().join("current.md");
         tokio::fs::symlink(&target, &link)
             .await

@@ -188,8 +188,9 @@ mod tests {
     #[test]
     fn should_not_activate_when_explicitly_disabled() {
         let fm = pipeline_fm();
-        let c =
-            PipelineContextContributor::new(PipelineContextConfig { enabled: Some(false) });
+        let c = PipelineContextContributor::new(PipelineContextConfig {
+            enabled: Some(false),
+        });
         let ctx = CompileContext::for_test(&fm);
         assert!(!c.should_activate(&ctx));
     }
@@ -235,10 +236,7 @@ mod tests {
                 "BUILD_TRIGGEREDBY_DEFINITIONNAME",
                 "Build.TriggeredBy.DefinitionName",
             ),
-            (
-                "BUILD_TRIGGEREDBY_PROJECTID",
-                "Build.TriggeredBy.ProjectID",
-            ),
+            ("BUILD_TRIGGEREDBY_PROJECTID", "Build.TriggeredBy.ProjectID"),
         ] {
             match bash.env.get(env_key) {
                 Some(EnvValue::AdoMacro(name)) => assert_eq!(*name, ado_var),

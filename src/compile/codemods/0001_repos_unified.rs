@@ -20,10 +20,10 @@
 //!   rejected — the user must pick one shape.
 //! - Sources with neither legacy field are no-ops (idempotent).
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde_yaml::{Mapping, Value};
 
-use super::{take_key, Codemod, CodemodContext};
+use super::{Codemod, CodemodContext, take_key};
 
 pub static CODEMOD: Codemod = Codemod {
     id: "repos_unified",
@@ -114,8 +114,7 @@ fn apply_codemod(fm: &mut Mapping, _ctx: &CodemodContext) -> Result<bool> {
     // Track which checkout aliases we've matched so we can flag
     // dangling references (alias listed in checkout but absent from
     // repositories).
-    let mut matched: std::collections::BTreeSet<String> =
-        std::collections::BTreeSet::new();
+    let mut matched: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
     let mut repos_seq: Vec<Value> = Vec::with_capacity(repositories_seq.len());
     for repo in repositories_seq {
@@ -192,10 +191,7 @@ fn apply_codemod(fm: &mut Mapping, _ctx: &CodemodContext) -> Result<bool> {
         // Only emit the `checkout` field when it deviates from the
         // default of `true`. Keeps rewritten output compact.
         if !do_checkout {
-            new_entry.insert(
-                Value::String("checkout".to_string()),
-                Value::Bool(false),
-            );
+            new_entry.insert(Value::String("checkout".to_string()), Value::Bool(false));
         }
 
         repos_seq.push(Value::Mapping(new_entry));
@@ -250,7 +246,11 @@ mod tests {
     fn run_noop(input: &str) -> Mapping {
         let mut m: Mapping = serde_yaml::from_str(input).unwrap();
         let changed = apply_codemod(&mut m, &CodemodContext::current()).expect("apply");
-        assert!(!changed, "expected codemod to be a no-op on input:\n{}", input);
+        assert!(
+            !changed,
+            "expected codemod to be a no-op on input:\n{}",
+            input
+        );
         m
     }
 
@@ -271,14 +271,12 @@ mod tests {
 
     #[test]
     fn converts_full_legacy_block_with_checkout_subset() {
-        let after = run(
-            "name: x\n\
+        let after = run("name: x\n\
              repositories:\n\
              - repository: tools\n  type: git\n  name: my-org/tools\n\
              - repository: schemas\n  type: git\n  name: my-org/schemas\n\
              - repository: docs\n  type: git\n  name: my-org/docs\n\
-             checkout:\n- tools\n- schemas\n",
-        );
+             checkout:\n- tools\n- schemas\n");
         // Legacy keys removed
         assert!(!after.contains_key(Value::String("repositories".into())));
         assert!(!after.contains_key(Value::String("checkout".into())));
@@ -287,9 +285,18 @@ mod tests {
         assert_eq!(r.len(), 3);
 
         let r0 = r[0].as_mapping().unwrap();
-        assert_eq!(r0.get(Value::String("alias".into())).unwrap().as_str(), Some("tools"));
-        assert_eq!(r0.get(Value::String("name".into())).unwrap().as_str(), Some("my-org/tools"));
-        assert_eq!(r0.get(Value::String("type".into())).unwrap().as_str(), Some("git"));
+        assert_eq!(
+            r0.get(Value::String("alias".into())).unwrap().as_str(),
+            Some("tools")
+        );
+        assert_eq!(
+            r0.get(Value::String("name".into())).unwrap().as_str(),
+            Some("my-org/tools")
+        );
+        assert_eq!(
+            r0.get(Value::String("type".into())).unwrap().as_str(),
+            Some("git")
+        );
         // checked out -> default, no explicit `checkout:` key.
         assert!(r0.get(Value::String("checkout".into())).is_none());
 
@@ -305,15 +312,15 @@ mod tests {
     fn converts_repositories_only_to_resource_only_entries() {
         // `repositories:` without `checkout:` means no entry was
         // cloned by the agent in the legacy semantics.
-        let after = run(
-            "name: x\n\
+        let after = run("name: x\n\
              repositories:\n\
-             - repository: tpl\n  type: git\n  name: org/tpl\n",
-        );
+             - repository: tpl\n  type: git\n  name: org/tpl\n");
         let r = repos(&after);
         assert_eq!(r.len(), 1);
         assert_eq!(
-            r[0].as_mapping().unwrap().get(Value::String("checkout".into())),
+            r[0].as_mapping()
+                .unwrap()
+                .get(Value::String("checkout".into())),
             Some(&Value::Bool(false)),
             "without an explicit checkout list, repos default to resource-only"
         );
@@ -321,12 +328,10 @@ mod tests {
 
     #[test]
     fn preserves_ref_field() {
-        let after = run(
-            "name: x\n\
+        let after = run("name: x\n\
              repositories:\n\
              - repository: docs\n  type: git\n  name: org/docs\n  ref: refs/heads/release/2.x\n\
-             checkout: [docs]\n",
-        );
+             checkout: [docs]\n");
         let r = repos(&after);
         let entry = r[0].as_mapping().unwrap();
         assert_eq!(
@@ -348,7 +353,11 @@ mod tests {
     #[test]
     fn rejects_checkout_without_repositories() {
         let err = run_err("name: x\ncheckout: [foo]\n");
-        assert!(err.contains("`checkout:` but no `repositories:`"), "got: {}", err);
+        assert!(
+            err.contains("`checkout:` but no `repositories:`"),
+            "got: {}",
+            err
+        );
     }
 
     #[test]
@@ -358,7 +367,11 @@ mod tests {
              repositories:\n- repository: a\n  type: git\n  name: org/a\n\
              checkout: [b]\n",
         );
-        assert!(err.contains("does not appear in `repositories:`"), "got: {}", err);
+        assert!(
+            err.contains("does not appear in `repositories:`"),
+            "got: {}",
+            err
+        );
     }
 
     #[test]
@@ -373,9 +386,7 @@ mod tests {
     fn already_using_repos_alone_is_noop() {
         // Idempotency: a file with only `repos:` (no legacy fields) is
         // a no-op.
-        let after = run_noop(
-            "name: x\nrepos:\n- my-org/tools\n",
-        );
+        let after = run_noop("name: x\nrepos:\n- my-org/tools\n");
         let r = repos(&after);
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].as_str(), Some("my-org/tools"));
@@ -393,20 +404,16 @@ mod tests {
 
     #[test]
     fn rejects_non_mapping_repository_entry() {
-        let err = run_err(
-            "name: x\nrepositories:\n- a-string-not-a-mapping\n",
-        );
+        let err = run_err("name: x\nrepositories:\n- a-string-not-a-mapping\n");
         assert!(err.contains("must be mappings"), "got: {}", err);
     }
 
     #[test]
     fn carries_over_unknown_repository_keys() {
         // Forward-compat: don't drop fields we don't yet model.
-        let after = run(
-            "name: x\n\
+        let after = run("name: x\n\
              repositories:\n- repository: a\n  type: git\n  name: org/a\n  trigger: none\n\
-             checkout: [a]\n",
-        );
+             checkout: [a]\n");
         let r = repos(&after);
         let entry = r[0].as_mapping().unwrap();
         assert_eq!(

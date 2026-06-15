@@ -421,10 +421,8 @@ mod tests {
     #[test]
     fn hostile_parameter_name_rejected_by_contributor() {
         let cfg = ManualContextConfig::default();
-        let c = ManualContextContributor::new_from_parts(
-            cfg,
-            vec!["evil-name; rm -rf /".to_string()],
-        );
+        let c =
+            ManualContextContributor::new_from_parts(cfg, vec!["evil-name; rm -rf /".to_string()]);
         let fm = manual_fm_no_params();
         let ctx = CompileContext::for_test(&fm);
         let result = c.prepare_step_typed(&ctx);

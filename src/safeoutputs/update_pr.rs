@@ -7,9 +7,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{PATH_SEGMENT, resolve_repo_name};
+use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::validate::reject_pipeline_injection;
 use anyhow::{Context, ensure};
 
@@ -279,7 +279,9 @@ impl Executor for UpdatePrResult {
         // Validate repository against allowed-repositories
         let repo_alias = self.repository.as_deref().unwrap_or("self");
         if !config.allowed_repositories.is_empty()
-            && !config.allowed_repositories.contains(&repo_alias.to_string())
+            && !config
+                .allowed_repositories
+                .contains(&repo_alias.to_string())
         {
             return Ok(ExecutionResult::failure(format!(
                 "Repository '{}' is not in the allowed-repositories list: [{}]",
@@ -305,29 +307,18 @@ impl Executor for UpdatePrResult {
 
         match self.operation.as_str() {
             "set-auto-complete" => {
-                self.execute_set_auto_complete(&client, &base_url, &repo_name, token, org_url, &config)
-                    .await
+                self.execute_set_auto_complete(
+                    &client, &base_url, &repo_name, token, org_url, &config,
+                )
+                .await
             }
             "vote" => {
-                self.execute_vote(
-                    &client,
-                    &base_url,
-                    &repo_name,
-                    token,
-                    org_url,
-                    &config,
-                )
-                .await
+                self.execute_vote(&client, &base_url, &repo_name, token, org_url, &config)
+                    .await
             }
             "add-reviewers" => {
-                self.execute_add_reviewers(
-                    &client,
-                    &base_url,
-                    &repo_name,
-                    token,
-                    org_url,
-                )
-                .await
+                self.execute_add_reviewers(&client, &base_url, &repo_name, token, org_url)
+                    .await
             }
             "add-labels" => {
                 self.execute_add_labels(&client, &base_url, &repo_name, token)
@@ -378,10 +369,7 @@ impl UpdatePrResult {
         let encoded_repo = utf8_percent_encode(repo_name, PATH_SEGMENT).to_string();
 
         // Resolve the agent's identity via connection data
-        let connection_url = format!(
-            "{}/_apis/connectiondata",
-            org_url.trim_end_matches('/')
-        );
+        let connection_url = format!("{}/_apis/connectiondata", org_url.trim_end_matches('/'));
         let conn_response = client
             .get(&connection_url)
             .basic_auth("", Some(token))
@@ -439,10 +427,7 @@ impl UpdatePrResult {
             .context("Failed to set auto-complete on PR")?;
 
         if response.status().is_success() {
-            info!(
-                "Auto-complete set on PR #{}",
-                self.pull_request_id
-            );
+            info!("Auto-complete set on PR #{}", self.pull_request_id);
             Ok(ExecutionResult::success_with_data(
                 format!("Auto-complete set on PR #{}", self.pull_request_id),
                 serde_json::json!({
@@ -491,8 +476,7 @@ impl UpdatePrResult {
                     .to_string(),
             ));
         }
-        if !config.allowed_votes.contains(&vote_str.to_string())
-        {
+        if !config.allowed_votes.contains(&vote_str.to_string()) {
             return Ok(ExecutionResult::failure(format!(
                 "Vote '{}' is not in the allowed-votes list: [{}]",
                 vote_str,
@@ -508,10 +492,7 @@ impl UpdatePrResult {
 
         // Resolve the current user identity.
         // Use the org URL for connection data — supports vanity domains and national clouds.
-        let connection_url = format!(
-            "{}/_apis/connectiondata",
-            org_url.trim_end_matches('/')
-        );
+        let connection_url = format!("{}/_apis/connectiondata", org_url.trim_end_matches('/'));
         debug!("Connection data URL: {}", connection_url);
 
         let conn_response = client
@@ -549,8 +530,7 @@ impl UpdatePrResult {
         // Positive votes (approve=10, approve-with-suggestions=5) are blocked when
         // the authenticated user is also the PR author.
         if vote_value > 0 {
-            let encoded_repo_check =
-                utf8_percent_encode(repo_name, PATH_SEGMENT).to_string();
+            let encoded_repo_check = utf8_percent_encode(repo_name, PATH_SEGMENT).to_string();
             let pr_url = format!(
                 "{}/{}/pullRequests/{}?api-version=7.1",
                 base_url, encoded_repo_check, self.pull_request_id
@@ -670,8 +650,7 @@ impl UpdatePrResult {
 
         // Derive VSSPS base URL once, before the loop.
         let trimmed_org = org_url.trim_end_matches('/');
-        let vssps_base = trimmed_org
-            .replace("://dev.azure.com/", "://vssps.dev.azure.com/");
+        let vssps_base = trimmed_org.replace("://dev.azure.com/", "://vssps.dev.azure.com/");
         if vssps_base == trimmed_org {
             return Ok(ExecutionResult::failure(format!(
                 "Cannot derive VSSPS identity endpoint from org URL '{}'. \
@@ -761,10 +740,7 @@ impl UpdatePrResult {
                 "name": label
             });
 
-            debug!(
-                "Adding label '{}' to PR #{}",
-                label, self.pull_request_id
-            );
+            debug!("Adding label '{}' to PR #{}", label, self.pull_request_id);
             let response = client
                 .post(&labels_url)
                 .header("Content-Type", "application/json")
@@ -870,10 +846,7 @@ impl UpdatePrResult {
         if response.status().is_success() {
             info!("Description updated on PR #{}", self.pull_request_id);
             Ok(ExecutionResult::success_with_data(
-                format!(
-                    "Description updated on PR #{}",
-                    self.pull_request_id
-                ),
+                format!("Description updated on PR #{}", self.pull_request_id),
                 serde_json::json!({
                     "pull_request_id": self.pull_request_id,
                     "operation": "update-description",
@@ -1147,8 +1120,16 @@ allowed-votes:
 "#;
         let config: UpdatePrConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.allowed_operations.len(), 2);
-        assert!(config.allowed_operations.contains(&"add-reviewers".to_string()));
-        assert!(config.allowed_operations.contains(&"set-auto-complete".to_string()));
+        assert!(
+            config
+                .allowed_operations
+                .contains(&"add-reviewers".to_string())
+        );
+        assert!(
+            config
+                .allowed_operations
+                .contains(&"set-auto-complete".to_string())
+        );
         assert_eq!(config.allowed_repositories.len(), 1);
         assert_eq!(config.allowed_votes.len(), 2);
     }
@@ -1173,7 +1154,13 @@ allowed-votes:
         // Each strategy name should be lowercase/camelCase as the ADO API requires.
         // Verify that valid strategies are accepted and case-sensitive rejects apply.
         assert!(!VALID_MERGE_STRATEGIES.contains(&"invalid"));
-        assert!(!VALID_MERGE_STRATEGIES.contains(&"Squash"), "'Squash' is not valid; only lowercase 'squash' is");
-        assert!(!VALID_MERGE_STRATEGIES.contains(&"REBASE"), "'REBASE' is not valid; only camelCase 'rebase' is");
+        assert!(
+            !VALID_MERGE_STRATEGIES.contains(&"Squash"),
+            "'Squash' is not valid; only lowercase 'squash' is"
+        );
+        assert!(
+            !VALID_MERGE_STRATEGIES.contains(&"REBASE"),
+            "'REBASE' is not valid; only camelCase 'rebase' is"
+        );
     }
 }

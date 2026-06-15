@@ -5,11 +5,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
-use ado_aw_derive::SanitizeConfig;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
 use crate::validate::reject_pipeline_injection;
+use ado_aw_derive::SanitizeConfig;
 use anyhow::{Context, ensure};
 
 /// Maximum allowed patch file size (5 MB)
@@ -170,10 +170,7 @@ async fn resolve_reviewer_identity(
                                 && let Some(local_id) =
                                     identity.get("localId").and_then(|id| id.as_str())
                             {
-                                debug!(
-                                    "Resolved reviewer '{}' to ID '{}'",
-                                    reviewer, local_id
-                                );
+                                debug!("Resolved reviewer '{}' to ID '{}'", reviewer, local_id);
                                 return Some(local_id.to_string());
                             }
                         }
@@ -579,9 +576,10 @@ impl Executor for CreatePrResult {
                 .or(ctx.repository_name.as_ref())
                 .context("Repository ID not configured for 'self'")?
                 .clone()
-        } else if let Some(ado_repo_name) =
-            crate::safeoutputs::lookup_allowed_repository(&self.repository, &ctx.allowed_repositories)
-        {
+        } else if let Some(ado_repo_name) = crate::safeoutputs::lookup_allowed_repository(
+            &self.repository,
+            &ctx.allowed_repositories,
+        ) {
             // Matched against allowed list (by alias, full value, or trailing name)
             debug!(
                 "Repository '{}' resolved to '{}'",
@@ -667,8 +665,7 @@ impl Executor for CreatePrResult {
 
         // SHA-256 integrity check: verify the patch file hasn't been tampered
         // with between Stage 1 and Stage 3.
-        let live_hash =
-            crate::hash::sha256_hex(patch_content.as_bytes());
+        let live_hash = crate::hash::sha256_hex(patch_content.as_bytes());
         if live_hash != self.patch_sha256 {
             return Ok(ExecutionResult::failure(format!(
                 "Patch file SHA-256 mismatch: expected {}, got {} — \
@@ -714,7 +711,10 @@ impl Executor for CreatePrResult {
         let patch_paths: Vec<String> = extract_paths_from_patch(&patch_content)
             .into_iter()
             .filter(|p| {
-                !config.excluded_files.iter().any(|pat| glob_match_simple(pat, p))
+                !config
+                    .excluded_files
+                    .iter()
+                    .any(|pat| glob_match_simple(pat, p))
             })
             .collect();
 
@@ -740,13 +740,11 @@ impl Executor for CreatePrResult {
         if file_count > config.max_files {
             warn!(
                 "Patch contains {} files, exceeding max of {}",
-                file_count,
-                config.max_files
+                file_count, config.max_files
             );
             return Ok(ExecutionResult::failure(format!(
                 "Patch contains {} files, exceeding maximum of {} files per PR",
-                file_count,
-                config.max_files
+                file_count, config.max_files
             )));
         }
 
@@ -872,7 +870,9 @@ impl Executor for CreatePrResult {
             .output()
             .await
             .context("Failed to get worktree HEAD SHA")?;
-        let base_sha = String::from_utf8_lossy(&base_sha_output.stdout).trim().to_string();
+        let base_sha = String::from_utf8_lossy(&base_sha_output.stdout)
+            .trim()
+            .to_string();
         debug!("Worktree base SHA before patch: {}", base_sha);
 
         // Apply the patch. Strategy depends on whether excluded-files are configured:
@@ -880,10 +880,11 @@ impl Executor for CreatePrResult {
         //   with git apply --3way as fallback
         // - With exclusions: use git apply --3way directly (git am does not support
         //   --exclude flags; git apply does)
-        let patch_committed = match apply_patch_to_worktree(&worktree_path, &patch_path, &exclude_args).await? {
-            Ok(committed) => committed,
-            Err(result) => return Ok(result),
-        };
+        let patch_committed =
+            match apply_patch_to_worktree(&worktree_path, &patch_path, &exclude_args).await? {
+                Ok(committed) => committed,
+                Err(result) => return Ok(result),
+            };
 
         // Collect changed files. The method depends on how the patch was applied:
         // - git am: changes are committed → use git diff-tree to compare base_sha..HEAD
@@ -908,7 +909,10 @@ impl Executor for CreatePrResult {
                     String::from_utf8_lossy(&diff_tree_output.stderr)
                 )));
             }
-            (String::from_utf8_lossy(&diff_tree_output.stdout).to_string(), true)
+            (
+                String::from_utf8_lossy(&diff_tree_output.stdout).to_string(),
+                true,
+            )
         } else {
             let status_output = Command::new("git")
                 .args(["status", "--porcelain"])
@@ -927,7 +931,10 @@ impl Executor for CreatePrResult {
                     String::from_utf8_lossy(&status_output.stderr)
                 )));
             }
-            (String::from_utf8_lossy(&status_output.stdout).to_string(), false)
+            (
+                String::from_utf8_lossy(&status_output.stdout).to_string(),
+                false,
+            )
         };
 
         debug!("Change detection output:\n{}", status_str);
@@ -1024,10 +1031,7 @@ impl Executor for CreatePrResult {
                     recorded
                 );
             }
-            info!(
-                "Using recorded base_commit from Stage 1: {}",
-                recorded
-            );
+            info!("Using recorded base_commit from Stage 1: {}", recorded);
             recorded.clone()
         } else {
             debug!("No recorded base_commit — resolving from ADO refs API");
@@ -1068,7 +1072,11 @@ impl Executor for CreatePrResult {
                 "{}{}/_apis/git/repositories/{}/refs?filter=heads/{}&api-version=7.1",
                 org_url, project, repo_id, source_branch
             );
-            debug!("Checking if source branch exists (attempt {}): {}", attempt + 1, check_ref_url);
+            debug!(
+                "Checking if source branch exists (attempt {}): {}",
+                attempt + 1,
+                check_ref_url
+            );
 
             let check_ref_response = client
                 .get(&check_ref_url)
@@ -1083,7 +1091,8 @@ impl Executor for CreatePrResult {
                 if refs.is_some_and(|r| !r.is_empty()) {
                     warn!(
                         "Branch '{}' already exists, generating new suffix (attempt {})",
-                        source_branch, attempt + 1
+                        source_branch,
+                        attempt + 1
                     );
                     use rand::RngExt;
                     let new_suffix: u32 = rand::rng().random();
@@ -1144,8 +1153,7 @@ impl Executor for CreatePrResult {
 
             // Handle TOCTOU branch collision: if the push fails because the branch
             // was created between our check and the push, retry with a new suffix
-            if status.as_u16() == 409
-                || (status.as_u16() == 400 && body.contains("already exists"))
+            if status.as_u16() == 409 || (status.as_u16() == 400 && body.contains("already exists"))
             {
                 warn!(
                     "Push failed due to branch collision, retrying with new suffix: {}",
@@ -1185,7 +1193,10 @@ impl Executor for CreatePrResult {
                 if !retry_response.status().is_success() {
                     let retry_status = retry_response.status();
                     let retry_body_text = retry_response.text().await.unwrap_or_default();
-                    warn!("Retry push also failed: {} - {}", retry_status, retry_body_text);
+                    warn!(
+                        "Retry push also failed: {} - {}",
+                        retry_status, retry_body_text
+                    );
                     return Ok(ExecutionResult::failure(format!(
                         "Failed to push changes after retry: {} - {}",
                         retry_status, retry_body_text
@@ -1207,15 +1218,15 @@ impl Executor for CreatePrResult {
         // PR description so the agent/PR author can see that some intended file
         // content was dropped for safety (otherwise the warning only appears in
         // Stage 3 infrastructure logs).
-        let description_with_stats = crate::agent_stats::append_stats_to_body(
-            &self.description,
-            ctx,
-            config.include_stats,
-        );
+        let description_with_stats =
+            crate::agent_stats::append_stats_to_body(&self.description, ctx, config.include_stats);
         let description_with_symlink_notice =
             append_skipped_symlink_notice(&description_with_stats, &skipped_symlinks);
-        let description_final =
-            format!("{}{}", description_with_symlink_notice, generate_pr_footer());
+        let description_final = format!(
+            "{}{}",
+            description_with_symlink_notice,
+            generate_pr_footer()
+        );
 
         // Create the pull request via REST API
         info!("Creating pull request");
@@ -1262,13 +1273,14 @@ impl Executor for CreatePrResult {
                     })
                     .collect();
                 if !disallowed.is_empty() {
-                    warn!(
-                        "Agent labels not in allowed-labels: {:?}",
-                        disallowed
-                    );
+                    warn!("Agent labels not in allowed-labels: {:?}", disallowed);
                     return Ok(ExecutionResult::failure(format!(
                         "Agent-provided labels not in allowed-labels: {}",
-                        disallowed.iter().map(|l| l.as_str()).collect::<Vec<_>>().join(", ")
+                        disallowed
+                            .iter()
+                            .map(|l| l.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     )));
                 }
             }
@@ -1317,15 +1329,21 @@ impl Executor for CreatePrResult {
                     {}\n\n\
                     ---\n\
                     *To create the PR manually, merge branch `{}` into `{}`.*",
-                    source_branch, target_branch, self.repository,
-                    status, sanitize_text(truncate_error_body(&body, 500)),
+                    source_branch,
+                    target_branch,
+                    self.repository,
+                    status,
+                    sanitize_text(truncate_error_body(&body, 500)),
                     sanitize_text(&self.description),
-                    source_branch, target_branch
+                    source_branch,
+                    target_branch
                 );
                 return Ok(ExecutionResult::failure_with_data(
                     format!(
                         "Failed to create pull request: {} - {}. Branch '{}' was pushed — create the PR manually.",
-                        status, sanitize_text(truncate_error_body(&body, 500)), source_branch,
+                        status,
+                        sanitize_text(truncate_error_body(&body, 500)),
+                        source_branch,
                     ),
                     serde_json::json!({
                         "fallback": "branch-recorded",
@@ -1364,7 +1382,9 @@ impl Executor for CreatePrResult {
 
         info!(
             "PR #{} created successfully: {} -> {}{}",
-            pr_id, source_branch, target_branch,
+            pr_id,
+            source_branch,
+            target_branch,
             if config.draft { " (draft)" } else { "" }
         );
 
@@ -1386,7 +1406,9 @@ impl Executor for CreatePrResult {
 /// Uses `git grep` to look for `<<<<<<<` or `>>>>>>>` markers (with trailing
 /// space to avoid false positives from reStructuredText heading underlines).
 /// Returns `Some(failure)` if conflicts are found, `None` if the tree is clean.
-async fn check_for_conflict_markers(worktree_path: &std::path::Path) -> anyhow::Result<Option<ExecutionResult>> {
+async fn check_for_conflict_markers(
+    worktree_path: &std::path::Path,
+) -> anyhow::Result<Option<ExecutionResult>> {
     let conflict_check = Command::new("git")
         .args(["grep", "-l", "-E", r"^(<<<<<<<\s|>>>>>>>\s)"])
         .current_dir(worktree_path)
@@ -1395,7 +1417,9 @@ async fn check_for_conflict_markers(worktree_path: &std::path::Path) -> anyhow::
         .context("Failed to run git grep for conflict markers")?;
 
     if conflict_check.status.success() {
-        let conflicting_files = String::from_utf8_lossy(&conflict_check.stdout).trim().to_string();
+        let conflicting_files = String::from_utf8_lossy(&conflict_check.stdout)
+            .trim()
+            .to_string();
         let err_msg = format!(
             "Patch applied with unresolved conflict markers in: {}",
             conflicting_files
@@ -1538,10 +1562,7 @@ struct PrContext<'a> {
 /// Set PR completion options (delete-source-branch, squash-merge) and optionally
 /// enable auto-complete. Logs a warning on failure but does not propagate the error
 /// because these are best-effort settings that do not affect the PR's existence.
-async fn set_pr_completion_options(
-    ctx: &PrContext<'_>,
-    pr_created_by_id: Option<&str>,
-) {
+async fn set_pr_completion_options(ctx: &PrContext<'_>, pr_created_by_id: Option<&str>) {
     debug!(
         "Setting PR completion options: delete_source_branch={}, squash_merge={}, auto_complete={}",
         ctx.config.delete_source_branch, ctx.config.squash_merge, ctx.config.auto_complete
@@ -1564,11 +1585,14 @@ async fn set_pr_completion_options(
         if let Some(creator_id) = pr_created_by_id {
             update_body["autoCompleteSetBy"] = serde_json::json!({ "id": creator_id });
         } else {
-            warn!("auto_complete requested but creator ID is unavailable; skipping autoCompleteSetBy");
+            warn!(
+                "auto_complete requested but creator ID is unavailable; skipping autoCompleteSetBy"
+            );
         }
     }
 
-    match ctx.client
+    match ctx
+        .client
         .patch(&pr_update_url)
         .basic_auth("", Some(ctx.token))
         .json(&update_body)
@@ -1592,10 +1616,7 @@ async fn set_pr_completion_options(
 /// Resolves each reviewer's identity (email/display-name → ADO identity ID) and
 /// issues a `PUT` for each one. Logs a warning if a reviewer cannot be resolved or
 /// if the API call fails; does not abort the overall PR creation.
-async fn add_reviewers_to_pr(
-    ctx: &PrContext<'_>,
-    organization: &str,
-) {
+async fn add_reviewers_to_pr(ctx: &PrContext<'_>, organization: &str) {
     if ctx.config.reviewers.is_empty() {
         return;
     }
@@ -1604,13 +1625,17 @@ async fn add_reviewers_to_pr(
         debug!("Adding reviewer: {}", reviewer);
 
         // Resolve reviewer identity (email/name -> ID)
-        let reviewer_id = match resolve_reviewer_identity(ctx.client, organization, ctx.token, reviewer).await {
-            Some(id) => id,
-            None => {
-                warn!("Could not resolve reviewer '{}' to an identity ID, skipping", reviewer);
-                continue;
-            }
-        };
+        let reviewer_id =
+            match resolve_reviewer_identity(ctx.client, organization, ctx.token, reviewer).await {
+                Some(id) => id,
+                None => {
+                    warn!(
+                        "Could not resolve reviewer '{}' to an identity ID, skipping",
+                        reviewer
+                    );
+                    continue;
+                }
+            };
 
         let reviewer_url = format!(
             "{}{}/_apis/git/repositories/{}/pullrequests/{}/reviewers/{}?api-version=7.1",
@@ -1618,7 +1643,8 @@ async fn add_reviewers_to_pr(
         );
         let reviewer_body = serde_json::json!({ "vote": 0, "isRequired": false });
 
-        match ctx.client
+        match ctx
+            .client
             .put(&reviewer_url)
             .basic_auth("", Some(ctx.token))
             .json(&reviewer_body)
@@ -1626,12 +1652,17 @@ async fn add_reviewers_to_pr(
             .await
         {
             Ok(resp) if resp.status().is_success() => {
-                debug!("Reviewer '{}' (ID: {}) added successfully", reviewer, reviewer_id);
+                debug!(
+                    "Reviewer '{}' (ID: {}) added successfully",
+                    reviewer, reviewer_id
+                );
             }
             Ok(resp) => {
                 warn!(
                     "Failed to add reviewer '{}' (ID: {}): {}",
-                    reviewer, reviewer_id, resp.status()
+                    reviewer,
+                    reviewer_id,
+                    resp.status()
                 );
             }
             Err(e) => {
@@ -2064,8 +2095,10 @@ fn validate_patch_paths(patch_content: &str) -> anyhow::Result<()> {
             validate_single_path(path)?;
         } else if line.starts_with("--- /dev/null") || line.starts_with("+++ /dev/null") {
             // New or deleted files — no path to validate
-        } else if line.starts_with("rename from ") || line.starts_with("rename to ")
-            || line.starts_with("copy from ") || line.starts_with("copy to ")
+        } else if line.starts_with("rename from ")
+            || line.starts_with("rename to ")
+            || line.starts_with("copy from ")
+            || line.starts_with("copy to ")
         {
             let path = line.splitn(3, ' ').nth(2).unwrap_or("").trim_matches('"');
             validate_single_path(path)?;
@@ -2079,13 +2112,9 @@ fn validate_patch_paths(patch_content: &str) -> anyhow::Result<()> {
         // removed (-) lines start with a non-whitespace prefix that
         // survives trim() and so cannot match the exact mode-line strings.
         let is_symlink_mode_header = {
-            let starts_with_ws = line
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_whitespace());
+            let starts_with_ws = line.chars().next().is_some_and(|c| c.is_whitespace());
             let trimmed = line.trim();
-            !starts_with_ws
-                && (trimmed == "new file mode 120000" || trimmed == "new mode 120000")
+            !starts_with_ws && (trimmed == "new file mode 120000" || trimmed == "new mode 120000")
         };
         if is_symlink_mode_header {
             // Reject patch lines that INTRODUCE a symlink (git mode 120000).
@@ -2100,9 +2129,7 @@ fn validate_patch_paths(patch_content: &str) -> anyhow::Result<()> {
             // with "old mode 120000" + "new mode 100644" converts a symlink into a
             // regular file, which is a legitimate cleanup operation and produces a
             // safe worktree.
-            anyhow::bail!(
-                "Patch introduces a symlink (mode 120000), which is not allowed"
-            );
+            anyhow::bail!("Patch introduces a symlink (mode 120000), which is not allowed");
         }
     }
     Ok(())
@@ -2174,8 +2201,11 @@ fn extract_paths_from_patch(patch_content: &str) -> Vec<String> {
             if !path.is_empty() {
                 paths.push(path.to_string());
             }
-        } else if line.starts_with("rename from ") || line.starts_with("rename to ") ||
-                  line.starts_with("copy from ") || line.starts_with("copy to ") {
+        } else if line.starts_with("rename from ")
+            || line.starts_with("rename to ")
+            || line.starts_with("copy from ")
+            || line.starts_with("copy to ")
+        {
             // "rename from <path>" / "rename to <path>"
             let path = line.splitn(3, ' ').nth(2).unwrap_or("").trim_matches('"');
             if !path.is_empty() {
@@ -2255,7 +2285,6 @@ fn generate_pr_footer() -> String {
     )
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2316,7 +2345,8 @@ mod tests {
             repository: "##vso[task.setvariable variable=x]y".to_string(),
             agent_labels: vec![],
             base_commit: None,
-            patch_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+            patch_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_string(),
         };
         result.sanitize_content_fields();
         assert!(
@@ -2410,7 +2440,10 @@ new file mode 100755
                      rename from some dir/../.git/config\n\
                      rename to new name\n";
         let result = validate_patch_paths(patch);
-        assert!(result.is_err(), "rename with spaces and traversal should be rejected");
+        assert!(
+            result.is_err(),
+            "rename with spaces and traversal should be rejected"
+        );
 
         // Also verify copy paths with spaces are validated correctly
         let patch_copy = "diff --git a/old b/new\n\
@@ -2633,7 +2666,10 @@ index 0000000..abcdefg
         // and the raw garbling characters are not anywhere in the notice.
         let notice_only = &out[body.len()..];
         assert!(
-            !notice_only.contains('\n') || notice_only.lines().all(|l| l.is_empty() || l.starts_with('>')),
+            !notice_only.contains('\n')
+                || notice_only
+                    .lines()
+                    .all(|l| l.is_empty() || l.starts_with('>')),
             "every non-empty line of the notice must remain inside the blockquote"
         );
     }
@@ -2717,10 +2753,7 @@ index 0000000..abcdefg
 
     #[test]
     fn test_find_protected_files_none() {
-        let paths = vec![
-            "src/main.rs".to_string(),
-            "docs/README.md".to_string(),
-        ];
+        let paths = vec!["src/main.rs".to_string(), "docs/README.md".to_string()];
         let protected = find_protected_files(&paths);
         assert!(protected.is_empty());
     }
@@ -2813,7 +2846,8 @@ index 0000000..abcdefg
 
     #[test]
     fn test_extract_paths_new_file() {
-        let patch = "diff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n";
+        let patch =
+            "diff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n";
         let paths = extract_paths_from_patch(patch);
         assert!(paths.contains(&"new.txt".to_string()));
         // /dev/null from --- should not be included (no a/ prefix)

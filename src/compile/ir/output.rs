@@ -156,7 +156,9 @@ pub fn lower_outputref(
     r: &OutputRef,
 ) -> anyhow::Result<String> {
     // Same job?
-    if consumer.job == producer.job && consumer.stage.map(|s| s.as_str()) == producer.stage.map(|s| s.as_str()) {
+    if consumer.job == producer.job
+        && consumer.stage.map(|s| s.as_str()) == producer.stage.map(|s| s.as_str())
+    {
         return Ok(format!("$({step}.{name})", step = r.step, name = r.name));
     }
     // Different stage?
@@ -293,8 +295,14 @@ mod tests {
         // PipelineBody::Jobs). Same syntax as same-stage cross-job.
         let pj = job_id("Setup");
         let cj = job_id("Agent");
-        let producer = ProducerLocation { stage: None, job: &pj };
-        let consumer = ConsumerLocation { stage: None, job: &cj };
+        let producer = ProducerLocation {
+            stage: None,
+            job: &pj,
+        };
+        let consumer = ConsumerLocation {
+            stage: None,
+            job: &cj,
+        };
         let r = OutputRef::new(StepId::new("synthPr").unwrap(), "X");
         assert_eq!(
             lower_outputref(consumer, producer, &r).unwrap(),

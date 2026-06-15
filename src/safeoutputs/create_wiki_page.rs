@@ -8,10 +8,10 @@ use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
 use super::resolve_wiki_branch;
-use ado_aw_derive::SanitizeConfig;
+use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, neutralize_pipeline_commands, sanitize as sanitize_text};
 use crate::tool_result;
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use ado_aw_derive::SanitizeConfig;
 
 /// Parameters for creating a wiki page (agent-provided)
 #[derive(Deserialize, JsonSchema)]
@@ -44,10 +44,7 @@ impl Validate for CreateWikiPageParams {
             !self.path.trim_matches('/').is_empty(),
             "path must contain at least one non-slash segment"
         );
-        ensure!(
-            !self.content.is_empty(),
-            "content must not be empty"
-        );
+        ensure!(!self.content.is_empty(), "content must not be empty");
         ensure!(
             self.content.len() >= 10,
             "content must be at least 10 characters"
@@ -138,7 +135,10 @@ pub struct CreateWikiPageConfig {
     pub comment: Option<String>,
 
     /// Whether to include agent execution stats in the output (default: true).
-    #[serde(default = "crate::agent_stats::default_include_stats", rename = "include-stats")]
+    #[serde(
+        default = "crate::agent_stats::default_include_stats",
+        rename = "include-stats"
+    )]
     pub include_stats: bool,
 }
 
@@ -224,10 +224,7 @@ impl Executor for CreateWikiPageResult {
             .context("wiki-name must be configured in safe-outputs.create-wiki-page.wiki-name")?;
 
         // Use the wiki-project override if present, otherwise use the pipeline project.
-        let project = config
-            .wiki_project
-            .as_deref()
-            .unwrap_or(pipeline_project);
+        let project = config.wiki_project.as_deref().unwrap_or(pipeline_project);
 
         // ── Path validation ───────────────────────────────────────────────────
         let mut effective_path = normalize_wiki_path(&self.path);
@@ -286,10 +283,8 @@ impl Executor for CreateWikiPageResult {
         };
 
         // ── GET: check whether the page already exists ────────────────────────
-        let mut get_query: Vec<(&str, &str)> = vec![
-            ("path", effective_path.as_str()),
-            ("api-version", "7.0"),
-        ];
+        let mut get_query: Vec<(&str, &str)> =
+            vec![("path", effective_path.as_str()), ("api-version", "7.0")];
         if let Some(branch) = &resolved_branch {
             get_query.push(("versionDescriptor.version", branch.as_str()));
             get_query.push(("versionDescriptor.versionType", "branch"));
@@ -379,10 +374,7 @@ impl Executor for CreateWikiPageResult {
                 .and_then(|v| v.as_i64())
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
-            let remote_url = body
-                .get("remoteUrl")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let remote_url = body.get("remoteUrl").and_then(|v| v.as_str()).unwrap_or("");
 
             info!("Created wiki page: {effective_path} (id={page_id})");
 
@@ -401,9 +393,7 @@ impl Executor for CreateWikiPageResult {
             let error_body = put_resp.text().await.unwrap_or_default();
             Ok(ExecutionResult::failure(format!(
                 "Failed to create wiki page '{}' (HTTP {}): {}",
-                effective_path,
-                put_status,
-                error_body
+                effective_path, put_status, error_body
             )))
         }
     }
@@ -629,10 +619,7 @@ wiki-name: "MyProject.wiki"
 
     #[test]
     fn test_apply_title_prefix_root_page() {
-        assert_eq!(
-            apply_title_prefix("/MyPage", "[Agent] "),
-            "/[Agent] MyPage"
-        );
+        assert_eq!(apply_title_prefix("/MyPage", "[Agent] "), "/[Agent] MyPage");
     }
 
     #[test]
@@ -645,10 +632,7 @@ wiki-name: "MyProject.wiki"
 
     #[test]
     fn test_apply_title_prefix_empty_prefix_is_noop() {
-        assert_eq!(
-            apply_title_prefix("/Folder/MyPage", ""),
-            "/Folder/MyPage"
-        );
+        assert_eq!(apply_title_prefix("/Folder/MyPage", ""), "/Folder/MyPage");
     }
 
     // ── Sanitize ──────────────────────────────────────────────────────────────

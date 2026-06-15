@@ -38,12 +38,7 @@ pub enum Confirm {
 /// the operation, [`Confirm::PromptTty`] for a single match on a tty,
 /// or [`Confirm::RequireYes`] when the operator must rerun with
 /// `--yes` (bulk deletes, single-match in non-tty).
-pub fn decide_confirm(
-    match_count: usize,
-    yes: bool,
-    dry_run: bool,
-    is_tty: bool,
-) -> Confirm {
+pub fn decide_confirm(match_count: usize, yes: bool, dry_run: bool, is_tty: bool) -> Confirm {
     if dry_run || yes {
         return Confirm::Proceed;
     }
@@ -57,9 +52,7 @@ pub fn decide_confirm(
         if is_tty {
             return Confirm::PromptTty;
         }
-        return Confirm::RequireYes(
-            "stdin is not a tty; rerun with --yes to confirm.".to_string(),
-        );
+        return Confirm::RequireYes("stdin is not a tty; rerun with --yes to confirm.".to_string());
     }
     Confirm::Proceed
 }

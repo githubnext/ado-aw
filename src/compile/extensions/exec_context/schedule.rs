@@ -145,8 +145,9 @@ mod tests {
     #[test]
     fn does_not_activate_without_on_schedule() {
         let fm = no_trigger_fm();
-        let c =
-            ScheduleContextContributor::new(ScheduleContextConfig { enabled: Some(true) });
+        let c = ScheduleContextContributor::new(ScheduleContextConfig {
+            enabled: Some(true),
+        });
         let ctx = CompileContext::for_test(&fm);
         assert!(!c.should_activate(&ctx));
     }
@@ -154,8 +155,9 @@ mod tests {
     #[test]
     fn activates_when_enabled_and_on_schedule() {
         let fm = schedule_fm();
-        let c =
-            ScheduleContextContributor::new(ScheduleContextConfig { enabled: Some(true) });
+        let c = ScheduleContextContributor::new(ScheduleContextConfig {
+            enabled: Some(true),
+        });
         let ctx = CompileContext::for_test(&fm);
         assert!(c.should_activate(&ctx));
     }
@@ -163,8 +165,9 @@ mod tests {
     #[test]
     fn prepare_step_runtime_gates_on_build_reason_schedule() {
         let fm = schedule_fm();
-        let c =
-            ScheduleContextContributor::new(ScheduleContextConfig { enabled: Some(true) });
+        let c = ScheduleContextContributor::new(ScheduleContextConfig {
+            enabled: Some(true),
+        });
         let ctx = CompileContext::for_test(&fm);
         let step = c.prepare_step_typed(&ctx).unwrap().unwrap();
         let bash = match &step {

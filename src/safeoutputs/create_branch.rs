@@ -7,9 +7,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{PATH_SEGMENT, validate_git_ref_name};
+use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize_config};
 use crate::tool_result;
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::validate::reject_pipeline_injection;
 use anyhow::{Context, ensure};
 
@@ -31,7 +31,10 @@ pub struct CreateBranchParams {
 
 impl Validate for CreateBranchParams {
     fn validate(&self) -> anyhow::Result<()> {
-        ensure!(!self.branch_name.is_empty(), "branch_name must not be empty");
+        ensure!(
+            !self.branch_name.is_empty(),
+            "branch_name must not be empty"
+        );
         ensure!(
             self.branch_name.len() <= 200,
             "branch_name must be at most 200 characters"
@@ -219,10 +222,8 @@ impl Executor for CreateBranchResult {
 
         // Validate branch name against branch-pattern regex (if configured)
         if let Some(ref pattern) = config.branch_pattern {
-            let re = regex_lite::Regex::new(pattern).context(format!(
-                "Invalid branch-pattern regex: '{}'",
-                pattern
-            ))?;
+            let re = regex_lite::Regex::new(pattern)
+                .context(format!("Invalid branch-pattern regex: '{}'", pattern))?;
             if !re.is_match(&self.branch_name) {
                 return Ok(ExecutionResult::failure(format!(
                     "Branch name '{}' does not match required pattern '{}'",
@@ -233,15 +234,14 @@ impl Executor for CreateBranchResult {
         }
 
         // Determine repository alias
-        let repo_alias = self
-            .repository
-            .as_deref()
-            .unwrap_or("self");
+        let repo_alias = self.repository.as_deref().unwrap_or("self");
 
         // Validate repository against config policy BEFORE resolving the name,
         // so operators see a policy error rather than a confusing "not in checkout list" error.
         if !config.allowed_repositories.is_empty()
-            && !config.allowed_repositories.contains(&repo_alias.to_string())
+            && !config
+                .allowed_repositories
+                .contains(&repo_alias.to_string())
         {
             return Ok(ExecutionResult::failure(format!(
                 "Repository '{}' is not in the allowed-repositories list: [{}]",
@@ -269,7 +269,9 @@ impl Executor for CreateBranchResult {
         // Validate source_branch against allowed-source-branches (if configured)
         let source_branch = self.source_branch.as_deref().unwrap_or("main");
         if !config.allowed_source_branches.is_empty()
-            && !config.allowed_source_branches.contains(&source_branch.to_string())
+            && !config
+                .allowed_source_branches
+                .contains(&source_branch.to_string())
         {
             return Ok(ExecutionResult::failure(format!(
                 "Source branch '{}' is not in the allowed-source-branches list",
@@ -357,7 +359,9 @@ impl Executor for CreateBranchResult {
             Ok(ExecutionResult::success_with_data(
                 format!(
                     "Created branch '{}' in repository '{}' from commit {}",
-                    self.branch_name, repo_name, &source_sha[..8]
+                    self.branch_name,
+                    repo_name,
+                    &source_sha[..8]
                 ),
                 serde_json::json!({
                     "branch": self.branch_name,
@@ -472,7 +476,10 @@ mod tests {
             repository: None,
         };
         let result: Result<CreateBranchResult, _> = params.try_into();
-        assert!(result.is_err(), "branch starting with '-' should be rejected");
+        assert!(
+            result.is_err(),
+            "branch starting with '-' should be rejected"
+        );
     }
 
     #[test]
@@ -508,7 +515,10 @@ mod tests {
             repository: None,
         };
         let result: Result<CreateBranchResult, _> = params.try_into();
-        assert!(result.is_err(), "source_branch with '..' should be rejected");
+        assert!(
+            result.is_err(),
+            "source_branch with '..' should be rejected"
+        );
     }
 
     #[test]

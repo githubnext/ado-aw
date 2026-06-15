@@ -35,9 +35,7 @@ pub async fn update_gitattributes<P: AsRef<Path>>(
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => {
-            return Err(e).with_context(|| {
-                format!("Failed to read existing {}", path.display())
-            })
+            return Err(e).with_context(|| format!("Failed to read existing {}", path.display()));
         }
     };
 
@@ -157,9 +155,11 @@ mod tests {
         assert!(written.contains(
             ".azdo/pipelines/review.lock.yml linguist-generated=true merge=ours text eol=lf"
         ));
-        assert!(written.contains(
-            "agents/my-agent.lock.yml linguist-generated=true merge=ours text eol=lf"
-        ));
+        assert!(
+            written.contains(
+                "agents/my-agent.lock.yml linguist-generated=true merge=ours text eol=lf"
+            )
+        );
     }
 
     #[tokio::test]
@@ -168,16 +168,15 @@ mod tests {
         let user = "*.png binary\n# my own comment\n";
         std::fs::write(dir.path().join(".gitattributes"), user).unwrap();
 
-        update_gitattributes(
-            dir.path(),
-            vec![PathBuf::from("agents/x.lock.yml")],
-        )
-        .await
-        .unwrap();
+        update_gitattributes(dir.path(), vec![PathBuf::from("agents/x.lock.yml")])
+            .await
+            .unwrap();
 
         let written = std::fs::read_to_string(dir.path().join(".gitattributes")).unwrap();
         assert!(written.starts_with("*.png binary\n# my own comment\n"));
-        assert!(written.contains("agents/x.lock.yml linguist-generated=true merge=ours text eol=lf"));
+        assert!(
+            written.contains("agents/x.lock.yml linguist-generated=true merge=ours text eol=lf")
+        );
     }
 
     #[tokio::test]
@@ -189,17 +188,16 @@ mod tests {
         );
         std::fs::write(dir.path().join(".gitattributes"), initial).unwrap();
 
-        update_gitattributes(
-            dir.path(),
-            vec![PathBuf::from("new/path.lock.yml")],
-        )
-        .await
-        .unwrap();
+        update_gitattributes(dir.path(), vec![PathBuf::from("new/path.lock.yml")])
+            .await
+            .unwrap();
 
         let written = std::fs::read_to_string(dir.path().join(".gitattributes")).unwrap();
         assert!(written.starts_with("*.png binary\n"));
         assert!(!written.contains("stale/path.lock.yml"));
-        assert!(written.contains("new/path.lock.yml linguist-generated=true merge=ours text eol=lf"));
+        assert!(
+            written.contains("new/path.lock.yml linguist-generated=true merge=ours text eol=lf")
+        );
         // Block markers should appear exactly once
         assert_eq!(written.matches(BEGIN_MARKER).count(), 1);
         assert_eq!(written.matches(END_MARKER).count(), 1);
@@ -214,7 +212,9 @@ mod tests {
         );
         std::fs::write(dir.path().join(".gitattributes"), initial).unwrap();
 
-        update_gitattributes(dir.path(), Vec::<PathBuf>::new()).await.unwrap();
+        update_gitattributes(dir.path(), Vec::<PathBuf>::new())
+            .await
+            .unwrap();
 
         let written = std::fs::read_to_string(dir.path().join(".gitattributes")).unwrap();
         assert_eq!(written, "*.png binary\n");
@@ -244,7 +244,9 @@ mod tests {
     async fn idempotent_when_unchanged() {
         let dir = tempfile::tempdir().unwrap();
         let pipelines = vec![PathBuf::from("agents/x.lock.yml")];
-        update_gitattributes(dir.path(), pipelines.clone()).await.unwrap();
+        update_gitattributes(dir.path(), pipelines.clone())
+            .await
+            .unwrap();
         let first = std::fs::read_to_string(dir.path().join(".gitattributes")).unwrap();
 
         update_gitattributes(dir.path(), pipelines).await.unwrap();
@@ -265,7 +267,9 @@ mod tests {
 
         let written = std::fs::read_to_string(dir.path().join(".gitattributes")).unwrap();
         assert!(
-            written.contains("\"my agents/pipeline.lock.yml\" linguist-generated=true merge=ours text eol=lf"),
+            written.contains(
+                "\"my agents/pipeline.lock.yml\" linguist-generated=true merge=ours text eol=lf"
+            ),
             "expected quoted path entry, got:\n{}",
             written
         );
@@ -277,12 +281,9 @@ mod tests {
         // doesn't autoconvert LF→CRLF on Windows checkouts and emit warnings
         // each time the pipeline is recompiled.
         let dir = tempfile::tempdir().unwrap();
-        update_gitattributes(
-            dir.path(),
-            vec![PathBuf::from("agents/x.lock.yml")],
-        )
-        .await
-        .unwrap();
+        update_gitattributes(dir.path(), vec![PathBuf::from("agents/x.lock.yml")])
+            .await
+            .unwrap();
 
         let written = std::fs::read_to_string(dir.path().join(".gitattributes")).unwrap();
         assert!(
