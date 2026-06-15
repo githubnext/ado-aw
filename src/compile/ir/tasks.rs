@@ -63,6 +63,38 @@ pub fn docker_installer_step(docker_version: impl Into<String>) -> TaskStep {
     TaskStep::new("DockerInstaller@0", "Install Docker").with_input("dockerVersion", docker_version)
 }
 
+/// Returns a [`TaskStep`] for `DotNetCoreCLI@2`.
+///
+/// Runs a .NET CLI command against .NET projects or solutions.
+///
+/// - `command` — the dotnet CLI sub-command. One of `"build"`, `"test"`,
+///   `"publish"`, `"restore"`, `"pack"`, `"run"`, `"push"`, or
+///   `"custom"`. This is the only required input; maps to the `command`
+///   ADO task input.
+///
+/// Optional inputs (applied with `.with_input(…)` on the returned value):
+///
+/// | Input key | Applies to | Default | Description |
+/// |---|---|---|---|
+/// | `projects` | build, test, publish, restore, run, custom | — | Glob for `.csproj`/`.sln` files. |
+/// | `arguments` | build, publish, run, test, custom | — | Extra CLI args (e.g. `"--configuration Release"`). |
+/// | `workingDirectory` | build, publish, run, test, custom | — | Working directory for the command. |
+/// | `publishTestResults` | test | `"true"` | Publish test results to the pipeline. |
+/// | `testRunTitle` | test | — | Title shown in the build summary. |
+/// | `zipAfterPublish` | publish | `"true"` | Zip output after publish. |
+/// | `modifyOutputPath` | publish | `"true"` | Append project folder name to publish path. |
+/// | `publishWebProjects` | publish | `"true"` | Publish all web projects. |
+/// | `custom` | custom | — | The custom dotnet sub-command word. |
+/// | `packagesToPush` | push | `"$(Build.ArtifactStagingDirectory)/*.nupkg"` | NuGet package glob to publish. |
+/// | `packagesToPack` | pack | `"**/*.csproj"` | `.csproj`/`.nuspec` glob to pack. |
+///
+/// ADO task reference:
+/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/dotnet-core-cli-v2>
+pub fn dot_net_core_cli_step(command: impl Into<String>) -> TaskStep {
+    let cmd: String = command.into();
+    TaskStep::new("DotNetCoreCLI@2", format!("dotnet {}", cmd)).with_input("command", cmd)
+}
+
 /// Returns a [`TaskStep`] for `PublishTestResults@2`.
 ///
 /// Publishes test results to the ADO build summary and timeline.
@@ -141,6 +173,78 @@ mod tests {
         assert_eq!(
             t.inputs.get("flattenFolders").map(|s| s.as_str()),
             Some("true")
+        );
+        assert_eq!(t.inputs.len(), 5);
+    }
+
+    // ── DotNetCoreCLI@2 ──────────────────────────────────────────────────
+
+    #[test]
+    fn dot_net_core_cli_step_build_sets_task_and_command() {
+        let t = dot_net_core_cli_step("build");
+        assert_eq!(t.task, "DotNetCoreCLI@2");
+        assert_eq!(t.display_name, "dotnet build");
+        assert_eq!(t.inputs.get("command").map(|s| s.as_str()), Some("build"));
+        // only the required input is set by default
+        assert_eq!(t.inputs.len(), 1);
+    }
+
+    #[test]
+    fn dot_net_core_cli_step_test_command_with_optional_inputs() {
+        let t = dot_net_core_cli_step("test")
+            .with_input("projects", "**/*Tests.csproj")
+            .with_input("arguments", "--configuration Release")
+            .with_input("publishTestResults", "true")
+            .with_input("testRunTitle", "Unit Tests");
+        assert_eq!(t.task, "DotNetCoreCLI@2");
+        assert_eq!(t.display_name, "dotnet test");
+        assert_eq!(t.inputs.get("command").map(|s| s.as_str()), Some("test"));
+        assert_eq!(
+            t.inputs.get("projects").map(|s| s.as_str()),
+            Some("**/*Tests.csproj")
+        );
+        assert_eq!(
+            t.inputs.get("arguments").map(|s| s.as_str()),
+            Some("--configuration Release")
+        );
+        assert_eq!(
+            t.inputs.get("publishTestResults").map(|s| s.as_str()),
+            Some("true")
+        );
+        assert_eq!(
+            t.inputs.get("testRunTitle").map(|s| s.as_str()),
+            Some("Unit Tests")
+        );
+        assert_eq!(t.inputs.len(), 5);
+    }
+
+    #[test]
+    fn dot_net_core_cli_step_accepts_all_supported_commands() {
+        for cmd in &[
+            "build", "test", "publish", "restore", "pack", "run", "push", "custom",
+        ] {
+            let t = dot_net_core_cli_step(*cmd);
+            assert_eq!(t.task, "DotNetCoreCLI@2");
+            assert_eq!(t.display_name, format!("dotnet {}", cmd));
+            assert_eq!(t.inputs.get("command").map(|s| s.as_str()), Some(*cmd));
+        }
+    }
+
+    #[test]
+    fn dot_net_core_cli_step_publish_optional_inputs() {
+        let t = dot_net_core_cli_step("publish")
+            .with_input("projects", "src/MyApp/MyApp.csproj")
+            .with_input("arguments", "--configuration Release --output $(Build.ArtifactStagingDirectory)")
+            .with_input("zipAfterPublish", "false")
+            .with_input("modifyOutputPath", "false");
+        assert_eq!(t.inputs.get("command").map(|s| s.as_str()), Some("publish"));
+        assert_eq!(
+            t.inputs.get("zipAfterPublish").map(|s| s.as_str()),
+            Some("false")
+        );
+        assert_eq!(
+            t.inputs.get("modifyOutputPath").map(|s| s.as_str()),
+            Some("false")
         );
         assert_eq!(t.inputs.len(), 5);
     }
