@@ -576,7 +576,13 @@ pub use crate::tools::cache_memory::CacheMemoryExtension;
 pub use ado_aw_marker::AdoAwMarkerExtension;
 pub use ado_script::AdoScriptExtension;
 pub use azure_cli::AzureCliExtension;
-pub use exec_context::{ExecContextExtension, pr_contributor_will_activate};
+pub use exec_context::{
+    ExecContextExtension, ci_push_contributor_will_activate,
+    manual_contributor_will_activate, pipeline_contributor_will_activate,
+    pr_checks_contributor_will_activate, pr_contributor_will_activate,
+    repo_contributor_will_activate, schedule_contributor_will_activate,
+    workitem_contributor_will_activate,
+};
 pub use github::GitHubExtension;
 pub use safe_outputs::SafeOutputsExtension;
 
@@ -664,6 +670,33 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
                 // AdoScriptExtension owns installing it. Shared helper
                 // keeps the activation predicate in lock-step.
                 exec_context_pr_active: pr_contributor_will_activate(front_matter),
+                // Same loose-coupling pattern for the Manual contributor
+                // (Stage 1 of the exec-context contributor build-out —
+                // see plan.md). Activates whenever any `parameters:`
+                // block is declared and the contributor isn't explicitly
+                // disabled.
+                exec_context_manual_active: manual_contributor_will_activate(front_matter),
+                // Same loose-coupling pattern for the Pipeline contributor
+                // (Stage 2 of the exec-context contributor build-out —
+                // see plan.md). Activates whenever `on.pipeline` is
+                // configured and the contributor isn't explicitly
+                // disabled.
+                exec_context_pipeline_active: pipeline_contributor_will_activate(front_matter),
+                // CI-push contributor (Stage 3 — opt-in, default OFF).
+                exec_context_ci_push_active: ci_push_contributor_will_activate(front_matter),
+                // Workitem contributor (Stage 4 — PR-linked mode only).
+                // Activates whenever the PR contributor activates and
+                // workitem isn't explicitly disabled.
+                exec_context_workitem_active: workitem_contributor_will_activate(front_matter),
+                // Schedule contributor (Stage 5 — opt-in, default OFF).
+                exec_context_schedule_active: schedule_contributor_will_activate(front_matter),
+                // PR-checks extension (Stage 6 — opt-in, default OFF).
+                exec_context_pr_checks_active: pr_checks_contributor_will_activate(
+                    front_matter,
+                ),
+                // Repo contributor (Stage 7 — opt-in, default OFF, no
+                // bearer / no REST, pure git).
+                exec_context_repo_active: repo_contributor_will_activate(front_matter),
                 pr_trigger_for_synth,
             }
         })),

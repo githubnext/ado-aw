@@ -19,6 +19,7 @@ Those wrappers are the only place per-target shape (top-level `PipelineShape`, t
 
 - `ids.rs` — typed `StageId`, `JobId`, and `StepId` newtypes. Constructors validate the ADO identifier grammar (`^[A-Za-z_][A-Za-z0-9_]*$`) so invalid names fail at compile time.
 - `step.rs` — `Step` and concrete step structs: `BashStep`, `TaskStep`, `CheckoutStep`, `DownloadStep`, and `PublishStep`.
+- `tasks.rs` — typed factory helpers for built-in ADO tasks that return preconfigured `TaskStep` values with required inputs set. Prefer extending these helpers for compiler-generated tasks rather than open-coding `TaskStep::new(...)` with raw string keys at each call site.
 - `job.rs` — `Job`, `Pool`, job variables, 1ES `templateContext` support, and target-job external `dependsOn` / `condition` wrapping.
 - `stage.rs` — `Stage` plus target-stage external `dependsOn` / `condition` wrapping.
 - `env.rs` — typed environment values (`EnvValue`) including ADO macros, pipeline variables, secrets, `OutputRef`s, `Coalesce`, and macro-form `Concat`.
@@ -85,7 +86,7 @@ pub enum Step {
 Use the typed structs whenever the compiler owns the step:
 
 - `Step::Bash` for inline bash (`BashStep::script` is the raw body, not a YAML block).
-- `Step::Task` for ADO task invocations such as `NodeTool@0`, `UsePythonVersion@0`, or `UseDotNet@2`.
+- `Step::Task` for ADO task invocations such as `NodeTool@0`, `UsePythonVersion@0`, or `UseDotNet@2`. For compiler-generated built-in tasks, prefer `src/compile/ir/tasks.rs` factory helpers over ad-hoc `TaskStep::new(...)` calls.
 - `Step::Checkout` for `checkout:` steps.
 - `Step::Download` for pipeline-artifact downloads.
 - `Step::Publish` for pipeline-artifact publishes. Under 1ES, lowering moves publish steps into `templateContext.outputs` so artifacts are published by the 1ES template machinery exactly once.

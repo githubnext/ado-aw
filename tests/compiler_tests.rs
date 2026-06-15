@@ -5450,6 +5450,31 @@ fn test_execution_context_pr_does_not_leak_system_accesstoken() {
     const ALLOWED_DISPLAY_NAMES: &[&str] = &[
         // Owned by this extension.
         "Stage PR execution context (aw-context/pr/*)",
+        // Pipeline contributor (Stage 2 of plan.md). Activates on
+        // on.pipeline / Build.Reason == ResourceTrigger. Needs the
+        // token to call the Build REST API to fetch upstream
+        // metadata. Same trust-boundary posture as the PR
+        // contributor — token mapped only into this step's env.
+        "Stage pipeline execution context (aw-context/pipeline/*)",
+        // CI-push contributor (Stage 3 of plan.md). Opt-in,
+        // default OFF. Activates on IndividualCI / BatchedCI runs.
+        // Bearer for "last successful build" lookup + git fetch
+        // deepening.
+        "Stage ci-push execution context (aw-context/ci-push/*)",
+        // Workitem contributor (Stage 4 of plan.md). Activates whenever
+        // the PR contributor activates. Needs the token to call the
+        // ADO REST API to look up linked work items. Same trust-boundary
+        // posture as the PR contributor — token mapped only into this
+        // step's env, never reachable from the agent step.
+        "Stage workitem execution context (aw-context/workitem/*)",
+        // Schedule contributor (Stage 5 of plan.md). Opt-in, default
+        // OFF. Activates on Build.Reason == Schedule. Bearer for
+        // REST + git fetch — same posture as ci-push.
+        "Stage schedule execution context (aw-context/schedule/*)",
+        // PR-checks extension (Stage 6 of plan.md). Activates whenever
+        // the PR contributor activates AND `pr.checks.enabled: true`.
+        // Needs the token to call the Build REST API. Same posture.
+        "Stage PR-checks execution context (aw-context/pr/checks/*)",
         // Stage 3 SafeOutputs executor — separate non-agent job; needs
         // the token to apply safe outputs against ADO. See PR #873.
         "Execute safe outputs (Stage 3)",
