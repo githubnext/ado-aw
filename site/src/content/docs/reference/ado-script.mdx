@@ -314,7 +314,7 @@ bundle**:
 When `filters:` lowers to non-empty checks, `AdoScriptExtension::declarations()`
 returns three typed `Declarations::setup_steps` entries for the Setup job:
 
-1. **`UseNode@1`** — installs Node 20.x LTS, capped at
+1. **`UseNode@1`** — installs Node 22.x LTS, capped at
    `timeoutInMinutes: 5`.
 2. **`curl` download + verify + extract** — fetches `checksums.txt`
    and `ado-script.zip` from the `githubnext/ado-aw` release matching
@@ -333,7 +333,7 @@ download first, then appends the relevant invocation steps.
 
 **`import.js` invocation** — active when `inlined-imports: false` (the default):
 
-1. **`UseNode@1`** — installs Node 20.x LTS, capped at `timeoutInMinutes: 5`.
+1. **`UseNode@1`** — installs Node 22.x LTS, capped at `timeoutInMinutes: 5`.
 2. **`curl` download + verify + extract** — same artefact and verification as the Setup job.
 3. **`bash: node '/tmp/ado-aw-scripts/ado-script/import.js'`** —
    expands `{{#runtime-import …}}` markers in

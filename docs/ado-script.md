@@ -449,7 +449,7 @@ bundle**:
 When `filters:` lowers to non-empty checks, `AdoScriptExtension::declarations()`
 returns three typed `Declarations::setup_steps` entries for the Setup job:
 
-1. **`UseNode@1`** — installs Node 20.x LTS, capped at
+1. **`UseNode@1`** — installs Node 22.x LTS, capped at
    `timeoutInMinutes: 5`.
 2. **`curl` download + verify + extract** — fetches `checksums.txt`
    and `ado-script.zip` from the `githubnext/ado-aw` release matching

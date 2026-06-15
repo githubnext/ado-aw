@@ -214,8 +214,8 @@ jobs:
     displayName: Pre-pull AWF and MCPG container images (v0.25.65)
   - task: UseNode@1
     inputs:
-      version: 20.x
-    displayName: Install Node.js 20.x
+      version: 22.x
+    displayName: Install Node.js 22.x
     timeoutInMinutes: 5
     condition: succeeded()
   - bash: |

@@ -4237,8 +4237,8 @@ fn test_exec_context_pr_downloads_bundle_in_both_jobs_with_synth_mode() {
 /// When a user pins a Node version via `runtimes.node:` AND runtime imports
 /// are active, both extensions emit `UseNode@1` into the Agent job. ADO's
 /// `UseNode@1` prepends to PATH, so the LAST install wins. The ado-script
-/// extension must run in the `System` phase so its Node 20.x install lands
-/// FIRST, and the user's Runtime-phase `UseNode@1 22.x` lands second —
+/// extension must run in the `System` phase so its Node 22.x install lands
+/// FIRST, and the user's Runtime-phase `UseNode@1 20.x` lands second —
 /// the user's pinned version then wins on PATH for the rest of the job.
 #[test]
 fn test_node_runtime_install_orders_after_ado_script_so_user_version_wins() {
@@ -4249,11 +4249,11 @@ fn test_node_runtime_install_orders_after_ado_script_so_user_version_wins() {
     // is identifiable by its displayName; the user's runtime install
     // carries the explicit user-pinned versionSpec.
     let ado_script_install_idx = agent
-        .find("displayName: Install Node.js 20.x")
-        .expect("ado-script Node 20.x install step missing from Agent job");
-    let user_runtime_install_idx = agent
         .find("displayName: Install Node.js 22.x")
-        .expect("user runtime Node 22.x install step missing from Agent job");
+        .expect("ado-script Node 22.x install step missing from Agent job");
+    let user_runtime_install_idx = agent
+        .find("displayName: Install Node.js 20.x")
+        .expect("user runtime Node 20.x install step missing from Agent job");
 
     assert!(
         ado_script_install_idx < user_runtime_install_idx,

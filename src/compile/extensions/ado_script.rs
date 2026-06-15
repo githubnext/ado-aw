@@ -332,7 +332,7 @@ fn install_and_download_steps_typed() -> Vec<Step> {
     let version = env!("CARGO_PKG_VERSION");
     let install = {
         let mut t =
-            TaskStep::new("UseNode@1", "Install Node.js 20.x").with_input("version", "20.x");
+            TaskStep::new("UseNode@1", "Install Node.js 22.x").with_input("version", "22.x");
         t.timeout = Some(std::time::Duration::from_secs(300));
         t.condition = Some(Condition::Succeeded);
         t
@@ -475,12 +475,12 @@ impl CompilerExtension for AdoScriptExtension {
     fn phase(&self) -> ExtensionPhase {
         // System phase: ado-script's UseNode@1 install + bundle download +
         // resolver step must complete BEFORE any user-facing Runtime
-        // extension (e.g. NodeExtension) runs. Otherwise our Node 20
+        // extension (e.g. NodeExtension) runs. Otherwise our Node 22
         // install would prepend onto PATH after the user's pinned Node,
         // silently overriding the user's choice for the rest of the
         // Agent job. By running first, our install lives only during the
         // brief window before the user's Runtime install, and the
-        // resolver step inside that window picks up our Node 20.
+        // resolver step inside that window picks up our Node 22.
         ExtensionPhase::System
     }
 
@@ -804,7 +804,7 @@ mod tests {
         match &steps[0] {
             Step::Task(t) => {
                 assert_eq!(t.task, "UseNode@1");
-                assert_eq!(t.display_name, "Install Node.js 20.x");
+                assert_eq!(t.display_name, "Install Node.js 22.x");
                 assert!(!t.display_name.contains("for gate evaluator"));
             }
             other => panic!("expected NodeTool task, got {other:?}"),

@@ -364,7 +364,7 @@ runtime-import resolver — see [`runtime-imports.md`](runtime-imports.md).
 
 For the gate path it controls:
 
-1. **Node install step** — emits a `UseNode@1` step pinned to Node 20.x
+1. **Node install step** — emits a `UseNode@1` step pinned to Node 22.x
    LTS so `gate.js` has a runtime.
 2. **Download step** — fetches `ado-script.zip` from the ado-aw release
    artifacts, verifies its SHA256 checksum via `checksums.txt`, then
